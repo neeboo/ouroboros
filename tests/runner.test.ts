@@ -102,6 +102,36 @@ describe("runner", () => {
     expect(prompt).toContain("isolated worktree");
   });
 
+  test("builds prompts with compact recent lessons", () => {
+    const runId = harness.createRun({ goal: "Use Ouroboros to iterate on Ouroboros" });
+    const taskId = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Use compact lessons",
+      prompt: "Apply prior lessons without loading raw evidence.",
+    });
+    const lessons = Array.from({ length: 14 }, (_value, index) => ({
+      id: `lesson_${index}`,
+      runId,
+      taskId: `task_${index}`,
+      attemptId: `attempt_${index}`,
+      kind: "lesson" as const,
+      summary: `lesson summary ${index}`,
+      evidence: { raw: `large raw evidence ${index}` },
+    }));
+
+    const prompt = buildTaskPrompt({
+      run: harness.getRun(runId)!,
+      task: harness.getTask(taskId)!,
+      dependencyAttempts: [],
+      lessons,
+    });
+
+    expect(prompt).not.toContain("lesson summary 0");
+    expect(prompt).toContain("lesson summary 13");
+    expect(prompt).not.toContain("large raw evidence");
+  });
+
   test("runs the next ready task with an executor and records the attempt", async () => {
     const runId = harness.createRun({ goal: "Build loop" });
     const taskId = harness.createTask({
