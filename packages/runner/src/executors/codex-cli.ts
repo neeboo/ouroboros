@@ -18,8 +18,6 @@ export function createCodexCliExecutor(options: CodexCliExecutorOptions): TaskEx
         options.cwd,
         "--sandbox",
         sandbox,
-        "--ask-for-approval",
-        "never",
         "-",
       ],
       stdin: prompt,

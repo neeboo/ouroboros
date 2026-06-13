@@ -53,8 +53,6 @@ describe("codex cli executor", () => {
           "/repo",
           "--sandbox",
           "read-only",
-          "--ask-for-approval",
-          "never",
           "-",
         ],
         stdin: "Plan next task",
