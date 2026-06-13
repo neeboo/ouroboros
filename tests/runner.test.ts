@@ -6,6 +6,7 @@ import { Harness } from "../packages/harness/src";
 import {
   buildTaskPrompt,
   createTasksFromOutputHook,
+  parseAttemptOutput,
   runNextReadyTask,
   runReadyTasks,
   runUntilIdle,
@@ -223,6 +224,52 @@ describe("runner", () => {
         sourceTaskId: plannerTask,
       },
     ]);
+  });
+
+  test("parses valid planner next tasks", () => {
+    const output = parseAttemptOutput(
+      JSON.stringify({
+        status: "done",
+        summary: "planned",
+        nextTasks: [
+          {
+            role: "worker",
+            goal: "Implement validation",
+            prompt: "Validate nextTasks before task creation.",
+            dependsOn: ["task_1"],
+            doneWhen: ["tests pass"],
+          },
+        ],
+      }),
+    );
+
+    expect(output.nextTasks).toEqual([
+      {
+        role: "worker",
+        goal: "Implement validation",
+        prompt: "Validate nextTasks before task creation.",
+        dependsOn: ["task_1"],
+        doneWhen: ["tests pass"],
+      },
+    ]);
+  });
+
+  test.each([
+    ["missing role", { goal: "Goal", prompt: "Prompt" }],
+    ["empty goal", { role: "worker", goal: "", prompt: "Prompt" }],
+    ["empty prompt", { role: "worker", goal: "Goal", prompt: "  " }],
+    ["invalid dependsOn", { role: "worker", goal: "Goal", prompt: "Prompt", dependsOn: "task_1" }],
+    ["invalid doneWhen", { role: "worker", goal: "Goal", prompt: "Prompt", doneWhen: [1] }],
+  ])("rejects planner next tasks with %s", (_name, plannedTask) => {
+    expect(() =>
+      parseAttemptOutput(
+        JSON.stringify({
+          status: "done",
+          summary: "planned",
+          nextTasks: [plannedTask],
+        }),
+      ),
+    ).toThrow(/planned task/);
   });
 
   test("runs multiple ready tasks with separate subagent sessions", async () => {

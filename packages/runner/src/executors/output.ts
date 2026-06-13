@@ -1,4 +1,4 @@
-import type { AttemptOutput } from "@ouroboros/harness";
+import type { AttemptOutput, PlannedTask } from "@ouroboros/harness";
 
 export function parseAttemptOutput(raw: string): AttemptOutput {
   const parsed = JSON.parse(extractJsonObject(raw));
@@ -12,8 +12,53 @@ export function parseAttemptOutput(raw: string): AttemptOutput {
     checks: Array.isArray(parsed.checks) ? parsed.checks : [],
     artifacts: Array.isArray(parsed.artifacts) ? parsed.artifacts : [],
     problems: Array.isArray(parsed.problems) ? parsed.problems.map(String) : [],
-    nextTasks: Array.isArray(parsed.nextTasks) ? parsed.nextTasks : [],
+    nextTasks: validatePlannedTasks(parsed.nextTasks),
   };
+}
+
+export function validatePlannedTasks(nextTasks: unknown): PlannedTask[] {
+  if (nextTasks === undefined) {
+    return [];
+  }
+  if (!Array.isArray(nextTasks)) {
+    throw new Error("planned task nextTasks must be an array");
+  }
+
+  return nextTasks.map((task, index) => validatePlannedTask(task, index));
+}
+
+function validatePlannedTask(task: unknown, index: number): PlannedTask {
+  if (!task || typeof task !== "object" || Array.isArray(task)) {
+    throw new Error(`planned task ${index} must be an object`);
+  }
+
+  const record = task as Record<string, unknown>;
+  return {
+    role: requiredPlannedTaskString(record, "role", index),
+    goal: requiredPlannedTaskString(record, "goal", index),
+    prompt: requiredPlannedTaskString(record, "prompt", index),
+    dependsOn: optionalStringArray(record, "dependsOn", index),
+    doneWhen: optionalStringArray(record, "doneWhen", index),
+  };
+}
+
+function requiredPlannedTaskString(task: Record<string, unknown>, key: "role" | "goal" | "prompt", index: number) {
+  const value = task[key];
+  if (typeof value !== "string" || value.trim().length === 0) {
+    throw new Error(`planned task ${index} must include a non-empty ${key}`);
+  }
+  return value;
+}
+
+function optionalStringArray(task: Record<string, unknown>, key: "dependsOn" | "doneWhen", index: number) {
+  const value = task[key];
+  if (value === undefined) {
+    return undefined;
+  }
+  if (!Array.isArray(value) || value.some((item) => typeof item !== "string")) {
+    throw new Error(`planned task ${index} ${key} must be an array of strings`);
+  }
+  return value;
 }
 
 function extractJsonObject(raw: string) {

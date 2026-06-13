@@ -1,14 +1,15 @@
-import type { Harness, PlannedTask } from "@ouroboros/harness";
+import type { Harness } from "@ouroboros/harness";
+import { validatePlannedTasks } from "../executors/output";
 import type { StopHook } from "../types";
 
 export function createTasksFromOutputHook(options: { harness: Harness }): StopHook {
   return ({ run, task, output }) => {
-    const created = (output.nextTasks ?? []).map((plannedTask) => {
+    const created = validatePlannedTasks(output.nextTasks).map((plannedTask) => {
       const taskId = options.harness.createTask({
         runId: run.id,
-        role: requiredString(plannedTask, "role"),
-        goal: requiredString(plannedTask, "goal"),
-        prompt: requiredString(plannedTask, "prompt"),
+        role: plannedTask.role,
+        goal: plannedTask.goal,
+        prompt: plannedTask.prompt,
         dependsOn: plannedTask.dependsOn ?? [task.id],
         doneWhen: plannedTask.doneWhen ?? [],
       });
@@ -24,12 +25,4 @@ export function createTasksFromOutputHook(options: { harness: Harness }): StopHo
       artifacts: created,
     };
   };
-}
-
-function requiredString(task: PlannedTask, key: "role" | "goal" | "prompt") {
-  const value = task[key];
-  if (!value || typeof value !== "string") {
-    throw new Error(`planned task is missing ${key}`);
-  }
-  return value;
 }
