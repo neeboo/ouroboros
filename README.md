@@ -37,7 +37,7 @@ bun run cli -- create-task --run-id <run_id> --role planner --goal "Plan next st
 bun run cli -- next-task --run-id <run_id>
 bun run cli -- run-next --run-id <run_id> --executor noop --limit 2
 bun run cli -- run-next --run-id <run_id> --executor acpx-codex --cwd "$(pwd)" --approval approve-reads --limit 2
-bun run cli -- run-next --run-id <run_id> --executor codex-cli --cwd "$(pwd)" --sandbox read-only --limit 2
+bun run cli -- run-next --run-id <run_id> --executor codex-cli --cwd "$(pwd)" --sandbox read-only --codex-bin "$(command -v codex)" --limit 2
 bun run cli -- record-attempt --task-id <task_id> --input-json '{}' --output-json '{"status":"done","summary":"..."}'
 ```
 

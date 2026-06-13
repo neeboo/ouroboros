@@ -106,6 +106,7 @@ switch (parsed.command) {
         return createCodexCliExecutor({
           cwd: runnerCwd(),
           sandbox: parseSandbox(flag(parsed, "sandbox") ?? "read-only"),
+          codexBin: flag(parsed, "codex-bin"),
           timeoutMs: parseTimeoutMs(flag(parsed, "timeout-ms")),
         });
       },

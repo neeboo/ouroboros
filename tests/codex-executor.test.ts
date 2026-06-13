@@ -7,6 +7,7 @@ describe("codex cli executor", () => {
     const executor = createCodexCliExecutor({
       cwd: "/repo",
       sandbox: "read-only",
+      codexBin: "/custom/codex",
       runCommand: async ({ cmd, stdin }) => {
         calls.push({ cmd, stdin });
         return {
@@ -45,7 +46,7 @@ describe("codex cli executor", () => {
     expect(calls).toEqual([
       {
         cmd: [
-          "codex",
+          "/custom/codex",
           "exec",
           "--skip-git-repo-check",
           "-C",

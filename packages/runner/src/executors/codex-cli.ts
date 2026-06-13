@@ -6,11 +6,12 @@ import type { TaskExecutor } from "../types";
 export function createCodexCliExecutor(options: CodexCliExecutorOptions): TaskExecutor {
   const sandbox = options.sandbox ?? "read-only";
   const runCommand = options.runCommand ?? runLocalCommand;
+  const codexBin = options.codexBin ?? "codex";
 
   return async ({ prompt }) => {
     const result = await runCommand({
       cmd: [
-        "codex",
+        codexBin,
         "exec",
         "--skip-git-repo-check",
         "-C",
