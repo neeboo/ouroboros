@@ -5,32 +5,42 @@ import type { AcpxCodexExecutorFactory, ApprovalMode, RunCommand } from "./types
 export const createAcpxCodexExecutor: AcpxCodexExecutorFactory = (options) => {
   const approval = options.approval ?? "approve-reads";
   const runCommand = options.runCommand ?? runLocalCommand;
+  const commandTimeoutMs = commandTimeout(options.timeoutMs);
 
   return async ({ prompt, sessionName }) => {
-    const base = ["acpx", "--cwd", options.cwd, approvalFlag(approval), "--format", "text", "codex"];
-    const session = await ensureSession({ base, runCommand, sessionName, timeoutMs: options.timeoutMs });
+    const base = [
+      "acpx",
+      "--cwd",
+      options.cwd,
+      approvalFlag(approval),
+      "--format",
+      "text",
+      ...acpxTimeout(options.timeoutMs),
+      "codex",
+    ];
+    const session = await ensureSession({ base, runCommand, sessionName, timeoutMs: commandTimeoutMs });
     if (session) {
       return session;
     }
 
-    let result = await runPrompt({ base, runCommand, sessionName, prompt, timeoutMs: options.timeoutMs });
+    let result = await runPrompt({ base, runCommand, sessionName, prompt, timeoutMs: commandTimeoutMs });
     if (commandFailed(result) && needsReconnect(result)) {
       await runCommand({
         cmd: [...base, "sessions", "close", sessionName],
         stdin: "",
-        timeoutMs: options.timeoutMs,
+        timeoutMs: commandTimeoutMs,
       });
       const recreated = await ensureSession({
         base,
         runCommand,
         sessionName,
-        timeoutMs: options.timeoutMs,
+        timeoutMs: commandTimeoutMs,
         forceCreate: true,
       });
       if (recreated) {
         return recreated;
       }
-      result = await runPrompt({ base, runCommand, sessionName, prompt, timeoutMs: options.timeoutMs });
+      result = await runPrompt({ base, runCommand, sessionName, prompt, timeoutMs: commandTimeoutMs });
     }
 
     if (commandFailed(result)) {
@@ -51,6 +61,17 @@ export const createAcpxCodexExecutor: AcpxCodexExecutorFactory = (options) => {
     });
   };
 };
+
+function acpxTimeout(timeoutMs: number | undefined) {
+  if (timeoutMs === undefined) {
+    return [];
+  }
+  return ["--timeout", String(Math.max(1, Math.ceil(timeoutMs / 1000)))];
+}
+
+function commandTimeout(timeoutMs: number | undefined) {
+  return timeoutMs === undefined ? undefined : timeoutMs + 5000;
+}
 
 async function ensureSession(input: {
   base: string[];

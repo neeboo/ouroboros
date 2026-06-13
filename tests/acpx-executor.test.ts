@@ -145,6 +145,65 @@ describe("acpx executor", () => {
     ]);
   });
 
+  test("passes timeout to acpx and leaves a grace window for command cleanup", async () => {
+    const calls: Array<{ cmd: string[]; timeoutMs?: number }> = [];
+    const executor = createAcpxCodexExecutor({
+      cwd: "/repo",
+      timeoutMs: 180000,
+      runCommand: async ({ cmd, timeoutMs }) => {
+        calls.push({ cmd, timeoutMs });
+        return {
+          exitCode: 0,
+          stdout: cmd.includes("-s")
+            ? '{"status":"done","summary":"ok","changedFiles":[],"checks":[],"artifacts":[],"problems":[]}'
+            : "",
+          stderr: "",
+        };
+      },
+    });
+
+    await executor({
+      prompt: "Do the task",
+      sessionName: "task_1",
+      run: {
+        id: "run_1",
+        goal: "Goal",
+        status: "todo",
+        context: {},
+      },
+      task: {
+        id: "task_1",
+        runId: "run_1",
+        parentId: null,
+        status: "todo",
+        role: "worker",
+        goal: "Task",
+        prompt: "Do it",
+        dependsOn: [],
+        doneWhen: [],
+        worktreePath: null,
+        sessionRef: null,
+        contextVersion: 1,
+      },
+    });
+
+    expect(calls[0].cmd).toEqual([
+      "acpx",
+      "--cwd",
+      "/repo",
+      "--approve-reads",
+      "--format",
+      "text",
+      "--timeout",
+      "180",
+      "codex",
+      "sessions",
+      "show",
+      "task_1",
+    ]);
+    expect(calls.every((call) => call.timeoutMs === 185000)).toBe(true);
+  });
+
   test("treats acpx stdout errors as command failures", async () => {
     const calls: string[][] = [];
     const executor = createAcpxCodexExecutor({
