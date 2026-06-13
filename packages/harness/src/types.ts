@@ -76,6 +76,12 @@ export interface RecordAttemptInput {
   id?: string;
 }
 
+export interface LeaseReadyTasksInput {
+  runId: string;
+  limit: number;
+  sessionForTask: (task: Task) => string;
+}
+
 export interface CreateExternalRefInput {
   localType: string;
   localId: string;

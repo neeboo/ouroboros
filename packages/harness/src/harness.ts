@@ -7,6 +7,7 @@ import type {
   CreateExternalRefInput,
   CreateRunInput,
   CreateTaskInput,
+  LeaseReadyTasksInput,
   ListExternalRefsInput,
   RecordAttemptInput,
   Status,
@@ -113,6 +114,48 @@ export class Harness {
         }
       }
       return null;
+    });
+  }
+
+  leaseReadyTasks(input: LeaseReadyTasksInput) {
+    return withDatabase(this.dbPath, (db) => {
+      const taskRows = db
+        .query(
+          `
+          select *
+          from tasks
+          where run_id = $runId and status = 'todo'
+          order by created_at, id
+          `,
+        )
+        .all({ $runId: input.runId }) as TaskRow[];
+      const statusRows = db
+        .query("select id, status from tasks where run_id = $runId")
+        .all({ $runId: input.runId }) as Array<{ id: string; status: Status }>;
+      const statuses = new Map(statusRows.map((row) => [row.id, row.status]));
+      const ready = taskRows
+        .map(taskFromRow)
+        .filter((task) => task.dependsOn.every((id) => statuses.get(id) === "done"))
+        .slice(0, input.limit);
+
+      return db.transaction(() => {
+        for (const task of ready) {
+          const sessionRef = input.sessionForTask(task);
+          db.query(
+            `
+            update tasks
+            set status = 'running', session_ref = $sessionRef, updated_at = current_timestamp
+            where id = $taskId and status = 'todo'
+            `,
+          ).run({
+            $sessionRef: sessionRef,
+            $taskId: task.id,
+          });
+          task.status = "running";
+          task.sessionRef = sessionRef;
+        }
+        return ready;
+      })();
     });
   }
 

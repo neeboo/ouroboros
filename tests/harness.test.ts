@@ -132,4 +132,32 @@ describe("Harness", () => {
       },
     ]);
   });
+
+  test("leases ready tasks with session refs", () => {
+    const runId = harness.createRun({ goal: "Build loop" });
+    const first = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Implement A",
+      prompt: "Implement A.",
+    });
+    const second = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Implement B",
+      prompt: "Implement B.",
+      dependsOn: [first],
+    });
+
+    const leased = harness.leaseReadyTasks({
+      runId,
+      limit: 2,
+      sessionForTask: (task) => `session-${task.id}`,
+    });
+
+    expect(leased.map((task) => task.id)).toEqual([first]);
+    expect(harness.getTask(first)?.status).toBe("running");
+    expect(harness.getTask(first)?.sessionRef).toBe(`session-${first}`);
+    expect(harness.getTask(second)?.status).toBe("todo");
+  });
 });

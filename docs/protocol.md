@@ -85,12 +85,13 @@ and every task in depends_on_json has status = "done"
 The scheduler then:
 
 1. assigns a worktree if needed
-2. assigns or resumes a session
-3. builds the prompt from run context plus task fields
-4. records an attempt
-5. updates task status from the attempt result
+2. leases one or more ready tasks
+3. assigns or resumes one session per leased task
+4. builds the prompt from run context plus task fields
+5. records an attempt
+6. updates task status from the attempt result
 
-The current v0 runner supports the same shape with an injectable executor. The `noop` executor is only for testing the loop; real Codex/acpx execution should use the same runner boundary and return the same structured output.
+The current v0 runner supports the same shape with an injectable executor. The `noop` executor is only for testing the loop. The `acpx-codex` executor creates or reuses a named acpx Codex session per task and returns the same structured output.
 
 ## Prompt Contract
 

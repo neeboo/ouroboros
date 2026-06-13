@@ -8,6 +8,7 @@ export type {
   CreateRunInput,
   CreateTaskInput,
   ExternalRef,
+  LeaseReadyTasksInput,
   ListExternalRefsInput,
   RecordAttemptInput,
   Run,

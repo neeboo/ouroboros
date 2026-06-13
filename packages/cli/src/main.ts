@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 import { Harness } from "@ouroboros/harness";
-import { runNextReadyTask } from "@ouroboros/runner";
+import { createAcpxCodexExecutor, runReadyTasks } from "@ouroboros/runner";
 import { fail, flag, parseArgs, required } from "./args";
 import { parseArray, parseObject, printJson } from "./json";
 
@@ -72,22 +72,37 @@ switch (parsed.command) {
   }
   case "run-next": {
     const executorName = required(parsed, "executor");
-    if (executorName !== "noop") {
+    const runId = required(parsed, "run-id");
+    const limit = Number(flag(parsed, "limit") ?? "1");
+    if (!Number.isInteger(limit) || limit < 1) {
+      fail("--limit must be a positive integer");
+    }
+    if (executorName !== "noop" && executorName !== "acpx-codex") {
       fail(`unsupported executor: ${executorName}`);
     }
-    const result = await runNextReadyTask({
+    const result = await runReadyTasks({
       harness,
-      runId: required(parsed, "run-id"),
-      executor: async ({ task }) => ({
-        status: "done",
-        summary: `Noop executor completed ${task.id}`,
-        changedFiles: [],
-        checks: [{ name: "noop executor", status: "passed" }],
-        artifacts: [],
-        problems: [],
-      }),
+      runId,
+      limit,
+      sessionForTask: (task) => task.sessionRef ?? `task-${task.id}`,
+      executorFactory: () => {
+        if (executorName === "noop") {
+          return async ({ task }) => ({
+            status: "done",
+            summary: `Noop executor completed ${task.id}`,
+            changedFiles: [],
+            checks: [{ name: "noop executor", status: "passed" }],
+            artifacts: [],
+            problems: [],
+          });
+        }
+        return createAcpxCodexExecutor({
+          cwd: flag(parsed, "cwd") ?? process.cwd(),
+          approval: parseApproval(flag(parsed, "approval") ?? "approve-reads"),
+        });
+      },
     });
-    printJson(result);
+    printJson({ tasks: result });
     break;
   }
   case "record-attempt": {
@@ -115,4 +130,11 @@ switch (parsed.command) {
   }
   default:
     fail(`unknown command: ${parsed.command}`);
+}
+
+function parseApproval(raw: string) {
+  if (raw !== "approve-all" && raw !== "approve-reads" && raw !== "deny-all") {
+    fail("--approval must be approve-all, approve-reads, or deny-all");
+  }
+  return raw;
 }

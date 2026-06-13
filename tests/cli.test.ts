@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtemp, rm } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -87,9 +87,99 @@ describe("CLI", () => {
     const result = await runCliJson("run-next", "--run-id", run.id, "--executor", "noop");
     const readyAfterRun = await runCliJson("next-task", "--run-id", run.id);
 
-    expect(result.taskId).toBe(task.id);
-    expect(result.attemptId).toBeString();
+    expect(result.tasks).toHaveLength(1);
+    expect(result.tasks[0].taskId).toBe(task.id);
+    expect(result.tasks[0].attemptId).toBeString();
+    expect(result.tasks[0].sessionName).toBe(`task-${task.id}`);
     expect(readyAfterRun).toBeNull();
+  });
+
+  test("runs multiple ready tasks with separate sessions", async () => {
+    await runCli("init");
+    const run = await runCliJson("create-run", "--goal", "Bootstrap ouroboros");
+    const first = await runCliJson(
+      "create-task",
+      "--run-id",
+      run.id,
+      "--role",
+      "worker",
+      "--goal",
+      "Task A",
+      "--prompt",
+      "Do A.",
+    );
+    const second = await runCliJson(
+      "create-task",
+      "--run-id",
+      run.id,
+      "--role",
+      "worker",
+      "--goal",
+      "Task B",
+      "--prompt",
+      "Do B.",
+    );
+
+    const result = await runCliJson("run-next", "--run-id", run.id, "--executor", "noop", "--limit", "2");
+
+    expect(result.tasks.map((task: { taskId: string }) => task.taskId).sort()).toEqual(
+      [first.id, second.id].sort(),
+    );
+    expect(result.tasks.map((task: { sessionName: string }) => task.sessionName).sort()).toEqual(
+      [`task-${first.id}`, `task-${second.id}`].sort(),
+    );
+  });
+
+  test("runs the next task with the acpx codex executor", async () => {
+    await runCli("init");
+    const run = await runCliJson("create-run", "--goal", "Bootstrap ouroboros");
+    const task = await runCliJson(
+      "create-task",
+      "--run-id",
+      run.id,
+      "--role",
+      "worker",
+      "--goal",
+      "Run through acpx",
+      "--prompt",
+      "Use the fake acpx executor.",
+    );
+    const binDir = join(dir, "bin");
+    await mkdir(binDir);
+    await writeFile(
+      join(binDir, "acpx"),
+      [
+        "#!/usr/bin/env bun",
+        "const prompt = await new Response(Bun.stdin.stream()).text();",
+        "console.log(JSON.stringify({",
+        "  status: 'done',",
+        "  summary: `fake acpx saw ${prompt.includes('Run through acpx')}`,",
+        "  changedFiles: [],",
+        "  checks: [{ name: 'fake acpx', status: 'passed' }],",
+        "  artifacts: [],",
+        "  problems: []",
+        "}));",
+      ].join("\n"),
+    );
+    await chmod(join(binDir, "acpx"), 0o755);
+
+    const result = await runCliJson(
+      "run-next",
+      "--run-id",
+      run.id,
+      "--executor",
+      "acpx-codex",
+      "--approval",
+      "approve-all",
+      "--cwd",
+      "/repo",
+      { PATH: `${binDir}:${process.env.PATH}` },
+    );
+
+    expect(result.tasks).toHaveLength(1);
+    expect(result.tasks[0].taskId).toBe(task.id);
+    expect(result.tasks[0].attemptId).toBeString();
+    expect(await runCliJson("next-task", "--run-id", run.id)).toBeNull();
   });
 
   test("records a structured attempt from JSON", async () => {
@@ -123,10 +213,14 @@ describe("CLI", () => {
     expect(readyAfterRecord).toBeNull();
   });
 
-  async function runCli(...args: string[]) {
+  async function runCli(...rawArgs: Array<string | Record<string, string>>) {
+    const envOverride =
+      typeof rawArgs.at(-1) === "object" ? (rawArgs.pop() as Record<string, string>) : {};
+    const args = rawArgs as string[];
     const proc = Bun.spawn({
       cmd: ["bun", "run", "packages/cli/src/main.ts", "--db", dbPath, ...args],
       cwd: process.cwd(),
+      env: { ...process.env, ...envOverride },
       stdout: "pipe",
       stderr: "pipe",
     });
@@ -141,7 +235,7 @@ describe("CLI", () => {
     return stdout.trim();
   }
 
-  async function runCliJson(...args: string[]) {
+  async function runCliJson(...args: Array<string | Record<string, string>>) {
     return JSON.parse(await runCli(...args));
   }
 });

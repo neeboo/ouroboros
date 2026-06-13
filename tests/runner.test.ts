@@ -3,7 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { Harness } from "../packages/harness/src";
-import { buildTaskPrompt, runNextReadyTask } from "../packages/runner/src";
+import { buildTaskPrompt, runNextReadyTask, runReadyTasks } from "../packages/runner/src";
 
 describe("runner", () => {
   let dir: string;
@@ -71,5 +71,53 @@ describe("runner", () => {
     expect(result?.attemptId).toBeString();
     expect(harness.getTask(taskId)?.status).toBe("done");
     expect(harness.getAttempt(result!.attemptId)?.output.summary).toBe(`Executed ${taskId}`);
+  });
+
+  test("runs multiple ready tasks with separate subagent sessions", async () => {
+    const runId = harness.createRun({ goal: "Build loop" });
+    const first = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Implement A",
+      prompt: "Implement A.",
+    });
+    const second = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Implement B",
+      prompt: "Implement B.",
+    });
+    const blockedByFirst = harness.createTask({
+      runId,
+      role: "verifier",
+      goal: "Verify A",
+      prompt: "Verify A.",
+      dependsOn: [first],
+    });
+
+    const seenSessions: string[] = [];
+    const results = await runReadyTasks({
+      harness,
+      runId,
+      limit: 2,
+      sessionForTask: (task) => `session-${task.id}`,
+      executorFactory: ({ sessionName }) => async ({ task }) => {
+        seenSessions.push(sessionName);
+        return {
+          status: "done",
+          summary: `Executed ${task.id} in ${sessionName}`,
+          artifacts: [],
+          checks: [],
+          problems: [],
+        };
+      },
+    });
+
+    expect(results.map((result) => result.taskId).sort()).toEqual([first, second].sort());
+    expect(seenSessions.sort()).toEqual([`session-${first}`, `session-${second}`].sort());
+    expect(harness.getTask(first)?.sessionRef).toBe(`session-${first}`);
+    expect(harness.getTask(second)?.sessionRef).toBe(`session-${second}`);
+    expect(harness.getTask(blockedByFirst)?.status).toBe("todo");
+    expect(harness.nextReadyTask(runId)?.id).toBe(blockedByFirst);
   });
 });

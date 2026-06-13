@@ -10,6 +10,7 @@ export interface ExecutorInput {
   prompt: string;
   run: Run;
   task: Task;
+  sessionName: string;
 }
 
 export type TaskExecutor = (input: ExecutorInput) => Promise<AttemptOutput>;
@@ -23,4 +24,26 @@ export interface RunNextReadyTaskInput {
 export interface RunNextReadyTaskResult {
   taskId: string;
   attemptId: string;
+}
+
+export interface ExecutorFactoryInput {
+  run: Run;
+  task: Task;
+  sessionName: string;
+}
+
+export type TaskExecutorFactory = (input: ExecutorFactoryInput) => TaskExecutor;
+
+export interface RunReadyTasksInput {
+  harness: Harness;
+  runId: string;
+  limit: number;
+  sessionForTask?: (task: Task) => string;
+  executorFactory: TaskExecutorFactory;
+}
+
+export interface RunReadyTasksResult {
+  taskId: string;
+  attemptId: string;
+  sessionName: string;
 }
