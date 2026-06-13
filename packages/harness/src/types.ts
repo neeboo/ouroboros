@@ -40,6 +40,15 @@ export interface AttemptOutput {
   checks?: unknown[];
   artifacts?: unknown[];
   problems?: string[];
+  nextTasks?: PlannedTask[];
+}
+
+export interface PlannedTask {
+  role: string;
+  goal: string;
+  prompt: string;
+  dependsOn?: string[];
+  doneWhen?: string[];
 }
 
 export interface ExternalRef {

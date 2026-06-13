@@ -10,6 +10,7 @@ export type {
   ExternalRef,
   LeaseReadyTasksInput,
   ListExternalRefsInput,
+  PlannedTask,
   RecordAttemptInput,
   RetryTaskInput,
   Run,

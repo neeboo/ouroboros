@@ -12,6 +12,7 @@ export function parseAttemptOutput(raw: string): AttemptOutput {
     checks: Array.isArray(parsed.checks) ? parsed.checks : [],
     artifacts: Array.isArray(parsed.artifacts) ? parsed.artifacts : [],
     problems: Array.isArray(parsed.problems) ? parsed.problems.map(String) : [],
+    nextTasks: Array.isArray(parsed.nextTasks) ? parsed.nextTasks : [],
   };
 }
 

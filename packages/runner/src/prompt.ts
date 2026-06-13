@@ -32,6 +32,15 @@ export function buildTaskPrompt(input: PromptInput) {
       checks: [],
       artifacts: [],
       problems: [],
+      nextTasks: [
+        {
+          role: "worker",
+          goal: "Optional next task goal",
+          prompt: "Optional next task instructions",
+          dependsOn: [],
+          doneWhen: [],
+        },
+      ],
     }),
   ].join("\n");
 }

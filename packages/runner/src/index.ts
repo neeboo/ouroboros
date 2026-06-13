@@ -4,6 +4,7 @@ export { createAcpxCodexExecutor } from "./executors/acpx";
 export { createCodexCliExecutor } from "./executors/codex-cli";
 export { parseAttemptOutput } from "./executors/output";
 export { runLocalCommand } from "./executors/command";
+export { createTasksFromOutputHook } from "./hooks/create-tasks";
 export type {
   ExecutorInput,
   PromptInput,

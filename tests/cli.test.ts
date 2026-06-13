@@ -130,6 +130,61 @@ describe("CLI", () => {
     );
   });
 
+  test("creates tasks from planner output when stop hook is enabled", async () => {
+    await runCli("init");
+    const run = await runCliJson("create-run", "--goal", "Bootstrap ouroboros");
+    const planner = await runCliJson(
+      "create-task",
+      "--run-id",
+      run.id,
+      "--role",
+      "planner",
+      "--goal",
+      "Plan next task",
+      "--prompt",
+      "Plan.",
+    );
+    const binDir = join(dir, "bin");
+    await mkdir(binDir);
+    await writeFile(
+      join(binDir, "codex"),
+      [
+        "#!/usr/bin/env bun",
+        "await new Response(Bun.stdin.stream()).text();",
+        "console.log(JSON.stringify({",
+        "  status: 'done',",
+        "  summary: 'planned',",
+        "  changedFiles: [],",
+        "  checks: [],",
+        "  artifacts: [],",
+        "  problems: [],",
+        "  nextTasks: [{ role: 'worker', goal: 'Generated task', prompt: 'Do generated task.', doneWhen: ['done'] }]",
+        "}));",
+      ].join("\n"),
+    );
+    await chmod(join(binDir, "codex"), 0o755);
+
+    const result = await runCliJson(
+      "run-next",
+      "--run-id",
+      run.id,
+      "--executor",
+      "codex-cli",
+      "--cwd",
+      "/repo",
+      "--sandbox",
+      "read-only",
+      "--stop-hook",
+      "create-tasks",
+      { PATH: `${binDir}:${process.env.PATH}` },
+    );
+    const generated = await runCliJson("next-task", "--run-id", run.id);
+
+    expect(result.tasks[0].taskId).toBe(planner.id);
+    expect(generated.goal).toBe("Generated task");
+    expect(generated.dependsOn).toEqual([planner.id]);
+  });
+
   test("runs the next task with the acpx codex executor", async () => {
     await runCli("init");
     const run = await runCliJson("create-run", "--goal", "Bootstrap ouroboros");

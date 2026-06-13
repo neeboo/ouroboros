@@ -1,6 +1,11 @@
 #!/usr/bin/env bun
 import { Harness } from "@ouroboros/harness";
-import { createAcpxCodexExecutor, createCodexCliExecutor, runReadyTasks } from "@ouroboros/runner";
+import {
+  createAcpxCodexExecutor,
+  createCodexCliExecutor,
+  createTasksFromOutputHook,
+  runReadyTasks,
+} from "@ouroboros/runner";
 import { fail, flag, parseArgs, required } from "./args";
 import { parseArray, parseObject, printJson } from "./json";
 
@@ -110,6 +115,7 @@ switch (parsed.command) {
           timeoutMs: parseTimeoutMs(flag(parsed, "timeout-ms")),
         });
       },
+      stopHooks: stopHooks(),
     });
     printJson({ tasks: result });
     break;
@@ -163,6 +169,17 @@ function parseSandbox(raw: string) {
 
 function runnerCwd() {
   return flag(parsed, "cwd") ?? process.cwd();
+}
+
+function stopHooks() {
+  const hook = flag(parsed, "stop-hook");
+  if (!hook) {
+    return [];
+  }
+  if (hook !== "create-tasks") {
+    fail("--stop-hook must be create-tasks");
+  }
+  return [createTasksFromOutputHook({ harness })];
 }
 
 function parseTimeoutMs(raw: string | undefined) {

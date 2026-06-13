@@ -115,7 +115,16 @@ The agent must return structured output matching:
   "changed_files": [],
   "checks": [],
   "artifacts": [],
-  "problems": []
+  "problems": [],
+  "nextTasks": [
+    {
+      "role": "worker",
+      "goal": "Implement the next small capability",
+      "prompt": "Concrete instructions for the next subagent",
+      "dependsOn": [],
+      "doneWhen": []
+    }
+  ]
 }
 ```
 
@@ -158,6 +167,8 @@ continue  append information without forcing retry
 ```
 
 Commit hooks should be explicit and opt-in. The default stop hook behavior should inspect and summarize, not create commits.
+
+The `create-tasks` stop hook reads `nextTasks` from the subagent output and inserts those tasks into the harness database. If a planned task omits `dependsOn`, the hook makes it depend on the planner task that produced it.
 
 ## Linear Bridge Rule
 

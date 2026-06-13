@@ -14,6 +14,7 @@ describe("acpx executor", () => {
       checks: [{ name: "test", status: "passed" }],
       artifacts: [],
       problems: [],
+      nextTasks: [],
     });
   });
 

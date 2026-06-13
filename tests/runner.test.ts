@@ -3,7 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { Harness } from "../packages/harness/src";
-import { buildTaskPrompt, runNextReadyTask, runReadyTasks } from "../packages/runner/src";
+import { buildTaskPrompt, createTasksFromOutputHook, runNextReadyTask, runReadyTasks } from "../packages/runner/src";
 
 describe("runner", () => {
   let dir: string;
@@ -43,6 +43,7 @@ describe("runner", () => {
     expect(prompt).toContain("Plan the next task");
     expect(prompt).toContain("Read current state and propose one small task.");
     expect(prompt).toContain('"status": "done"');
+    expect(prompt).toContain('"nextTasks"');
     expect(prompt).toContain("a next task exists");
   });
 
@@ -172,6 +173,50 @@ describe("runner", () => {
     expect(attempt.status).toBe("blocked");
     expect(harness.getTask(taskId)?.status).toBe("todo");
     expect(attempt.output.problems).toEqual(["subagent output was not specific enough"]);
+  });
+
+  test("planner stop hook creates next tasks from structured output", async () => {
+    const runId = harness.createRun({ goal: "Build loop" });
+    const plannerTask = harness.createTask({
+      runId,
+      role: "planner",
+      goal: "Plan next work",
+      prompt: "Plan one task.",
+    });
+
+    const result = await runNextReadyTask({
+      harness,
+      runId,
+      executor: async () => ({
+        status: "done",
+        summary: "Planned next task",
+        artifacts: [],
+        checks: [],
+        problems: [],
+        nextTasks: [
+          {
+            role: "worker",
+            goal: "Implement planner output hook",
+            prompt: "Create tasks from planner output.",
+            doneWhen: ["tests pass"],
+          },
+        ],
+      }),
+      stopHooks: [createTasksFromOutputHook({ harness })],
+    });
+
+    const attempt = harness.getAttempt(result!.attemptId)!;
+    const next = harness.nextReadyTask(runId);
+    expect(next?.role).toBe("worker");
+    expect(next?.goal).toBe("Implement planner output hook");
+    expect(next?.dependsOn).toEqual([plannerTask]);
+    expect(attempt.output.artifacts).toEqual([
+      {
+        kind: "created_task",
+        taskId: next?.id,
+        sourceTaskId: plannerTask,
+      },
+    ]);
   });
 
   test("runs multiple ready tasks with separate subagent sessions", async () => {

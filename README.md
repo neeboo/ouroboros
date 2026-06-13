@@ -38,6 +38,7 @@ bun run cli -- next-task --run-id <run_id>
 bun run cli -- run-next --run-id <run_id> --executor noop --limit 2
 bun run cli -- run-next --run-id <run_id> --executor acpx-codex --cwd "$(pwd)" --approval approve-reads --limit 2
 bun run cli -- run-next --run-id <run_id> --executor codex-cli --cwd "$(pwd)" --sandbox read-only --codex-bin "$(command -v codex)" --limit 2
+bun run cli -- run-next --run-id <run_id> --executor codex-cli --cwd "$(pwd)" --stop-hook create-tasks
 bun run cli -- record-attempt --task-id <task_id> --input-json '{}' --output-json '{"status":"done","summary":"..."}'
 bun run cli -- retry-task --task-id <task_id>
 ```
@@ -45,6 +46,8 @@ bun run cli -- retry-task --task-id <task_id>
 `run-next` leases ready tasks first, assigns each task a separate session name, then runs the selected executor for each leased task. The `acpx-codex` executor creates or reuses an `acpx codex` named session per task. The `codex-cli` executor is a one-shot fallback for environments where the ACP adapter cannot create sessions.
 
 Runner stop hooks run after a subagent turn and before the attempt is recorded. Hooks can append checks/artifacts/problems and decide `exit` or `retry`, which prevents a subagent from repeating itself indefinitely.
+
+The `create-tasks` stop hook turns planner `nextTasks` output into real DB tasks.
 
 ## Boundaries
 
