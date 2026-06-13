@@ -10,6 +10,7 @@ import type {
   LeaseReadyTasksInput,
   ListExternalRefsInput,
   RecordAttemptInput,
+  RetryTaskInput,
   Status,
 } from "./types";
 
@@ -201,6 +202,18 @@ export class Harness {
         });
       })();
       return id;
+    });
+  }
+
+  retryTask(input: RetryTaskInput) {
+    return withDatabase(this.dbPath, (db) => {
+      db.query(
+        `
+        update tasks
+        set status = 'todo', updated_at = current_timestamp
+        where id = $taskId
+        `,
+      ).run({ $taskId: input.taskId });
     });
   }
 

@@ -160,4 +160,28 @@ describe("Harness", () => {
     expect(harness.getTask(first)?.sessionRef).toBe(`session-${first}`);
     expect(harness.getTask(second)?.status).toBe("todo");
   });
+
+  test("retries a blocked task", () => {
+    const runId = harness.createRun({ goal: "Build loop" });
+    const taskId = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Implement A",
+      prompt: "Implement A.",
+    });
+    harness.recordAttempt({
+      taskId,
+      input: {},
+      output: {
+        status: "blocked",
+        summary: "Network failed",
+        problems: ["timeout"],
+      },
+    });
+
+    harness.retryTask({ taskId });
+
+    expect(harness.getTask(taskId)?.status).toBe("todo");
+    expect(harness.nextReadyTask(runId)?.id).toBe(taskId);
+  });
 });

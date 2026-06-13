@@ -19,6 +19,7 @@ export interface RunNextReadyTaskInput {
   harness: Harness;
   runId: string;
   executor: TaskExecutor;
+  stopHooks?: StopHook[];
 }
 
 export interface RunNextReadyTaskResult {
@@ -40,6 +41,7 @@ export interface RunReadyTasksInput {
   limit: number;
   sessionForTask?: (task: Task) => string;
   executorFactory: TaskExecutorFactory;
+  stopHooks?: StopHook[];
 }
 
 export interface RunReadyTasksResult {
@@ -47,3 +49,22 @@ export interface RunReadyTasksResult {
   attemptId: string;
   sessionName: string;
 }
+
+export type StopDecision = "continue" | "retry" | "exit";
+
+export interface StopHookInput {
+  run: Run;
+  task: Task;
+  sessionName: string;
+  prompt: string;
+  output: AttemptOutput;
+}
+
+export interface StopHookResult {
+  decision?: StopDecision;
+  checks?: unknown[];
+  artifacts?: unknown[];
+  problems?: string[];
+}
+
+export type StopHook = (input: StopHookInput) => Promise<StopHookResult> | StopHookResult;

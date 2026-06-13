@@ -73,6 +73,107 @@ describe("runner", () => {
     expect(harness.getAttempt(result!.attemptId)?.output.summary).toBe(`Executed ${taskId}`);
   });
 
+  test("applies stop hooks before recording an attempt", async () => {
+    const runId = harness.createRun({ goal: "Build loop" });
+    const taskId = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Implement runner",
+      prompt: "Implement the smallest runner.",
+    });
+
+    const result = await runNextReadyTask({
+      harness,
+      runId,
+      executor: async () => ({
+        status: "done",
+        summary: "Executed task",
+        artifacts: [],
+        checks: [],
+        problems: [],
+      }),
+      stopHooks: [
+        async ({ task }) => ({
+          decision: "exit",
+          checks: [{ name: "stop hook", status: "passed" }],
+          artifacts: [{ kind: "summary", taskId: task.id }],
+        }),
+      ],
+    });
+
+    const attempt = harness.getAttempt(result!.attemptId)!;
+    expect(attempt.taskId).toBe(taskId);
+    expect(attempt.output.checks).toEqual([{ name: "stop hook", status: "passed" }]);
+    expect(attempt.output.artifacts).toEqual([{ kind: "summary", taskId }]);
+  });
+
+  test("stop hooks can block an otherwise successful attempt", async () => {
+    const runId = harness.createRun({ goal: "Build loop" });
+    const taskId = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Implement runner",
+      prompt: "Implement the smallest runner.",
+    });
+
+    const result = await runNextReadyTask({
+      harness,
+      runId,
+      executor: async () => ({
+        status: "done",
+        summary: "Executed task",
+        artifacts: [],
+        checks: [],
+        problems: [],
+      }),
+      stopHooks: [
+        async () => ({
+          decision: "exit",
+          problems: ["git tree is dirty"],
+        }),
+      ],
+    });
+
+    const attempt = harness.getAttempt(result!.attemptId)!;
+    expect(attempt.taskId).toBe(taskId);
+    expect(attempt.status).toBe("blocked");
+    expect(attempt.output.status).toBe("blocked");
+    expect(attempt.output.problems).toEqual(["git tree is dirty"]);
+  });
+
+  test("stop hooks can request retry without pretending the task is complete", async () => {
+    const runId = harness.createRun({ goal: "Build loop" });
+    const taskId = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Implement runner",
+      prompt: "Implement the smallest runner.",
+    });
+
+    const result = await runNextReadyTask({
+      harness,
+      runId,
+      executor: async () => ({
+        status: "done",
+        summary: "Executed task",
+        artifacts: [],
+        checks: [],
+        problems: [],
+      }),
+      stopHooks: [
+        async () => ({
+          decision: "retry",
+          problems: ["subagent output was not specific enough"],
+        }),
+      ],
+    });
+
+    const attempt = harness.getAttempt(result!.attemptId)!;
+    expect(attempt.status).toBe("blocked");
+    expect(harness.getTask(taskId)?.status).toBe("todo");
+    expect(attempt.output.problems).toEqual(["subagent output was not specific enough"]);
+  });
+
   test("runs multiple ready tasks with separate subagent sessions", async () => {
     const runId = harness.createRun({ goal: "Build loop" });
     const first = harness.createTask({

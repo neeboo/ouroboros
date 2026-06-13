@@ -82,6 +82,10 @@ export interface LeaseReadyTasksInput {
   sessionForTask: (task: Task) => string;
 }
 
+export interface RetryTaskInput {
+  taskId: string;
+}
+
 export interface CreateExternalRefInput {
   localType: string;
   localId: string;

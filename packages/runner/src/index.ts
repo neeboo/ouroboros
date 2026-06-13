@@ -11,6 +11,10 @@ export type {
   RunNextReadyTaskResult,
   RunReadyTasksInput,
   RunReadyTasksResult,
+  StopDecision,
+  StopHook,
+  StopHookInput,
+  StopHookResult,
   TaskExecutor,
   TaskExecutorFactory,
 } from "./types";

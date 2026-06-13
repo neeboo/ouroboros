@@ -138,6 +138,27 @@ Verifier output may:
 
 The verifier should read database state and real artifacts. It should not trust agent summaries alone.
 
+## Stop Hooks
+
+After an executor returns and before an attempt is recorded, the runner may apply stop hooks.
+
+Stop hooks are for turn-end control:
+
+- append checks
+- append artifacts
+- append problems
+- decide whether the task should exit or retry
+
+Hook decisions:
+
+```text
+exit      record the attempt and keep the resulting task status
+retry     record a blocked attempt, then move the task back to todo
+continue  append information without forcing retry
+```
+
+Commit hooks should be explicit and opt-in. The default stop hook behavior should inspect and summarize, not create commits.
+
 ## Linear Bridge Rule
 
 Linear events never mutate task state directly.

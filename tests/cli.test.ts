@@ -264,6 +264,36 @@ describe("CLI", () => {
     expect(readyAfterRecord).toBeNull();
   });
 
+  test("retries a blocked task", async () => {
+    await runCli("init");
+    const run = await runCliJson("create-run", "--goal", "Bootstrap ouroboros");
+    const task = await runCliJson(
+      "create-task",
+      "--run-id",
+      run.id,
+      "--role",
+      "worker",
+      "--goal",
+      "Retry task",
+      "--prompt",
+      "Retry me.",
+    );
+    await runCliJson(
+      "record-attempt",
+      "--task-id",
+      task.id,
+      "--input-json",
+      "{}",
+      "--output-json",
+      '{"status":"blocked","summary":"Blocked","problems":["timeout"]}',
+    );
+
+    const retried = await runCliJson("retry-task", "--task-id", task.id);
+
+    expect(retried).toEqual({ taskId: task.id, status: "todo" });
+    expect((await runCliJson("next-task", "--run-id", run.id)).id).toBe(task.id);
+  });
+
   async function runCli(...rawArgs: Array<string | Record<string, string>>) {
     const envOverride =
       typeof rawArgs.at(-1) === "object" ? (rawArgs.pop() as Record<string, string>) : {};

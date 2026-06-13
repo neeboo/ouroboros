@@ -137,6 +137,12 @@ switch (parsed.command) {
     });
     break;
   }
+  case "retry-task": {
+    const taskId = required(parsed, "task-id");
+    harness.retryTask({ taskId });
+    printJson({ taskId, status: "todo" });
+    break;
+  }
   default:
     fail(`unknown command: ${parsed.command}`);
 }
