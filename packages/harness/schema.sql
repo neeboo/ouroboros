@@ -43,6 +43,19 @@ create table if not exists attempts (
 
 create index if not exists idx_attempts_task on attempts(task_id, started_at);
 
+create table if not exists attempt_events (
+  id text primary key,
+  attempt_id text not null references attempts(id) on delete cascade,
+  sequence integer not null,
+  stream text not null check (stream in ('stdout', 'stderr', 'codex-json', 'system')),
+  text text,
+  payload_json text not null default '{}',
+  created_at text not null default current_timestamp,
+  unique (attempt_id, sequence)
+);
+
+create index if not exists idx_attempt_events_attempt on attempt_events(attempt_id, sequence);
+
 create table if not exists lessons (
   id text primary key,
   run_id text not null references runs(id) on delete cascade,

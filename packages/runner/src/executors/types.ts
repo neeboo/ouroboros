@@ -13,6 +13,8 @@ export interface RunCommandInput {
   stdin: string;
   timeoutMs?: number;
   idleTimeoutMs?: number;
+  onStdout?: (chunk: string) => void;
+  onStderr?: (chunk: string) => void;
 }
 
 export type RunCommand = (input: RunCommandInput) => Promise<CommandResult>;

@@ -33,6 +33,16 @@ export interface AttemptRow {
   error: string | null;
 }
 
+export interface AttemptEventRow {
+  id: string;
+  attempt_id: string;
+  sequence: number;
+  stream: "stdout" | "stderr" | "codex-json" | "system";
+  text: string | null;
+  payload_json: string;
+  created_at: string;
+}
+
 export interface ExternalRefRow {
   id: string;
   local_type: string;

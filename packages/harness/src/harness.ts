@@ -8,6 +8,7 @@ import {
 import { makeId } from "./ids";
 import { toJson } from "./json";
 import {
+  attemptEventFromRow,
   attemptFromRow,
   externalRefFromRow,
   lessonFromRow,
@@ -15,7 +16,15 @@ import {
   runFromRow,
   taskFromRow,
 } from "./mappers";
-import type { AttemptRow, ExternalRefRow, LessonRow, PromptTemplateRow, RunRow, TaskRow } from "./rows";
+import type {
+  AttemptEventRow,
+  AttemptRow,
+  ExternalRefRow,
+  LessonRow,
+  PromptTemplateRow,
+  RunRow,
+  TaskRow,
+} from "./rows";
 import type {
   CreateExternalRefInput,
   SetPromptTemplateInput,
@@ -23,14 +32,17 @@ import type {
   CreateTaskInput,
   DependencyAttempt,
   FinishAttemptInput,
+  GetRunOverviewInput,
   LeaseReadyTasksInput,
   ListRunningAttemptsInput,
   ListExternalRefsInput,
   ListLessonsInput,
+  RecordAttemptEventInput,
   RecordAttemptInput,
   RetryTaskInput,
   StartAttemptInput,
   Status,
+  UpdateAttemptInputInput,
 } from "./types";
 
 export class Harness {
@@ -410,6 +422,118 @@ export class Harness {
     });
   }
 
+  updateAttemptInput(input: UpdateAttemptInputInput) {
+    return withDatabase(this.dbPath, (db) => {
+      db.query(
+        `
+        update attempts
+        set input_json = $inputJson
+        where id = $attemptId
+        `,
+      ).run({
+        $inputJson: toJson(input.input),
+        $attemptId: input.attemptId,
+      });
+    });
+  }
+
+  recordAttemptEvent(input: RecordAttemptEventInput) {
+    const id = input.id ?? makeId("event");
+    return withDatabase(this.dbPath, (db) => {
+      db.query(
+        `
+        insert into attempt_events (
+          id, attempt_id, sequence, stream, text, payload_json
+        )
+        values (
+          $id, $attemptId, $sequence, $stream, $text, $payloadJson
+        )
+        on conflict(attempt_id, sequence) do update set
+          stream = excluded.stream,
+          text = excluded.text,
+          payload_json = excluded.payload_json
+        `,
+      ).run({
+        $id: id,
+        $attemptId: input.attemptId,
+        $sequence: input.sequence,
+        $stream: input.stream,
+        $text: input.text ?? null,
+        $payloadJson: toJson(input.payload ?? {}),
+      });
+      return id;
+    });
+  }
+
+  getRunOverview(input: GetRunOverviewInput) {
+    return withDatabase(this.dbPath, (db) => {
+      const runRow = db.query("select * from runs where id = $runId").get({ $runId: input.runId }) as RunRow | null;
+      const taskRows = db
+        .query(
+          `
+          select *
+          from tasks
+          where run_id = $runId
+          order by rowid
+          `,
+        )
+        .all({ $runId: input.runId }) as TaskRow[];
+      const tasks = taskRows.map(taskFromRow);
+      const taskById = new Map(tasks.map((task) => [task.id, task]));
+      const attemptRows = db
+        .query(
+          `
+          select attempts.*, attempts.started_at as started_at
+          from attempts
+          join tasks on tasks.id = attempts.task_id
+          where tasks.run_id = $runId
+          order by attempts.rowid
+          `,
+        )
+        .all({ $runId: input.runId }) as Array<AttemptRow & { started_at: string | null }>;
+      const eventQuery = db.query(
+        `
+        select *
+        from attempt_events
+        where attempt_id = $attemptId
+        order by sequence desc
+        limit $limit
+        `,
+      );
+      const eventLimit = input.eventLimit ?? 25;
+      const sessions = attemptRows.flatMap((row) => {
+        const attempt = attemptFromRow(row);
+        const task = taskById.get(attempt.taskId);
+        if (!task) {
+          return [];
+        }
+        const events = (eventQuery.all({ $attemptId: attempt.id, $limit: eventLimit }) as AttemptEventRow[])
+          .map(attemptEventFromRow)
+          .reverse();
+        return [
+          {
+            role: task.role,
+            taskId: task.id,
+            taskGoal: task.goal,
+            attemptId: attempt.id,
+            status: attempt.status,
+            sessionName: stringOrNull(attempt.input.sessionName),
+            codexSessionId: stringOrNull(attempt.input.codexSessionId),
+            worktreePath: task.worktreePath,
+            startedAt: row.started_at,
+            latestText: latestEventText(events),
+            events,
+          },
+        ];
+      });
+      return {
+        run: runRow ? runFromRow(runRow) : null,
+        tasks,
+        sessions,
+      };
+    });
+  }
+
   retryTask(input: RetryTaskInput) {
     return withDatabase(this.dbPath, (db) => {
       db.query(
@@ -529,6 +653,27 @@ export class Harness {
       }
     });
   }
+}
+
+function stringOrNull(value: unknown) {
+  return typeof value === "string" && value.trim().length > 0 ? value : null;
+}
+
+function latestEventText(events: Array<{ text: string | null; payload: Record<string, unknown> }>) {
+  for (const event of [...events].reverse()) {
+    for (const key of ["delta", "message", "text", "content"]) {
+      const value = event.payload[key];
+      if (typeof value === "string" && value.trim().length > 0) {
+        return value.trim();
+      }
+    }
+  }
+  for (const event of [...events].reverse()) {
+    if (event.text && event.text.trim().length > 0) {
+      return event.text.trim();
+    }
+  }
+  return "";
 }
 
 function lessonForAttempt(output: RecordAttemptInput["output"]) {

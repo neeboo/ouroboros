@@ -1,13 +1,13 @@
 import type { CommandResult, RunCommand } from "./types";
 
-export const runLocalCommand: RunCommand = async ({ cmd, stdin, timeoutMs, idleTimeoutMs }) => {
+export const runLocalCommand: RunCommand = async (input) => {
   const proc = Bun.spawn({
-    cmd,
+    cmd: input.cmd,
     stdin: "pipe",
     stdout: "pipe",
     stderr: "pipe",
   });
-  proc.stdin.write(stdin);
+  proc.stdin.write(input.stdin);
   proc.stdin.end();
 
   let stdout = "";
@@ -34,7 +34,7 @@ export const runLocalCommand: RunCommand = async ({ cmd, stdin, timeoutMs, idleT
     };
 
     const resetIdleTimeout = () => {
-      if (idleTimeoutMs === undefined || settled) {
+      if (input.idleTimeoutMs === undefined || settled) {
         return;
       }
       if (idleTimeout) {
@@ -45,29 +45,31 @@ export const runLocalCommand: RunCommand = async ({ cmd, stdin, timeoutMs, idleT
         finish({
           exitCode: 124,
           stdout,
-          stderr: appendProblem(stderr, `command idle timed out after ${idleTimeoutMs}ms`),
+          stderr: appendProblem(stderr, `command idle timed out after ${input.idleTimeoutMs}ms`),
         });
-      }, idleTimeoutMs);
+      }, input.idleTimeoutMs);
     };
 
-    if (timeoutMs !== undefined) {
+    if (input.timeoutMs !== undefined) {
       hardTimeout = setTimeout(() => {
         proc.kill();
         finish({
           exitCode: 124,
           stdout,
-          stderr: appendProblem(stderr, `command timed out after ${timeoutMs}ms`),
+          stderr: appendProblem(stderr, `command timed out after ${input.timeoutMs}ms`),
         });
-      }, timeoutMs);
+      }, input.timeoutMs);
     }
 
     resetIdleTimeout();
     drainStream(proc.stdout, (chunk) => {
       stdout += chunk;
+      input.onStdout?.(chunk);
       resetIdleTimeout();
     });
     drainStream(proc.stderr, (chunk) => {
       stderr += chunk;
+      input.onStderr?.(chunk);
       resetIdleTimeout();
     });
     proc.exited.then((exitCode) => {

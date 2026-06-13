@@ -351,6 +351,40 @@ describe("codex cli executor", () => {
     });
   });
 
+  test("resumable client streams stdout and parsed json events", async () => {
+    const observedChunks: string[] = [];
+    const observedEvents: Array<Record<string, unknown>> = [];
+    const client = createCodexResumableClient({
+      cwd: "/repo",
+      codexBin: "/custom/codex",
+      runCommand: async ({ onStdout }) => {
+        onStdout?.(`${JSON.stringify({ type: "session.started", session_id: "session_123" })}\n`);
+        onStdout?.(`${JSON.stringify({ type: "agent.message.delta", delta: "thinking" })}\n`);
+        return {
+          exitCode: 124,
+          stdout: [
+            JSON.stringify({ type: "session.started", session_id: "session_123" }),
+            JSON.stringify({ type: "agent.message.delta", delta: "thinking" }),
+          ].join("\n"),
+          stderr: "command idle timed out after 300000ms",
+        };
+      },
+    });
+
+    await client.start({
+      prompt: "Plan next task",
+      sessionName: "task_1",
+      onStdout: (chunk) => observedChunks.push(chunk),
+      onEvent: (event) => observedEvents.push(event),
+    });
+
+    expect(observedChunks.join("")).toContain("session.started");
+    expect(observedEvents).toEqual([
+      { type: "session.started", session_id: "session_123" },
+      { type: "agent.message.delta", delta: "thinking" },
+    ]);
+  });
+
   test("resumable client resumes a session and parses the final attempt output", async () => {
     const calls: Array<{ cmd: string[]; stdin: string }> = [];
     const client = createCodexResumableClient({

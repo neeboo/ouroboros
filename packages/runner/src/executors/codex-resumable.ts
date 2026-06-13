@@ -10,12 +10,18 @@ export interface CodexResumableClientOptions extends CodexCliExecutorOptions {}
 export interface CodexResumableStartInput {
   prompt: string;
   sessionName: string;
+  onStdout?: (chunk: string) => void;
+  onStderr?: (chunk: string) => void;
+  onEvent?: (event: Record<string, unknown>) => void;
 }
 
 export interface CodexResumableResumeInput {
   sessionId: string;
   prompt?: string;
   sessionName: string;
+  onStdout?: (chunk: string) => void;
+  onStderr?: (chunk: string) => void;
+  onEvent?: (event: Record<string, unknown>) => void;
 }
 
 export type CodexResumableResult =
@@ -46,6 +52,7 @@ export function createCodexResumableClient(options: CodexResumableClientOptions)
     start: async (input: CodexResumableStartInput) => {
       const outputPath = await makeOutputPath(options.outputDir, input.sessionName);
       const modelArgs = options.model ? ["-m", options.model] : [];
+      const stdoutObserver = createStdoutObserver(input);
       const result = await runCommand({
         cmd: [
           codexBin,
@@ -65,12 +72,15 @@ export function createCodexResumableClient(options: CodexResumableClientOptions)
         stdin: input.prompt,
         timeoutMs: options.timeoutMs,
         idleTimeoutMs: options.idleTimeoutMs,
+        onStdout: stdoutObserver,
+        onStderr: input.onStderr,
       });
       return resumableResult({ result, outputPath, commandName: "codex exec" });
     },
     resume: async (input: CodexResumableResumeInput) => {
       const outputPath = await makeOutputPath(options.outputDir, input.sessionName);
       const modelArgs = options.model ? ["-m", options.model] : [];
+      const stdoutObserver = createStdoutObserver(input);
       const result = await runCommand({
         cmd: [
           codexBin,
@@ -92,9 +102,30 @@ export function createCodexResumableClient(options: CodexResumableClientOptions)
         stdin: input.prompt ?? "",
         timeoutMs: options.timeoutMs,
         idleTimeoutMs: options.idleTimeoutMs,
+        onStdout: stdoutObserver,
+        onStderr: input.onStderr,
       });
       return resumableResult({ result, outputPath, commandName: "codex exec resume" });
     },
+  };
+}
+
+function createStdoutObserver(input: {
+  onStdout?: (chunk: string) => void;
+  onEvent?: (event: Record<string, unknown>) => void;
+}) {
+  let buffer = "";
+  return (chunk: string) => {
+    input.onStdout?.(chunk);
+    buffer += chunk;
+    const lines = buffer.split(/\r?\n/);
+    buffer = lines.pop() ?? "";
+    for (const line of lines) {
+      const parsed = parseJsonLine(line);
+      if (parsed) {
+        input.onEvent?.(parsed);
+      }
+    }
   };
 }
 
@@ -158,13 +189,18 @@ function parseJsonLines(stdout: string) {
     .map((line) => line.trim())
     .filter((line) => line.length > 0)
     .flatMap((line) => {
-      try {
-        const parsed = JSON.parse(line);
-        return parsed && typeof parsed === "object" ? [parsed as Record<string, unknown>] : [];
-      } catch {
-        return [];
-      }
+      const parsed = parseJsonLine(line);
+      return parsed ? [parsed] : [];
     });
+}
+
+function parseJsonLine(line: string) {
+  try {
+    const parsed = JSON.parse(line);
+    return parsed && typeof parsed === "object" ? (parsed as Record<string, unknown>) : null;
+  } catch {
+    return null;
+  }
 }
 
 function sessionIdFromEvents(events: Array<Record<string, unknown>>) {

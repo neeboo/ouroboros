@@ -47,4 +47,29 @@ describe("command runner", () => {
     expect(result.stdout).toContain("started");
     expect(result.stderr).toContain("idle timed out");
   });
+
+  test("notifies stdout and stderr chunks while the command is running", async () => {
+    const chunks: string[] = [];
+
+    const result = await runLocalCommand({
+      cmd: [
+        "bun",
+        "-e",
+        [
+          "console.log('first');",
+          "console.error('warn');",
+          "await new Promise((resolve) => setTimeout(resolve, 20));",
+          "console.log('second');",
+        ].join("\n"),
+      ],
+      stdin: "",
+      onStdout: (chunk) => chunks.push(`stdout:${chunk.trim()}`),
+      onStderr: (chunk) => chunks.push(`stderr:${chunk.trim()}`),
+    });
+
+    expect(result.exitCode).toBe(0);
+    expect(chunks).toContain("stdout:first");
+    expect(chunks).toContain("stderr:warn");
+    expect(chunks).toContain("stdout:second");
+  });
 });

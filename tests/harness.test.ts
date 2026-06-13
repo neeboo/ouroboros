@@ -184,6 +184,113 @@ describe("Harness", () => {
     ]);
   });
 
+  test("updates running attempt input for resumable session ids", () => {
+    const runId = harness.createRun({ goal: "Build loop" });
+    const taskId = harness.createTask({
+      runId,
+      role: "planner",
+      goal: "Plan",
+      prompt: "Plan.",
+    });
+    const attemptId = harness.startAttempt({
+      taskId,
+      input: {
+        sessionName: "planner-session",
+      },
+    });
+
+    harness.updateAttemptInput({
+      attemptId,
+      input: {
+        sessionName: "planner-session",
+        codexSessionId: "codex-session-1",
+      },
+    });
+
+    expect(harness.getAttempt(attemptId)?.input).toMatchObject({
+      sessionName: "planner-session",
+      codexSessionId: "codex-session-1",
+    });
+  });
+
+  test("records attempt events and builds an observable run overview", () => {
+    const runId = harness.createRun({ goal: "Build observable loop" });
+    const planner = harness.createTask({
+      runId,
+      role: "planner",
+      goal: "Plan graph",
+      prompt: "Plan.",
+    });
+    const worker = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Implement graph",
+      prompt: "Implement.",
+      dependsOn: [planner],
+    });
+    const plannerAttempt = harness.startAttempt({
+      taskId: planner,
+      input: {
+        sessionName: "planner-session",
+        codexSessionId: "codex-planner",
+      },
+    });
+    const workerAttempt = harness.startAttempt({
+      taskId: worker,
+      input: {
+        sessionName: "worker-session",
+        codexSessionId: "codex-worker",
+      },
+    });
+
+    harness.recordAttemptEvent({
+      attemptId: plannerAttempt,
+      stream: "codex-json",
+      sequence: 1,
+      payload: {
+        type: "agent.message.delta",
+        delta: "planning",
+      },
+    });
+    harness.recordAttemptEvent({
+      attemptId: workerAttempt,
+      stream: "stdout",
+      sequence: 1,
+      text: "implementing\n",
+    });
+
+    const overview = harness.getRunOverview({ runId, eventLimit: 5 });
+
+    expect(overview.run?.id).toBe(runId);
+    expect(overview.tasks.map((task) => task.id)).toEqual([planner, worker]);
+    expect(overview.sessions).toEqual([
+      expect.objectContaining({
+        role: "planner",
+        taskId: planner,
+        attemptId: plannerAttempt,
+        sessionName: "planner-session",
+        codexSessionId: "codex-planner",
+        status: "running",
+        latestText: "planning",
+        events: [
+          expect.objectContaining({
+            stream: "codex-json",
+            payload: expect.objectContaining({ delta: "planning" }),
+          }),
+        ],
+      }),
+      expect.objectContaining({
+        role: "worker",
+        taskId: worker,
+        attemptId: workerAttempt,
+        sessionName: "worker-session",
+        codexSessionId: "codex-worker",
+        status: "running",
+        latestText: "implementing",
+      }),
+    ]);
+  });
+
   test("records experiences and lessons from attempts", () => {
     const runId = harness.createRun({ goal: "Build loop" });
     const successTask = harness.createTask({

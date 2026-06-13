@@ -16,6 +16,7 @@ import {
 } from "@ouroboros/runner";
 import { fail, flag, parseArgs, required } from "./args";
 import { parseArray, parseObject, printJson } from "./json";
+import { serveDashboard } from "./dashboard";
 import { join } from "node:path";
 
 const parsed = parseArgs(Bun.argv.slice(2));
@@ -212,6 +213,31 @@ switch (parsed.command) {
     printJson(harness.listRunningAttempts({ runId: required(parsed, "run-id") }));
     break;
   }
+  case "run-overview": {
+    printJson(
+      harness.getRunOverview({
+        runId: required(parsed, "run-id"),
+        eventLimit: parsePositiveInteger(flag(parsed, "event-limit") ?? "25", "--event-limit"),
+      }),
+    );
+    break;
+  }
+  case "dashboard": {
+    const runId = required(parsed, "run-id");
+    const port = parsePositiveInteger(flag(parsed, "port") ?? "7331", "--port");
+    const server = serveDashboard({
+      runId,
+      port,
+      overview: () =>
+        harness.getRunOverview({
+          runId,
+          eventLimit: parsePositiveInteger(flag(parsed, "event-limit") ?? "25", "--event-limit"),
+        }),
+    });
+    console.log(`Ouroboros dashboard: http://localhost:${server.port}`);
+    await new Promise(() => {});
+    break;
+  }
   case "codex-start-attempt": {
     const taskId = required(parsed, "task-id");
     const task = harness.getTask(taskId);
@@ -230,10 +256,25 @@ switch (parsed.command) {
       lessons: harness.listLessons({ runId: run.id }),
       template: harness.getPromptTemplate("task")?.contentMd,
     });
-    const result = await codexResumableClient().start({ prompt, sessionName });
-    const input = codexAttemptInput({ prompt, sessionName, result });
+    const input = {
+      prompt,
+      sessionName,
+      executor: "codex-resumable",
+    };
+    const attemptId = harness.startAttempt({ taskId, input });
+    const recorder = createAttemptEventRecorder(attemptId);
+    const result = await codexResumableClient().start({
+      prompt,
+      sessionName,
+      onStdout: recorder.stdout,
+      onStderr: recorder.stderr,
+      onEvent: recorder.event,
+    });
+    harness.updateAttemptInput({
+      attemptId,
+      input: codexAttemptInput({ prompt, sessionName, result }),
+    });
     if (result.status === "running") {
-      const attemptId = harness.startAttempt({ taskId, input });
       printJson({
         attemptId,
         taskId,
@@ -242,9 +283,8 @@ switch (parsed.command) {
       });
       break;
     }
-    const attemptId = harness.recordAttempt({
-      taskId,
-      input,
+    harness.finishAttempt({
+      attemptId,
       output: withCodexArtifacts(result.output, result.sessionId),
     });
     printJson({
@@ -266,10 +306,25 @@ switch (parsed.command) {
       fail(`attempt has no codexSessionId: ${attemptId}`);
     }
     const sessionName = typeof attempt.input.sessionName === "string" ? attempt.input.sessionName : `attempt-${attemptId}`;
+    const recorder = createAttemptEventRecorder(attemptId);
     const result = await codexResumableClient().resume({
       sessionId,
       sessionName,
       prompt: flag(parsed, "prompt") ?? "Continue until you can return the required structured JSON.",
+      onStdout: recorder.stdout,
+      onStderr: recorder.stderr,
+      onEvent: recorder.event,
+    });
+    harness.updateAttemptInput({
+      attemptId,
+      input: {
+        ...attempt.input,
+        ...codexAttemptInput({
+          prompt: flag(parsed, "prompt") ?? "Continue until you can return the required structured JSON.",
+          sessionName,
+          result,
+        }),
+      },
     });
     if (result.status === "running") {
       printJson({
@@ -400,10 +455,21 @@ async function resumeRunningCodexAttempts(input: { runId: string; limit: number 
       typeof attempt.input.prompt === "string"
         ? attempt.input.prompt
         : "Continue until you can return the required structured JSON.";
+    const recorder = createAttemptEventRecorder(attempt.id);
     const result = await codexResumableClient().resume({
       sessionId,
       sessionName,
       prompt,
+      onStdout: recorder.stdout,
+      onStderr: recorder.stderr,
+      onEvent: recorder.event,
+    });
+    harness.updateAttemptInput({
+      attemptId: attempt.id,
+      input: {
+        ...attempt.input,
+        ...codexAttemptInput({ prompt, sessionName, result }),
+      },
     });
     if (result.status === "running") {
       tasks.push({
@@ -458,10 +524,23 @@ async function startReadyCodexAttempts(input: { runId: string; limit: number }) 
       lessons: harness.listLessons({ runId: run.id }),
       template: harness.getPromptTemplate("task")?.contentMd,
     });
-    const result = await codexResumableClient().start({ prompt, sessionName });
+    const baseInput = {
+      prompt,
+      sessionName,
+      executor: "codex-resumable",
+    };
+    const attemptId = harness.startAttempt({ taskId: task.id, input: baseInput });
+    const recorder = createAttemptEventRecorder(attemptId);
+    const result = await codexResumableClient().start({
+      prompt,
+      sessionName,
+      onStdout: recorder.stdout,
+      onStderr: recorder.stderr,
+      onEvent: recorder.event,
+    });
     const attemptInput = codexAttemptInput({ prompt, sessionName, result });
+    harness.updateAttemptInput({ attemptId, input: attemptInput });
     if (result.status === "running") {
-      const attemptId = harness.startAttempt({ taskId: task.id, input: attemptInput });
       tasks.push({
         taskId: task.id,
         attemptId,
@@ -478,9 +557,8 @@ async function startReadyCodexAttempts(input: { runId: string; limit: number }) 
       prompt,
       output: withCodexArtifacts(result.output, result.sessionId),
     });
-    const attemptId = harness.recordAttempt({
-      taskId: task.id,
-      input: attemptInput,
+    harness.finishAttempt({
+      attemptId,
       output,
     });
     if (decision === "retry") {
@@ -568,6 +646,40 @@ function codexAttemptInput(input: {
     stdout: input.result.stdout,
     stderr: input.result.stderr,
     events: input.result.events,
+  };
+}
+
+function createAttemptEventRecorder(attemptId: string) {
+  let sequence = Date.now() * 1000;
+  const nextSequence = () => {
+    sequence += 1;
+    return sequence;
+  };
+  return {
+    stdout: (chunk: string) => {
+      harness.recordAttemptEvent({
+        attemptId,
+        stream: "stdout",
+        sequence: nextSequence(),
+        text: chunk,
+      });
+    },
+    stderr: (chunk: string) => {
+      harness.recordAttemptEvent({
+        attemptId,
+        stream: "stderr",
+        sequence: nextSequence(),
+        text: chunk,
+      });
+    },
+    event: (event: Record<string, unknown>) => {
+      harness.recordAttemptEvent({
+        attemptId,
+        stream: "codex-json",
+        sequence: nextSequence(),
+        payload: event,
+      });
+    },
   };
 }
 

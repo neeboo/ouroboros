@@ -46,9 +46,14 @@ bun run cli -- run-next --run-id <run_id> --executor codex-cli --worktree-root "
 bun run cli -- run-loop --run-id <run_id> --executor codex-cli --cwd "$(pwd)" --stop-hook create-tasks,create-verifier,create-repair,context-summary --max-rounds 8
 
 # resumable Codex CLI execution
+bun run cli -- run-loop --run-id <run_id> --executor codex-resumable --cwd "$(pwd)" --sandbox workspace-write --timeout-ms 1800000 --idle-timeout-ms 300000 --stop-hook create-tasks,create-verifier,create-repair,context-summary --max-rounds 8
 bun run cli -- codex-start-attempt --task-id <task_id> --cwd "$(pwd)" --sandbox workspace-write --timeout-ms 1800000 --idle-timeout-ms 300000
 bun run cli -- list-running-attempts --run-id <run_id>
 bun run cli -- codex-resume-attempt --attempt-id <attempt_id> --cwd "$(pwd)" --sandbox workspace-write --timeout-ms 1800000 --idle-timeout-ms 300000
+
+# observability
+bun run cli -- run-overview --run-id <run_id>
+bun run cli -- dashboard --run-id <run_id> --port 7331
 
 # manual attempt control
 bun run cli -- start-attempt --task-id <task_id> --input-json '{}'
@@ -76,6 +81,8 @@ Use `--timeout-ms` as a generous hard runtime cap. Use `--idle-timeout-ms` to st
 `codex-start-attempt` starts a resumable Codex CLI task with `codex exec --json`. If the command window ends after Codex emits a session id, Ouroboros records a `running` attempt instead of marking the task blocked. `codex-resume-attempt` resumes that session with `codex exec resume <session_id>` and finishes the same attempt when structured JSON is returned.
 
 `list-running-attempts` shows attempts that can be resumed. `start-attempt` and `finish-attempt` are lower-level commands for tools that want to manage running attempts themselves.
+
+`run-overview` returns the run, tasks, observable sessions, and recent attempt events as JSON. `dashboard` starts a local web page that polls the same overview data so planner, worker, and verifier sessions can be watched side by side while they run.
 
 Runner stop hooks run after a subagent turn and before the attempt is recorded. Hooks can append checks/artifacts/problems and decide `exit`, `continue`, or `retry`, which prevents a subagent from repeating itself indefinitely.
 

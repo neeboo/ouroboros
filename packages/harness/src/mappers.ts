@@ -1,6 +1,14 @@
 import { parseJson } from "./json";
-import type { Attempt, AttemptOutput, ExternalRef, Lesson, PromptTemplate, Run, Task } from "./types";
-import type { AttemptRow, ExternalRefRow, LessonRow, PromptTemplateRow, RunRow, TaskRow } from "./rows";
+import type { Attempt, AttemptEvent, AttemptOutput, ExternalRef, Lesson, PromptTemplate, Run, Task } from "./types";
+import type {
+  AttemptEventRow,
+  AttemptRow,
+  ExternalRefRow,
+  LessonRow,
+  PromptTemplateRow,
+  RunRow,
+  TaskRow,
+} from "./rows";
 
 export function runFromRow(row: RunRow): Run {
   return {
@@ -38,6 +46,18 @@ export function attemptFromRow(row: AttemptRow): Attempt {
     checks: parseJson<unknown[]>(row.checks_json),
     artifacts: parseJson<unknown[]>(row.artifacts_json),
     error: row.error,
+  };
+}
+
+export function attemptEventFromRow(row: AttemptEventRow): AttemptEvent {
+  return {
+    id: row.id,
+    attemptId: row.attempt_id,
+    sequence: row.sequence,
+    stream: row.stream,
+    text: row.text,
+    payload: parseJson<Record<string, unknown>>(row.payload_json),
+    createdAt: row.created_at,
   };
 }
 

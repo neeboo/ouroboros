@@ -33,6 +33,18 @@ export interface Attempt {
   error: string | null;
 }
 
+export type AttemptEventStream = "stdout" | "stderr" | "codex-json" | "system";
+
+export interface AttemptEvent {
+  id: string;
+  attemptId: string;
+  sequence: number;
+  stream: AttemptEventStream;
+  text: string | null;
+  payload: Record<string, unknown>;
+  createdAt: string;
+}
+
 export interface AttemptOutput {
   status: "done" | "blocked";
   summary: string;
@@ -122,6 +134,45 @@ export interface StartAttemptInput {
 export interface FinishAttemptInput {
   attemptId: string;
   output: AttemptOutput;
+}
+
+export interface UpdateAttemptInputInput {
+  attemptId: string;
+  input: Record<string, unknown>;
+}
+
+export interface RecordAttemptEventInput {
+  attemptId: string;
+  stream: AttemptEventStream;
+  sequence: number;
+  text?: string | null;
+  payload?: Record<string, unknown>;
+  id?: string;
+}
+
+export interface GetRunOverviewInput {
+  runId: string;
+  eventLimit?: number;
+}
+
+export interface ObservableSession {
+  role: string;
+  taskId: string;
+  taskGoal: string;
+  attemptId: string;
+  status: Exclude<Status, "todo">;
+  sessionName: string | null;
+  codexSessionId: string | null;
+  worktreePath: string | null;
+  startedAt: string | null;
+  latestText: string;
+  events: AttemptEvent[];
+}
+
+export interface RunOverview {
+  run: Run | null;
+  tasks: Task[];
+  sessions: ObservableSession[];
 }
 
 export interface ListRunningAttemptsInput {

@@ -779,6 +779,7 @@ describe("CLI", () => {
       "1",
     );
     const running = await runCliJson("list-running-attempts", "--run-id", run.id);
+    const overview = await runCliJson("run-overview", "--run-id", run.id);
     const resumed = await runCliJson(
       "run-loop",
       "--run-id",
@@ -809,6 +810,21 @@ describe("CLI", () => {
       expect.objectContaining({
         taskId: planner.id,
         status: "running",
+      }),
+    ]);
+    expect(overview.sessions).toEqual([
+      expect.objectContaining({
+        role: "planner",
+        taskId: planner.id,
+        status: "running",
+        codexSessionId: "session_loop",
+        latestText: "working",
+        events: expect.arrayContaining([
+          expect.objectContaining({
+            stream: "codex-json",
+            payload: expect.objectContaining({ type: "agent.message.delta", delta: "working" }),
+          }),
+        ]),
       }),
     ]);
     expect(resumed.rounds[0].tasks).toEqual([
