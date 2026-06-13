@@ -1,5 +1,5 @@
 export { buildTaskPrompt } from "./prompt";
-export { runNextReadyTask, runReadyTasks } from "./runner";
+export { runNextReadyTask, runReadyTasks, runUntilIdle } from "./runner";
 export { createAcpxCodexExecutor } from "./executors/acpx";
 export { createCodexCliExecutor } from "./executors/codex-cli";
 export { parseAttemptOutput } from "./executors/output";
@@ -13,6 +13,8 @@ export type {
   RunNextReadyTaskResult,
   RunReadyTasksInput,
   RunReadyTasksResult,
+  RunUntilIdleInput,
+  RunUntilIdleResult,
   StartHook,
   StartHookInput,
   StartHookResult,

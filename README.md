@@ -41,11 +41,14 @@ bun run cli -- run-next --run-id <run_id> --executor codex-cli --cwd "$(pwd)" --
 bun run cli -- run-next --run-id <run_id> --executor codex-cli --worktree-root ".ouroboros/worktrees" --limit 2
 bun run cli -- run-next --run-id <run_id> --executor codex-cli --worktree-root ".ouroboros/worktrees" --start-hook git-worktree
 bun run cli -- run-next --run-id <run_id> --executor codex-cli --cwd "$(pwd)" --stop-hook create-tasks
+bun run cli -- run-loop --run-id <run_id> --executor codex-cli --cwd "$(pwd)" --stop-hook create-tasks --max-rounds 5
 bun run cli -- record-attempt --task-id <task_id> --input-json '{}' --output-json '{"status":"done","summary":"..."}'
 bun run cli -- retry-task --task-id <task_id>
 ```
 
 `run-next` leases ready tasks first, assigns each task a separate session name, then runs the selected executor for each leased task. The `acpx-codex` executor creates or reuses an `acpx codex` named session per task. The `codex-cli` executor is a one-shot fallback for environments where the ACP adapter cannot create sessions.
+
+`run-loop` repeats the same leasing and execution flow until there are no ready tasks, or until `--max-rounds` is reached.
 
 Use `--worktree-root` to assign each leased task a separate working directory path. The executor receives that path as its cwd.
 

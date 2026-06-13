@@ -54,6 +54,17 @@ export interface RunReadyTasksResult {
   sessionName: string;
 }
 
+export interface RunUntilIdleInput extends RunReadyTasksInput {
+  maxRounds: number;
+}
+
+export interface RunUntilIdleResult {
+  rounds: Array<{
+    index: number;
+    tasks: RunReadyTasksResult[];
+  }>;
+}
+
 export type StopDecision = "continue" | "retry" | "exit";
 
 export interface StartHookInput {

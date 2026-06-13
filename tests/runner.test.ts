@@ -3,7 +3,13 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { Harness } from "../packages/harness/src";
-import { buildTaskPrompt, createTasksFromOutputHook, runNextReadyTask, runReadyTasks } from "../packages/runner/src";
+import {
+  buildTaskPrompt,
+  createTasksFromOutputHook,
+  runNextReadyTask,
+  runReadyTasks,
+  runUntilIdle,
+} from "../packages/runner/src";
 
 describe("runner", () => {
   let dir: string;
@@ -339,5 +345,53 @@ describe("runner", () => {
     expect(harness.getAttempt(result.attemptId)?.output.checks).toEqual([
       { name: "start hook", status: "passed" },
     ]);
+  });
+
+  test("runs task rounds until no ready task remains", async () => {
+    const runId = harness.createRun({ goal: "Build loop" });
+    harness.createTask({
+      runId,
+      role: "planner",
+      goal: "Plan worker",
+      prompt: "Plan one worker.",
+    });
+
+    const result = await runUntilIdle({
+      harness,
+      runId,
+      limit: 1,
+      maxRounds: 3,
+      stopHooks: [createTasksFromOutputHook({ harness })],
+      executorFactory: ({ task }) => async () => {
+        if (task.role === "planner") {
+          return {
+            status: "done",
+            summary: "planned",
+            artifacts: [],
+            checks: [],
+            problems: [],
+            nextTasks: [
+              {
+                role: "worker",
+                goal: "Generated worker",
+                prompt: "Do worker task.",
+              },
+            ],
+          };
+        }
+        return {
+          status: "done",
+          summary: "worker done",
+          artifacts: [],
+          checks: [],
+          problems: [],
+        };
+      },
+    });
+
+    expect(result.rounds).toHaveLength(2);
+    expect(result.rounds[0].tasks).toHaveLength(1);
+    expect(result.rounds[1].tasks).toHaveLength(1);
+    expect(harness.nextReadyTask(runId)).toBeNull();
   });
 });

@@ -1,5 +1,12 @@
 import { buildTaskPrompt } from "./prompt";
-import type { RunNextReadyTaskInput, RunReadyTasksInput, StartHook, StartHookResult, StopHook } from "./types";
+import type {
+  RunNextReadyTaskInput,
+  RunReadyTasksInput,
+  RunUntilIdleInput,
+  StartHook,
+  StartHookResult,
+  StopHook,
+} from "./types";
 
 export async function runNextReadyTask(input: RunNextReadyTaskInput) {
   const task = input.harness.nextReadyTask(input.runId);
@@ -106,6 +113,18 @@ export async function runReadyTasks(input: RunReadyTasksInput) {
       return { taskId: task.id, attemptId, sessionName };
     }),
   );
+}
+
+export async function runUntilIdle(input: RunUntilIdleInput) {
+  const rounds = [];
+  for (let index = 0; index < input.maxRounds; index += 1) {
+    const tasks = await runReadyTasks(input);
+    if (tasks.length === 0) {
+      break;
+    }
+    rounds.push({ index, tasks });
+  }
+  return { rounds };
 }
 
 async function applyStartHooks(input: {

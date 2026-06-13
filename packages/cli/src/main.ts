@@ -6,6 +6,7 @@ import {
   createGitWorktreeHook,
   createTasksFromOutputHook,
   runReadyTasks,
+  runUntilIdle,
 } from "@ouroboros/runner";
 import { fail, flag, parseArgs, required } from "./args";
 import { parseArray, parseObject, printJson } from "./json";
@@ -78,15 +79,9 @@ switch (parsed.command) {
     break;
   }
   case "run-next": {
-    const executorName = required(parsed, "executor");
+    const executorName = parseExecutorName(required(parsed, "executor"));
     const runId = required(parsed, "run-id");
-    const limit = Number(flag(parsed, "limit") ?? "1");
-    if (!Number.isInteger(limit) || limit < 1) {
-      fail("--limit must be a positive integer");
-    }
-    if (executorName !== "noop" && executorName !== "acpx-codex" && executorName !== "codex-cli") {
-      fail(`unsupported executor: ${executorName}`);
-    }
+    const limit = parsePositiveInteger(flag(parsed, "limit") ?? "1", "--limit");
     const result = await runReadyTasks({
       harness,
       runId,
@@ -95,34 +90,30 @@ switch (parsed.command) {
       sessionForTask: (task) => task.sessionRef ?? `task-${task.id}`,
       worktreeForTask: worktreeForTask(),
       startHooks: startHooks(),
-      executorFactory: ({ cwd }) => {
-        if (executorName === "noop") {
-          return async ({ task }) => ({
-            status: "done",
-            summary: `Noop executor completed ${task.id}`,
-            changedFiles: [],
-            checks: [{ name: "noop executor", status: "passed" }],
-            artifacts: [],
-            problems: [],
-          });
-        }
-        if (executorName === "acpx-codex") {
-          return createAcpxCodexExecutor({
-            cwd,
-            approval: parseApproval(flag(parsed, "approval") ?? "approve-reads"),
-            timeoutMs: parseTimeoutMs(flag(parsed, "timeout-ms")),
-          });
-        }
-        return createCodexCliExecutor({
-          cwd,
-          sandbox: parseSandbox(flag(parsed, "sandbox") ?? "read-only"),
-          codexBin: flag(parsed, "codex-bin"),
-          timeoutMs: parseTimeoutMs(flag(parsed, "timeout-ms")),
-        });
-      },
+      executorFactory: executorFactory(executorName),
       stopHooks: stopHooks(),
     });
     printJson({ tasks: result });
+    break;
+  }
+  case "run-loop": {
+    const executorName = parseExecutorName(required(parsed, "executor"));
+    const runId = required(parsed, "run-id");
+    const limit = parsePositiveInteger(flag(parsed, "limit") ?? "1", "--limit");
+    const maxRounds = parsePositiveInteger(flag(parsed, "max-rounds") ?? "10", "--max-rounds");
+    const result = await runUntilIdle({
+      harness,
+      runId,
+      limit,
+      maxRounds,
+      cwd: runnerCwd(),
+      sessionForTask: (task) => task.sessionRef ?? `task-${task.id}`,
+      worktreeForTask: worktreeForTask(),
+      startHooks: startHooks(),
+      executorFactory: executorFactory(executorName),
+      stopHooks: stopHooks(),
+    });
+    printJson(result);
     break;
   }
   case "record-attempt": {
@@ -170,6 +161,49 @@ function parseSandbox(raw: string) {
     fail("--sandbox must be read-only, workspace-write, or danger-full-access");
   }
   return raw;
+}
+
+function parseExecutorName(raw: string) {
+  if (raw !== "noop" && raw !== "acpx-codex" && raw !== "codex-cli") {
+    fail(`unsupported executor: ${raw}`);
+  }
+  return raw;
+}
+
+function executorFactory(executorName: "noop" | "acpx-codex" | "codex-cli") {
+  return ({ cwd }: { cwd: string }) => {
+    if (executorName === "noop") {
+      return async ({ task }: { task: { id: string } }) => ({
+        status: "done" as const,
+        summary: `Noop executor completed ${task.id}`,
+        changedFiles: [],
+        checks: [{ name: "noop executor", status: "passed" as const }],
+        artifacts: [],
+        problems: [],
+      });
+    }
+    if (executorName === "acpx-codex") {
+      return createAcpxCodexExecutor({
+        cwd,
+        approval: parseApproval(flag(parsed, "approval") ?? "approve-reads"),
+        timeoutMs: parseTimeoutMs(flag(parsed, "timeout-ms")),
+      });
+    }
+    return createCodexCliExecutor({
+      cwd,
+      sandbox: parseSandbox(flag(parsed, "sandbox") ?? "read-only"),
+      codexBin: flag(parsed, "codex-bin"),
+      timeoutMs: parseTimeoutMs(flag(parsed, "timeout-ms")),
+    });
+  };
+}
+
+function parsePositiveInteger(raw: string, name: string) {
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value < 1) {
+    fail(`${name} must be a positive integer`);
+  }
+  return value;
 }
 
 function runnerCwd() {
