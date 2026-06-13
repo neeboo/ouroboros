@@ -56,6 +56,6 @@ function approvalFlag(approval: ApprovalMode) {
   return `--${approval}`;
 }
 
-function commandFailed(result: { exitCode: number; stderr: string }) {
-  return result.exitCode !== 0 || result.stderr.includes("Error:");
+function commandFailed(result: { exitCode: number; stdout: string; stderr: string }) {
+  return result.exitCode !== 0 || result.stderr.includes("Error:") || result.stdout.includes("Error:");
 }

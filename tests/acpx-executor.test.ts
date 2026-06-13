@@ -131,4 +131,61 @@ describe("acpx executor", () => {
       ["acpx", "--cwd", "/repo", "--approve-reads", "--format", "text", "codex", "-s", "existing"],
     ]);
   });
+
+  test("treats acpx stdout errors as command failures", async () => {
+    const calls: string[][] = [];
+    const executor = createAcpxCodexExecutor({
+      cwd: "/repo",
+      runCommand: async ({ cmd }) => {
+        calls.push(cmd);
+        if (cmd.includes("show")) {
+          return {
+            exitCode: 1,
+            stdout: "",
+            stderr: "missing session",
+          };
+        }
+        return {
+          exitCode: 0,
+          stdout: "Error: error loading config: /Users/example/.codex/config.toml: missing field `path`",
+          stderr: "",
+        };
+      },
+    });
+
+    const output = await executor({
+      prompt: "Do the task",
+      sessionName: "task_1",
+      run: {
+        id: "run_1",
+        goal: "Goal",
+        status: "todo",
+        context: {},
+      },
+      task: {
+        id: "task_1",
+        runId: "run_1",
+        parentId: null,
+        status: "todo",
+        role: "worker",
+        goal: "Task",
+        prompt: "Do it",
+        dependsOn: [],
+        doneWhen: [],
+        worktreePath: null,
+        sessionRef: null,
+        contextVersion: 1,
+      },
+    });
+
+    expect(output).toEqual({
+      status: "blocked",
+      summary: "acpx session creation failed",
+      changedFiles: [],
+      checks: [{ name: "acpx sessions new", status: "failed" }],
+      artifacts: [],
+      problems: ["Error: error loading config: /Users/example/.codex/config.toml: missing field `path`"],
+    });
+    expect(calls).toHaveLength(2);
+  });
 });
