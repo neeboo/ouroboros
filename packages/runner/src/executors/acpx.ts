@@ -8,8 +8,9 @@ export const createAcpxCodexExecutor: AcpxCodexExecutorFactory = (options) => {
 
   return async ({ prompt, sessionName }) => {
     const base = ["acpx", "--cwd", options.cwd, approvalFlag(approval), "--format", "text", "codex"];
+    const showSessionCommand = [...base, "sessions", "show", sessionName];
     const existing = await runCommand({
-      cmd: [...base, "sessions", "show", sessionName],
+      cmd: showSessionCommand,
       stdin: "",
       timeoutMs: options.timeoutMs,
     });
@@ -27,6 +28,21 @@ export const createAcpxCodexExecutor: AcpxCodexExecutorFactory = (options) => {
           checks: [{ name: "acpx sessions new", status: "failed" }],
           artifacts: [],
           problems: [created.stderr || created.stdout || `exit code ${created.exitCode}`],
+        };
+      }
+      const verified = await runCommand({
+        cmd: showSessionCommand,
+        stdin: "",
+        timeoutMs: options.timeoutMs,
+      });
+      if (commandFailed(verified)) {
+        return {
+          status: "blocked",
+          summary: "acpx session creation failed",
+          changedFiles: [],
+          checks: [{ name: "acpx sessions new", status: "failed" }],
+          artifacts: [],
+          problems: [verified.stderr || verified.stdout || `exit code ${verified.exitCode}`],
         };
       }
     }

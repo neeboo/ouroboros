@@ -20,12 +20,21 @@ describe("acpx executor", () => {
 
   test("runs acpx codex exec through an injectable command runner", async () => {
     const calls: Array<{ cmd: string[]; stdin: string }> = [];
+    let showCalls = 0;
     const executor = createAcpxCodexExecutor({
       cwd: "/repo",
       approval: "approve-all",
       runCommand: async ({ cmd, stdin }) => {
         calls.push({ cmd, stdin });
         if (cmd.includes("show")) {
+          showCalls += 1;
+          if (showCalls > 1) {
+            return {
+              exitCode: 0,
+              stdout: "",
+              stderr: "",
+            };
+          }
           return {
             exitCode: 1,
             stdout: "",
@@ -74,6 +83,10 @@ describe("acpx executor", () => {
       },
       {
         cmd: ["acpx", "--cwd", "/repo", "--approve-all", "--format", "text", "codex", "sessions", "new", "--name", "task_1"],
+        stdin: "",
+      },
+      {
+        cmd: ["acpx", "--cwd", "/repo", "--approve-all", "--format", "text", "codex", "sessions", "show", "task_1"],
         stdin: "",
       },
       {
@@ -187,5 +200,66 @@ describe("acpx executor", () => {
       problems: ["Error: error loading config: /Users/example/.codex/config.toml: missing field `path`"],
     });
     expect(calls).toHaveLength(2);
+  });
+
+  test("verifies an acpx session exists after creating it", async () => {
+    const calls: string[][] = [];
+    const executor = createAcpxCodexExecutor({
+      cwd: "/repo",
+      runCommand: async ({ cmd }) => {
+        calls.push(cmd);
+        if (cmd.includes("show")) {
+          return {
+            exitCode: 1,
+            stdout: "",
+            stderr: "No named session task_1",
+          };
+        }
+        return {
+          exitCode: 0,
+          stdout: "",
+          stderr: "",
+        };
+      },
+    });
+
+    const output = await executor({
+      prompt: "Do the task",
+      sessionName: "task_1",
+      run: {
+        id: "run_1",
+        goal: "Goal",
+        status: "todo",
+        context: {},
+      },
+      task: {
+        id: "task_1",
+        runId: "run_1",
+        parentId: null,
+        status: "todo",
+        role: "worker",
+        goal: "Task",
+        prompt: "Do it",
+        dependsOn: [],
+        doneWhen: [],
+        worktreePath: null,
+        sessionRef: null,
+        contextVersion: 1,
+      },
+    });
+
+    expect(output).toEqual({
+      status: "blocked",
+      summary: "acpx session creation failed",
+      changedFiles: [],
+      checks: [{ name: "acpx sessions new", status: "failed" }],
+      artifacts: [],
+      problems: ["No named session task_1"],
+    });
+    expect(calls).toEqual([
+      ["acpx", "--cwd", "/repo", "--approve-reads", "--format", "text", "codex", "sessions", "show", "task_1"],
+      ["acpx", "--cwd", "/repo", "--approve-reads", "--format", "text", "codex", "sessions", "new", "--name", "task_1"],
+      ["acpx", "--cwd", "/repo", "--approve-reads", "--format", "text", "codex", "sessions", "show", "task_1"],
+    ]);
   });
 });
