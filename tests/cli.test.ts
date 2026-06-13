@@ -550,6 +550,41 @@ describe("CLI", () => {
     expect(readyAfterRecord).toBeNull();
   });
 
+  test("lists lessons recorded from attempts", async () => {
+    await runCli("init");
+    const run = await runCliJson("create-run", "--goal", "Bootstrap ouroboros");
+    const task = await runCliJson(
+      "create-task",
+      "--run-id",
+      run.id,
+      "--role",
+      "worker",
+      "--goal",
+      "Record lesson",
+      "--prompt",
+      "Write result into the harness.",
+    );
+    await runCliJson(
+      "record-attempt",
+      "--task-id",
+      task.id,
+      "--input-json",
+      "{}",
+      "--output-json",
+      '{"status":"blocked","summary":"Blocked","problems":["missing workspace link"]}',
+    );
+
+    const lessons = await runCliJson("list-lessons", "--run-id", run.id);
+
+    expect(lessons).toHaveLength(1);
+    expect(lessons[0]).toMatchObject({
+      runId: run.id,
+      taskId: task.id,
+      kind: "lesson",
+      summary: "missing workspace link",
+    });
+  });
+
   test("retries a blocked task", async () => {
     await runCli("init");
     const run = await runCliJson("create-run", "--goal", "Bootstrap ouroboros");

@@ -1,9 +1,10 @@
-import type { AttemptOutput, Harness, Run, Task } from "@ouroboros/harness";
+import type { AttemptOutput, Harness, Lesson, Run, Task } from "@ouroboros/harness";
 
 export interface PromptInput {
   run: Run;
   task: Task;
   dependencyAttempts: unknown[];
+  lessons?: Lesson[];
 }
 
 export interface ExecutorInput {

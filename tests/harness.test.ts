@@ -108,6 +108,62 @@ describe("Harness", () => {
     expect(harness.nextReadyTask(runId)?.id).toBe(second);
   });
 
+  test("records experiences and lessons from attempts", () => {
+    const runId = harness.createRun({ goal: "Build loop" });
+    const successTask = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Implement A",
+      prompt: "Implement A.",
+    });
+    const failedTask = harness.createTask({
+      runId,
+      role: "verifier",
+      goal: "Verify A",
+      prompt: "Verify A.",
+    });
+    const successAttempt = harness.recordAttempt({
+      taskId: successTask,
+      input: {},
+      output: {
+        status: "done",
+        summary: "Using output-last-message avoids noisy stdout parsing.",
+        changedFiles: ["packages/runner/src/executors/codex-cli.ts"],
+        checks: [{ name: "bun test", status: "passed" }],
+        artifacts: [],
+        problems: [],
+      },
+    });
+    const failedAttempt = harness.recordAttempt({
+      taskId: failedTask,
+      input: {},
+      output: {
+        status: "blocked",
+        summary: "Verifier failed",
+        checks: [{ name: "bun test", status: "failed" }],
+        artifacts: [],
+        problems: ["workspace package resolution failed inside worktree"],
+      },
+    });
+
+    expect(harness.listLessons({ runId })).toEqual([
+      expect.objectContaining({
+        runId,
+        taskId: successTask,
+        attemptId: successAttempt,
+        kind: "experience",
+        summary: "Using output-last-message avoids noisy stdout parsing.",
+      }),
+      expect.objectContaining({
+        runId,
+        taskId: failedTask,
+        attemptId: failedAttempt,
+        kind: "lesson",
+        summary: "workspace package resolution failed inside worktree",
+      }),
+    ]);
+  });
+
   test("links a local entity to an external project", () => {
     const runId = harness.createRun({ goal: "Build loop" });
 

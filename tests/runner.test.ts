@@ -56,6 +56,51 @@ describe("runner", () => {
     expect(prompt).toContain("a next task exists");
   });
 
+  test("builds prompts with run lessons", () => {
+    const runId = harness.createRun({
+      goal: "Use Ouroboros to iterate on Ouroboros",
+      context: { repo: "/Users/ghostcorn/dev/ouroboros" },
+    });
+    const taskId = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Use lessons",
+      prompt: "Apply prior lessons.",
+    });
+
+    const prompt = buildTaskPrompt({
+      run: harness.getRun(runId)!,
+      task: harness.getTask(taskId)!,
+      dependencyAttempts: [],
+      lessons: [
+        {
+          id: "lesson_1",
+          runId,
+          taskId: "task_success",
+          attemptId: "attempt_success",
+          kind: "experience",
+          summary: "Use output-last-message for Codex final JSON.",
+          evidence: { checks: [{ name: "bun test", status: "passed" }] },
+        },
+        {
+          id: "lesson_2",
+          runId,
+          taskId: "task_failed",
+          attemptId: "attempt_failed",
+          kind: "lesson",
+          summary: "Do not run full CLI tests inside an isolated worktree without workspace links.",
+          evidence: { problems: ["package resolution failed"] },
+        },
+      ],
+    });
+
+    expect(prompt).toContain("## Run Lessons");
+    expect(prompt).toContain("experience");
+    expect(prompt).toContain("Use output-last-message");
+    expect(prompt).toContain("lesson");
+    expect(prompt).toContain("isolated worktree");
+  });
+
   test("runs the next ready task with an executor and records the attempt", async () => {
     const runId = harness.createRun({ goal: "Build loop" });
     const taskId = harness.createTask({
@@ -81,6 +126,51 @@ describe("runner", () => {
     expect(result?.attemptId).toBeString();
     expect(harness.getTask(taskId)?.status).toBe("done");
     expect(harness.getAttempt(result!.attemptId)?.output.summary).toBe(`Executed ${taskId}`);
+  });
+
+  test("runner injects recorded lessons into the next task prompt", async () => {
+    const runId = harness.createRun({ goal: "Build loop" });
+    const first = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Learn",
+      prompt: "Create a lesson.",
+    });
+    harness.recordAttempt({
+      taskId: first,
+      input: {},
+      output: {
+        status: "blocked",
+        summary: "Verifier failed",
+        problems: ["worktree lacks linked workspace packages"],
+      },
+    });
+    harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Use lesson",
+      prompt: "Use prior lesson.",
+    });
+
+    const prompts: string[] = [];
+    await runReadyTasks({
+      harness,
+      runId,
+      limit: 1,
+      executorFactory: () => async ({ prompt }) => {
+        prompts.push(prompt);
+        return {
+          status: "done",
+          summary: "Used lesson",
+          artifacts: [],
+          checks: [],
+          problems: [],
+        };
+      },
+    });
+
+    expect(prompts[0]).toContain("## Run Lessons");
+    expect(prompts[0]).toContain("worktree lacks linked workspace packages");
   });
 
   test("applies stop hooks before recording an attempt", async () => {

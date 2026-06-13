@@ -1,6 +1,6 @@
 import { parseJson } from "./json";
-import type { Attempt, AttemptOutput, ExternalRef, Run, Task } from "./types";
-import type { AttemptRow, ExternalRefRow, RunRow, TaskRow } from "./rows";
+import type { Attempt, AttemptOutput, ExternalRef, Lesson, Run, Task } from "./types";
+import type { AttemptRow, ExternalRefRow, LessonRow, RunRow, TaskRow } from "./rows";
 
 export function runFromRow(row: RunRow): Run {
   return {
@@ -50,5 +50,17 @@ export function externalRefFromRow(row: ExternalRefRow): ExternalRef {
     externalType: row.external_type,
     externalId: row.external_id,
     externalUrl: row.external_url,
+  };
+}
+
+export function lessonFromRow(row: LessonRow): Lesson {
+  return {
+    id: row.id,
+    runId: row.run_id,
+    taskId: row.task_id,
+    attemptId: row.attempt_id,
+    kind: row.kind,
+    summary: row.summary,
+    evidence: parseJson<Record<string, unknown>>(row.evidence_json),
   };
 }

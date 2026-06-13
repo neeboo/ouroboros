@@ -43,6 +43,19 @@ create table if not exists attempts (
 
 create index if not exists idx_attempts_task on attempts(task_id, started_at);
 
+create table if not exists lessons (
+  id text primary key,
+  run_id text not null references runs(id) on delete cascade,
+  task_id text not null references tasks(id) on delete cascade,
+  attempt_id text not null references attempts(id) on delete cascade,
+  kind text not null check (kind in ('experience', 'lesson')),
+  summary text not null,
+  evidence_json text not null default '{}',
+  created_at text not null default current_timestamp
+);
+
+create index if not exists idx_lessons_run on lessons(run_id, created_at, id);
+
 create table if not exists inbox_events (
   id text primary key,
   provider text not null,

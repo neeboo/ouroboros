@@ -42,3 +42,13 @@ export interface ExternalRefRow {
   external_id: string;
   external_url: string | null;
 }
+
+export interface LessonRow {
+  id: string;
+  run_id: string;
+  task_id: string;
+  attempt_id: string;
+  kind: "experience" | "lesson";
+  summary: string;
+  evidence_json: string;
+}

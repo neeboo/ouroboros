@@ -80,6 +80,10 @@ switch (parsed.command) {
     });
     break;
   }
+  case "list-lessons": {
+    printJson(harness.listLessons({ runId: required(parsed, "run-id") }));
+    break;
+  }
   case "run-next": {
     const executorName = parseExecutorName(required(parsed, "executor"));
     const runId = required(parsed, "run-id");

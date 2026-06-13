@@ -100,6 +100,7 @@ Every generated prompt should contain:
 
 - run goal
 - run context
+- run lessons
 - task goal
 - task role
 - dependencies and their latest results
@@ -135,6 +136,15 @@ Allowed `status` values in output:
 done
 blocked
 ```
+
+## Lessons
+
+Every recorded attempt creates one run-level lesson:
+
+- `experience`: created from a successful attempt
+- `lesson`: created from a blocked attempt
+
+The next prompt for the same run includes recent lessons in `## Run Lessons`. Successful lessons should preserve useful execution patterns. Failure lessons should preserve avoidable problems and their evidence.
 
 ## Verification
 

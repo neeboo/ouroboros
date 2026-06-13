@@ -61,6 +61,18 @@ export interface ExternalRef {
   externalUrl: string | null;
 }
 
+export type LessonKind = "experience" | "lesson";
+
+export interface Lesson {
+  id: string;
+  runId: string;
+  taskId: string;
+  attemptId: string;
+  kind: LessonKind;
+  summary: string;
+  evidence: Record<string, unknown>;
+}
+
 export interface CreateRunInput {
   goal: string;
   context?: Record<string, unknown>;
@@ -109,4 +121,9 @@ export interface CreateExternalRefInput {
 export interface ListExternalRefsInput {
   localType: string;
   localId: string;
+}
+
+export interface ListLessonsInput {
+  runId: string;
+  limit?: number;
 }

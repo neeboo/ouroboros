@@ -23,6 +23,17 @@ export function buildTaskPrompt(input: PromptInput) {
     "## Dependency Attempts",
     fencedJson(input.dependencyAttempts),
     "",
+    "## Run Lessons",
+    fencedJson(
+      (input.lessons ?? []).map((lesson) => ({
+        kind: lesson.kind,
+        summary: lesson.summary,
+        taskId: lesson.taskId,
+        attemptId: lesson.attemptId,
+        evidence: lesson.evidence,
+      })),
+    ),
+    "",
     "## Required Output",
     "Return only JSON with this shape:",
     fencedJson({

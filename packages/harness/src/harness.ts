@@ -1,14 +1,15 @@
 import { initDatabase, withDatabase } from "./database";
 import { makeId } from "./ids";
 import { toJson } from "./json";
-import { attemptFromRow, externalRefFromRow, runFromRow, taskFromRow } from "./mappers";
-import type { AttemptRow, ExternalRefRow, RunRow, TaskRow } from "./rows";
+import { attemptFromRow, externalRefFromRow, lessonFromRow, runFromRow, taskFromRow } from "./mappers";
+import type { AttemptRow, ExternalRefRow, LessonRow, RunRow, TaskRow } from "./rows";
 import type {
   CreateExternalRefInput,
   CreateRunInput,
   CreateTaskInput,
   LeaseReadyTasksInput,
   ListExternalRefsInput,
+  ListLessonsInput,
   RecordAttemptInput,
   RetryTaskInput,
   Status,
@@ -206,6 +207,30 @@ export class Harness {
           $status: input.output.status,
           $taskId: input.taskId,
         });
+        const taskRow = db.query("select * from tasks where id = $taskId").get({ $taskId: input.taskId }) as
+          | TaskRow
+          | null;
+        if (taskRow) {
+          const lesson = lessonForAttempt(input.output);
+          db.query(
+            `
+            insert into lessons (
+              id, run_id, task_id, attempt_id, kind, summary, evidence_json
+            )
+            values (
+              $id, $runId, $taskId, $attemptId, $kind, $summary, $evidenceJson
+            )
+            `,
+          ).run({
+            $id: makeId("lesson"),
+            $runId: taskRow.run_id,
+            $taskId: input.taskId,
+            $attemptId: id,
+            $kind: lesson.kind,
+            $summary: lesson.summary,
+            $evidenceJson: toJson(lesson.evidence),
+          });
+        }
       })();
       return id;
     });
@@ -266,4 +291,46 @@ export class Harness {
       return rows.map(externalRefFromRow);
     });
   }
+
+  listLessons(input: ListLessonsInput) {
+    return withDatabase(this.dbPath, (db) => {
+      const rows = db
+        .query(
+          `
+          select *
+          from lessons
+          where run_id = $runId
+          order by created_at, rowid
+          limit $limit
+          `,
+        )
+        .all({ $runId: input.runId, $limit: input.limit ?? 50 }) as LessonRow[];
+      return rows.map(lessonFromRow);
+    });
+  }
+}
+
+function lessonForAttempt(output: RecordAttemptInput["output"]) {
+  if (output.status === "done") {
+    return {
+      kind: "experience" as const,
+      summary: output.summary || "Task completed successfully",
+      evidence: {
+        changedFiles: output.changedFiles ?? [],
+        checks: output.checks ?? [],
+        artifacts: output.artifacts ?? [],
+      },
+    };
+  }
+
+  return {
+    kind: "lesson" as const,
+    summary: output.problems?.[0] ?? output.summary ?? "Task was blocked",
+    evidence: {
+      summary: output.summary,
+      checks: output.checks ?? [],
+      artifacts: output.artifacts ?? [],
+      problems: output.problems ?? [],
+    },
+  };
 }
