@@ -235,6 +235,7 @@ switch (parsed.command) {
         }),
     });
     console.log(`Ouroboros dashboard: http://localhost:${server.port}`);
+    setInterval(() => {}, 60 * 60 * 1000);
     await new Promise(() => {});
     break;
   }
