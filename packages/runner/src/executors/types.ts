@@ -24,3 +24,11 @@ export interface AcpxCodexExecutorOptions {
 export interface AcpxCodexExecutorFactory {
   (options: AcpxCodexExecutorOptions): TaskExecutor;
 }
+
+export type CodexSandbox = "read-only" | "workspace-write" | "danger-full-access";
+
+export interface CodexCliExecutorOptions {
+  cwd: string;
+  sandbox?: CodexSandbox;
+  runCommand?: RunCommand;
+}

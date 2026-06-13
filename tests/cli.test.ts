@@ -182,6 +182,57 @@ describe("CLI", () => {
     expect(await runCliJson("next-task", "--run-id", run.id)).toBeNull();
   });
 
+  test("runs the next task with the codex cli executor", async () => {
+    await runCli("init");
+    const run = await runCliJson("create-run", "--goal", "Bootstrap ouroboros");
+    const task = await runCliJson(
+      "create-task",
+      "--run-id",
+      run.id,
+      "--role",
+      "planner",
+      "--goal",
+      "Run through codex",
+      "--prompt",
+      "Use the fake codex executor.",
+    );
+    const binDir = join(dir, "bin");
+    await mkdir(binDir);
+    await writeFile(
+      join(binDir, "codex"),
+      [
+        "#!/usr/bin/env bun",
+        "const prompt = await new Response(Bun.stdin.stream()).text();",
+        "console.log(JSON.stringify({",
+        "  status: 'done',",
+        "  summary: `fake codex saw ${prompt.includes('Run through codex')}`,",
+        "  changedFiles: [],",
+        "  checks: [{ name: 'fake codex', status: 'passed' }],",
+        "  artifacts: [],",
+        "  problems: []",
+        "}));",
+      ].join("\n"),
+    );
+    await chmod(join(binDir, "codex"), 0o755);
+
+    const result = await runCliJson(
+      "run-next",
+      "--run-id",
+      run.id,
+      "--executor",
+      "codex-cli",
+      "--cwd",
+      "/repo",
+      "--sandbox",
+      "read-only",
+      { PATH: `${binDir}:${process.env.PATH}` },
+    );
+
+    expect(result.tasks).toHaveLength(1);
+    expect(result.tasks[0].taskId).toBe(task.id);
+    expect(result.tasks[0].attemptId).toBeString();
+  });
+
   test("records a structured attempt from JSON", async () => {
     await runCli("init");
     const run = await runCliJson("create-run", "--goal", "Bootstrap ouroboros");

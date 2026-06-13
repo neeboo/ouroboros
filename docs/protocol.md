@@ -91,7 +91,7 @@ The scheduler then:
 5. records an attempt
 6. updates task status from the attempt result
 
-The current v0 runner supports the same shape with an injectable executor. The `noop` executor is only for testing the loop. The `acpx-codex` executor creates or reuses a named acpx Codex session per task and returns the same structured output.
+The current v0 runner supports the same shape with an injectable executor. The `noop` executor is only for testing the loop. The `acpx-codex` executor creates or reuses a named acpx Codex session per task and returns the same structured output. The `codex-cli` executor can run one-shot Codex subagents when named ACP sessions are unavailable.
 
 ## Prompt Contract
 

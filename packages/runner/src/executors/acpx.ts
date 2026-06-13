@@ -12,12 +12,12 @@ export const createAcpxCodexExecutor: AcpxCodexExecutorFactory = (options) => {
       cmd: [...base, "sessions", "show", sessionName],
       stdin: "",
     });
-    if (existing.exitCode !== 0) {
+    if (commandFailed(existing)) {
       const created = await runCommand({
         cmd: [...base, "sessions", "new", "--name", sessionName],
         stdin: "",
       });
-      if (created.exitCode !== 0) {
+      if (commandFailed(created)) {
         return {
           status: "blocked",
           summary: "acpx session creation failed",
@@ -34,7 +34,7 @@ export const createAcpxCodexExecutor: AcpxCodexExecutorFactory = (options) => {
       stdin: prompt,
     });
 
-    if (result.exitCode !== 0) {
+    if (commandFailed(result)) {
       return {
         status: "blocked",
         summary: "acpx codex executor failed",
@@ -51,4 +51,8 @@ export const createAcpxCodexExecutor: AcpxCodexExecutorFactory = (options) => {
 
 function approvalFlag(approval: ApprovalMode) {
   return `--${approval}`;
+}
+
+function commandFailed(result: { exitCode: number; stderr: string }) {
+  return result.exitCode !== 0 || result.stderr.includes("Error:");
 }

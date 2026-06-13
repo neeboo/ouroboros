@@ -37,10 +37,11 @@ bun run cli -- create-task --run-id <run_id> --role planner --goal "Plan next st
 bun run cli -- next-task --run-id <run_id>
 bun run cli -- run-next --run-id <run_id> --executor noop --limit 2
 bun run cli -- run-next --run-id <run_id> --executor acpx-codex --cwd "$(pwd)" --approval approve-reads --limit 2
+bun run cli -- run-next --run-id <run_id> --executor codex-cli --cwd "$(pwd)" --sandbox read-only --limit 2
 bun run cli -- record-attempt --task-id <task_id> --input-json '{}' --output-json '{"status":"done","summary":"..."}'
 ```
 
-`run-next` leases ready tasks first, assigns each task a separate session name, then runs the selected executor for each leased task. The `acpx-codex` executor creates or reuses an `acpx codex` named session per task.
+`run-next` leases ready tasks first, assigns each task a separate session name, then runs the selected executor for each leased task. The `acpx-codex` executor creates or reuses an `acpx codex` named session per task. The `codex-cli` executor is a one-shot fallback for environments where the ACP adapter cannot create sessions.
 
 ## Boundaries
 

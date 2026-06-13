@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 import { Harness } from "@ouroboros/harness";
-import { createAcpxCodexExecutor, runReadyTasks } from "@ouroboros/runner";
+import { createAcpxCodexExecutor, createCodexCliExecutor, runReadyTasks } from "@ouroboros/runner";
 import { fail, flag, parseArgs, required } from "./args";
 import { parseArray, parseObject, printJson } from "./json";
 
@@ -77,7 +77,7 @@ switch (parsed.command) {
     if (!Number.isInteger(limit) || limit < 1) {
       fail("--limit must be a positive integer");
     }
-    if (executorName !== "noop" && executorName !== "acpx-codex") {
+    if (executorName !== "noop" && executorName !== "acpx-codex" && executorName !== "codex-cli") {
       fail(`unsupported executor: ${executorName}`);
     }
     const result = await runReadyTasks({
@@ -96,9 +96,15 @@ switch (parsed.command) {
             problems: [],
           });
         }
-        return createAcpxCodexExecutor({
-          cwd: flag(parsed, "cwd") ?? process.cwd(),
-          approval: parseApproval(flag(parsed, "approval") ?? "approve-reads"),
+        if (executorName === "acpx-codex") {
+          return createAcpxCodexExecutor({
+            cwd: runnerCwd(),
+            approval: parseApproval(flag(parsed, "approval") ?? "approve-reads"),
+          });
+        }
+        return createCodexCliExecutor({
+          cwd: runnerCwd(),
+          sandbox: parseSandbox(flag(parsed, "sandbox") ?? "read-only"),
         });
       },
     });
@@ -137,4 +143,15 @@ function parseApproval(raw: string) {
     fail("--approval must be approve-all, approve-reads, or deny-all");
   }
   return raw;
+}
+
+function parseSandbox(raw: string) {
+  if (raw !== "read-only" && raw !== "workspace-write" && raw !== "danger-full-access") {
+    fail("--sandbox must be read-only, workspace-write, or danger-full-access");
+  }
+  return raw;
+}
+
+function runnerCwd() {
+  return flag(parsed, "cwd") ?? process.cwd();
 }
