@@ -61,3 +61,20 @@ export const DEFAULT_REPAIR_TASK_PROMPT_TEMPLATE = [
   "",
   "Return structured JSON. Include changedFiles, checks, artifacts, and problems.",
 ].join("\n");
+
+export const DEFAULT_CONTEXT_SUMMARY_PROMPT_TEMPLATE = [
+  "# Ouroboros Context Summary",
+  "",
+  "Summarize one completed loop attempt into compact reusable context.",
+  "",
+  "## Attempt Output",
+  "```json",
+  "{{attemptOutputJson}}",
+  "```",
+  "",
+  "## Required Output",
+  "Return only JSON with this shape:",
+  "```json",
+  '{ "experience": { "summary": "one reusable success pattern", "evidence": {} }, "lesson": { "summary": "one failure or avoidance lesson", "evidence": {} } }',
+  "```",
+].join("\n");

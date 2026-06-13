@@ -30,7 +30,7 @@ export async function runNextReadyTask(input: RunNextReadyTaskInput) {
   const sessionName = task.sessionRef ?? defaultSessionName(task.id);
   const rawOutput = await input.executor({ prompt, run, task, sessionName });
   const { output, decision } = await applyStopHooks({
-    hooks: input.stopHooks ?? [],
+    hooks: hooksForTask(input.stopHooks, input.stopHooksByRole, task),
     run,
     task,
     sessionName,
@@ -97,7 +97,7 @@ export async function runReadyTasks(input: RunReadyTasksInput) {
       const executor = input.executorFactory({ run, task, sessionName, cwd });
       const rawOutput = await executor({ prompt, run, task, sessionName });
       const { output, decision } = await applyStopHooks({
-        hooks: input.stopHooks ?? [],
+        hooks: hooksForTask(input.stopHooks, input.stopHooksByRole, task),
         run,
         task,
         sessionName,
@@ -164,6 +164,10 @@ function latestDependencyAttempts(harness: Pick<Harness, "listLatestAttemptsForT
   return harness.listLatestAttemptsForTasks(task.dependsOn);
 }
 
+function hooksForTask(globalHooks: StopHook[] | undefined, hooksByRole: Record<string, StopHook[]> | undefined, task: Task) {
+  return [...(globalHooks ?? []), ...(hooksByRole?.[task.role] ?? [])];
+}
+
 async function applyStopHooks(input: {
   hooks: StopHook[];
   run: Parameters<StopHook>[0]["run"];
@@ -187,6 +191,9 @@ async function applyStopHooks(input: {
     }
     if (result.artifacts) {
       output.artifacts = [...(output.artifacts ?? []), ...result.artifacts];
+    }
+    if (result.outputPatch) {
+      output = { ...output, ...result.outputPatch };
     }
     if (result.problems && result.problems.length > 0) {
       output.problems = [...(output.problems ?? []), ...result.problems];

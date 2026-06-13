@@ -4,6 +4,7 @@ export { createAcpxCodexExecutor } from "./executors/acpx";
 export { createCodexCliExecutor } from "./executors/codex-cli";
 export { parseAttemptOutput } from "./executors/output";
 export { runLocalCommand } from "./executors/command";
+export { createContextSubagentHook, createContextSummaryHook } from "./hooks/context-summary";
 export { createRepairTaskHook } from "./hooks/create-repair";
 export { createTasksFromOutputHook } from "./hooks/create-tasks";
 export { createVerifierTaskHook } from "./hooks/create-verifier";
@@ -24,6 +25,7 @@ export type {
   StopHook,
   StopHookInput,
   StopHookResult,
+  StopHooksByRole,
   TaskExecutor,
   TaskExecutorFactory,
 } from "./types";
@@ -36,3 +38,9 @@ export type {
   RunCommand,
   RunCommandInput,
 } from "./executors/types";
+export type {
+  ContextSubagent,
+  ContextSubagentEntry,
+  ContextSubagentOutput,
+  StopHookOutputPatch,
+} from "./types";

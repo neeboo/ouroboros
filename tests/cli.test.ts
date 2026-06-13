@@ -113,6 +113,48 @@ describe("CLI", () => {
     expect(readyAfterRun).toBeNull();
   });
 
+  test("runs the context summary stop hook after verifier attempts from the CLI", async () => {
+    await runCli("init");
+    const run = await runCliJson("create-run", "--goal", "Bootstrap ouroboros");
+    const task = await runCliJson(
+      "create-task",
+      "--run-id",
+      run.id,
+      "--role",
+      "verifier",
+      "--goal",
+      "Archive context",
+      "--prompt",
+      "Run and archive context.",
+    );
+
+    const result = await runCliJson(
+      "run-next",
+      "--run-id",
+      run.id,
+      "--executor",
+      "noop",
+      "--stop-hook",
+      "context-summary",
+    );
+
+    const attempt = new Harness(dbPath).getAttempt(result.tasks[0].attemptId)!;
+    expect(result.tasks[0].taskId).toBe(task.id);
+    expect(attempt.output.checks).toContainEqual({ name: "context subagent", status: "passed" });
+    expect(attempt.output.artifacts).toContainEqual(
+      expect.objectContaining({
+        kind: "context_experience_archive",
+        taskId: task.id,
+      }),
+    );
+    expect(attempt.output.artifacts).toContainEqual(
+      expect.objectContaining({
+        kind: "context_lesson_archive",
+        taskId: task.id,
+      }),
+    );
+  });
+
   test("runs multiple ready tasks with separate sessions", async () => {
     await runCli("init");
     const run = await runCliJson("create-run", "--goal", "Bootstrap ouroboros");

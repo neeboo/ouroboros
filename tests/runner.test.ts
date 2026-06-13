@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { Harness } from "../packages/harness/src";
 import {
   buildTaskPrompt,
+  createContextSummaryHook,
   createRepairTaskHook,
   createTasksFromOutputHook,
   createVerifierTaskHook,
@@ -402,6 +403,199 @@ describe("runner", () => {
     expect(attempt.status).toBe("blocked");
     expect(harness.getTask(taskId)?.status).toBe("todo");
     expect(attempt.output.problems).toEqual(["subagent output was not specific enough"]);
+  });
+
+  test("runner applies stop hooks by task role", async () => {
+    const runId = harness.createRun({ goal: "Build loop" });
+    const planner = harness.createTask({
+      runId,
+      role: "planner",
+      goal: "Plan",
+      prompt: "Plan.",
+    });
+    const worker = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Work",
+      prompt: "Work.",
+    });
+
+    const results = await runReadyTasks({
+      harness,
+      runId,
+      limit: 2,
+      stopHooksByRole: {
+        planner: [
+          async () => ({
+            artifacts: [{ kind: "planner_hook" }],
+          }),
+        ],
+        worker: [
+          async () => ({
+            artifacts: [{ kind: "worker_hook" }],
+          }),
+        ],
+      },
+      executorFactory: () => async () => ({
+        status: "done",
+        summary: "ok",
+        artifacts: [],
+        checks: [],
+        problems: [],
+      }),
+    });
+
+    const attemptsByTask = new Map(results.map((result) => [result.taskId, harness.getAttempt(result.attemptId)!]));
+    expect(attemptsByTask.get(planner)?.output.artifacts).toEqual([{ kind: "planner_hook" }]);
+    expect(attemptsByTask.get(worker)?.output.artifacts).toEqual([{ kind: "worker_hook" }]);
+  });
+
+  test("context summary archives experience and lesson after successful verifier attempts", async () => {
+    const runId = harness.createRun({ goal: "Build loop" });
+    const taskId = harness.createTask({
+      runId,
+      role: "verifier",
+      goal: "Verify runner",
+      prompt: "Verify the smallest runner.",
+    });
+
+    const result = await runNextReadyTask({
+      harness,
+      runId,
+      executor: async () => ({
+        status: "done",
+        summary: "Raw success with noisy implementation notes",
+        changedFiles: ["packages/runner/src/runner.ts"],
+        artifacts: [],
+        checks: [{ name: "bun test", status: "passed" }],
+        problems: [],
+      }),
+      stopHooks: [
+        createContextSummaryHook({
+          summarize: async ({ output }) => ({
+            experience: {
+              summary: "Stop hooks can preserve compact context after successful execution.",
+              evidence: { checks: output.checks },
+            },
+            lesson: {
+              summary: "No failure pattern found in this successful attempt.",
+              evidence: { rawProblems: output.problems ?? [] },
+            },
+          }),
+        }),
+      ],
+    });
+
+    const attempt = harness.getAttempt(result!.attemptId)!;
+    expect(attempt.taskId).toBe(taskId);
+    expect(attempt.output.summary).toBe("Stop hooks can preserve compact context after successful execution.");
+    expect(attempt.output.artifacts).toContainEqual({
+      kind: "context_experience_archive",
+      taskId,
+      summary: "Stop hooks can preserve compact context after successful execution.",
+      evidence: { checks: [{ name: "bun test", status: "passed" }] },
+    });
+    expect(attempt.output.artifacts).toContainEqual({
+      kind: "context_lesson_archive",
+      taskId,
+      summary: "No failure pattern found in this successful attempt.",
+      evidence: { rawProblems: [] },
+    });
+    expect(harness.listLessons({ runId })).toContainEqual(
+      expect.objectContaining({
+        kind: "experience",
+        summary: "Stop hooks can preserve compact context after successful execution.",
+      }),
+    );
+  });
+
+  test("role hook routing keeps verifier summaries away from worker attempts", async () => {
+    const runId = harness.createRun({ goal: "Build loop" });
+    const taskId = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Implement runner",
+      prompt: "Implement the smallest runner.",
+    });
+
+    const result = await runNextReadyTask({
+      harness,
+      runId,
+      executor: async () => ({
+        status: "done",
+        summary: "Implemented runner",
+        artifacts: [],
+        checks: [],
+        problems: [],
+      }),
+      stopHooksByRole: {
+        verifier: [createContextSummaryHook()],
+      },
+    });
+
+    const attempt = harness.getAttempt(result!.attemptId)!;
+    expect(attempt.taskId).toBe(taskId);
+    expect(attempt.output.summary).toBe("Implemented runner");
+    expect(attempt.output.artifacts).not.toContainEqual(
+      expect.objectContaining({ kind: "context_experience_archive" }),
+    );
+  });
+
+  test("context summary turns blocked verifier attempts into compact lessons with raw evidence", async () => {
+    const runId = harness.createRun({ goal: "Build loop" });
+    const taskId = harness.createTask({
+      runId,
+      role: "verifier",
+      goal: "Verify acpx planner",
+      prompt: "Verify the planner through acpx.",
+    });
+    const rawProblem = "exit code: 124\n\nstderr:\ncommand timed out after 600000ms";
+
+    const result = await runNextReadyTask({
+      harness,
+      runId,
+      executor: async () => ({
+        status: "blocked",
+        summary: "acpx codex executor failed",
+        artifacts: [],
+        checks: [{ name: "acpx codex exec", status: "failed" }],
+        problems: [rawProblem],
+      }),
+      stopHooks: [
+        createContextSummaryHook({
+          summarize: async ({ output }) => ({
+            experience: {
+              summary: "No reusable success pattern recorded for the blocked acpx attempt.",
+              evidence: { status: output.status },
+            },
+            lesson: {
+              summary: "Bound acpx planner turns with a shorter timeout or a smaller prompt.",
+              evidence: { rawProblems: output.problems },
+            },
+          }),
+        }),
+      ],
+    });
+
+    const attempt = harness.getAttempt(result!.attemptId)!;
+    expect(attempt.taskId).toBe(taskId);
+    expect(attempt.output.summary).toBe("Bound acpx planner turns with a shorter timeout or a smaller prompt.");
+    expect(attempt.output.problems).toEqual([
+      "Bound acpx planner turns with a shorter timeout or a smaller prompt.",
+      rawProblem,
+    ]);
+    expect(attempt.output.artifacts).toContainEqual({
+      kind: "context_lesson_archive",
+      taskId,
+      summary: "Bound acpx planner turns with a shorter timeout or a smaller prompt.",
+      evidence: { rawProblems: [rawProblem] },
+    });
+    expect(harness.listLessons({ runId })).toContainEqual(
+      expect.objectContaining({
+        kind: "lesson",
+        summary: "Bound acpx planner turns with a shorter timeout or a smaller prompt.",
+      }),
+    );
   });
 
   test("planner stop hook creates next tasks from structured output", async () => {

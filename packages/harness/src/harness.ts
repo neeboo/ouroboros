@@ -1,5 +1,6 @@
 import { initDatabase, withDatabase } from "./database";
 import {
+  DEFAULT_CONTEXT_SUMMARY_PROMPT_TEMPLATE,
   DEFAULT_REPAIR_TASK_PROMPT_TEMPLATE,
   DEFAULT_TASK_PROMPT_TEMPLATE,
   DEFAULT_VERIFIER_TASK_PROMPT_TEMPLATE,
@@ -396,6 +397,7 @@ export class Harness {
         { key: "task", contentMd: DEFAULT_TASK_PROMPT_TEMPLATE },
         { key: "verifier-task", contentMd: DEFAULT_VERIFIER_TASK_PROMPT_TEMPLATE },
         { key: "repair-task", contentMd: DEFAULT_REPAIR_TASK_PROMPT_TEMPLATE },
+        { key: "context-summary", contentMd: DEFAULT_CONTEXT_SUMMARY_PROMPT_TEMPLATE },
       ]) {
         query.run({
           $key: template.key,

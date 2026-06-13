@@ -52,11 +52,13 @@ describe("Harness", () => {
     const seeded = harness.getPromptTemplate("task");
     const verifierSeeded = harness.getPromptTemplate("verifier-task");
     const repairSeeded = harness.getPromptTemplate("repair-task");
+    const contextSeeded = harness.getPromptTemplate("context-summary");
 
     expect(seeded?.contentMd).toContain("# Ouroboros Task");
     expect(seeded?.contentMd).toContain("{{runLessonsJson}}");
     expect(verifierSeeded?.contentMd).toContain("{{sourceTaskId}}");
     expect(repairSeeded?.contentMd).toContain("{{verifierTaskId}}");
+    expect(contextSeeded?.contentMd).toContain("{{attemptOutputJson}}");
 
     harness.setPromptTemplate({
       key: "task",

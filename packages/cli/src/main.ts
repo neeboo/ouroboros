@@ -3,6 +3,7 @@ import { Harness } from "@ouroboros/harness";
 import {
   createAcpxCodexExecutor,
   createCodexCliExecutor,
+  createContextSummaryHook,
   createGitWorktreeHook,
   createRepairTaskHook,
   createTasksFromOutputHook,
@@ -113,7 +114,7 @@ switch (parsed.command) {
       worktreeForTask: worktreeForTask(),
       startHooks: startHooks(),
       executorFactory: executorFactory(executorName),
-      stopHooks: stopHooks(),
+      stopHooksByRole: stopHooksByRole(),
     });
     printJson({ tasks: result });
     break;
@@ -133,7 +134,7 @@ switch (parsed.command) {
       worktreeForTask: worktreeForTask(),
       startHooks: startHooks(),
       executorFactory: executorFactory(executorName),
-      stopHooks: stopHooks(),
+      stopHooksByRole: stopHooksByRole(),
     });
     printJson(result);
     break;
@@ -241,23 +242,40 @@ function worktreeForTask() {
   return (task: { id: string }) => join(root, task.id);
 }
 
-function stopHooks() {
+function stopHooksByRole() {
   const raw = flag(parsed, "stop-hook");
+  const hooks = {
+    planner: [],
+    worker: [],
+    verifier: [],
+  } as {
+    planner: ReturnType<typeof createTasksFromOutputHook>[];
+    worker: ReturnType<typeof createVerifierTaskHook>[];
+    verifier: Array<ReturnType<typeof createRepairTaskHook> | ReturnType<typeof createContextSummaryHook>>;
+  };
   if (!raw) {
-    return [];
+    return hooks;
   }
-  return raw.split(",").map((hook) => {
+  for (const hook of raw.split(",")) {
     if (hook === "create-tasks") {
-      return createTasksFromOutputHook({ harness });
+      hooks.planner.push(createTasksFromOutputHook({ harness }));
+      continue;
     }
     if (hook === "create-verifier") {
-      return createVerifierTaskHook({ harness });
+      hooks.worker.push(createVerifierTaskHook({ harness }));
+      continue;
     }
     if (hook === "create-repair") {
-      return createRepairTaskHook({ harness });
+      hooks.verifier.push(createRepairTaskHook({ harness }));
+      continue;
     }
-    fail("--stop-hook must contain create-tasks, create-verifier, or create-repair");
-  });
+    if (hook === "context-summary" || hook === "context-subagent") {
+      hooks.verifier.push(createContextSummaryHook());
+      continue;
+    }
+    fail("--stop-hook must contain create-tasks, create-verifier, create-repair, or context-summary");
+  }
+  return hooks;
 }
 
 function startHooks() {

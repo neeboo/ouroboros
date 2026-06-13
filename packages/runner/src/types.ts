@@ -22,6 +22,7 @@ export interface RunNextReadyTaskInput {
   runId: string;
   executor: TaskExecutor;
   stopHooks?: StopHook[];
+  stopHooksByRole?: StopHooksByRole;
 }
 
 export interface RunNextReadyTaskResult {
@@ -48,6 +49,7 @@ export interface RunReadyTasksInput {
   executorFactory: TaskExecutorFactory;
   startHooks?: StartHook[];
   stopHooks?: StopHook[];
+  stopHooksByRole?: StopHooksByRole;
 }
 
 export interface RunReadyTasksResult {
@@ -97,6 +99,23 @@ export interface StopHookResult {
   checks?: unknown[];
   artifacts?: unknown[];
   problems?: string[];
+  outputPatch?: StopHookOutputPatch;
 }
 
 export type StopHook = (input: StopHookInput) => Promise<StopHookResult> | StopHookResult;
+
+export type StopHooksByRole = Record<string, StopHook[]>;
+
+export type StopHookOutputPatch = Partial<Pick<AttemptOutput, "summary" | "changedFiles" | "problems" | "nextTasks">>;
+
+export interface ContextSubagentEntry {
+  summary: string;
+  evidence?: Record<string, unknown>;
+}
+
+export interface ContextSubagentOutput {
+  experience: ContextSubagentEntry;
+  lesson: ContextSubagentEntry;
+}
+
+export type ContextSubagent = (input: StopHookInput) => Promise<ContextSubagentOutput> | ContextSubagentOutput;
