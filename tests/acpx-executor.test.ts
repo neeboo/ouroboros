@@ -397,4 +397,71 @@ describe("acpx executor", () => {
       "task_1",
     ]);
   });
+
+  test("recreates an acpx session once when the agent needs reconnect", async () => {
+    const calls: Array<{ cmd: string[]; stdin: string }> = [];
+    let promptCalls = 0;
+    const executor = createAcpxCodexExecutor({
+      cwd: "/repo",
+      runCommand: async ({ cmd, stdin }) => {
+        calls.push({ cmd, stdin });
+        if (cmd.includes("-s")) {
+          promptCalls += 1;
+          if (promptCalls === 1) {
+            return {
+              exitCode: 1,
+              stdout: "session task_1 · agent needs reconnect",
+              stderr: "",
+            };
+          }
+          return {
+            exitCode: 0,
+            stdout: '{"status":"done","summary":"recovered","changedFiles":[],"checks":[],"artifacts":[],"problems":[]}',
+            stderr: "",
+          };
+        }
+        return {
+          exitCode: 0,
+          stdout: "",
+          stderr: "",
+        };
+      },
+    });
+
+    const output = await executor({
+      prompt: "Do the task",
+      sessionName: "task_1",
+      run: {
+        id: "run_1",
+        goal: "Goal",
+        status: "todo",
+        context: {},
+      },
+      task: {
+        id: "task_1",
+        runId: "run_1",
+        parentId: null,
+        status: "todo",
+        role: "worker",
+        goal: "Task",
+        prompt: "Do it",
+        dependsOn: [],
+        doneWhen: [],
+        worktreePath: null,
+        sessionRef: null,
+        contextVersion: 1,
+      },
+    });
+
+    expect(output.status).toBe("done");
+    expect(output.summary).toBe("recovered");
+    expect(calls.map((call) => call.cmd)).toEqual([
+      ["acpx", "--cwd", "/repo", "--approve-reads", "--format", "text", "codex", "sessions", "show", "task_1"],
+      ["acpx", "--cwd", "/repo", "--approve-reads", "--format", "text", "codex", "-s", "task_1"],
+      ["acpx", "--cwd", "/repo", "--approve-reads", "--format", "text", "codex", "sessions", "close", "task_1"],
+      ["acpx", "--cwd", "/repo", "--approve-reads", "--format", "text", "codex", "sessions", "new", "--name", "task_1"],
+      ["acpx", "--cwd", "/repo", "--approve-reads", "--format", "text", "codex", "sessions", "show", "task_1"],
+      ["acpx", "--cwd", "/repo", "--approve-reads", "--format", "text", "codex", "-s", "task_1"],
+    ]);
+  });
 });
