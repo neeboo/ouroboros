@@ -24,9 +24,18 @@ describe("acpx executor", () => {
       approval: "approve-all",
       runCommand: async ({ cmd, stdin }) => {
         calls.push({ cmd, stdin });
+        if (cmd.includes("show")) {
+          return {
+            exitCode: 1,
+            stdout: "",
+            stderr: "missing session",
+          };
+        }
         return {
           exitCode: 0,
-          stdout: '{"status":"blocked","summary":"Need input","changedFiles":[],"checks":[],"artifacts":[],"problems":["missing token"]}',
+          stdout: cmd.includes("-s")
+            ? '{"status":"blocked","summary":"Need input","changedFiles":[],"checks":[],"artifacts":[],"problems":["missing token"]}'
+            : "",
           stderr: "",
         };
       },
@@ -59,7 +68,11 @@ describe("acpx executor", () => {
 
     expect(calls).toEqual([
       {
-        cmd: ["acpx", "--cwd", "/repo", "--approve-all", "--format", "text", "codex", "sessions", "ensure", "--name", "task_1"],
+        cmd: ["acpx", "--cwd", "/repo", "--approve-all", "--format", "text", "codex", "sessions", "show", "task_1"],
+        stdin: "",
+      },
+      {
+        cmd: ["acpx", "--cwd", "/repo", "--approve-all", "--format", "text", "codex", "sessions", "new", "--name", "task_1"],
         stdin: "",
       },
       {
@@ -69,5 +82,52 @@ describe("acpx executor", () => {
     ]);
     expect(output.status).toBe("blocked");
     expect(output.problems).toEqual(["missing token"]);
+  });
+
+  test("reuses an existing acpx session when show succeeds", async () => {
+    const calls: string[][] = [];
+    const executor = createAcpxCodexExecutor({
+      cwd: "/repo",
+      runCommand: async ({ cmd }) => {
+        calls.push(cmd);
+        return {
+          exitCode: 0,
+          stdout: cmd.includes("-s")
+            ? '{"status":"done","summary":"ok","changedFiles":[],"checks":[],"artifacts":[],"problems":[]}'
+            : "",
+          stderr: "",
+        };
+      },
+    });
+
+    await executor({
+      prompt: "Do the task",
+      sessionName: "existing",
+      run: {
+        id: "run_1",
+        goal: "Goal",
+        status: "todo",
+        context: {},
+      },
+      task: {
+        id: "task_1",
+        runId: "run_1",
+        parentId: null,
+        status: "todo",
+        role: "worker",
+        goal: "Task",
+        prompt: "Do it",
+        dependsOn: [],
+        doneWhen: [],
+        worktreePath: null,
+        sessionRef: null,
+        contextVersion: 1,
+      },
+    });
+
+    expect(calls).toEqual([
+      ["acpx", "--cwd", "/repo", "--approve-reads", "--format", "text", "codex", "sessions", "show", "existing"],
+      ["acpx", "--cwd", "/repo", "--approve-reads", "--format", "text", "codex", "-s", "existing"],
+    ]);
   });
 });

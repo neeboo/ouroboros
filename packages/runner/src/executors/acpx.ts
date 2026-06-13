@@ -8,19 +8,25 @@ export const createAcpxCodexExecutor: AcpxCodexExecutorFactory = (options) => {
 
   return async ({ prompt, sessionName }) => {
     const base = ["acpx", "--cwd", options.cwd, approvalFlag(approval), "--format", "text", "codex"];
-    const ensure = await runCommand({
-      cmd: [...base, "sessions", "ensure", "--name", sessionName],
+    const existing = await runCommand({
+      cmd: [...base, "sessions", "show", sessionName],
       stdin: "",
     });
-    if (ensure.exitCode !== 0) {
-      return {
-        status: "blocked",
-        summary: "acpx session ensure failed",
-        changedFiles: [],
-        checks: [{ name: "acpx sessions ensure", status: "failed" }],
-        artifacts: [],
-        problems: [ensure.stderr || ensure.stdout || `exit code ${ensure.exitCode}`],
-      };
+    if (existing.exitCode !== 0) {
+      const created = await runCommand({
+        cmd: [...base, "sessions", "new", "--name", sessionName],
+        stdin: "",
+      });
+      if (created.exitCode !== 0) {
+        return {
+          status: "blocked",
+          summary: "acpx session creation failed",
+          changedFiles: [],
+          checks: [{ name: "acpx sessions new", status: "failed" }],
+          artifacts: [],
+          problems: [created.stderr || created.stdout || `exit code ${created.exitCode}`],
+        };
+      }
     }
 
     const result = await runCommand({
