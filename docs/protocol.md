@@ -150,6 +150,8 @@ The verifier should read database state and real artifacts. It should not trust 
 
 The built-in `create-verifier` stop hook creates verifier tasks only for successful worker attempts by default. The verifier depends on the worker task, so it becomes ready only after the worker attempt is recorded.
 
+The built-in `create-repair` stop hook creates worker repair tasks for blocked verifier attempts. Repair tasks use the failed verifier as `parentId` instead of `dependsOn`, because blocked tasks do not unlock dependencies.
+
 ## Stop Hooks
 
 After an executor returns and before an attempt is recorded, the runner may apply stop hooks.
@@ -175,10 +177,12 @@ The `create-tasks` stop hook reads `nextTasks` from the subagent output and inse
 
 The `create-verifier` stop hook reads a successful worker output and inserts a verifier task with `dependsOn` set to the worker task. It does not create verifier tasks for verifier attempts, which gives the loop a natural exit.
 
+The `create-repair` stop hook reads a blocked verifier output and inserts a worker repair task. A successful repair task may then create another verifier through `create-verifier`.
+
 Multiple stop hooks may be applied in order. The CLI accepts a comma-separated list such as:
 
 ```text
---stop-hook create-tasks,create-verifier
+--stop-hook create-tasks,create-verifier,create-repair
 ```
 
 ## Start Hooks

@@ -43,6 +43,7 @@ bun run cli -- run-next --run-id <run_id> --executor codex-cli --worktree-root "
 bun run cli -- run-next --run-id <run_id> --executor codex-cli --cwd "$(pwd)" --stop-hook create-tasks
 bun run cli -- run-loop --run-id <run_id> --executor codex-cli --cwd "$(pwd)" --stop-hook create-tasks --max-rounds 5
 bun run cli -- run-loop --run-id <run_id> --executor codex-cli --cwd "$(pwd)" --stop-hook create-tasks,create-verifier --max-rounds 5
+bun run cli -- run-loop --run-id <run_id> --executor codex-cli --cwd "$(pwd)" --stop-hook create-tasks,create-verifier,create-repair --max-rounds 8
 bun run cli -- record-attempt --task-id <task_id> --input-json '{}' --output-json '{"status":"done","summary":"..."}'
 bun run cli -- retry-task --task-id <task_id>
 ```
@@ -60,6 +61,8 @@ Runner stop hooks run after a subagent turn and before the attempt is recorded. 
 The `create-tasks` stop hook turns planner `nextTasks` output into real DB tasks.
 
 The `create-verifier` stop hook turns a successful worker attempt into a verifier task that depends on the worker. Multiple stop hooks can be enabled with a comma-separated list, for example `--stop-hook create-tasks,create-verifier`.
+
+The `create-repair` stop hook turns a blocked verifier attempt into a ready worker repair task. A successful repair can then create another verifier through `create-verifier`.
 
 ## Boundaries
 

@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { Harness } from "../packages/harness/src";
 import {
   buildTaskPrompt,
+  createRepairTaskHook,
   createTasksFromOutputHook,
   createVerifierTaskHook,
   parseAttemptOutput,
@@ -288,6 +289,43 @@ describe("runner", () => {
     });
 
     expect(harness.nextReadyTask(runId)).toBeNull();
+  });
+
+  test("blocked verifier stop hook creates a ready repair task", async () => {
+    const runId = harness.createRun({ goal: "Build loop" });
+    const verifierTask = harness.createTask({
+      runId,
+      role: "verifier",
+      goal: "Verify runner",
+      prompt: "Verify the runner.",
+    });
+
+    const result = await runNextReadyTask({
+      harness,
+      runId,
+      executor: async () => ({
+        status: "blocked",
+        summary: "Verification failed",
+        artifacts: [{ kind: "log", path: "verify.log" }],
+        checks: [{ name: "bun test", status: "failed" }],
+        problems: ["runner test failed"],
+      }),
+      stopHooks: [createRepairTaskHook({ harness })],
+    });
+
+    const attempt = harness.getAttempt(result!.attemptId)!;
+    const repair = harness.nextReadyTask(runId)!;
+    expect(repair.role).toBe("worker");
+    expect(repair.goal).toBe("Repair: Verify runner");
+    expect(repair.parentId).toBe(verifierTask);
+    expect(repair.dependsOn).toEqual([]);
+    expect(repair.prompt).toContain(`Verifier Task ID: ${verifierTask}`);
+    expect(repair.prompt).toContain("runner test failed");
+    expect(attempt.output.artifacts).toContainEqual({
+      kind: "created_repair_task",
+      taskId: repair.id,
+      verifierTaskId: verifierTask,
+    });
   });
 
   test("parses valid planner next tasks", () => {

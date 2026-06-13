@@ -4,6 +4,7 @@ export { createAcpxCodexExecutor } from "./executors/acpx";
 export { createCodexCliExecutor } from "./executors/codex-cli";
 export { parseAttemptOutput } from "./executors/output";
 export { runLocalCommand } from "./executors/command";
+export { createRepairTaskHook } from "./hooks/create-repair";
 export { createTasksFromOutputHook } from "./hooks/create-tasks";
 export { createVerifierTaskHook } from "./hooks/create-verifier";
 export { createGitWorktreeHook } from "./hooks/git-worktree";

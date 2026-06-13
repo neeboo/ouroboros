@@ -4,6 +4,7 @@ import {
   createAcpxCodexExecutor,
   createCodexCliExecutor,
   createGitWorktreeHook,
+  createRepairTaskHook,
   createTasksFromOutputHook,
   createVerifierTaskHook,
   runReadyTasks,
@@ -232,7 +233,10 @@ function stopHooks() {
     if (hook === "create-verifier") {
       return createVerifierTaskHook({ harness });
     }
-    fail("--stop-hook must contain create-tasks or create-verifier");
+    if (hook === "create-repair") {
+      return createRepairTaskHook({ harness });
+    }
+    fail("--stop-hook must contain create-tasks, create-verifier, or create-repair");
   });
 }
 
