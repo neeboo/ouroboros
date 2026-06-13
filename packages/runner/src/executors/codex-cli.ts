@@ -22,6 +22,7 @@ export function createCodexCliExecutor(options: CodexCliExecutorOptions): TaskEx
         "-",
       ],
       stdin: prompt,
+      timeoutMs: options.timeoutMs,
     });
 
     if (result.exitCode !== 0) {

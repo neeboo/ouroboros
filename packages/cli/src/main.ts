@@ -100,11 +100,13 @@ switch (parsed.command) {
           return createAcpxCodexExecutor({
             cwd: runnerCwd(),
             approval: parseApproval(flag(parsed, "approval") ?? "approve-reads"),
+            timeoutMs: parseTimeoutMs(flag(parsed, "timeout-ms")),
           });
         }
         return createCodexCliExecutor({
           cwd: runnerCwd(),
           sandbox: parseSandbox(flag(parsed, "sandbox") ?? "read-only"),
+          timeoutMs: parseTimeoutMs(flag(parsed, "timeout-ms")),
         });
       },
     });
@@ -154,4 +156,15 @@ function parseSandbox(raw: string) {
 
 function runnerCwd() {
   return flag(parsed, "cwd") ?? process.cwd();
+}
+
+function parseTimeoutMs(raw: string | undefined) {
+  if (raw === undefined) {
+    return undefined;
+  }
+  const timeoutMs = Number(raw);
+  if (!Number.isInteger(timeoutMs) || timeoutMs < 1) {
+    fail("--timeout-ms must be a positive integer");
+  }
+  return timeoutMs;
 }

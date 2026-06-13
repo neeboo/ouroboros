@@ -11,11 +11,13 @@ export const createAcpxCodexExecutor: AcpxCodexExecutorFactory = (options) => {
     const existing = await runCommand({
       cmd: [...base, "sessions", "show", sessionName],
       stdin: "",
+      timeoutMs: options.timeoutMs,
     });
     if (commandFailed(existing)) {
       const created = await runCommand({
         cmd: [...base, "sessions", "new", "--name", sessionName],
         stdin: "",
+        timeoutMs: options.timeoutMs,
       });
       if (commandFailed(created)) {
         return {
@@ -32,6 +34,7 @@ export const createAcpxCodexExecutor: AcpxCodexExecutorFactory = (options) => {
     const result = await runCommand({
       cmd: [...base, "-s", sessionName],
       stdin: prompt,
+      timeoutMs: options.timeoutMs,
     });
 
     if (commandFailed(result)) {

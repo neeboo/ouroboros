@@ -1,6 +1,6 @@
-import type { RunCommand } from "./types";
+import type { CommandResult, RunCommand } from "./types";
 
-export const runLocalCommand: RunCommand = async ({ cmd, stdin }) => {
+export const runLocalCommand: RunCommand = async ({ cmd, stdin, timeoutMs }) => {
   const proc = Bun.spawn({
     cmd,
     stdin: "pipe",
@@ -10,11 +10,29 @@ export const runLocalCommand: RunCommand = async ({ cmd, stdin }) => {
   proc.stdin.write(stdin);
   proc.stdin.end();
 
-  const [stdout, stderr, exitCode] = await Promise.all([
+  let timeout: Timer | undefined;
+  const completed = Promise.all([
     new Response(proc.stdout).text(),
     new Response(proc.stderr).text(),
     proc.exited,
-  ]);
+  ]).then(([stdout, stderr, exitCode]) => ({ exitCode, stdout, stderr }));
+  const timedOut =
+    timeoutMs === undefined
+      ? undefined
+      : new Promise<CommandResult>((resolve) => {
+          timeout = setTimeout(() => {
+            proc.kill();
+            resolve({
+              exitCode: 124,
+              stdout: "",
+              stderr: `command timed out after ${timeoutMs}ms`,
+            });
+          }, timeoutMs);
+        });
 
-  return { exitCode, stdout, stderr };
+  const result = timedOut ? await Promise.race([completed, timedOut]) : await completed;
+  if (timeout) {
+    clearTimeout(timeout);
+  }
+  return result;
 };

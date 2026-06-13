@@ -11,6 +11,7 @@ export interface CommandResult {
 export interface RunCommandInput {
   cmd: string[];
   stdin: string;
+  timeoutMs?: number;
 }
 
 export type RunCommand = (input: RunCommandInput) => Promise<CommandResult>;
@@ -18,6 +19,7 @@ export type RunCommand = (input: RunCommandInput) => Promise<CommandResult>;
 export interface AcpxCodexExecutorOptions {
   cwd: string;
   approval?: ApprovalMode;
+  timeoutMs?: number;
   runCommand?: RunCommand;
 }
 
@@ -30,5 +32,6 @@ export type CodexSandbox = "read-only" | "workspace-write" | "danger-full-access
 export interface CodexCliExecutorOptions {
   cwd: string;
   sandbox?: CodexSandbox;
+  timeoutMs?: number;
   runCommand?: RunCommand;
 }
