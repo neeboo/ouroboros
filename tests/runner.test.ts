@@ -173,6 +173,102 @@ describe("runner", () => {
     expect(prompts[0]).toContain("worktree lacks linked workspace packages");
   });
 
+  test("runner injects latest direct dependency attempts into the task prompt", async () => {
+    const runId = harness.createRun({ goal: "Build loop" });
+    const upstream = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Implement prompt templates",
+      prompt: "Store prompts in the database.",
+    });
+    const olderAttempt = harness.recordAttempt({
+      taskId: upstream,
+      input: {},
+      output: {
+        status: "done",
+        summary: "Older implementation attempt",
+        checks: [{ name: "bun test", status: "failed" }],
+        artifacts: [],
+        problems: [],
+      },
+    });
+    harness.recordAttempt({
+      taskId: upstream,
+      input: {},
+      output: {
+        status: "done",
+        summary: "Prompt templates stored in SQLite",
+        changedFiles: ["packages/harness/src/harness.ts"],
+        checks: [{ name: "bun test", status: "passed" }],
+        artifacts: [{ kind: "commit", sha: "b8bf39b" }],
+        problems: [],
+      },
+    });
+    harness.createTask({
+      runId,
+      role: "verifier",
+      goal: "Verify prompt templates",
+      prompt: "Verify the upstream implementation.",
+      dependsOn: [upstream],
+    });
+
+    const prompts: string[] = [];
+    await runReadyTasks({
+      harness,
+      runId,
+      limit: 1,
+      executorFactory: () => async ({ prompt }) => {
+        prompts.push(prompt);
+        return {
+          status: "done",
+          summary: "Verified dependency context",
+          artifacts: [],
+          checks: [],
+          problems: [],
+        };
+      },
+    });
+
+    const dependencySection = prompts[0].split("## Dependency Attempts")[1]!.split("## Run Lessons")[0]!;
+    expect(dependencySection).toContain(upstream);
+    expect(dependencySection).toContain("Prompt templates stored in SQLite");
+    expect(dependencySection).toContain("packages/harness/src/harness.ts");
+    expect(dependencySection).toContain('"name": "bun test"');
+    expect(dependencySection).toContain('"status": "passed"');
+    expect(dependencySection).not.toContain(olderAttempt);
+    expect(dependencySection).not.toContain("Older implementation attempt");
+  });
+
+  test("runner keeps dependency attempts empty for tasks without dependencies", async () => {
+    const runId = harness.createRun({ goal: "Build loop" });
+    harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Implement standalone task",
+      prompt: "No upstream context needed.",
+    });
+
+    const prompts: string[] = [];
+    await runReadyTasks({
+      harness,
+      runId,
+      limit: 1,
+      executorFactory: () => async ({ prompt }) => {
+        prompts.push(prompt);
+        return {
+          status: "done",
+          summary: "Executed standalone task",
+          artifacts: [],
+          checks: [],
+          problems: [],
+        };
+      },
+    });
+
+    const dependencySection = prompts[0].split("## Dependency Attempts")[1]!.split("## Run Lessons")[0]!;
+    expect(dependencySection).toContain("[]");
+  });
+
   test("runner builds task prompts from the database template", async () => {
     const runId = harness.createRun({ goal: "Build loop" });
     harness.setPromptTemplate({

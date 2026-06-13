@@ -43,6 +43,17 @@ export interface AttemptOutput {
   nextTasks?: PlannedTask[];
 }
 
+export interface DependencyAttempt {
+  taskId: string;
+  attemptId: string;
+  status: AttemptOutput["status"];
+  summary: string;
+  changedFiles: string[];
+  checks: unknown[];
+  artifacts: unknown[];
+  problems: string[];
+}
+
 export interface PlannedTask {
   role: string;
   goal: string;

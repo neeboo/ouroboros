@@ -1,3 +1,4 @@
+import type { Harness, Task } from "@ouroboros/harness";
 import { buildTaskPrompt } from "./prompt";
 import type {
   RunNextReadyTaskInput,
@@ -22,7 +23,7 @@ export async function runNextReadyTask(input: RunNextReadyTaskInput) {
   const prompt = buildTaskPrompt({
     run,
     task,
-    dependencyAttempts: [],
+    dependencyAttempts: latestDependencyAttempts(input.harness, task),
     lessons: input.harness.listLessons({ runId: input.runId }),
     template: input.harness.getPromptTemplate("task")?.contentMd,
   });
@@ -89,7 +90,7 @@ export async function runReadyTasks(input: RunReadyTasksInput) {
       const prompt = buildTaskPrompt({
         run,
         task,
-        dependencyAttempts: [],
+        dependencyAttempts: latestDependencyAttempts(input.harness, task),
         lessons: input.harness.listLessons({ runId: input.runId }),
         template: input.harness.getPromptTemplate("task")?.contentMd,
       });
@@ -154,6 +155,13 @@ async function applyStartHooks(input: {
 
 function defaultSessionName(taskId: string) {
   return `task-${taskId}`;
+}
+
+function latestDependencyAttempts(harness: Pick<Harness, "listLatestAttemptsForTasks">, task: Pick<Task, "dependsOn">) {
+  if (task.dependsOn.length === 0) {
+    return [];
+  }
+  return harness.listLatestAttemptsForTasks(task.dependsOn);
 }
 
 async function applyStopHooks(input: {

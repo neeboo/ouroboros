@@ -20,6 +20,7 @@ import type {
   SetPromptTemplateInput,
   CreateRunInput,
   CreateTaskInput,
+  DependencyAttempt,
   LeaseReadyTasksInput,
   ListExternalRefsInput,
   ListLessonsInput,
@@ -103,6 +104,41 @@ export class Harness {
     return withDatabase(this.dbPath, (db) => {
       const row = db.query("select * from attempts where id = $id").get({ $id: id }) as AttemptRow | null;
       return row ? attemptFromRow(row) : null;
+    });
+  }
+
+  listLatestAttemptsForTasks(taskIds: string[]): DependencyAttempt[] {
+    if (taskIds.length === 0) {
+      return [];
+    }
+
+    return withDatabase(this.dbPath, (db) => {
+      const latestAttemptQuery = db.query(`
+        select *
+        from attempts
+        where task_id = $taskId
+        order by finished_at desc, started_at desc, rowid desc
+        limit 1
+      `);
+      return taskIds.flatMap((taskId) => {
+        const row = latestAttemptQuery.get({ $taskId: taskId }) as AttemptRow | null;
+        if (!row) {
+          return [];
+        }
+        const attempt = attemptFromRow(row);
+        return [
+          {
+            taskId,
+            attemptId: attempt.id,
+            status: attempt.output.status,
+            summary: attempt.output.summary,
+            changedFiles: attempt.output.changedFiles ?? [],
+            checks: attempt.output.checks ?? [],
+            artifacts: attempt.output.artifacts ?? [],
+            problems: attempt.output.problems ?? [],
+          },
+        ];
+      });
     });
   }
 

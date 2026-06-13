@@ -12,6 +12,7 @@ export type {
   CreateExternalRefInput,
   CreateRunInput,
   CreateTaskInput,
+  DependencyAttempt,
   ExternalRef,
   LeaseReadyTasksInput,
   Lesson,
