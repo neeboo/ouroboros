@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { createCodexCliExecutor } from "../packages/runner/src";
+import { createCodexCliExecutor, createCodexResumableClient } from "../packages/runner/src";
 
 describe("codex cli executor", () => {
   test("runs codex exec through an injectable command runner", async () => {
@@ -292,5 +292,109 @@ describe("codex cli executor", () => {
     });
 
     expect(output.problems).toEqual(["exit code: 1\n\nstdout:\ncodex stdout\n\nstderr:\ncodex stderr"]);
+  });
+
+  test("resumable client returns running when a json event stream times out after session creation", async () => {
+    const calls: Array<{ cmd: string[]; stdin: string; timeoutMs?: number; idleTimeoutMs?: number }> = [];
+    const client = createCodexResumableClient({
+      cwd: "/repo",
+      codexBin: "/custom/codex",
+      timeoutMs: 900000,
+      idleTimeoutMs: 300000,
+      runCommand: async ({ cmd, stdin, timeoutMs, idleTimeoutMs }) => {
+        calls.push({ cmd, stdin, timeoutMs, idleTimeoutMs });
+        return {
+          exitCode: 124,
+          stdout: [
+            JSON.stringify({ type: "session.started", session_id: "session_123" }),
+            JSON.stringify({ type: "agent.message.delta", delta: "thinking" }),
+          ].join("\n"),
+          stderr: "command idle timed out after 300000ms",
+        };
+      },
+    });
+
+    const result = await client.start({
+      prompt: "Plan next task",
+      sessionName: "task_1",
+    });
+
+    expect(result).toEqual({
+      status: "running",
+      sessionId: "session_123",
+      outputPath: expect.any(String),
+      stdout: expect.stringContaining("session.started"),
+      stderr: "command idle timed out after 300000ms",
+      events: [
+        { type: "session.started", session_id: "session_123" },
+        { type: "agent.message.delta", delta: "thinking" },
+      ],
+    });
+    expect(calls[0]).toMatchObject({
+      cmd: [
+        "/custom/codex",
+        "exec",
+        "--json",
+        "--skip-git-repo-check",
+        "--ignore-user-config",
+        "--output-last-message",
+        expect.any(String),
+        "-C",
+        "/repo",
+        "--sandbox",
+        "read-only",
+        "-",
+      ],
+      stdin: "Plan next task",
+      timeoutMs: 900000,
+      idleTimeoutMs: 300000,
+    });
+  });
+
+  test("resumable client resumes a session and parses the final attempt output", async () => {
+    const calls: Array<{ cmd: string[]; stdin: string }> = [];
+    const client = createCodexResumableClient({
+      cwd: "/repo",
+      codexBin: "/custom/codex",
+      runCommand: async ({ cmd, stdin }) => {
+        calls.push({ cmd, stdin });
+        return {
+          exitCode: 0,
+          stdout: [
+            JSON.stringify({ type: "session.started", session_id: "session_123" }),
+            JSON.stringify({
+              type: "agent.message",
+              message:
+                '{"status":"done","summary":"planned","changedFiles":[],"checks":[],"artifacts":[],"problems":[]}',
+            }),
+          ].join("\n"),
+          stderr: "",
+        };
+      },
+    });
+
+    const result = await client.resume({
+      sessionId: "session_123",
+      prompt: "continue",
+      sessionName: "task_1",
+    });
+
+    expect(result.status).toBe("done");
+    if (result.status === "running") {
+      throw new Error("expected finished result");
+    }
+    expect(result.output).toMatchObject({
+      status: "done",
+      summary: "planned",
+    });
+    expect(calls[0].cmd.slice(0, 6)).toEqual([
+      "/custom/codex",
+      "exec",
+      "resume",
+      "session_123",
+      "--json",
+      "--skip-git-repo-check",
+    ]);
+    expect(calls[0].stdin).toBe("continue");
   });
 });

@@ -2,6 +2,7 @@ export { buildTaskPrompt } from "./prompt";
 export { runNextReadyTask, runReadyTasks, runUntilIdle } from "./runner";
 export { createAcpxCodexExecutor } from "./executors/acpx";
 export { createCodexCliExecutor } from "./executors/codex-cli";
+export { createCodexResumableClient } from "./executors/codex-resumable";
 export { parseAttemptOutput } from "./executors/output";
 export { runLocalCommand } from "./executors/command";
 export { createContextSubagentHook, createContextSummaryHook } from "./hooks/context-summary";
@@ -38,6 +39,12 @@ export type {
   RunCommand,
   RunCommandInput,
 } from "./executors/types";
+export type {
+  CodexResumableClientOptions,
+  CodexResumableResumeInput,
+  CodexResumableResult,
+  CodexResumableStartInput,
+} from "./executors/codex-resumable";
 export type {
   ContextSubagent,
   ContextSubagentEntry,

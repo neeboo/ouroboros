@@ -1,8 +1,11 @@
 #!/usr/bin/env bun
 import { Harness } from "@ouroboros/harness";
+import type { AttemptOutput } from "@ouroboros/harness";
 import {
+  buildTaskPrompt,
   createAcpxCodexExecutor,
   createCodexCliExecutor,
+  createCodexResumableClient,
   createContextSummaryHook,
   createGitWorktreeHook,
   createRepairTaskHook,
@@ -200,6 +203,84 @@ switch (parsed.command) {
     printJson(harness.listRunningAttempts({ runId: required(parsed, "run-id") }));
     break;
   }
+  case "codex-start-attempt": {
+    const taskId = required(parsed, "task-id");
+    const task = harness.getTask(taskId);
+    if (!task) {
+      fail(`task not found: ${taskId}`);
+    }
+    const run = harness.getRun(task.runId);
+    if (!run) {
+      fail(`run not found: ${task.runId}`);
+    }
+    const sessionName = task.sessionRef ?? `task-${task.id}`;
+    const prompt = buildTaskPrompt({
+      run,
+      task,
+      dependencyAttempts: task.dependsOn.length > 0 ? harness.listLatestAttemptsForTasks(task.dependsOn) : [],
+      lessons: harness.listLessons({ runId: run.id }),
+      template: harness.getPromptTemplate("task")?.contentMd,
+    });
+    const result = await codexResumableClient().start({ prompt, sessionName });
+    const input = codexAttemptInput({ prompt, sessionName, result });
+    if (result.status === "running") {
+      const attemptId = harness.startAttempt({ taskId, input });
+      printJson({
+        attemptId,
+        taskId,
+        status: "running",
+        codexSessionId: result.sessionId,
+      });
+      break;
+    }
+    const attemptId = harness.recordAttempt({
+      taskId,
+      input,
+      output: withCodexArtifacts(result.output, result.sessionId),
+    });
+    printJson({
+      attemptId,
+      taskId,
+      status: result.status,
+      codexSessionId: result.sessionId,
+    });
+    break;
+  }
+  case "codex-resume-attempt": {
+    const attemptId = required(parsed, "attempt-id");
+    const attempt = harness.getAttempt(attemptId);
+    if (!attempt) {
+      fail(`attempt not found: ${attemptId}`);
+    }
+    const sessionId = typeof attempt.input.codexSessionId === "string" ? attempt.input.codexSessionId : "";
+    if (!sessionId) {
+      fail(`attempt has no codexSessionId: ${attemptId}`);
+    }
+    const sessionName = typeof attempt.input.sessionName === "string" ? attempt.input.sessionName : `attempt-${attemptId}`;
+    const result = await codexResumableClient().resume({
+      sessionId,
+      sessionName,
+      prompt: flag(parsed, "prompt") ?? "Continue until you can return the required structured JSON.",
+    });
+    if (result.status === "running") {
+      printJson({
+        attemptId,
+        status: "running",
+        codexSessionId: result.sessionId,
+      });
+      break;
+    }
+    harness.finishAttempt({
+      attemptId,
+      output: withCodexArtifacts(result.output, result.sessionId),
+    });
+    printJson({
+      attemptId,
+      status: result.status,
+      codexSessionId: result.sessionId,
+    });
+    break;
+  }
   case "retry-task": {
     const taskId = required(parsed, "task-id");
     harness.retryTask({ taskId });
@@ -259,6 +340,50 @@ function executorFactory(executorName: "noop" | "acpx-codex" | "codex-cli") {
       timeoutMs: parseTimeoutMs(flag(parsed, "timeout-ms")),
       idleTimeoutMs: parseTimeoutMs(flag(parsed, "idle-timeout-ms"), "--idle-timeout-ms"),
     });
+  };
+}
+
+function codexResumableClient() {
+  return createCodexResumableClient({
+    cwd: runnerCwd(),
+    sandbox: parseSandbox(flag(parsed, "sandbox") ?? "read-only"),
+    codexBin: flag(parsed, "codex-bin"),
+    model: flag(parsed, "model"),
+    timeoutMs: parseTimeoutMs(flag(parsed, "timeout-ms")),
+    idleTimeoutMs: parseTimeoutMs(flag(parsed, "idle-timeout-ms"), "--idle-timeout-ms"),
+  });
+}
+
+function codexAttemptInput(input: {
+  prompt: string;
+  sessionName: string;
+  result: {
+    sessionId: string | null;
+    outputPath: string;
+    stdout: string;
+    stderr: string;
+    events: Array<Record<string, unknown>>;
+  };
+}) {
+  return {
+    prompt: input.prompt,
+    sessionName: input.sessionName,
+    executor: "codex-resumable",
+    codexSessionId: input.result.sessionId,
+    outputPath: input.result.outputPath,
+    stdout: input.result.stdout,
+    stderr: input.result.stderr,
+    events: input.result.events,
+  };
+}
+
+function withCodexArtifacts(output: AttemptOutput, sessionId: string | null): AttemptOutput {
+  if (!sessionId) {
+    return output;
+  }
+  return {
+    ...output,
+    artifacts: [...(output.artifacts ?? []), { kind: "codex_session", sessionId }],
   };
 }
 

@@ -653,6 +653,81 @@ describe("CLI", () => {
     expect(await runCliJson("next-task", "--run-id", run.id)).toBeNull();
   });
 
+  test("starts and resumes a codex running attempt", async () => {
+    await runCli("init");
+    const run = await runCliJson("create-run", "--goal", "Bootstrap ouroboros");
+    const task = await runCliJson(
+      "create-task",
+      "--run-id",
+      run.id,
+      "--role",
+      "planner",
+      "--goal",
+      "Async planner",
+      "--prompt",
+      "Plan asynchronously.",
+    );
+    const codexBin = join(dir, "fake-codex");
+    await writeFile(
+      codexBin,
+      [
+        "#!/usr/bin/env bun",
+        "const args = Bun.argv.slice(2);",
+        "if (args.includes('resume')) {",
+        "  console.log(JSON.stringify({ type: 'session.started', session_id: 'session_123' }));",
+        "  console.log(JSON.stringify({ type: 'agent.message', message: '{\"status\":\"done\",\"summary\":\"resumed planner\",\"changedFiles\":[],\"checks\":[],\"artifacts\":[],\"problems\":[]}' }));",
+        "  process.exit(0);",
+        "}",
+        "console.log(JSON.stringify({ type: 'session.started', session_id: 'session_123' }));",
+        "console.log(JSON.stringify({ type: 'agent.message.delta', delta: 'working' }));",
+        "console.error('command idle timed out after 300000ms');",
+        "process.exit(124);",
+      ].join("\n"),
+    );
+    await chmod(codexBin, 0o755);
+
+    const started = await runCliJson(
+      "codex-start-attempt",
+      "--task-id",
+      task.id,
+      "--codex-bin",
+      codexBin,
+      "--timeout-ms",
+      "900000",
+      "--idle-timeout-ms",
+      "300000",
+    );
+    const running = await runCliJson("list-running-attempts", "--run-id", run.id);
+    const resumed = await runCliJson(
+      "codex-resume-attempt",
+      "--attempt-id",
+      started.attemptId,
+      "--codex-bin",
+      codexBin,
+      "--timeout-ms",
+      "900000",
+      "--idle-timeout-ms",
+      "300000",
+    );
+
+    expect(started).toMatchObject({
+      taskId: task.id,
+      status: "running",
+      codexSessionId: "session_123",
+    });
+    expect(running).toEqual([
+      expect.objectContaining({
+        id: started.attemptId,
+        status: "running",
+      }),
+    ]);
+    expect(resumed).toMatchObject({
+      attemptId: started.attemptId,
+      status: "done",
+    });
+    expect(new Harness(dbPath).getAttempt(started.attemptId)?.output.summary).toBe("resumed planner");
+  });
+
   test("lists lessons recorded from attempts", async () => {
     await runCli("init");
     const run = await runCliJson("create-run", "--goal", "Bootstrap ouroboros");
