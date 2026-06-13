@@ -33,6 +33,7 @@ export interface CodexCliExecutorOptions {
   cwd: string;
   sandbox?: CodexSandbox;
   codexBin?: string;
+  model?: string;
   outputDir?: string;
   timeoutMs?: number;
   runCommand?: RunCommand;

@@ -116,4 +116,48 @@ describe("codex cli executor", () => {
       await rm(dir, { recursive: true, force: true });
     }
   });
+
+  test("passes an explicit model to codex exec", async () => {
+    const calls: Array<{ cmd: string[] }> = [];
+    const executor = createCodexCliExecutor({
+      cwd: "/repo",
+      model: "gpt-5-codex",
+      runCommand: async ({ cmd }) => {
+        calls.push({ cmd });
+        return {
+          exitCode: 0,
+          stdout: '{"status":"done","summary":"ok","changedFiles":[],"checks":[],"artifacts":[],"problems":[]}',
+          stderr: "",
+        };
+      },
+    });
+
+    await executor({
+      prompt: "Plan next task",
+      sessionName: "task_1",
+      run: {
+        id: "run_1",
+        goal: "Goal",
+        status: "todo",
+        context: {},
+      },
+      task: {
+        id: "task_1",
+        runId: "run_1",
+        parentId: null,
+        status: "todo",
+        role: "planner",
+        goal: "Task",
+        prompt: "Plan",
+        dependsOn: [],
+        doneWhen: [],
+        worktreePath: null,
+        sessionRef: null,
+        contextVersion: 1,
+      },
+    });
+
+    expect(calls[0].cmd).toContain("-m");
+    expect(calls[0].cmd).toContain("gpt-5-codex");
+  });
 });

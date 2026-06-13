@@ -193,6 +193,7 @@ function executorFactory(executorName: "noop" | "acpx-codex" | "codex-cli") {
       cwd,
       sandbox: parseSandbox(flag(parsed, "sandbox") ?? "read-only"),
       codexBin: flag(parsed, "codex-bin"),
+      model: flag(parsed, "model"),
       timeoutMs: parseTimeoutMs(flag(parsed, "timeout-ms")),
     });
   };

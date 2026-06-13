@@ -13,10 +13,12 @@ export function createCodexCliExecutor(options: CodexCliExecutorOptions): TaskEx
 
   return async ({ prompt, sessionName }) => {
     const outputPath = await makeOutputPath(options.outputDir, sessionName);
+    const modelArgs = options.model ? ["-m", options.model] : [];
     const result = await runCommand({
       cmd: [
         codexBin,
         "exec",
+        ...modelArgs,
         "--skip-git-repo-check",
         "--ignore-user-config",
         "--output-last-message",
