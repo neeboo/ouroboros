@@ -173,6 +173,40 @@ describe("runner", () => {
     expect(prompts[0]).toContain("worktree lacks linked workspace packages");
   });
 
+  test("runner builds task prompts from the database template", async () => {
+    const runId = harness.createRun({ goal: "Build loop" });
+    harness.setPromptTemplate({
+      key: "task",
+      contentMd: "# Custom Harness Prompt\nGoal={{taskGoal}}\nLessons={{runLessonsJson}}",
+    });
+    harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Use custom template",
+      prompt: "Use prior lesson.",
+    });
+
+    const prompts: string[] = [];
+    await runReadyTasks({
+      harness,
+      runId,
+      limit: 1,
+      executorFactory: () => async ({ prompt }) => {
+        prompts.push(prompt);
+        return {
+          status: "done",
+          summary: "Used custom template",
+          artifacts: [],
+          checks: [],
+          problems: [],
+        };
+      },
+    });
+
+    expect(prompts[0]).toContain("# Custom Harness Prompt");
+    expect(prompts[0]).toContain("Goal=Use custom template");
+  });
+
   test("applies stop hooks before recording an attempt", async () => {
     const runId = harness.createRun({ goal: "Build loop" });
     const taskId = harness.createTask({
@@ -356,6 +390,35 @@ describe("runner", () => {
     });
   });
 
+  test("verifier task hook uses the database template", async () => {
+    const runId = harness.createRun({ goal: "Build loop" });
+    harness.setPromptTemplate({
+      key: "verifier-task",
+      contentMd: "Custom verifier for {{sourceTaskId}}: {{sourceSummary}}",
+    });
+    const workerTask = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Implement runner",
+      prompt: "Implement the smallest runner.",
+    });
+
+    await runNextReadyTask({
+      harness,
+      runId,
+      executor: async () => ({
+        status: "done",
+        summary: "Implemented runner",
+        artifacts: [],
+        checks: [],
+        problems: [],
+      }),
+      stopHooks: [createVerifierTaskHook({ harness })],
+    });
+
+    expect(harness.nextReadyTask(runId)?.prompt).toBe(`Custom verifier for ${workerTask}: Implemented runner`);
+  });
+
   test("verifier stop hook does not create verifier tasks for verifier attempts", async () => {
     const runId = harness.createRun({ goal: "Build loop" });
     harness.createTask({
@@ -416,6 +479,36 @@ describe("runner", () => {
       taskId: repair.id,
       verifierTaskId: verifierTask,
     });
+  });
+
+  test("repair task hook uses the database template", async () => {
+    const runId = harness.createRun({ goal: "Build loop" });
+    harness.setPromptTemplate({
+      key: "repair-task",
+      contentMd: "Custom repair for {{verifierTaskId}}: {{verifierProblemsJson}}",
+    });
+    const verifierTask = harness.createTask({
+      runId,
+      role: "verifier",
+      goal: "Verify runner",
+      prompt: "Verify the runner.",
+    });
+
+    await runNextReadyTask({
+      harness,
+      runId,
+      executor: async () => ({
+        status: "blocked",
+        summary: "Verification failed",
+        artifacts: [],
+        checks: [],
+        problems: ["missing regression test"],
+      }),
+      stopHooks: [createRepairTaskHook({ harness })],
+    });
+
+    expect(harness.nextReadyTask(runId)?.prompt).toContain(`Custom repair for ${verifierTask}`);
+    expect(harness.nextReadyTask(runId)?.prompt).toContain("missing regression test");
   });
 
   test("parses valid planner next tasks", () => {

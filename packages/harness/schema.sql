@@ -56,6 +56,13 @@ create table if not exists lessons (
 
 create index if not exists idx_lessons_run on lessons(run_id, created_at, id);
 
+create table if not exists prompt_templates (
+  key text primary key,
+  content_md text not null,
+  created_at text not null default current_timestamp,
+  updated_at text not null default current_timestamp
+);
+
 create table if not exists inbox_events (
   id text primary key,
   provider text not null,

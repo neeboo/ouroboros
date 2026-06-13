@@ -1,4 +1,5 @@
-import type { AttemptOutput, Harness } from "@ouroboros/harness";
+import { DEFAULT_VERIFIER_TASK_PROMPT_TEMPLATE, type AttemptOutput, type Harness } from "@ouroboros/harness";
+import { prettyJson, renderPromptTemplate } from "../template";
 import type { StopHook } from "../types";
 
 const DEFAULT_SOURCE_ROLES = new Set(["worker"]);
@@ -14,7 +15,7 @@ export function createVerifierTaskHook(options: { harness: Harness; sourceRoles?
       runId: run.id,
       role: "verifier",
       goal: `Verify: ${task.goal}`,
-      prompt: buildVerifierPrompt(task.id, output),
+      prompt: buildVerifierPrompt(options.harness.getPromptTemplate("verifier-task")?.contentMd, task.id, output),
       dependsOn: [task.id],
       doneWhen: [
         "source task output is checked against real changed files and artifacts",
@@ -36,25 +37,18 @@ export function createVerifierTaskHook(options: { harness: Harness; sourceRoles?
   };
 }
 
-function buildVerifierPrompt(sourceTaskId: string, output: AttemptOutput) {
-  return [
-    "Verify the completed source task using repository state and recorded output.",
-    "",
-    `Source Task ID: ${sourceTaskId}`,
-    "",
-    "## Source Output",
-    fencedJson({
+function buildVerifierPrompt(template: string | undefined, sourceTaskId: string, output: AttemptOutput) {
+  const sourceOutput = {
       summary: output.summary,
       changedFiles: output.changedFiles ?? [],
       checks: output.checks ?? [],
       artifacts: output.artifacts ?? [],
       problems: output.problems ?? [],
-    }),
-    "",
-    "Return structured JSON. Use status blocked with concrete problems when verification cannot pass.",
-  ].join("\n");
-}
-
-function fencedJson(value: unknown) {
-  return `\`\`\`json\n${JSON.stringify(value, null, 2)}\n\`\`\``;
+    };
+  return renderPromptTemplate(template ?? DEFAULT_VERIFIER_TASK_PROMPT_TEMPLATE, {
+    sourceTaskId,
+    sourceSummary: output.summary,
+    sourceOutputJson: prettyJson(sourceOutput),
+    sourceProblemsJson: prettyJson(output.problems ?? []),
+  });
 }

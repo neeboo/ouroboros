@@ -96,6 +96,14 @@ The current v0 runner supports the same shape with an injectable executor. The `
 
 ## Prompt Contract
 
+Prompt Markdown lives in `prompt_templates`, not only in code. The built-in template keys are:
+
+```text
+task
+verifier-task
+repair-task
+```
+
 Every generated prompt should contain:
 
 - run goal
@@ -145,6 +153,8 @@ Every recorded attempt creates one run-level lesson:
 - `lesson`: created from a blocked attempt
 
 The next prompt for the same run includes recent lessons in `## Run Lessons`. Successful lessons should preserve useful execution patterns. Failure lessons should preserve avoidable problems and their evidence.
+
+Templates can decide how strongly lessons influence the next graph design. The default task template exposes lessons as JSON so planners can turn them into constraints, avoid repeated failure modes, and reuse successful patterns.
 
 ## Verification
 

@@ -46,6 +46,8 @@ bun run cli -- run-loop --run-id <run_id> --executor codex-cli --cwd "$(pwd)" --
 bun run cli -- run-loop --run-id <run_id> --executor codex-cli --cwd "$(pwd)" --stop-hook create-tasks,create-verifier,create-repair --max-rounds 8
 bun run cli -- record-attempt --task-id <task_id> --input-json '{}' --output-json '{"status":"done","summary":"..."}'
 bun run cli -- list-lessons --run-id <run_id>
+bun run cli -- show-prompt-template --key task
+bun run cli -- set-prompt-template --key task --content "# Custom template..."
 bun run cli -- retry-task --task-id <task_id>
 ```
 
@@ -66,6 +68,8 @@ The `create-verifier` stop hook turns a successful worker attempt into a verifie
 The `create-repair` stop hook turns a blocked verifier attempt into a ready worker repair task. A successful repair can then create another verifier through `create-verifier`.
 
 Every recorded attempt also creates a run lesson. Successful attempts become `experience`; blocked attempts become `lesson`. Future prompts include the run lessons so the next loop can reuse working patterns and avoid known failures.
+
+Prompt Markdown is stored in SQLite under `prompt_templates`. The default keys are `task`, `verifier-task`, and `repair-task`, so the loop prompt, verifier prompt, and repair prompt can be edited without changing code.
 
 ## Boundaries
 

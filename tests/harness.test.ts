@@ -48,6 +48,27 @@ describe("Harness", () => {
     });
   });
 
+  test("seeds and updates prompt templates", () => {
+    const seeded = harness.getPromptTemplate("task");
+    const verifierSeeded = harness.getPromptTemplate("verifier-task");
+    const repairSeeded = harness.getPromptTemplate("repair-task");
+
+    expect(seeded?.contentMd).toContain("# Ouroboros Task");
+    expect(seeded?.contentMd).toContain("{{runLessonsJson}}");
+    expect(verifierSeeded?.contentMd).toContain("{{sourceTaskId}}");
+    expect(repairSeeded?.contentMd).toContain("{{verifierTaskId}}");
+
+    harness.setPromptTemplate({
+      key: "task",
+      contentMd: "# Custom Task\n{{taskGoal}}\n{{runLessonsJson}}",
+    });
+
+    expect(harness.getPromptTemplate("task")).toMatchObject({
+      key: "task",
+      contentMd: "# Custom Task\n{{taskGoal}}\n{{runLessonsJson}}",
+    });
+  });
+
   test("waits for dependencies before returning the next ready task", () => {
     const runId = harness.createRun({ goal: "Build loop" });
     const first = harness.createTask({

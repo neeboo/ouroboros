@@ -84,6 +84,22 @@ switch (parsed.command) {
     printJson(harness.listLessons({ runId: required(parsed, "run-id") }));
     break;
   }
+  case "show-prompt-template": {
+    const template = harness.getPromptTemplate(required(parsed, "key"));
+    if (!template) {
+      fail("prompt template not found");
+    }
+    printJson(template);
+    break;
+  }
+  case "set-prompt-template": {
+    const template = harness.setPromptTemplate({
+      key: required(parsed, "key"),
+      contentMd: required(parsed, "content"),
+    });
+    printJson(template);
+    break;
+  }
   case "run-next": {
     const executorName = parseExecutorName(required(parsed, "executor"));
     const runId = required(parsed, "run-id");

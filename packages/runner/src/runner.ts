@@ -24,6 +24,7 @@ export async function runNextReadyTask(input: RunNextReadyTaskInput) {
     task,
     dependencyAttempts: [],
     lessons: input.harness.listLessons({ runId: input.runId }),
+    template: input.harness.getPromptTemplate("task")?.contentMd,
   });
   const sessionName = task.sessionRef ?? defaultSessionName(task.id);
   const rawOutput = await input.executor({ prompt, run, task, sessionName });
@@ -90,6 +91,7 @@ export async function runReadyTasks(input: RunReadyTasksInput) {
         task,
         dependencyAttempts: [],
         lessons: input.harness.listLessons({ runId: input.runId }),
+        template: input.harness.getPromptTemplate("task")?.contentMd,
       });
       const executor = input.executorFactory({ run, task, sessionName, cwd });
       const rawOutput = await executor({ prompt, run, task, sessionName });

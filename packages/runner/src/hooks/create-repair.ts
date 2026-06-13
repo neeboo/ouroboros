@@ -1,4 +1,5 @@
-import type { AttemptOutput, Harness } from "@ouroboros/harness";
+import { DEFAULT_REPAIR_TASK_PROMPT_TEMPLATE, type AttemptOutput, type Harness } from "@ouroboros/harness";
+import { prettyJson, renderPromptTemplate } from "../template";
 import type { StopHook } from "../types";
 
 export function createRepairTaskHook(options: { harness: Harness }): StopHook {
@@ -12,7 +13,7 @@ export function createRepairTaskHook(options: { harness: Harness }): StopHook {
       parentId: task.id,
       role: "worker",
       goal: `Repair: ${task.goal}`,
-      prompt: buildRepairPrompt(task.id, output),
+      prompt: buildRepairPrompt(options.harness.getPromptTemplate("repair-task")?.contentMd, task.id, output),
       doneWhen: [
         "verifier problems are addressed",
         "relevant checks pass",
@@ -33,25 +34,18 @@ export function createRepairTaskHook(options: { harness: Harness }): StopHook {
   };
 }
 
-function buildRepairPrompt(verifierTaskId: string, output: AttemptOutput) {
-  return [
-    "Repair the failed verifier result.",
-    "",
-    `Verifier Task ID: ${verifierTaskId}`,
-    "",
-    "## Verifier Output",
-    fencedJson({
+function buildRepairPrompt(template: string | undefined, verifierTaskId: string, output: AttemptOutput) {
+  const verifierOutput = {
       summary: output.summary,
       changedFiles: output.changedFiles ?? [],
       checks: output.checks ?? [],
       artifacts: output.artifacts ?? [],
       problems: output.problems ?? [],
-    }),
-    "",
-    "Return structured JSON. Include changedFiles, checks, artifacts, and problems.",
-  ].join("\n");
-}
-
-function fencedJson(value: unknown) {
-  return `\`\`\`json\n${JSON.stringify(value, null, 2)}\n\`\`\``;
+    };
+  return renderPromptTemplate(template ?? DEFAULT_REPAIR_TASK_PROMPT_TEMPLATE, {
+    verifierTaskId,
+    verifierSummary: output.summary,
+    verifierOutputJson: prettyJson(verifierOutput),
+    verifierProblemsJson: prettyJson(output.problems ?? []),
+  });
 }

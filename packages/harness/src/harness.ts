@@ -1,10 +1,23 @@
 import { initDatabase, withDatabase } from "./database";
+import {
+  DEFAULT_REPAIR_TASK_PROMPT_TEMPLATE,
+  DEFAULT_TASK_PROMPT_TEMPLATE,
+  DEFAULT_VERIFIER_TASK_PROMPT_TEMPLATE,
+} from "./default-prompts";
 import { makeId } from "./ids";
 import { toJson } from "./json";
-import { attemptFromRow, externalRefFromRow, lessonFromRow, runFromRow, taskFromRow } from "./mappers";
-import type { AttemptRow, ExternalRefRow, LessonRow, RunRow, TaskRow } from "./rows";
+import {
+  attemptFromRow,
+  externalRefFromRow,
+  lessonFromRow,
+  promptTemplateFromRow,
+  runFromRow,
+  taskFromRow,
+} from "./mappers";
+import type { AttemptRow, ExternalRefRow, LessonRow, PromptTemplateRow, RunRow, TaskRow } from "./rows";
 import type {
   CreateExternalRefInput,
+  SetPromptTemplateInput,
   CreateRunInput,
   CreateTaskInput,
   LeaseReadyTasksInput,
@@ -24,6 +37,7 @@ export class Harness {
 
   init() {
     initDatabase(this.dbPath);
+    this.seedPromptTemplates();
   }
 
   createRun(input: CreateRunInput) {
@@ -306,6 +320,52 @@ export class Harness {
         )
         .all({ $runId: input.runId, $limit: input.limit ?? 50 }) as LessonRow[];
       return rows.map(lessonFromRow);
+    });
+  }
+
+  getPromptTemplate(key: string) {
+    return withDatabase(this.dbPath, (db) => {
+      const row = db.query("select * from prompt_templates where key = $key").get({ $key: key }) as
+        | PromptTemplateRow
+        | null;
+      return row ? promptTemplateFromRow(row) : null;
+    });
+  }
+
+  setPromptTemplate(input: SetPromptTemplateInput) {
+    return withDatabase(this.dbPath, (db) => {
+      db.query(
+        `
+        insert into prompt_templates (key, content_md)
+        values ($key, $contentMd)
+        on conflict(key) do update set
+          content_md = excluded.content_md,
+          updated_at = current_timestamp
+        `,
+      ).run({ $key: input.key, $contentMd: input.contentMd });
+      const row = db.query("select * from prompt_templates where key = $key").get({ $key: input.key }) as
+        | PromptTemplateRow
+        | null;
+      return promptTemplateFromRow(row!);
+    });
+  }
+
+  private seedPromptTemplates() {
+    return withDatabase(this.dbPath, (db) => {
+      const query = db.query(`
+        insert or ignore into prompt_templates (key, content_md)
+        values ($key, $contentMd)
+      `);
+      for (const template of [
+        { key: "task", contentMd: DEFAULT_TASK_PROMPT_TEMPLATE },
+        { key: "verifier-task", contentMd: DEFAULT_VERIFIER_TASK_PROMPT_TEMPLATE },
+        { key: "repair-task", contentMd: DEFAULT_REPAIR_TASK_PROMPT_TEMPLATE },
+      ]) {
+        query.run({
+          $key: template.key,
+          $contentMd: template.contentMd,
+        });
+      }
     });
   }
 }

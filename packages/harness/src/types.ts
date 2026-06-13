@@ -73,6 +73,11 @@ export interface Lesson {
   evidence: Record<string, unknown>;
 }
 
+export interface PromptTemplate {
+  key: string;
+  contentMd: string;
+}
+
 export interface CreateRunInput {
   goal: string;
   context?: Record<string, unknown>;
@@ -126,4 +131,9 @@ export interface ListExternalRefsInput {
 export interface ListLessonsInput {
   runId: string;
   limit?: number;
+}
+
+export interface SetPromptTemplateInput {
+  key: string;
+  contentMd: string;
 }

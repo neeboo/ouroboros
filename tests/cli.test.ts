@@ -70,6 +70,24 @@ describe("CLI", () => {
     });
   });
 
+  test("shows and updates prompt templates", async () => {
+    await runCli("init");
+
+    const seeded = await runCliJson("show-prompt-template", "--key", "task");
+    expect(seeded.contentMd).toContain("# Ouroboros Task");
+
+    const updated = await runCliJson(
+      "set-prompt-template",
+      "--key",
+      "task",
+      "--content",
+      "# Custom Task\n{{taskGoal}}",
+    );
+
+    expect(updated).toMatchObject({ key: "task" });
+    expect((await runCliJson("show-prompt-template", "--key", "task")).contentMd).toBe("# Custom Task\n{{taskGoal}}");
+  });
+
   test("runs the next task with the noop executor", async () => {
     await runCli("init");
     const run = await runCliJson("create-run", "--goal", "Bootstrap ouroboros");

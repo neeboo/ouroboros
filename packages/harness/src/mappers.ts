@@ -1,6 +1,6 @@
 import { parseJson } from "./json";
-import type { Attempt, AttemptOutput, ExternalRef, Lesson, Run, Task } from "./types";
-import type { AttemptRow, ExternalRefRow, LessonRow, RunRow, TaskRow } from "./rows";
+import type { Attempt, AttemptOutput, ExternalRef, Lesson, PromptTemplate, Run, Task } from "./types";
+import type { AttemptRow, ExternalRefRow, LessonRow, PromptTemplateRow, RunRow, TaskRow } from "./rows";
 
 export function runFromRow(row: RunRow): Run {
   return {
@@ -62,5 +62,12 @@ export function lessonFromRow(row: LessonRow): Lesson {
     kind: row.kind,
     summary: row.summary,
     evidence: parseJson<Record<string, unknown>>(row.evidence_json),
+  };
+}
+
+export function promptTemplateFromRow(row: PromptTemplateRow): PromptTemplate {
+  return {
+    key: row.key,
+    contentMd: row.content_md,
   };
 }

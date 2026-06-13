@@ -5,6 +5,7 @@ export interface PromptInput {
   task: Task;
   dependencyAttempts: unknown[];
   lessons?: Lesson[];
+  template?: string;
 }
 
 export interface ExecutorInput {

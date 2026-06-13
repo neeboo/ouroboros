@@ -1,30 +1,18 @@
+import { DEFAULT_TASK_PROMPT_TEMPLATE } from "@ouroboros/harness";
 import type { PromptInput } from "./types";
+import { prettyJson, renderPromptTemplate } from "./template";
 
 export function buildTaskPrompt(input: PromptInput) {
-  return [
-    "# Ouroboros Task",
-    "",
-    `Run Goal: ${input.run.goal}`,
-    "",
-    "## Run Context",
-    fencedJson(input.run.context),
-    "",
-    "## Task",
-    `Task ID: ${input.task.id}`,
-    `Role: ${input.task.role}`,
-    `Goal: ${input.task.goal}`,
-    "",
-    "## Instructions",
-    input.task.prompt,
-    "",
-    "## Done When",
-    ...input.task.doneWhen.map((item) => `- ${item}`),
-    "",
-    "## Dependency Attempts",
-    fencedJson(input.dependencyAttempts),
-    "",
-    "## Run Lessons",
-    fencedJson(
+  return renderPromptTemplate(input.template ?? DEFAULT_TASK_PROMPT_TEMPLATE, {
+    runGoal: input.run.goal,
+    runContextJson: prettyJson(input.run.context),
+    taskId: input.task.id,
+    taskRole: input.task.role,
+    taskGoal: input.task.goal,
+    taskPrompt: input.task.prompt,
+    doneWhenMarkdown: input.task.doneWhen.map((item) => `- ${item}`).join("\n"),
+    dependencyAttemptsJson: prettyJson(input.dependencyAttempts),
+    runLessonsJson: prettyJson(
       (input.lessons ?? []).map((lesson) => ({
         kind: lesson.kind,
         summary: lesson.summary,
@@ -33,10 +21,7 @@ export function buildTaskPrompt(input: PromptInput) {
         evidence: lesson.evidence,
       })),
     ),
-    "",
-    "## Required Output",
-    "Return only JSON with this shape:",
-    fencedJson({
+    requiredOutputJson: prettyJson({
       status: "done",
       summary: "Short completion summary",
       changedFiles: [],
@@ -53,9 +38,5 @@ export function buildTaskPrompt(input: PromptInput) {
         },
       ],
     }),
-  ].join("\n");
-}
-
-function fencedJson(value: unknown) {
-  return `\`\`\`json\n${JSON.stringify(value, null, 2)}\n\`\`\``;
+  });
 }

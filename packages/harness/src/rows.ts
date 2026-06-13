@@ -52,3 +52,8 @@ export interface LessonRow {
   summary: string;
   evidence_json: string;
 }
+
+export interface PromptTemplateRow {
+  key: string;
+  content_md: string;
+}
