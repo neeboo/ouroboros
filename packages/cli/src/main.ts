@@ -108,6 +108,11 @@ switch (parsed.command) {
     const executorName = parseExecutorName(required(parsed, "executor"));
     const runId = required(parsed, "run-id");
     const limit = parsePositiveInteger(flag(parsed, "limit") ?? "1", "--limit");
+    if (executorName === "codex-resumable") {
+      const result = await runCodexResumableLoop({ runId, maxRounds: 1, limit });
+      printJson({ tasks: result.rounds.flatMap((round) => round.tasks) });
+      break;
+    }
     const result = await runReadyTasks({
       harness,
       runId,
@@ -127,6 +132,10 @@ switch (parsed.command) {
     const runId = required(parsed, "run-id");
     const limit = parsePositiveInteger(flag(parsed, "limit") ?? "1", "--limit");
     const maxRounds = parsePositiveInteger(flag(parsed, "max-rounds") ?? "10", "--max-rounds");
+    if (executorName === "codex-resumable") {
+      printJson(await runCodexResumableLoop({ runId, maxRounds, limit }));
+      break;
+    }
     const result = await runUntilIdle({
       harness,
       runId,
@@ -306,13 +315,13 @@ function parseSandbox(raw: string) {
 }
 
 function parseExecutorName(raw: string) {
-  if (raw !== "noop" && raw !== "acpx-codex" && raw !== "codex-cli") {
+  if (raw !== "noop" && raw !== "acpx-codex" && raw !== "codex-cli" && raw !== "codex-resumable") {
     fail(`unsupported executor: ${raw}`);
   }
   return raw;
 }
 
-function executorFactory(executorName: "noop" | "acpx-codex" | "codex-cli") {
+function executorFactory(executorName: "noop" | "acpx-codex" | "codex-cli" | "codex-resumable") {
   return ({ cwd }: { cwd: string }) => {
     if (executorName === "noop") {
       return async ({ task }: { task: { id: string } }) => ({
@@ -332,6 +341,9 @@ function executorFactory(executorName: "noop" | "acpx-codex" | "codex-cli") {
         idleTimeoutMs: parseTimeoutMs(flag(parsed, "idle-timeout-ms"), "--idle-timeout-ms"),
       });
     }
+    if (executorName === "codex-resumable") {
+      fail("codex-resumable uses the resumable loop path");
+    }
     return createCodexCliExecutor({
       cwd,
       sandbox: parseSandbox(flag(parsed, "sandbox") ?? "read-only"),
@@ -341,6 +353,188 @@ function executorFactory(executorName: "noop" | "acpx-codex" | "codex-cli") {
       idleTimeoutMs: parseTimeoutMs(flag(parsed, "idle-timeout-ms"), "--idle-timeout-ms"),
     });
   };
+}
+
+async function runCodexResumableLoop(input: { runId: string; maxRounds: number; limit: number }) {
+  const rounds = [];
+  for (let index = 0; index < input.maxRounds; index += 1) {
+    const resumed = await resumeRunningCodexAttempts({ runId: input.runId, limit: input.limit });
+    if (resumed.length > 0) {
+      rounds.push({ index, tasks: resumed });
+      if (resumed.some((task) => task.status === "running")) {
+        break;
+      }
+      continue;
+    }
+
+    const started = await startReadyCodexAttempts({ runId: input.runId, limit: input.limit });
+    if (started.length === 0) {
+      break;
+    }
+    rounds.push({ index, tasks: started });
+    if (started.some((task) => task.status === "running")) {
+      break;
+    }
+  }
+  return { rounds };
+}
+
+async function resumeRunningCodexAttempts(input: { runId: string; limit: number }) {
+  const attempts = harness.listRunningAttempts({ runId: input.runId }).slice(0, input.limit);
+  const tasks = [];
+  for (const attempt of attempts) {
+    const task = harness.getTask(attempt.taskId);
+    if (!task) {
+      continue;
+    }
+    const run = harness.getRun(task.runId);
+    if (!run) {
+      continue;
+    }
+    const sessionId = typeof attempt.input.codexSessionId === "string" ? attempt.input.codexSessionId : "";
+    if (!sessionId) {
+      continue;
+    }
+    const sessionName = typeof attempt.input.sessionName === "string" ? attempt.input.sessionName : `attempt-${attempt.id}`;
+    const prompt =
+      typeof attempt.input.prompt === "string"
+        ? attempt.input.prompt
+        : "Continue until you can return the required structured JSON.";
+    const result = await codexResumableClient().resume({
+      sessionId,
+      sessionName,
+      prompt,
+    });
+    if (result.status === "running") {
+      tasks.push({
+        taskId: task.id,
+        attemptId: attempt.id,
+        sessionName,
+        status: "running",
+        codexSessionId: result.sessionId,
+      });
+      continue;
+    }
+    const { output, decision } = await applyCliStopHooks({
+      run,
+      task,
+      sessionName,
+      prompt,
+      output: withCodexArtifacts(result.output, result.sessionId),
+    });
+    harness.finishAttempt({ attemptId: attempt.id, output });
+    if (decision === "retry") {
+      harness.retryTask({ taskId: task.id });
+    }
+    tasks.push({
+      taskId: task.id,
+      attemptId: attempt.id,
+      sessionName,
+      status: output.status,
+      codexSessionId: result.sessionId,
+    });
+  }
+  return tasks;
+}
+
+async function startReadyCodexAttempts(input: { runId: string; limit: number }) {
+  const run = harness.getRun(input.runId);
+  if (!run) {
+    fail(`run not found: ${input.runId}`);
+  }
+  const leased = harness.leaseReadyTasks({
+    runId: input.runId,
+    limit: input.limit,
+    sessionForTask: (task) => task.sessionRef ?? `task-${task.id}`,
+    worktreeForTask: worktreeForTask(),
+  });
+  const tasks = [];
+  for (const task of leased) {
+    const sessionName = task.sessionRef ?? `task-${task.id}`;
+    const prompt = buildTaskPrompt({
+      run,
+      task,
+      dependencyAttempts: task.dependsOn.length > 0 ? harness.listLatestAttemptsForTasks(task.dependsOn) : [],
+      lessons: harness.listLessons({ runId: run.id }),
+      template: harness.getPromptTemplate("task")?.contentMd,
+    });
+    const result = await codexResumableClient().start({ prompt, sessionName });
+    const attemptInput = codexAttemptInput({ prompt, sessionName, result });
+    if (result.status === "running") {
+      const attemptId = harness.startAttempt({ taskId: task.id, input: attemptInput });
+      tasks.push({
+        taskId: task.id,
+        attemptId,
+        sessionName,
+        status: "running",
+        codexSessionId: result.sessionId,
+      });
+      continue;
+    }
+    const { output, decision } = await applyCliStopHooks({
+      run,
+      task,
+      sessionName,
+      prompt,
+      output: withCodexArtifacts(result.output, result.sessionId),
+    });
+    const attemptId = harness.recordAttempt({
+      taskId: task.id,
+      input: attemptInput,
+      output,
+    });
+    if (decision === "retry") {
+      harness.retryTask({ taskId: task.id });
+    }
+    tasks.push({
+      taskId: task.id,
+      attemptId,
+      sessionName,
+      status: output.status,
+      codexSessionId: result.sessionId,
+    });
+  }
+  return tasks;
+}
+
+async function applyCliStopHooks(input: {
+  run: NonNullable<ReturnType<Harness["getRun"]>>;
+  task: NonNullable<ReturnType<Harness["getTask"]>>;
+  sessionName: string;
+  prompt: string;
+  output: AttemptOutput;
+}) {
+  let output = {
+    ...input.output,
+    checks: [...(input.output.checks ?? [])],
+    artifacts: [...(input.output.artifacts ?? [])],
+    problems: [...(input.output.problems ?? [])],
+  };
+  let decision: "continue" | "retry" | "exit" = "exit";
+  const hooks = [
+    ...(stopHooksByRole()[input.task.role as "planner" | "worker" | "verifier"] ?? []),
+  ];
+  for (const hook of hooks) {
+    const result = await hook({ ...input, output });
+    output.checks = [...(output.checks ?? []), ...(result.checks ?? [])];
+    output.artifacts = [...(output.artifacts ?? []), ...(result.artifacts ?? [])];
+    if (result.outputPatch) {
+      output = { ...output, ...result.outputPatch };
+    }
+    if (result.problems && result.problems.length > 0) {
+      output.problems = [...(output.problems ?? []), ...result.problems];
+      output.status = "blocked";
+    }
+    if (result.decision === "retry") {
+      decision = "retry";
+      output.status = "blocked";
+    } else if (result.decision === "continue" && decision !== "retry") {
+      decision = "continue";
+    } else if (result.decision === "exit" && decision !== "retry") {
+      decision = "exit";
+    }
+  }
+  return { output, decision };
 }
 
 function codexResumableClient() {
