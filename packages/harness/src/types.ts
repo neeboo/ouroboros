@@ -113,6 +113,21 @@ export interface RecordAttemptInput {
   id?: string;
 }
 
+export interface StartAttemptInput {
+  taskId: string;
+  input: Record<string, unknown>;
+  id?: string;
+}
+
+export interface FinishAttemptInput {
+  attemptId: string;
+  output: AttemptOutput;
+}
+
+export interface ListRunningAttemptsInput {
+  runId: string;
+}
+
 export interface LeaseReadyTasksInput {
   runId: string;
   limit: number;

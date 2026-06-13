@@ -31,6 +31,7 @@ export function createCodexCliExecutor(options: CodexCliExecutorOptions): TaskEx
       ],
       stdin: prompt,
       timeoutMs: options.timeoutMs,
+      idleTimeoutMs: options.idleTimeoutMs,
     });
 
     if (result.exitCode !== 0) {

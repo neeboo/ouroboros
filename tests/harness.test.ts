@@ -131,6 +131,59 @@ describe("Harness", () => {
     expect(harness.nextReadyTask(runId)?.id).toBe(second);
   });
 
+  test("starts and finishes a resumable running attempt", () => {
+    const runId = harness.createRun({ goal: "Build loop" });
+    const taskId = harness.createTask({
+      runId,
+      role: "planner",
+      goal: "Plan",
+      prompt: "Plan.",
+    });
+
+    const attemptId = harness.startAttempt({
+      taskId,
+      input: { sessionName: "planner-session" },
+    });
+    const reopened = new Harness(harness.dbPath);
+
+    expect(reopened.getAttempt(attemptId)).toMatchObject({
+      id: attemptId,
+      taskId,
+      status: "running",
+      input: { sessionName: "planner-session" },
+    });
+    expect(reopened.getTask(taskId)?.status).toBe("running");
+    expect(reopened.listRunningAttempts({ runId })).toEqual([
+      expect.objectContaining({ id: attemptId, taskId, status: "running" }),
+    ]);
+
+    reopened.finishAttempt({
+      attemptId,
+      output: {
+        status: "done",
+        summary: "Planned next task",
+        changedFiles: [],
+        checks: [{ name: "planner", status: "passed" }],
+        artifacts: [],
+        problems: [],
+      },
+    });
+
+    expect(reopened.getAttempt(attemptId)).toMatchObject({
+      id: attemptId,
+      status: "done",
+      output: expect.objectContaining({ summary: "Planned next task" }),
+    });
+    expect(reopened.getTask(taskId)?.status).toBe("done");
+    expect(reopened.listLessons({ runId })).toEqual([
+      expect.objectContaining({
+        attemptId,
+        kind: "experience",
+        summary: "Planned next task",
+      }),
+    ]);
+  });
+
   test("records experiences and lessons from attempts", () => {
     const runId = harness.createRun({ goal: "Build loop" });
     const successTask = harness.createTask({

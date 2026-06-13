@@ -22,11 +22,14 @@ import type {
   CreateRunInput,
   CreateTaskInput,
   DependencyAttempt,
+  FinishAttemptInput,
   LeaseReadyTasksInput,
+  ListRunningAttemptsInput,
   ListExternalRefsInput,
   ListLessonsInput,
   RecordAttemptInput,
   RetryTaskInput,
+  StartAttemptInput,
   Status,
 } from "./types";
 
@@ -105,6 +108,23 @@ export class Harness {
     return withDatabase(this.dbPath, (db) => {
       const row = db.query("select * from attempts where id = $id").get({ $id: id }) as AttemptRow | null;
       return row ? attemptFromRow(row) : null;
+    });
+  }
+
+  listRunningAttempts(input: ListRunningAttemptsInput) {
+    return withDatabase(this.dbPath, (db) => {
+      const rows = db
+        .query(
+          `
+          select attempts.*
+          from attempts
+          join tasks on tasks.id = attempts.task_id
+          where tasks.run_id = $runId and attempts.status = 'running'
+          order by attempts.started_at, attempts.id
+          `,
+        )
+        .all({ $runId: input.runId }) as AttemptRow[];
+      return rows.map(attemptFromRow);
     });
   }
 
@@ -284,6 +304,109 @@ export class Harness {
         }
       })();
       return id;
+    });
+  }
+
+  startAttempt(input: StartAttemptInput) {
+    const id = input.id ?? makeId("attempt");
+    return withDatabase(this.dbPath, (db) => {
+      db.transaction(() => {
+        db.query(
+          `
+          insert into attempts (
+            id, task_id, status, input_json, output_json,
+            checks_json, artifacts_json, error, finished_at
+          )
+          values (
+            $id, $taskId, 'running', $inputJson, '{}',
+            '[]', '[]', null, null
+          )
+          `,
+        ).run({
+          $id: id,
+          $taskId: input.taskId,
+          $inputJson: toJson(input.input),
+        });
+        db.query(
+          `
+          update tasks
+          set status = 'running', updated_at = current_timestamp
+          where id = $taskId
+          `,
+        ).run({ $taskId: input.taskId });
+      })();
+      return id;
+    });
+  }
+
+  finishAttempt(input: FinishAttemptInput) {
+    if (input.output.status !== "done" && input.output.status !== "blocked") {
+      throw new Error("attempt output status must be 'done' or 'blocked'");
+    }
+
+    const problems = input.output.problems ?? [];
+    return withDatabase(this.dbPath, (db) => {
+      db.transaction(() => {
+        db.query(
+          `
+          update attempts
+          set status = $status,
+              output_json = $outputJson,
+              checks_json = $checksJson,
+              artifacts_json = $artifactsJson,
+              error = $error,
+              finished_at = current_timestamp
+          where id = $attemptId and status = 'running'
+          `,
+        ).run({
+          $status: input.output.status,
+          $outputJson: toJson(input.output),
+          $checksJson: toJson(input.output.checks ?? []),
+          $artifactsJson: toJson(input.output.artifacts ?? []),
+          $error: problems.length > 0 ? problems.join("\n") : null,
+          $attemptId: input.attemptId,
+        });
+        const attemptRow = db.query("select * from attempts where id = $attemptId").get({
+          $attemptId: input.attemptId,
+        }) as AttemptRow | null;
+        if (!attemptRow) {
+          throw new Error(`attempt not found: ${input.attemptId}`);
+        }
+        db.query(
+          `
+          update tasks
+          set status = $status, updated_at = current_timestamp
+          where id = $taskId
+          `,
+        ).run({
+          $status: input.output.status,
+          $taskId: attemptRow.task_id,
+        });
+        const taskRow = db.query("select * from tasks where id = $taskId").get({ $taskId: attemptRow.task_id }) as
+          | TaskRow
+          | null;
+        if (taskRow) {
+          const lesson = lessonForAttempt(input.output);
+          db.query(
+            `
+            insert into lessons (
+              id, run_id, task_id, attempt_id, kind, summary, evidence_json
+            )
+            values (
+              $id, $runId, $taskId, $attemptId, $kind, $summary, $evidenceJson
+            )
+            `,
+          ).run({
+            $id: makeId("lesson"),
+            $runId: taskRow.run_id,
+            $taskId: attemptRow.task_id,
+            $attemptId: input.attemptId,
+            $kind: lesson.kind,
+            $summary: lesson.summary,
+            $evidenceJson: toJson(lesson.evidence),
+          });
+        }
+      })();
     });
   }
 

@@ -12,6 +12,7 @@ export interface RunCommandInput {
   cmd: string[];
   stdin: string;
   timeoutMs?: number;
+  idleTimeoutMs?: number;
 }
 
 export type RunCommand = (input: RunCommandInput) => Promise<CommandResult>;
@@ -20,6 +21,7 @@ export interface AcpxCodexExecutorOptions {
   cwd: string;
   approval?: ApprovalMode;
   timeoutMs?: number;
+  idleTimeoutMs?: number;
   runCommand?: RunCommand;
 }
 
@@ -36,5 +38,6 @@ export interface CodexCliExecutorOptions {
   model?: string;
   outputDir?: string;
   timeoutMs?: number;
+  idleTimeoutMs?: number;
   runCommand?: RunCommand;
 }

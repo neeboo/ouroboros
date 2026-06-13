@@ -162,6 +162,44 @@ switch (parsed.command) {
     });
     break;
   }
+  case "start-attempt": {
+    const taskId = required(parsed, "task-id");
+    const input = parseObject(flag(parsed, "input-json") ?? "{}");
+    const attemptId = harness.startAttempt({
+      taskId,
+      input,
+    });
+    printJson({
+      attemptId,
+      taskId,
+      status: "running",
+    });
+    break;
+  }
+  case "finish-attempt": {
+    const attemptId = required(parsed, "attempt-id");
+    const output = parseObject(flag(parsed, "output-json") ?? "{}");
+    harness.finishAttempt({
+      attemptId,
+      output: {
+        status: output.status as "done" | "blocked",
+        summary: String(output.summary ?? ""),
+        changedFiles: Array.isArray(output.changedFiles) ? output.changedFiles : [],
+        checks: Array.isArray(output.checks) ? output.checks : [],
+        artifacts: Array.isArray(output.artifacts) ? output.artifacts : [],
+        problems: Array.isArray(output.problems) ? output.problems.map(String) : [],
+      },
+    });
+    printJson({
+      attemptId,
+      status: output.status,
+    });
+    break;
+  }
+  case "list-running-attempts": {
+    printJson(harness.listRunningAttempts({ runId: required(parsed, "run-id") }));
+    break;
+  }
   case "retry-task": {
     const taskId = required(parsed, "task-id");
     harness.retryTask({ taskId });
@@ -210,6 +248,7 @@ function executorFactory(executorName: "noop" | "acpx-codex" | "codex-cli") {
         cwd,
         approval: parseApproval(flag(parsed, "approval") ?? "approve-reads"),
         timeoutMs: parseTimeoutMs(flag(parsed, "timeout-ms")),
+        idleTimeoutMs: parseTimeoutMs(flag(parsed, "idle-timeout-ms"), "--idle-timeout-ms"),
       });
     }
     return createCodexCliExecutor({
@@ -218,6 +257,7 @@ function executorFactory(executorName: "noop" | "acpx-codex" | "codex-cli") {
       codexBin: flag(parsed, "codex-bin"),
       model: flag(parsed, "model"),
       timeoutMs: parseTimeoutMs(flag(parsed, "timeout-ms")),
+      idleTimeoutMs: parseTimeoutMs(flag(parsed, "idle-timeout-ms"), "--idle-timeout-ms"),
     });
   };
 }
@@ -297,13 +337,13 @@ function startHooks() {
   ];
 }
 
-function parseTimeoutMs(raw: string | undefined) {
+function parseTimeoutMs(raw: string | undefined, name = "--timeout-ms") {
   if (raw === undefined) {
     return undefined;
   }
   const timeoutMs = Number(raw);
   if (!Number.isInteger(timeoutMs) || timeoutMs < 1) {
-    fail("--timeout-ms must be a positive integer");
+    fail(`${name} must be a positive integer`);
   }
   return timeoutMs;
 }

@@ -161,6 +161,50 @@ describe("codex cli executor", () => {
     expect(calls[0].cmd).toContain("gpt-5-codex");
   });
 
+  test("passes hard and idle timeouts to the command runner", async () => {
+    const calls: Array<{ timeoutMs?: number; idleTimeoutMs?: number }> = [];
+    const executor = createCodexCliExecutor({
+      cwd: "/repo",
+      timeoutMs: 900000,
+      idleTimeoutMs: 300000,
+      runCommand: async ({ timeoutMs, idleTimeoutMs }) => {
+        calls.push({ timeoutMs, idleTimeoutMs });
+        return {
+          exitCode: 0,
+          stdout: '{"status":"done","summary":"ok","changedFiles":[],"checks":[],"artifacts":[],"problems":[]}',
+          stderr: "",
+        };
+      },
+    });
+
+    await executor({
+      prompt: "Plan next task",
+      sessionName: "task_1",
+      run: {
+        id: "run_1",
+        goal: "Goal",
+        status: "todo",
+        context: {},
+      },
+      task: {
+        id: "task_1",
+        runId: "run_1",
+        parentId: null,
+        status: "todo",
+        role: "planner",
+        goal: "Task",
+        prompt: "Plan",
+        dependsOn: [],
+        doneWhen: [],
+        worktreePath: null,
+        sessionRef: null,
+        contextVersion: 1,
+      },
+    });
+
+    expect(calls).toEqual([{ timeoutMs: 900000, idleTimeoutMs: 300000 }]);
+  });
+
   test("returns a blocked output when codex succeeds without structured JSON", async () => {
     const dir = await mkdtemp(join(tmpdir(), "ouroboros-codex-"));
     try {

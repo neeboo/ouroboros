@@ -610,6 +610,49 @@ describe("CLI", () => {
     expect(readyAfterRecord).toBeNull();
   });
 
+  test("starts lists and finishes a running attempt", async () => {
+    await runCli("init");
+    const run = await runCliJson("create-run", "--goal", "Bootstrap ouroboros");
+    const task = await runCliJson(
+      "create-task",
+      "--run-id",
+      run.id,
+      "--role",
+      "planner",
+      "--goal",
+      "Async planner",
+      "--prompt",
+      "Start asynchronously.",
+    );
+
+    const started = await runCliJson(
+      "start-attempt",
+      "--task-id",
+      task.id,
+      "--input-json",
+      '{"sessionName":"planner-session"}',
+    );
+    const running = await runCliJson("list-running-attempts", "--run-id", run.id);
+    const finished = await runCliJson(
+      "finish-attempt",
+      "--attempt-id",
+      started.attemptId,
+      "--output-json",
+      '{"status":"done","summary":"Async planner finished","changedFiles":[],"checks":[],"artifacts":[],"problems":[]}',
+    );
+
+    expect(started.taskId).toBe(task.id);
+    expect(running).toEqual([
+      expect.objectContaining({
+        id: started.attemptId,
+        taskId: task.id,
+        status: "running",
+      }),
+    ]);
+    expect(finished).toEqual({ attemptId: started.attemptId, status: "done" });
+    expect(await runCliJson("next-task", "--run-id", run.id)).toBeNull();
+  });
+
   test("lists lessons recorded from attempts", async () => {
     await runCli("init");
     const run = await runCliJson("create-run", "--goal", "Bootstrap ouroboros");

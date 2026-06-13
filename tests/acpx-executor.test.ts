@@ -145,13 +145,14 @@ describe("acpx executor", () => {
     ]);
   });
 
-  test("passes timeout to acpx and leaves a grace window for command cleanup", async () => {
-    const calls: Array<{ cmd: string[]; timeoutMs?: number }> = [];
+  test("uses command hard and idle timeouts without passing an acpx wall timeout", async () => {
+    const calls: Array<{ cmd: string[]; timeoutMs?: number; idleTimeoutMs?: number }> = [];
     const executor = createAcpxCodexExecutor({
       cwd: "/repo",
-      timeoutMs: 180000,
-      runCommand: async ({ cmd, timeoutMs }) => {
-        calls.push({ cmd, timeoutMs });
+      timeoutMs: 900000,
+      idleTimeoutMs: 300000,
+      runCommand: async ({ cmd, timeoutMs, idleTimeoutMs }) => {
+        calls.push({ cmd, timeoutMs, idleTimeoutMs });
         return {
           exitCode: 0,
           stdout: cmd.includes("-s")
@@ -194,14 +195,13 @@ describe("acpx executor", () => {
       "--approve-reads",
       "--format",
       "text",
-      "--timeout",
-      "180",
       "codex",
       "sessions",
       "show",
       "task_1",
     ]);
-    expect(calls.every((call) => call.timeoutMs === 185000)).toBe(true);
+    expect(calls.every((call) => call.timeoutMs === 900000)).toBe(true);
+    expect(calls.every((call) => call.idleTimeoutMs === 300000)).toBe(true);
   });
 
   test("treats acpx stdout errors as command failures", async () => {

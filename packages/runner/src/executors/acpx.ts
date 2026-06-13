@@ -5,7 +5,6 @@ import type { AcpxCodexExecutorFactory, ApprovalMode, RunCommand } from "./types
 export const createAcpxCodexExecutor: AcpxCodexExecutorFactory = (options) => {
   const approval = options.approval ?? "approve-reads";
   const runCommand = options.runCommand ?? runLocalCommand;
-  const commandTimeoutMs = commandTimeout(options.timeoutMs);
 
   return async ({ prompt, sessionName }) => {
     const base = [
@@ -15,32 +14,53 @@ export const createAcpxCodexExecutor: AcpxCodexExecutorFactory = (options) => {
       approvalFlag(approval),
       "--format",
       "text",
-      ...acpxTimeout(options.timeoutMs),
       "codex",
     ];
-    const session = await ensureSession({ base, runCommand, sessionName, timeoutMs: commandTimeoutMs });
+    const session = await ensureSession({
+      base,
+      runCommand,
+      sessionName,
+      timeoutMs: options.timeoutMs,
+      idleTimeoutMs: options.idleTimeoutMs,
+    });
     if (session) {
       return session;
     }
 
-    let result = await runPrompt({ base, runCommand, sessionName, prompt, timeoutMs: commandTimeoutMs });
+    let result = await runPrompt({
+      base,
+      runCommand,
+      sessionName,
+      prompt,
+      timeoutMs: options.timeoutMs,
+      idleTimeoutMs: options.idleTimeoutMs,
+    });
     if (commandFailed(result) && needsReconnect(result)) {
       await runCommand({
         cmd: [...base, "sessions", "close", sessionName],
         stdin: "",
-        timeoutMs: commandTimeoutMs,
+        timeoutMs: options.timeoutMs,
+        idleTimeoutMs: options.idleTimeoutMs,
       });
       const recreated = await ensureSession({
         base,
         runCommand,
         sessionName,
-        timeoutMs: commandTimeoutMs,
+        timeoutMs: options.timeoutMs,
+        idleTimeoutMs: options.idleTimeoutMs,
         forceCreate: true,
       });
       if (recreated) {
         return recreated;
       }
-      result = await runPrompt({ base, runCommand, sessionName, prompt, timeoutMs: commandTimeoutMs });
+      result = await runPrompt({
+        base,
+        runCommand,
+        sessionName,
+        prompt,
+        timeoutMs: options.timeoutMs,
+        idleTimeoutMs: options.idleTimeoutMs,
+      });
     }
 
     if (commandFailed(result)) {
@@ -62,22 +82,12 @@ export const createAcpxCodexExecutor: AcpxCodexExecutorFactory = (options) => {
   };
 };
 
-function acpxTimeout(timeoutMs: number | undefined) {
-  if (timeoutMs === undefined) {
-    return [];
-  }
-  return ["--timeout", String(Math.max(1, Math.ceil(timeoutMs / 1000)))];
-}
-
-function commandTimeout(timeoutMs: number | undefined) {
-  return timeoutMs === undefined ? undefined : timeoutMs + 5000;
-}
-
 async function ensureSession(input: {
   base: string[];
   runCommand: RunCommand;
   sessionName: string;
   timeoutMs?: number;
+  idleTimeoutMs?: number;
   forceCreate?: boolean;
 }) {
   const showSessionCommand = [...input.base, "sessions", "show", input.sessionName];
@@ -86,6 +96,7 @@ async function ensureSession(input: {
       cmd: showSessionCommand,
       stdin: "",
       timeoutMs: input.timeoutMs,
+      idleTimeoutMs: input.idleTimeoutMs,
     });
     if (!commandFailed(existing)) {
       return null;
@@ -96,6 +107,7 @@ async function ensureSession(input: {
     cmd: [...input.base, "sessions", "new", "--name", input.sessionName],
     stdin: "",
     timeoutMs: input.timeoutMs,
+    idleTimeoutMs: input.idleTimeoutMs,
   });
   if (commandFailed(created)) {
     return {
@@ -112,6 +124,7 @@ async function ensureSession(input: {
     cmd: showSessionCommand,
     stdin: "",
     timeoutMs: input.timeoutMs,
+    idleTimeoutMs: input.idleTimeoutMs,
   });
   if (!commandFailed(verified)) {
     return null;
@@ -123,6 +136,7 @@ async function ensureSession(input: {
           cmd: ["acpx", "--verbose", ...input.base.slice(1), "sessions", "new", "--name", input.sessionName],
           stdin: "",
           timeoutMs: input.timeoutMs,
+          idleTimeoutMs: input.idleTimeoutMs,
         })
       : null;
   return {
@@ -141,11 +155,13 @@ function runPrompt(input: {
   sessionName: string;
   prompt: string;
   timeoutMs?: number;
+  idleTimeoutMs?: number;
 }) {
   return input.runCommand({
     cmd: [...input.base, "-s", input.sessionName],
     stdin: input.prompt,
     timeoutMs: input.timeoutMs,
+    idleTimeoutMs: input.idleTimeoutMs,
   });
 }
 
