@@ -215,11 +215,17 @@ describe("acpx executor", () => {
             stderr: "No named session task_1",
           };
         }
-        return {
+        return cmd.includes("--verbose")
+          ? {
+              exitCode: 0,
+              stdout: "Error: verbose diagnostic",
+              stderr: "",
+            }
+          : {
           exitCode: 0,
           stdout: "",
           stderr: "",
-        };
+            };
       },
     });
 
@@ -254,12 +260,13 @@ describe("acpx executor", () => {
       changedFiles: [],
       checks: [{ name: "acpx sessions new", status: "failed" }],
       artifacts: [],
-      problems: ["sessions show stderr:\nNo named session task_1"],
+      problems: ["sessions show stderr:\nNo named session task_1\n\nverbose sessions new stdout:\nError: verbose diagnostic"],
     });
     expect(calls).toEqual([
       ["acpx", "--cwd", "/repo", "--approve-reads", "--format", "text", "codex", "sessions", "show", "task_1"],
       ["acpx", "--cwd", "/repo", "--approve-reads", "--format", "text", "codex", "sessions", "new", "--name", "task_1"],
       ["acpx", "--cwd", "/repo", "--approve-reads", "--format", "text", "codex", "sessions", "show", "task_1"],
+      ["acpx", "--verbose", "--cwd", "/repo", "--approve-reads", "--format", "text", "codex", "sessions", "new", "--name", "task_1"],
     ]);
   });
 
@@ -274,11 +281,17 @@ describe("acpx executor", () => {
             stderr: "No named session task_1",
           };
         }
-        return {
+        return cmd.includes("--verbose")
+          ? {
+              exitCode: 0,
+              stdout: "",
+              stderr: "",
+            }
+          : {
           exitCode: 0,
           stdout: "created stdout was empty in normal mode",
           stderr: "created stderr was empty",
-        };
+            };
       },
     });
 
@@ -309,6 +322,79 @@ describe("acpx executor", () => {
 
     expect(output.problems).toEqual([
       "sessions new stdout:\ncreated stdout was empty in normal mode\n\nsessions new stderr:\ncreated stderr was empty\n\nsessions show stderr:\nNo named session task_1",
+    ]);
+  });
+
+  test("runs verbose acpx diagnostics when session creation is silent but verification fails", async () => {
+    const calls: string[][] = [];
+    const executor = createAcpxCodexExecutor({
+      cwd: "/repo",
+      runCommand: async ({ cmd }) => {
+        calls.push(cmd);
+        if (cmd.includes("show")) {
+          return {
+            exitCode: 1,
+            stdout: "",
+            stderr: "No named session task_1",
+          };
+        }
+        if (cmd.includes("--verbose")) {
+          return {
+            exitCode: 0,
+            stdout: "[acpx] spawning agent\nError: error loading config: missing field `path`",
+            stderr: "",
+          };
+        }
+        return {
+          exitCode: 0,
+          stdout: "",
+          stderr: "",
+        };
+      },
+    });
+
+    const output = await executor({
+      prompt: "Do the task",
+      sessionName: "task_1",
+      run: {
+        id: "run_1",
+        goal: "Goal",
+        status: "todo",
+        context: {},
+      },
+      task: {
+        id: "task_1",
+        runId: "run_1",
+        parentId: null,
+        status: "todo",
+        role: "worker",
+        goal: "Task",
+        prompt: "Do it",
+        dependsOn: [],
+        doneWhen: [],
+        worktreePath: null,
+        sessionRef: null,
+        contextVersion: 1,
+      },
+    });
+
+    const problem = output.problems?.[0] ?? "";
+    expect(problem).toContain("sessions show stderr");
+    expect(problem).toContain("verbose sessions new stdout");
+    expect(problem).toContain("missing field `path`");
+    expect(calls).toContainEqual([
+      "acpx",
+      "--verbose",
+      "--cwd",
+      "/repo",
+      "--approve-reads",
+      "--format",
+      "text",
+      "codex",
+      "sessions",
+      "new",
+      "--name",
+      "task_1",
     ]);
   });
 });

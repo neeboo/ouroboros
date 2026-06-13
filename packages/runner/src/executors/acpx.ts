@@ -36,13 +36,21 @@ export const createAcpxCodexExecutor: AcpxCodexExecutorFactory = (options) => {
         timeoutMs: options.timeoutMs,
       });
       if (commandFailed(verified)) {
+        const diagnostic =
+          created.stdout.trim().length === 0 && created.stderr.trim().length === 0
+            ? await runCommand({
+                cmd: ["acpx", "--verbose", ...base.slice(1), "sessions", "new", "--name", sessionName],
+                stdin: "",
+                timeoutMs: options.timeoutMs,
+              })
+            : null;
         return {
           status: "blocked",
           summary: "acpx session creation failed",
           changedFiles: [],
           checks: [{ name: "acpx sessions new", status: "failed" }],
           artifacts: [],
-          problems: [sessionCreationProblem(created, verified)],
+          problems: [sessionCreationProblem(created, verified, diagnostic)],
         };
       }
     }
@@ -79,12 +87,15 @@ function commandFailed(result: { exitCode: number; stdout: string; stderr: strin
 function sessionCreationProblem(
   created: { exitCode: number; stdout: string; stderr: string },
   verified: { exitCode: number; stdout: string; stderr: string },
+  diagnostic?: { exitCode: number; stdout: string; stderr: string } | null,
 ) {
   const parts = [
     ["sessions new stdout", created.stdout],
     ["sessions new stderr", created.stderr],
     ["sessions show stdout", verified.stdout],
     ["sessions show stderr", verified.stderr],
+    ["verbose sessions new stdout", diagnostic?.stdout ?? ""],
+    ["verbose sessions new stderr", diagnostic?.stderr ?? ""],
   ]
     .filter(([, value]) => value.trim().length > 0)
     .map(([label, value]) => `${label}:\n${value.trim()}`);
