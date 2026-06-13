@@ -35,20 +35,32 @@ bun run cli -- init
 bun run cli -- create-run --goal "Use Ouroboros to iterate on Ouroboros"
 bun run cli -- create-task --run-id <run_id> --role planner --goal "Plan next step" --prompt "Propose one small task."
 bun run cli -- next-task --run-id <run_id>
+
+# synchronous task execution
 bun run cli -- run-next --run-id <run_id> --executor noop --limit 2
 bun run cli -- run-next --run-id <run_id> --executor acpx-codex --cwd "$(pwd)" --approval approve-reads --limit 2
 bun run cli -- run-next --run-id <run_id> --executor codex-cli --cwd "$(pwd)" --sandbox read-only --codex-bin "$(command -v codex)" --model gpt-5-codex --limit 2
+bun run cli -- run-next --run-id <run_id> --executor codex-cli --cwd "$(pwd)" --timeout-ms 1800000 --idle-timeout-ms 300000
 bun run cli -- run-next --run-id <run_id> --executor codex-cli --worktree-root ".ouroboros/worktrees" --limit 2
 bun run cli -- run-next --run-id <run_id> --executor codex-cli --worktree-root ".ouroboros/worktrees" --start-hook git-worktree
-bun run cli -- run-next --run-id <run_id> --executor codex-cli --cwd "$(pwd)" --stop-hook create-tasks
-bun run cli -- run-loop --run-id <run_id> --executor codex-cli --cwd "$(pwd)" --stop-hook create-tasks --max-rounds 5
-bun run cli -- run-loop --run-id <run_id> --executor codex-cli --cwd "$(pwd)" --stop-hook create-tasks,create-verifier --max-rounds 5
-bun run cli -- run-loop --run-id <run_id> --executor codex-cli --cwd "$(pwd)" --stop-hook create-tasks,create-verifier,create-repair --max-rounds 8
+bun run cli -- run-loop --run-id <run_id> --executor codex-cli --cwd "$(pwd)" --stop-hook create-tasks,create-verifier,create-repair,context-summary --max-rounds 8
+
+# resumable Codex CLI execution
+bun run cli -- codex-start-attempt --task-id <task_id> --cwd "$(pwd)" --sandbox workspace-write --timeout-ms 1800000 --idle-timeout-ms 300000
+bun run cli -- list-running-attempts --run-id <run_id>
+bun run cli -- codex-resume-attempt --attempt-id <attempt_id> --cwd "$(pwd)" --sandbox workspace-write --timeout-ms 1800000 --idle-timeout-ms 300000
+
+# manual attempt control
+bun run cli -- start-attempt --task-id <task_id> --input-json '{}'
+bun run cli -- finish-attempt --attempt-id <attempt_id> --output-json '{"status":"done","summary":"..."}'
 bun run cli -- record-attempt --task-id <task_id> --input-json '{}' --output-json '{"status":"done","summary":"..."}'
+bun run cli -- retry-task --task-id <task_id>
+
+# lessons and editable prompt templates
 bun run cli -- list-lessons --run-id <run_id>
 bun run cli -- show-prompt-template --key task
+bun run cli -- show-prompt-template --key context-summary
 bun run cli -- set-prompt-template --key task --content "# Custom template..."
-bun run cli -- retry-task --task-id <task_id>
 ```
 
 `run-next` leases ready tasks first, assigns each task a separate session name, then runs the selected executor for each leased task. The `acpx-codex` executor creates or reuses an `acpx codex` named session per task. The `codex-cli` executor is a one-shot fallback for environments where the ACP adapter cannot create sessions.
@@ -59,7 +71,21 @@ Use `--worktree-root` to assign each leased task a separate working directory pa
 
 Use `--start-hook git-worktree` with `--worktree-root` to create a real git worktree before the subagent runs.
 
-Runner stop hooks run after a subagent turn and before the attempt is recorded. Hooks can append checks/artifacts/problems and decide `exit` or `retry`, which prevents a subagent from repeating itself indefinitely.
+Use `--timeout-ms` as a generous hard runtime cap. Use `--idle-timeout-ms` to stop commands only after they stop producing stdout or stderr. Long-running Codex work should use a large hard cap and rely on idle timeout for stuck-process detection.
+
+`codex-start-attempt` starts a resumable Codex CLI task with `codex exec --json`. If the command window ends after Codex emits a session id, Ouroboros records a `running` attempt instead of marking the task blocked. `codex-resume-attempt` resumes that session with `codex exec resume <session_id>` and finishes the same attempt when structured JSON is returned.
+
+`list-running-attempts` shows attempts that can be resumed. `start-attempt` and `finish-attempt` are lower-level commands for tools that want to manage running attempts themselves.
+
+Runner stop hooks run after a subagent turn and before the attempt is recorded. Hooks can append checks/artifacts/problems and decide `exit`, `continue`, or `retry`, which prevents a subagent from repeating itself indefinitely.
+
+Stop hooks are role-scoped by the CLI:
+
+```text
+planner  -> create-tasks
+worker   -> create-verifier
+verifier -> create-repair, context-summary
+```
 
 The `create-tasks` stop hook turns planner `nextTasks` output into real DB tasks.
 
@@ -67,9 +93,11 @@ The `create-verifier` stop hook turns a successful worker attempt into a verifie
 
 The `create-repair` stop hook turns a blocked verifier attempt into a ready worker repair task. A successful repair can then create another verifier through `create-verifier`.
 
-Every recorded attempt also creates a run lesson. Successful attempts become `experience`; blocked attempts become `lesson`. Future prompts include the run lessons so the next loop can reuse working patterns and avoid known failures.
+The `context-summary` stop hook runs for verifier tasks. It rewrites verbose attempt summaries into compact reusable context and adds `context_experience_archive` and `context_lesson_archive` artifacts.
 
-Prompt Markdown is stored in SQLite under `prompt_templates`. The default keys are `task`, `verifier-task`, and `repair-task`, so the loop prompt, verifier prompt, and repair prompt can be edited without changing code.
+Every finished attempt also creates a run lesson. Successful attempts become `experience`; blocked attempts become `lesson`. Future prompts include compact lessons so the next loop can reuse working patterns and avoid known failures without growing prompts indefinitely. The task prompt currently includes the latest 12 lessons, with each summary compacted to 320 characters.
+
+Prompt Markdown is stored in SQLite under `prompt_templates`. The default keys are `task`, `verifier-task`, `repair-task`, and `context-summary`, so the loop prompt, verifier prompt, repair prompt, and context-summary prompt can be edited without changing code.
 
 ## Boundaries
 
