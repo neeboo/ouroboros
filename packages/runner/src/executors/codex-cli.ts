@@ -1,5 +1,5 @@
 import { runLocalCommand } from "./command";
-import { parseAttemptOutput } from "./output";
+import { parseAttemptOutputOrBlocked } from "./output";
 import type { CodexCliExecutorOptions } from "./types";
 import type { TaskExecutor } from "../types";
 import { mkdir, readFile } from "node:fs/promises";
@@ -44,7 +44,11 @@ export function createCodexCliExecutor(options: CodexCliExecutorOptions): TaskEx
       };
     }
 
-    return parseAttemptOutput((await readOutputFile(outputPath)) || result.stdout);
+    return parseAttemptOutputOrBlocked({
+      raw: (await readOutputFile(outputPath)) || result.stdout,
+      summary: "codex cli executor produced invalid output",
+      checkName: "codex output parse",
+    });
   };
 }
 

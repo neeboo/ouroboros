@@ -1,4 +1,4 @@
-import { parseAttemptOutput } from "./output";
+import { parseAttemptOutputOrBlocked } from "./output";
 import { runLocalCommand } from "./command";
 import type { AcpxCodexExecutorFactory, ApprovalMode, RunCommand } from "./types";
 
@@ -44,7 +44,11 @@ export const createAcpxCodexExecutor: AcpxCodexExecutorFactory = (options) => {
       };
     }
 
-    return parseAttemptOutput(result.stdout);
+    return parseAttemptOutputOrBlocked({
+      raw: result.stdout,
+      summary: "acpx codex executor produced invalid output",
+      checkName: "acpx output parse",
+    });
   };
 };
 

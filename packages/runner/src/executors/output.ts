@@ -1,5 +1,24 @@
 import type { AttemptOutput, PlannedTask } from "@ouroboros/harness";
 
+export function parseAttemptOutputOrBlocked(input: {
+  raw: string;
+  summary: string;
+  checkName: string;
+}): AttemptOutput {
+  try {
+    return parseAttemptOutput(input.raw);
+  } catch (error) {
+    return {
+      status: "blocked",
+      summary: input.summary,
+      changedFiles: [],
+      checks: [{ name: input.checkName, status: "failed" }],
+      artifacts: [],
+      problems: [`${error instanceof Error ? error.message : String(error)}\n\nOutput:\n${input.raw}`],
+    };
+  }
+}
+
 export function parseAttemptOutput(raw: string): AttemptOutput {
   const parsed = JSON.parse(extractJsonObject(raw));
   if (parsed.status !== "done" && parsed.status !== "blocked") {

@@ -464,4 +464,49 @@ describe("acpx executor", () => {
       ["acpx", "--cwd", "/repo", "--approve-reads", "--format", "text", "codex", "-s", "task_1"],
     ]);
   });
+
+  test("returns a blocked output when acpx succeeds without structured JSON", async () => {
+    const executor = createAcpxCodexExecutor({
+      cwd: "/repo",
+      runCommand: async ({ cmd }) => ({
+        exitCode: 0,
+        stdout: cmd.includes("-s") ? "[client] initialize (running)" : "",
+        stderr: "",
+      }),
+    });
+
+    const output = await executor({
+      prompt: "Do the task",
+      sessionName: "task_1",
+      run: {
+        id: "run_1",
+        goal: "Goal",
+        status: "todo",
+        context: {},
+      },
+      task: {
+        id: "task_1",
+        runId: "run_1",
+        parentId: null,
+        status: "todo",
+        role: "worker",
+        goal: "Task",
+        prompt: "Do it",
+        dependsOn: [],
+        doneWhen: [],
+        worktreePath: null,
+        sessionRef: null,
+        contextVersion: 1,
+      },
+    });
+
+    expect(output).toEqual({
+      status: "blocked",
+      summary: "acpx codex executor produced invalid output",
+      changedFiles: [],
+      checks: [{ name: "acpx output parse", status: "failed" }],
+      artifacts: [],
+      problems: ["agent output did not contain a JSON object\n\nOutput:\n[client] initialize (running)"],
+    });
+  });
 });

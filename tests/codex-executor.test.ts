@@ -160,4 +160,55 @@ describe("codex cli executor", () => {
     expect(calls[0].cmd).toContain("-m");
     expect(calls[0].cmd).toContain("gpt-5-codex");
   });
+
+  test("returns a blocked output when codex succeeds without structured JSON", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "ouroboros-codex-"));
+    try {
+      const executor = createCodexCliExecutor({
+        cwd: "/repo",
+        outputDir: dir,
+        runCommand: async () => ({
+          exitCode: 0,
+          stdout: "Codex completed without final JSON",
+          stderr: "",
+        }),
+      });
+
+      const output = await executor({
+        prompt: "Plan next task",
+        sessionName: "task_1",
+        run: {
+          id: "run_1",
+          goal: "Goal",
+          status: "todo",
+          context: {},
+        },
+        task: {
+          id: "task_1",
+          runId: "run_1",
+          parentId: null,
+          status: "todo",
+          role: "planner",
+          goal: "Task",
+          prompt: "Plan",
+          dependsOn: [],
+          doneWhen: [],
+          worktreePath: null,
+          sessionRef: null,
+          contextVersion: 1,
+        },
+      });
+
+      expect(output).toEqual({
+        status: "blocked",
+        summary: "codex cli executor produced invalid output",
+        changedFiles: [],
+        checks: [{ name: "codex output parse", status: "failed" }],
+        artifacts: [],
+        problems: ["agent output did not contain a JSON object\n\nOutput:\nCodex completed without final JSON"],
+      });
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
 });
