@@ -49,17 +49,19 @@ export async function runReadyTasks(input: RunReadyTasksInput) {
     runId: input.runId,
     limit: input.limit,
     sessionForTask: input.sessionForTask ?? ((task) => defaultSessionName(task.id)),
+    worktreeForTask: input.worktreeForTask,
   });
 
   return Promise.all(
     tasks.map(async (task) => {
       const sessionName = task.sessionRef ?? defaultSessionName(task.id);
+      const cwd = task.worktreePath ?? input.cwd ?? process.cwd();
       const prompt = buildTaskPrompt({
         run,
         task,
         dependencyAttempts: [],
       });
-      const executor = input.executorFactory({ run, task, sessionName });
+      const executor = input.executorFactory({ run, task, sessionName, cwd });
       const rawOutput = await executor({ prompt, run, task, sessionName });
       const { output, decision } = await applyStopHooks({
         hooks: input.stopHooks ?? [],

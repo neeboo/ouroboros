@@ -142,18 +142,24 @@ export class Harness {
       return db.transaction(() => {
         for (const task of ready) {
           const sessionRef = input.sessionForTask(task);
+          const worktreePath = input.worktreeForTask?.(task) ?? task.worktreePath;
           db.query(
             `
             update tasks
-            set status = 'running', session_ref = $sessionRef, updated_at = current_timestamp
+            set status = 'running',
+                session_ref = $sessionRef,
+                worktree_path = $worktreePath,
+                updated_at = current_timestamp
             where id = $taskId and status = 'todo'
             `,
           ).run({
             $sessionRef: sessionRef,
+            $worktreePath: worktreePath,
             $taskId: task.id,
           });
           task.status = "running";
           task.sessionRef = sessionRef;
+          task.worktreePath = worktreePath;
         }
         return ready;
       })();

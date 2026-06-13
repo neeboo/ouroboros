@@ -247,6 +247,7 @@ describe("runner", () => {
       runId,
       limit: 2,
       sessionForTask: (task) => `session-${task.id}`,
+      worktreeForTask: (task) => `/tmp/worktrees/${task.id}`,
       executorFactory: ({ sessionName }) => async ({ task }) => {
         seenSessions.push(sessionName);
         return {
@@ -263,7 +264,39 @@ describe("runner", () => {
     expect(seenSessions.sort()).toEqual([`session-${first}`, `session-${second}`].sort());
     expect(harness.getTask(first)?.sessionRef).toBe(`session-${first}`);
     expect(harness.getTask(second)?.sessionRef).toBe(`session-${second}`);
+    expect(harness.getTask(first)?.worktreePath).toBe(`/tmp/worktrees/${first}`);
+    expect(harness.getTask(second)?.worktreePath).toBe(`/tmp/worktrees/${second}`);
     expect(harness.getTask(blockedByFirst)?.status).toBe("todo");
     expect(harness.nextReadyTask(runId)?.id).toBe(blockedByFirst);
+  });
+
+  test("passes task worktree path to executor factory", async () => {
+    const runId = harness.createRun({ goal: "Build loop" });
+    const taskId = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Implement A",
+      prompt: "Implement A.",
+    });
+    const cwdByTask: string[] = [];
+
+    await runReadyTasks({
+      harness,
+      runId,
+      limit: 1,
+      worktreeForTask: (task) => `/tmp/worktrees/${task.id}`,
+      executorFactory: ({ cwd }) => {
+        cwdByTask.push(cwd);
+        return async () => ({
+          status: "done",
+          summary: "ok",
+          artifacts: [],
+          checks: [],
+          problems: [],
+        });
+      },
+    });
+
+    expect(cwdByTask).toEqual([`/tmp/worktrees/${taskId}`]);
   });
 });

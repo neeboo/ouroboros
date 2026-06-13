@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { Harness } from "../packages/harness/src";
 
 describe("CLI", () => {
   let dir: string;
@@ -128,6 +129,35 @@ describe("CLI", () => {
     expect(result.tasks.map((task: { sessionName: string }) => task.sessionName).sort()).toEqual(
       [`task-${first.id}`, `task-${second.id}`].sort(),
     );
+  });
+
+  test("assigns worktree paths from the CLI", async () => {
+    await runCli("init");
+    const run = await runCliJson("create-run", "--goal", "Bootstrap ouroboros");
+    const task = await runCliJson(
+      "create-task",
+      "--run-id",
+      run.id,
+      "--role",
+      "worker",
+      "--goal",
+      "Task with worktree",
+      "--prompt",
+      "Do work.",
+    );
+    const worktreeRoot = join(dir, "worktrees");
+
+    await runCliJson(
+      "run-next",
+      "--run-id",
+      run.id,
+      "--executor",
+      "noop",
+      "--worktree-root",
+      worktreeRoot,
+    );
+
+    expect(new Harness(dbPath).getTask(task.id)?.worktreePath).toBe(join(worktreeRoot, task.id));
   });
 
   test("creates tasks from planner output when stop hook is enabled", async () => {

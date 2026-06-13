@@ -31,6 +31,7 @@ export interface ExecutorFactoryInput {
   run: Run;
   task: Task;
   sessionName: string;
+  cwd: string;
 }
 
 export type TaskExecutorFactory = (input: ExecutorFactoryInput) => TaskExecutor;
@@ -39,7 +40,9 @@ export interface RunReadyTasksInput {
   harness: Harness;
   runId: string;
   limit: number;
+  cwd?: string;
   sessionForTask?: (task: Task) => string;
+  worktreeForTask?: (task: Task) => string | null;
   executorFactory: TaskExecutorFactory;
   stopHooks?: StopHook[];
 }

@@ -8,6 +8,7 @@ import {
 } from "@ouroboros/runner";
 import { fail, flag, parseArgs, required } from "./args";
 import { parseArray, parseObject, printJson } from "./json";
+import { join } from "node:path";
 
 const parsed = parseArgs(Bun.argv.slice(2));
 const harness = new Harness(parsed.db);
@@ -89,8 +90,10 @@ switch (parsed.command) {
       harness,
       runId,
       limit,
+      cwd: runnerCwd(),
       sessionForTask: (task) => task.sessionRef ?? `task-${task.id}`,
-      executorFactory: () => {
+      worktreeForTask: worktreeForTask(),
+      executorFactory: ({ cwd }) => {
         if (executorName === "noop") {
           return async ({ task }) => ({
             status: "done",
@@ -103,13 +106,13 @@ switch (parsed.command) {
         }
         if (executorName === "acpx-codex") {
           return createAcpxCodexExecutor({
-            cwd: runnerCwd(),
+            cwd,
             approval: parseApproval(flag(parsed, "approval") ?? "approve-reads"),
             timeoutMs: parseTimeoutMs(flag(parsed, "timeout-ms")),
           });
         }
         return createCodexCliExecutor({
-          cwd: runnerCwd(),
+          cwd,
           sandbox: parseSandbox(flag(parsed, "sandbox") ?? "read-only"),
           codexBin: flag(parsed, "codex-bin"),
           timeoutMs: parseTimeoutMs(flag(parsed, "timeout-ms")),
@@ -169,6 +172,14 @@ function parseSandbox(raw: string) {
 
 function runnerCwd() {
   return flag(parsed, "cwd") ?? process.cwd();
+}
+
+function worktreeForTask() {
+  const root = flag(parsed, "worktree-root");
+  if (!root) {
+    return undefined;
+  }
+  return (task: { id: string }) => join(root, task.id);
 }
 
 function stopHooks() {

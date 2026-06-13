@@ -89,6 +89,7 @@ export interface LeaseReadyTasksInput {
   runId: string;
   limit: number;
   sessionForTask: (task: Task) => string;
+  worktreeForTask?: (task: Task) => string | null;
 }
 
 export interface RetryTaskInput {

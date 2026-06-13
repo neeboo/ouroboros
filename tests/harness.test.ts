@@ -161,6 +161,27 @@ describe("Harness", () => {
     expect(harness.getTask(second)?.status).toBe("todo");
   });
 
+  test("leases ready tasks with worktree paths", () => {
+    const runId = harness.createRun({ goal: "Build loop" });
+    const taskId = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Implement A",
+      prompt: "Implement A.",
+    });
+
+    const leased = harness.leaseReadyTasks({
+      runId,
+      limit: 1,
+      sessionForTask: (task) => `session-${task.id}`,
+      worktreeForTask: (task) => `/tmp/worktrees/${task.id}`,
+    });
+
+    expect(leased[0].id).toBe(taskId);
+    expect(leased[0].worktreePath).toBe(`/tmp/worktrees/${taskId}`);
+    expect(harness.getTask(taskId)?.worktreePath).toBe(`/tmp/worktrees/${taskId}`);
+  });
+
   test("retries a blocked task", () => {
     const runId = harness.createRun({ goal: "Build loop" });
     const taskId = harness.createTask({

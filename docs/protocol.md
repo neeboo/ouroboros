@@ -87,9 +87,10 @@ The scheduler then:
 1. assigns a worktree if needed
 2. leases one or more ready tasks
 3. assigns or resumes one session per leased task
-4. builds the prompt from run context plus task fields
-5. records an attempt
-6. updates task status from the attempt result
+4. optionally assigns one worktree path per leased task
+5. builds the prompt from run context plus task fields
+6. records an attempt
+7. updates task status from the attempt result
 
 The current v0 runner supports the same shape with an injectable executor. The `noop` executor is only for testing the loop. The `acpx-codex` executor creates or reuses a named acpx Codex session per task and returns the same structured output. The `codex-cli` executor can run one-shot Codex subagents when named ACP sessions are unavailable.
 
