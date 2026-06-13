@@ -1,0 +1,150 @@
+# Ouroboros Minimal Protocol
+
+This protocol keeps the loop small enough to implement and strict enough to verify.
+
+## Entities
+
+### Run
+
+A run is one user or external goal.
+
+Required fields:
+
+- `id`
+- `goal`
+- `status`
+- `context_json`
+
+### Task
+
+A task is one schedulable node in a run.
+
+Required fields:
+
+- `id`
+- `run_id`
+- `status`
+- `role`
+- `goal`
+- `prompt`
+- `depends_on_json`
+- `done_when_json`
+
+Optional but useful fields:
+
+- `parent_id`
+- `worktree_path`
+- `session_ref`
+- `context_version`
+
+### Attempt
+
+An attempt is one execution of one task by one agent session.
+
+Required fields:
+
+- `id`
+- `task_id`
+- `status`
+- `input_json`
+- `output_json`
+
+Optional but useful fields:
+
+- `checks_json`
+- `artifacts_json`
+- `error`
+
+## Status Values
+
+Keep statuses deliberately small:
+
+```text
+todo
+running
+done
+blocked
+```
+
+Meaning:
+
+- `todo`: ready or waiting for dependencies
+- `running`: leased by a session
+- `done`: accepted by the harness or verifier
+- `blocked`: cannot continue without repair or human input
+
+## Scheduler Rule
+
+A task is runnable when:
+
+```text
+task.status = "todo"
+and every task in depends_on_json has status = "done"
+```
+
+The scheduler then:
+
+1. assigns a worktree if needed
+2. assigns or resumes a session
+3. builds the prompt from run context plus task fields
+4. records an attempt
+5. updates task status from the attempt result
+
+## Prompt Contract
+
+Every generated prompt should contain:
+
+- run goal
+- run context
+- task goal
+- task role
+- dependencies and their latest results
+- allowed working directory
+- required output shape
+- done criteria
+
+The agent must return structured output matching:
+
+```json
+{
+  "status": "done",
+  "summary": "What changed",
+  "changed_files": [],
+  "checks": [],
+  "artifacts": [],
+  "problems": []
+}
+```
+
+Allowed `status` values in output:
+
+```text
+done
+blocked
+```
+
+## Verification
+
+A verifier is just another task with role `verifier`.
+
+Verifier output may:
+
+- mark the target task accepted
+- mark the target task blocked
+- create a repair task
+
+The verifier should read database state and real artifacts. It should not trust agent summaries alone.
+
+## Linear Bridge Rule
+
+Linear events never mutate task state directly.
+
+They enter through `inbox_events`. The harness consumes them and decides whether to:
+
+- create a run
+- create a task
+- add context
+- create a repair task
+- ignore the event
+
+Progress back to Linear is derived from accepted harness state.

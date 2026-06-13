@@ -1,0 +1,12 @@
+{
+  "name": "@ouroboros/cli",
+  "version": "0.0.0",
+  "type": "module",
+  "private": true,
+  "bin": {
+    "ouroboros": "./src/main.ts"
+  },
+  "dependencies": {
+    "@ouroboros/harness": "workspace:*"
+  }
+}
