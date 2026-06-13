@@ -5,6 +5,7 @@ export { createCodexCliExecutor } from "./executors/codex-cli";
 export { parseAttemptOutput } from "./executors/output";
 export { runLocalCommand } from "./executors/command";
 export { createTasksFromOutputHook } from "./hooks/create-tasks";
+export { createGitWorktreeHook } from "./hooks/git-worktree";
 export type {
   ExecutorInput,
   PromptInput,
@@ -12,6 +13,9 @@ export type {
   RunNextReadyTaskResult,
   RunReadyTasksInput,
   RunReadyTasksResult,
+  StartHook,
+  StartHookInput,
+  StartHookResult,
   StopDecision,
   StopHook,
   StopHookInput,

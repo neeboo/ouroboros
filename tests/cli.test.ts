@@ -160,6 +160,52 @@ describe("CLI", () => {
     expect(new Harness(dbPath).getTask(task.id)?.worktreePath).toBe(join(worktreeRoot, task.id));
   });
 
+  test("runs git worktree start hook from the CLI", async () => {
+    await runCli("init");
+    const run = await runCliJson("create-run", "--goal", "Bootstrap ouroboros");
+    const task = await runCliJson(
+      "create-task",
+      "--run-id",
+      run.id,
+      "--role",
+      "worker",
+      "--goal",
+      "Task with git worktree",
+      "--prompt",
+      "Do work.",
+    );
+    const binDir = join(dir, "bin");
+    await mkdir(binDir);
+    await writeFile(join(binDir, "git"), "#!/usr/bin/env bun\nprocess.exit(0);\n");
+    await chmod(join(binDir, "git"), 0o755);
+
+    const result = await runCliJson(
+      "run-next",
+      "--run-id",
+      run.id,
+      "--executor",
+      "noop",
+      "--worktree-root",
+      join(dir, "worktrees"),
+      "--start-hook",
+      "git-worktree",
+      "--cwd",
+      "/repo",
+      "--git-base-ref",
+      "main",
+      { PATH: `${binDir}:${process.env.PATH}` },
+    );
+
+    const attempt = new Harness(dbPath).getAttempt(result.tasks[0].attemptId)!;
+    expect(result.tasks[0].taskId).toBe(task.id);
+    expect(attempt.output.checks).toContainEqual({ name: "git worktree add", status: "passed" });
+    expect(attempt.output.artifacts).toContainEqual({
+      kind: "worktree",
+      path: join(dir, "worktrees", task.id),
+      branch: `ouroboros/${task.id}`,
+    });
+  });
+
   test("creates tasks from planner output when stop hook is enabled", async () => {
     await runCli("init");
     const run = await runCliJson("create-run", "--goal", "Bootstrap ouroboros");

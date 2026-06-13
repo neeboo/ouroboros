@@ -1,5 +1,5 @@
 import { buildTaskPrompt } from "./prompt";
-import type { RunNextReadyTaskInput, RunReadyTasksInput, StopHook } from "./types";
+import type { RunNextReadyTaskInput, RunReadyTasksInput, StartHook, StartHookResult, StopHook } from "./types";
 
 export async function runNextReadyTask(input: RunNextReadyTaskInput) {
   const task = input.harness.nextReadyTask(input.runId);
@@ -56,6 +56,27 @@ export async function runReadyTasks(input: RunReadyTasksInput) {
     tasks.map(async (task) => {
       const sessionName = task.sessionRef ?? defaultSessionName(task.id);
       const cwd = task.worktreePath ?? input.cwd ?? process.cwd();
+      const startResult = await applyStartHooks({
+        hooks: input.startHooks ?? [],
+        run,
+        task,
+        sessionName,
+        cwd,
+      });
+      if ((startResult.problems ?? []).length > 0) {
+        const attemptId = input.harness.recordAttempt({
+          taskId: task.id,
+          input: { sessionName, cwd, startHooks: true },
+          output: {
+            status: "blocked",
+            summary: "start hooks blocked task execution",
+            checks: startResult.checks ?? [],
+            artifacts: startResult.artifacts ?? [],
+            problems: startResult.problems ?? [],
+          },
+        });
+        return { taskId: task.id, attemptId, sessionName };
+      }
       const prompt = buildTaskPrompt({
         run,
         task,
@@ -71,6 +92,8 @@ export async function runReadyTasks(input: RunReadyTasksInput) {
         prompt,
         output: rawOutput,
       });
+      output.checks = [...(startResult.checks ?? []), ...(output.checks ?? [])];
+      output.artifacts = [...(startResult.artifacts ?? []), ...(output.artifacts ?? [])];
       const attemptId = input.harness.recordAttempt({
         taskId: task.id,
         input: { prompt, sessionName },
@@ -83,6 +106,27 @@ export async function runReadyTasks(input: RunReadyTasksInput) {
       return { taskId: task.id, attemptId, sessionName };
     }),
   );
+}
+
+async function applyStartHooks(input: {
+  hooks: StartHook[];
+  run: Parameters<StartHook>[0]["run"];
+  task: Parameters<StartHook>[0]["task"];
+  sessionName: string;
+  cwd: string;
+}): Promise<StartHookResult> {
+  const combined: StartHookResult = {
+    checks: [],
+    artifacts: [],
+    problems: [],
+  };
+  for (const hook of input.hooks) {
+    const result = await hook(input);
+    combined.checks = [...(combined.checks ?? []), ...(result.checks ?? [])];
+    combined.artifacts = [...(combined.artifacts ?? []), ...(result.artifacts ?? [])];
+    combined.problems = [...(combined.problems ?? []), ...(result.problems ?? [])];
+  }
+  return combined;
 }
 
 function defaultSessionName(taskId: string) {

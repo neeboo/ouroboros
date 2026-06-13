@@ -44,6 +44,7 @@ export interface RunReadyTasksInput {
   sessionForTask?: (task: Task) => string;
   worktreeForTask?: (task: Task) => string | null;
   executorFactory: TaskExecutorFactory;
+  startHooks?: StartHook[];
   stopHooks?: StopHook[];
 }
 
@@ -54,6 +55,21 @@ export interface RunReadyTasksResult {
 }
 
 export type StopDecision = "continue" | "retry" | "exit";
+
+export interface StartHookInput {
+  run: Run;
+  task: Task;
+  sessionName: string;
+  cwd: string;
+}
+
+export interface StartHookResult {
+  checks?: unknown[];
+  artifacts?: unknown[];
+  problems?: string[];
+}
+
+export type StartHook = (input: StartHookInput) => Promise<StartHookResult> | StartHookResult;
 
 export interface StopHookInput {
   run: Run;

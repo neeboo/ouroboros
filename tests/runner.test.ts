@@ -299,4 +299,45 @@ describe("runner", () => {
 
     expect(cwdByTask).toEqual([`/tmp/worktrees/${taskId}`]);
   });
+
+  test("runs start hooks before executor", async () => {
+    const runId = harness.createRun({ goal: "Build loop" });
+    const taskId = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Implement A",
+      prompt: "Implement A.",
+    });
+    const events: string[] = [];
+
+    const [result] = await runReadyTasks({
+      harness,
+      runId,
+      limit: 1,
+      worktreeForTask: (task) => `/tmp/worktrees/${task.id}`,
+      startHooks: [
+        async ({ cwd }) => {
+          events.push(`start:${cwd}`);
+          return {
+            checks: [{ name: "start hook", status: "passed" }],
+          };
+        },
+      ],
+      executorFactory: () => async () => {
+        events.push("executor");
+        return {
+          status: "done",
+          summary: "ok",
+          artifacts: [],
+          checks: [],
+          problems: [],
+        };
+      },
+    });
+
+    expect(events).toEqual([`start:/tmp/worktrees/${taskId}`, "executor"]);
+    expect(harness.getAttempt(result.attemptId)?.output.checks).toEqual([
+      { name: "start hook", status: "passed" },
+    ]);
+  });
 });

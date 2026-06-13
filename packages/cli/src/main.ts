@@ -3,6 +3,7 @@ import { Harness } from "@ouroboros/harness";
 import {
   createAcpxCodexExecutor,
   createCodexCliExecutor,
+  createGitWorktreeHook,
   createTasksFromOutputHook,
   runReadyTasks,
 } from "@ouroboros/runner";
@@ -93,6 +94,7 @@ switch (parsed.command) {
       cwd: runnerCwd(),
       sessionForTask: (task) => task.sessionRef ?? `task-${task.id}`,
       worktreeForTask: worktreeForTask(),
+      startHooks: startHooks(),
       executorFactory: ({ cwd }) => {
         if (executorName === "noop") {
           return async ({ task }) => ({
@@ -191,6 +193,25 @@ function stopHooks() {
     fail("--stop-hook must be create-tasks");
   }
   return [createTasksFromOutputHook({ harness })];
+}
+
+function startHooks() {
+  const hook = flag(parsed, "start-hook");
+  if (!hook) {
+    return [];
+  }
+  if (hook !== "git-worktree") {
+    fail("--start-hook must be git-worktree");
+  }
+  if (!flag(parsed, "worktree-root")) {
+    fail("--start-hook git-worktree requires --worktree-root");
+  }
+  return [
+    createGitWorktreeHook({
+      repoPath: runnerCwd(),
+      baseRef: flag(parsed, "git-base-ref") ?? "main",
+    }),
+  ];
 }
 
 function parseTimeoutMs(raw: string | undefined) {

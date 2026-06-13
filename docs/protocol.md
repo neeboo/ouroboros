@@ -171,6 +171,18 @@ Commit hooks should be explicit and opt-in. The default stop hook behavior shoul
 
 The `create-tasks` stop hook reads `nextTasks` from the subagent output and inserts those tasks into the harness database. If a planned task omits `dependsOn`, the hook makes it depend on the planner task that produced it.
 
+## Start Hooks
+
+Start hooks run after a task is leased and before the executor starts.
+
+The first built-in start hook is `git-worktree`, which creates a branch and git worktree for the task:
+
+```text
+git worktree add <task_worktree_path> -b ouroboros/<task_id> <base_ref>
+```
+
+If the start hook fails, the runner records a blocked attempt and skips the executor.
+
 ## Linear Bridge Rule
 
 Linear events never mutate task state directly.
