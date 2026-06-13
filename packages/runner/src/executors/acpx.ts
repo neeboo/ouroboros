@@ -42,7 +42,7 @@ export const createAcpxCodexExecutor: AcpxCodexExecutorFactory = (options) => {
           changedFiles: [],
           checks: [{ name: "acpx sessions new", status: "failed" }],
           artifacts: [],
-          problems: [verified.stderr || verified.stdout || `exit code ${verified.exitCode}`],
+          problems: [sessionCreationProblem(created, verified)],
         };
       }
     }
@@ -74,4 +74,20 @@ function approvalFlag(approval: ApprovalMode) {
 
 function commandFailed(result: { exitCode: number; stdout: string; stderr: string }) {
   return result.exitCode !== 0 || result.stderr.includes("Error:") || result.stdout.includes("Error:");
+}
+
+function sessionCreationProblem(
+  created: { exitCode: number; stdout: string; stderr: string },
+  verified: { exitCode: number; stdout: string; stderr: string },
+) {
+  const parts = [
+    ["sessions new stdout", created.stdout],
+    ["sessions new stderr", created.stderr],
+    ["sessions show stdout", verified.stdout],
+    ["sessions show stderr", verified.stderr],
+  ]
+    .filter(([, value]) => value.trim().length > 0)
+    .map(([label, value]) => `${label}:\n${value.trim()}`);
+
+  return parts.length > 0 ? parts.join("\n\n") : `exit code ${verified.exitCode}`;
 }

@@ -254,12 +254,61 @@ describe("acpx executor", () => {
       changedFiles: [],
       checks: [{ name: "acpx sessions new", status: "failed" }],
       artifacts: [],
-      problems: ["No named session task_1"],
+      problems: ["sessions show stderr:\nNo named session task_1"],
     });
     expect(calls).toEqual([
       ["acpx", "--cwd", "/repo", "--approve-reads", "--format", "text", "codex", "sessions", "show", "task_1"],
       ["acpx", "--cwd", "/repo", "--approve-reads", "--format", "text", "codex", "sessions", "new", "--name", "task_1"],
       ["acpx", "--cwd", "/repo", "--approve-reads", "--format", "text", "codex", "sessions", "show", "task_1"],
+    ]);
+  });
+
+  test("reports both acpx creation and verification output when session creation cannot be verified", async () => {
+    const executor = createAcpxCodexExecutor({
+      cwd: "/repo",
+      runCommand: async ({ cmd }) => {
+        if (cmd.includes("show")) {
+          return {
+            exitCode: 1,
+            stdout: "",
+            stderr: "No named session task_1",
+          };
+        }
+        return {
+          exitCode: 0,
+          stdout: "created stdout was empty in normal mode",
+          stderr: "created stderr was empty",
+        };
+      },
+    });
+
+    const output = await executor({
+      prompt: "Do the task",
+      sessionName: "task_1",
+      run: {
+        id: "run_1",
+        goal: "Goal",
+        status: "todo",
+        context: {},
+      },
+      task: {
+        id: "task_1",
+        runId: "run_1",
+        parentId: null,
+        status: "todo",
+        role: "worker",
+        goal: "Task",
+        prompt: "Do it",
+        dependsOn: [],
+        doneWhen: [],
+        worktreePath: null,
+        sessionRef: null,
+        contextVersion: 1,
+      },
+    });
+
+    expect(output.problems).toEqual([
+      "sessions new stdout:\ncreated stdout was empty in normal mode\n\nsessions new stderr:\ncreated stderr was empty\n\nsessions show stderr:\nNo named session task_1",
     ]);
   });
 });
