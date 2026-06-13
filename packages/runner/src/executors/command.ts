@@ -36,3 +36,15 @@ export const runLocalCommand: RunCommand = async ({ cmd, stdin, timeoutMs }) => 
   }
   return result;
 };
+
+export function commandProblem(result: CommandResult) {
+  const parts = [
+    ["exit code", String(result.exitCode)],
+    ["stdout", result.stdout],
+    ["stderr", result.stderr],
+  ]
+    .filter(([, value], index) => index === 0 || value.trim().length > 0)
+    .map(([label, value]) => (label === "exit code" ? `${label}: ${value}` : `${label}:\n${value.trim()}`));
+
+  return parts.join("\n\n");
+}

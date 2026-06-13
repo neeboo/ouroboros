@@ -211,4 +211,42 @@ describe("codex cli executor", () => {
       await rm(dir, { recursive: true, force: true });
     }
   });
+
+  test("includes exit code stdout and stderr when codex exec fails", async () => {
+    const executor = createCodexCliExecutor({
+      cwd: "/repo",
+      runCommand: async () => ({
+        exitCode: 1,
+        stdout: "codex stdout",
+        stderr: "codex stderr",
+      }),
+    });
+
+    const output = await executor({
+      prompt: "Plan next task",
+      sessionName: "task_1",
+      run: {
+        id: "run_1",
+        goal: "Goal",
+        status: "todo",
+        context: {},
+      },
+      task: {
+        id: "task_1",
+        runId: "run_1",
+        parentId: null,
+        status: "todo",
+        role: "planner",
+        goal: "Task",
+        prompt: "Plan",
+        dependsOn: [],
+        doneWhen: [],
+        worktreePath: null,
+        sessionRef: null,
+        contextVersion: 1,
+      },
+    });
+
+    expect(output.problems).toEqual(["exit code: 1\n\nstdout:\ncodex stdout\n\nstderr:\ncodex stderr"]);
+  });
 });

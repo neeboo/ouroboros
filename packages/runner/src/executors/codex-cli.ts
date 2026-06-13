@@ -1,4 +1,4 @@
-import { runLocalCommand } from "./command";
+import { commandProblem, runLocalCommand } from "./command";
 import { parseAttemptOutputOrBlocked } from "./output";
 import type { CodexCliExecutorOptions } from "./types";
 import type { TaskExecutor } from "../types";
@@ -40,7 +40,7 @@ export function createCodexCliExecutor(options: CodexCliExecutorOptions): TaskEx
         changedFiles: [],
         checks: [{ name: "codex exec", status: "failed" }],
         artifacts: [],
-        problems: [result.stderr || result.stdout || `exit code ${result.exitCode}`],
+        problems: [commandProblem(result)],
       };
     }
 

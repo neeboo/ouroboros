@@ -197,7 +197,9 @@ describe("acpx executor", () => {
       changedFiles: [],
       checks: [{ name: "acpx sessions new", status: "failed" }],
       artifacts: [],
-      problems: ["Error: error loading config: /Users/example/.codex/config.toml: missing field `path`"],
+      problems: [
+        "exit code: 0\n\nstdout:\nError: error loading config: /Users/example/.codex/config.toml: missing field `path`",
+      ],
     });
     expect(calls).toHaveLength(2);
   });
@@ -508,5 +510,45 @@ describe("acpx executor", () => {
       artifacts: [],
       problems: ["agent output did not contain a JSON object\n\nOutput:\n[client] initialize (running)"],
     });
+  });
+
+  test("includes exit code stdout and stderr when acpx prompt fails", async () => {
+    const executor = createAcpxCodexExecutor({
+      cwd: "/repo",
+      runCommand: async ({ cmd }) => ({
+        exitCode: cmd.includes("-s") ? 1 : 0,
+        stdout: cmd.includes("-s") ? "agent connected" : "",
+        stderr: cmd.includes("-s") ? "runtime internal error" : "",
+      }),
+    });
+
+    const output = await executor({
+      prompt: "Do the task",
+      sessionName: "task_1",
+      run: {
+        id: "run_1",
+        goal: "Goal",
+        status: "todo",
+        context: {},
+      },
+      task: {
+        id: "task_1",
+        runId: "run_1",
+        parentId: null,
+        status: "todo",
+        role: "worker",
+        goal: "Task",
+        prompt: "Do it",
+        dependsOn: [],
+        doneWhen: [],
+        worktreePath: null,
+        sessionRef: null,
+        contextVersion: 1,
+      },
+    });
+
+    expect(output.problems).toEqual([
+      "exit code: 1\n\nstdout:\nagent connected\n\nstderr:\nruntime internal error",
+    ]);
   });
 });
