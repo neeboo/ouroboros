@@ -90,6 +90,8 @@ The scheduler then:
 4. records an attempt
 5. updates task status from the attempt result
 
+The current v0 runner supports the same shape with an injectable executor. The `noop` executor is only for testing the loop; real Codex/acpx execution should use the same runner boundary and return the same structured output.
+
 ## Prompt Contract
 
 Every generated prompt should contain:

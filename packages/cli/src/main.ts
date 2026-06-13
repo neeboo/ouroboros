@@ -1,5 +1,6 @@
 #!/usr/bin/env bun
 import { Harness } from "@ouroboros/harness";
+import { runNextReadyTask } from "@ouroboros/runner";
 import { fail, flag, parseArgs, required } from "./args";
 import { parseArray, parseObject, printJson } from "./json";
 
@@ -66,6 +67,49 @@ switch (parsed.command) {
       externalType,
       externalId,
       externalUrl,
+    });
+    break;
+  }
+  case "run-next": {
+    const executorName = required(parsed, "executor");
+    if (executorName !== "noop") {
+      fail(`unsupported executor: ${executorName}`);
+    }
+    const result = await runNextReadyTask({
+      harness,
+      runId: required(parsed, "run-id"),
+      executor: async ({ task }) => ({
+        status: "done",
+        summary: `Noop executor completed ${task.id}`,
+        changedFiles: [],
+        checks: [{ name: "noop executor", status: "passed" }],
+        artifacts: [],
+        problems: [],
+      }),
+    });
+    printJson(result);
+    break;
+  }
+  case "record-attempt": {
+    const taskId = required(parsed, "task-id");
+    const input = parseObject(flag(parsed, "input-json") ?? "{}");
+    const output = parseObject(flag(parsed, "output-json") ?? "{}");
+    const attemptId = harness.recordAttempt({
+      taskId,
+      input,
+      output: {
+        status: output.status as "done" | "blocked",
+        summary: String(output.summary ?? ""),
+        changedFiles: Array.isArray(output.changedFiles) ? output.changedFiles : [],
+        checks: Array.isArray(output.checks) ? output.checks : [],
+        artifacts: Array.isArray(output.artifacts) ? output.artifacts : [],
+        problems: Array.isArray(output.problems) ? output.problems.map(String) : [],
+      },
+    });
+    printJson({
+      attemptId,
+      taskId,
+      status: output.status,
     });
     break;
   }

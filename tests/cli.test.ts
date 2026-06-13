@@ -69,6 +69,60 @@ describe("CLI", () => {
     });
   });
 
+  test("runs the next task with the noop executor", async () => {
+    await runCli("init");
+    const run = await runCliJson("create-run", "--goal", "Bootstrap ouroboros");
+    const task = await runCliJson(
+      "create-task",
+      "--run-id",
+      run.id,
+      "--role",
+      "planner",
+      "--goal",
+      "Plan v0",
+      "--prompt",
+      "Create the next small task.",
+    );
+
+    const result = await runCliJson("run-next", "--run-id", run.id, "--executor", "noop");
+    const readyAfterRun = await runCliJson("next-task", "--run-id", run.id);
+
+    expect(result.taskId).toBe(task.id);
+    expect(result.attemptId).toBeString();
+    expect(readyAfterRun).toBeNull();
+  });
+
+  test("records a structured attempt from JSON", async () => {
+    await runCli("init");
+    const run = await runCliJson("create-run", "--goal", "Bootstrap ouroboros");
+    const task = await runCliJson(
+      "create-task",
+      "--run-id",
+      run.id,
+      "--role",
+      "worker",
+      "--goal",
+      "Record attempt",
+      "--prompt",
+      "Write result into the harness.",
+    );
+
+    const attempt = await runCliJson(
+      "record-attempt",
+      "--task-id",
+      task.id,
+      "--input-json",
+      '{"source":"test"}',
+      "--output-json",
+      '{"status":"done","summary":"Recorded result","changedFiles":[],"checks":[],"artifacts":[],"problems":[]}',
+    );
+    const readyAfterRecord = await runCliJson("next-task", "--run-id", run.id);
+
+    expect(attempt.taskId).toBe(task.id);
+    expect(attempt.status).toBe("done");
+    expect(readyAfterRecord).toBeNull();
+  });
+
   async function runCli(...args: string[]) {
     const proc = Bun.spawn({
       cmd: ["bun", "run", "packages/cli/src/main.ts", "--db", dbPath, ...args],

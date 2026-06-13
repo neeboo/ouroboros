@@ -24,7 +24,19 @@ goal -> task graph -> ready task -> prompt -> agent attempt
 docs/protocol.md                 Minimal runtime protocol
 packages/harness/schema.sql      SQLite schema for the harness and bridge
 packages/harness/src/            Local harness library
+packages/runner/src/             Prompt builder and task runner
 packages/cli/src/                Local CLI wrapper
+```
+
+## Local Commands
+
+```bash
+bun run cli -- init
+bun run cli -- create-run --goal "Use Ouroboros to iterate on Ouroboros"
+bun run cli -- create-task --run-id <run_id> --role planner --goal "Plan next step" --prompt "Propose one small task."
+bun run cli -- next-task --run-id <run_id>
+bun run cli -- run-next --run-id <run_id> --executor noop
+bun run cli -- record-attempt --task-id <task_id> --input-json '{}' --output-json '{"status":"done","summary":"..."}'
 ```
 
 ## Boundaries

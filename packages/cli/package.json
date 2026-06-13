@@ -7,6 +7,7 @@
     "ouroboros": "./src/main.ts"
   },
   "dependencies": {
-    "@ouroboros/harness": "workspace:*"
+    "@ouroboros/harness": "workspace:*",
+    "@ouroboros/runner": "workspace:*"
   }
 }
