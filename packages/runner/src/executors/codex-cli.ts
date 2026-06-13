@@ -14,6 +14,7 @@ export function createCodexCliExecutor(options: CodexCliExecutorOptions): TaskEx
         codexBin,
         "exec",
         "--skip-git-repo-check",
+        "--ignore-user-config",
         "-C",
         options.cwd,
         "--sandbox",

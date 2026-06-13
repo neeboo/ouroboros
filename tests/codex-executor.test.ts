@@ -49,6 +49,7 @@ describe("codex cli executor", () => {
           "/custom/codex",
           "exec",
           "--skip-git-repo-check",
+          "--ignore-user-config",
           "-C",
           "/repo",
           "--sandbox",
