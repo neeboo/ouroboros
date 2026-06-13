@@ -5,6 +5,7 @@ import {
   createCodexCliExecutor,
   createGitWorktreeHook,
   createTasksFromOutputHook,
+  createVerifierTaskHook,
   runReadyTasks,
   runUntilIdle,
 } from "@ouroboros/runner";
@@ -220,14 +221,19 @@ function worktreeForTask() {
 }
 
 function stopHooks() {
-  const hook = flag(parsed, "stop-hook");
-  if (!hook) {
+  const raw = flag(parsed, "stop-hook");
+  if (!raw) {
     return [];
   }
-  if (hook !== "create-tasks") {
-    fail("--stop-hook must be create-tasks");
-  }
-  return [createTasksFromOutputHook({ harness })];
+  return raw.split(",").map((hook) => {
+    if (hook === "create-tasks") {
+      return createTasksFromOutputHook({ harness });
+    }
+    if (hook === "create-verifier") {
+      return createVerifierTaskHook({ harness });
+    }
+    fail("--stop-hook must contain create-tasks or create-verifier");
+  });
 }
 
 function startHooks() {

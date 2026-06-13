@@ -310,6 +310,57 @@ describe("CLI", () => {
     expect(await runCliJson("next-task", "--run-id", run.id)).toBeNull();
   });
 
+  test("runs planner worker and verifier with multiple stop hooks", async () => {
+    await runCli("init");
+    const run = await runCliJson("create-run", "--goal", "Bootstrap ouroboros");
+    await runCliJson(
+      "create-task",
+      "--run-id",
+      run.id,
+      "--role",
+      "planner",
+      "--goal",
+      "Plan worker",
+      "--prompt",
+      "Plan.",
+    );
+    const binDir = join(dir, "bin");
+    await mkdir(binDir);
+    await writeFile(
+      join(binDir, "codex"),
+      [
+        "#!/usr/bin/env bun",
+        "const prompt = await new Response(Bun.stdin.stream()).text();",
+        "if (prompt.includes('Role: planner')) {",
+        "  console.log(JSON.stringify({ status: 'done', summary: 'planned', changedFiles: [], checks: [], artifacts: [], problems: [], nextTasks: [{ role: 'worker', goal: 'Generated worker', prompt: 'Do generated work.' }] }));",
+        "} else if (prompt.includes('Role: worker')) {",
+        "  console.log(JSON.stringify({ status: 'done', summary: 'worker done', changedFiles: ['src/worker.ts'], checks: [{ name: 'worker check', status: 'passed' }], artifacts: [], problems: [] }));",
+        "} else {",
+        "  console.log(JSON.stringify({ status: 'done', summary: 'verifier done', changedFiles: [], checks: [{ name: 'verify', status: 'passed' }], artifacts: [], problems: [] }));",
+        "}",
+      ].join("\n"),
+    );
+    await chmod(join(binDir, "codex"), 0o755);
+
+    const result = await runCliJson(
+      "run-loop",
+      "--run-id",
+      run.id,
+      "--executor",
+      "codex-cli",
+      "--cwd",
+      "/repo",
+      "--stop-hook",
+      "create-tasks,create-verifier",
+      "--max-rounds",
+      "4",
+      { PATH: `${binDir}:${process.env.PATH}` },
+    );
+
+    expect(result.rounds).toHaveLength(3);
+    expect(await runCliJson("next-task", "--run-id", run.id)).toBeNull();
+  });
+
   test("runs the next task with the acpx codex executor", async () => {
     await runCli("init");
     const run = await runCliJson("create-run", "--goal", "Bootstrap ouroboros");

@@ -6,6 +6,7 @@ import { Harness } from "../packages/harness/src";
 import {
   buildTaskPrompt,
   createTasksFromOutputHook,
+  createVerifierTaskHook,
   parseAttemptOutput,
   runNextReadyTask,
   runReadyTasks,
@@ -224,6 +225,69 @@ describe("runner", () => {
         sourceTaskId: plannerTask,
       },
     ]);
+  });
+
+  test("worker stop hook creates a verifier task", async () => {
+    const runId = harness.createRun({ goal: "Build loop" });
+    const workerTask = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Implement runner",
+      prompt: "Implement the smallest runner.",
+    });
+
+    const result = await runNextReadyTask({
+      harness,
+      runId,
+      executor: async () => ({
+        status: "done",
+        summary: "Implemented runner",
+        changedFiles: ["packages/runner/src/runner.ts"],
+        artifacts: [{ kind: "commit", sha: "abc123" }],
+        checks: [{ name: "bun test", status: "passed" }],
+        problems: [],
+      }),
+      stopHooks: [createVerifierTaskHook({ harness })],
+    });
+
+    const attempt = harness.getAttempt(result!.attemptId)!;
+    const verifier = harness.nextReadyTask(runId)!;
+    expect(verifier.role).toBe("verifier");
+    expect(verifier.goal).toBe("Verify: Implement runner");
+    expect(verifier.dependsOn).toEqual([workerTask]);
+    expect(verifier.prompt).toContain(`Source Task ID: ${workerTask}`);
+    expect(verifier.prompt).toContain("Implemented runner");
+    expect(verifier.prompt).toContain("packages/runner/src/runner.ts");
+    expect(attempt.output.artifacts).toContainEqual({
+      kind: "created_verifier_task",
+      taskId: verifier.id,
+      sourceTaskId: workerTask,
+    });
+  });
+
+  test("verifier stop hook does not create verifier tasks for verifier attempts", async () => {
+    const runId = harness.createRun({ goal: "Build loop" });
+    harness.createTask({
+      runId,
+      role: "verifier",
+      goal: "Verify runner",
+      prompt: "Verify the runner.",
+    });
+
+    await runNextReadyTask({
+      harness,
+      runId,
+      executor: async () => ({
+        status: "done",
+        summary: "Verified runner",
+        artifacts: [],
+        checks: [],
+        problems: [],
+      }),
+      stopHooks: [createVerifierTaskHook({ harness })],
+    });
+
+    expect(harness.nextReadyTask(runId)).toBeNull();
   });
 
   test("parses valid planner next tasks", () => {

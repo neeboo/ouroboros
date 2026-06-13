@@ -148,6 +148,8 @@ Verifier output may:
 
 The verifier should read database state and real artifacts. It should not trust agent summaries alone.
 
+The built-in `create-verifier` stop hook creates verifier tasks only for successful worker attempts by default. The verifier depends on the worker task, so it becomes ready only after the worker attempt is recorded.
+
 ## Stop Hooks
 
 After an executor returns and before an attempt is recorded, the runner may apply stop hooks.
@@ -170,6 +172,14 @@ continue  append information without forcing retry
 Commit hooks should be explicit and opt-in. The default stop hook behavior should inspect and summarize, not create commits.
 
 The `create-tasks` stop hook reads `nextTasks` from the subagent output and inserts those tasks into the harness database. If a planned task omits `dependsOn`, the hook makes it depend on the planner task that produced it.
+
+The `create-verifier` stop hook reads a successful worker output and inserts a verifier task with `dependsOn` set to the worker task. It does not create verifier tasks for verifier attempts, which gives the loop a natural exit.
+
+Multiple stop hooks may be applied in order. The CLI accepts a comma-separated list such as:
+
+```text
+--stop-hook create-tasks,create-verifier
+```
 
 ## Start Hooks
 
