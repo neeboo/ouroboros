@@ -37,6 +37,12 @@ describe("dashboard", () => {
     expect(html).toContain("todo-list");
     expect(html).toContain("doneWhen");
     expect(html).toContain("checkbox");
+    expect(html).toContain(".todo-item.done");
+    expect(html).toContain("aria-hidden");
+    expect(html).toContain("Progress");
+    expect(html).not.toContain("<h2>Lessons</h2>");
+    expect(html).not.toContain("<h2>Queue</h2>");
+    expect(html).not.toContain("<h2>Run Info</h2>");
   });
 
   test("polls overview through a worker instead of a main-thread interval", () => {

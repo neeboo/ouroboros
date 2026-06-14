@@ -31,6 +31,28 @@ export function dashboardHtml(input: { runId: string }) {
       background: var(--app);
     }
     * { box-sizing: border-box; }
+    * {
+      scrollbar-width: thin;
+      scrollbar-color: rgba(255, 255, 255, 0.22) transparent;
+    }
+    *::-webkit-scrollbar {
+      width: 12px;
+      height: 12px;
+    }
+    *::-webkit-scrollbar-track {
+      background: transparent;
+    }
+    *::-webkit-scrollbar-thumb {
+      min-height: 44px;
+      border: 4px solid transparent;
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.2);
+      background-clip: padding-box;
+    }
+    *::-webkit-scrollbar-thumb:hover {
+      background: rgba(255, 255, 255, 0.32);
+      background-clip: padding-box;
+    }
     html, body { min-height: 100%; }
     body {
       margin: 0;
@@ -123,7 +145,8 @@ export function dashboardHtml(input: { runId: string }) {
     .task-nav {
       min-height: 0;
       overflow: auto;
-      padding: 0 4px 8px;
+      padding: 0 8px 24px 4px;
+      scrollbar-gutter: stable;
     }
     .nav-section { margin-bottom: 18px; }
     .section-label {
@@ -194,7 +217,7 @@ export function dashboardHtml(input: { runId: string }) {
       overflow: hidden;
     }
     .workspace-head {
-      padding: 18px 28px 12px;
+      padding: 24px 44px 18px;
       border-bottom: 1px solid rgba(255, 255, 255, 0.08);
       background: rgba(18, 18, 18, 0.88);
       backdrop-filter: blur(12px);
@@ -208,7 +231,7 @@ export function dashboardHtml(input: { runId: string }) {
     }
     .workspace-title {
       margin-top: 8px;
-      max-width: 900px;
+      max-width: 760px;
       color: var(--ink);
       font-size: 24px;
       font-weight: 720;
@@ -217,10 +240,11 @@ export function dashboardHtml(input: { runId: string }) {
     .workspace-flow {
       min-height: 0;
       overflow: auto;
-      padding: 18px 28px 96px;
+      padding: 38px 48px 128px;
+      scrollbar-gutter: stable;
     }
     .flow-inner {
-      width: min(100%, 820px);
+      width: min(100%, 720px);
       margin: 0 auto;
     }
     .transcript {
@@ -229,14 +253,14 @@ export function dashboardHtml(input: { runId: string }) {
     .turn {
       display: grid;
       grid-template-columns: 34px minmax(0, 1fr);
-      gap: 14px;
-      padding: 18px 0 22px;
-      border-top: 1px solid rgba(255, 255, 255, 0.09);
+      gap: 18px;
+      padding: 28px 0 36px;
+      border-top: 1px solid rgba(255, 255, 255, 0.065);
       background: transparent;
       animation: liftIn 260ms cubic-bezier(0.16, 1, 0.3, 1) both;
     }
     .turn.primary {
-      padding-top: 8px;
+      padding-top: 12px;
       border-top: 0;
     }
     .turn-gutter {
@@ -278,24 +302,24 @@ export function dashboardHtml(input: { runId: string }) {
       line-height: 1.45;
     }
     .turn-summary {
-      margin-top: 3px;
+      margin-top: 6px;
       color: var(--muted);
       font-size: 11px;
       line-height: 1.55;
     }
     .turn-text {
-      margin-top: 12px;
+      margin-top: 18px;
       color: #d8d7d0;
       font-size: 14px;
-      line-height: 1.75;
+      line-height: 1.85;
       white-space: pre-wrap;
     }
     .stream-output {
-      margin: 12px 0 0;
+      margin: 18px 0 0;
       max-height: 260px;
       overflow: hidden;
-      padding: 12px 0 0 14px;
-      border-left: 1px solid rgba(255, 255, 255, 0.16);
+      padding: 14px 0 0 16px;
+      border-left: 1px solid rgba(255, 255, 255, 0.12);
       color: #efefea;
       font-family: var(--mono);
       font-size: 11px;
@@ -303,60 +327,82 @@ export function dashboardHtml(input: { runId: string }) {
       white-space: pre-wrap;
     }
     .tool-line {
-      margin-top: 10px;
-      color: var(--muted);
+      margin-top: 14px;
+      color: var(--muted-2);
       font-size: 11px;
       line-height: 1.6;
     }
     .turn .meta { margin-top: 10px; }
     .inspector-panel {
       height: 100dvh;
-      padding: 18px 16px;
+      padding: 58px 24px 24px;
       background: var(--app);
       border-left: 1px solid rgba(255, 255, 255, 0.08);
       overflow: auto;
+      scrollbar-gutter: stable;
     }
     .inspector-card {
-      padding: 16px 0 18px;
-      border-top: 1px solid rgba(255, 255, 255, 0.09);
-      background: transparent;
+      padding: 24px 26px 28px;
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      border-radius: 28px;
+      background: #2a2a29;
     }
     .inspector-card:first-child {
-      padding-top: 0;
-      border-top: 0;
+      padding-top: 24px;
     }
     .inspector-card h2 {
-      margin: 0 0 12px;
-      color: #d2d1ca;
-      font-size: 11px;
+      margin: 0 0 22px;
+      color: #a8a7a1;
+      font-size: 15px;
       font-weight: 760;
-      letter-spacing: 0.08em;
-      text-transform: uppercase;
+      letter-spacing: 0;
+      text-transform: none;
     }
     .todo-list, .lesson-list, .info-list {
       display: grid;
-      gap: 9px;
+      gap: 16px;
       margin: 0;
       padding: 0;
       list-style: none;
     }
     .todo-item {
       display: grid;
-      grid-template-columns: 16px 1fr;
-      gap: 9px;
+      grid-template-columns: 22px 1fr;
+      gap: 12px;
       align-items: start;
       color: #d9d8d1;
-      font-size: 14px;
-      line-height: 1.55;
+      font-size: 16px;
+      line-height: 1.48;
+    }
+    .todo-item.done {
+      color: var(--muted);
+    }
+    .todo-item.done .todo-text {
+      text-decoration: line-through;
+      text-decoration-color: rgba(255, 255, 255, 0.38);
+    }
+    .todo-item .meta {
+      display: block;
+      margin-top: 2px;
     }
     .checkbox {
-      width: 13px;
-      height: 13px;
-      margin-top: 3px;
-      border: 1px solid rgba(255, 255, 255, 0.35);
+      width: 18px;
+      height: 18px;
+      margin-top: 2px;
+      display: inline-grid;
+      place-items: center;
+      border: 2px solid rgba(255, 255, 255, 0.42);
       border-radius: 999px;
     }
     .checkbox.done { background: #deded8; border-color: #deded8; }
+    .checkbox.done::after {
+      content: "";
+      width: 5px;
+      height: 3px;
+      border-left: 1.5px solid #111;
+      border-bottom: 1.5px solid #111;
+      transform: translateY(-1px) rotate(-45deg);
+    }
     .lesson {
       padding: 9px 0 11px;
       border-top: 1px solid rgba(255, 255, 255, 0.07);
@@ -620,20 +666,10 @@ export function dashboardHtml(input: { runId: string }) {
     const renderInspector = (overview, group) => {
       if (!group) return '<section class="inspector-card"><h2>Detail</h2><div class="empty">Select a goal</div></section>';
       const doneWhen = group.tasks.flatMap((task) => (Array.isArray(task.doneWhen) ? task.doneWhen : []).map((item) => ({ task, item })));
-      return '<section class="inspector-card"><h2>Todos</h2>' +
+      return '<section class="inspector-card"><h2>Progress</h2>' +
         (doneWhen.length ? '<ul class="todo-list">' + doneWhen.map(({ task, item }) =>
-          '<li class="todo-item"><span class="checkbox ' + (task.status === "done" ? "done" : "") + '"></span><span>' + escapeHtml(item) + '<span class="meta"> · ' + escapeHtml(task.role) + '</span></span></li>'
-        ).join("") + '</ul>' : '<div class="empty">No todos recorded</div>') + '</section>' +
-        '<section class="inspector-card"><h2>Queue</h2>' +
-        (group.activeTasks.length ? '<ul class="info-list">' + group.activeTasks.map((task) => '<li class="meta"><span class="status-text ' + escapeHtml(task.status) + '">' + escapeHtml(task.status) + '</span> ' + escapeHtml(task.role) + ' · ' + escapeHtml(task.goal) + '</li>').join("") + '</ul>' : '<div class="empty">No active queue for this goal</div>') + '</section>' +
-        '<section class="inspector-card"><h2>Goal</h2><div class="inspector-row"><span class="status-text ' + escapeHtml(group.status) + '">' + escapeHtml(group.status) + '</span>' + promptLink(group.titleTask) + '</div>' +
-        '<div class="meta" style="margin-top:10px">' + group.tasks.length + ' tasks · ' + group.sessions.length + ' sessions</div><div class="meta" style="margin-top:10px">' + escapeHtml(compact(group.root.prompt, 420)) + '</div></section>' +
-        '<section class="inspector-card"><h2>Lessons</h2>' + lessonList(group.lessons.slice(-8)) + '</section>' +
-        '<section class="inspector-card"><h2>Run Info</h2><ul class="info-list">' +
-        '<li class="meta">Run status: ' + escapeHtml(overview.run?.status || "") + '</li>' +
-        '<li class="meta">Tasks: ' + overview.tasks.length + '</li>' +
-        '<li class="meta">Sessions: ' + overview.sessions.length + '</li>' +
-        '<li class="meta">Lessons: ' + (overview.lessons || []).length + '</li></ul></section>';
+          '<li class="todo-item ' + (task.status === "done" ? "done" : "") + '"><span class="checkbox ' + (task.status === "done" ? "done" : "") + '" aria-hidden="true"></span><span class="todo-text">' + escapeHtml(item) + '<span class="meta">' + escapeHtml(task.role) + '</span></span></li>'
+        ).join("") + '</ul>' : '<div class="empty">No todos recorded</div>') + '</section>';
     };
     const overviewWorkerSource = [
       'let runId = null;',
