@@ -25,6 +25,8 @@ describe("dashboard", () => {
     expect(html).toContain('id="inspector-panel"');
     expect(html).toContain("buildGoalGroups");
     expect(html).toContain("task.cycleId");
+    expect(html).toContain("transcript");
+    expect(html).toContain("stream-output");
     expect(html).toContain("renderWorkspace");
     expect(html).toContain("renderInspector");
   });

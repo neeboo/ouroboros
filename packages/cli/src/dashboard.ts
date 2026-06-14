@@ -217,42 +217,98 @@ export function dashboardHtml(input: { runId: string }) {
     .workspace-flow {
       min-height: 0;
       overflow: auto;
-      padding: 22px 28px 96px;
+      padding: 18px 28px 96px;
     }
     .flow-inner {
       width: min(100%, 820px);
       margin: 0 auto;
     }
-    .flow-card {
-      padding: 18px 0 20px;
+    .transcript {
+      display: grid;
+    }
+    .turn {
+      display: grid;
+      grid-template-columns: 34px minmax(0, 1fr);
+      gap: 14px;
+      padding: 18px 0 22px;
       border-top: 1px solid rgba(255, 255, 255, 0.09);
       background: transparent;
       animation: liftIn 260ms cubic-bezier(0.16, 1, 0.3, 1) both;
     }
-    .flow-card.primary {
-      padding-top: 0;
+    .turn.primary {
+      padding-top: 8px;
       border-top: 0;
     }
-    .flow-card-head, .inspector-row {
+    .turn-gutter {
+      display: grid;
+      grid-template-rows: 26px 1fr;
+      justify-items: center;
+      min-height: 100%;
+    }
+    .turn-avatar {
+      width: 26px;
+      height: 26px;
+      display: inline-grid;
+      place-items: center;
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.055);
+      color: #ecebe5;
+      font-size: 11px;
+      font-weight: 760;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+    }
+    .turn-rail {
+      width: 1px;
+      min-height: 24px;
+      margin-top: 8px;
+      background: rgba(255, 255, 255, 0.08);
+    }
+    .turn-head, .inspector-row {
       display: flex;
       align-items: flex-start;
       justify-content: space-between;
       gap: 12px;
     }
-    .flow-card-title {
+    .turn-author {
       color: #f1f1ec;
-      font-size: 18px;
+      font-size: 16px;
       font-weight: 720;
       line-height: 1.45;
     }
-    .flow-card-text {
-      margin-top: 10px;
+    .turn-summary {
+      margin-top: 3px;
+      color: var(--muted);
+      font-size: 11px;
+      line-height: 1.55;
+    }
+    .turn-text {
+      margin-top: 12px;
       color: #d8d7d0;
       font-size: 14px;
       line-height: 1.75;
       white-space: pre-wrap;
     }
-    .flow-card .meta { margin-top: 10px; }
+    .stream-output {
+      margin: 12px 0 0;
+      max-height: 260px;
+      overflow: hidden;
+      padding: 12px 0 0 14px;
+      border-left: 1px solid rgba(255, 255, 255, 0.16);
+      color: #efefea;
+      font-family: var(--mono);
+      font-size: 11px;
+      line-height: 1.6;
+      white-space: pre-wrap;
+    }
+    .tool-line {
+      margin-top: 10px;
+      color: var(--muted);
+      font-size: 11px;
+      line-height: 1.6;
+    }
+    .turn .meta { margin-top: 10px; }
     .inspector-panel {
       height: 100dvh;
       padding: 18px 16px;
@@ -384,20 +440,6 @@ export function dashboardHtml(input: { runId: string }) {
       font-size: 11px;
       line-height: 1.65;
     }
-    pre {
-      margin: 12px 0 0;
-      max-height: 240px;
-      overflow: hidden;
-      padding: 10px 0 0 12px;
-      border: 0;
-      border-left: 1px solid rgba(255, 255, 255, 0.16);
-      background: #171717;
-      color: #efefea;
-      font-family: var(--mono);
-      font-size: 11px;
-      line-height: 1.55;
-      white-space: pre-wrap;
-    }
     @keyframes breathe {
       0%, 100% { box-shadow: 0 0 0 0 rgba(0, 0, 0, 0); }
       50% { box-shadow: 0 0 0 4px rgba(0, 0, 0, 0.08); }
@@ -523,31 +565,57 @@ export function dashboardHtml(input: { runId: string }) {
       : '<div class="empty">No lessons or experiences</div>';
     const taskMeta = (task) => '<span class="code-meta">id ' + escapeHtml(task.id) + '</span>' + (task.dependsOn.length ? ' · depends on ' + task.dependsOn.map((id) => '<span class="code-meta">' + escapeHtml(id) + '</span>').join(", ") : '');
     const roleSummary = (tasks) => [...new Set(tasks.map((task) => task.role))].join(" / ");
+    const roleMark = (role) => escapeHtml(String(role || "?").slice(0, 2));
     const goalRow = (group) =>
       '<button class="task-row ' + (group.id === selectedGoalId ? 'selected' : '') + '" data-goal-id="' + escapeHtml(group.id) + '">' +
       '<span class="status-dot ' + escapeHtml(group.status) + '"></span>' +
       '<span><strong>' + escapeHtml(group.titleTask.goal) + '</strong><span class="row-meta">' + group.tasks.length + ' tasks · ' + escapeHtml(roleSummary(group.tasks)) + '</span></span>' +
       '<span class="status-text ' + escapeHtml(group.status) + '">' + escapeHtml(group.status) + '</span></button>';
-    const sessionFlowCard = (session) =>
-      '<article class="flow-card"><div class="flow-card-head"><div><span class="role-label">' + escapeHtml(session.role) + '</span>' +
-      '<div class="flow-card-title">' + escapeHtml(session.taskGoal) + '</div></div>' +
-      '<span class="status-text ' + escapeHtml(session.status) + '">' + escapeHtml(session.status) + '</span></div>' +
-      '<div class="meta code-meta">task ' + escapeHtml(session.taskId) + '<br>attempt ' + escapeHtml(session.attemptId) +
-      '<br>session ' + escapeHtml(session.sessionName || "") + '<br>codex ' + escapeHtml(session.codexSessionId || "") + '</div>' +
-      (latestText(session) ? '<pre>' + escapeHtml(latestText(session)) + '</pre>' : '<div class="flow-card-text">No stream output recorded.</div>') +
-      '</article>';
+    const turn = (input) =>
+      '<article class="turn ' + (input.primary ? "primary" : "") + '"><div class="turn-gutter"><div class="turn-avatar">' + input.mark + '</div><div class="turn-rail"></div></div>' +
+      '<div class="turn-body"><div class="turn-head"><div><div class="turn-author">' + input.author + '</div>' +
+      (input.summary ? '<div class="turn-summary">' + input.summary + '</div>' : '') + '</div>' +
+      (input.action || '') + '</div>' + (input.body || '') + '</div></article>';
+    const sessionFlowTurn = (session) =>
+      turn({
+        mark: roleMark(session.role),
+        author: escapeHtml(session.role),
+        summary: escapeHtml(session.taskGoal) + ' · ' + escapeHtml(session.status),
+        action: '<span class="status-text ' + escapeHtml(session.status) + '">' + escapeHtml(session.status) + '</span>',
+        body:
+          '<div class="tool-line code-meta">task ' + escapeHtml(session.taskId) + ' · attempt ' + escapeHtml(session.attemptId) +
+          (session.sessionName ? '<br>session ' + escapeHtml(session.sessionName) : '') +
+          (session.codexSessionId ? '<br>codex ' + escapeHtml(session.codexSessionId) : '') + '</div>' +
+          (latestText(session) ? '<div class="stream-output">' + escapeHtml(latestText(session)) + '</div>' : '<div class="turn-text">No stream output recorded.</div>'),
+      });
     const renderWorkspace = (group) => {
       if (!group) return '<div class="flow-inner"><div class="empty">No goal selected</div></div>';
       const taskIdsWithSessions = new Set(group.sessions.map((session) => session.taskId));
       const pendingFlow = group.tasks.filter((task) => !taskIdsWithSessions.has(task.id) && (task.status === "todo" || task.status === "running"));
-      return '<div class="flow-inner"><article class="flow-card primary"><div class="flow-card-head"><div>' +
-        '<span class="status-text ' + escapeHtml(group.status) + '">' + escapeHtml(group.status) + '</span> <span class="role-label">' + escapeHtml(roleSummary(group.tasks)) + '</span>' +
-        '<div class="flow-card-title">' + escapeHtml(group.titleTask.goal) + '</div></div>' + promptLink(group.titleTask) + '</div>' +
-        '<div class="meta">' + taskMeta(group.root) + '</div><div class="flow-card-text">' + escapeHtml(group.root.prompt) + '</div></article>' +
-        (group.sessions.length ? group.sessions.map(sessionFlowCard).join("") : '<div class="empty">No sessions recorded for this goal yet.</div>') +
-        (pendingFlow.length ? pendingFlow.map((task) => '<article class="flow-card"><div class="flow-card-head"><div><span class="role-label">' + escapeHtml(task.role) + '</span><div class="flow-card-title">' + escapeHtml(task.goal) + '</div></div><span class="status-text ' + escapeHtml(task.status) + '">' + escapeHtml(task.status) + '</span></div><div class="meta">' + taskMeta(task) + '</div></article>').join("") : '') +
-        (group.lessons.length ? '<article class="flow-card"><div class="flow-card-head"><div class="flow-card-title">Lessons and experiences</div></div>' + lessonList(group.lessons.slice(-6)) + '</article>' : '') +
-        '</div>';
+      return '<div class="flow-inner"><div class="transcript">' +
+        turn({
+          primary: true,
+          mark: "go",
+          author: escapeHtml(group.titleTask.goal),
+          summary: '<span class="role-label">' + escapeHtml(roleSummary(group.tasks)) + '</span> · <span class="status-text ' + escapeHtml(group.status) + '">' + escapeHtml(group.status) + '</span>',
+          action: promptLink(group.titleTask),
+          body: '<div class="tool-line">' + taskMeta(group.root) + '</div><div class="turn-text">' + escapeHtml(group.root.prompt) + '</div>',
+        }) +
+        (group.sessions.length ? group.sessions.map(sessionFlowTurn).join("") : '<div class="empty">No sessions recorded for this goal yet.</div>') +
+        (pendingFlow.length ? pendingFlow.map((task) => turn({
+          mark: roleMark(task.role),
+          author: escapeHtml(task.role),
+          summary: escapeHtml(task.goal),
+          action: '<span class="status-text ' + escapeHtml(task.status) + '">' + escapeHtml(task.status) + '</span>',
+          body: '<div class="tool-line">' + taskMeta(task) + '</div>',
+        })).join("") : '') +
+        (group.lessons.length ? turn({
+          mark: "le",
+          author: "Lessons and experiences",
+          summary: escapeHtml(group.lessons.length + " records"),
+          body: lessonList(group.lessons.slice(-6)),
+        }) : '') +
+        '</div></div>';
     };
     const renderInspector = (overview, group) => {
       if (!group) return '<section class="inspector-card"><h2>Detail</h2><div class="empty">Select a goal</div></section>';
