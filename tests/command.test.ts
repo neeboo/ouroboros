@@ -1,7 +1,43 @@
 import { describe, expect, test } from "bun:test";
-import { runLocalCommand } from "../packages/runner/src";
+import { proxyEnvForChildProcess, proxyEnvFromScutilOutput, runLocalCommand } from "../packages/runner/src";
 
 describe("command runner", () => {
+  test("builds proxy env from macOS system proxy output", () => {
+    const env = proxyEnvFromScutilOutput([
+      "<dictionary> {",
+      "  ExceptionsList : <array> {",
+      "    0 : 127.0.0.1",
+      "    1 : localhost",
+      "  }",
+      "  HTTPEnable : 1",
+      "  HTTPPort : 7893",
+      "  HTTPProxy : 127.0.0.1",
+      "  HTTPSEnable : 1",
+      "  HTTPSPort : 7893",
+      "  HTTPSProxy : 127.0.0.1",
+      "  SOCKSEnable : 1",
+      "  SOCKSPort : 7893",
+      "  SOCKSProxy : 127.0.0.1",
+      "}",
+    ].join("\n"));
+
+    expect(env.HTTP_PROXY).toBe("http://127.0.0.1:7893");
+    expect(env.HTTPS_PROXY).toBe("http://127.0.0.1:7893");
+    expect(env.ALL_PROXY).toBe("socks5://127.0.0.1:7893");
+    expect(env.NO_PROXY).toContain("localhost");
+    expect(env.no_proxy).toBe(env.NO_PROXY);
+  });
+
+  test("keeps explicit proxy env unchanged", () => {
+    const env = proxyEnvForChildProcess({
+      PATH: "/bin",
+      HTTPS_PROXY: "http://manual.proxy:8080",
+    });
+
+    expect(env.HTTPS_PROXY).toBe("http://manual.proxy:8080");
+    expect(env.PATH).toBe("/bin");
+  });
+
   test("returns a timeout result when a command runs too long", async () => {
     const result = await runLocalCommand({
       cmd: ["bun", "-e", "await new Promise((resolve) => setTimeout(resolve, 1000));"],

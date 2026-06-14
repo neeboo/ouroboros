@@ -5,6 +5,7 @@ export { createCodexCliExecutor } from "./executors/codex-cli";
 export { createCodexResumableClient } from "./executors/codex-resumable";
 export { parseAttemptOutput } from "./executors/output";
 export { runLocalCommand } from "./executors/command";
+export { proxyEnvForChildProcess, proxyEnvFromScutilOutput } from "./executors/proxy-env";
 export { createContextSubagentHook, createContextSummaryHook } from "./hooks/context-summary";
 export { createRepairTaskHook } from "./hooks/create-repair";
 export { createTasksFromOutputHook } from "./hooks/create-tasks";

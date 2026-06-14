@@ -11,6 +11,7 @@ import {
   createRepairTaskHook,
   createTasksFromOutputHook,
   createVerifierTaskHook,
+  proxyEnvForChildProcess,
   runReadyTasks,
   runUntilIdle,
 } from "@ouroboros/runner";
@@ -300,6 +301,7 @@ switch (parsed.command) {
       runnerProcess = Bun.spawn({
         cmd,
         cwd: process.cwd(),
+        env: proxyEnvForChildProcess(),
         stdin: "ignore",
         stdout: "pipe",
         stderr: "pipe",
