@@ -250,6 +250,91 @@ switch (parsed.command) {
     const runId = required(parsed, "run-id");
     const port = parsePositiveInteger(flag(parsed, "port") ?? "7331", "--port");
     harness.init();
+    let runnerProcess: ReturnType<typeof Bun.spawn> | null = null;
+    const runnerState: {
+      status: "idle" | "running" | "exited";
+      pid: number | null;
+      startedAt: string | null;
+      finishedAt: string | null;
+      exitCode: number | null;
+      lastOutput: string;
+    } = {
+      status: "idle",
+      pid: null,
+      startedAt: null,
+      finishedAt: null,
+      exitCode: null,
+      lastOutput: "",
+    };
+    const runnerStatus = () => ({ ...runnerState });
+    const appendRunnerOutput = (chunk: string) => {
+      const next = `${runnerState.lastOutput}${chunk}`;
+      runnerState.lastOutput = next.length > 2000 ? next.slice(next.length - 2000) : next;
+    };
+    const finishRunningAttemptsFromDashboard = (summary: string, problem: string) => {
+      for (const attempt of harness.listRunningAttempts({ runId })) {
+        harness.finishAttempt({
+          attemptId: attempt.id,
+          output: {
+            status: "blocked",
+            summary,
+            changedFiles: [],
+            checks: [{ name: "dashboard runner", status: "failed" }],
+            artifacts: [],
+            problems: [problem],
+          },
+        });
+      }
+      harness.updateRunStatus({ runId, status: "todo" });
+    };
+    const startDashboardRunner = () => {
+      if (runnerProcess && runnerState.status === "running") {
+        return { status: "running", pid: runnerState.pid ?? undefined };
+      }
+      runnerState.status = "running";
+      runnerState.startedAt = new Date().toISOString();
+      runnerState.finishedAt = null;
+      runnerState.exitCode = null;
+      runnerState.lastOutput = "";
+      const cmd = dashboardRunnerCommand(runId);
+      runnerProcess = Bun.spawn({
+        cmd,
+        cwd: process.cwd(),
+        stdin: "ignore",
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      runnerState.pid = runnerProcess.pid;
+      if (runnerProcess.stdout instanceof ReadableStream) {
+        drainDashboardRunnerStream(runnerProcess.stdout, appendRunnerOutput);
+      }
+      if (runnerProcess.stderr instanceof ReadableStream) {
+        drainDashboardRunnerStream(runnerProcess.stderr, appendRunnerOutput);
+      }
+      runnerProcess.exited.then((exitCode) => {
+        runnerState.status = "exited";
+        runnerState.finishedAt = new Date().toISOString();
+        runnerState.exitCode = exitCode;
+        runnerProcess = null;
+      });
+      return { status: "running", pid: runnerState.pid ?? undefined };
+    };
+    const stopDashboardRunner = () => {
+      const pid = runnerState.pid;
+      if (runnerProcess && runnerState.status === "running") {
+        killDashboardRunnerChildren(pid);
+        runnerProcess.kill();
+      }
+      runnerProcess = null;
+      runnerState.status = "exited";
+      runnerState.finishedAt = new Date().toISOString();
+      runnerState.exitCode = null;
+      finishRunningAttemptsFromDashboard(
+        "Stopped by the dashboard runner control",
+        "dashboard stopped the runner process before it could finish cleanly",
+      );
+      return { status: "blocked", pid: pid ?? undefined };
+    };
     const server = serveDashboard({
       runId,
       port,
@@ -258,8 +343,11 @@ switch (parsed.command) {
           runId,
           eventLimit: parsePositiveInteger(flag(parsed, "event-limit") ?? "25", "--event-limit"),
         }),
+      runnerStatus,
       renderTaskPrompt,
       actions: {
+        startRunner: startDashboardRunner,
+        stopRunner: stopDashboardRunner,
         createGoal: (goal) => {
           harness.updateRunStatus({ runId, status: "todo" });
           const taskId = createPlannerFromUserGoal({ runId, goal, interrupted: false });
@@ -999,6 +1087,72 @@ function createAttemptEventRecorder(attemptId: string) {
       });
     },
   };
+}
+
+function dashboardRunnerCommand(runId: string) {
+  const cmd = [
+    Bun.argv[0],
+    Bun.argv[1],
+    "--db",
+    parsed.db,
+    "autopilot",
+    "--run-id",
+    runId,
+    "--executor",
+    "codex-resumable",
+  ];
+  for (const name of [
+    "limit",
+    "max-rounds",
+    "max-cycles",
+    "max-tries",
+    "interval-ms",
+    "codex-bin",
+    "sandbox",
+    "timeout-ms",
+    "idle-timeout-ms",
+    "model",
+    "cwd",
+  ]) {
+    const value = flag(parsed, name);
+    if (value !== undefined) {
+      cmd.push(`--${name}`, value);
+    }
+  }
+  return cmd;
+}
+
+function killDashboardRunnerChildren(pid: number | null) {
+  if (!pid || process.platform === "win32") {
+    return;
+  }
+  Bun.spawnSync({
+    cmd: ["/bin/zsh", "-lc", `pkill -TERM -P ${pid} >/dev/null 2>&1 || true`],
+    stdout: "ignore",
+    stderr: "ignore",
+  });
+}
+
+function drainDashboardRunnerStream(stream: ReadableStream<Uint8Array>, onChunk: (chunk: string) => void) {
+  const decoder = new TextDecoder();
+  void (async () => {
+    try {
+      const reader = stream.getReader();
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) {
+          break;
+        }
+        onChunk(decoder.decode(value, { stream: true }));
+      }
+      const tail = decoder.decode();
+      if (tail) {
+        onChunk(tail);
+      }
+    } catch (error) {
+      onChunk(`\nrunner stream read failed: ${error instanceof Error ? error.message : String(error)}\n`);
+    }
+  })();
 }
 
 function withCodexArtifacts(output: AttemptOutput, sessionId: string | null): AttemptOutput {

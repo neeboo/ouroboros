@@ -5,6 +5,7 @@ interface DashboardActionResult {
   taskId?: string;
   status?: string;
   interrupted?: number;
+  pid?: number;
 }
 
 interface DashboardActions {
@@ -13,6 +14,17 @@ interface DashboardActions {
   resumeTask?: (taskId: string) => DashboardActionResult;
   rerunTask?: (taskId: string) => DashboardActionResult;
   stopAttempt?: (attemptId: string) => DashboardActionResult;
+  startRunner?: () => DashboardActionResult;
+  stopRunner?: () => DashboardActionResult;
+}
+
+interface DashboardRunnerStatus {
+  status: "idle" | "running" | "exited";
+  pid?: number | null;
+  startedAt?: string | null;
+  finishedAt?: string | null;
+  exitCode?: number | null;
+  lastOutput?: string;
 }
 
 export function dashboardHtml(input: { runId: string }) {
@@ -459,6 +471,9 @@ export function dashboardHtml(input: { runId: string }) {
     .inspector-card:first-child {
       padding-top: 24px;
     }
+    .inspector-card + .inspector-card {
+      margin-top: 14px;
+    }
     .inspector-card h2 {
       margin: 0 0 22px;
       color: #a8a7a1;
@@ -849,6 +864,18 @@ export function dashboardHtml(input: { runId: string }) {
         (resumableTasks.length ? '<div class="control-row"><button class="plain-button" data-resume-task-id="' + escapeHtml(resumableTasks[0].id) + '">Resume blocked task</button></div>' : '') +
         '</section>';
     };
+    const renderRunner = (runner) => {
+      const status = runner?.status || "idle";
+      const statusClass = status === "running" ? "running" : status === "exited" ? "blocked" : "todo";
+      return '<section class="inspector-card"><h2>Runner</h2>' +
+        '<div class="current-task"><div class="current-task-title">Autopilot</div><div class="current-task-meta">runner · <span class="status-text ' + escapeHtml(statusClass) + '">' + escapeHtml(status) + '</span>' +
+        (runner?.pid ? '<br><span class="code-meta">pid ' + escapeHtml(runner.pid) + '</span>' : '') +
+        (runner?.exitCode !== undefined && runner?.exitCode !== null ? '<br><span class="code-meta">exit ' + escapeHtml(runner.exitCode) + '</span>' : '') +
+        '</div></div>' +
+        (runner?.lastOutput ? '<div class="stream-output">' + escapeHtml(runner.lastOutput) + '</div>' : '') +
+        '<div class="control-row"><button class="plain-button" data-start-runner>Start runner</button><button class="plain-button danger" data-stop-runner>Stop runner</button></div>' +
+        '</section>';
+    };
     const postJson = async (path, body) => {
       const response = await fetch(path, {
         method: "POST",
@@ -970,7 +997,7 @@ export function dashboardHtml(input: { runId: string }) {
       setHtmlIfChanged("active-goal-list", activeGroups.length ? activeGroups.map(goalRow).join("") : '<div class="empty"><strong>Idle</strong>No active tasks. Open a blocked history goal and rerun it, or add a new goal.</div>');
       setHtmlIfChanged("history-goal-list", [...goalGroups].reverse().filter((group) => group.activeTasks.length === 0).map(goalRow).join(""));
       patchWorkspace(renderWorkspace(selectedGroup));
-      setHtmlIfChanged("inspector-panel", renderInspector(overview, selectedGroup));
+      setHtmlIfChanged("inspector-panel", renderInspector(overview, selectedGroup) + renderRunner(overview.runner));
     }
     document.addEventListener("click", (event) => {
       if (!event.target || !event.target.closest) return;
@@ -985,6 +1012,30 @@ export function dashboardHtml(input: { runId: string }) {
           })
           .catch((error) => setGoalFormStatus(error.message))
           .finally(() => { stopButton.disabled = false; });
+        return;
+      }
+      const startRunnerButton = event.target.closest("[data-start-runner]");
+      if (startRunnerButton) {
+        startRunnerButton.disabled = true;
+        postJson("/api/runs/" + encodeURIComponent(runId) + "/runner/start", {})
+          .then(() => {
+            setGoalFormStatus("Runner started.");
+            refreshOverview();
+          })
+          .catch((error) => setGoalFormStatus(error.message))
+          .finally(() => { startRunnerButton.disabled = false; });
+        return;
+      }
+      const stopRunnerButton = event.target.closest("[data-stop-runner]");
+      if (stopRunnerButton) {
+        stopRunnerButton.disabled = true;
+        postJson("/api/runs/" + encodeURIComponent(runId) + "/runner/stop", {})
+          .then(() => {
+            setGoalFormStatus("Runner stopped.");
+            refreshOverview();
+          })
+          .catch((error) => setGoalFormStatus(error.message))
+          .finally(() => { stopRunnerButton.disabled = false; });
         return;
       }
       const rerunButton = event.target.closest("[data-rerun-task-id]");
@@ -1049,6 +1100,7 @@ export function serveDashboard(input: {
   port: number;
   overview: () => RunOverview;
   renderTaskPrompt: (taskId: string) => string;
+  runnerStatus?: () => DashboardRunnerStatus | null;
   actions?: DashboardActions;
 }) {
   return Bun.serve({
@@ -1065,6 +1117,7 @@ export function handleDashboardRequest(
     runId: string;
     overview: () => RunOverview;
     renderTaskPrompt: (taskId: string) => string;
+    runnerStatus?: () => DashboardRunnerStatus | null;
     actions?: DashboardActions;
   },
 ) {
@@ -1075,7 +1128,23 @@ export function handleDashboardRequest(
     });
   }
   if (url.pathname === `/api/runs/${input.runId}/overview`) {
-    return Response.json(input.overview());
+    return Response.json({ ...input.overview(), runner: input.runnerStatus?.() ?? null });
+  }
+  if (request.method === "POST" && url.pathname === `/api/runs/${input.runId}/runner/start`) {
+    return withDashboardAction(async () => {
+      if (!input.actions?.startRunner) {
+        throw new Error("dashboard runner start is not configured");
+      }
+      return input.actions.startRunner();
+    });
+  }
+  if (request.method === "POST" && url.pathname === `/api/runs/${input.runId}/runner/stop`) {
+    return withDashboardAction(async () => {
+      if (!input.actions?.stopRunner) {
+        throw new Error("dashboard runner stop is not configured");
+      }
+      return input.actions.stopRunner();
+    });
   }
   if (request.method === "POST" && url.pathname === `/api/runs/${input.runId}/goals`) {
     return withDashboardAction(async () => {

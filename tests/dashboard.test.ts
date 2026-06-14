@@ -24,6 +24,9 @@ describe("dashboard", () => {
     expect(html).toContain("Stop current task");
     expect(html).toContain("data-rerun-task-id");
     expect(html).toContain("Rerun task");
+    expect(html).toContain("data-start-runner");
+    expect(html).toContain("data-stop-runner");
+    expect(html).toContain("Start runner");
   });
 
   test("renders workspace and inspector regions for sessions prompts and lessons", () => {
@@ -151,7 +154,10 @@ describe("dashboard", () => {
       runId,
       overview: () => harness.getRunOverview({ runId }),
       renderTaskPrompt: () => "",
+      runnerStatus: () => ({ status: "idle" as const, pid: null }),
       actions: {
+        startRunner: () => ({ status: "running", pid: 1234 }),
+        stopRunner: () => ({ status: "blocked", pid: 1234 }),
         createGoal: (goal: string) => ({
           taskId: harness.createTask({
             runId,
@@ -217,6 +223,35 @@ describe("dashboard", () => {
     };
 
     try {
+      const overviewResponse = await handleDashboardRequest(
+        new Request(`http://localhost/api/runs/${runId}/overview`),
+        dashboardInput,
+      );
+      const overviewBody = await overviewResponse.json();
+      expect(overviewBody.runner).toEqual({ status: "idle", pid: null });
+
+      const startRunnerResponse = await handleDashboardRequest(
+        new Request(`http://localhost/api/runs/${runId}/runner/start`, {
+          method: "POST",
+          body: JSON.stringify({}),
+        }),
+        dashboardInput,
+      );
+      const startRunnerBody = await startRunnerResponse.json();
+      expect(startRunnerResponse.status).toBe(200);
+      expect(startRunnerBody.status).toBe("running");
+
+      const stopRunnerResponse = await handleDashboardRequest(
+        new Request(`http://localhost/api/runs/${runId}/runner/stop`, {
+          method: "POST",
+          body: JSON.stringify({}),
+        }),
+        dashboardInput,
+      );
+      const stopRunnerBody = await stopRunnerResponse.json();
+      expect(stopRunnerResponse.status).toBe(200);
+      expect(stopRunnerBody.status).toBe("blocked");
+
       const stopResponse = await handleDashboardRequest(
         new Request(`http://localhost/api/attempts/${runningAttemptId}/stop`, {
           method: "POST",
