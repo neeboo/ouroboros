@@ -74,6 +74,34 @@ export function dashboardHtml(input: { runId: string }) {
       color: #5c6b73;
       font-size: 13px;
     }
+    .checklist {
+      display: grid;
+      gap: 6px;
+      margin: 8px 0 0;
+      padding: 0;
+      list-style: none;
+      color: #34424c;
+      font-size: 12px;
+    }
+    .checklist li {
+      display: grid;
+      grid-template-columns: 16px 1fr;
+      gap: 6px;
+      align-items: start;
+    }
+    .checkbox {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 14px;
+      height: 14px;
+      border: 1px solid #9aa8b2;
+      border-radius: 3px;
+      color: #166534;
+      font-size: 11px;
+      line-height: 1;
+      margin-top: 1px;
+    }
     .task {
       display: grid;
       grid-template-columns: 78px 86px 1fr;
@@ -169,6 +197,14 @@ export function dashboardHtml(input: { runId: string }) {
       "'": "&#39;"
     }[char]));
     const latestText = (session) => session.latestText || session.events.map((event) => event.text || event.payload?.delta || event.payload?.message || "").filter(Boolean).slice(-1)[0] || "";
+    const checklist = (task) => {
+      const doneWhen = Array.isArray(task.doneWhen) ? task.doneWhen : [];
+      if (!doneWhen.length) return "";
+      const checked = task.status === "done";
+      return '<ul class="checklist" data-source="doneWhen">' + doneWhen.map((item) =>
+        '<li><span class="checkbox">' + (checked ? "✓" : "") + '</span><span>' + escapeHtml(item) + '</span></li>'
+      ).join("") + '</ul>';
+    };
     async function refresh() {
       const response = await fetch("/api/runs/" + encodeURIComponent(runId) + "/overview");
       const overview = await response.json();
@@ -190,14 +226,14 @@ export function dashboardHtml(input: { runId: string }) {
         '<span class="badge">' + escapeHtml(task.role) + '</span>' +
         '<div><strong>' + escapeHtml(task.goal) + '</strong><div class="meta">' +
         'id ' + escapeHtml(task.id) + (task.dependsOn.length ? ' · depends on ' + task.dependsOn.map(escapeHtml).join(", ") : '') +
-        '</div></div></div>'
+        '</div>' + checklist(task) + '</div></div>'
       ).join("") : '<div class="empty">No active tasks</div>';
       document.getElementById("tasks").innerHTML = overview.tasks.map((task) =>
         '<div class="task"><span class="badge ' + task.status + '">' + escapeHtml(task.status) + '</span>' +
         '<span class="badge">' + escapeHtml(task.role) + '</span>' +
         '<div><strong>' + escapeHtml(task.goal) + '</strong><div class="meta">' +
         'id ' + escapeHtml(task.id) + (task.dependsOn.length ? ' · depends on ' + task.dependsOn.map(escapeHtml).join(", ") : '') +
-        '</div></div></div>'
+        '</div>' + checklist(task) + '</div></div>'
       ).join("");
       document.getElementById("sessions").innerHTML = overview.sessions.map((session) =>
         '<article class="session"><div class="session-head"><span class="role">' + escapeHtml(session.role) + '</span>' +
