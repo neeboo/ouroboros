@@ -27,6 +27,8 @@ describe("dashboard", () => {
     expect(html).toContain("data-start-runner");
     expect(html).toContain("data-stop-runner");
     expect(html).toContain("Start runner");
+    expect(html).toContain("Connection timed out");
+    expect(html).toContain("runnerIssue");
   });
 
   test("renders workspace and inspector regions for sessions prompts and lessons", () => {

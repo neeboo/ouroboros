@@ -864,7 +864,20 @@ export function dashboardHtml(input: { runId: string }) {
         (resumableTasks.length ? '<div class="control-row"><button class="plain-button" data-resume-task-id="' + escapeHtml(resumableTasks[0].id) + '">Resume blocked task</button></div>' : '') +
         '</section>';
     };
-    const renderRunner = (runner) => {
+    const runnerIssue = (overview) => {
+      const session = [...(overview.sessions || [])].reverse().find((item) => item.status === "running" || item.status === "blocked");
+      const text = session ? latestText(session) : "";
+      if (!session || !text) return null;
+      const timedOut = text.includes("Reconnecting... 5/5") || text.toLowerCase().includes("request timed out");
+      return {
+        status: session.status,
+        taskGoal: session.taskGoal,
+        attemptId: session.attemptId,
+        text,
+        timedOut,
+      };
+    };
+    const renderRunner = (runner, issue) => {
       const status = runner?.status || "idle";
       const statusClass = status === "running" ? "running" : status === "exited" ? "blocked" : "todo";
       return '<section class="inspector-card"><h2>Runner</h2>' +
@@ -872,6 +885,7 @@ export function dashboardHtml(input: { runId: string }) {
         (runner?.pid ? '<br><span class="code-meta">pid ' + escapeHtml(runner.pid) + '</span>' : '') +
         (runner?.exitCode !== undefined && runner?.exitCode !== null ? '<br><span class="code-meta">exit ' + escapeHtml(runner.exitCode) + '</span>' : '') +
         '</div></div>' +
+        (issue ? '<div class="current-task"><div class="current-task-title">' + escapeHtml(issue.timedOut ? "Connection timed out" : "Latest runner issue") + '</div><div class="current-task-meta">' + escapeHtml(issue.taskGoal) + '<br><span class="code-meta">' + escapeHtml(issue.attemptId) + '</span></div><div class="stream-output">' + escapeHtml(issue.text) + '</div></div>' : '') +
         (runner?.lastOutput ? '<div class="stream-output">' + escapeHtml(runner.lastOutput) + '</div>' : '') +
         '<div class="control-row"><button class="plain-button" data-start-runner>Start runner</button><button class="plain-button danger" data-stop-runner>Stop runner</button></div>' +
         '</section>';
@@ -997,7 +1011,7 @@ export function dashboardHtml(input: { runId: string }) {
       setHtmlIfChanged("active-goal-list", activeGroups.length ? activeGroups.map(goalRow).join("") : '<div class="empty"><strong>Idle</strong>No active tasks. Open a blocked history goal and rerun it, or add a new goal.</div>');
       setHtmlIfChanged("history-goal-list", [...goalGroups].reverse().filter((group) => group.activeTasks.length === 0).map(goalRow).join(""));
       patchWorkspace(renderWorkspace(selectedGroup));
-      setHtmlIfChanged("inspector-panel", renderInspector(overview, selectedGroup) + renderRunner(overview.runner));
+      setHtmlIfChanged("inspector-panel", renderInspector(overview, selectedGroup) + renderRunner(overview.runner, runnerIssue(overview)));
     }
     document.addEventListener("click", (event) => {
       if (!event.target || !event.target.closest) return;
