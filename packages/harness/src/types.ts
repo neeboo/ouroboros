@@ -47,6 +47,7 @@ export interface AttemptEvent {
 
 export interface AttemptOutput {
   status: "done" | "blocked";
+  runDecision?: "complete" | "continue" | "verify";
   summary: string;
   changedFiles?: string[];
   checks?: unknown[];
@@ -105,6 +106,11 @@ export interface CreateRunInput {
   goal: string;
   context?: Record<string, unknown>;
   id?: string;
+}
+
+export interface UpdateRunStatusInput {
+  runId: string;
+  status: Status;
 }
 
 export interface CreateTaskInput {

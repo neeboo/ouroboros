@@ -447,6 +447,17 @@ async function runCodexResumableLoop(input: { runId: string; maxRounds: number; 
 
     const started = await startReadyCodexAttempts({ runId: input.runId, limit: input.limit });
     if (started.length === 0) {
+      const review = ensureGoalReviewTask(input.runId);
+      if (review.created) {
+        const reviewed = await startReadyCodexAttempts({ runId: input.runId, limit: input.limit });
+        if (reviewed.length > 0) {
+          rounds.push({ index, tasks: reviewed, goalReview: review });
+          if (reviewed.some((task) => task.status === "running")) {
+            break;
+          }
+          continue;
+        }
+      }
       break;
     }
     rounds.push({ index, tasks: started });
@@ -455,6 +466,40 @@ async function runCodexResumableLoop(input: { runId: string; maxRounds: number; 
     }
   }
   return { rounds };
+}
+
+function ensureGoalReviewTask(runId: string) {
+  const run = harness.getRun(runId);
+  if (!run) {
+    fail(`run not found: ${runId}`);
+  }
+  if (run.status === "done") {
+    return { created: false as const, reason: "run_done" };
+  }
+  const overview = harness.getRunOverview({ runId, eventLimit: 0 });
+  if (overview.tasks.some((task) => task.status === "todo" || task.status === "running")) {
+    return { created: false as const, reason: "active_tasks" };
+  }
+  const taskId = harness.createTask({
+    runId,
+    role: "goal-review",
+    goal: "Review whether the run goal is complete",
+    prompt: [
+      "Answer this before creating more work: are we sure the original run goal has been reached?",
+      "",
+      "Inspect the repository, README, tests, dashboard state, recent attempts, and run lessons.",
+      "Return structured JSON with one of these decisions:",
+      "- runDecision complete: the run goal is satisfied; do not include nextTasks.",
+      "- runDecision continue: the run goal is not satisfied; include exactly one nextTasks item, usually a planner.",
+      "- runDecision verify: completion is uncertain; include exactly one verifier nextTasks item.",
+    ].join("\n"),
+    doneWhen: [
+      "runDecision is complete, continue, or verify",
+      "complete does not create nextTasks",
+      "continue or verify includes exactly one nextTasks item",
+    ],
+  });
+  return { created: true as const, taskId };
 }
 
 async function resumeRunningCodexAttempts(input: { runId: string; limit: number }) {
@@ -612,6 +657,13 @@ async function applyCliStopHooks(input: {
     problems: [...(input.output.problems ?? [])],
   };
   let decision: "continue" | "retry" | "exit" = "exit";
+  if (input.task.role === "goal-review") {
+    const result = applyGoalReviewDecision(input);
+    return {
+      output: result.output,
+      decision: result.decision,
+    };
+  }
   const hooks = [
     ...(stopHooksByRole()[input.task.role as "planner" | "worker" | "verifier"] ?? []),
   ];
@@ -636,6 +688,70 @@ async function applyCliStopHooks(input: {
     }
   }
   return { output, decision };
+}
+
+function applyGoalReviewDecision(input: {
+  run: NonNullable<ReturnType<Harness["getRun"]>>;
+  task: NonNullable<ReturnType<Harness["getTask"]>>;
+  output: AttemptOutput;
+}) {
+  const output = {
+    ...input.output,
+    checks: [...(input.output.checks ?? [])],
+    artifacts: [...(input.output.artifacts ?? [])],
+    problems: [...(input.output.problems ?? [])],
+  };
+  if (!output.runDecision) {
+    output.status = "blocked";
+    output.problems = [...(output.problems ?? []), "goal-review output must include runDecision"];
+    return { output, decision: "exit" as const };
+  }
+  output.artifacts = [
+    ...(output.artifacts ?? []),
+    {
+      kind: "goal_review",
+      runDecision: output.runDecision,
+      taskId: input.task.id,
+    },
+  ];
+
+  if (output.runDecision === "complete") {
+    if ((output.nextTasks ?? []).length > 0) {
+      output.status = "blocked";
+      output.problems = [...(output.problems ?? []), "complete goal-review must not include nextTasks"];
+      return { output, decision: "exit" as const };
+    }
+    harness.updateRunStatus({ runId: input.run.id, status: "done" });
+    return { output, decision: "exit" as const };
+  }
+
+  const nextTasks = output.nextTasks ?? [];
+  if (nextTasks.length !== 1) {
+    output.status = "blocked";
+    output.problems = [
+      ...(output.problems ?? []),
+      `${output.runDecision} goal-review must include exactly one nextTasks item`,
+    ];
+    return { output, decision: "exit" as const };
+  }
+
+  const created = nextTasks.map((plannedTask) => {
+    const taskId = harness.createTask({
+      runId: input.run.id,
+      role: plannedTask.role,
+      goal: plannedTask.goal,
+      prompt: plannedTask.prompt,
+      dependsOn: plannedTask.dependsOn ?? [input.task.id],
+      doneWhen: plannedTask.doneWhen ?? [],
+    });
+    return {
+      kind: "created_task",
+      taskId,
+      sourceTaskId: input.task.id,
+    };
+  });
+  output.artifacts = [...(output.artifacts ?? []), ...created];
+  return { output, decision: "exit" as const };
 }
 
 function codexResumableClient() {

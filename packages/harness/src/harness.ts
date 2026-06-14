@@ -42,6 +42,7 @@ import type {
   RetryTaskInput,
   StartAttemptInput,
   Status,
+  UpdateRunStatusInput,
   UpdateAttemptInputInput,
 } from "./types";
 
@@ -71,6 +72,21 @@ export class Harness {
         $contextJson: toJson(input.context ?? {}),
       });
       return id;
+    });
+  }
+
+  updateRunStatus(input: UpdateRunStatusInput) {
+    return withDatabase(this.dbPath, (db) => {
+      db.query(
+        `
+        update runs
+        set status = $status, updated_at = current_timestamp
+        where id = $runId
+        `,
+      ).run({
+        $status: input.status,
+        $runId: input.runId,
+      });
     });
   }
 

@@ -913,6 +913,87 @@ describe("CLI", () => {
     });
   });
 
+  test("run-loop reviews the goal when the queue is empty and can complete the run", async () => {
+    await runCli("init");
+    const run = await runCliJson("create-run", "--goal", "Bootstrap ouroboros");
+    const codexBin = join(dir, "fake-codex-goal-complete");
+    await writeFile(
+      codexBin,
+      [
+        "#!/usr/bin/env bun",
+        "const prompt = await new Response(Bun.stdin.stream()).text();",
+        "if (!prompt.includes('Role: goal-review')) process.exit(2);",
+        "console.log(JSON.stringify({ status: 'done', runDecision: 'complete', summary: 'goal reached', changedFiles: [], checks: [], artifacts: [], problems: [] }));",
+      ].join("\n"),
+    );
+    await chmod(codexBin, 0o755);
+
+    const result = await runCliJson(
+      "run-loop",
+      "--run-id",
+      run.id,
+      "--executor",
+      "codex-resumable",
+      "--codex-bin",
+      codexBin,
+      "--cwd",
+      "/repo",
+      "--max-rounds",
+      "1",
+    );
+    const overview = await runCliJson("run-overview", "--run-id", run.id);
+
+    expect(result.rounds[0].tasks).toEqual([
+      expect.objectContaining({
+        status: "done",
+      }),
+    ]);
+    expect(overview.run.status).toBe("done");
+    expect(overview.tasks).toEqual([
+      expect.objectContaining({
+        role: "goal-review",
+        status: "done",
+      }),
+    ]);
+    expect(await runCliJson("next-task", "--run-id", run.id)).toBeNull();
+  });
+
+  test("run-loop reviews the goal when idle and can create a planner when more work remains", async () => {
+    await runCli("init");
+    const run = await runCliJson("create-run", "--goal", "Bootstrap ouroboros");
+    const codexBin = join(dir, "fake-codex-goal-continue");
+    await writeFile(
+      codexBin,
+      [
+        "#!/usr/bin/env bun",
+        "const prompt = await new Response(Bun.stdin.stream()).text();",
+        "if (!prompt.includes('Role: goal-review')) process.exit(2);",
+        "console.log(JSON.stringify({ status: 'done', runDecision: 'continue', summary: 'more work remains', changedFiles: [], checks: [], artifacts: [], problems: [], nextTasks: [{ role: 'planner', goal: 'Plan the gap', prompt: 'Choose the next gap.', doneWhen: ['gap planned'] }] }));",
+      ].join("\n"),
+    );
+    await chmod(codexBin, 0o755);
+
+    await runCliJson(
+      "run-loop",
+      "--run-id",
+      run.id,
+      "--executor",
+      "codex-resumable",
+      "--codex-bin",
+      codexBin,
+      "--cwd",
+      "/repo",
+      "--max-rounds",
+      "1",
+    );
+    const next = await runCliJson("next-task", "--run-id", run.id);
+
+    expect(next).toMatchObject({
+      role: "planner",
+      goal: "Plan the gap",
+    });
+  });
+
   test("lists lessons recorded from attempts", async () => {
     await runCli("init");
     const run = await runCliJson("create-run", "--goal", "Bootstrap ouroboros");

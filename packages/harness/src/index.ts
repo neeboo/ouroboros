@@ -33,5 +33,6 @@ export type {
   SetPromptTemplateInput,
   Status,
   Task,
+  UpdateRunStatusInput,
   UpdateAttemptInputInput,
 } from "./types";

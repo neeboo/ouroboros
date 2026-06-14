@@ -73,6 +73,8 @@ bun run cli -- set-prompt-template --key task --content "# Custom template..."
 
 `run-loop` repeats the same leasing and execution flow until there are no ready tasks, or until `--max-rounds` is reached.
 
+For `codex-resumable`, an idle run does not blindly create another planner. When there are no `todo` or `running` tasks, `run-loop` creates a `goal-review` task that asks whether the original run goal is complete. A `goal-review` attempt must return `runDecision: "complete"`, `"continue"`, or `"verify"`. `complete` marks the run done and creates no tasks. `continue` or `verify` must include exactly one `nextTasks` item.
+
 Use `--worktree-root` to assign each leased task a separate working directory path. The executor receives that path as its cwd.
 
 Use `--start-hook git-worktree` with `--worktree-root` to create a real git worktree before the subagent runs.

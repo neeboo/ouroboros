@@ -26,6 +26,7 @@ export function parseAttemptOutput(raw: string): AttemptOutput {
   }
   return {
     status: parsed.status,
+    runDecision: validateRunDecision(parsed.runDecision),
     summary: String(parsed.summary ?? ""),
     changedFiles: Array.isArray(parsed.changedFiles) ? parsed.changedFiles.map(String) : [],
     checks: Array.isArray(parsed.checks) ? parsed.checks : [],
@@ -33,6 +34,16 @@ export function parseAttemptOutput(raw: string): AttemptOutput {
     problems: Array.isArray(parsed.problems) ? parsed.problems.map(String) : [],
     nextTasks: validatePlannedTasks(parsed.nextTasks),
   };
+}
+
+function validateRunDecision(value: unknown) {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (value !== "complete" && value !== "continue" && value !== "verify") {
+    throw new Error("agent output runDecision must be 'complete', 'continue', or 'verify'");
+  }
+  return value;
 }
 
 export function validatePlannedTasks(nextTasks: unknown): PlannedTask[] {
