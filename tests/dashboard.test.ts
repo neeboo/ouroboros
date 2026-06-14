@@ -34,6 +34,9 @@ describe("dashboard", () => {
     expect(html).toContain("task.cycleId");
     expect(html).toContain("transcript");
     expect(html).toContain("stream-output");
+    expect(html).toContain("stream-line");
+    expect(html).toContain("eventText");
+    expect(html).toContain("streamOutput");
     expect(html).toContain("renderWorkspace");
     expect(html).toContain("renderInspector");
   });
@@ -45,6 +48,7 @@ describe("dashboard", () => {
     expect(html).toContain("doneWhen");
     expect(html).toContain("checkbox");
     expect(html).toContain(".todo-item.done");
+    expect(html).toContain("current-task");
     expect(html).toContain("aria-hidden");
     expect(html).toContain("Progress");
     expect(html).not.toContain("<h2>Lessons</h2>");

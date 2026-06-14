@@ -422,8 +422,8 @@ export function dashboardHtml(input: { runId: string }) {
     }
     .stream-output {
       margin: 18px 0 0;
-      max-height: 260px;
-      overflow: hidden;
+      max-height: 320px;
+      overflow: auto;
       padding: 14px 0 0 16px;
       border-left: 1px solid rgba(255, 255, 255, 0.12);
       color: #efefea;
@@ -431,6 +431,9 @@ export function dashboardHtml(input: { runId: string }) {
       font-size: 11px;
       line-height: 1.6;
       white-space: pre-wrap;
+    }
+    .stream-line + .stream-line {
+      margin-top: 8px;
     }
     .tool-line {
       margin-top: 14px;
@@ -470,6 +473,23 @@ export function dashboardHtml(input: { runId: string }) {
       margin: 0;
       padding: 0;
       list-style: none;
+    }
+    .current-task {
+      margin: 0 0 20px;
+      padding-bottom: 18px;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+    }
+    .current-task-title {
+      color: #efeee9;
+      font-size: 13px;
+      font-weight: 690;
+      line-height: 1.5;
+    }
+    .current-task-meta {
+      margin-top: 8px;
+      color: var(--muted);
+      font-size: 11px;
+      line-height: 1.55;
     }
     .todo-item {
       display: grid;
@@ -674,7 +694,23 @@ export function dashboardHtml(input: { runId: string }) {
       '"': "&quot;",
       "'": "&#39;"
     }[char]));
-    const latestText = (session) => session.latestText || session.events.map((event) => event.text || event.payload?.delta || event.payload?.message || "").filter(Boolean).slice(-1)[0] || "";
+    const eventText = (event) => {
+      if (event.text && String(event.text).trim()) return String(event.text).trim();
+      const payload = event.payload || {};
+      for (const key of ["delta", "message", "text", "content"]) {
+        if (typeof payload[key] === "string" && payload[key].trim()) return payload[key].trim();
+      }
+      return "";
+    };
+    const latestText = (session) => session.latestText || session.events.map(eventText).filter(Boolean).slice(-1)[0] || "";
+    const streamOutput = (session) => {
+      const lines = (session.events || []).map(eventText).filter(Boolean).slice(-20);
+      if (lines.length === 0 && latestText(session)) lines.push(latestText(session));
+      if (lines.length === 0) return '<div class="turn-text">No stream output recorded.</div>';
+      return '<div class="stream-output" data-attempt-stream="' + escapeHtml(session.attemptId) + '">' +
+        lines.map((line, index) => '<div class="stream-line" data-event-index="' + index + '">' + escapeHtml(line) + '</div>').join("") +
+        '</div>';
+    };
     const promptLink = (task) => '<a class="prompt-link" target="_blank" rel="noreferrer" href="/tasks/' + encodeURIComponent(task.id) + '/prompt">Prompt</a>';
     let selectedGoalId = null;
     let latestOverview = null;
@@ -753,7 +789,7 @@ export function dashboardHtml(input: { runId: string }) {
           '<div class="tool-line code-meta">task ' + escapeHtml(session.taskId) + ' · attempt ' + escapeHtml(session.attemptId) +
           (session.sessionName ? '<br>session ' + escapeHtml(session.sessionName) : '') +
           (session.codexSessionId ? '<br>codex ' + escapeHtml(session.codexSessionId) : '') + '</div>' +
-          (latestText(session) ? '<div class="stream-output">' + escapeHtml(latestText(session)) + '</div>' : '<div class="turn-text">No stream output recorded.</div>'),
+          streamOutput(session),
       });
     const renderWorkspace = (group) => {
       if (!group) return '<div class="flow-inner"><div class="empty">No goal selected</div></div>';
@@ -792,8 +828,12 @@ export function dashboardHtml(input: { runId: string }) {
       const doneWhen = group.tasks.flatMap((task) => (Array.isArray(task.doneWhen) ? task.doneWhen : []).map((item) => ({ task, item })));
       const resumableTasks = group.tasks.filter((task) => task.status === "blocked");
       const runningSessions = group.sessions.filter((session) => session.status === "running");
+      const currentTask = group.tasks.find((task) => task.status === "running") ||
+        group.tasks.find((task) => task.status === "todo") ||
+        [...group.tasks].reverse().find((task) => task.status === "blocked" || task.status === "done");
       const rerunnableTask = runningSessions.length ? null : [...group.tasks].reverse().find((task) => task.status === "blocked" || task.status === "done");
       return '<section class="inspector-card"><h2>Progress</h2>' +
+        (currentTask ? '<div class="current-task"><div class="current-task-title">' + escapeHtml(currentTask.goal) + '</div><div class="current-task-meta">' + escapeHtml(currentTask.role) + ' · <span class="status-text ' + escapeHtml(currentTask.status) + '">' + escapeHtml(currentTask.status) + '</span><br><span class="code-meta">' + escapeHtml(currentTask.id) + '</span></div></div>' : '') +
         (doneWhen.length ? '<ul class="todo-list">' + doneWhen.map(({ task, item }) =>
           '<li class="todo-item ' + (task.status === "done" ? "done" : "") + '"><span class="checkbox ' + (task.status === "done" ? "done" : "") + '" aria-hidden="true"></span><span class="todo-text">' + escapeHtml(item) + '<span class="meta">' + escapeHtml(task.role) + '</span></span></li>'
         ).join("") + '</ul>' : '<div class="empty">No todos recorded</div>') +
@@ -861,6 +901,9 @@ export function dashboardHtml(input: { runId: string }) {
         currentTranscript.appendChild(currentTurn);
       }
       renderedHtml.set("workspace-flow", html);
+      for (const stream of node.querySelectorAll(".stream-output")) {
+        stream.scrollTop = stream.scrollHeight;
+      }
     };
     const overviewWorkerSource = [
       'let runId = null;',
