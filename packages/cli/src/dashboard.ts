@@ -1066,8 +1066,31 @@ export function dashboardHtml(input: { runId: string }) {
         '</div>';
     };
     const promptLink = (task) => '<a class="prompt-link" target="_blank" rel="noreferrer" href="/tasks/' + encodeURIComponent(task.id) + '/prompt">Prompt</a>';
-    let selectedGoalId = null;
-    let workspaceMode = "flow";
+    const dashboardStorageKey = "ouroboros:dashboard:" + runId;
+    const isWorkspaceMode = (value) => value === "canvas" || value === "flow";
+    const readDashboardState = () => {
+      try {
+        const parsed = JSON.parse(window.localStorage?.getItem(dashboardStorageKey) || "{}");
+        return {
+          selectedGoalId: typeof parsed.selectedGoalId === "string" ? parsed.selectedGoalId : null,
+          workspaceMode: isWorkspaceMode(parsed.workspaceMode) ? parsed.workspaceMode : null,
+        };
+      } catch {
+        return { selectedGoalId: null, workspaceMode: null };
+      }
+    };
+    const writeDashboardState = (state) => {
+      try {
+        window.localStorage?.setItem(dashboardStorageKey, JSON.stringify({
+          selectedGoalId: typeof state.selectedGoalId === "string" ? state.selectedGoalId : null,
+          workspaceMode: isWorkspaceMode(state.workspaceMode) ? state.workspaceMode : "flow",
+        }));
+      } catch {
+      }
+    };
+    const restoredDashboardState = readDashboardState();
+    let selectedGoalId = restoredDashboardState.selectedGoalId || null;
+    let workspaceMode = restoredDashboardState.workspaceMode || "flow";
     let latestOverview = null;
     const groupStatus = (tasks) => {
       if (tasks.some((task) => task.status === "running")) return "running";
@@ -1340,14 +1363,14 @@ export function dashboardHtml(input: { runId: string }) {
       }
     };
     const renderInspector = (overview, group) => {
-      if (!group) return '<section class="inspector-card"><h2>Detail</h2><div class="empty">Select a goal</div></section>';
+      if (!group) return '<section class="inspector-card" data-inspector-section="progress"><h2>Detail</h2><div class="empty">Select a goal</div></section>';
       const doneWhen = group.tasks.flatMap((task) => (Array.isArray(task.doneWhen) ? task.doneWhen : []).map((item) => ({ task, item })));
       const runningSessions = group.sessions.filter((session) => session.status === "running");
       const currentTask = group.tasks.find((task) => task.status === "running") ||
         group.tasks.find((task) => task.status === "todo") ||
         [...group.tasks].reverse().find((task) => task.status === "blocked" || task.status === "done");
       const rerunnableTask = runningSessions.length ? null : [...group.tasks].reverse().find((task) => task.status === "blocked" || task.status === "done");
-      return '<section class="inspector-card"><h2>Progress</h2>' +
+      return '<section class="inspector-card" data-inspector-section="progress"><h2>Progress</h2>' +
         (currentTask ? '<div class="current-task"><div class="current-task-title">' + escapeHtml(currentTask.goal) + '</div><div class="current-task-meta">' + escapeHtml(currentTask.role) + ' · <span class="status-text ' + escapeHtml(currentTask.status) + '">' + escapeHtml(currentTask.status) + '</span><br><span class="code-meta">' + escapeHtml(currentTask.id) + '</span></div></div>' : '') +
         (doneWhen.length ? '<ul class="todo-list">' + doneWhen.map(({ task, item }) =>
           '<li class="todo-item ' + (task.status === "done" ? "done" : "") + '"><span class="checkbox ' + (task.status === "done" ? "done" : "") + '" aria-hidden="true"></span><span class="todo-text">' + escapeHtml(item) + '<span class="meta">' + escapeHtml(task.role) + '</span></span></li>'
@@ -1388,7 +1411,7 @@ export function dashboardHtml(input: { runId: string }) {
       const statusClass = status === "running" ? "running" : runDone || runner?.exitCode === 0 ? "done" : status === "exited" ? "blocked" : "todo";
       const title = runDone ? "Run complete" : status === "running" ? "Background runner" : "Runner idle";
       const meta = runDone ? "goal reached" : status === "running" ? "background loop is active" : canStart ? "ready to process queued work" : "no queued work";
-      return '<section class="inspector-card"><h2>Runner</h2>' +
+      return '<section class="inspector-card" data-inspector-section="runner"><h2>Runner</h2>' +
         '<div class="current-task"><div class="current-task-title">' + escapeHtml(title) + '</div><div class="current-task-meta">' + escapeHtml(meta) + ' · <span class="status-text ' + escapeHtml(statusClass) + '">' + escapeHtml(status) + '</span>' +
         (runner?.pid ? '<br><span class="code-meta">pid ' + escapeHtml(runner.pid) + '</span>' : '') +
         (runner?.exitCode !== undefined && runner?.exitCode !== null ? '<br><span class="code-meta">exit ' + escapeHtml(runner.exitCode) + '</span>' : '') +
@@ -1429,6 +1452,42 @@ export function dashboardHtml(input: { runId: string }) {
       const node = document.getElementById(id);
       if (node) node.innerHTML = html;
     };
+    const patchKeyedChildren = (id, html, keyAttribute) => {
+      if (renderedHtml.get(id) === html) return;
+      const node = document.getElementById(id);
+      if (!node) return;
+      const template = document.createElement("template");
+      template.innerHTML = html;
+      const nextChildren = Array.from(template.content.children);
+      const keyedNextChildren = nextChildren.filter((child) => child.hasAttribute(keyAttribute));
+      if (keyedNextChildren.length === 0) {
+        renderedHtml.set(id, html);
+        node.innerHTML = html;
+        return;
+      }
+      const nextKeys = new Set(keyedNextChildren.map((child) => child.getAttribute(keyAttribute)));
+      for (const currentChild of Array.from(node.children)) {
+        const key = currentChild.getAttribute(keyAttribute);
+        if (!key || !nextKeys.has(key)) currentChild.remove();
+      }
+      for (const nextChild of keyedNextChildren) {
+        const key = nextChild.getAttribute(keyAttribute);
+        const currentChild = node.querySelector("[" + keyAttribute + "=\\"" + CSS.escape(key) + "\\"]");
+        if (!currentChild) {
+          node.appendChild(nextChild.cloneNode(true));
+          continue;
+        }
+        if (currentChild.outerHTML !== nextChild.outerHTML) {
+          currentChild.replaceWith(nextChild.cloneNode(true));
+          continue;
+        }
+        node.appendChild(currentChild);
+      }
+      renderedHtml.set(id, html);
+    };
+    const patchInspectorPanel = (progressHtml, runnerHtml) => {
+      patchKeyedChildren("inspector-panel", progressHtml + runnerHtml, "data-inspector-section");
+    };
     const syncWorkspaceToggle = () => {
       for (const button of document.querySelectorAll("[data-workspace-mode]")) {
         const active = button.getAttribute("data-workspace-mode") === workspaceMode;
@@ -1436,22 +1495,83 @@ export function dashboardHtml(input: { runId: string }) {
         button.setAttribute("aria-pressed", active ? "true" : "false");
       }
     };
-    const scrollWorkspaceToBottom = () => {
+    const captureFlowScrollState = () => {
       if (workspaceMode !== "flow") return;
       const node = document.getElementById("workspace-flow");
       if (!node) return;
+      const distanceFromBottom = node.scrollHeight - node.scrollTop - node.clientHeight;
+      return {
+        scrollTop: node.scrollTop,
+        shouldFollowBottom: distanceFromBottom <= 48,
+        streams: Array.from(node.querySelectorAll(".stream-output[data-attempt-stream]")).map((stream) => {
+          const streamDistanceFromBottom = stream.scrollHeight - stream.scrollTop - stream.clientHeight;
+          return {
+            attemptId: stream.getAttribute("data-attempt-stream"),
+            scrollTop: stream.scrollTop,
+            shouldFollowBottom: streamDistanceFromBottom <= 48,
+          };
+        }),
+      };
+    };
+    const restoreFlowScrollState = (scrollState) => {
+      if (workspaceMode !== "flow" || !scrollState) return;
+      const node = document.getElementById("workspace-flow");
+      if (!node) return;
       requestAnimationFrame(() => {
-        node.scrollTop = node.scrollHeight;
-        for (const stream of node.querySelectorAll(".stream-output")) {
-          stream.scrollTop = stream.scrollHeight;
+        node.scrollTop = scrollState.shouldFollowBottom ? node.scrollHeight : scrollState.scrollTop;
+        for (const stream of node.querySelectorAll(".stream-output[data-attempt-stream]")) {
+          const streamScroll = scrollState.streams.find((item) => item.attemptId === stream.getAttribute("data-attempt-stream"));
+          if (!streamScroll) continue;
+          stream.scrollTop = streamScroll.shouldFollowBottom ? stream.scrollHeight : streamScroll.scrollTop;
         }
       });
+    };
+    const patchStreamOutput = (currentStream, nextStream) => {
+      const nextLines = Array.from(nextStream.querySelectorAll("[data-event-index]"));
+      if (nextLines.length === 0) {
+        if (currentStream.innerHTML !== nextStream.innerHTML) currentStream.innerHTML = nextStream.innerHTML;
+        return;
+      }
+      const nextIndexes = new Set(nextLines.map((line) => line.getAttribute("data-event-index")));
+      for (const currentLine of Array.from(currentStream.querySelectorAll("[data-event-index]"))) {
+        if (!nextIndexes.has(currentLine.getAttribute("data-event-index"))) currentLine.remove();
+      }
+      for (const nextLine of nextLines) {
+        const index = nextLine.getAttribute("data-event-index");
+        const currentLine = currentStream.querySelector('[data-event-index="' + CSS.escape(index) + '"]');
+        if (!currentLine) {
+          currentStream.appendChild(nextLine.cloneNode(true));
+          continue;
+        }
+        if (currentLine.outerHTML !== nextLine.outerHTML) {
+          currentLine.replaceWith(nextLine.cloneNode(true));
+          continue;
+        }
+        currentStream.appendChild(currentLine);
+      }
+    };
+    const patchWorkspaceTurn = (currentTurn, nextTurn) => {
+      if (currentTurn.outerHTML === nextTurn.outerHTML) return;
+      for (const nextStream of nextTurn.querySelectorAll(".stream-output[data-attempt-stream]")) {
+        const attemptId = nextStream.getAttribute("data-attempt-stream");
+        const currentStream = currentTurn.querySelector('.stream-output[data-attempt-stream="' + CSS.escape(attemptId) + '"]');
+        if (currentStream) patchStreamOutput(currentStream, nextStream);
+      }
+      if (currentTurn.outerHTML === nextTurn.outerHTML) return;
+      const patchedTurn = nextTurn.cloneNode(true);
+      for (const nextStream of Array.from(patchedTurn.querySelectorAll(".stream-output[data-attempt-stream]"))) {
+        const attemptId = nextStream.getAttribute("data-attempt-stream");
+        const currentStream = currentTurn.querySelector('.stream-output[data-attempt-stream="' + CSS.escape(attemptId) + '"]');
+        if (currentStream) nextStream.replaceWith(currentStream);
+      }
+      currentTurn.replaceChildren(...Array.from(patchedTurn.childNodes));
     };
     const patchWorkspace = (html) => {
       const node = document.getElementById("workspace-flow");
       if (!node) return;
+      const scrollState = captureFlowScrollState();
       if (renderedHtml.get("workspace-flow") === html) {
-        scrollWorkspaceToBottom();
+        restoreFlowScrollState(scrollState);
         return;
       }
       const template = document.createElement("template");
@@ -1461,7 +1581,7 @@ export function dashboardHtml(input: { runId: string }) {
       if (!nextTranscript || !currentTranscript) {
         renderedHtml.set("workspace-flow", html);
         node.innerHTML = html;
-        scrollWorkspaceToBottom();
+        restoreFlowScrollState(scrollState);
         return;
       }
       const nextTurns = Array.from(nextTranscript.querySelectorAll("[data-turn-key]"));
@@ -1476,14 +1596,11 @@ export function dashboardHtml(input: { runId: string }) {
           currentTranscript.appendChild(nextTurn.cloneNode(true));
           continue;
         }
-        if (currentTurn.outerHTML !== nextTurn.outerHTML) {
-          currentTurn.replaceWith(nextTurn.cloneNode(true));
-          continue;
-        }
+        patchWorkspaceTurn(currentTurn, nextTurn);
         currentTranscript.appendChild(currentTurn);
       }
       renderedHtml.set("workspace-flow", html);
-      scrollWorkspaceToBottom();
+      restoreFlowScrollState(scrollState);
     };
     const overviewWorkerSource = [
       'let runId = null;',
@@ -1528,6 +1645,7 @@ export function dashboardHtml(input: { runId: string }) {
       const activeGroups = goalGroups.filter((group) => group.activeTasks.length > 0);
       if (!selectedGoalId || !goalGroups.some((group) => group.id === selectedGoalId)) {
         selectedGoalId = (activeGroups[0] || goalGroups[goalGroups.length - 1] || {}).id || null;
+        writeDashboardState({ selectedGoalId, workspaceMode });
       }
       const selectedGroup = goalGroups.find((group) => group.id === selectedGoalId);
       setTextIfChanged("run-status", overview.run?.status || "unknown");
@@ -1546,13 +1664,14 @@ export function dashboardHtml(input: { runId: string }) {
       setHtmlIfChanged("history-goal-list", [...goalGroups].reverse().filter((group) => group.activeTasks.length === 0).map(goalRow).join(""));
       patchWorkspace(renderWorkspace(selectedGroup));
       mountReactFlowCanvas();
-      setHtmlIfChanged("inspector-panel", renderInspector(overview, selectedGroup) + renderRunner(overview));
+      patchInspectorPanel(renderInspector(overview, selectedGroup), renderRunner(overview));
     }
     document.addEventListener("click", (event) => {
       if (!event.target || !event.target.closest) return;
       const modeButton = event.target.closest("[data-workspace-mode]");
       if (modeButton) {
         workspaceMode = modeButton.getAttribute("data-workspace-mode") || "flow";
+        writeDashboardState({ selectedGoalId, workspaceMode });
         if (latestOverview) render(latestOverview);
         return;
       }
@@ -1619,6 +1738,7 @@ export function dashboardHtml(input: { runId: string }) {
       const row = event.target.closest("[data-goal-id]");
       if (!row) return;
       selectedGoalId = row.getAttribute("data-goal-id");
+      writeDashboardState({ selectedGoalId, workspaceMode });
       if (latestOverview) render(latestOverview);
     });
     document.getElementById("goal-composer").addEventListener("submit", (event) => {
@@ -1638,6 +1758,7 @@ export function dashboardHtml(input: { runId: string }) {
         .then((payload) => {
           input.value = "";
           selectedGoalId = payload.taskId || selectedGoalId;
+          writeDashboardState({ selectedGoalId, workspaceMode });
           setGoalFormStatus(action === "interrupt" ? "Interrupted. Planner queued." : "Planner queued.");
           refreshOverview();
         })

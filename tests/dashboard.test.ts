@@ -46,8 +46,9 @@ describe("dashboard", () => {
     expect(html).toContain("renderWorkspace");
     expect(html).toContain("renderInspector");
     expect(html).toContain("orderedSessions");
-    expect(html).toContain("scrollWorkspaceToBottom");
-    expect(html).toContain("node.scrollTop = node.scrollHeight");
+    expect(html).toContain("captureFlowScrollState");
+    expect(html).toContain("restoreFlowScrollState");
+    expect(html).toContain("node.scrollTop = scrollState.shouldFollowBottom ? node.scrollHeight : scrollState.scrollTop");
   });
 
   test("renders Canvas and Flow workspace modes for the selected task graph", () => {
@@ -71,6 +72,55 @@ describe("dashboard", () => {
     expect(html).toContain("task.cycleId");
     expect(html).toContain("transcript");
     expect(html).toContain("stream-output");
+  });
+
+  test("persists selected goal and workspace mode in run-scoped browser storage", () => {
+    const html = dashboardHtml({ runId: "run_123" });
+
+    expect(html).toContain('const dashboardStorageKey = "ouroboros:dashboard:" + runId;');
+    expect(html).toContain("readDashboardState");
+    expect(html).toContain("writeDashboardState");
+    expect(html).toContain("const restoredDashboardState = readDashboardState();");
+    expect(html).toContain("let selectedGoalId = restoredDashboardState.selectedGoalId || null;");
+    expect(html).toContain('let workspaceMode = restoredDashboardState.workspaceMode || "flow";');
+    expect(html).toContain("writeDashboardState({ selectedGoalId, workspaceMode });");
+    expect(html).toContain("selectedGoalId = payload.taskId || selectedGoalId;");
+    expect(html).toContain("writeDashboardState({ selectedGoalId, workspaceMode });");
+    expect(html).not.toContain('localStorage.setItem("selectedGoalId"');
+    expect(html).not.toContain('localStorage.getItem("selectedGoalId"');
+  });
+
+  test("preserves flow scroll position across refresh patches unless already near bottom", () => {
+    const html = dashboardHtml({ runId: "run_123" });
+
+    expect(html).toContain("captureFlowScrollState");
+    expect(html).toContain("restoreFlowScrollState");
+    expect(html).toContain("shouldFollowBottom");
+    expect(html).toContain("distanceFromBottom <= 48");
+    expect(html).toContain("node.scrollTop = scrollState.shouldFollowBottom ? node.scrollHeight : scrollState.scrollTop;");
+    expect(html).toContain("stream.scrollTop = streamScroll.shouldFollowBottom ? stream.scrollHeight : streamScroll.scrollTop;");
+    expect(html).not.toContain("node.scrollTop = node.scrollHeight;");
+  });
+
+  test("patches dashboard refreshes without replacing major visible panels", () => {
+    const html = dashboardHtml({ runId: "run_123" });
+
+    expect(html).toContain("patchKeyedChildren");
+    expect(html).toContain("patchInspectorPanel");
+    expect(html).toContain('data-inspector-section="progress"');
+    expect(html).toContain('data-inspector-section="runner"');
+    expect(html).toContain('patchKeyedChildren("inspector-panel"');
+    expect(html).not.toContain('setHtmlIfChanged("inspector-panel", renderInspector(overview, selectedGroup) + renderRunner(overview));');
+  });
+
+  test("patches stream output in place instead of replacing the whole flow turn", () => {
+    const html = dashboardHtml({ runId: "run_123" });
+
+    expect(html).toContain("patchWorkspaceTurn");
+    expect(html).toContain("patchStreamOutput");
+    expect(html).toContain("[data-event-index]");
+    expect(html).toContain("currentStream.appendChild(nextLine.cloneNode(true));");
+    expect(html).not.toContain("currentTurn.replaceWith(nextTurn.cloneNode(true));");
   });
 
   test("serves bundled React Flow canvas assets", async () => {
