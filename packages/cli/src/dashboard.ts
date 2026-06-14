@@ -340,6 +340,15 @@ export function dashboardHtml(input: { runId: string }) {
       background: rgba(18, 18, 18, 0.88);
       backdrop-filter: blur(12px);
     }
+    .workspace-head-row {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 18px;
+    }
+    .workspace-title-block {
+      min-width: 0;
+    }
     .workspace-kicker {
       color: var(--muted-2);
       font-size: 11px;
@@ -355,6 +364,34 @@ export function dashboardHtml(input: { runId: string }) {
       font-weight: 720;
       line-height: 1.45;
     }
+    .workspace-toggle {
+      flex: 0 0 auto;
+      display: inline-grid;
+      grid-template-columns: repeat(2, minmax(72px, 1fr));
+      gap: 3px;
+      padding: 3px;
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.055);
+    }
+    .workspace-toggle button {
+      min-width: 0;
+      height: 30px;
+      padding: 0 13px;
+      border: 0;
+      border-radius: 999px;
+      background: transparent;
+      color: #b9b8b1;
+      font: inherit;
+      font-size: 12px;
+      font-weight: 720;
+      cursor: pointer;
+    }
+    .workspace-toggle button.active {
+      background: #e3e2dc;
+      color: #171716;
+      box-shadow: 0 1px 8px rgba(0, 0, 0, 0.24);
+    }
     .workspace-flow {
       min-height: 0;
       overflow: auto;
@@ -367,6 +404,73 @@ export function dashboardHtml(input: { runId: string }) {
     }
     .transcript {
       display: grid;
+    }
+    .canvas-inner {
+      width: min(100%, 1040px);
+      margin: 0 auto;
+      display: grid;
+      gap: 18px;
+    }
+    .graph-board {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+      gap: 14px;
+      align-items: stretch;
+    }
+    .graph-node {
+      min-height: 174px;
+      display: grid;
+      grid-template-rows: auto 1fr auto;
+      gap: 12px;
+      padding: 16px;
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      border-radius: 8px;
+      background: #222221;
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.045);
+    }
+    .graph-node-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+    }
+    .graph-node-title {
+      color: #f1f0eb;
+      font-size: 14px;
+      font-weight: 700;
+      line-height: 1.45;
+      overflow-wrap: anywhere;
+    }
+    .graph-node-meta {
+      display: grid;
+      gap: 4px;
+      color: var(--muted);
+      font-family: var(--mono);
+      font-size: 10.5px;
+      line-height: 1.55;
+      overflow-wrap: anywhere;
+    }
+    .graph-relations {
+      display: grid;
+      gap: 8px;
+      padding: 14px 0 2px;
+    }
+    .graph-edge {
+      display: grid;
+      grid-template-columns: 88px minmax(0, 1fr);
+      gap: 12px;
+      align-items: start;
+      padding: 10px 0;
+      border-top: 1px solid rgba(255, 255, 255, 0.075);
+      color: #cbc9c2;
+      font-size: 12px;
+      line-height: 1.55;
+    }
+    .graph-edge-kind {
+      color: var(--muted-2);
+      font-weight: 760;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
     }
     .turn {
       display: grid;
@@ -658,8 +762,21 @@ export function dashboardHtml(input: { runId: string }) {
         max-height: none;
         overflow: visible;
       }
+      .workspace-head-row {
+        display: grid;
+      }
+      .workspace-toggle {
+        width: 100%;
+      }
       .workspace-flow { padding: 18px 16px 32px; }
       .workspace-head { padding: 16px; }
+      .graph-board {
+        grid-template-columns: 1fr;
+      }
+      .graph-edge {
+        grid-template-columns: 1fr;
+        gap: 3px;
+      }
     }
   </style>
 </head>
@@ -696,8 +813,16 @@ export function dashboardHtml(input: { runId: string }) {
     </aside>
     <main class="workspace">
       <header class="workspace-head">
-        <div class="workspace-kicker" id="workspace-kicker">Task Flow</div>
-        <div class="workspace-title" id="workspace-title">Loading</div>
+        <div class="workspace-head-row">
+          <div class="workspace-title-block">
+            <div class="workspace-kicker" id="workspace-kicker">Task Flow</div>
+            <div class="workspace-title" id="workspace-title">Loading</div>
+          </div>
+          <div class="workspace-toggle" aria-label="Workspace view">
+            <button type="button" data-workspace-mode="canvas" aria-pressed="false">Canvas</button>
+            <button type="button" data-workspace-mode="flow" aria-pressed="true" class="active">Flow</button>
+          </div>
+        </div>
       </header>
       <section class="workspace-flow" id="workspace-flow"></section>
     </main>
@@ -735,6 +860,7 @@ export function dashboardHtml(input: { runId: string }) {
     };
     const promptLink = (task) => '<a class="prompt-link" target="_blank" rel="noreferrer" href="/tasks/' + encodeURIComponent(task.id) + '/prompt">Prompt</a>';
     let selectedGoalId = null;
+    let workspaceMode = "flow";
     let latestOverview = null;
     const groupStatus = (tasks) => {
       if (tasks.some((task) => task.status === "running")) return "running";
@@ -788,6 +914,7 @@ export function dashboardHtml(input: { runId: string }) {
       ).join("") + '</div>'
       : '<div class="empty">No lessons or experiences</div>';
     const taskMeta = (task) => '<span class="code-meta">id ' + escapeHtml(task.id) + '</span>' + (task.dependsOn.length ? ' · depends on ' + task.dependsOn.map((id) => '<span class="code-meta">' + escapeHtml(id) + '</span>').join(", ") : '');
+    const relationText = (ids) => ids.length ? ids.map((id) => '<span class="code-meta">' + escapeHtml(id) + '</span>').join(", ") : '<span class="meta">none</span>';
     const roleSummary = (tasks) => [...new Set(tasks.map((task) => task.role))].join(" / ");
     const roleMark = (role) => escapeHtml(String(role || "?").slice(0, 2));
     const goalRow = (group) =>
@@ -813,7 +940,7 @@ export function dashboardHtml(input: { runId: string }) {
           (session.codexSessionId ? '<br>codex ' + escapeHtml(session.codexSessionId) : '') + '</div>' +
           streamOutput(session),
       });
-    const renderWorkspace = (group) => {
+    const renderFlowWorkspace = (group) => {
       if (!group) return '<div class="flow-inner"><div class="empty">No goal selected</div></div>';
       const taskIdsWithSessions = new Set(group.sessions.map((session) => session.taskId));
       const pendingFlow = group.tasks.filter((task) => !taskIdsWithSessions.has(task.id) && (task.status === "todo" || task.status === "running"));
@@ -845,6 +972,38 @@ export function dashboardHtml(input: { runId: string }) {
         }) : '') +
         '</div></div>';
     };
+    const graphEdgesFor = (task, groupTaskIds) => [
+      ...((task.dependsOn || []).filter((id) => groupTaskIds.has(id)).map((sourceId) => ({ kind: "dependsOn", sourceId, targetId: task.id }))),
+      ...(task.parentId && groupTaskIds.has(task.parentId) ? [{ kind: "parentId", sourceId: task.parentId, targetId: task.id }] : []),
+    ];
+    const renderCanvasWorkspace = (group) => {
+      if (!group) return '<div class="canvas-inner"><div class="empty">No goal selected</div></div>';
+      const groupTaskIds = new Set(group.tasks.map((task) => task.id));
+      const edges = group.tasks.flatMap((task) => graphEdgesFor(task, groupTaskIds));
+      return '<div class="canvas-inner" data-canvas-goal-id="' + escapeHtml(group.id) + '">' +
+        '<div class="graph-board">' + group.tasks.map((task) => {
+          const incoming = edges.filter((edge) => edge.targetId === task.id);
+          const outgoing = edges.filter((edge) => edge.sourceId === task.id);
+          return '<article class="graph-node ' + escapeHtml(task.status) + '" data-canvas-task-id="' + escapeHtml(task.id) + '">' +
+            '<div class="graph-node-head"><span class="role-label">' + escapeHtml(task.role) + '</span><span class="status-text ' + escapeHtml(task.status) + '">' + escapeHtml(task.status) + '</span></div>' +
+            '<div class="graph-node-title">' + escapeHtml(compact(task.goal, 120)) + '</div>' +
+            '<div class="graph-node-meta">' +
+              '<span>id ' + escapeHtml(task.id) + '</span>' +
+              '<span>dependsOn ' + relationText(task.dependsOn || []) + '</span>' +
+              '<span>parentId ' + (task.parentId ? '<span class="code-meta">' + escapeHtml(task.parentId) + '</span>' : '<span class="meta">none</span>') + '</span>' +
+              '<span>in ' + incoming.length + ' · out ' + outgoing.length + '</span>' +
+            '</div>' +
+            promptLink(task) +
+          '</article>';
+        }).join("") + '</div>' +
+        (edges.length ? '<div class="graph-relations" aria-label="Task graph relationships">' + edges.map((edge) =>
+          '<div class="graph-edge" data-edge-kind="' + escapeHtml(edge.kind) + '" data-edge-source="' + escapeHtml(edge.sourceId) + '" data-edge-target="' + escapeHtml(edge.targetId) + '">' +
+            '<span class="graph-edge-kind">' + escapeHtml(edge.kind) + '</span><span><span class="code-meta">' + escapeHtml(edge.sourceId) + '</span> -> <span class="code-meta">' + escapeHtml(edge.targetId) + '</span></span>' +
+          '</div>'
+        ).join("") + '</div>' : '<div class="empty">No dependency or parent relationships recorded for this goal.</div>') +
+        '</div>';
+    };
+    const renderWorkspace = (group) => workspaceMode === "canvas" ? renderCanvasWorkspace(group) : renderFlowWorkspace(group);
     const renderInspector = (overview, group) => {
       if (!group) return '<section class="inspector-card"><h2>Detail</h2><div class="empty">Select a goal</div></section>';
       const doneWhen = group.tasks.flatMap((task) => (Array.isArray(task.doneWhen) ? task.doneWhen : []).map((item) => ({ task, item })));
@@ -935,6 +1094,13 @@ export function dashboardHtml(input: { runId: string }) {
       const node = document.getElementById(id);
       if (node) node.innerHTML = html;
     };
+    const syncWorkspaceToggle = () => {
+      for (const button of document.querySelectorAll("[data-workspace-mode]")) {
+        const active = button.getAttribute("data-workspace-mode") === workspaceMode;
+        button.classList.toggle("active", active);
+        button.setAttribute("aria-pressed", active ? "true" : "false");
+      }
+    };
     const patchWorkspace = (html) => {
       const node = document.getElementById("workspace-flow");
       if (!node || renderedHtml.get("workspace-flow") === html) return;
@@ -1019,6 +1185,7 @@ export function dashboardHtml(input: { runId: string }) {
       setTextIfChanged("run-title", overview.run ? overview.run.goal : runId);
       setTextIfChanged("workspace-kicker", selectedGroup ? selectedGroup.status + " / " + selectedGroup.tasks.length + " tasks" : "Goal Flow");
       setTextIfChanged("workspace-title", selectedGroup ? selectedGroup.titleTask.goal : "No goal selected");
+      syncWorkspaceToggle();
       setHtmlIfChanged("sidebar-stats", [
         ["Goals", goalGroups.length],
         ["Active goals", activeGroups.length],
@@ -1032,6 +1199,12 @@ export function dashboardHtml(input: { runId: string }) {
     }
     document.addEventListener("click", (event) => {
       if (!event.target || !event.target.closest) return;
+      const modeButton = event.target.closest("[data-workspace-mode]");
+      if (modeButton) {
+        workspaceMode = modeButton.getAttribute("data-workspace-mode") || "flow";
+        if (latestOverview) render(latestOverview);
+        return;
+      }
       const stopButton = event.target.closest("[data-stop-attempt-id]");
       if (stopButton) {
         const attemptId = stopButton.getAttribute("data-stop-attempt-id");

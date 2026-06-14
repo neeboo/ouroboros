@@ -47,6 +47,25 @@ describe("dashboard", () => {
     expect(html).toContain("renderInspector");
   });
 
+  test("renders Canvas and Flow workspace modes for the selected task graph", () => {
+    const html = dashboardHtml({ runId: "run_123" });
+
+    expect(html).toContain('data-workspace-mode="canvas"');
+    expect(html).toContain('data-workspace-mode="flow"');
+    expect(html).toContain("workspaceMode");
+    expect(html).toContain("renderCanvasWorkspace");
+    expect(html).toContain("renderFlowWorkspace");
+    expect(html).toContain("graph-node");
+    expect(html).toContain("data-canvas-task-id");
+    expect(html).toContain("graph-edge");
+    expect(html).toContain("data-edge-kind");
+    expect(html).toContain("dependsOn");
+    expect(html).toContain("parentId");
+    expect(html).toContain("task.cycleId");
+    expect(html).toContain("transcript");
+    expect(html).toContain("stream-output");
+  });
+
   test("renders task doneWhen items in the todo inspector", () => {
     const html = dashboardHtml({ runId: "run_123" });
 
