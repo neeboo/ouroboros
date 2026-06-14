@@ -97,6 +97,10 @@ switch (parsed.command) {
     printJson(template);
     break;
   }
+  case "show-task-prompt": {
+    console.log(renderTaskPrompt(required(parsed, "task-id")));
+    break;
+  }
   case "set-prompt-template": {
     const template = harness.setPromptTemplate({
       key: required(parsed, "key"),
@@ -375,6 +379,24 @@ function parseExecutorName(raw: string) {
     fail(`unsupported executor: ${raw}`);
   }
   return raw;
+}
+
+function renderTaskPrompt(taskId: string) {
+  const task = harness.getTask(taskId);
+  if (!task) {
+    fail(`task not found: ${taskId}`);
+  }
+  const run = harness.getRun(task.runId);
+  if (!run) {
+    fail(`run not found: ${task.runId}`);
+  }
+  return buildTaskPrompt({
+    run,
+    task,
+    dependencyAttempts: task.dependsOn.length > 0 ? harness.listLatestAttemptsForTasks(task.dependsOn) : [],
+    lessons: harness.listLessons({ runId: run.id }),
+    template: harness.getPromptTemplate("task")?.contentMd,
+  });
 }
 
 function executorFactory(executorName: "noop" | "acpx-codex" | "codex-cli" | "codex-resumable") {

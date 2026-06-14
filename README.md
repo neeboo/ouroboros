@@ -63,6 +63,7 @@ bun run cli -- retry-task --task-id <task_id>
 
 # lessons and editable prompt templates
 bun run cli -- list-lessons --run-id <run_id>
+bun run cli -- show-task-prompt --task-id <task_id>
 bun run cli -- show-prompt-template --key task
 bun run cli -- show-prompt-template --key context-summary
 bun run cli -- set-prompt-template --key task --content "# Custom template..."

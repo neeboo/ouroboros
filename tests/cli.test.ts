@@ -88,6 +88,79 @@ describe("CLI", () => {
     expect((await runCliJson("show-prompt-template", "--key", "task")).contentMd).toBe("# Custom Task\n{{taskGoal}}");
   });
 
+  test("shows the fully rendered task prompt with custom template and lessons", async () => {
+    await runCli("init");
+    const run = await runCliJson(
+      "create-run",
+      "--goal",
+      "Bootstrap ouroboros",
+      "--context-json",
+      '{"repo":"ouroboros"}',
+    );
+    const dependency = await runCliJson(
+      "create-task",
+      "--run-id",
+      run.id,
+      "--role",
+      "worker",
+      "--goal",
+      "Implement dependency",
+      "--prompt",
+      "Build the upstream piece.",
+    );
+    await runCliJson(
+      "record-attempt",
+      "--task-id",
+      dependency.id,
+      "--input-json",
+      "{}",
+      "--output-json",
+      '{"status":"done","summary":"Dependency implemented","changedFiles":["src/dependency.ts"],"checks":[],"artifacts":[],"problems":[]}',
+    );
+    const task = await runCliJson(
+      "create-task",
+      "--run-id",
+      run.id,
+      "--role",
+      "worker",
+      "--goal",
+      "Preview prompt",
+      "--prompt",
+      "Render the current prompt.",
+      "--depends-on-json",
+      JSON.stringify([dependency.id]),
+      "--done-when-json",
+      '["prompt previewed"]',
+    );
+    await runCliJson(
+      "set-prompt-template",
+      "--key",
+      "task",
+      "--content",
+      [
+        "# Custom Preview Template",
+        "Goal={{runGoal}}",
+        "Task={{taskId}} {{taskRole}} {{taskGoal}}",
+        "Prompt={{taskPrompt}}",
+        "Done={{doneWhenMarkdown}}",
+        "Dependencies={{dependencyAttemptsJson}}",
+        "Lessons={{runLessonsJson}}",
+      ].join("\n"),
+    );
+
+    const prompt = await runCli("show-task-prompt", "--task-id", task.id);
+
+    expect(prompt).toContain("# Custom Preview Template");
+    expect(prompt).toContain("Goal=Bootstrap ouroboros");
+    expect(prompt).toContain(`Task=${task.id} worker Preview prompt`);
+    expect(prompt).toContain("Prompt=Render the current prompt.");
+    expect(prompt).toContain("- prompt previewed");
+    expect(prompt).toContain("Dependency implemented");
+    expect(prompt).toContain("src/dependency.ts");
+    expect(prompt).toContain("Lessons=[");
+    expect(prompt).toContain("experience");
+  });
+
   test("runs the next task with the noop executor", async () => {
     await runCli("init");
     const run = await runCliJson("create-run", "--goal", "Bootstrap ouroboros");

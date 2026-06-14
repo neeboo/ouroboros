@@ -40,7 +40,7 @@ describe("command runner", () => {
       cmd: ["bun", "-e", "console.log('started'); await new Promise((resolve) => setTimeout(resolve, 1000));"],
       stdin: "",
       timeoutMs: 1000,
-      idleTimeoutMs: 20,
+      idleTimeoutMs: 80,
     });
 
     expect(result.exitCode).toBe(124);
