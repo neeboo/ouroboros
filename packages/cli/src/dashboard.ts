@@ -10,55 +10,153 @@ export function dashboardHtml(input: { runId: string }) {
   <style>
     :root {
       color-scheme: light;
-      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-      color: #182026;
-      background: #eef2f5;
+      font-family: "Aptos", "Segoe UI Variable", ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+      --bg: #f5f7f4;
+      --ink: #17201c;
+      --muted: #66736d;
+      --soft: #f9faf8;
+      --panel: #ffffff;
+      --line: #d9dfd8;
+      --line-strong: #bec8c0;
+      --rail: #18211e;
+      --rail-2: #222c28;
+      --accent: #2f6f5e;
+      --accent-2: #52796f;
+      --accent-soft: #dcebe5;
+      --warn: #a26316;
+      --danger: #a83f2f;
+      --ok: #2f7d4d;
+      --mono: "JetBrains Mono", "SFMono-Regular", Consolas, monospace;
+      color: var(--ink);
+      background: var(--bg);
     }
     * { box-sizing: border-box; }
-    body { margin: 0; }
+    body {
+      margin: 0;
+      min-height: 100dvh;
+      background:
+        linear-gradient(90deg, rgba(24, 33, 30, 0.045) 1px, transparent 1px),
+        linear-gradient(180deg, rgba(24, 33, 30, 0.035) 1px, transparent 1px),
+        var(--bg);
+      background-size: 28px 28px;
+    }
     header {
+      position: sticky;
+      top: 0;
+      z-index: 2;
       display: flex;
       align-items: center;
       justify-content: space-between;
       gap: 16px;
-      padding: 18px 24px;
-      background: #101820;
-      color: white;
+      padding: 18px 28px;
+      background: rgba(24, 33, 30, 0.96);
+      color: #f6faf7;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+      box-shadow: 0 18px 45px -32px rgba(24, 33, 30, 0.75);
+      backdrop-filter: blur(14px);
     }
-    h1 { margin: 0; font-size: 18px; font-weight: 700; letter-spacing: 0; }
-    main { padding: 20px 24px 28px; }
+    h1 {
+      margin: 0;
+      font-size: 18px;
+      font-weight: 780;
+      letter-spacing: 0;
+    }
+    #run-title {
+      max-width: 72ch;
+      color: #cbd8d1;
+      font-size: 13px;
+      line-height: 1.4;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    main {
+      width: min(100%, 1540px);
+      margin: 0 auto;
+      padding: 24px 28px 32px;
+    }
     .stats {
       display: grid;
       grid-template-columns: repeat(4, minmax(120px, 1fr));
-      gap: 12px;
-      margin-bottom: 18px;
+      gap: 1px;
+      margin-bottom: 22px;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      overflow: hidden;
+      background: var(--line);
     }
     .stat, .panel, .session, .task-row, .focus-task {
-      background: white;
-      border: 1px solid #d7dee5;
-      border-radius: 8px;
-      box-shadow: 0 1px 2px rgba(16, 24, 32, 0.04);
+      background: rgba(255, 255, 255, 0.92);
+      border: 1px solid var(--line);
     }
-    .stat { padding: 12px 14px; }
-    .stat b { display: block; font-size: 24px; }
-    .stat span { color: #5c6b73; font-size: 12px; }
+    .stat {
+      padding: 16px 18px;
+      border: 0;
+      border-radius: 0;
+    }
+    .stat b {
+      display: block;
+      font-family: var(--mono);
+      font-size: 25px;
+      line-height: 1;
+      letter-spacing: -0.03em;
+    }
+    .stat span {
+      display: block;
+      margin-top: 7px;
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
     .layout {
       display: grid;
       grid-template-columns: minmax(320px, 0.9fr) minmax(460px, 1.5fr);
-      gap: 16px;
+      gap: 18px;
       align-items: start;
     }
-    .panel { padding: 14px; }
-    .panel h2 { margin: 0 0 12px; font-size: 14px; }
-    .focus-panel { margin-bottom: 16px; border-color: #9fc5d8; }
+    .panel {
+      padding: 16px;
+      border-radius: 12px;
+      box-shadow: 0 24px 70px -54px rgba(24, 33, 30, 0.58);
+    }
+    .panel h2 {
+      margin: 0 0 14px;
+      font-size: 12px;
+      color: var(--muted);
+      font-weight: 800;
+      letter-spacing: 0.11em;
+      text-transform: uppercase;
+    }
+    .focus-panel {
+      position: relative;
+      margin-bottom: 18px;
+      border-color: rgba(47, 111, 94, 0.32);
+      background:
+        linear-gradient(135deg, rgba(24, 33, 30, 0.98), rgba(34, 44, 40, 0.98));
+      color: #edf5f0;
+      overflow: hidden;
+    }
+    .focus-panel h2 { color: #b7c9c0; }
+    .focus-panel::before {
+      content: "";
+      position: absolute;
+      inset: 0 0 auto;
+      height: 1px;
+      background: linear-gradient(90deg, transparent, rgba(220, 235, 229, 0.45), transparent);
+    }
     .focus-list {
       display: grid;
-      gap: 10px;
+      gap: 12px;
     }
     .focus-task {
-      padding: 12px;
-      border-color: #b7d7e8;
-      background: #fbfdff;
+      padding: 14px;
+      border-color: rgba(220, 235, 229, 0.18);
+      border-radius: 10px;
+      background: rgba(255, 255, 255, 0.055);
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08);
+      animation: liftIn 360ms cubic-bezier(0.16, 1, 0.3, 1) both;
     }
     .focus-head, .task-detail-head {
       align-items: flex-start;
@@ -74,63 +172,91 @@ export function dashboardHtml(input: { runId: string }) {
       gap: 8px;
       align-items: start;
     }
-    .focus-title strong, .detail-title strong { font-size: 15px; }
+    .focus-title strong, .detail-title strong {
+      font-size: 15px;
+      line-height: 1.35;
+      letter-spacing: -0.01em;
+    }
     .role-grid {
       display: grid;
       grid-template-columns: repeat(3, minmax(180px, 1fr));
       gap: 10px;
-      margin-top: 10px;
+      margin-top: 12px;
     }
     .role-lane {
       min-height: 128px;
-      border: 1px solid #edf1f4;
-      border-radius: 6px;
-      background: white;
+      border: 1px solid rgba(220, 235, 229, 0.18);
+      border-radius: 9px;
+      background: rgba(250, 252, 251, 0.06);
       padding: 10px;
     }
     .role-lane h3, .detail-section h3 {
       margin: 0 0 8px;
-      font-size: 12px;
-      color: #34424c;
+      font-size: 11px;
+      color: var(--muted);
+      font-weight: 800;
+      letter-spacing: 0.11em;
       text-transform: uppercase;
     }
+    .focus-panel .role-lane h3, .focus-panel .detail-section h3 { color: #aec4ba; }
     .detail-section { margin-top: 14px; }
     .task-row {
       width: 100%;
       display: grid;
       grid-template-columns: 76px 82px 1fr;
-      gap: 8px;
+      gap: 10px;
       align-items: start;
-      padding: 9px;
-      border: 1px solid #edf1f4;
-      background: #fff;
+      padding: 11px;
+      border-color: transparent;
+      border-radius: 10px;
+      background: transparent;
       text-align: left;
       font: inherit;
       cursor: pointer;
+      transition: transform 180ms cubic-bezier(0.16, 1, 0.3, 1), background 180ms, border-color 180ms;
     }
-    .task-row + .task-row { margin-top: 8px; }
-    .task-row.selected { border-color: #579bbd; background: #f4fbff; }
-    .task-row:hover { border-color: #9fc5d8; }
-    .task-list { max-height: 70vh; overflow: auto; padding-right: 2px; }
+    .task-row + .task-row { margin-top: 4px; }
+    .task-row.selected {
+      border-color: rgba(47, 111, 94, 0.3);
+      background: var(--accent-soft);
+    }
+    .task-row:hover {
+      transform: translateY(-1px);
+      border-color: rgba(82, 121, 111, 0.24);
+      background: rgba(220, 235, 229, 0.48);
+    }
+    .task-row:active { transform: translateY(0) scale(0.995); }
+    .task-list {
+      max-height: 70vh;
+      overflow: auto;
+      padding-right: 4px;
+    }
     .task-detail {
       min-height: 320px;
     }
     .empty {
-      padding: 10px;
-      border: 1px dashed #cbd5dd;
-      border-radius: 6px;
-      color: #5c6b73;
+      padding: 18px;
+      border: 1px dashed var(--line-strong);
+      border-radius: 10px;
+      color: var(--muted);
       font-size: 13px;
+      background: rgba(255, 255, 255, 0.42);
+    }
+    .focus-panel .empty {
+      color: #b8c7c0;
+      background: rgba(255, 255, 255, 0.055);
+      border-color: rgba(220, 235, 229, 0.22);
     }
     .checklist {
       display: grid;
       gap: 6px;
-      margin: 8px 0 0;
+      margin: 10px 0 0;
       padding: 0;
       list-style: none;
-      color: #34424c;
+      color: var(--muted);
       font-size: 12px;
     }
+    .focus-panel .checklist { color: #c8d7d0; }
     .checklist li {
       display: grid;
       grid-template-columns: 16px 1fr;
@@ -143,9 +269,9 @@ export function dashboardHtml(input: { runId: string }) {
       justify-content: center;
       width: 14px;
       height: 14px;
-      border: 1px solid #9aa8b2;
-      border-radius: 3px;
-      color: #166534;
+      border: 1px solid var(--line-strong);
+      border-radius: 999px;
+      color: var(--ok);
       font-size: 11px;
       line-height: 1;
       margin-top: 1px;
@@ -157,31 +283,71 @@ export function dashboardHtml(input: { runId: string }) {
       height: 24px;
       padding: 0 8px;
       border-radius: 999px;
-      background: #e9eef2;
-      color: #2f3b43;
-      font-size: 12px;
+      background: #edf1ee;
+      color: #2d3934;
+      border: 1px solid rgba(23, 32, 28, 0.06);
+      font-size: 11px;
+      font-weight: 760;
+      letter-spacing: 0.02em;
       white-space: nowrap;
     }
-    .badge.running { background: #dff1ff; color: #075985; }
-    .badge.done { background: #e4f7e7; color: #166534; }
-    .badge.blocked { background: #ffe7e2; color: #9f2d18; }
-    .badge.todo { background: #fff4d8; color: #8a5a00; }
+    .badge.running {
+      background: #dbece6;
+      color: #215d4f;
+      animation: breathe 1.8s ease-in-out infinite;
+    }
+    .badge.done { background: #e1efe6; color: var(--ok); }
+    .badge.blocked { background: #f4dfdb; color: var(--danger); }
+    .badge.todo { background: #f3e7d2; color: var(--warn); }
+    .focus-panel .badge {
+      background: rgba(255, 255, 255, 0.08);
+      color: #e8f1ec;
+      border-color: rgba(255, 255, 255, 0.12);
+    }
+    .focus-panel .badge.running { color: #cde9dd; }
+    .focus-panel .badge.done { color: #cfead7; }
+    .focus-panel .badge.blocked { color: #f2cbc5; }
+    .focus-panel .badge.todo { color: #efd6ac; }
     .prompt-link {
       display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 28px;
+      padding: 0 10px;
       margin-left: 8px;
-      color: #075985;
-      font-weight: 650;
+      border: 1px solid rgba(47, 111, 94, 0.22);
+      border-radius: 999px;
+      color: var(--accent);
+      background: rgba(220, 235, 229, 0.58);
+      font-size: 12px;
+      font-weight: 760;
       text-decoration: none;
+      transition: transform 180ms cubic-bezier(0.16, 1, 0.3, 1), background 180ms;
     }
-    .prompt-link:hover { text-decoration: underline; }
+    .prompt-link:hover {
+      transform: translateY(-1px);
+      background: rgba(220, 235, 229, 0.9);
+    }
+    .prompt-link:active { transform: translateY(0) scale(0.98); }
+    .focus-panel .prompt-link {
+      color: #e8f3ef;
+      background: rgba(255, 255, 255, 0.08);
+      border-color: rgba(255, 255, 255, 0.14);
+    }
     .sessions, .lesson-list {
       display: grid;
       gap: 8px;
     }
     .session {
-      padding: 10px;
-      border-color: #edf1f4;
+      padding: 11px;
+      border-color: rgba(23, 32, 28, 0.08);
+      border-radius: 9px;
       box-shadow: none;
+    }
+    .focus-panel .session {
+      color: #edf5f0;
+      background: rgba(255, 255, 255, 0.055);
+      border-color: rgba(255, 255, 255, 0.1);
     }
     .session-head {
       display: flex;
@@ -190,33 +356,81 @@ export function dashboardHtml(input: { runId: string }) {
       gap: 8px;
       margin-bottom: 10px;
     }
-    .role { font-weight: 700; text-transform: uppercase; font-size: 12px; color: #34424c; }
-    .goal { font-size: 14px; font-weight: 650; margin-bottom: 8px; }
-    .meta { color: #5c6b73; font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
-    .lesson {
-      padding: 8px;
-      border: 1px solid #edf1f4;
-      border-radius: 6px;
-      background: #fcfcfb;
-      font-size: 12px;
+    .role {
+      font-weight: 800;
+      text-transform: uppercase;
+      font-size: 11px;
+      letter-spacing: 0.1em;
+      color: var(--muted);
     }
-    .lesson.experience { border-left: 3px solid #2f855a; }
-    .lesson.lesson { border-left: 3px solid #b45309; }
+    .focus-panel .role { color: #b8cbc1; }
+    .goal {
+      font-size: 13px;
+      font-weight: 720;
+      line-height: 1.35;
+      margin-bottom: 8px;
+    }
+    .meta {
+      color: var(--muted);
+      font-family: var(--mono);
+      font-size: 11px;
+      line-height: 1.55;
+      overflow-wrap: anywhere;
+    }
+    .focus-panel .meta { color: #b6c7bf; }
+    .lesson {
+      padding: 10px;
+      border: 1px solid rgba(23, 32, 28, 0.08);
+      border-radius: 9px;
+      background: rgba(255, 255, 255, 0.78);
+      font-size: 12px;
+      line-height: 1.45;
+    }
+    .lesson.experience {
+      border-top-color: rgba(47, 125, 77, 0.38);
+      background: linear-gradient(180deg, rgba(47, 125, 77, 0.045), rgba(255, 255, 255, 0.78) 34px);
+    }
+    .lesson.lesson {
+      border-top-color: rgba(162, 99, 22, 0.42);
+      background: linear-gradient(180deg, rgba(162, 99, 22, 0.05), rgba(255, 255, 255, 0.78) 34px);
+    }
+    .focus-panel .lesson {
+      background: rgba(255, 255, 255, 0.055);
+      border-color: rgba(255, 255, 255, 0.1);
+    }
     pre {
       margin: 10px 0 0;
       min-height: 72px;
       max-height: 180px;
       overflow: auto;
       padding: 10px;
-      border-radius: 6px;
-      background: #101820;
-      color: #d8f3dc;
-      font-size: 12px;
+      border-radius: 9px;
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      background: #121a17;
+      color: #dcebe5;
+      font-family: var(--mono);
+      font-size: 11px;
+      line-height: 1.5;
       white-space: pre-wrap;
     }
+    @keyframes breathe {
+      0%, 100% { box-shadow: 0 0 0 0 rgba(47, 111, 94, 0.0); }
+      50% { box-shadow: 0 0 0 4px rgba(47, 111, 94, 0.12); }
+    }
+    @keyframes liftIn {
+      from { opacity: 0; transform: translateY(8px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
     @media (max-width: 900px) {
-      header { align-items: flex-start; flex-direction: column; }
+      header {
+        align-items: flex-start;
+        flex-direction: column;
+        padding: 16px;
+      }
+      #run-title { white-space: normal; }
+      main { padding: 16px; }
       .stats, .layout, .role-grid { grid-template-columns: 1fr; }
+      .task-row { grid-template-columns: 1fr; }
     }
   </style>
 </head>
