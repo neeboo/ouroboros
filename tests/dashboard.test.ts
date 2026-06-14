@@ -18,6 +18,7 @@ describe("dashboard", () => {
     expect(html).toContain("/prompt");
     expect(html).toContain('id="goal-composer"');
     expect(html).toContain("Interrupt + replan");
+    expect(html).toContain("No active tasks. Open a blocked history goal and rerun it, or add a new goal.");
     expect(html).toContain("data-resume-task-id");
     expect(html).toContain("data-stop-attempt-id");
     expect(html).toContain("Stop current task");

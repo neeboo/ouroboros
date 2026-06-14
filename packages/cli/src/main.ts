@@ -21,6 +21,7 @@ import { join } from "node:path";
 
 const parsed = parseArgs(Bun.argv.slice(2));
 const harness = new Harness(parsed.db);
+const DEFAULT_MAX_TRIES = 3;
 
 switch (parsed.command) {
   case "init": {
@@ -114,7 +115,8 @@ switch (parsed.command) {
     const runId = required(parsed, "run-id");
     const limit = parsePositiveInteger(flag(parsed, "limit") ?? "1", "--limit");
     if (executorName === "codex-resumable") {
-      const result = await runCodexResumableLoop({ runId, maxRounds: 1, limit });
+      const maxTries = parsePositiveInteger(flag(parsed, "max-tries") ?? String(DEFAULT_MAX_TRIES), "--max-tries");
+      const result = await runCodexResumableLoop({ runId, maxRounds: 1, limit, maxTries });
       printJson({ tasks: result.rounds.flatMap((round) => round.tasks) });
       break;
     }
@@ -137,8 +139,9 @@ switch (parsed.command) {
     const runId = required(parsed, "run-id");
     const limit = parsePositiveInteger(flag(parsed, "limit") ?? "1", "--limit");
     const maxRounds = parsePositiveInteger(flag(parsed, "max-rounds") ?? "10", "--max-rounds");
+    const maxTries = parsePositiveInteger(flag(parsed, "max-tries") ?? String(DEFAULT_MAX_TRIES), "--max-tries");
     if (executorName === "codex-resumable") {
-      printJson(await runCodexResumableLoop({ runId, maxRounds, limit }));
+      printJson(await runCodexResumableLoop({ runId, maxRounds, limit, maxTries }));
       break;
     }
     const result = await runUntilIdle({
@@ -167,6 +170,7 @@ switch (parsed.command) {
         limit: parsePositiveInteger(flag(parsed, "limit") ?? "1", "--limit"),
         maxRounds: parsePositiveInteger(flag(parsed, "max-rounds") ?? "1", "--max-rounds"),
         maxCycles: parsePositiveInteger(flag(parsed, "max-cycles") ?? "100", "--max-cycles"),
+        maxTries: parsePositiveInteger(flag(parsed, "max-tries") ?? String(DEFAULT_MAX_TRIES), "--max-tries"),
         intervalMs: parseNonNegativeInteger(flag(parsed, "interval-ms") ?? "1500", "--interval-ms"),
       }),
     );
@@ -515,7 +519,7 @@ function executorFactory(executorName: "noop" | "acpx-codex" | "codex-cli" | "co
   };
 }
 
-async function runCodexResumableLoop(input: { runId: string; maxRounds: number; limit: number }) {
+async function runCodexResumableLoop(input: { runId: string; maxRounds: number; limit: number; maxTries: number }) {
   const rounds = [];
   for (let index = 0; index < input.maxRounds; index += 1) {
     const resumed = await resumeRunningCodexAttempts({ runId: input.runId, limit: input.limit });
@@ -529,7 +533,7 @@ async function runCodexResumableLoop(input: { runId: string; maxRounds: number; 
 
     const started = await startReadyCodexAttempts({ runId: input.runId, limit: input.limit });
     if (started.length === 0) {
-      const review = ensureGoalReviewTask(input.runId);
+      const review = ensureGoalReviewTask(input.runId, input.maxTries);
       if (review.created) {
         const reviewed = await startReadyCodexAttempts({ runId: input.runId, limit: input.limit });
         if (reviewed.length > 0) {
@@ -555,6 +559,7 @@ async function runAutopilot(input: {
   maxCycles: number;
   maxRounds: number;
   limit: number;
+  maxTries: number;
   intervalMs: number;
 }) {
   const cycles = [];
@@ -563,6 +568,7 @@ async function runAutopilot(input: {
       runId: input.runId,
       maxRounds: input.maxRounds,
       limit: input.limit,
+      maxTries: input.maxTries,
     });
     const overview = harness.getRunOverview({ runId: input.runId, eventLimit: 0 });
     cycles.push({
@@ -586,7 +592,7 @@ async function runAutopilot(input: {
   };
 }
 
-function ensureGoalReviewTask(runId: string) {
+function ensureGoalReviewTask(runId: string, maxTries: number) {
   const run = harness.getRun(runId);
   if (!run) {
     fail(`run not found: ${runId}`);
@@ -597,6 +603,17 @@ function ensureGoalReviewTask(runId: string) {
   const overview = harness.getRunOverview({ runId, eventLimit: 0 });
   if (overview.tasks.some((task) => task.status === "todo" || task.status === "running")) {
     return { created: false as const, reason: "active_tasks" };
+  }
+  const blockedReview = [...overview.tasks].reverse().find(
+    (task) => task.role === "goal-review" && task.status === "blocked",
+  );
+  if (blockedReview) {
+    const tries = overview.sessions.filter((session) => session.taskId === blockedReview.id).length;
+    if (tries >= maxTries) {
+      return { created: false as const, reason: "max_tries", taskId: blockedReview.id, tries, maxTries };
+    }
+    harness.retryTask({ taskId: blockedReview.id });
+    return { created: true as const, taskId: blockedReview.id, retried: true as const, tries: tries + 1, maxTries };
   }
   const taskId = harness.createTask({
     runId,

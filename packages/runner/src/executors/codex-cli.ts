@@ -1,4 +1,5 @@
 import { commandProblem, runLocalCommand } from "./command";
+import { defaultCodexBin } from "./codex-bin";
 import { parseAttemptOutputOrBlocked } from "./output";
 import type { CodexCliExecutorOptions } from "./types";
 import type { TaskExecutor } from "../types";
@@ -9,7 +10,7 @@ import { tmpdir } from "node:os";
 export function createCodexCliExecutor(options: CodexCliExecutorOptions): TaskExecutor {
   const sandbox = options.sandbox ?? "read-only";
   const runCommand = options.runCommand ?? runLocalCommand;
-  const codexBin = options.codexBin ?? "codex";
+  const codexBin = options.codexBin ?? defaultCodexBin();
 
   return async ({ prompt, sessionName }) => {
     const outputPath = await makeOutputPath(options.outputDir, sessionName);

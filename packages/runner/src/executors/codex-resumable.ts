@@ -1,6 +1,7 @@
 import { mkdir, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { defaultCodexBin } from "./codex-bin";
 import { commandProblem, runLocalCommand } from "./command";
 import { parseAttemptOutput, parseAttemptOutputOrBlocked } from "./output";
 import type { CodexCliExecutorOptions, RunCommand } from "./types";
@@ -46,7 +47,7 @@ export type CodexResumableResult =
 export function createCodexResumableClient(options: CodexResumableClientOptions) {
   const sandbox = options.sandbox ?? "read-only";
   const runCommand = options.runCommand ?? runLocalCommand;
-  const codexBin = options.codexBin ?? "codex";
+  const codexBin = options.codexBin ?? defaultCodexBin();
 
   return {
     start: async (input: CodexResumableStartInput) => {

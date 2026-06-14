@@ -606,6 +606,13 @@ export function dashboardHtml(input: { runId: string }) {
       line-height: 1.6;
       background: rgba(255, 255, 255, 0.035);
     }
+    .empty strong {
+      display: block;
+      margin-bottom: 4px;
+      color: #d8d7d0;
+      font-size: 13px;
+      font-weight: 680;
+    }
     .meta {
       color: var(--muted);
       font-size: 11px;
@@ -960,7 +967,7 @@ export function dashboardHtml(input: { runId: string }) {
         ["Queued tasks", (taskCounts.todo || 0) + (taskCounts.running || 0)],
         ["Running sessions", sessionCounts.running || 0]
       ].map(([label, value]) => '<div class="stat"><b>' + value + '</b><span>' + label + '</span></div>').join(""));
-      setHtmlIfChanged("active-goal-list", activeGroups.length ? activeGroups.map(goalRow).join("") : '<div class="empty">No active goals</div>');
+      setHtmlIfChanged("active-goal-list", activeGroups.length ? activeGroups.map(goalRow).join("") : '<div class="empty"><strong>Idle</strong>No active tasks. Open a blocked history goal and rerun it, or add a new goal.</div>');
       setHtmlIfChanged("history-goal-list", [...goalGroups].reverse().filter((group) => group.activeTasks.length === 0).map(goalRow).join(""));
       patchWorkspace(renderWorkspace(selectedGroup));
       setHtmlIfChanged("inspector-panel", renderInspector(overview, selectedGroup));
