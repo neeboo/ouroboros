@@ -848,7 +848,6 @@ export function dashboardHtml(input: { runId: string }) {
     const renderInspector = (overview, group) => {
       if (!group) return '<section class="inspector-card"><h2>Detail</h2><div class="empty">Select a goal</div></section>';
       const doneWhen = group.tasks.flatMap((task) => (Array.isArray(task.doneWhen) ? task.doneWhen : []).map((item) => ({ task, item })));
-      const resumableTasks = group.tasks.filter((task) => task.status === "blocked");
       const runningSessions = group.sessions.filter((session) => session.status === "running");
       const currentTask = group.tasks.find((task) => task.status === "running") ||
         group.tasks.find((task) => task.status === "todo") ||
@@ -860,14 +859,14 @@ export function dashboardHtml(input: { runId: string }) {
           '<li class="todo-item ' + (task.status === "done" ? "done" : "") + '"><span class="checkbox ' + (task.status === "done" ? "done" : "") + '" aria-hidden="true"></span><span class="todo-text">' + escapeHtml(item) + '<span class="meta">' + escapeHtml(task.role) + '</span></span></li>'
         ).join("") + '</ul>' : '<div class="empty">No todos recorded</div>') +
         (runningSessions.length ? '<div class="control-row"><button class="plain-button danger" data-stop-attempt-id="' + escapeHtml(runningSessions[0].attemptId) + '">Stop current task</button></div>' : '') +
-        (rerunnableTask ? '<div class="control-row"><button class="plain-button" data-rerun-task-id="' + escapeHtml(rerunnableTask.id) + '">Rerun task</button></div>' : '') +
-        (resumableTasks.length ? '<div class="control-row"><button class="plain-button" data-resume-task-id="' + escapeHtml(resumableTasks[0].id) + '">Resume blocked task</button></div>' : '') +
+        (rerunnableTask ? '<div class="control-row"><button class="plain-button" data-rerun-task-id="' + escapeHtml(rerunnableTask.id) + '">Rerun selected task</button></div>' : '') +
         '</section>';
     };
-    const runnerIssue = (overview) => {
-      const session = [...(overview.sessions || [])].reverse().find((item) => item.status === "running" || item.status === "blocked");
+    const latestRunnerSignal = (overview) => {
+      const session = [...(overview.sessions || [])].reverse()[0];
       const text = session ? latestText(session) : "";
-      if (!session || !text) return null;
+      if (!session || !text || session.status === "done") return null;
+      if (session.status !== "running" && session.status !== "blocked") return null;
       const timedOut = text.includes("Reconnecting... 5/5") || text.toLowerCase().includes("request timed out");
       return {
         status: session.status,
@@ -877,17 +876,35 @@ export function dashboardHtml(input: { runId: string }) {
         timedOut,
       };
     };
-    const renderRunner = (runner, issue) => {
+    const runnerOutputSnippet = (runner, runDone) => {
+      const text = String(runner?.lastOutput || "").trim();
+      if (!text || runDone || runner?.exitCode === 0) return "";
+      if (text.startsWith("{") && text.includes('"status":"done"')) return "";
+      return compact(text, 900);
+    };
+    const renderRunner = (overview) => {
+      const runner = overview.runner;
+      const issue = latestRunnerSignal(overview);
       const status = runner?.status || "idle";
-      const statusClass = status === "running" ? "running" : status === "exited" ? "blocked" : "todo";
+      const runDone = overview.run?.status === "done";
+      const hasQueuedWork = (overview.tasks || []).some((task) => task.status === "todo" || task.status === "running");
+      const canStart = status !== "running" && !runDone && hasQueuedWork;
+      const canStop = status === "running";
+      const output = runnerOutputSnippet(runner, runDone);
+      const statusClass = status === "running" ? "running" : runDone || runner?.exitCode === 0 ? "done" : status === "exited" ? "blocked" : "todo";
+      const title = runDone ? "Run complete" : status === "running" ? "Background runner" : "Runner idle";
+      const meta = runDone ? "goal reached" : status === "running" ? "background loop is active" : canStart ? "ready to process queued work" : "no queued work";
       return '<section class="inspector-card"><h2>Runner</h2>' +
-        '<div class="current-task"><div class="current-task-title">Autopilot</div><div class="current-task-meta">runner · <span class="status-text ' + escapeHtml(statusClass) + '">' + escapeHtml(status) + '</span>' +
+        '<div class="current-task"><div class="current-task-title">' + escapeHtml(title) + '</div><div class="current-task-meta">' + escapeHtml(meta) + ' · <span class="status-text ' + escapeHtml(statusClass) + '">' + escapeHtml(status) + '</span>' +
         (runner?.pid ? '<br><span class="code-meta">pid ' + escapeHtml(runner.pid) + '</span>' : '') +
         (runner?.exitCode !== undefined && runner?.exitCode !== null ? '<br><span class="code-meta">exit ' + escapeHtml(runner.exitCode) + '</span>' : '') +
         '</div></div>' +
         (issue ? '<div class="current-task"><div class="current-task-title">' + escapeHtml(issue.timedOut ? "Connection timed out" : "Latest runner issue") + '</div><div class="current-task-meta">' + escapeHtml(issue.taskGoal) + '<br><span class="code-meta">' + escapeHtml(issue.attemptId) + '</span></div><div class="stream-output">' + escapeHtml(issue.text) + '</div></div>' : '') +
-        (runner?.lastOutput ? '<div class="stream-output">' + escapeHtml(runner.lastOutput) + '</div>' : '') +
-        '<div class="control-row"><button class="plain-button" data-start-runner>Start runner</button><button class="plain-button danger" data-stop-runner>Stop runner</button></div>' +
+        (output ? '<div class="stream-output">' + escapeHtml(output) + '</div>' : '') +
+        (canStart || canStop ? '<div class="control-row">' +
+          (canStart ? '<button class="plain-button" data-start-runner>Start background runner</button>' : '') +
+          (canStop ? '<button class="plain-button danger" data-stop-runner>Stop background runner</button>' : '') +
+        '</div>' : '') +
         '</section>';
     };
     const postJson = async (path, body) => {
@@ -1011,7 +1028,7 @@ export function dashboardHtml(input: { runId: string }) {
       setHtmlIfChanged("active-goal-list", activeGroups.length ? activeGroups.map(goalRow).join("") : '<div class="empty"><strong>Idle</strong>No active tasks. Open a blocked history goal and rerun it, or add a new goal.</div>');
       setHtmlIfChanged("history-goal-list", [...goalGroups].reverse().filter((group) => group.activeTasks.length === 0).map(goalRow).join(""));
       patchWorkspace(renderWorkspace(selectedGroup));
-      setHtmlIfChanged("inspector-panel", renderInspector(overview, selectedGroup) + renderRunner(overview.runner, runnerIssue(overview)));
+      setHtmlIfChanged("inspector-panel", renderInspector(overview, selectedGroup) + renderRunner(overview));
     }
     document.addEventListener("click", (event) => {
       if (!event.target || !event.target.closest) return;

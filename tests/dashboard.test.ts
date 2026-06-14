@@ -19,16 +19,16 @@ describe("dashboard", () => {
     expect(html).toContain('id="goal-composer"');
     expect(html).toContain("Interrupt + replan");
     expect(html).toContain("No active tasks. Open a blocked history goal and rerun it, or add a new goal.");
-    expect(html).toContain("data-resume-task-id");
     expect(html).toContain("data-stop-attempt-id");
     expect(html).toContain("Stop current task");
     expect(html).toContain("data-rerun-task-id");
-    expect(html).toContain("Rerun task");
+    expect(html).toContain("Rerun selected task");
     expect(html).toContain("data-start-runner");
     expect(html).toContain("data-stop-runner");
-    expect(html).toContain("Start runner");
+    expect(html).toContain("Start background runner");
+    expect(html).toContain("Stop background runner");
     expect(html).toContain("Connection timed out");
-    expect(html).toContain("runnerIssue");
+    expect(html).toContain("latestRunnerSignal");
   });
 
   test("renders workspace and inspector regions for sessions prompts and lessons", () => {
