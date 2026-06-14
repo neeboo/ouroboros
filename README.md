@@ -32,6 +32,7 @@ packages/cli/src/                Local CLI wrapper
 
 ```bash
 bun run cli -- init
+bun run cli -- self-iterate
 bun run cli -- create-run --goal "Use Ouroboros to iterate on Ouroboros"
 bun run cli -- create-task --run-id <run_id> --role planner --goal "Plan next step" --prompt "Propose one small task."
 bun run cli -- next-task --run-id <run_id>
@@ -67,6 +68,17 @@ bun run cli -- show-task-prompt --task-id <task_id>
 bun run cli -- show-prompt-template --key task
 bun run cli -- show-prompt-template --key context-summary
 bun run cli -- set-prompt-template --key task --content "# Custom template..."
+```
+
+`self-iterate` initializes the local harness database if needed, creates a run for `Use Ouroboros to plan its own next self-iteration cycle`, and adds one planner task seeded from `docs/self-iteration-plan.md`. It prints JSON with the created `runId`, planner `taskId`, plus the exact commands to run next:
+
+```json
+{
+  "runId": "run_...",
+  "taskId": "task_...",
+  "dashboardCommand": "bun run cli -- --db .ouroboros/ouroboros.db dashboard --run-id run_... --port 7331",
+  "runnerCommand": "bun run cli -- --db .ouroboros/ouroboros.db run-loop --run-id run_... --executor codex-resumable --cwd $(pwd) --sandbox workspace-write --stop-hook create-tasks,create-verifier,create-repair,context-summary --max-rounds 8"
+}
 ```
 
 `run-next` leases ready tasks first, assigns each task a separate session name, then runs the selected executor for each leased task. The `acpx-codex` executor creates or reuses an `acpx codex` named session per task. The `codex-cli` executor is a one-shot fallback for environments where the ACP adapter cannot create sessions.

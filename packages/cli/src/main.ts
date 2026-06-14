@@ -23,11 +23,58 @@ import { join } from "node:path";
 const parsed = parseArgs(Bun.argv.slice(2));
 const harness = new Harness(parsed.db);
 const DEFAULT_MAX_TRIES = 3;
+const SELF_ITERATION_GOAL = "Use Ouroboros to plan its own next self-iteration cycle";
+const SELF_ITERATION_PLAN_DOC = "docs/self-iteration-plan.md";
+const SELF_ITERATION_PLANNER_DONE_WHEN = [
+  "Planner output contains exactly one nextTasks item",
+  "The planned task has one role, one concrete goal, and one prompt with exact files or commands to inspect first",
+  "The planned task includes explicit dependsOn when ordering matters and three to five doneWhen checks",
+  "The planned task identifies a clear artifact, code change, test, or decision",
+  "The planned task includes a natural failure path through verifier, repair, or another planner",
+];
 
 switch (parsed.command) {
   case "init": {
     harness.init();
     printJson({ db: parsed.db, status: "initialized" });
+    break;
+  }
+  case "self-iterate": {
+    harness.init();
+    const runId = harness.createRun({
+      goal: SELF_ITERATION_GOAL,
+      context: {
+        source: "self-iterate",
+        planDoc: SELF_ITERATION_PLAN_DOC,
+      },
+    });
+    const taskId = harness.createTask({
+      runId,
+      role: "planner",
+      goal: "Plan the next Ouroboros self-iteration increment",
+      prompt: selfIterationPlannerPrompt(),
+      doneWhen: SELF_ITERATION_PLANNER_DONE_WHEN,
+    });
+    printJson({
+      runId,
+      taskId,
+      dashboardCommand: cliCommand("dashboard", "--run-id", runId, "--port", "7331"),
+      runnerCommand: cliCommand(
+        "run-loop",
+        "--run-id",
+        runId,
+        "--executor",
+        "codex-resumable",
+        "--cwd",
+        "$(pwd)",
+        "--sandbox",
+        "workspace-write",
+        "--stop-hook",
+        "create-tasks,create-verifier,create-repair,context-summary",
+        "--max-rounds",
+        "8",
+      ),
+    });
     break;
   }
   case "create-run": {
@@ -555,6 +602,37 @@ function parseExecutorName(raw: string) {
     fail(`unsupported executor: ${raw}`);
   }
   return raw;
+}
+
+function selfIterationPlannerPrompt() {
+  return [
+    "Create the first task for the next Ouroboros self-iteration planning cycle.",
+    "",
+    "Inspect these inputs before deciding:",
+    "",
+    "- `README.md`",
+    "- `docs/protocol.md`",
+    `- \`${SELF_ITERATION_PLAN_DOC}\``,
+    "- `packages/cli/src/dashboard.ts`",
+    "- `packages/cli/src/main.ts`",
+    "- `packages/runner/src/runner.ts`",
+    "- recent run lessons from the harness database using `bun run cli -- list-lessons --run-id <run_id>`",
+    "",
+    `Use the split-enough rule and first planning prompt in \`${SELF_ITERATION_PLAN_DOC}\`.`,
+    "",
+    "Return structured JSON with exactly one `nextTasks` item. That item should be a smaller planner task, a worker task, or a verifier task. Give it concrete files or commands to inspect first, explicit dependencies when ordering matters, three to five `doneWhen` checks, and a natural failure path through verifier, repair, or another planner.",
+  ].join("\n");
+}
+
+function cliCommand(command: string, ...args: string[]) {
+  return ["bun", "run", "cli", "--", "--db", parsed.db, command, ...args].map(shellQuote).join(" ");
+}
+
+function shellQuote(value: string) {
+  if (/^[A-Za-z0-9_./:=,@%+-]+$/.test(value) || value === "$(pwd)") {
+    return value;
+  }
+  return `'${value.replaceAll("'", "'\\''")}'`;
 }
 
 function renderTaskPrompt(taskId: string) {

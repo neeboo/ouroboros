@@ -41,6 +41,47 @@ describe("CLI", () => {
     expect(ready.role).toBe("planner");
   });
 
+  test("bootstraps a self-iteration planning run", async () => {
+    const result = await runCliJson("self-iterate");
+    const overview = await runCliJson("run-overview", "--run-id", result.runId);
+
+    expect(result.runId).toBeString();
+    expect(result.taskId).toBeString();
+    expect(result.dashboardCommand).toBeString();
+    expect(result.runnerCommand).toBeString();
+    expect(result.dashboardCommand).toContain(`dashboard --run-id ${result.runId}`);
+    expect(result.runnerCommand).toContain(`run-loop --run-id ${result.runId}`);
+    expect(result.dashboardCommand).toContain("--port 7331");
+    expect(result.runnerCommand).toContain("--executor codex-resumable");
+    expect(result.runnerCommand).toContain("--stop-hook create-tasks,create-verifier,create-repair,context-summary");
+
+    expect(overview.run).toMatchObject({
+      id: result.runId,
+      goal: "Use Ouroboros to plan its own next self-iteration cycle",
+      context: expect.objectContaining({
+        source: "self-iterate",
+        planDoc: "docs/self-iteration-plan.md",
+      }),
+    });
+    expect(overview.tasks).toHaveLength(1);
+    expect(overview.tasks[0]).toMatchObject({
+      id: result.taskId,
+      runId: result.runId,
+      role: "planner",
+      status: "todo",
+      dependsOn: [],
+    });
+    expect(overview.tasks[0].prompt).toContain("docs/self-iteration-plan.md");
+    expect(overview.tasks[0].prompt).toContain("recent run lessons from the harness database");
+    expect(overview.tasks[0].doneWhen).toEqual([
+      "Planner output contains exactly one nextTasks item",
+      "The planned task has one role, one concrete goal, and one prompt with exact files or commands to inspect first",
+      "The planned task includes explicit dependsOn when ordering matters and three to five doneWhen checks",
+      "The planned task identifies a clear artifact, code change, test, or decision",
+      "The planned task includes a natural failure path through verifier, repair, or another planner",
+    ]);
+  });
+
   test("links a local run to a Linear project", async () => {
     await runCli("init");
     const run = await runCliJson("create-run", "--goal", "Bootstrap ouroboros");
