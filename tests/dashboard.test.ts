@@ -19,6 +19,10 @@ describe("dashboard", () => {
     expect(html).toContain('id="goal-composer"');
     expect(html).toContain("Interrupt + replan");
     expect(html).toContain("data-resume-task-id");
+    expect(html).toContain("data-stop-attempt-id");
+    expect(html).toContain("Stop current task");
+    expect(html).toContain("data-rerun-task-id");
+    expect(html).toContain("Rerun task");
   });
 
   test("renders workspace and inspector regions for sessions prompts and lessons", () => {
@@ -134,7 +138,7 @@ describe("dashboard", () => {
       goal: "Long running task",
       prompt: "Keep working.",
     });
-    harness.startAttempt({
+    const runningAttemptId = harness.startAttempt({
       taskId: runningTaskId,
       input: { sessionName: "task-long-running", codexSessionId: "codex_123" },
     });
@@ -184,10 +188,60 @@ describe("dashboard", () => {
           harness.retryTask({ taskId });
           return { taskId, status: "todo" };
         },
+        rerunTask: (taskId: string) => {
+          harness.retryTask({ taskId });
+          return { taskId, status: "todo" };
+        },
+        stopAttempt: (attemptId: string) => {
+          const attempt = harness.getAttempt(attemptId);
+          if (!attempt) throw new Error(`attempt not found: ${attemptId}`);
+          harness.finishAttempt({
+            attemptId,
+            output: {
+              status: "blocked",
+              summary: "Stopped by dashboard",
+              changedFiles: [],
+              checks: [{ name: "dashboard stop", status: "failed" }],
+              artifacts: [],
+              problems: ["user stopped the task"],
+            },
+          });
+          return { attemptId, taskId: attempt.taskId, status: "blocked" };
+        },
       },
     };
 
     try {
+      const stopResponse = await handleDashboardRequest(
+        new Request(`http://localhost/api/attempts/${runningAttemptId}/stop`, {
+          method: "POST",
+          body: JSON.stringify({}),
+        }),
+        dashboardInput,
+      );
+      const stopBody = await stopResponse.json();
+      expect(stopResponse.status).toBe(200);
+      expect(stopBody.status).toBe("blocked");
+      expect(harness.getAttempt(runningAttemptId)?.status).toBe("blocked");
+      expect(harness.getTask(runningTaskId)?.status).toBe("blocked");
+
+      const rerunResponse = await handleDashboardRequest(
+        new Request(`http://localhost/api/tasks/${runningTaskId}/rerun`, {
+          method: "POST",
+          body: JSON.stringify({}),
+        }),
+        dashboardInput,
+      );
+      const rerunBody = await rerunResponse.json();
+      expect(rerunResponse.status).toBe(200);
+      expect(rerunBody.status).toBe("todo");
+      expect(harness.getTask(runningTaskId)?.status).toBe("todo");
+
+      harness.startAttempt({
+        taskId: runningTaskId,
+        input: { sessionName: "task-long-running-again", codexSessionId: "codex_456" },
+      });
+
       const addResponse = await handleDashboardRequest(
         new Request(`http://localhost/api/runs/${runId}/goals`, {
           method: "POST",

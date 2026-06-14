@@ -283,6 +283,41 @@ switch (parsed.command) {
           harness.retryTask({ taskId });
           return { taskId, status: "todo" };
         },
+        rerunTask: (taskId) => {
+          const task = harness.getTask(taskId);
+          if (!task) {
+            fail(`task not found: ${taskId}`);
+          }
+          if (task.runId !== runId) {
+            fail(`task does not belong to run: ${runId}`);
+          }
+          harness.updateRunStatus({ runId, status: "todo" });
+          harness.retryTask({ taskId });
+          return { taskId, status: "todo" };
+        },
+        stopAttempt: (attemptId) => {
+          const attempt = harness.getAttempt(attemptId);
+          if (!attempt) {
+            fail(`attempt not found: ${attemptId}`);
+          }
+          const task = harness.getTask(attempt.taskId);
+          if (!task || task.runId !== runId) {
+            fail(`attempt does not belong to run: ${runId}`);
+          }
+          harness.finishAttempt({
+            attemptId,
+            output: {
+              status: "blocked",
+              summary: "Stopped by the dashboard user",
+              changedFiles: [],
+              checks: [{ name: "dashboard stop", status: "failed" }],
+              artifacts: [],
+              problems: ["user stopped the current task from the dashboard"],
+            },
+          });
+          harness.updateRunStatus({ runId, status: "todo" });
+          return { attemptId, taskId: task.id, status: "blocked" };
+        },
       },
     });
     console.log(`Ouroboros dashboard: http://localhost:${server.port}`);

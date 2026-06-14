@@ -1,6 +1,7 @@
 import type { RunOverview } from "@ouroboros/harness";
 
 interface DashboardActionResult {
+  attemptId?: string;
   taskId?: string;
   status?: string;
   interrupted?: number;
@@ -10,6 +11,8 @@ interface DashboardActions {
   createGoal?: (goal: string) => DashboardActionResult;
   interruptAndCreateGoal?: (goal: string) => DashboardActionResult;
   resumeTask?: (taskId: string) => DashboardActionResult;
+  rerunTask?: (taskId: string) => DashboardActionResult;
+  stopAttempt?: (attemptId: string) => DashboardActionResult;
 }
 
 export function dashboardHtml(input: { runId: string }) {
@@ -197,6 +200,15 @@ export function dashboardHtml(input: { runId: string }) {
     .plain-button.secondary {
       color: #d7d6cf;
       background: transparent;
+    }
+    .plain-button.danger {
+      color: #ead2d0;
+      border-color: rgba(210, 170, 168, 0.32);
+      background: rgba(210, 170, 168, 0.08);
+    }
+    .plain-button.danger:hover {
+      border-color: rgba(210, 170, 168, 0.48);
+      background: rgba(210, 170, 168, 0.14);
     }
     .plain-button:disabled {
       cursor: default;
@@ -479,7 +491,7 @@ export function dashboardHtml(input: { runId: string }) {
       display: block;
       margin-top: 2px;
     }
-    .resume-row {
+    .control-row {
       margin-top: 20px;
       padding-top: 18px;
       border-top: 1px solid rgba(255, 255, 255, 0.1);
@@ -779,11 +791,15 @@ export function dashboardHtml(input: { runId: string }) {
       if (!group) return '<section class="inspector-card"><h2>Detail</h2><div class="empty">Select a goal</div></section>';
       const doneWhen = group.tasks.flatMap((task) => (Array.isArray(task.doneWhen) ? task.doneWhen : []).map((item) => ({ task, item })));
       const resumableTasks = group.tasks.filter((task) => task.status === "blocked");
+      const runningSessions = group.sessions.filter((session) => session.status === "running");
+      const rerunnableTask = runningSessions.length ? null : [...group.tasks].reverse().find((task) => task.status === "blocked" || task.status === "done");
       return '<section class="inspector-card"><h2>Progress</h2>' +
         (doneWhen.length ? '<ul class="todo-list">' + doneWhen.map(({ task, item }) =>
           '<li class="todo-item ' + (task.status === "done" ? "done" : "") + '"><span class="checkbox ' + (task.status === "done" ? "done" : "") + '" aria-hidden="true"></span><span class="todo-text">' + escapeHtml(item) + '<span class="meta">' + escapeHtml(task.role) + '</span></span></li>'
         ).join("") + '</ul>' : '<div class="empty">No todos recorded</div>') +
-        (resumableTasks.length ? '<div class="resume-row"><button class="plain-button" data-resume-task-id="' + escapeHtml(resumableTasks[0].id) + '">Resume blocked task</button></div>' : '') +
+        (runningSessions.length ? '<div class="control-row"><button class="plain-button danger" data-stop-attempt-id="' + escapeHtml(runningSessions[0].attemptId) + '">Stop current task</button></div>' : '') +
+        (rerunnableTask ? '<div class="control-row"><button class="plain-button" data-rerun-task-id="' + escapeHtml(rerunnableTask.id) + '">Rerun task</button></div>' : '') +
+        (resumableTasks.length ? '<div class="control-row"><button class="plain-button" data-resume-task-id="' + escapeHtml(resumableTasks[0].id) + '">Resume blocked task</button></div>' : '') +
         '</section>';
     };
     const postJson = async (path, body) => {
@@ -908,6 +924,32 @@ export function dashboardHtml(input: { runId: string }) {
     }
     document.addEventListener("click", (event) => {
       if (!event.target || !event.target.closest) return;
+      const stopButton = event.target.closest("[data-stop-attempt-id]");
+      if (stopButton) {
+        const attemptId = stopButton.getAttribute("data-stop-attempt-id");
+        stopButton.disabled = true;
+        postJson("/api/attempts/" + encodeURIComponent(attemptId) + "/stop", {})
+          .then(() => {
+            setGoalFormStatus("Stopped current task.");
+            refreshOverview();
+          })
+          .catch((error) => setGoalFormStatus(error.message))
+          .finally(() => { stopButton.disabled = false; });
+        return;
+      }
+      const rerunButton = event.target.closest("[data-rerun-task-id]");
+      if (rerunButton) {
+        const taskId = rerunButton.getAttribute("data-rerun-task-id");
+        rerunButton.disabled = true;
+        postJson("/api/tasks/" + encodeURIComponent(taskId) + "/rerun", {})
+          .then(() => {
+            setGoalFormStatus("Task queued for rerun.");
+            refreshOverview();
+          })
+          .catch((error) => setGoalFormStatus(error.message))
+          .finally(() => { rerunButton.disabled = false; });
+        return;
+      }
       const resumeButton = event.target.closest("[data-resume-task-id]");
       if (resumeButton) {
         const taskId = resumeButton.getAttribute("data-resume-task-id");
@@ -1012,6 +1054,24 @@ export function handleDashboardRequest(
         throw new Error("dashboard resume is not configured");
       }
       return input.actions.resumeTask(decodeURIComponent(resumeMatch[1]));
+    });
+  }
+  const rerunMatch = url.pathname.match(/^\/api\/tasks\/([^/]+)\/rerun$/);
+  if (request.method === "POST" && rerunMatch) {
+    return withDashboardAction(async () => {
+      if (!input.actions?.rerunTask) {
+        throw new Error("dashboard rerun is not configured");
+      }
+      return input.actions.rerunTask(decodeURIComponent(rerunMatch[1]));
+    });
+  }
+  const stopMatch = url.pathname.match(/^\/api\/attempts\/([^/]+)\/stop$/);
+  if (request.method === "POST" && stopMatch) {
+    return withDashboardAction(async () => {
+      if (!input.actions?.stopAttempt) {
+        throw new Error("dashboard stop is not configured");
+      }
+      return input.actions.stopAttempt(decodeURIComponent(stopMatch[1]));
     });
   }
   const promptMatch = url.pathname.match(/^\/tasks\/([^/]+)\/prompt$/);
