@@ -17,9 +17,9 @@ Ouroboros already has the minimum working loop:
 
 ## Next Iteration Goal
 
-Make Ouroboros able to plan its own next improvement cycle before it implements anything.
+Make Ouroboros able to plan and drain its own next improvement cycle before it asks for human intervention.
 
-The first self-planning run should produce a task graph that is narrow enough to execute safely, but complete enough that a human can understand why each task exists.
+The first self-planning run should produce a task graph that is narrow enough to execute safely, but complete enough that a human can understand why each task exists and watch the run-loop finish every task.
 
 ## Split-Enough Rule
 
@@ -47,11 +47,13 @@ The initial planner should inspect:
 - `packages/runner/src/runner.ts`
 - recent run lessons from the harness database
 
-It should return structured JSON with exactly one `nextTasks` item. That item should be either:
+It should return structured JSON with a small `nextTasks` graph. Prefer 2 to 5 tasks when there is enough certainty to split the work safely. A valid graph can include:
 
-- a smaller planner task if the next improvement area is still broad;
-- a worker task if the next increment is obvious and testable;
-- a verifier task if the current baseline may already satisfy the goal.
+- planner tasks when a subproblem needs more decomposition;
+- worker tasks for concrete implementation increments;
+- verifier tasks when a current baseline or worker output needs independent validation.
+
+Use `dependsOn` to express graph order. Independent worker tasks can run in parallel. Do not force everything into one task just because it is the first planning pass.
 
 ## Candidate Improvement Areas
 
@@ -79,7 +81,8 @@ Pause for human review when:
 This self-iteration planning cycle is complete when:
 
 - a new Ouroboros run exists for self-iteration;
-- its planner has produced a fine-grained next task or a justified verifier task;
+- its planner has produced a fine-grained task graph or a justified verifier task;
 - the dashboard shows the active goal, task stream, todos, and runner state for that run;
-- the generated plan points to concrete files and checks;
-- no implementation task starts from an underspecified prompt.
+- the generated graph points to concrete files and checks;
+- no implementation task starts from an underspecified prompt;
+- the run-loop can drain the generated graph to either done tasks, blocked tasks with repair paths, or a goal-review decision.

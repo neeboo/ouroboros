@@ -73,12 +73,13 @@ describe("CLI", () => {
     });
     expect(overview.tasks[0].prompt).toContain("docs/self-iteration-plan.md");
     expect(overview.tasks[0].prompt).toContain("recent run lessons from the harness database");
+    expect(overview.tasks[0].prompt).toContain("small `nextTasks` graph");
     expect(overview.tasks[0].doneWhen).toEqual([
-      "Planner output contains exactly one nextTasks item",
-      "The planned task has one role, one concrete goal, and one prompt with exact files or commands to inspect first",
-      "The planned task includes explicit dependsOn when ordering matters and three to five doneWhen checks",
-      "The planned task identifies a clear artifact, code change, test, or decision",
-      "The planned task includes a natural failure path through verifier, repair, or another planner",
+      "Planner output contains a small nextTasks graph, usually two to five tasks",
+      "Every planned task has one role, one concrete goal, and one prompt with exact files or commands to inspect first",
+      "The task graph includes explicit dependsOn when ordering matters and each task has three to five doneWhen checks",
+      "Every planned task identifies a clear artifact, code change, test, or decision",
+      "The graph includes natural failure paths through verifier, repair, or another planner and can be drained by run-loop",
     ]);
   });
 

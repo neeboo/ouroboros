@@ -26,11 +26,11 @@ const DEFAULT_MAX_TRIES = 3;
 const SELF_ITERATION_GOAL = "Use Ouroboros to plan its own next self-iteration cycle";
 const SELF_ITERATION_PLAN_DOC = "docs/self-iteration-plan.md";
 const SELF_ITERATION_PLANNER_DONE_WHEN = [
-  "Planner output contains exactly one nextTasks item",
-  "The planned task has one role, one concrete goal, and one prompt with exact files or commands to inspect first",
-  "The planned task includes explicit dependsOn when ordering matters and three to five doneWhen checks",
-  "The planned task identifies a clear artifact, code change, test, or decision",
-  "The planned task includes a natural failure path through verifier, repair, or another planner",
+  "Planner output contains a small nextTasks graph, usually two to five tasks",
+  "Every planned task has one role, one concrete goal, and one prompt with exact files or commands to inspect first",
+  "The task graph includes explicit dependsOn when ordering matters and each task has three to five doneWhen checks",
+  "Every planned task identifies a clear artifact, code change, test, or decision",
+  "The graph includes natural failure paths through verifier, repair, or another planner and can be drained by run-loop",
 ];
 
 switch (parsed.command) {
@@ -620,7 +620,7 @@ function selfIterationPlannerPrompt() {
     "",
     `Use the split-enough rule and first planning prompt in \`${SELF_ITERATION_PLAN_DOC}\`.`,
     "",
-    "Return structured JSON with exactly one `nextTasks` item. That item should be a smaller planner task, a worker task, or a verifier task. Give it concrete files or commands to inspect first, explicit dependencies when ordering matters, three to five `doneWhen` checks, and a natural failure path through verifier, repair, or another planner.",
+    "Return structured JSON with a small `nextTasks` graph, usually two to five tasks. Use planner tasks for unclear subproblems, worker tasks for concrete implementation, and verifier tasks for independent validation. Give each task concrete files or commands to inspect first, explicit dependencies when ordering matters, three to five `doneWhen` checks, and a natural failure path through verifier, repair, or another planner. The run-loop should be able to drain the graph without manual task injection.",
   ].join("\n");
 }
 
