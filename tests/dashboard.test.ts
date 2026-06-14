@@ -7,12 +7,12 @@ import { buildTaskPrompt } from "../packages/runner/src";
 import { dashboardHtml, handleDashboardRequest } from "../packages/cli/src/dashboard";
 
 describe("dashboard", () => {
-  test("renders Codex-style task navigation for active and history tasks", () => {
+  test("renders Codex-style goal navigation for active and history goals", () => {
     const html = dashboardHtml({ runId: "run_123" });
 
-    expect(html).toContain("Active Tasks");
-    expect(html).toContain('id="active-task-list"');
-    expect(html).toContain('id="history-task-list"');
+    expect(html).toContain("Active Goals");
+    expect(html).toContain('id="active-goal-list"');
+    expect(html).toContain('id="history-goal-list"');
     expect(html).toContain("todo");
     expect(html).toContain("running");
     expect(html).toContain("/prompt");
@@ -23,8 +23,8 @@ describe("dashboard", () => {
 
     expect(html).toContain('id="workspace-flow"');
     expect(html).toContain('id="inspector-panel"');
-    expect(html).toContain("sessionsForTaskChain");
-    expect(html).toContain("lessonsForTaskChain");
+    expect(html).toContain("buildGoalGroups");
+    expect(html).toContain("collectGoalTasks");
     expect(html).toContain("renderWorkspace");
     expect(html).toContain("renderInspector");
   });
@@ -35,6 +35,15 @@ describe("dashboard", () => {
     expect(html).toContain("todo-list");
     expect(html).toContain("doneWhen");
     expect(html).toContain("checkbox");
+  });
+
+  test("polls overview through a worker instead of a main-thread interval", () => {
+    const html = dashboardHtml({ runId: "run_123" });
+
+    expect(html).toContain("overviewWorkerSource");
+    expect(html).toContain("new Worker");
+    expect(html).toContain("new Blob");
+    expect(html).not.toContain("setInterval");
   });
 
   test("serves a rendered task prompt preview as plain text", async () => {

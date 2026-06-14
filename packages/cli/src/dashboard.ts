@@ -433,14 +433,14 @@ export function dashboardHtml(input: { runId: string }) {
         <div id="run-title">Loading ${escapeHtml(input.runId)}</div>
       </div>
       <section class="sidebar-stats" id="sidebar-stats"></section>
-      <nav class="task-nav" aria-label="Tasks">
+      <nav class="task-nav" aria-label="Goals">
         <section class="nav-section">
-          <h2 class="section-label">Active Tasks</h2>
-          <div class="task-list" id="active-task-list"></div>
+          <h2 class="section-label">Active Goals</h2>
+          <div class="task-list" id="active-goal-list"></div>
         </section>
         <section class="nav-section">
           <h2 class="section-label">History</h2>
-          <div class="task-list" id="history-task-list"></div>
+          <div class="task-list" id="history-goal-list"></div>
         </section>
       </nav>
     </aside>
@@ -468,22 +468,69 @@ export function dashboardHtml(input: { runId: string }) {
     }[char]));
     const latestText = (session) => session.latestText || session.events.map((event) => event.text || event.payload?.delta || event.payload?.message || "").filter(Boolean).slice(-1)[0] || "";
     const promptLink = (task) => '<a class="prompt-link" target="_blank" rel="noreferrer" href="/tasks/' + encodeURIComponent(task.id) + '/prompt">Prompt</a>';
-    let selectedTaskId = null;
+    let selectedGoalId = null;
     let latestOverview = null;
     const taskById = (overview) => new Map(overview.tasks.map((task) => [task.id, task]));
-    const collectTaskChain = (task, map, seen = new Set()) => {
-      if (!task || seen.has(task.id)) return seen;
-      seen.add(task.id);
-      for (const id of task.dependsOn || []) collectTaskChain(map.get(id), map, seen);
+    const dependentsByTaskId = (overview) => {
+      const dependents = new Map(overview.tasks.map((task) => [task.id, []]));
+      for (const task of overview.tasks) {
+        for (const id of task.dependsOn || []) {
+          if (!dependents.has(id)) dependents.set(id, []);
+          dependents.get(id).push(task);
+        }
+        if (task.parentId) {
+          if (!dependents.has(task.parentId)) dependents.set(task.parentId, []);
+          dependents.get(task.parentId).push(task);
+        }
+      }
+      return dependents;
+    };
+    const rootTaskFor = (task, map) => {
+      let current = task;
+      const seen = new Set();
+      while (current && !seen.has(current.id)) {
+        seen.add(current.id);
+        const parent = current.parentId ? map.get(current.parentId) : null;
+        const dependencyParent = (current.dependsOn || []).map((id) => map.get(id)).find(Boolean);
+        const next = parent || dependencyParent;
+        if (!next) break;
+        current = next;
+      }
+      return current || task;
+    };
+    const collectGoalTasks = (root, dependents, seen = new Set()) => {
+      if (!root || seen.has(root.id)) return seen;
+      seen.add(root.id);
+      for (const child of dependents.get(root.id) || []) collectGoalTasks(child, dependents, seen);
       return seen;
     };
-    const sessionsForTaskChain = (overview, task) => {
-      const ids = collectTaskChain(task, taskById(overview));
-      return overview.sessions.filter((session) => ids.has(session.taskId));
+    const groupStatus = (tasks) => {
+      if (tasks.some((task) => task.status === "running")) return "running";
+      if (tasks.some((task) => task.status === "todo")) return "todo";
+      if (tasks.some((task) => task.status === "blocked")) return "blocked";
+      return "done";
     };
-    const lessonsForTaskChain = (overview, task) => {
-      const ids = collectTaskChain(task, taskById(overview));
-      return (overview.lessons || []).filter((lesson) => ids.has(lesson.taskId));
+    const buildGoalGroups = (overview) => {
+      const map = taskById(overview);
+      const dependents = dependentsByTaskId(overview);
+      const rootIds = new Set(overview.tasks.map((task) => rootTaskFor(task, map).id));
+      return [...rootIds].map((rootId) => {
+        const root = map.get(rootId);
+        const ids = collectGoalTasks(root, dependents);
+        const tasks = overview.tasks.filter((task) => ids.has(task.id));
+        const sessions = overview.sessions.filter((session) => ids.has(session.taskId));
+        const lessons = (overview.lessons || []).filter((lesson) => ids.has(lesson.taskId));
+        const activeTasks = tasks.filter((task) => task.status === "todo" || task.status === "running");
+        return {
+          id: root.id,
+          root,
+          tasks,
+          sessions,
+          lessons,
+          activeTasks,
+          status: groupStatus(tasks),
+        };
+      });
     };
     const compact = (value, max = 140) => {
       const text = String(value ?? "").replace(/\\s+/g, " ").trim();
@@ -496,11 +543,12 @@ export function dashboardHtml(input: { runId: string }) {
       ).join("") + '</div>'
       : '<div class="empty">No lessons or experiences</div>';
     const taskMeta = (task) => '<span class="code-meta">id ' + escapeHtml(task.id) + '</span>' + (task.dependsOn.length ? ' · depends on ' + task.dependsOn.map((id) => '<span class="code-meta">' + escapeHtml(id) + '</span>').join(", ") : '');
-    const taskRow = (task) =>
-      '<button class="task-row ' + (task.id === selectedTaskId ? 'selected' : '') + '" data-task-id="' + escapeHtml(task.id) + '">' +
-      '<span class="status-dot ' + escapeHtml(task.status) + '"></span>' +
-      '<span><strong>' + escapeHtml(task.goal) + '</strong><span class="row-meta">' + escapeHtml(task.role) + ' · ' + escapeHtml(task.status) + '</span></span>' +
-      '<span class="status-text ' + escapeHtml(task.status) + '">' + escapeHtml(task.status) + '</span></button>';
+    const roleSummary = (tasks) => [...new Set(tasks.map((task) => task.role))].join(" / ");
+    const goalRow = (group) =>
+      '<button class="task-row ' + (group.id === selectedGoalId ? 'selected' : '') + '" data-goal-id="' + escapeHtml(group.id) + '">' +
+      '<span class="status-dot ' + escapeHtml(group.status) + '"></span>' +
+      '<span><strong>' + escapeHtml(group.root.goal) + '</strong><span class="row-meta">' + group.tasks.length + ' tasks · ' + escapeHtml(roleSummary(group.tasks)) + '</span></span>' +
+      '<span class="status-text ' + escapeHtml(group.status) + '">' + escapeHtml(group.status) + '</span></button>';
     const sessionFlowCard = (session) =>
       '<article class="flow-card"><div class="flow-card-head"><div><span class="role-label">' + escapeHtml(session.role) + '</span>' +
       '<div class="flow-card-title">' + escapeHtml(session.taskGoal) + '</div></div>' +
@@ -509,73 +557,100 @@ export function dashboardHtml(input: { runId: string }) {
       '<br>session ' + escapeHtml(session.sessionName || "") + '<br>codex ' + escapeHtml(session.codexSessionId || "") + '</div>' +
       (latestText(session) ? '<pre>' + escapeHtml(latestText(session)) + '</pre>' : '<div class="flow-card-text">No stream output recorded.</div>') +
       '</article>';
-    const renderWorkspace = (overview, task) => {
-      if (!task) return '<div class="flow-inner"><div class="empty">No task selected</div></div>';
-      const sessions = sessionsForTaskChain(overview, task);
-      const lessons = lessonsForTaskChain(overview, task);
+    const renderWorkspace = (group) => {
+      if (!group) return '<div class="flow-inner"><div class="empty">No goal selected</div></div>';
+      const taskIdsWithSessions = new Set(group.sessions.map((session) => session.taskId));
+      const pendingFlow = group.tasks.filter((task) => !taskIdsWithSessions.has(task.id) && (task.status === "todo" || task.status === "running"));
       return '<div class="flow-inner"><article class="flow-card primary"><div class="flow-card-head"><div>' +
-        '<span class="status-text ' + escapeHtml(task.status) + '">' + escapeHtml(task.status) + '</span> <span class="role-label">' + escapeHtml(task.role) + '</span>' +
-        '<div class="flow-card-title">' + escapeHtml(task.goal) + '</div></div>' + promptLink(task) + '</div>' +
-        '<div class="meta">' + taskMeta(task) + '</div><div class="flow-card-text">' + escapeHtml(task.prompt) + '</div></article>' +
-        (sessions.length ? sessions.map(sessionFlowCard).join("") : '<div class="empty">No sessions recorded for this task yet.</div>') +
-        (lessons.length ? '<article class="flow-card"><div class="flow-card-head"><div class="flow-card-title">Lessons and experiences</div></div>' + lessonList(lessons.slice(-6)) + '</article>' : '') +
+        '<span class="status-text ' + escapeHtml(group.status) + '">' + escapeHtml(group.status) + '</span> <span class="role-label">' + escapeHtml(roleSummary(group.tasks)) + '</span>' +
+        '<div class="flow-card-title">' + escapeHtml(group.root.goal) + '</div></div>' + promptLink(group.root) + '</div>' +
+        '<div class="meta">' + taskMeta(group.root) + '</div><div class="flow-card-text">' + escapeHtml(group.root.prompt) + '</div></article>' +
+        (group.sessions.length ? group.sessions.map(sessionFlowCard).join("") : '<div class="empty">No sessions recorded for this goal yet.</div>') +
+        (pendingFlow.length ? pendingFlow.map((task) => '<article class="flow-card"><div class="flow-card-head"><div><span class="role-label">' + escapeHtml(task.role) + '</span><div class="flow-card-title">' + escapeHtml(task.goal) + '</div></div><span class="status-text ' + escapeHtml(task.status) + '">' + escapeHtml(task.status) + '</span></div><div class="meta">' + taskMeta(task) + '</div></article>').join("") : '') +
+        (group.lessons.length ? '<article class="flow-card"><div class="flow-card-head"><div class="flow-card-title">Lessons and experiences</div></div>' + lessonList(group.lessons.slice(-6)) + '</article>' : '') +
         '</div>';
     };
-    const renderInspector = (overview, task) => {
-      if (!task) return '<section class="inspector-card"><h2>Detail</h2><div class="empty">Select a task</div></section>';
-      const lessons = lessonsForTaskChain(overview, task);
-      const doneWhen = Array.isArray(task.doneWhen) ? task.doneWhen : [];
+    const renderInspector = (overview, group) => {
+      if (!group) return '<section class="inspector-card"><h2>Detail</h2><div class="empty">Select a goal</div></section>';
+      const doneWhen = group.tasks.flatMap((task) => (Array.isArray(task.doneWhen) ? task.doneWhen : []).map((item) => ({ task, item })));
       return '<section class="inspector-card"><h2>Todos</h2>' +
-        (doneWhen.length ? '<ul class="todo-list">' + doneWhen.map((item) =>
-          '<li class="todo-item"><span class="checkbox ' + (task.status === "done" ? "done" : "") + '"></span><span>' + escapeHtml(item) + '</span></li>'
+        (doneWhen.length ? '<ul class="todo-list">' + doneWhen.map(({ task, item }) =>
+          '<li class="todo-item"><span class="checkbox ' + (task.status === "done" ? "done" : "") + '"></span><span>' + escapeHtml(item) + '<span class="meta"> · ' + escapeHtml(task.role) + '</span></span></li>'
         ).join("") + '</ul>' : '<div class="empty">No todos recorded</div>') + '</section>' +
-        '<section class="inspector-card"><h2>Task</h2><div class="inspector-row"><span class="status-text ' + escapeHtml(task.status) + '">' + escapeHtml(task.status) + '</span>' + promptLink(task) + '</div>' +
-        '<div class="meta" style="margin-top:10px">' + taskMeta(task) + '</div><div class="meta" style="margin-top:10px">' + escapeHtml(compact(task.prompt, 420)) + '</div></section>' +
-        '<section class="inspector-card"><h2>Lessons</h2>' + lessonList(lessons.slice(-8)) + '</section>' +
+        '<section class="inspector-card"><h2>Queue</h2>' +
+        (group.activeTasks.length ? '<ul class="info-list">' + group.activeTasks.map((task) => '<li class="meta"><span class="status-text ' + escapeHtml(task.status) + '">' + escapeHtml(task.status) + '</span> ' + escapeHtml(task.role) + ' · ' + escapeHtml(task.goal) + '</li>').join("") + '</ul>' : '<div class="empty">No active queue for this goal</div>') + '</section>' +
+        '<section class="inspector-card"><h2>Goal</h2><div class="inspector-row"><span class="status-text ' + escapeHtml(group.status) + '">' + escapeHtml(group.status) + '</span>' + promptLink(group.root) + '</div>' +
+        '<div class="meta" style="margin-top:10px">' + group.tasks.length + ' tasks · ' + group.sessions.length + ' sessions</div><div class="meta" style="margin-top:10px">' + escapeHtml(compact(group.root.prompt, 420)) + '</div></section>' +
+        '<section class="inspector-card"><h2>Lessons</h2>' + lessonList(group.lessons.slice(-8)) + '</section>' +
         '<section class="inspector-card"><h2>Run Info</h2><ul class="info-list">' +
         '<li class="meta">Run status: ' + escapeHtml(overview.run?.status || "") + '</li>' +
         '<li class="meta">Tasks: ' + overview.tasks.length + '</li>' +
         '<li class="meta">Sessions: ' + overview.sessions.length + '</li>' +
         '<li class="meta">Lessons: ' + (overview.lessons || []).length + '</li></ul></section>';
     };
-    async function refresh() {
-      const response = await fetch("/api/runs/" + encodeURIComponent(runId) + "/overview");
-      const overview = await response.json();
-      render(overview);
-    }
+    const overviewWorkerSource = [
+      'let runId = null;',
+      'let apiBase = "";',
+      'let timer = null;',
+      'const shouldPoll = (overview) => overview.run?.status !== "done" || overview.tasks.some((task) => task.status === "todo" || task.status === "running") || overview.sessions.some((session) => session.status === "running");',
+      'const schedule = (delay) => { if (timer) clearTimeout(timer); timer = setTimeout(refresh, delay); };',
+      'async function refresh() {',
+      '  if (!runId) return;',
+      '  try {',
+      '    const response = await fetch(apiBase + "/api/runs/" + encodeURIComponent(runId) + "/overview");',
+      '    if (!response.ok) throw new Error("overview request failed: " + response.status);',
+      '    const overview = await response.json();',
+      '    self.postMessage({ type: "overview", overview });',
+      '    if (shouldPoll(overview)) schedule(1500);',
+      '  } catch (error) {',
+      '    self.postMessage({ type: "error", message: error && error.message ? error.message : String(error) });',
+      '    schedule(5000);',
+      '  }',
+      '}',
+      'self.onmessage = (event) => {',
+      '  if (event.data?.type === "start") { runId = event.data.runId; apiBase = event.data.apiBase || ""; refresh(); }',
+      '  if (event.data?.type === "refresh") refresh();',
+      '};'
+    ].join("\\n");
+    const overviewWorker = new Worker(URL.createObjectURL(new Blob([overviewWorkerSource], { type: "text/javascript" })));
+    overviewWorker.onmessage = (event) => {
+      if (event.data?.type === "overview") render(event.data.overview);
+      if (event.data?.type === "error") console.error("overview worker:", event.data.message);
+    };
+    overviewWorker.onerror = (event) => console.error("overview worker:", event.message);
     function render(overview) {
       latestOverview = overview;
       const taskCounts = byStatus(overview.tasks);
       const sessionCounts = byStatus(overview.sessions);
-      const activeTasks = overview.tasks.filter((task) => task.status === "todo" || task.status === "running");
-      if (!selectedTaskId || !overview.tasks.some((task) => task.id === selectedTaskId)) {
-        selectedTaskId = (activeTasks[0] || overview.tasks[overview.tasks.length - 1] || {}).id || null;
+      const goalGroups = buildGoalGroups(overview);
+      const activeGroups = goalGroups.filter((group) => group.activeTasks.length > 0);
+      if (!selectedGoalId || !goalGroups.some((group) => group.id === selectedGoalId)) {
+        selectedGoalId = (activeGroups[0] || goalGroups[goalGroups.length - 1] || {}).id || null;
       }
-      const selectedTask = overview.tasks.find((task) => task.id === selectedTaskId);
+      const selectedGroup = goalGroups.find((group) => group.id === selectedGoalId);
       document.getElementById("run-status").textContent = overview.run?.status || "unknown";
       document.getElementById("run-title").textContent = overview.run ? overview.run.goal : runId;
-      document.getElementById("workspace-kicker").textContent = selectedTask ? selectedTask.role + " / " + selectedTask.status : "Task Flow";
-      document.getElementById("workspace-title").textContent = selectedTask ? selectedTask.goal : "No task selected";
+      document.getElementById("workspace-kicker").textContent = selectedGroup ? selectedGroup.status + " / " + selectedGroup.tasks.length + " tasks" : "Goal Flow";
+      document.getElementById("workspace-title").textContent = selectedGroup ? selectedGroup.root.goal : "No goal selected";
       document.getElementById("sidebar-stats").innerHTML = [
-        ["Tasks", overview.tasks.length],
-        ["Todo tasks", taskCounts.todo || 0],
-        ["Running tasks", taskCounts.running || 0],
+        ["Goals", goalGroups.length],
+        ["Active goals", activeGroups.length],
+        ["Queued tasks", (taskCounts.todo || 0) + (taskCounts.running || 0)],
         ["Running sessions", sessionCounts.running || 0]
       ].map(([label, value]) => '<div class="stat"><b>' + value + '</b><span>' + label + '</span></div>').join("");
-      document.getElementById("active-task-list").innerHTML = activeTasks.length ? activeTasks.map(taskRow).join("") : '<div class="empty">No active tasks</div>';
-      document.getElementById("history-task-list").innerHTML = [...overview.tasks].reverse().map(taskRow).join("");
-      document.getElementById("workspace-flow").innerHTML = renderWorkspace(overview, selectedTask);
-      document.getElementById("inspector-panel").innerHTML = renderInspector(overview, selectedTask);
+      document.getElementById("active-goal-list").innerHTML = activeGroups.length ? activeGroups.map(goalRow).join("") : '<div class="empty">No active goals</div>';
+      document.getElementById("history-goal-list").innerHTML = [...goalGroups].reverse().filter((group) => group.activeTasks.length === 0).map(goalRow).join("");
+      document.getElementById("workspace-flow").innerHTML = renderWorkspace(selectedGroup);
+      document.getElementById("inspector-panel").innerHTML = renderInspector(overview, selectedGroup);
     }
     document.addEventListener("click", (event) => {
       if (!event.target || !event.target.closest) return;
-      const row = event.target.closest("[data-task-id]");
+      const row = event.target.closest("[data-goal-id]");
       if (!row) return;
-      selectedTaskId = row.getAttribute("data-task-id");
+      selectedGoalId = row.getAttribute("data-goal-id");
       if (latestOverview) render(latestOverview);
     });
-    refresh().catch(console.error);
-    setInterval(() => refresh().catch(console.error), 1500);
+    overviewWorker.postMessage({ type: "start", runId, apiBase: window.location.origin });
   </script>
 </body>
 </html>`;
