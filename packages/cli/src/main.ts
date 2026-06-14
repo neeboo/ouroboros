@@ -255,6 +255,35 @@ switch (parsed.command) {
           eventLimit: parsePositiveInteger(flag(parsed, "event-limit") ?? "25", "--event-limit"),
         }),
       renderTaskPrompt,
+      actions: {
+        createGoal: (goal) => {
+          harness.updateRunStatus({ runId, status: "todo" });
+          const taskId = createPlannerFromUserGoal({ runId, goal, interrupted: false });
+          return { taskId, status: "todo" };
+        },
+        interruptAndCreateGoal: (goal) => {
+          harness.updateRunStatus({ runId, status: "todo" });
+          const running = harness.listRunningAttempts({ runId });
+          for (const attempt of running) {
+            const output: AttemptOutput = {
+              status: "blocked",
+              summary: "Interrupted by the dashboard user",
+              changedFiles: [],
+              checks: [{ name: "dashboard interrupt", status: "failed" }],
+              artifacts: [],
+              problems: [goal],
+            };
+            harness.finishAttempt({ attemptId: attempt.id, output });
+          }
+          const taskId = createPlannerFromUserGoal({ runId, goal, interrupted: true });
+          return { taskId, status: "todo", interrupted: running.length };
+        },
+        resumeTask: (taskId) => {
+          harness.updateRunStatus({ runId, status: "todo" });
+          harness.retryTask({ taskId });
+          return { taskId, status: "todo" };
+        },
+      },
     });
     console.log(`Ouroboros dashboard: http://localhost:${server.port}`);
     setInterval(() => {}, 60 * 60 * 1000);
@@ -554,6 +583,33 @@ function ensureGoalReviewTask(runId: string) {
     ],
   });
   return { created: true as const, taskId };
+}
+
+function createPlannerFromUserGoal(input: { runId: string; goal: string; interrupted: boolean }) {
+  const prefix = input.interrupted ? "Replan after user interruption" : "Plan user goal";
+  return harness.createTask({
+    runId: input.runId,
+    role: "planner",
+    goal: `${prefix}: ${input.goal}`,
+    prompt: [
+      input.interrupted
+        ? "The user interrupted the current run and gave a new requirement."
+        : "The user added a new goal from the dashboard.",
+      "",
+      "User request:",
+      input.goal,
+      "",
+      "Inspect the current run state, recent attempts, lessons, and repository state before planning.",
+      "Return structured JSON with exactly one nextTasks item for the next smallest useful increment.",
+      "Prefer a worker task when the next step is implementation, or a verifier task when the next step is validation.",
+      "Keep the task small enough for the existing run-loop to execute and verify.",
+    ].join("\n"),
+    doneWhen: [
+      "current run state has been inspected",
+      "exactly one nextTasks item is returned",
+      "next task is small enough for the run-loop",
+    ],
+  });
 }
 
 async function resumeRunningCodexAttempts(input: { runId: string; limit: number }) {

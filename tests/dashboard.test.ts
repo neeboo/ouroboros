@@ -16,6 +16,9 @@ describe("dashboard", () => {
     expect(html).toContain("todo");
     expect(html).toContain("running");
     expect(html).toContain("/prompt");
+    expect(html).toContain('id="goal-composer"');
+    expect(html).toContain("Interrupt + replan");
+    expect(html).toContain("data-resume-task-id");
   });
 
   test("renders workspace and inspector regions for sessions prompts and lessons", () => {
@@ -85,7 +88,7 @@ describe("dashboard", () => {
       dependsOn: [dependencyId],
     });
 
-    const response = handleDashboardRequest(
+    const response = await handleDashboardRequest(
       new Request(`http://localhost/tasks/${taskId}/prompt`),
       {
         runId,
@@ -115,6 +118,110 @@ describe("dashboard", () => {
       expect(body).toContain("src/dependency.ts");
       expect(body).toContain("Run Lessons");
       expect(body).toContain("Dependency implemented summary");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("handles dashboard goal interrupt and resume actions", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "ouroboros-dashboard-actions-"));
+    const harness = new Harness(join(dir, "ouroboros.db"));
+    harness.init();
+    const runId = harness.createRun({ goal: "Bootstrap interactive control" });
+    const runningTaskId = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Long running task",
+      prompt: "Keep working.",
+    });
+    harness.startAttempt({
+      taskId: runningTaskId,
+      input: { sessionName: "task-long-running", codexSessionId: "codex_123" },
+    });
+    const dashboardInput = {
+      runId,
+      overview: () => harness.getRunOverview({ runId }),
+      renderTaskPrompt: () => "",
+      actions: {
+        createGoal: (goal: string) => ({
+          taskId: harness.createTask({
+            runId,
+            role: "planner",
+            goal: `Plan user goal: ${goal}`,
+            prompt: goal,
+            doneWhen: ["planned"],
+          }),
+          status: "todo",
+        }),
+        interruptAndCreateGoal: (goal: string) => {
+          const running = harness.listRunningAttempts({ runId });
+          for (const attempt of running) {
+            harness.finishAttempt({
+              attemptId: attempt.id,
+              output: {
+                status: "blocked",
+                summary: "Interrupted by dashboard",
+                changedFiles: [],
+                checks: [{ name: "dashboard interrupt", status: "failed" }],
+                artifacts: [],
+                problems: [goal],
+              },
+            });
+          }
+          return {
+            taskId: harness.createTask({
+              runId,
+              role: "planner",
+              goal: `Replan after user interruption: ${goal}`,
+              prompt: goal,
+              doneWhen: ["replanned"],
+            }),
+            status: "todo",
+            interrupted: running.length,
+          };
+        },
+        resumeTask: (taskId: string) => {
+          harness.retryTask({ taskId });
+          return { taskId, status: "todo" };
+        },
+      },
+    };
+
+    try {
+      const addResponse = await handleDashboardRequest(
+        new Request(`http://localhost/api/runs/${runId}/goals`, {
+          method: "POST",
+          body: JSON.stringify({ goal: "Add a new dashboard control" }),
+        }),
+        dashboardInput,
+      );
+      const addBody = await addResponse.json();
+      expect(addResponse.status).toBe(200);
+      expect(harness.getTask(addBody.taskId)?.role).toBe("planner");
+
+      const interruptResponse = await handleDashboardRequest(
+        new Request(`http://localhost/api/runs/${runId}/interrupt`, {
+          method: "POST",
+          body: JSON.stringify({ goal: "Change direction now" }),
+        }),
+        dashboardInput,
+      );
+      const interruptBody = await interruptResponse.json();
+      expect(interruptResponse.status).toBe(200);
+      expect(interruptBody.interrupted).toBe(1);
+      expect(harness.getTask(runningTaskId)?.status).toBe("blocked");
+
+      const resumeResponse = await handleDashboardRequest(
+        new Request(`http://localhost/api/tasks/${runningTaskId}/resume`, {
+          method: "POST",
+          body: JSON.stringify({}),
+        }),
+        dashboardInput,
+      );
+      const resumeBody = await resumeResponse.json();
+      expect(resumeResponse.status).toBe(200);
+      expect(resumeBody.status).toBe("todo");
+      expect(harness.getTask(runningTaskId)?.status).toBe("todo");
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

@@ -1,5 +1,17 @@
 import type { RunOverview } from "@ouroboros/harness";
 
+interface DashboardActionResult {
+  taskId?: string;
+  status?: string;
+  interrupted?: number;
+}
+
+interface DashboardActions {
+  createGoal?: (goal: string) => DashboardActionResult;
+  interruptAndCreateGoal?: (goal: string) => DashboardActionResult;
+  resumeTask?: (taskId: string) => DashboardActionResult;
+}
+
 export function dashboardHtml(input: { runId: string }) {
   return `<!doctype html>
 <html lang="en">
@@ -114,6 +126,77 @@ export function dashboardHtml(input: { runId: string }) {
       -webkit-line-clamp: 2;
       -webkit-box-orient: vertical;
       overflow: hidden;
+    }
+    .goal-composer {
+      display: grid;
+      gap: 8px;
+      margin-top: 16px;
+    }
+    .goal-label {
+      color: #bab9b2;
+      font-size: 11px;
+      font-weight: 760;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+    .goal-input {
+      width: 100%;
+      min-height: 72px;
+      resize: vertical;
+      padding: 10px 11px;
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      border-radius: 12px;
+      outline: 0;
+      background: rgba(18, 18, 18, 0.3);
+      color: #f0f0eb;
+      font: inherit;
+      font-size: 13px;
+      line-height: 1.45;
+    }
+    .goal-input:focus {
+      border-color: rgba(255, 255, 255, 0.32);
+      background: rgba(18, 18, 18, 0.44);
+    }
+    .goal-actions {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+    }
+    .plain-button {
+      min-width: 0;
+      min-height: 30px;
+      padding: 0 10px;
+      border: 1px solid rgba(255, 255, 255, 0.14);
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.07);
+      color: #efeee9;
+      font: inherit;
+      font-size: 12px;
+      font-weight: 680;
+      cursor: pointer;
+      transition: transform 160ms cubic-bezier(0.16, 1, 0.3, 1), background 160ms, border-color 160ms;
+    }
+    .plain-button:hover {
+      background: rgba(255, 255, 255, 0.11);
+      border-color: rgba(255, 255, 255, 0.24);
+    }
+    .plain-button:active {
+      transform: scale(0.98);
+    }
+    .plain-button.secondary {
+      color: #d7d6cf;
+      background: transparent;
+    }
+    .plain-button:disabled {
+      cursor: default;
+      opacity: 0.45;
+      transform: none;
+    }
+    .form-status {
+      min-height: 15px;
+      color: var(--muted);
+      font-size: 11px;
+      line-height: 1.35;
     }
     .sidebar-stats {
       display: grid;
@@ -385,6 +468,11 @@ export function dashboardHtml(input: { runId: string }) {
       display: block;
       margin-top: 2px;
     }
+    .resume-row {
+      margin-top: 20px;
+      padding-top: 18px;
+      border-top: 1px solid rgba(255, 255, 255, 0.1);
+    }
     .checkbox {
       width: 18px;
       height: 18px;
@@ -519,6 +607,15 @@ export function dashboardHtml(input: { runId: string }) {
           <div class="run-status" id="run-status">Loading</div>
         </div>
         <div id="run-title">Loading ${escapeHtml(input.runId)}</div>
+        <form class="goal-composer" id="goal-composer">
+          <label class="goal-label" for="goal-input">New goal</label>
+          <textarea class="goal-input" id="goal-input" name="goal" placeholder="Describe a new goal or change request"></textarea>
+          <div class="goal-actions">
+            <button class="plain-button" type="submit" data-goal-action="add">Add goal</button>
+            <button class="plain-button secondary" type="submit" data-goal-action="interrupt">Interrupt + replan</button>
+          </div>
+          <div class="form-status" id="goal-form-status"></div>
+        </form>
       </div>
       <section class="sidebar-stats" id="sidebar-stats"></section>
       <nav class="task-nav" aria-label="Goals">
@@ -666,10 +763,28 @@ export function dashboardHtml(input: { runId: string }) {
     const renderInspector = (overview, group) => {
       if (!group) return '<section class="inspector-card"><h2>Detail</h2><div class="empty">Select a goal</div></section>';
       const doneWhen = group.tasks.flatMap((task) => (Array.isArray(task.doneWhen) ? task.doneWhen : []).map((item) => ({ task, item })));
+      const resumableTasks = group.tasks.filter((task) => task.status === "blocked");
       return '<section class="inspector-card"><h2>Progress</h2>' +
         (doneWhen.length ? '<ul class="todo-list">' + doneWhen.map(({ task, item }) =>
           '<li class="todo-item ' + (task.status === "done" ? "done" : "") + '"><span class="checkbox ' + (task.status === "done" ? "done" : "") + '" aria-hidden="true"></span><span class="todo-text">' + escapeHtml(item) + '<span class="meta">' + escapeHtml(task.role) + '</span></span></li>'
-        ).join("") + '</ul>' : '<div class="empty">No todos recorded</div>') + '</section>';
+        ).join("") + '</ul>' : '<div class="empty">No todos recorded</div>') +
+        (resumableTasks.length ? '<div class="resume-row"><button class="plain-button" data-resume-task-id="' + escapeHtml(resumableTasks[0].id) + '">Resume blocked task</button></div>' : '') +
+        '</section>';
+    };
+    const postJson = async (path, body) => {
+      const response = await fetch(path, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(payload.error || "request failed");
+      return payload;
+    };
+    const refreshOverview = () => overviewWorker.postMessage({ type: "refresh" });
+    const setGoalFormStatus = (message) => {
+      const node = document.getElementById("goal-form-status");
+      if (node) node.textContent = message;
     };
     const overviewWorkerSource = [
       'let runId = null;',
@@ -728,10 +843,43 @@ export function dashboardHtml(input: { runId: string }) {
     }
     document.addEventListener("click", (event) => {
       if (!event.target || !event.target.closest) return;
+      const resumeButton = event.target.closest("[data-resume-task-id]");
+      if (resumeButton) {
+        const taskId = resumeButton.getAttribute("data-resume-task-id");
+        resumeButton.disabled = true;
+        postJson("/api/tasks/" + encodeURIComponent(taskId) + "/resume", {})
+          .then(() => refreshOverview())
+          .catch((error) => setGoalFormStatus(error.message))
+          .finally(() => { resumeButton.disabled = false; });
+        return;
+      }
       const row = event.target.closest("[data-goal-id]");
       if (!row) return;
       selectedGoalId = row.getAttribute("data-goal-id");
       if (latestOverview) render(latestOverview);
+    });
+    document.getElementById("goal-composer").addEventListener("submit", (event) => {
+      event.preventDefault();
+      const submitter = event.submitter;
+      const action = submitter?.getAttribute("data-goal-action") || "add";
+      const input = document.getElementById("goal-input");
+      const goal = input.value.trim();
+      if (!goal) {
+        setGoalFormStatus("Write a goal first.");
+        return;
+      }
+      submitter.disabled = true;
+      setGoalFormStatus(action === "interrupt" ? "Interrupting and replanning..." : "Adding goal...");
+      const path = action === "interrupt" ? "/api/runs/" + encodeURIComponent(runId) + "/interrupt" : "/api/runs/" + encodeURIComponent(runId) + "/goals";
+      postJson(path, { goal })
+        .then((payload) => {
+          input.value = "";
+          selectedGoalId = payload.taskId || selectedGoalId;
+          setGoalFormStatus(action === "interrupt" ? "Interrupted. Planner queued." : "Planner queued.");
+          refreshOverview();
+        })
+        .catch((error) => setGoalFormStatus(error.message))
+        .finally(() => { submitter.disabled = false; });
     });
     overviewWorker.postMessage({ type: "start", runId, apiBase: window.location.origin });
   </script>
@@ -744,6 +892,7 @@ export function serveDashboard(input: {
   port: number;
   overview: () => RunOverview;
   renderTaskPrompt: (taskId: string) => string;
+  actions?: DashboardActions;
 }) {
   return Bun.serve({
     port: input.port,
@@ -759,6 +908,7 @@ export function handleDashboardRequest(
     runId: string;
     overview: () => RunOverview;
     renderTaskPrompt: (taskId: string) => string;
+    actions?: DashboardActions;
   },
 ) {
   const url = new URL(request.url);
@@ -770,6 +920,35 @@ export function handleDashboardRequest(
   if (url.pathname === `/api/runs/${input.runId}/overview`) {
     return Response.json(input.overview());
   }
+  if (request.method === "POST" && url.pathname === `/api/runs/${input.runId}/goals`) {
+    return withDashboardAction(async () => {
+      if (!input.actions?.createGoal) {
+        throw new Error("dashboard goal creation is not configured");
+      }
+      const body = await readJsonBody(request);
+      const goal = requiredBodyString(body, "goal");
+      return input.actions.createGoal(goal);
+    });
+  }
+  if (request.method === "POST" && url.pathname === `/api/runs/${input.runId}/interrupt`) {
+    return withDashboardAction(async () => {
+      if (!input.actions?.interruptAndCreateGoal) {
+        throw new Error("dashboard interrupt is not configured");
+      }
+      const body = await readJsonBody(request);
+      const goal = requiredBodyString(body, "goal");
+      return input.actions.interruptAndCreateGoal(goal);
+    });
+  }
+  const resumeMatch = url.pathname.match(/^\/api\/tasks\/([^/]+)\/resume$/);
+  if (request.method === "POST" && resumeMatch) {
+    return withDashboardAction(async () => {
+      if (!input.actions?.resumeTask) {
+        throw new Error("dashboard resume is not configured");
+      }
+      return input.actions.resumeTask(decodeURIComponent(resumeMatch[1]));
+    });
+  }
   const promptMatch = url.pathname.match(/^\/tasks\/([^/]+)\/prompt$/);
   if (promptMatch) {
     return new Response(input.renderTaskPrompt(decodeURIComponent(promptMatch[1])), {
@@ -777,6 +956,30 @@ export function handleDashboardRequest(
     });
   }
   return new Response("not found", { status: 404 });
+}
+
+async function withDashboardAction(input: () => DashboardActionResult | Promise<DashboardActionResult>) {
+  try {
+    return Response.json(await input());
+  } catch (error) {
+    return Response.json({ error: error instanceof Error ? error.message : String(error) }, { status: 400 });
+  }
+}
+
+async function readJsonBody(request: Request) {
+  const value = await request.json().catch(() => null);
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("request body must be a JSON object");
+  }
+  return value as Record<string, unknown>;
+}
+
+function requiredBodyString(body: Record<string, unknown>, key: string) {
+  const value = body[key];
+  if (typeof value !== "string" || value.trim().length === 0) {
+    throw new Error(`${key} is required`);
+  }
+  return value.trim();
 }
 
 function escapeHtml(value: string) {
