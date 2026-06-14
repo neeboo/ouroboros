@@ -45,6 +45,9 @@ describe("dashboard", () => {
     expect(html).toContain("streamOutput");
     expect(html).toContain("renderWorkspace");
     expect(html).toContain("renderInspector");
+    expect(html).toContain("orderedSessions");
+    expect(html).toContain("scrollWorkspaceToBottom");
+    expect(html).toContain("node.scrollTop = node.scrollHeight");
   });
 
   test("renders Canvas and Flow workspace modes for the selected task graph", () => {

@@ -1229,7 +1229,12 @@ export function dashboardHtml(input: { runId: string }) {
       });
     const renderFlowWorkspace = (group) => {
       if (!group) return '<div class="flow-inner"><div class="empty">No goal selected</div></div>';
-      const taskIdsWithSessions = new Set(group.sessions.map((session) => session.taskId));
+      const orderedSessions = [...group.sessions].sort((left, right) => {
+        const leftTime = Date.parse(left.startedAt || "") || 0;
+        const rightTime = Date.parse(right.startedAt || "") || 0;
+        return leftTime - rightTime;
+      });
+      const taskIdsWithSessions = new Set(orderedSessions.map((session) => session.taskId));
       const pendingFlow = group.tasks.filter((task) => !taskIdsWithSessions.has(task.id) && (task.status === "todo" || task.status === "running"));
       return '<div class="flow-inner"><div class="transcript">' +
         turn({
@@ -1241,7 +1246,7 @@ export function dashboardHtml(input: { runId: string }) {
           action: promptLink(group.titleTask),
           body: '<div class="tool-line">' + taskMeta(group.root) + '</div><div class="turn-text">' + escapeHtml(group.root.prompt) + '</div>',
         }) +
-        (group.sessions.length ? group.sessions.map(sessionFlowTurn).join("") : '<div class="empty">No sessions recorded for this goal yet.</div>') +
+        (orderedSessions.length ? orderedSessions.map(sessionFlowTurn).join("") : '<div class="empty">No sessions recorded for this goal yet.</div>') +
         (pendingFlow.length ? pendingFlow.map((task) => turn({
           key: "task:" + task.id,
           mark: roleMark(task.role),
@@ -1431,9 +1436,24 @@ export function dashboardHtml(input: { runId: string }) {
         button.setAttribute("aria-pressed", active ? "true" : "false");
       }
     };
+    const scrollWorkspaceToBottom = () => {
+      if (workspaceMode !== "flow") return;
+      const node = document.getElementById("workspace-flow");
+      if (!node) return;
+      requestAnimationFrame(() => {
+        node.scrollTop = node.scrollHeight;
+        for (const stream of node.querySelectorAll(".stream-output")) {
+          stream.scrollTop = stream.scrollHeight;
+        }
+      });
+    };
     const patchWorkspace = (html) => {
       const node = document.getElementById("workspace-flow");
-      if (!node || renderedHtml.get("workspace-flow") === html) return;
+      if (!node) return;
+      if (renderedHtml.get("workspace-flow") === html) {
+        scrollWorkspaceToBottom();
+        return;
+      }
       const template = document.createElement("template");
       template.innerHTML = html;
       const nextTranscript = template.content.querySelector(".transcript");
@@ -1441,6 +1461,7 @@ export function dashboardHtml(input: { runId: string }) {
       if (!nextTranscript || !currentTranscript) {
         renderedHtml.set("workspace-flow", html);
         node.innerHTML = html;
+        scrollWorkspaceToBottom();
         return;
       }
       const nextTurns = Array.from(nextTranscript.querySelectorAll("[data-turn-key]"));
@@ -1462,9 +1483,7 @@ export function dashboardHtml(input: { runId: string }) {
         currentTranscript.appendChild(currentTurn);
       }
       renderedHtml.set("workspace-flow", html);
-      for (const stream of node.querySelectorAll(".stream-output")) {
-        stream.scrollTop = stream.scrollHeight;
-      }
+      scrollWorkspaceToBottom();
     };
     const overviewWorkerSource = [
       'let runId = null;',
