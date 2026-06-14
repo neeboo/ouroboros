@@ -117,6 +117,17 @@ export function dashboardHtml(input: { runId: string }) {
       text-overflow: ellipsis;
       white-space: nowrap;
     }
+    .run-status.updating::after {
+      content: "";
+      display: inline-block;
+      width: 4px;
+      height: 4px;
+      margin-left: 7px;
+      border-radius: 999px;
+      background: currentColor;
+      vertical-align: middle;
+      animation: breathe 1.2s ease-in-out infinite;
+    }
     #run-title {
       margin-top: 10px;
       color: #d0d0c9;
@@ -715,12 +726,13 @@ export function dashboardHtml(input: { runId: string }) {
       '<span><strong>' + escapeHtml(group.titleTask.goal) + '</strong><span class="row-meta">' + group.tasks.length + ' tasks · ' + escapeHtml(roleSummary(group.tasks)) + '</span></span>' +
       '<span class="status-text ' + escapeHtml(group.status) + '">' + escapeHtml(group.status) + '</span></button>';
     const turn = (input) =>
-      '<article class="turn ' + (input.primary ? "primary" : "") + '"><div class="turn-gutter"><div class="turn-avatar">' + input.mark + '</div><div class="turn-rail"></div></div>' +
+      '<article class="turn ' + (input.primary ? "primary" : "") + '" data-turn-key="' + escapeHtml(input.key || input.mark) + '"><div class="turn-gutter"><div class="turn-avatar">' + input.mark + '</div><div class="turn-rail"></div></div>' +
       '<div class="turn-body"><div class="turn-head"><div><div class="turn-author">' + input.author + '</div>' +
       (input.summary ? '<div class="turn-summary">' + input.summary + '</div>' : '') + '</div>' +
       (input.action || '') + '</div>' + (input.body || '') + '</div></article>';
     const sessionFlowTurn = (session) =>
       turn({
+        key: session.attemptId,
         mark: roleMark(session.role),
         author: escapeHtml(session.role),
         summary: escapeHtml(session.taskGoal) + ' · ' + escapeHtml(session.status),
@@ -738,6 +750,7 @@ export function dashboardHtml(input: { runId: string }) {
       return '<div class="flow-inner"><div class="transcript">' +
         turn({
           primary: true,
+          key: "goal:" + group.id,
           mark: "go",
           author: escapeHtml(group.titleTask.goal),
           summary: '<span class="role-label">' + escapeHtml(roleSummary(group.tasks)) + '</span> · <span class="status-text ' + escapeHtml(group.status) + '">' + escapeHtml(group.status) + '</span>',
@@ -746,6 +759,7 @@ export function dashboardHtml(input: { runId: string }) {
         }) +
         (group.sessions.length ? group.sessions.map(sessionFlowTurn).join("") : '<div class="empty">No sessions recorded for this goal yet.</div>') +
         (pendingFlow.length ? pendingFlow.map((task) => turn({
+          key: "task:" + task.id,
           mark: roleMark(task.role),
           author: escapeHtml(task.role),
           summary: escapeHtml(task.goal),
@@ -753,6 +767,7 @@ export function dashboardHtml(input: { runId: string }) {
           body: '<div class="tool-line">' + taskMeta(task) + '</div>',
         })).join("") : '') +
         (group.lessons.length ? turn({
+          key: "lessons:" + group.id,
           mark: "le",
           author: "Lessons and experiences",
           summary: escapeHtml(group.lessons.length + " records"),
@@ -786,6 +801,51 @@ export function dashboardHtml(input: { runId: string }) {
       const node = document.getElementById("goal-form-status");
       if (node) node.textContent = message;
     };
+    const renderedHtml = new Map();
+    const setTextIfChanged = (id, value) => {
+      const node = document.getElementById(id);
+      const next = String(value ?? "");
+      if (node && node.textContent !== next) node.textContent = next;
+    };
+    const setHtmlIfChanged = (id, html) => {
+      const current = renderedHtml.get(id);
+      if (current === html) return;
+      renderedHtml.set(id, html);
+      const node = document.getElementById(id);
+      if (node) node.innerHTML = html;
+    };
+    const patchWorkspace = (html) => {
+      const node = document.getElementById("workspace-flow");
+      if (!node || renderedHtml.get("workspace-flow") === html) return;
+      const template = document.createElement("template");
+      template.innerHTML = html;
+      const nextTranscript = template.content.querySelector(".transcript");
+      const currentTranscript = node.querySelector(".transcript");
+      if (!nextTranscript || !currentTranscript) {
+        renderedHtml.set("workspace-flow", html);
+        node.innerHTML = html;
+        return;
+      }
+      const nextTurns = Array.from(nextTranscript.querySelectorAll("[data-turn-key]"));
+      const nextKeys = new Set(nextTurns.map((turnNode) => turnNode.getAttribute("data-turn-key")));
+      for (const currentTurn of Array.from(currentTranscript.querySelectorAll("[data-turn-key]"))) {
+        if (!nextKeys.has(currentTurn.getAttribute("data-turn-key"))) currentTurn.remove();
+      }
+      for (const nextTurn of nextTurns) {
+        const key = nextTurn.getAttribute("data-turn-key");
+        const currentTurn = currentTranscript.querySelector('[data-turn-key="' + CSS.escape(key) + '"]');
+        if (!currentTurn) {
+          currentTranscript.appendChild(nextTurn.cloneNode(true));
+          continue;
+        }
+        if (currentTurn.outerHTML !== nextTurn.outerHTML) {
+          currentTurn.replaceWith(nextTurn.cloneNode(true));
+          continue;
+        }
+        currentTranscript.appendChild(currentTurn);
+      }
+      renderedHtml.set("workspace-flow", html);
+    };
     const overviewWorkerSource = [
       'let runId = null;',
       'let apiBase = "";',
@@ -795,6 +855,7 @@ export function dashboardHtml(input: { runId: string }) {
       'async function refresh() {',
       '  if (!runId) return;',
       '  try {',
+      '    self.postMessage({ type: "refreshing" });',
       '    const response = await fetch(apiBase + "/api/runs/" + encodeURIComponent(runId) + "/overview");',
       '    if (!response.ok) throw new Error("overview request failed: " + response.status);',
       '    const overview = await response.json();',
@@ -812,7 +873,11 @@ export function dashboardHtml(input: { runId: string }) {
     ].join("\\n");
     const overviewWorker = new Worker(URL.createObjectURL(new Blob([overviewWorkerSource], { type: "text/javascript" })));
     overviewWorker.onmessage = (event) => {
-      if (event.data?.type === "overview") render(event.data.overview);
+      if (event.data?.type === "refreshing") document.getElementById("run-status")?.classList.add("updating");
+      if (event.data?.type === "overview") {
+        document.getElementById("run-status")?.classList.remove("updating");
+        render(event.data.overview);
+      }
       if (event.data?.type === "error") console.error("overview worker:", event.data.message);
     };
     overviewWorker.onerror = (event) => console.error("overview worker:", event.message);
@@ -826,20 +891,20 @@ export function dashboardHtml(input: { runId: string }) {
         selectedGoalId = (activeGroups[0] || goalGroups[goalGroups.length - 1] || {}).id || null;
       }
       const selectedGroup = goalGroups.find((group) => group.id === selectedGoalId);
-      document.getElementById("run-status").textContent = overview.run?.status || "unknown";
-      document.getElementById("run-title").textContent = overview.run ? overview.run.goal : runId;
-      document.getElementById("workspace-kicker").textContent = selectedGroup ? selectedGroup.status + " / " + selectedGroup.tasks.length + " tasks" : "Goal Flow";
-      document.getElementById("workspace-title").textContent = selectedGroup ? selectedGroup.titleTask.goal : "No goal selected";
-      document.getElementById("sidebar-stats").innerHTML = [
+      setTextIfChanged("run-status", overview.run?.status || "unknown");
+      setTextIfChanged("run-title", overview.run ? overview.run.goal : runId);
+      setTextIfChanged("workspace-kicker", selectedGroup ? selectedGroup.status + " / " + selectedGroup.tasks.length + " tasks" : "Goal Flow");
+      setTextIfChanged("workspace-title", selectedGroup ? selectedGroup.titleTask.goal : "No goal selected");
+      setHtmlIfChanged("sidebar-stats", [
         ["Goals", goalGroups.length],
         ["Active goals", activeGroups.length],
         ["Queued tasks", (taskCounts.todo || 0) + (taskCounts.running || 0)],
         ["Running sessions", sessionCounts.running || 0]
-      ].map(([label, value]) => '<div class="stat"><b>' + value + '</b><span>' + label + '</span></div>').join("");
-      document.getElementById("active-goal-list").innerHTML = activeGroups.length ? activeGroups.map(goalRow).join("") : '<div class="empty">No active goals</div>';
-      document.getElementById("history-goal-list").innerHTML = [...goalGroups].reverse().filter((group) => group.activeTasks.length === 0).map(goalRow).join("");
-      document.getElementById("workspace-flow").innerHTML = renderWorkspace(selectedGroup);
-      document.getElementById("inspector-panel").innerHTML = renderInspector(overview, selectedGroup);
+      ].map(([label, value]) => '<div class="stat"><b>' + value + '</b><span>' + label + '</span></div>').join(""));
+      setHtmlIfChanged("active-goal-list", activeGroups.length ? activeGroups.map(goalRow).join("") : '<div class="empty">No active goals</div>');
+      setHtmlIfChanged("history-goal-list", [...goalGroups].reverse().filter((group) => group.activeTasks.length === 0).map(goalRow).join(""));
+      patchWorkspace(renderWorkspace(selectedGroup));
+      setHtmlIfChanged("inspector-panel", renderInspector(overview, selectedGroup));
     }
     document.addEventListener("click", (event) => {
       if (!event.target || !event.target.closest) return;
