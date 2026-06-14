@@ -62,6 +62,9 @@ describe("dashboard", () => {
     expect(html).toContain("data-canvas-task-id");
     expect(html).toContain("dependsOn");
     expect(html).toContain("parentId");
+    expect(html).toContain("created");
+    expect(html).toContain("reviews");
+    expect(html).toContain("canvas-workspace");
     expect(html).toContain("task.cycleId");
     expect(html).toContain("transcript");
     expect(html).toContain("stream-output");
@@ -167,6 +170,70 @@ describe("dashboard", () => {
       );
       expect(graph.edges).toContainEqual(
         expect.objectContaining({ source: workerId, target: verifierId, label: "parentId" }),
+      );
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("builds Canvas graph with every planner-created worker participant", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "ouroboros-dashboard-created-graph-"));
+    const harness = new Harness(join(dir, "ouroboros.db"));
+    harness.init();
+    const runId = harness.createRun({ goal: "Render every planner-created worker" });
+    const plannerId = harness.createTask({
+      runId,
+      role: "planner",
+      goal: "Plan parallel workers",
+      prompt: "Plan the work.",
+    });
+    const workerAId = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Implement left branch",
+      prompt: "Build left.",
+      id: "task_worker_a",
+    });
+    const workerBId = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Implement right branch",
+      prompt: "Build right.",
+      id: "task_worker_b",
+    });
+    const verifierId = harness.createTask({
+      runId,
+      role: "verifier",
+      goal: "Verify left branch",
+      prompt: "Verify left.",
+      dependsOn: [workerAId],
+    });
+    harness.recordAttempt({
+      taskId: plannerId,
+      input: { sessionName: "planner-session" },
+      output: {
+        status: "done",
+        summary: "Planner created two workers",
+        artifacts: [
+          { kind: "created_task", sourceTaskId: plannerId, taskId: workerAId },
+          { kind: "created_task", sourceTaskId: plannerId, taskId: workerBId },
+        ],
+      },
+    });
+
+    try {
+      const graph = buildDashboardTaskGraph(harness.getRunOverview({ runId }), plannerId);
+
+      expect(graph.nodes.map((node) => node.id)).toEqual([plannerId, workerAId, workerBId, verifierId]);
+      expect(graph.nodes.filter((node) => node.data.role === "worker")).toHaveLength(2);
+      expect(graph.edges).toContainEqual(
+        expect.objectContaining({ source: plannerId, target: workerAId, label: "created" }),
+      );
+      expect(graph.edges).toContainEqual(
+        expect.objectContaining({ source: plannerId, target: workerBId, label: "created" }),
+      );
+      expect(graph.edges).toContainEqual(
+        expect.objectContaining({ source: workerAId, target: verifierId, label: "dependsOn" }),
       );
     } finally {
       await rm(dir, { recursive: true, force: true });

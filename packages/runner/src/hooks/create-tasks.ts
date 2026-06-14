@@ -5,12 +5,14 @@ import type { StopHook } from "../types";
 export function createTasksFromOutputHook(options: { harness: Harness }): StopHook {
   return ({ run, task, output }) => {
     const created = validatePlannedTasks(output.nextTasks).map((plannedTask) => {
+      const dependsOn =
+        plannedTask.dependsOn && plannedTask.dependsOn.length > 0 ? plannedTask.dependsOn : [task.id];
       const taskId = options.harness.createTask({
         runId: run.id,
         role: plannedTask.role,
         goal: plannedTask.goal,
         prompt: plannedTask.prompt,
-        dependsOn: plannedTask.dependsOn ?? [task.id],
+        dependsOn,
         doneWhen: plannedTask.doneWhen ?? [],
       });
       return {

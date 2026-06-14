@@ -169,6 +169,7 @@ export interface ObservableSession {
   taskGoal: string;
   attemptId: string;
   status: Exclude<Status, "todo">;
+  output: Partial<AttemptOutput>;
   sessionName: string | null;
   codexSessionId: string | null;
   worktreePath: string | null;

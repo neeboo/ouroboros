@@ -541,6 +541,7 @@ export class Harness {
             taskGoal: task.goal,
             attemptId: attempt.id,
             status: attempt.status,
+            output: attempt.output,
             sessionName: stringOrNull(attempt.input.sessionName),
             codexSessionId: stringOrNull(attempt.input.codexSessionId),
             worktreePath: task.worktreePath,

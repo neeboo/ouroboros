@@ -52,7 +52,7 @@ interface DashboardTaskGraphEdge {
   id: string;
   source: string;
   target: string;
-  label: "dependsOn" | "parentId";
+  label: "dependsOn" | "parentId" | "created" | "reviews";
   type: "smoothstep";
   animated: boolean;
   markerEnd: { type: "arrowclosed" };
@@ -64,9 +64,8 @@ export interface DashboardTaskGraph {
 }
 
 export function buildDashboardTaskGraph(overview: RunOverview, groupId?: string | null): DashboardTaskGraph {
-  const selectedTasks = groupId
-    ? overview.tasks.filter((task) => (task.cycleId || task.id) === groupId)
-    : overview.tasks;
+  const selectedTaskIds = collectRelatedTaskIds(overview, groupId);
+  const selectedTasks = overview.tasks.filter((task) => selectedTaskIds.has(task.id));
   const taskIds = new Set(selectedTasks.map((task) => task.id));
   const latestSessionByTask = new Map(
     overview.sessions
@@ -101,17 +100,91 @@ export function buildDashboardTaskGraph(overview: RunOverview, groupId?: string 
       },
     };
   });
-  const edges = selectedTasks.flatMap((task) => {
-    const dependencyEdges = (task.dependsOn || [])
-      .filter((sourceId) => taskIds.has(sourceId))
-      .map((sourceId) => taskGraphEdge("dependsOn", sourceId, task.id, task.status === "running"));
-    const parentEdges =
-      task.parentId && taskIds.has(task.parentId)
-        ? [taskGraphEdge("parentId", task.parentId, task.id, task.status === "running")]
-        : [];
-    return [...dependencyEdges, ...parentEdges];
-  });
+  const edges = graphRelations(overview)
+    .filter((relation) => taskIds.has(relation.sourceId) && taskIds.has(relation.targetId))
+    .map((relation) =>
+      taskGraphEdge(
+        relation.kind,
+        relation.sourceId,
+        relation.targetId,
+        selectedTasks.some((task) => task.id === relation.targetId && task.status === "running"),
+      ),
+    );
   return { nodes, edges };
+}
+
+function collectRelatedTaskIds(overview: RunOverview, groupId?: string | null) {
+  if (!groupId) {
+    return new Set(overview.tasks.map((task) => task.id));
+  }
+  const seeds = overview.tasks
+    .filter((task) => task.id === groupId || (task.cycleId || task.id) === groupId)
+    .map((task) => task.id);
+  const related = new Set(seeds.length ? seeds : [groupId]);
+  const adjacency = new Map<string, Set<string>>();
+  const link = (sourceId: string, targetId: string) => {
+    if (!adjacency.has(sourceId)) adjacency.set(sourceId, new Set());
+    if (!adjacency.has(targetId)) adjacency.set(targetId, new Set());
+    adjacency.get(sourceId)?.add(targetId);
+    adjacency.get(targetId)?.add(sourceId);
+  };
+  for (const relation of graphRelations(overview)) {
+    link(relation.sourceId, relation.targetId);
+  }
+  const queue = [...related];
+  while (queue.length > 0) {
+    const id = queue.shift()!;
+    for (const next of adjacency.get(id) ?? []) {
+      if (!related.has(next)) {
+        related.add(next);
+        queue.push(next);
+      }
+    }
+  }
+  return related;
+}
+
+function graphRelations(overview: RunOverview) {
+  const taskIds = new Set(overview.tasks.map((task) => task.id));
+  const relations: Array<{ kind: DashboardTaskGraphEdge["label"]; sourceId: string; targetId: string }> = [];
+  const seen = new Set<string>();
+  const add = (kind: DashboardTaskGraphEdge["label"], sourceId: unknown, targetId: unknown) => {
+    if (typeof sourceId !== "string" || typeof targetId !== "string") return;
+    if (!taskIds.has(sourceId) || !taskIds.has(targetId) || sourceId === targetId) return;
+    const pairKey = `${sourceId}->${targetId}`;
+    const key = `${kind}:${pairKey}`;
+    if (seen.has(key)) return;
+    if (kind === "created" && relations.some((relation) => `${relation.sourceId}->${relation.targetId}` === pairKey)) return;
+    seen.add(key);
+    relations.push({ kind, sourceId, targetId });
+  };
+
+  for (const task of overview.tasks) {
+    for (const sourceId of task.dependsOn || []) add("dependsOn", sourceId, task.id);
+    if (task.parentId) add("parentId", task.parentId, task.id);
+  }
+
+  for (const session of overview.sessions) {
+    const artifacts = Array.isArray(session.output?.artifacts) ? session.output.artifacts : [];
+    for (const artifact of artifacts) {
+      if (!artifact || typeof artifact !== "object") continue;
+      const record = artifact as Record<string, unknown>;
+      add("created", record.sourceTaskId, record.taskId);
+    }
+  }
+
+  for (const task of overview.tasks) {
+    if (task.role !== "goal-review") continue;
+    const hasRelation = relations.some((relation) => relation.sourceId === task.id || relation.targetId === task.id);
+    if (hasRelation) continue;
+    const taskIndex = overview.tasks.findIndex((candidate) => candidate.id === task.id);
+    const previous = [...overview.tasks.slice(0, taskIndex)]
+      .reverse()
+      .find((candidate) => candidate.role !== "goal-review");
+    if (previous) add("reviews", previous.id, task.id);
+  }
+
+  return relations;
 }
 
 function taskGraphEdge(
@@ -520,6 +593,11 @@ export function dashboardHtml(input: { runId: string }) {
       padding: 38px 48px 128px;
       scrollbar-gutter: stable;
     }
+    .workspace-flow.canvas-workspace {
+      overflow: hidden;
+      padding: 0;
+      scrollbar-gutter: auto;
+    }
     .flow-inner {
       width: min(100%, 720px);
       margin: 0 auto;
@@ -528,12 +606,12 @@ export function dashboardHtml(input: { runId: string }) {
       display: grid;
     }
     .canvas-inner {
-      width: min(100%, 1120px);
-      min-height: 620px;
-      height: calc(100dvh - 166px);
-      margin: 0 auto;
-      border: 1px solid rgba(255, 255, 255, 0.1);
-      border-radius: 8px;
+      width: 100%;
+      min-height: 0;
+      height: 100%;
+      margin: 0;
+      border: 0;
+      border-radius: 0;
       overflow: hidden;
       background: #f6f6f3;
     }
@@ -899,6 +977,7 @@ export function dashboardHtml(input: { runId: string }) {
         width: 100%;
       }
       .workspace-flow { padding: 18px 16px 32px; }
+      .workspace-flow.canvas-workspace { min-height: 560px; padding: 0; }
       .workspace-head { padding: 16px; }
       .canvas-inner {
         height: 560px;
@@ -1001,20 +1080,100 @@ export function dashboardHtml(input: { runId: string }) {
       tasks.find((task) => !["planner", "verifier", "goal-review"].includes(task.role) && !task.goal.startsWith("Repair:")) ||
       tasks.find((task) => task.role === "verifier") ||
       tasks[0];
-    const buildGoalGroups = (overview) => {
-      const groups = new Map();
-      for (const task of overview.tasks) {
-        const cycleId = task.cycleId || task.id;
-        if (!groups.has(cycleId)) {
-          groups.set(cycleId, { id: cycleId, root: task, titleTask: task, taskIds: new Set(), tasks: [] });
-        }
-        const group = groups.get(cycleId);
-        group.taskIds.add(task.id);
-        group.tasks.push(task);
-        if (task.id === cycleId || isCycleStarter(task)) group.root = task;
-        group.titleTask = titleTaskFor(group.tasks);
+    const addRelation = (relations, seen, taskIds, kind, sourceId, targetId) => {
+      if (typeof sourceId !== "string" || typeof targetId !== "string") return;
+      if (!taskIds.has(sourceId) || !taskIds.has(targetId) || sourceId === targetId) return;
+      const pairKey = sourceId + "->" + targetId;
+      if (kind === "created" && relations.some((relation) => relation.sourceId + "->" + relation.targetId === pairKey)) return;
+      const key = kind + ":" + pairKey;
+      if (seen.has(key)) return;
+      seen.add(key);
+      relations.push({ kind, sourceId, targetId });
+    };
+    const graphRelationsFor = (overview) => {
+      const taskIds = new Set((overview.tasks || []).map((task) => task.id));
+      const relations = [];
+      const seen = new Set();
+      for (const task of overview.tasks || []) {
+        for (const sourceId of task.dependsOn || []) addRelation(relations, seen, taskIds, "dependsOn", sourceId, task.id);
+        if (task.parentId) addRelation(relations, seen, taskIds, "parentId", task.parentId, task.id);
       }
-      return [...groups.values()].map((group) => {
+      for (const session of overview.sessions || []) {
+        const artifacts = Array.isArray(session.output?.artifacts) ? session.output.artifacts : [];
+        for (const artifact of artifacts) {
+          if (!artifact || typeof artifact !== "object") continue;
+          addRelation(relations, seen, taskIds, "created", artifact.sourceTaskId, artifact.taskId);
+        }
+      }
+      for (const task of overview.tasks || []) {
+        if (task.role !== "goal-review") continue;
+        const hasRelation = relations.some((relation) => relation.sourceId === task.id || relation.targetId === task.id);
+        if (hasRelation) continue;
+        const taskIndex = overview.tasks.findIndex((candidate) => candidate.id === task.id);
+        const previous = [...overview.tasks.slice(0, taskIndex)].reverse().find((candidate) => candidate.role !== "goal-review");
+        if (previous) addRelation(relations, seen, taskIds, "reviews", previous.id, task.id);
+      }
+      return relations;
+    };
+    const relatedTaskIdsFor = (overview, groupId) => {
+      if (!groupId) return new Set((overview.tasks || []).map((task) => task.id));
+      const seeds = (overview.tasks || [])
+        .filter((task) => task.id === groupId || (task.cycleId || task.id) === groupId)
+        .map((task) => task.id);
+      const related = new Set(seeds.length ? seeds : [groupId]);
+      const adjacency = new Map();
+      const link = (sourceId, targetId) => {
+        if (!adjacency.has(sourceId)) adjacency.set(sourceId, new Set());
+        if (!adjacency.has(targetId)) adjacency.set(targetId, new Set());
+        adjacency.get(sourceId).add(targetId);
+        adjacency.get(targetId).add(sourceId);
+      };
+      for (const relation of graphRelationsFor(overview)) link(relation.sourceId, relation.targetId);
+      const queue = [...related];
+      while (queue.length) {
+        const id = queue.shift();
+        for (const next of adjacency.get(id) || []) {
+          if (!related.has(next)) {
+            related.add(next);
+            queue.push(next);
+          }
+        }
+      }
+      return related;
+    };
+    const buildGoalGroups = (overview) => {
+      const relations = graphRelationsFor(overview);
+      const adjacency = new Map();
+      const link = (sourceId, targetId) => {
+        if (!adjacency.has(sourceId)) adjacency.set(sourceId, new Set());
+        if (!adjacency.has(targetId)) adjacency.set(targetId, new Set());
+        adjacency.get(sourceId).add(targetId);
+        adjacency.get(targetId).add(sourceId);
+      };
+      for (const relation of relations) link(relation.sourceId, relation.targetId);
+      const taskById = new Map((overview.tasks || []).map((task) => [task.id, task]));
+      const visited = new Set();
+      const groups = [];
+      for (const task of overview.tasks) {
+        if (visited.has(task.id)) continue;
+        const taskIds = new Set();
+        const queue = [task.id];
+        visited.add(task.id);
+        while (queue.length) {
+          const id = queue.shift();
+          taskIds.add(id);
+          for (const next of adjacency.get(id) || []) {
+            if (!visited.has(next)) {
+              visited.add(next);
+              queue.push(next);
+            }
+          }
+        }
+        const tasks = overview.tasks.filter((candidate) => taskIds.has(candidate.id));
+        const root = tasks.find((candidate) => isCycleStarter(candidate)) || taskById.get(task.id) || tasks[0];
+        groups.push({ id: root.cycleId || root.id, root, titleTask: titleTaskFor(tasks), taskIds, tasks });
+      }
+      return groups.map((group) => {
         const ids = group.taskIds;
         const sessions = overview.sessions.filter((session) => ids.has(session.taskId));
         const lessons = (overview.lessons || []).filter((lesson) => ids.has(lesson.taskId));
@@ -1100,16 +1259,13 @@ export function dashboardHtml(input: { runId: string }) {
         }) : '') +
         '</div></div>';
     };
-    const graphEdgesFor = (task, groupTaskIds) => [
-      ...((task.dependsOn || []).filter((id) => groupTaskIds.has(id)).map((sourceId) => ({ kind: "dependsOn", sourceId, targetId: task.id }))),
-      ...(task.parentId && groupTaskIds.has(task.parentId) ? [{ kind: "parentId", sourceId: task.parentId, targetId: task.id }] : []),
-    ];
     const graphColumn = (role) => role === "planner" || role === "goal-review" ? "planner" : role === "verifier" ? "verifier" : "worker";
     const graphColumnX = (column) => column === "planner" ? 0 : column === "verifier" ? 720 : 360;
-    const canvasGraphFor = (group) => {
+    const canvasGraphFor = (overview, group) => {
       if (!group) return { nodes: [], edges: [] };
-      const groupTaskIds = new Set(group.tasks.map((task) => task.id));
-      const sessions = new Map(group.sessions.map((session) => [session.taskId, {
+      const groupTaskIds = relatedTaskIdsFor(overview, group.id);
+      const tasks = overview.tasks.filter((task) => groupTaskIds.has(task.id));
+      const sessions = new Map((overview.sessions || []).filter((session) => groupTaskIds.has(session.taskId)).map((session) => [session.taskId, {
         status: session.status,
         attemptId: session.attemptId,
         sessionName: session.sessionName,
@@ -1117,7 +1273,7 @@ export function dashboardHtml(input: { runId: string }) {
         latestText: latestText(session),
       }]));
       const columns = new Map();
-      const nodes = group.tasks.map((task, index) => {
+      const nodes = tasks.map((task, index) => {
         const column = graphColumn(task.role);
         const row = columns.get(column) || 0;
         columns.set(column, row + 1);
@@ -1135,24 +1291,27 @@ export function dashboardHtml(input: { runId: string }) {
           },
         };
       });
-      const edges = group.tasks.flatMap((task) => graphEdgesFor(task, groupTaskIds).map((edge) => ({
+      const edges = graphRelationsFor(overview).filter((edge) => groupTaskIds.has(edge.sourceId) && groupTaskIds.has(edge.targetId)).map((edge) => ({
         id: edge.kind + ":" + edge.sourceId + "->" + edge.targetId,
         source: edge.sourceId,
         target: edge.targetId,
         label: edge.kind,
         type: "smoothstep",
-        animated: task.status === "running",
+        animated: tasks.some((task) => task.id === edge.targetId && task.status === "running"),
         markerEnd: { type: "arrowclosed" },
-      })));
+      }));
       return { nodes, edges };
     };
     const renderCanvasWorkspace = (group) => {
       if (!group) return '<div class="canvas-inner"><div class="empty">No goal selected</div></div>';
-      const graph = canvasGraphFor(group);
+      const graph = canvasGraphFor(latestOverview || { tasks: group.tasks, sessions: group.sessions, lessons: group.lessons }, group);
       return '<div class="canvas-inner" data-canvas-goal-id="' + escapeHtml(group.id) + '">' +
         '<div id="dashboard-canvas-root" data-canvas-graph="' + escapeHtml(JSON.stringify(graph)) + '"></div>' +
-        '<div hidden>' + group.tasks.map((task) =>
-          '<span data-canvas-task-id="' + escapeHtml(task.id) + '">' + escapeHtml(task.role) + ' ' + escapeHtml(task.status) + ' dependsOn ' + relationText(task.dependsOn || []) + ' parentId ' + escapeHtml(task.parentId || "none") + '</span>'
+        '<div hidden>' + graph.nodes.map((node) => {
+          const task = node.data;
+          return '<span data-canvas-task-id="' + escapeHtml(task.taskId) + '">' + escapeHtml(task.role) + ' ' + escapeHtml(task.status) + '</span>';
+        }).join("") + graph.edges.map((edge) =>
+          '<span data-canvas-edge="' + escapeHtml(edge.id) + '">' + escapeHtml(edge.label) + '</span>'
         ).join("") + '</div>' +
         '</div>';
     };
@@ -1357,6 +1516,7 @@ export function dashboardHtml(input: { runId: string }) {
       setTextIfChanged("workspace-kicker", selectedGroup ? selectedGroup.status + " / " + selectedGroup.tasks.length + " tasks" : "Goal Flow");
       setTextIfChanged("workspace-title", selectedGroup ? selectedGroup.titleTask.goal : "No goal selected");
       syncWorkspaceToggle();
+      document.getElementById("workspace-flow")?.classList.toggle("canvas-workspace", workspaceMode === "canvas");
       setHtmlIfChanged("sidebar-stats", [
         ["Goals", goalGroups.length],
         ["Active goals", activeGroups.length],
