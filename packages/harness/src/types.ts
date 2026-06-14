@@ -179,6 +179,7 @@ export interface RunOverview {
   run: Run | null;
   tasks: Task[];
   sessions: ObservableSession[];
+  lessons: Lesson[];
 }
 
 export interface ListRunningAttemptsInput {

@@ -269,6 +269,7 @@ describe("Harness", () => {
 
     expect(overview.run?.id).toBe(runId);
     expect(overview.tasks.map((task) => task.id)).toEqual([planner, worker]);
+    expect(overview.lessons).toEqual([]);
     expect(overview.sessions).toEqual([
       expect.objectContaining({
         role: "planner",
@@ -335,7 +336,10 @@ describe("Harness", () => {
       },
     });
 
-    expect(harness.listLessons({ runId })).toEqual([
+    const lessons = harness.listLessons({ runId });
+    const overview = harness.getRunOverview({ runId });
+
+    expect(lessons).toEqual([
       expect.objectContaining({
         runId,
         taskId: successTask,
@@ -351,6 +355,7 @@ describe("Harness", () => {
         summary: "workspace package resolution failed inside worktree",
       }),
     ]);
+    expect(overview.lessons).toEqual(lessons);
   });
 
   test("links a local entity to an external project", () => {

@@ -542,10 +542,21 @@ export class Harness {
           },
         ];
       });
+      const lessonRows = db
+        .query(
+          `
+          select *
+          from lessons
+          where run_id = $runId
+          order by created_at, rowid
+          `,
+        )
+        .all({ $runId: input.runId }) as LessonRow[];
       return {
         run: runRow ? runFromRow(runRow) : null,
         tasks,
         sessions,
+        lessons: lessonRows.map(lessonFromRow),
       };
     });
   }

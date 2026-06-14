@@ -10,11 +10,21 @@ describe("dashboard", () => {
   test("renders a dedicated active queue region for todo and running tasks", () => {
     const html = dashboardHtml({ runId: "run_123" });
 
-    expect(html).toContain("Active Queue");
-    expect(html).toContain('id="active-queue"');
+    expect(html).toContain("Active Task Focus");
+    expect(html).toContain('id="active-focus"');
     expect(html).toContain("todo");
     expect(html).toContain("running");
     expect(html).toContain("/prompt");
+  });
+
+  test("renders history task detail regions for sessions prompts and lessons", () => {
+    const html = dashboardHtml({ runId: "run_123" });
+
+    expect(html).toContain('id="history-task-list"');
+    expect(html).toContain('id="task-detail"');
+    expect(html).toContain("sessionsForTaskChain");
+    expect(html).toContain("lessonsForTaskChain");
+    expect(html).toContain("Prompt Detail");
   });
 
   test("renders task doneWhen items as a checklist", () => {

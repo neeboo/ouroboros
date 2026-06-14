@@ -33,7 +33,7 @@ export function dashboardHtml(input: { runId: string }) {
       gap: 12px;
       margin-bottom: 18px;
     }
-    .stat, .panel, .session {
+    .stat, .panel, .session, .task-row, .focus-task {
       background: white;
       border: 1px solid #d7dee5;
       border-radius: 8px;
@@ -44,28 +44,76 @@ export function dashboardHtml(input: { runId: string }) {
     .stat span { color: #5c6b73; font-size: 12px; }
     .layout {
       display: grid;
-      grid-template-columns: minmax(320px, 1.2fr) minmax(420px, 2fr);
+      grid-template-columns: minmax(320px, 0.9fr) minmax(460px, 1.5fr);
       gap: 16px;
       align-items: start;
     }
     .panel { padding: 14px; }
     .panel h2 { margin: 0 0 12px; font-size: 14px; }
-    .queue-panel { margin-bottom: 16px; }
-    .queue-list {
+    .focus-panel { margin-bottom: 16px; border-color: #9fc5d8; }
+    .focus-list {
       display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
       gap: 10px;
     }
-    .queue-item {
+    .focus-task {
+      padding: 12px;
+      border-color: #b7d7e8;
+      background: #fbfdff;
+    }
+    .focus-head, .task-detail-head {
+      align-items: flex-start;
+      justify-content: space-between;
       display: grid;
-      grid-template-columns: 78px 86px 1fr;
+      grid-template-columns: 1fr auto;
+      gap: 8px;
+      margin-bottom: 10px;
+    }
+    .focus-title, .detail-title {
+      display: flex;
+      flex-wrap: wrap;
       gap: 8px;
       align-items: start;
-      padding: 10px;
+    }
+    .focus-title strong, .detail-title strong { font-size: 15px; }
+    .role-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(180px, 1fr));
+      gap: 10px;
+      margin-top: 10px;
+    }
+    .role-lane {
+      min-height: 128px;
       border: 1px solid #edf1f4;
       border-radius: 6px;
-      background: #fbfcfd;
-      font-size: 13px;
+      background: white;
+      padding: 10px;
+    }
+    .role-lane h3, .detail-section h3 {
+      margin: 0 0 8px;
+      font-size: 12px;
+      color: #34424c;
+      text-transform: uppercase;
+    }
+    .detail-section { margin-top: 14px; }
+    .task-row {
+      width: 100%;
+      display: grid;
+      grid-template-columns: 76px 82px 1fr;
+      gap: 8px;
+      align-items: start;
+      padding: 9px;
+      border: 1px solid #edf1f4;
+      background: #fff;
+      text-align: left;
+      font: inherit;
+      cursor: pointer;
+    }
+    .task-row + .task-row { margin-top: 8px; }
+    .task-row.selected { border-color: #579bbd; background: #f4fbff; }
+    .task-row:hover { border-color: #9fc5d8; }
+    .task-list { max-height: 70vh; overflow: auto; padding-right: 2px; }
+    .task-detail {
+      min-height: 320px;
     }
     .empty {
       padding: 10px;
@@ -102,16 +150,6 @@ export function dashboardHtml(input: { runId: string }) {
       line-height: 1;
       margin-top: 1px;
     }
-    .task {
-      display: grid;
-      grid-template-columns: 78px 86px 1fr;
-      gap: 8px;
-      align-items: center;
-      padding: 8px 0;
-      border-top: 1px solid #edf1f4;
-      font-size: 13px;
-    }
-    .task:first-of-type { border-top: 0; }
     .badge {
       display: inline-flex;
       align-items: center;
@@ -127,6 +165,7 @@ export function dashboardHtml(input: { runId: string }) {
     .badge.running { background: #dff1ff; color: #075985; }
     .badge.done { background: #e4f7e7; color: #166534; }
     .badge.blocked { background: #ffe7e2; color: #9f2d18; }
+    .badge.todo { background: #fff4d8; color: #8a5a00; }
     .prompt-link {
       display: inline-flex;
       margin-left: 8px;
@@ -135,12 +174,15 @@ export function dashboardHtml(input: { runId: string }) {
       text-decoration: none;
     }
     .prompt-link:hover { text-decoration: underline; }
-    .sessions {
+    .sessions, .lesson-list {
       display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
-      gap: 12px;
+      gap: 8px;
     }
-    .session { padding: 12px; }
+    .session {
+      padding: 10px;
+      border-color: #edf1f4;
+      box-shadow: none;
+    }
     .session-head {
       display: flex;
       justify-content: space-between;
@@ -151,10 +193,19 @@ export function dashboardHtml(input: { runId: string }) {
     .role { font-weight: 700; text-transform: uppercase; font-size: 12px; color: #34424c; }
     .goal { font-size: 14px; font-weight: 650; margin-bottom: 8px; }
     .meta { color: #5c6b73; font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
+    .lesson {
+      padding: 8px;
+      border: 1px solid #edf1f4;
+      border-radius: 6px;
+      background: #fcfcfb;
+      font-size: 12px;
+    }
+    .lesson.experience { border-left: 3px solid #2f855a; }
+    .lesson.lesson { border-left: 3px solid #b45309; }
     pre {
       margin: 10px 0 0;
-      min-height: 96px;
-      max-height: 240px;
+      min-height: 72px;
+      max-height: 180px;
       overflow: auto;
       padding: 10px;
       border-radius: 6px;
@@ -165,7 +216,7 @@ export function dashboardHtml(input: { runId: string }) {
     }
     @media (max-width: 900px) {
       header { align-items: flex-start; flex-direction: column; }
-      .stats, .layout { grid-template-columns: 1fr; }
+      .stats, .layout, .role-grid { grid-template-columns: 1fr; }
     }
   </style>
 </head>
@@ -176,18 +227,18 @@ export function dashboardHtml(input: { runId: string }) {
   </header>
   <main>
     <section class="stats" id="stats"></section>
-    <section class="panel queue-panel">
-      <h2>Active Queue</h2>
-      <div class="queue-list" id="active-queue"></div>
+    <section class="panel focus-panel">
+      <h2>Active Task Focus</h2>
+      <div class="focus-list" id="active-focus"></div>
     </section>
     <section class="layout">
       <div class="panel">
-        <h2>Tasks</h2>
-        <div id="tasks"></div>
+        <h2>Task History</h2>
+        <div class="task-list" id="history-task-list"></div>
       </div>
       <div class="panel">
-        <h2>Sessions</h2>
-        <div class="sessions" id="sessions"></div>
+        <h2>Task Detail</h2>
+        <div class="task-detail" id="task-detail"></div>
       </div>
     </section>
   </main>
@@ -206,6 +257,8 @@ export function dashboardHtml(input: { runId: string }) {
     }[char]));
     const latestText = (session) => session.latestText || session.events.map((event) => event.text || event.payload?.delta || event.payload?.message || "").filter(Boolean).slice(-1)[0] || "";
     const promptLink = (task) => '<a class="prompt-link" target="_blank" rel="noreferrer" href="/tasks/' + encodeURIComponent(task.id) + '/prompt">Prompt</a>';
+    let selectedTaskId = null;
+    let latestOverview = null;
     const checklist = (task) => {
       const doneWhen = Array.isArray(task.doneWhen) ? task.doneWhen : [];
       if (!doneWhen.length) return "";
@@ -214,12 +267,73 @@ export function dashboardHtml(input: { runId: string }) {
         '<li><span class="checkbox">' + (checked ? "✓" : "") + '</span><span>' + escapeHtml(item) + '</span></li>'
       ).join("") + '</ul>';
     };
+    const taskById = (overview) => new Map(overview.tasks.map((task) => [task.id, task]));
+    const collectTaskChain = (task, map, seen = new Set()) => {
+      if (!task || seen.has(task.id)) return seen;
+      seen.add(task.id);
+      for (const id of task.dependsOn || []) collectTaskChain(map.get(id), map, seen);
+      return seen;
+    };
+    const sessionsForTaskChain = (overview, task) => {
+      const ids = collectTaskChain(task, taskById(overview));
+      return overview.sessions.filter((session) => ids.has(session.taskId));
+    };
+    const lessonsForTaskChain = (overview, task) => {
+      const ids = collectTaskChain(task, taskById(overview));
+      return (overview.lessons || []).filter((lesson) => ids.has(lesson.taskId));
+    };
+    const sessionCard = (session) =>
+      '<article class="session"><div class="session-head"><span class="role">' + escapeHtml(session.role) + '</span>' +
+      '<span class="badge ' + session.status + '">' + escapeHtml(session.status) + '</span></div>' +
+      '<div class="goal">' + escapeHtml(session.taskGoal) + '</div>' +
+      '<div class="meta">task ' + escapeHtml(session.taskId) + '<br>attempt ' + escapeHtml(session.attemptId) +
+      '<br>session ' + escapeHtml(session.sessionName || "") + '<br>codex ' + escapeHtml(session.codexSessionId || "") + '</div>' +
+      '<pre>' + escapeHtml(latestText(session)) + '</pre></article>';
+    const roleLane = (title, sessions) =>
+      '<section class="role-lane"><h3>' + title + '</h3>' +
+      (sessions.length ? sessions.map(sessionCard).join("") : '<div class="empty">No session</div>') + '</section>';
+    const lessonList = (lessons) => lessons.length
+      ? '<div class="lesson-list">' + lessons.map((lesson) =>
+        '<div class="lesson ' + escapeHtml(lesson.kind) + '"><span class="badge">' + escapeHtml(lesson.kind) + '</span> ' +
+        escapeHtml(lesson.summary) + '<div class="meta">task ' + escapeHtml(lesson.taskId) + '<br>attempt ' + escapeHtml(lesson.attemptId) + '</div></div>'
+      ).join("") + '</div>'
+      : '<div class="empty">No lessons or experiences</div>';
+    const roleSessions = (sessions, roles) => sessions.filter((session) => roles.includes(session.role));
+    const taskMeta = (task) => 'id ' + escapeHtml(task.id) + (task.dependsOn.length ? ' · depends on ' + task.dependsOn.map(escapeHtml).join(", ") : '');
+    const renderFocusTask = (overview, task) => {
+      const sessions = sessionsForTaskChain(overview, task);
+      const lessons = lessonsForTaskChain(overview, task);
+      return '<article class="focus-task"><div class="focus-head"><div class="focus-title">' +
+        '<span class="badge ' + task.status + '">' + escapeHtml(task.status) + '</span>' +
+        '<span class="badge">' + escapeHtml(task.role) + '</span><strong>' + escapeHtml(task.goal) + '</strong></div>' +
+        '<div>' + promptLink(task) + '</div></div><div class="meta">' + taskMeta(task) + '</div>' +
+        checklist(task) +
+        '<div class="role-grid">' +
+        roleLane("Planner", roleSessions(sessions, ["planner"])) +
+        roleLane("Executor", roleSessions(sessions, ["worker"])) +
+        roleLane("Reviewer", roleSessions(sessions, ["verifier", "goal-review"])) +
+        '</div><div class="detail-section"><h3>Lessons And Experiences</h3>' + lessonList(lessons) + '</div></article>';
+    };
+    const renderTaskDetail = (overview, task) => {
+      if (!task) return '<div class="empty">Select a task</div>';
+      const sessions = sessionsForTaskChain(overview, task);
+      const lessons = lessonsForTaskChain(overview, task);
+      return '<div class="task-detail-head"><div class="detail-title">' +
+        '<span class="badge ' + task.status + '">' + escapeHtml(task.status) + '</span>' +
+        '<span class="badge">' + escapeHtml(task.role) + '</span><strong>' + escapeHtml(task.goal) + '</strong></div>' +
+        '<div>' + promptLink(task) + '</div></div>' +
+        '<div class="meta">' + taskMeta(task) + '</div>' + checklist(task) +
+        '<div class="detail-section"><h3>Prompt Detail</h3><div class="meta">' + escapeHtml(task.prompt) + '</div></div>' +
+        '<div class="detail-section"><h3>Related Sessions</h3><div class="sessions">' + (sessions.length ? sessions.map(sessionCard).join("") : '<div class="empty">No session</div>') + '</div></div>' +
+        '<div class="detail-section"><h3>Lessons And Experiences</h3>' + lessonList(lessons) + '</div>';
+    };
     async function refresh() {
       const response = await fetch("/api/runs/" + encodeURIComponent(runId) + "/overview");
       const overview = await response.json();
       render(overview);
     }
     function render(overview) {
+      latestOverview = overview;
       document.getElementById("run-title").textContent = overview.run ? overview.run.goal : runId;
       const taskCounts = byStatus(overview.tasks);
       const sessionCounts = byStatus(overview.sessions);
@@ -230,29 +344,27 @@ export function dashboardHtml(input: { runId: string }) {
         ["Running sessions", sessionCounts.running || 0]
       ].map(([label, value]) => '<div class="stat"><b>' + value + '</b><span>' + label + '</span></div>').join("");
       const activeTasks = overview.tasks.filter((task) => task.status === "todo" || task.status === "running");
-      document.getElementById("active-queue").innerHTML = activeTasks.length ? activeTasks.map((task) =>
-        '<div class="queue-item"><span class="badge ' + task.status + '">' + escapeHtml(task.status) + '</span>' +
+      if (!selectedTaskId || !overview.tasks.some((task) => task.id === selectedTaskId)) {
+        selectedTaskId = (activeTasks[0] || overview.tasks[overview.tasks.length - 1] || {}).id || null;
+      }
+      document.getElementById("active-focus").innerHTML = activeTasks.length
+        ? activeTasks.map((task) => renderFocusTask(overview, task)).join("")
+        : '<div class="empty">No active tasks</div>';
+      document.getElementById("history-task-list").innerHTML = [...overview.tasks].reverse().map((task) =>
+        '<button class="task-row ' + (task.id === selectedTaskId ? 'selected' : '') + '" data-task-id="' + escapeHtml(task.id) + '">' +
+        '<span class="badge ' + task.status + '">' + escapeHtml(task.status) + '</span>' +
         '<span class="badge">' + escapeHtml(task.role) + '</span>' +
-        '<div><strong>' + escapeHtml(task.goal) + '</strong><div class="meta">' +
-        'id ' + escapeHtml(task.id) + (task.dependsOn.length ? ' · depends on ' + task.dependsOn.map(escapeHtml).join(", ") : '') +
-        promptLink(task) + '</div>' + checklist(task) + '</div></div>'
-      ).join("") : '<div class="empty">No active tasks</div>';
-      document.getElementById("tasks").innerHTML = overview.tasks.map((task) =>
-        '<div class="task"><span class="badge ' + task.status + '">' + escapeHtml(task.status) + '</span>' +
-        '<span class="badge">' + escapeHtml(task.role) + '</span>' +
-        '<div><strong>' + escapeHtml(task.goal) + '</strong><div class="meta">' +
-        'id ' + escapeHtml(task.id) + (task.dependsOn.length ? ' · depends on ' + task.dependsOn.map(escapeHtml).join(", ") : '') +
-        promptLink(task) + '</div>' + checklist(task) + '</div></div>'
+        '<span><strong>' + escapeHtml(task.goal) + '</strong><br><span class="meta">' + taskMeta(task) + '</span></span></button>'
       ).join("");
-      document.getElementById("sessions").innerHTML = overview.sessions.map((session) =>
-        '<article class="session"><div class="session-head"><span class="role">' + escapeHtml(session.role) + '</span>' +
-        '<span class="badge ' + session.status + '">' + escapeHtml(session.status) + '</span></div>' +
-        '<div class="goal">' + escapeHtml(session.taskGoal) + '</div>' +
-        '<div class="meta">task ' + escapeHtml(session.taskId) + '<br>attempt ' + escapeHtml(session.attemptId) +
-        '<br>session ' + escapeHtml(session.sessionName || "") + '<br>codex ' + escapeHtml(session.codexSessionId || "") + '</div>' +
-        '<pre>' + escapeHtml(latestText(session)) + '</pre></article>'
-      ).join("");
+      document.getElementById("task-detail").innerHTML = renderTaskDetail(overview, overview.tasks.find((task) => task.id === selectedTaskId));
     }
+    document.addEventListener("click", (event) => {
+      if (!event.target || !event.target.closest) return;
+      const row = event.target.closest("[data-task-id]");
+      if (!row) return;
+      selectedTaskId = row.getAttribute("data-task-id");
+      if (latestOverview) render(latestOverview);
+    });
     refresh().catch(console.error);
     setInterval(() => refresh().catch(console.error), 1500);
   </script>
