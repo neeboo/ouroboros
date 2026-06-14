@@ -87,6 +87,14 @@ Use `--timeout-ms` as a generous hard runtime cap. Use `--idle-timeout-ms` to st
 
 `run-overview` returns the run, tasks, observable sessions, and recent attempt events as JSON. `dashboard` starts a local web page that polls the same overview data so planner, worker, and verifier sessions can be watched side by side while they run.
 
+When the dashboard starts its background runner, it launches `autopilot` with the standard stop hooks by default:
+
+```text
+create-tasks,create-verifier,create-repair,context-summary
+```
+
+Pass `--stop-hook` to override that list. The dashboard also forwards `--start-hook` and `--worktree-root` to the background runner.
+
 Runner stop hooks run after a subagent turn and before the attempt is recorded. Hooks can append checks/artifacts/problems and decide `exit`, `continue`, or `retry`, which prevents a subagent from repeating itself indefinitely.
 
 Stop hooks are role-scoped by the CLI:

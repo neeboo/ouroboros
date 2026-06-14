@@ -1092,6 +1092,7 @@ function createAttemptEventRecorder(attemptId: string) {
 }
 
 function dashboardRunnerCommand(runId: string) {
+  const stopHook = flag(parsed, "stop-hook") ?? "create-tasks,create-verifier,create-repair,context-summary";
   const cmd = [
     Bun.argv[0],
     Bun.argv[1],
@@ -1102,6 +1103,8 @@ function dashboardRunnerCommand(runId: string) {
     runId,
     "--executor",
     "codex-resumable",
+    "--stop-hook",
+    stopHook,
   ];
   for (const name of [
     "limit",
@@ -1115,6 +1118,8 @@ function dashboardRunnerCommand(runId: string) {
     "idle-timeout-ms",
     "model",
     "cwd",
+    "start-hook",
+    "worktree-root",
   ]) {
     const value = flag(parsed, name);
     if (value !== undefined) {
