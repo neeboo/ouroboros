@@ -11,366 +11,356 @@ export function dashboardHtml(input: { runId: string }) {
     :root {
       color-scheme: light;
       font-family: "Aptos", "Segoe UI Variable", ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
-      --bg: #f6f6f4;
-      --ink: #151515;
-      --muted: #6f6f6a;
-      --soft: #fafaf8;
-      --panel: #ffffff;
-      --line: #ddddda;
-      --line-strong: #c7c7c2;
-      --rail: #161616;
-      --rail-2: #242424;
-      --accent: #333333;
-      --accent-2: #6b6b66;
-      --accent-soft: #eeeeeb;
-      --warn: #5f5f5a;
-      --danger: #3f3f3d;
-      --ok: #575753;
+      --app: #121212;
+      --sidebar: #30302f;
+      --sidebar-soft: #3a3a38;
+      --panel: #252524;
+      --panel-soft: #2f2f2e;
+      --canvas: #151515;
+      --canvas-soft: #1d1d1c;
+      --line: rgba(255, 255, 255, 0.1);
+      --line-strong: rgba(255, 255, 255, 0.18);
+      --ink: #f0f0eb;
+      --muted: #aaa9a3;
+      --muted-2: #787772;
+      --chip: #3a3a38;
+      --chip-strong: #4a4a47;
+      --ok: #c9c9c3;
+      --warn: #b8b7b0;
+      --danger: #d4d3cc;
       --mono: "JetBrains Mono", "SFMono-Regular", Consolas, monospace;
       color: var(--ink);
-      background: var(--bg);
+      background: var(--app);
     }
     * { box-sizing: border-box; }
+    html, body { min-height: 100%; }
     body {
       margin: 0;
       min-height: 100dvh;
-      background: var(--bg);
+      overflow: hidden;
+      background: var(--app);
     }
-    header {
-      position: sticky;
-      top: 0;
-      z-index: 2;
+    .app-shell {
+      min-height: 100dvh;
+      display: grid;
+      grid-template-columns: 300px minmax(520px, 1fr) 326px;
+      background: var(--app);
+    }
+    .task-sidebar {
+      display: grid;
+      grid-template-rows: auto auto 1fr;
+      min-width: 0;
+      padding: 14px 10px;
+      background: linear-gradient(180deg, #313130, #565652);
+      border-right: 1px solid rgba(255, 255, 255, 0.12);
+      overflow: hidden;
+    }
+    .sidebar-head {
+      padding: 2px 6px 14px;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+    }
+    .brand-row {
       display: flex;
       align-items: center;
       justify-content: space-between;
-      gap: 16px;
-      padding: 18px 28px;
-      background: rgba(22, 22, 22, 0.96);
-      color: #f7f7f4;
-      border-bottom: 1px solid rgba(255, 255, 255, 0.08);
-      box-shadow: 0 18px 45px -34px rgba(0, 0, 0, 0.72);
-      backdrop-filter: blur(14px);
+      gap: 12px;
     }
     h1 {
       margin: 0;
       font-size: 18px;
-      font-weight: 780;
+      font-weight: 760;
       letter-spacing: 0;
     }
-    #run-title {
-      max-width: 72ch;
-      color: #d8d8d3;
-      font-size: 14px;
-      line-height: 1.5;
+    .run-status {
+      min-width: 0;
+      max-width: 160px;
+      padding: 4px 8px;
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      border-radius: 999px;
+      color: #e5e5df;
+      font-size: 11px;
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
     }
-    main {
-      width: min(100%, 1540px);
-      margin: 0 auto;
-      padding: 24px 28px 32px;
-    }
-    .stats {
-      display: grid;
-      grid-template-columns: repeat(4, minmax(120px, 1fr));
-      gap: 1px;
-      margin-bottom: 22px;
-      border: 1px solid var(--line);
-      border-radius: 10px;
+    #run-title {
+      margin-top: 10px;
+      color: #d0d0c9;
+      font-size: 14px;
+      line-height: 1.5;
+      display: -webkit-box;
+      -webkit-line-clamp: 2;
+      -webkit-box-orient: vertical;
       overflow: hidden;
-      background: var(--line);
     }
-    .stat, .panel, .session, .task-row, .focus-task {
-      background: rgba(255, 255, 255, 0.92);
-      border: 1px solid var(--line);
+    .sidebar-stats {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 8px;
+      padding: 14px 6px;
     }
     .stat {
-      padding: 16px 18px;
-      border: 0;
-      border-radius: 0;
+      padding: 9px 10px;
+      border-radius: 9px;
+      background: rgba(255, 255, 255, 0.08);
+      border: 1px solid rgba(255, 255, 255, 0.08);
     }
     .stat b {
       display: block;
       font-family: var(--mono);
-      font-size: 25px;
-      line-height: 1;
-      letter-spacing: -0.03em;
+      font-size: 24px;
+      line-height: 1.1;
+      color: #f1f1ec;
     }
     .stat span {
       display: block;
-      margin-top: 7px;
-      color: var(--muted);
+      margin-top: 5px;
+      color: #bbbab3;
       font-size: 11px;
-      font-weight: 700;
+      font-weight: 720;
       letter-spacing: 0.08em;
       text-transform: uppercase;
     }
-    .layout {
-      display: grid;
-      grid-template-columns: minmax(320px, 0.9fr) minmax(460px, 1.5fr);
-      gap: 18px;
-      align-items: start;
+    .task-nav {
+      min-height: 0;
+      overflow: auto;
+      padding: 0 4px 8px;
     }
-    .panel {
-      padding: 16px;
-      border-radius: 12px;
-      box-shadow: 0 22px 64px -56px rgba(0, 0, 0, 0.45);
-    }
-    .panel h2 {
-      margin: 0 0 14px;
-      font-size: 12px;
-      color: var(--muted);
-      font-weight: 800;
-      letter-spacing: 0.11em;
-      text-transform: uppercase;
-    }
-    .focus-panel {
-      position: relative;
-      margin-bottom: 18px;
-      border-color: #2f2f2d;
-      background:
-        linear-gradient(135deg, #181818, #292928);
-      color: #f4f4ef;
-      overflow: hidden;
-    }
-    .focus-panel h2 { color: #c9c9c2; }
-    .focus-panel::before {
-      content: "";
-      position: absolute;
-      inset: 0 0 auto;
-      height: 1px;
-      background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.24), transparent);
-    }
-    .focus-list {
-      display: grid;
-      gap: 12px;
-    }
-    .focus-task {
-      padding: 14px;
-      border-color: rgba(255, 255, 255, 0.12);
-      border-radius: 10px;
-      background: rgba(255, 255, 255, 0.06);
-      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08);
-      animation: liftIn 360ms cubic-bezier(0.16, 1, 0.3, 1) both;
-    }
-    .focus-head, .task-detail-head {
-      align-items: flex-start;
-      justify-content: space-between;
-      display: grid;
-      grid-template-columns: 1fr auto;
-      gap: 8px;
-      margin-bottom: 10px;
-    }
-    .focus-title, .detail-title {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 8px;
-      align-items: start;
-    }
-    .focus-title strong, .detail-title strong {
-      font-size: 15px;
-      line-height: 1.35;
-      letter-spacing: -0.01em;
-    }
-    .role-grid {
-      display: grid;
-      grid-template-columns: repeat(3, minmax(180px, 1fr));
-      gap: 10px;
-      margin-top: 12px;
-    }
-    .role-lane {
-      min-height: 128px;
-      border: 1px solid rgba(255, 255, 255, 0.12);
-      border-radius: 9px;
-      background: rgba(250, 252, 251, 0.06);
-      padding: 10px;
-    }
-    .role-lane h3, .detail-section h3 {
+    .nav-section { margin-bottom: 18px; }
+    .section-label {
       margin: 0 0 8px;
+      padding: 0 4px;
+      color: #bab9b2;
       font-size: 11px;
-      color: var(--muted);
-      font-weight: 800;
-      letter-spacing: 0.11em;
+      font-weight: 760;
+      letter-spacing: 0.08em;
       text-transform: uppercase;
     }
-    .focus-panel .role-lane h3, .focus-panel .detail-section h3 { color: #c9c9c2; }
-    .detail-section { margin-top: 14px; }
+    .task-list {
+      display: grid;
+      gap: 5px;
+    }
     .task-row {
       width: 100%;
       display: grid;
-      grid-template-columns: 76px 82px 1fr;
-      gap: 10px;
+      grid-template-columns: 1fr auto;
+      gap: 8px;
       align-items: start;
-      padding: 11px;
-      border-color: transparent;
-      border-radius: 10px;
+      padding: 9px 10px;
+      border: 1px solid transparent;
+      border-radius: 9px;
       background: transparent;
+      color: #e4e3dd;
       text-align: left;
       font: inherit;
       cursor: pointer;
-      transition: transform 180ms cubic-bezier(0.16, 1, 0.3, 1), background 180ms, border-color 180ms;
-    }
-    .task-row + .task-row { margin-top: 4px; }
-    .task-row.selected {
-      border-color: #c7c7c2;
-      background: var(--accent-soft);
+      transition: transform 160ms cubic-bezier(0.16, 1, 0.3, 1), background 160ms, border-color 160ms;
     }
     .task-row:hover {
       transform: translateY(-1px);
-      border-color: #d1d1cc;
-      background: #f0f0ed;
+      background: rgba(255, 255, 255, 0.08);
+      border-color: rgba(255, 255, 255, 0.08);
     }
     .task-row:active { transform: translateY(0) scale(0.995); }
-    .task-list {
-      max-height: 70vh;
-      overflow: auto;
-      padding-right: 4px;
+    .task-row.selected {
+      background: rgba(255, 255, 255, 0.14);
+      border-color: rgba(255, 255, 255, 0.16);
     }
-    .task-detail {
-      min-height: 320px;
-    }
-    .empty {
-      padding: 18px;
-      border: 1px dashed var(--line-strong);
-      border-radius: 10px;
-      color: var(--muted);
-      font-size: 13px;
-      background: rgba(255, 255, 255, 0.42);
-    }
-    .focus-panel .empty {
-      color: #d3d3cc;
-      background: rgba(255, 255, 255, 0.055);
-      border-color: rgba(255, 255, 255, 0.14);
-    }
-    .checklist {
-      display: grid;
-      gap: 6px;
-      margin: 10px 0 0;
-      padding: 0;
-      list-style: none;
-      color: var(--muted);
-      font-size: 13px;
-      line-height: 1.6;
-    }
-    .focus-panel .checklist { color: #d6d6cf; }
-    .checklist li {
-      display: grid;
-      grid-template-columns: 16px 1fr;
-      gap: 6px;
-      align-items: start;
-    }
-    .checkbox {
-      display: inline-flex;
-      align-items: center;
-      justify-content: center;
-      width: 14px;
-      height: 14px;
-      border: 1px solid var(--line-strong);
-      border-radius: 999px;
-      color: var(--ok);
-      font-size: 11px;
-      line-height: 1;
-      margin-top: 1px;
-    }
-    .badge {
-      display: inline-flex;
-      align-items: center;
-      justify-content: center;
-      height: 24px;
-      padding: 0 8px;
-      border-radius: 999px;
-      background: #eeeeeb;
-      color: #333333;
-      border: 1px solid rgba(23, 32, 28, 0.06);
-      font-size: 11px;
-      font-weight: 760;
-      letter-spacing: 0.02em;
+    .task-row strong {
+      display: block;
+      min-width: 0;
+      color: #f2f1ec;
+      font-size: 14px;
+      font-weight: 680;
+      line-height: 1.35;
+      overflow: hidden;
+      text-overflow: ellipsis;
       white-space: nowrap;
     }
-    .badge.running {
-      background: #e5e5e1;
-      color: #2f2f2d;
-      animation: breathe 1.8s ease-in-out infinite;
+    .task-row .row-meta {
+      margin-top: 4px;
+      color: #aaa9a2;
+      font-size: 11px;
+      line-height: 1.35;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
     }
-    .badge.done { background: #e7e7e3; color: var(--ok); }
-    .badge.blocked { background: #deded9; color: var(--danger); }
-    .badge.todo { background: #f0f0eb; color: var(--warn); }
-    .focus-panel .badge {
-      background: rgba(255, 255, 255, 0.08);
-      color: #e8f1ec;
+    .workspace {
+      min-width: 0;
+      height: 100dvh;
+      display: grid;
+      grid-template-rows: auto 1fr;
+      background: var(--canvas);
+      overflow: hidden;
+    }
+    .workspace-head {
+      padding: 18px 28px 12px;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+      background: rgba(18, 18, 18, 0.88);
+      backdrop-filter: blur(12px);
+    }
+    .workspace-kicker {
+      color: var(--muted-2);
+      font-size: 11px;
+      font-weight: 740;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+    .workspace-title {
+      margin-top: 8px;
+      max-width: 900px;
+      color: var(--ink);
+      font-size: 24px;
+      font-weight: 720;
+      line-height: 1.45;
+    }
+    .workspace-flow {
+      min-height: 0;
+      overflow: auto;
+      padding: 22px 28px 96px;
+    }
+    .flow-inner {
+      width: min(100%, 820px);
+      margin: 0 auto;
+    }
+    .flow-card {
+      margin-bottom: 18px;
+      padding: 16px 18px;
+      border: 1px solid rgba(255, 255, 255, 0.09);
+      border-radius: 14px;
+      background: var(--canvas-soft);
+      animation: liftIn 260ms cubic-bezier(0.16, 1, 0.3, 1) both;
+    }
+    .flow-card.primary {
+      background: transparent;
       border-color: rgba(255, 255, 255, 0.12);
     }
-    .focus-panel .badge.running { color: #f0f0ea; }
-    .focus-panel .badge.done { color: #ecece6; }
-    .focus-panel .badge.blocked { color: #deded8; }
-    .focus-panel .badge.todo { color: #d8d8d2; }
+    .flow-card-head, .inspector-row {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 12px;
+    }
+    .flow-card-title {
+      color: #f1f1ec;
+      font-size: 18px;
+      font-weight: 720;
+      line-height: 1.45;
+    }
+    .flow-card-text {
+      margin-top: 10px;
+      color: #d8d7d0;
+      font-size: 14px;
+      line-height: 1.75;
+      white-space: pre-wrap;
+    }
+    .flow-card .meta { margin-top: 10px; }
+    .inspector-panel {
+      height: 100dvh;
+      padding: 18px 16px;
+      background: var(--app);
+      border-left: 1px solid rgba(255, 255, 255, 0.08);
+      overflow: auto;
+    }
+    .inspector-card {
+      margin-bottom: 14px;
+      padding: 14px 16px;
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      border-radius: 18px;
+      background: var(--panel);
+    }
+    .inspector-card h2 {
+      margin: 0 0 12px;
+      color: #d2d1ca;
+      font-size: 11px;
+      font-weight: 760;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+    .todo-list, .lesson-list, .info-list {
+      display: grid;
+      gap: 9px;
+      margin: 0;
+      padding: 0;
+      list-style: none;
+    }
+    .todo-item {
+      display: grid;
+      grid-template-columns: 16px 1fr;
+      gap: 9px;
+      align-items: start;
+      color: #d9d8d1;
+      font-size: 14px;
+      line-height: 1.55;
+    }
+    .checkbox {
+      width: 13px;
+      height: 13px;
+      margin-top: 3px;
+      border: 1px solid rgba(255, 255, 255, 0.35);
+      border-radius: 999px;
+    }
+    .checkbox.done { background: #deded8; border-color: #deded8; }
+    .lesson {
+      padding: 10px;
+      border-radius: 11px;
+      background: rgba(255, 255, 255, 0.045);
+      color: #d6d5cf;
+      font-size: 14px;
+      line-height: 1.55;
+    }
     .prompt-link {
       display: inline-flex;
       align-items: center;
       justify-content: center;
-      min-height: 28px;
-      padding: 0 10px;
-      margin-left: 8px;
-      border: 1px solid #d1d1cc;
+      min-height: 30px;
+      padding: 0 11px;
+      border: 1px solid rgba(255, 255, 255, 0.15);
       border-radius: 999px;
-      color: #242424;
-      background: #eeeeeb;
-      font-size: 12px;
-      font-weight: 760;
+      color: #efeee8;
+      background: rgba(255, 255, 255, 0.07);
+      font-size: 14px;
+      font-weight: 720;
       text-decoration: none;
-      transition: transform 180ms cubic-bezier(0.16, 1, 0.3, 1), background 180ms;
+      transition: transform 160ms cubic-bezier(0.16, 1, 0.3, 1), background 160ms;
     }
     .prompt-link:hover {
       transform: translateY(-1px);
-      background: #e4e4df;
+      background: rgba(255, 255, 255, 0.11);
     }
     .prompt-link:active { transform: translateY(0) scale(0.98); }
-    .focus-panel .prompt-link {
-      color: #f4f4ef;
-      background: rgba(255, 255, 255, 0.08);
-      border-color: rgba(255, 255, 255, 0.14);
-    }
-    .sessions, .lesson-list {
-      display: grid;
-      gap: 8px;
-    }
-    .session {
-      padding: 11px;
-      border-color: rgba(23, 32, 28, 0.08);
-      border-radius: 9px;
-      box-shadow: none;
-    }
-    .focus-panel .session {
-      color: #f4f4ef;
-      background: rgba(255, 255, 255, 0.055);
-      border-color: rgba(255, 255, 255, 0.1);
-    }
-    .session-head {
-      display: flex;
-      justify-content: space-between;
+    .badge {
+      display: inline-flex;
       align-items: center;
-      gap: 8px;
-      margin-bottom: 10px;
-    }
-    .role {
-      font-weight: 800;
-      text-transform: uppercase;
+      justify-content: center;
+      height: 22px;
+      padding: 0 8px;
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      border-radius: 999px;
+      background: var(--chip);
+      color: #e8e7e1;
       font-size: 11px;
-      letter-spacing: 0.1em;
-      color: var(--muted);
-    }
-    .focus-panel .role { color: #d0d0c8; }
-    .goal {
-      font-size: 14px;
       font-weight: 720;
-      line-height: 1.45;
-      margin-bottom: 10px;
+      white-space: nowrap;
+    }
+    .badge.running { animation: breathe 1.8s ease-in-out infinite; }
+    .badge.done { color: #d8d7d0; }
+    .badge.blocked { background: var(--chip-strong); }
+    .badge.todo { color: #c9c8c2; }
+    .empty {
+      padding: 16px;
+      border: 1px dashed rgba(255, 255, 255, 0.14);
+      border-radius: 12px;
+      color: #aaa9a3;
+      font-size: 14px;
+      line-height: 1.6;
+      background: rgba(255, 255, 255, 0.035);
     }
     .meta {
       color: var(--muted);
-      font-size: 12px;
-      line-height: 1.65;
+      font-size: 11px;
+      line-height: 1.6;
       overflow-wrap: anywhere;
     }
     .code-meta {
@@ -378,40 +368,18 @@ export function dashboardHtml(input: { runId: string }) {
       font-size: 11px;
       line-height: 1.65;
     }
-    .focus-panel .meta { color: #d0d0c8; }
-    .lesson {
-      padding: 10px;
-      border: 1px solid rgba(23, 32, 28, 0.08);
-      border-radius: 9px;
-      background: rgba(255, 255, 255, 0.78);
-      font-size: 12px;
-      line-height: 1.45;
-    }
-    .lesson.experience {
-      border-top-color: #c7c7c2;
-      background: linear-gradient(180deg, rgba(0, 0, 0, 0.025), rgba(255, 255, 255, 0.78) 34px);
-    }
-    .lesson.lesson {
-      border-top-color: #bdbdb7;
-      background: linear-gradient(180deg, rgba(0, 0, 0, 0.035), rgba(255, 255, 255, 0.78) 34px);
-    }
-    .focus-panel .lesson {
-      background: rgba(255, 255, 255, 0.055);
-      border-color: rgba(255, 255, 255, 0.1);
-    }
     pre {
-      margin: 10px 0 0;
-      min-height: 72px;
-      max-height: 180px;
-      overflow: auto;
+      margin: 12px 0 0;
+      max-height: 240px;
+      overflow: hidden;
+      border-radius: 10px;
       padding: 10px;
-      border-radius: 9px;
       border: 1px solid rgba(255, 255, 255, 0.08);
       background: #171717;
       color: #efefea;
       font-family: var(--mono);
       font-size: 11px;
-      line-height: 1.5;
+      line-height: 1.55;
       white-space: pre-wrap;
     }
     @keyframes breathe {
@@ -423,40 +391,52 @@ export function dashboardHtml(input: { runId: string }) {
       to { opacity: 1; transform: translateY(0); }
     }
     @media (max-width: 900px) {
-      header {
-        align-items: flex-start;
-        flex-direction: column;
-        padding: 16px;
+      body { overflow: auto; }
+      .app-shell {
+        min-height: 100dvh;
+        grid-template-columns: 1fr;
       }
-      #run-title { white-space: normal; }
-      main { padding: 16px; }
-      .stats, .layout, .role-grid { grid-template-columns: 1fr; }
-      .task-row { grid-template-columns: 1fr; }
+      .task-sidebar, .workspace, .inspector-panel {
+        height: auto;
+        max-height: none;
+        overflow: visible;
+      }
+      .workspace-flow { padding: 18px 16px 32px; }
+      .workspace-head { padding: 16px; }
     }
   </style>
 </head>
 <body>
-  <header>
-    <h1>Ouroboros</h1>
-    <div id="run-title">Loading ${escapeHtml(input.runId)}</div>
-  </header>
-  <main>
-    <section class="stats" id="stats"></section>
-    <section class="panel focus-panel">
-      <h2>Active Task Focus</h2>
-      <div class="focus-list" id="active-focus"></div>
-    </section>
-    <section class="layout">
-      <div class="panel">
-        <h2>Task History</h2>
-        <div class="task-list" id="history-task-list"></div>
+  <div class="app-shell">
+    <aside class="task-sidebar">
+      <div class="sidebar-head">
+        <div class="brand-row">
+          <h1>Ouroboros</h1>
+          <div class="run-status" id="run-status">Loading</div>
+        </div>
+        <div id="run-title">Loading ${escapeHtml(input.runId)}</div>
       </div>
-      <div class="panel">
-        <h2>Task Detail</h2>
-        <div class="task-detail" id="task-detail"></div>
-      </div>
-    </section>
-  </main>
+      <section class="sidebar-stats" id="sidebar-stats"></section>
+      <nav class="task-nav" aria-label="Tasks">
+        <section class="nav-section">
+          <h2 class="section-label">Active Tasks</h2>
+          <div class="task-list" id="active-task-list"></div>
+        </section>
+        <section class="nav-section">
+          <h2 class="section-label">History</h2>
+          <div class="task-list" id="history-task-list"></div>
+        </section>
+      </nav>
+    </aside>
+    <main class="workspace">
+      <header class="workspace-head">
+        <div class="workspace-kicker" id="workspace-kicker">Task Flow</div>
+        <div class="workspace-title" id="workspace-title">Loading</div>
+      </header>
+      <section class="workspace-flow" id="workspace-flow"></section>
+    </main>
+    <aside class="inspector-panel" id="inspector-panel"></aside>
+  </div>
   <script>
     const runId = ${JSON.stringify(input.runId)};
     const byStatus = (items) => items.reduce((acc, item) => {
@@ -474,14 +454,6 @@ export function dashboardHtml(input: { runId: string }) {
     const promptLink = (task) => '<a class="prompt-link" target="_blank" rel="noreferrer" href="/tasks/' + encodeURIComponent(task.id) + '/prompt">Prompt</a>';
     let selectedTaskId = null;
     let latestOverview = null;
-    const checklist = (task) => {
-      const doneWhen = Array.isArray(task.doneWhen) ? task.doneWhen : [];
-      if (!doneWhen.length) return "";
-      const checked = task.status === "done";
-      return '<ul class="checklist" data-source="doneWhen">' + doneWhen.map((item) =>
-        '<li><span class="checkbox">' + (checked ? "✓" : "") + '</span><span>' + escapeHtml(item) + '</span></li>'
-      ).join("") + '</ul>';
-    };
     const taskById = (overview) => new Map(overview.tasks.map((task) => [task.id, task]));
     const collectTaskChain = (task, map, seen = new Set()) => {
       if (!task || seen.has(task.id)) return seen;
@@ -497,50 +469,57 @@ export function dashboardHtml(input: { runId: string }) {
       const ids = collectTaskChain(task, taskById(overview));
       return (overview.lessons || []).filter((lesson) => ids.has(lesson.taskId));
     };
-    const sessionCard = (session) =>
-      '<article class="session"><div class="session-head"><span class="role">' + escapeHtml(session.role) + '</span>' +
-      '<span class="badge ' + session.status + '">' + escapeHtml(session.status) + '</span></div>' +
-      '<div class="goal">' + escapeHtml(session.taskGoal) + '</div>' +
-      '<div class="meta">task ' + escapeHtml(session.taskId) + '<br>attempt ' + escapeHtml(session.attemptId) +
-      '<br>session ' + escapeHtml(session.sessionName || "") + '<br>codex ' + escapeHtml(session.codexSessionId || "") + '</div>' +
-      '<pre>' + escapeHtml(latestText(session)) + '</pre></article>';
-    const roleLane = (title, sessions) =>
-      '<section class="role-lane"><h3>' + title + '</h3>' +
-      (sessions.length ? sessions.map(sessionCard).join("") : '<div class="empty">No session</div>') + '</section>';
+    const compact = (value, max = 140) => {
+      const text = String(value ?? "").replace(/\\s+/g, " ").trim();
+      return text.length > max ? text.slice(0, max - 1) + "…" : text;
+    };
     const lessonList = (lessons) => lessons.length
       ? '<div class="lesson-list">' + lessons.map((lesson) =>
         '<div class="lesson ' + escapeHtml(lesson.kind) + '"><span class="badge">' + escapeHtml(lesson.kind) + '</span> ' +
         escapeHtml(lesson.summary) + '<div class="meta code-meta">task ' + escapeHtml(lesson.taskId) + '<br>attempt ' + escapeHtml(lesson.attemptId) + '</div></div>'
       ).join("") + '</div>'
       : '<div class="empty">No lessons or experiences</div>';
-    const roleSessions = (sessions, roles) => sessions.filter((session) => roles.includes(session.role));
     const taskMeta = (task) => '<span class="code-meta">id ' + escapeHtml(task.id) + '</span>' + (task.dependsOn.length ? ' · depends on ' + task.dependsOn.map((id) => '<span class="code-meta">' + escapeHtml(id) + '</span>').join(", ") : '');
-    const renderFocusTask = (overview, task) => {
+    const taskRow = (task) =>
+      '<button class="task-row ' + (task.id === selectedTaskId ? 'selected' : '') + '" data-task-id="' + escapeHtml(task.id) + '">' +
+      '<span><strong>' + escapeHtml(task.goal) + '</strong><span class="row-meta">' + escapeHtml(task.role) + ' · ' + escapeHtml(task.status) + '</span></span>' +
+      '<span class="badge ' + task.status + '">' + escapeHtml(task.status) + '</span></button>';
+    const sessionFlowCard = (session) =>
+      '<article class="flow-card"><div class="flow-card-head"><div><span class="badge">' + escapeHtml(session.role) + '</span>' +
+      '<div class="flow-card-title">' + escapeHtml(session.taskGoal) + '</div></div>' +
+      '<span class="badge ' + session.status + '">' + escapeHtml(session.status) + '</span></div>' +
+      '<div class="meta code-meta">task ' + escapeHtml(session.taskId) + '<br>attempt ' + escapeHtml(session.attemptId) +
+      '<br>session ' + escapeHtml(session.sessionName || "") + '<br>codex ' + escapeHtml(session.codexSessionId || "") + '</div>' +
+      (latestText(session) ? '<pre>' + escapeHtml(latestText(session)) + '</pre>' : '<div class="flow-card-text">No stream output recorded.</div>') +
+      '</article>';
+    const renderWorkspace = (overview, task) => {
+      if (!task) return '<div class="flow-inner"><div class="empty">No task selected</div></div>';
       const sessions = sessionsForTaskChain(overview, task);
       const lessons = lessonsForTaskChain(overview, task);
-      return '<article class="focus-task"><div class="focus-head"><div class="focus-title">' +
-        '<span class="badge ' + task.status + '">' + escapeHtml(task.status) + '</span>' +
-        '<span class="badge">' + escapeHtml(task.role) + '</span><strong>' + escapeHtml(task.goal) + '</strong></div>' +
-        '<div>' + promptLink(task) + '</div></div><div class="meta">' + taskMeta(task) + '</div>' +
-        checklist(task) +
-        '<div class="role-grid">' +
-        roleLane("Planner", roleSessions(sessions, ["planner"])) +
-        roleLane("Executor", roleSessions(sessions, ["worker"])) +
-        roleLane("Reviewer", roleSessions(sessions, ["verifier", "goal-review"])) +
-        '</div><div class="detail-section"><h3>Lessons And Experiences</h3>' + lessonList(lessons) + '</div></article>';
+      return '<div class="flow-inner"><article class="flow-card primary"><div class="flow-card-head"><div>' +
+        '<span class="badge ' + task.status + '">' + escapeHtml(task.status) + '</span> <span class="badge">' + escapeHtml(task.role) + '</span>' +
+        '<div class="flow-card-title">' + escapeHtml(task.goal) + '</div></div>' + promptLink(task) + '</div>' +
+        '<div class="meta">' + taskMeta(task) + '</div><div class="flow-card-text">' + escapeHtml(task.prompt) + '</div></article>' +
+        (sessions.length ? sessions.map(sessionFlowCard).join("") : '<div class="empty">No sessions recorded for this task yet.</div>') +
+        (lessons.length ? '<article class="flow-card"><div class="flow-card-head"><div class="flow-card-title">Lessons and experiences</div></div>' + lessonList(lessons.slice(-6)) + '</article>' : '') +
+        '</div>';
     };
-    const renderTaskDetail = (overview, task) => {
-      if (!task) return '<div class="empty">Select a task</div>';
-      const sessions = sessionsForTaskChain(overview, task);
+    const renderInspector = (overview, task) => {
+      if (!task) return '<section class="inspector-card"><h2>Detail</h2><div class="empty">Select a task</div></section>';
       const lessons = lessonsForTaskChain(overview, task);
-      return '<div class="task-detail-head"><div class="detail-title">' +
-        '<span class="badge ' + task.status + '">' + escapeHtml(task.status) + '</span>' +
-        '<span class="badge">' + escapeHtml(task.role) + '</span><strong>' + escapeHtml(task.goal) + '</strong></div>' +
-        '<div>' + promptLink(task) + '</div></div>' +
-        '<div class="meta">' + taskMeta(task) + '</div>' + checklist(task) +
-        '<div class="detail-section"><h3>Prompt Detail</h3><div class="meta">' + escapeHtml(task.prompt) + '</div></div>' +
-        '<div class="detail-section"><h3>Related Sessions</h3><div class="sessions">' + (sessions.length ? sessions.map(sessionCard).join("") : '<div class="empty">No session</div>') + '</div></div>' +
-        '<div class="detail-section"><h3>Lessons And Experiences</h3>' + lessonList(lessons) + '</div>';
+      const doneWhen = Array.isArray(task.doneWhen) ? task.doneWhen : [];
+      return '<section class="inspector-card"><h2>Todos</h2>' +
+        (doneWhen.length ? '<ul class="todo-list">' + doneWhen.map((item) =>
+          '<li class="todo-item"><span class="checkbox ' + (task.status === "done" ? "done" : "") + '"></span><span>' + escapeHtml(item) + '</span></li>'
+        ).join("") + '</ul>' : '<div class="empty">No todos recorded</div>') + '</section>' +
+        '<section class="inspector-card"><h2>Task</h2><div class="inspector-row"><span class="badge ' + task.status + '">' + escapeHtml(task.status) + '</span>' + promptLink(task) + '</div>' +
+        '<div class="meta" style="margin-top:10px">' + taskMeta(task) + '</div><div class="meta" style="margin-top:10px">' + escapeHtml(compact(task.prompt, 420)) + '</div></section>' +
+        '<section class="inspector-card"><h2>Lessons</h2>' + lessonList(lessons.slice(-8)) + '</section>' +
+        '<section class="inspector-card"><h2>Run Info</h2><ul class="info-list">' +
+        '<li class="meta">Run status: ' + escapeHtml(overview.run?.status || "") + '</li>' +
+        '<li class="meta">Tasks: ' + overview.tasks.length + '</li>' +
+        '<li class="meta">Sessions: ' + overview.sessions.length + '</li>' +
+        '<li class="meta">Lessons: ' + (overview.lessons || []).length + '</li></ul></section>';
     };
     async function refresh() {
       const response = await fetch("/api/runs/" + encodeURIComponent(runId) + "/overview");
@@ -549,29 +528,27 @@ export function dashboardHtml(input: { runId: string }) {
     }
     function render(overview) {
       latestOverview = overview;
-      document.getElementById("run-title").textContent = overview.run ? overview.run.goal : runId;
       const taskCounts = byStatus(overview.tasks);
       const sessionCounts = byStatus(overview.sessions);
-      document.getElementById("stats").innerHTML = [
+      const activeTasks = overview.tasks.filter((task) => task.status === "todo" || task.status === "running");
+      if (!selectedTaskId || !overview.tasks.some((task) => task.id === selectedTaskId)) {
+        selectedTaskId = (activeTasks[0] || overview.tasks[overview.tasks.length - 1] || {}).id || null;
+      }
+      const selectedTask = overview.tasks.find((task) => task.id === selectedTaskId);
+      document.getElementById("run-status").textContent = overview.run?.status || "unknown";
+      document.getElementById("run-title").textContent = overview.run ? overview.run.goal : runId;
+      document.getElementById("workspace-kicker").textContent = selectedTask ? selectedTask.role + " / " + selectedTask.status : "Task Flow";
+      document.getElementById("workspace-title").textContent = selectedTask ? selectedTask.goal : "No task selected";
+      document.getElementById("sidebar-stats").innerHTML = [
         ["Tasks", overview.tasks.length],
         ["Todo tasks", taskCounts.todo || 0],
         ["Running tasks", taskCounts.running || 0],
         ["Running sessions", sessionCounts.running || 0]
       ].map(([label, value]) => '<div class="stat"><b>' + value + '</b><span>' + label + '</span></div>').join("");
-      const activeTasks = overview.tasks.filter((task) => task.status === "todo" || task.status === "running");
-      if (!selectedTaskId || !overview.tasks.some((task) => task.id === selectedTaskId)) {
-        selectedTaskId = (activeTasks[0] || overview.tasks[overview.tasks.length - 1] || {}).id || null;
-      }
-      document.getElementById("active-focus").innerHTML = activeTasks.length
-        ? activeTasks.map((task) => renderFocusTask(overview, task)).join("")
-        : '<div class="empty">No active tasks</div>';
-      document.getElementById("history-task-list").innerHTML = [...overview.tasks].reverse().map((task) =>
-        '<button class="task-row ' + (task.id === selectedTaskId ? 'selected' : '') + '" data-task-id="' + escapeHtml(task.id) + '">' +
-        '<span class="badge ' + task.status + '">' + escapeHtml(task.status) + '</span>' +
-        '<span class="badge">' + escapeHtml(task.role) + '</span>' +
-        '<span><strong>' + escapeHtml(task.goal) + '</strong><br><span class="meta">' + taskMeta(task) + '</span></span></button>'
-      ).join("");
-      document.getElementById("task-detail").innerHTML = renderTaskDetail(overview, overview.tasks.find((task) => task.id === selectedTaskId));
+      document.getElementById("active-task-list").innerHTML = activeTasks.length ? activeTasks.map(taskRow).join("") : '<div class="empty">No active tasks</div>';
+      document.getElementById("history-task-list").innerHTML = [...overview.tasks].reverse().map(taskRow).join("");
+      document.getElementById("workspace-flow").innerHTML = renderWorkspace(overview, selectedTask);
+      document.getElementById("inspector-panel").innerHTML = renderInspector(overview, selectedTask);
     }
     document.addEventListener("click", (event) => {
       if (!event.target || !event.target.closest) return;

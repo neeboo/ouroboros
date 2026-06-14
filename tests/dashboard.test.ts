@@ -7,30 +7,32 @@ import { buildTaskPrompt } from "../packages/runner/src";
 import { dashboardHtml, handleDashboardRequest } from "../packages/cli/src/dashboard";
 
 describe("dashboard", () => {
-  test("renders a dedicated active queue region for todo and running tasks", () => {
+  test("renders Codex-style task navigation for active and history tasks", () => {
     const html = dashboardHtml({ runId: "run_123" });
 
-    expect(html).toContain("Active Task Focus");
-    expect(html).toContain('id="active-focus"');
+    expect(html).toContain("Active Tasks");
+    expect(html).toContain('id="active-task-list"');
+    expect(html).toContain('id="history-task-list"');
     expect(html).toContain("todo");
     expect(html).toContain("running");
     expect(html).toContain("/prompt");
   });
 
-  test("renders history task detail regions for sessions prompts and lessons", () => {
+  test("renders workspace and inspector regions for sessions prompts and lessons", () => {
     const html = dashboardHtml({ runId: "run_123" });
 
-    expect(html).toContain('id="history-task-list"');
-    expect(html).toContain('id="task-detail"');
+    expect(html).toContain('id="workspace-flow"');
+    expect(html).toContain('id="inspector-panel"');
     expect(html).toContain("sessionsForTaskChain");
     expect(html).toContain("lessonsForTaskChain");
-    expect(html).toContain("Prompt Detail");
+    expect(html).toContain("renderWorkspace");
+    expect(html).toContain("renderInspector");
   });
 
-  test("renders task doneWhen items as a checklist", () => {
+  test("renders task doneWhen items in the todo inspector", () => {
     const html = dashboardHtml({ runId: "run_123" });
 
-    expect(html).toContain("checklist");
+    expect(html).toContain("todo-list");
     expect(html).toContain("doneWhen");
     expect(html).toContain("checkbox");
   });
