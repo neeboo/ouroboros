@@ -93,14 +93,21 @@ export class Harness {
   createTask(input: CreateTaskInput) {
     const id = input.id ?? makeId("task");
     return withDatabase(this.dbPath, (db) => {
+      const cycleId = resolveTaskCycleId(db, {
+        id,
+        role: input.role,
+        parentId: input.parentId ?? null,
+        dependsOn: input.dependsOn ?? [],
+        cycleId: input.cycleId ?? null,
+      });
       db.query(
         `
         insert into tasks (
-          id, run_id, parent_id, status, role, goal, prompt,
+          id, run_id, parent_id, cycle_id, status, role, goal, prompt,
           depends_on_json, done_when_json
         )
         values (
-          $id, $runId, $parentId, 'todo', $role, $goal, $prompt,
+          $id, $runId, $parentId, $cycleId, 'todo', $role, $goal, $prompt,
           $dependsOnJson, $doneWhenJson
         )
         `,
@@ -108,6 +115,7 @@ export class Harness {
         $id: id,
         $runId: input.runId,
         $parentId: input.parentId ?? null,
+        $cycleId: cycleId,
         $role: input.role,
         $goal: input.goal,
         $prompt: input.prompt,
@@ -684,6 +692,27 @@ export class Harness {
 
 function stringOrNull(value: unknown) {
   return typeof value === "string" && value.trim().length > 0 ? value : null;
+}
+
+function resolveTaskCycleId(
+  db: Parameters<Parameters<typeof withDatabase>[1]>[0],
+  input: { id: string; role: string; parentId: string | null; dependsOn: string[]; cycleId: string | null },
+) {
+  if (input.cycleId) {
+    return input.cycleId;
+  }
+  if (input.role === "planner" || input.role === "goal-review") {
+    return input.id;
+  }
+  const linkedIds = [input.parentId, ...input.dependsOn].filter((id): id is string => typeof id === "string");
+  const query = db.query("select cycle_id from tasks where id = $id");
+  for (const id of linkedIds) {
+    const row = query.get({ $id: id }) as { cycle_id: string | null } | null;
+    if (row?.cycle_id) {
+      return row.cycle_id;
+    }
+  }
+  return input.id;
 }
 
 function latestEventText(events: Array<{ text: string | null; payload: Record<string, unknown> }>) {

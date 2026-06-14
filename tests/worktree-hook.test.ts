@@ -24,6 +24,7 @@ describe("git worktree hook", () => {
         id: "task_1",
         runId: "run_1",
         parentId: null,
+        cycleId: "task_1",
         status: "running",
         role: "worker",
         goal: "Task",

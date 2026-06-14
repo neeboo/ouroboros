@@ -99,6 +99,50 @@ describe("Harness", () => {
     expect(ready?.id).not.toBe(second);
   });
 
+  test("assigns task cycles from planners dependencies and parents", () => {
+    const runId = harness.createRun({ goal: "Build loop" });
+    const planner = harness.createTask({
+      runId,
+      role: "planner",
+      goal: "Plan cycle",
+      prompt: "Plan.",
+    });
+    const worker = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Implement cycle",
+      prompt: "Implement.",
+      dependsOn: [planner],
+    });
+    const verifier = harness.createTask({
+      runId,
+      role: "verifier",
+      goal: "Verify cycle",
+      prompt: "Verify.",
+      dependsOn: [worker],
+    });
+    const repair = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Repair cycle",
+      prompt: "Repair.",
+      parentId: verifier,
+    });
+    const nextPlanner = harness.createTask({
+      runId,
+      role: "planner",
+      goal: "Plan next cycle",
+      prompt: "Plan next.",
+      dependsOn: [verifier],
+    });
+
+    expect(harness.getTask(planner)?.cycleId).toBe(planner);
+    expect(harness.getTask(worker)?.cycleId).toBe(planner);
+    expect(harness.getTask(verifier)?.cycleId).toBe(planner);
+    expect(harness.getTask(repair)?.cycleId).toBe(planner);
+    expect(harness.getTask(nextPlanner)?.cycleId).toBe(nextPlanner);
+  });
+
   test("records a done attempt and unlocks dependent work", () => {
     const runId = harness.createRun({ goal: "Build loop" });
     const first = harness.createTask({

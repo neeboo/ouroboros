@@ -13,6 +13,7 @@ create table if not exists tasks (
   id text primary key,
   run_id text not null references runs(id) on delete cascade,
   parent_id text references tasks(id) on delete set null,
+  cycle_id text,
   status text not null check (status in ('todo', 'running', 'done', 'blocked')),
   role text not null,
   goal text not null,

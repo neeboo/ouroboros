@@ -24,6 +24,7 @@ export function taskFromRow(row: TaskRow): Task {
     id: row.id,
     runId: row.run_id,
     parentId: row.parent_id,
+    cycleId: row.cycle_id ?? row.id,
     status: row.status,
     role: row.role,
     goal: row.goal,

@@ -245,6 +245,7 @@ switch (parsed.command) {
   case "dashboard": {
     const runId = required(parsed, "run-id");
     const port = parsePositiveInteger(flag(parsed, "port") ?? "7331", "--port");
+    harness.init();
     const server = serveDashboard({
       runId,
       port,

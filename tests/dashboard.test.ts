@@ -24,7 +24,7 @@ describe("dashboard", () => {
     expect(html).toContain('id="workspace-flow"');
     expect(html).toContain('id="inspector-panel"');
     expect(html).toContain("buildGoalGroups");
-    expect(html).toContain("collectGoalTasks");
+    expect(html).toContain("task.cycleId");
     expect(html).toContain("renderWorkspace");
     expect(html).toContain("renderInspector");
   });

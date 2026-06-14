@@ -11,6 +11,7 @@ export interface Task {
   id: string;
   runId: string;
   parentId: string | null;
+  cycleId: string;
   status: Status;
   role: string;
   goal: string;
@@ -121,6 +122,7 @@ export interface CreateTaskInput {
   dependsOn?: string[];
   doneWhen?: string[];
   parentId?: string | null;
+  cycleId?: string | null;
   id?: string;
 }
 

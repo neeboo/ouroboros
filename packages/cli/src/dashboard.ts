@@ -470,65 +470,44 @@ export function dashboardHtml(input: { runId: string }) {
     const promptLink = (task) => '<a class="prompt-link" target="_blank" rel="noreferrer" href="/tasks/' + encodeURIComponent(task.id) + '/prompt">Prompt</a>';
     let selectedGoalId = null;
     let latestOverview = null;
-    const taskById = (overview) => new Map(overview.tasks.map((task) => [task.id, task]));
-    const dependentsByTaskId = (overview) => {
-      const dependents = new Map(overview.tasks.map((task) => [task.id, []]));
-      for (const task of overview.tasks) {
-        for (const id of task.dependsOn || []) {
-          if (!dependents.has(id)) dependents.set(id, []);
-          dependents.get(id).push(task);
-        }
-        if (task.parentId) {
-          if (!dependents.has(task.parentId)) dependents.set(task.parentId, []);
-          dependents.get(task.parentId).push(task);
-        }
-      }
-      return dependents;
-    };
-    const rootTaskFor = (task, map) => {
-      let current = task;
-      const seen = new Set();
-      while (current && !seen.has(current.id)) {
-        seen.add(current.id);
-        const parent = current.parentId ? map.get(current.parentId) : null;
-        const dependencyParent = (current.dependsOn || []).map((id) => map.get(id)).find(Boolean);
-        const next = parent || dependencyParent;
-        if (!next) break;
-        current = next;
-      }
-      return current || task;
-    };
-    const collectGoalTasks = (root, dependents, seen = new Set()) => {
-      if (!root || seen.has(root.id)) return seen;
-      seen.add(root.id);
-      for (const child of dependents.get(root.id) || []) collectGoalTasks(child, dependents, seen);
-      return seen;
-    };
     const groupStatus = (tasks) => {
       if (tasks.some((task) => task.status === "running")) return "running";
       if (tasks.some((task) => task.status === "todo")) return "todo";
       if (tasks.some((task) => task.status === "blocked")) return "blocked";
       return "done";
     };
+    const isCycleStarter = (task) => task.role === "planner" || task.role === "goal-review";
+    const titleTaskFor = (tasks) =>
+      tasks.find((task) => !["planner", "verifier", "goal-review"].includes(task.role) && !task.goal.startsWith("Repair:")) ||
+      tasks.find((task) => task.role === "verifier") ||
+      tasks[0];
     const buildGoalGroups = (overview) => {
-      const map = taskById(overview);
-      const dependents = dependentsByTaskId(overview);
-      const rootIds = new Set(overview.tasks.map((task) => rootTaskFor(task, map).id));
-      return [...rootIds].map((rootId) => {
-        const root = map.get(rootId);
-        const ids = collectGoalTasks(root, dependents);
-        const tasks = overview.tasks.filter((task) => ids.has(task.id));
+      const groups = new Map();
+      for (const task of overview.tasks) {
+        const cycleId = task.cycleId || task.id;
+        if (!groups.has(cycleId)) {
+          groups.set(cycleId, { id: cycleId, root: task, titleTask: task, taskIds: new Set(), tasks: [] });
+        }
+        const group = groups.get(cycleId);
+        group.taskIds.add(task.id);
+        group.tasks.push(task);
+        if (task.id === cycleId || isCycleStarter(task)) group.root = task;
+        group.titleTask = titleTaskFor(group.tasks);
+      }
+      return [...groups.values()].map((group) => {
+        const ids = group.taskIds;
         const sessions = overview.sessions.filter((session) => ids.has(session.taskId));
         const lessons = (overview.lessons || []).filter((lesson) => ids.has(lesson.taskId));
-        const activeTasks = tasks.filter((task) => task.status === "todo" || task.status === "running");
+        const activeTasks = group.tasks.filter((task) => task.status === "todo" || task.status === "running");
         return {
-          id: root.id,
-          root,
-          tasks,
+          id: group.id,
+          root: group.root,
+          titleTask: group.titleTask,
+          tasks: group.tasks,
           sessions,
           lessons,
           activeTasks,
-          status: groupStatus(tasks),
+          status: groupStatus(group.tasks),
         };
       });
     };
@@ -547,7 +526,7 @@ export function dashboardHtml(input: { runId: string }) {
     const goalRow = (group) =>
       '<button class="task-row ' + (group.id === selectedGoalId ? 'selected' : '') + '" data-goal-id="' + escapeHtml(group.id) + '">' +
       '<span class="status-dot ' + escapeHtml(group.status) + '"></span>' +
-      '<span><strong>' + escapeHtml(group.root.goal) + '</strong><span class="row-meta">' + group.tasks.length + ' tasks · ' + escapeHtml(roleSummary(group.tasks)) + '</span></span>' +
+      '<span><strong>' + escapeHtml(group.titleTask.goal) + '</strong><span class="row-meta">' + group.tasks.length + ' tasks · ' + escapeHtml(roleSummary(group.tasks)) + '</span></span>' +
       '<span class="status-text ' + escapeHtml(group.status) + '">' + escapeHtml(group.status) + '</span></button>';
     const sessionFlowCard = (session) =>
       '<article class="flow-card"><div class="flow-card-head"><div><span class="role-label">' + escapeHtml(session.role) + '</span>' +
@@ -563,7 +542,7 @@ export function dashboardHtml(input: { runId: string }) {
       const pendingFlow = group.tasks.filter((task) => !taskIdsWithSessions.has(task.id) && (task.status === "todo" || task.status === "running"));
       return '<div class="flow-inner"><article class="flow-card primary"><div class="flow-card-head"><div>' +
         '<span class="status-text ' + escapeHtml(group.status) + '">' + escapeHtml(group.status) + '</span> <span class="role-label">' + escapeHtml(roleSummary(group.tasks)) + '</span>' +
-        '<div class="flow-card-title">' + escapeHtml(group.root.goal) + '</div></div>' + promptLink(group.root) + '</div>' +
+        '<div class="flow-card-title">' + escapeHtml(group.titleTask.goal) + '</div></div>' + promptLink(group.titleTask) + '</div>' +
         '<div class="meta">' + taskMeta(group.root) + '</div><div class="flow-card-text">' + escapeHtml(group.root.prompt) + '</div></article>' +
         (group.sessions.length ? group.sessions.map(sessionFlowCard).join("") : '<div class="empty">No sessions recorded for this goal yet.</div>') +
         (pendingFlow.length ? pendingFlow.map((task) => '<article class="flow-card"><div class="flow-card-head"><div><span class="role-label">' + escapeHtml(task.role) + '</span><div class="flow-card-title">' + escapeHtml(task.goal) + '</div></div><span class="status-text ' + escapeHtml(task.status) + '">' + escapeHtml(task.status) + '</span></div><div class="meta">' + taskMeta(task) + '</div></article>').join("") : '') +
@@ -579,7 +558,7 @@ export function dashboardHtml(input: { runId: string }) {
         ).join("") + '</ul>' : '<div class="empty">No todos recorded</div>') + '</section>' +
         '<section class="inspector-card"><h2>Queue</h2>' +
         (group.activeTasks.length ? '<ul class="info-list">' + group.activeTasks.map((task) => '<li class="meta"><span class="status-text ' + escapeHtml(task.status) + '">' + escapeHtml(task.status) + '</span> ' + escapeHtml(task.role) + ' · ' + escapeHtml(task.goal) + '</li>').join("") + '</ul>' : '<div class="empty">No active queue for this goal</div>') + '</section>' +
-        '<section class="inspector-card"><h2>Goal</h2><div class="inspector-row"><span class="status-text ' + escapeHtml(group.status) + '">' + escapeHtml(group.status) + '</span>' + promptLink(group.root) + '</div>' +
+        '<section class="inspector-card"><h2>Goal</h2><div class="inspector-row"><span class="status-text ' + escapeHtml(group.status) + '">' + escapeHtml(group.status) + '</span>' + promptLink(group.titleTask) + '</div>' +
         '<div class="meta" style="margin-top:10px">' + group.tasks.length + ' tasks · ' + group.sessions.length + ' sessions</div><div class="meta" style="margin-top:10px">' + escapeHtml(compact(group.root.prompt, 420)) + '</div></section>' +
         '<section class="inspector-card"><h2>Lessons</h2>' + lessonList(group.lessons.slice(-8)) + '</section>' +
         '<section class="inspector-card"><h2>Run Info</h2><ul class="info-list">' +
@@ -631,7 +610,7 @@ export function dashboardHtml(input: { runId: string }) {
       document.getElementById("run-status").textContent = overview.run?.status || "unknown";
       document.getElementById("run-title").textContent = overview.run ? overview.run.goal : runId;
       document.getElementById("workspace-kicker").textContent = selectedGroup ? selectedGroup.status + " / " + selectedGroup.tasks.length + " tasks" : "Goal Flow";
-      document.getElementById("workspace-title").textContent = selectedGroup ? selectedGroup.root.goal : "No goal selected";
+      document.getElementById("workspace-title").textContent = selectedGroup ? selectedGroup.titleTask.goal : "No goal selected";
       document.getElementById("sidebar-stats").innerHTML = [
         ["Goals", goalGroups.length],
         ["Active goals", activeGroups.length],

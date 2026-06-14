@@ -11,6 +11,7 @@ export interface TaskRow {
   id: string;
   run_id: string;
   parent_id: string | null;
+  cycle_id: string | null;
   status: Status;
   role: string;
   goal: string;
