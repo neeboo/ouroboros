@@ -50,6 +50,30 @@ export function dashboardHtml(input: { runId: string }) {
     }
     .panel { padding: 14px; }
     .panel h2 { margin: 0 0 12px; font-size: 14px; }
+    .queue-panel { margin-bottom: 16px; }
+    .queue-list {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+      gap: 10px;
+    }
+    .queue-item {
+      display: grid;
+      grid-template-columns: 78px 86px 1fr;
+      gap: 8px;
+      align-items: start;
+      padding: 10px;
+      border: 1px solid #edf1f4;
+      border-radius: 6px;
+      background: #fbfcfd;
+      font-size: 13px;
+    }
+    .empty {
+      padding: 10px;
+      border: 1px dashed #cbd5dd;
+      border-radius: 6px;
+      color: #5c6b73;
+      font-size: 13px;
+    }
     .task {
       display: grid;
       grid-template-columns: 78px 86px 1fr;
@@ -116,6 +140,10 @@ export function dashboardHtml(input: { runId: string }) {
   </header>
   <main>
     <section class="stats" id="stats"></section>
+    <section class="panel queue-panel">
+      <h2>Active Queue</h2>
+      <div class="queue-list" id="active-queue"></div>
+    </section>
     <section class="layout">
       <div class="panel">
         <h2>Tasks</h2>
@@ -152,10 +180,18 @@ export function dashboardHtml(input: { runId: string }) {
       const sessionCounts = byStatus(overview.sessions);
       document.getElementById("stats").innerHTML = [
         ["Tasks", overview.tasks.length],
+        ["Todo tasks", taskCounts.todo || 0],
         ["Running tasks", taskCounts.running || 0],
-        ["Sessions", overview.sessions.length],
         ["Running sessions", sessionCounts.running || 0]
       ].map(([label, value]) => '<div class="stat"><b>' + value + '</b><span>' + label + '</span></div>').join("");
+      const activeTasks = overview.tasks.filter((task) => task.status === "todo" || task.status === "running");
+      document.getElementById("active-queue").innerHTML = activeTasks.length ? activeTasks.map((task) =>
+        '<div class="queue-item"><span class="badge ' + task.status + '">' + escapeHtml(task.status) + '</span>' +
+        '<span class="badge">' + escapeHtml(task.role) + '</span>' +
+        '<div><strong>' + escapeHtml(task.goal) + '</strong><div class="meta">' +
+        'id ' + escapeHtml(task.id) + (task.dependsOn.length ? ' · depends on ' + task.dependsOn.map(escapeHtml).join(", ") : '') +
+        '</div></div></div>'
+      ).join("") : '<div class="empty">No active tasks</div>';
       document.getElementById("tasks").innerHTML = overview.tasks.map((task) =>
         '<div class="task"><span class="badge ' + task.status + '">' + escapeHtml(task.status) + '</span>' +
         '<span class="badge">' + escapeHtml(task.role) + '</span>' +
