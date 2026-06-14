@@ -11,21 +11,21 @@ export function dashboardHtml(input: { runId: string }) {
     :root {
       color-scheme: light;
       font-family: "Aptos", "Segoe UI Variable", ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
-      --bg: #f5f7f4;
-      --ink: #17201c;
-      --muted: #66736d;
-      --soft: #f9faf8;
+      --bg: #f6f6f4;
+      --ink: #151515;
+      --muted: #6f6f6a;
+      --soft: #fafaf8;
       --panel: #ffffff;
-      --line: #d9dfd8;
-      --line-strong: #bec8c0;
-      --rail: #18211e;
-      --rail-2: #222c28;
-      --accent: #2f6f5e;
-      --accent-2: #52796f;
-      --accent-soft: #dcebe5;
-      --warn: #a26316;
-      --danger: #a83f2f;
-      --ok: #2f7d4d;
+      --line: #ddddda;
+      --line-strong: #c7c7c2;
+      --rail: #161616;
+      --rail-2: #242424;
+      --accent: #333333;
+      --accent-2: #6b6b66;
+      --accent-soft: #eeeeeb;
+      --warn: #5f5f5a;
+      --danger: #3f3f3d;
+      --ok: #575753;
       --mono: "JetBrains Mono", "SFMono-Regular", Consolas, monospace;
       color: var(--ink);
       background: var(--bg);
@@ -34,11 +34,7 @@ export function dashboardHtml(input: { runId: string }) {
     body {
       margin: 0;
       min-height: 100dvh;
-      background:
-        linear-gradient(90deg, rgba(24, 33, 30, 0.045) 1px, transparent 1px),
-        linear-gradient(180deg, rgba(24, 33, 30, 0.035) 1px, transparent 1px),
-        var(--bg);
-      background-size: 28px 28px;
+      background: var(--bg);
     }
     header {
       position: sticky;
@@ -49,10 +45,10 @@ export function dashboardHtml(input: { runId: string }) {
       justify-content: space-between;
       gap: 16px;
       padding: 18px 28px;
-      background: rgba(24, 33, 30, 0.96);
-      color: #f6faf7;
+      background: rgba(22, 22, 22, 0.96);
+      color: #f7f7f4;
       border-bottom: 1px solid rgba(255, 255, 255, 0.08);
-      box-shadow: 0 18px 45px -32px rgba(24, 33, 30, 0.75);
+      box-shadow: 0 18px 45px -34px rgba(0, 0, 0, 0.72);
       backdrop-filter: blur(14px);
     }
     h1 {
@@ -63,9 +59,9 @@ export function dashboardHtml(input: { runId: string }) {
     }
     #run-title {
       max-width: 72ch;
-      color: #cbd8d1;
-      font-size: 13px;
-      line-height: 1.4;
+      color: #d8d8d3;
+      font-size: 14px;
+      line-height: 1.5;
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
@@ -119,7 +115,7 @@ export function dashboardHtml(input: { runId: string }) {
     .panel {
       padding: 16px;
       border-radius: 12px;
-      box-shadow: 0 24px 70px -54px rgba(24, 33, 30, 0.58);
+      box-shadow: 0 22px 64px -56px rgba(0, 0, 0, 0.45);
     }
     .panel h2 {
       margin: 0 0 14px;
@@ -132,19 +128,19 @@ export function dashboardHtml(input: { runId: string }) {
     .focus-panel {
       position: relative;
       margin-bottom: 18px;
-      border-color: rgba(47, 111, 94, 0.32);
+      border-color: #2f2f2d;
       background:
-        linear-gradient(135deg, rgba(24, 33, 30, 0.98), rgba(34, 44, 40, 0.98));
-      color: #edf5f0;
+        linear-gradient(135deg, #181818, #292928);
+      color: #f4f4ef;
       overflow: hidden;
     }
-    .focus-panel h2 { color: #b7c9c0; }
+    .focus-panel h2 { color: #c9c9c2; }
     .focus-panel::before {
       content: "";
       position: absolute;
       inset: 0 0 auto;
       height: 1px;
-      background: linear-gradient(90deg, transparent, rgba(220, 235, 229, 0.45), transparent);
+      background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.24), transparent);
     }
     .focus-list {
       display: grid;
@@ -152,9 +148,9 @@ export function dashboardHtml(input: { runId: string }) {
     }
     .focus-task {
       padding: 14px;
-      border-color: rgba(220, 235, 229, 0.18);
+      border-color: rgba(255, 255, 255, 0.12);
       border-radius: 10px;
-      background: rgba(255, 255, 255, 0.055);
+      background: rgba(255, 255, 255, 0.06);
       box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08);
       animation: liftIn 360ms cubic-bezier(0.16, 1, 0.3, 1) both;
     }
@@ -185,7 +181,7 @@ export function dashboardHtml(input: { runId: string }) {
     }
     .role-lane {
       min-height: 128px;
-      border: 1px solid rgba(220, 235, 229, 0.18);
+      border: 1px solid rgba(255, 255, 255, 0.12);
       border-radius: 9px;
       background: rgba(250, 252, 251, 0.06);
       padding: 10px;
@@ -198,7 +194,7 @@ export function dashboardHtml(input: { runId: string }) {
       letter-spacing: 0.11em;
       text-transform: uppercase;
     }
-    .focus-panel .role-lane h3, .focus-panel .detail-section h3 { color: #aec4ba; }
+    .focus-panel .role-lane h3, .focus-panel .detail-section h3 { color: #c9c9c2; }
     .detail-section { margin-top: 14px; }
     .task-row {
       width: 100%;
@@ -217,13 +213,13 @@ export function dashboardHtml(input: { runId: string }) {
     }
     .task-row + .task-row { margin-top: 4px; }
     .task-row.selected {
-      border-color: rgba(47, 111, 94, 0.3);
+      border-color: #c7c7c2;
       background: var(--accent-soft);
     }
     .task-row:hover {
       transform: translateY(-1px);
-      border-color: rgba(82, 121, 111, 0.24);
-      background: rgba(220, 235, 229, 0.48);
+      border-color: #d1d1cc;
+      background: #f0f0ed;
     }
     .task-row:active { transform: translateY(0) scale(0.995); }
     .task-list {
@@ -243,9 +239,9 @@ export function dashboardHtml(input: { runId: string }) {
       background: rgba(255, 255, 255, 0.42);
     }
     .focus-panel .empty {
-      color: #b8c7c0;
+      color: #d3d3cc;
       background: rgba(255, 255, 255, 0.055);
-      border-color: rgba(220, 235, 229, 0.22);
+      border-color: rgba(255, 255, 255, 0.14);
     }
     .checklist {
       display: grid;
@@ -254,9 +250,10 @@ export function dashboardHtml(input: { runId: string }) {
       padding: 0;
       list-style: none;
       color: var(--muted);
-      font-size: 12px;
+      font-size: 13px;
+      line-height: 1.6;
     }
-    .focus-panel .checklist { color: #c8d7d0; }
+    .focus-panel .checklist { color: #d6d6cf; }
     .checklist li {
       display: grid;
       grid-template-columns: 16px 1fr;
@@ -283,8 +280,8 @@ export function dashboardHtml(input: { runId: string }) {
       height: 24px;
       padding: 0 8px;
       border-radius: 999px;
-      background: #edf1ee;
-      color: #2d3934;
+      background: #eeeeeb;
+      color: #333333;
       border: 1px solid rgba(23, 32, 28, 0.06);
       font-size: 11px;
       font-weight: 760;
@@ -292,22 +289,22 @@ export function dashboardHtml(input: { runId: string }) {
       white-space: nowrap;
     }
     .badge.running {
-      background: #dbece6;
-      color: #215d4f;
+      background: #e5e5e1;
+      color: #2f2f2d;
       animation: breathe 1.8s ease-in-out infinite;
     }
-    .badge.done { background: #e1efe6; color: var(--ok); }
-    .badge.blocked { background: #f4dfdb; color: var(--danger); }
-    .badge.todo { background: #f3e7d2; color: var(--warn); }
+    .badge.done { background: #e7e7e3; color: var(--ok); }
+    .badge.blocked { background: #deded9; color: var(--danger); }
+    .badge.todo { background: #f0f0eb; color: var(--warn); }
     .focus-panel .badge {
       background: rgba(255, 255, 255, 0.08);
       color: #e8f1ec;
       border-color: rgba(255, 255, 255, 0.12);
     }
-    .focus-panel .badge.running { color: #cde9dd; }
-    .focus-panel .badge.done { color: #cfead7; }
-    .focus-panel .badge.blocked { color: #f2cbc5; }
-    .focus-panel .badge.todo { color: #efd6ac; }
+    .focus-panel .badge.running { color: #f0f0ea; }
+    .focus-panel .badge.done { color: #ecece6; }
+    .focus-panel .badge.blocked { color: #deded8; }
+    .focus-panel .badge.todo { color: #d8d8d2; }
     .prompt-link {
       display: inline-flex;
       align-items: center;
@@ -315,10 +312,10 @@ export function dashboardHtml(input: { runId: string }) {
       min-height: 28px;
       padding: 0 10px;
       margin-left: 8px;
-      border: 1px solid rgba(47, 111, 94, 0.22);
+      border: 1px solid #d1d1cc;
       border-radius: 999px;
-      color: var(--accent);
-      background: rgba(220, 235, 229, 0.58);
+      color: #242424;
+      background: #eeeeeb;
       font-size: 12px;
       font-weight: 760;
       text-decoration: none;
@@ -326,11 +323,11 @@ export function dashboardHtml(input: { runId: string }) {
     }
     .prompt-link:hover {
       transform: translateY(-1px);
-      background: rgba(220, 235, 229, 0.9);
+      background: #e4e4df;
     }
     .prompt-link:active { transform: translateY(0) scale(0.98); }
     .focus-panel .prompt-link {
-      color: #e8f3ef;
+      color: #f4f4ef;
       background: rgba(255, 255, 255, 0.08);
       border-color: rgba(255, 255, 255, 0.14);
     }
@@ -345,7 +342,7 @@ export function dashboardHtml(input: { runId: string }) {
       box-shadow: none;
     }
     .focus-panel .session {
-      color: #edf5f0;
+      color: #f4f4ef;
       background: rgba(255, 255, 255, 0.055);
       border-color: rgba(255, 255, 255, 0.1);
     }
@@ -363,21 +360,25 @@ export function dashboardHtml(input: { runId: string }) {
       letter-spacing: 0.1em;
       color: var(--muted);
     }
-    .focus-panel .role { color: #b8cbc1; }
+    .focus-panel .role { color: #d0d0c8; }
     .goal {
-      font-size: 13px;
+      font-size: 14px;
       font-weight: 720;
-      line-height: 1.35;
-      margin-bottom: 8px;
+      line-height: 1.45;
+      margin-bottom: 10px;
     }
     .meta {
       color: var(--muted);
-      font-family: var(--mono);
-      font-size: 11px;
-      line-height: 1.55;
+      font-size: 12px;
+      line-height: 1.65;
       overflow-wrap: anywhere;
     }
-    .focus-panel .meta { color: #b6c7bf; }
+    .code-meta {
+      font-family: var(--mono);
+      font-size: 11px;
+      line-height: 1.65;
+    }
+    .focus-panel .meta { color: #d0d0c8; }
     .lesson {
       padding: 10px;
       border: 1px solid rgba(23, 32, 28, 0.08);
@@ -387,12 +388,12 @@ export function dashboardHtml(input: { runId: string }) {
       line-height: 1.45;
     }
     .lesson.experience {
-      border-top-color: rgba(47, 125, 77, 0.38);
-      background: linear-gradient(180deg, rgba(47, 125, 77, 0.045), rgba(255, 255, 255, 0.78) 34px);
+      border-top-color: #c7c7c2;
+      background: linear-gradient(180deg, rgba(0, 0, 0, 0.025), rgba(255, 255, 255, 0.78) 34px);
     }
     .lesson.lesson {
-      border-top-color: rgba(162, 99, 22, 0.42);
-      background: linear-gradient(180deg, rgba(162, 99, 22, 0.05), rgba(255, 255, 255, 0.78) 34px);
+      border-top-color: #bdbdb7;
+      background: linear-gradient(180deg, rgba(0, 0, 0, 0.035), rgba(255, 255, 255, 0.78) 34px);
     }
     .focus-panel .lesson {
       background: rgba(255, 255, 255, 0.055);
@@ -406,16 +407,16 @@ export function dashboardHtml(input: { runId: string }) {
       padding: 10px;
       border-radius: 9px;
       border: 1px solid rgba(255, 255, 255, 0.08);
-      background: #121a17;
-      color: #dcebe5;
+      background: #171717;
+      color: #efefea;
       font-family: var(--mono);
       font-size: 11px;
       line-height: 1.5;
       white-space: pre-wrap;
     }
     @keyframes breathe {
-      0%, 100% { box-shadow: 0 0 0 0 rgba(47, 111, 94, 0.0); }
-      50% { box-shadow: 0 0 0 4px rgba(47, 111, 94, 0.12); }
+      0%, 100% { box-shadow: 0 0 0 0 rgba(0, 0, 0, 0); }
+      50% { box-shadow: 0 0 0 4px rgba(0, 0, 0, 0.08); }
     }
     @keyframes liftIn {
       from { opacity: 0; transform: translateY(8px); }
@@ -509,11 +510,11 @@ export function dashboardHtml(input: { runId: string }) {
     const lessonList = (lessons) => lessons.length
       ? '<div class="lesson-list">' + lessons.map((lesson) =>
         '<div class="lesson ' + escapeHtml(lesson.kind) + '"><span class="badge">' + escapeHtml(lesson.kind) + '</span> ' +
-        escapeHtml(lesson.summary) + '<div class="meta">task ' + escapeHtml(lesson.taskId) + '<br>attempt ' + escapeHtml(lesson.attemptId) + '</div></div>'
+        escapeHtml(lesson.summary) + '<div class="meta code-meta">task ' + escapeHtml(lesson.taskId) + '<br>attempt ' + escapeHtml(lesson.attemptId) + '</div></div>'
       ).join("") + '</div>'
       : '<div class="empty">No lessons or experiences</div>';
     const roleSessions = (sessions, roles) => sessions.filter((session) => roles.includes(session.role));
-    const taskMeta = (task) => 'id ' + escapeHtml(task.id) + (task.dependsOn.length ? ' · depends on ' + task.dependsOn.map(escapeHtml).join(", ") : '');
+    const taskMeta = (task) => '<span class="code-meta">id ' + escapeHtml(task.id) + '</span>' + (task.dependsOn.length ? ' · depends on ' + task.dependsOn.map((id) => '<span class="code-meta">' + escapeHtml(id) + '</span>').join(", ") : '');
     const renderFocusTask = (overview, task) => {
       const sessions = sessionsForTaskChain(overview, task);
       const lessons = lessonsForTaskChain(overview, task);
