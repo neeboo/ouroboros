@@ -127,6 +127,14 @@ export function dashboardHtml(input: { runId: string }) {
     .badge.running { background: #dff1ff; color: #075985; }
     .badge.done { background: #e4f7e7; color: #166534; }
     .badge.blocked { background: #ffe7e2; color: #9f2d18; }
+    .prompt-link {
+      display: inline-flex;
+      margin-left: 8px;
+      color: #075985;
+      font-weight: 650;
+      text-decoration: none;
+    }
+    .prompt-link:hover { text-decoration: underline; }
     .sessions {
       display: grid;
       grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
@@ -197,6 +205,7 @@ export function dashboardHtml(input: { runId: string }) {
       "'": "&#39;"
     }[char]));
     const latestText = (session) => session.latestText || session.events.map((event) => event.text || event.payload?.delta || event.payload?.message || "").filter(Boolean).slice(-1)[0] || "";
+    const promptLink = (task) => '<a class="prompt-link" target="_blank" rel="noreferrer" href="/tasks/' + encodeURIComponent(task.id) + '/prompt">Prompt</a>';
     const checklist = (task) => {
       const doneWhen = Array.isArray(task.doneWhen) ? task.doneWhen : [];
       if (!doneWhen.length) return "";
@@ -226,14 +235,14 @@ export function dashboardHtml(input: { runId: string }) {
         '<span class="badge">' + escapeHtml(task.role) + '</span>' +
         '<div><strong>' + escapeHtml(task.goal) + '</strong><div class="meta">' +
         'id ' + escapeHtml(task.id) + (task.dependsOn.length ? ' · depends on ' + task.dependsOn.map(escapeHtml).join(", ") : '') +
-        '</div>' + checklist(task) + '</div></div>'
+        promptLink(task) + '</div>' + checklist(task) + '</div></div>'
       ).join("") : '<div class="empty">No active tasks</div>';
       document.getElementById("tasks").innerHTML = overview.tasks.map((task) =>
         '<div class="task"><span class="badge ' + task.status + '">' + escapeHtml(task.status) + '</span>' +
         '<span class="badge">' + escapeHtml(task.role) + '</span>' +
         '<div><strong>' + escapeHtml(task.goal) + '</strong><div class="meta">' +
         'id ' + escapeHtml(task.id) + (task.dependsOn.length ? ' · depends on ' + task.dependsOn.map(escapeHtml).join(", ") : '') +
-        '</div>' + checklist(task) + '</div></div>'
+        promptLink(task) + '</div>' + checklist(task) + '</div></div>'
       ).join("");
       document.getElementById("sessions").innerHTML = overview.sessions.map((session) =>
         '<article class="session"><div class="session-head"><span class="role">' + escapeHtml(session.role) + '</span>' +
@@ -255,22 +264,40 @@ export function serveDashboard(input: {
   runId: string;
   port: number;
   overview: () => RunOverview;
+  renderTaskPrompt: (taskId: string) => string;
 }) {
   return Bun.serve({
     port: input.port,
     fetch(request) {
-      const url = new URL(request.url);
-      if (url.pathname === "/") {
-        return new Response(dashboardHtml({ runId: input.runId }), {
-          headers: { "content-type": "text/html; charset=utf-8" },
-        });
-      }
-      if (url.pathname === `/api/runs/${input.runId}/overview`) {
-        return Response.json(input.overview());
-      }
-      return new Response("not found", { status: 404 });
+      return handleDashboardRequest(request, input);
     },
   });
+}
+
+export function handleDashboardRequest(
+  request: Request,
+  input: {
+    runId: string;
+    overview: () => RunOverview;
+    renderTaskPrompt: (taskId: string) => string;
+  },
+) {
+  const url = new URL(request.url);
+  if (url.pathname === "/") {
+    return new Response(dashboardHtml({ runId: input.runId }), {
+      headers: { "content-type": "text/html; charset=utf-8" },
+    });
+  }
+  if (url.pathname === `/api/runs/${input.runId}/overview`) {
+    return Response.json(input.overview());
+  }
+  const promptMatch = url.pathname.match(/^\/tasks\/([^/]+)\/prompt$/);
+  if (promptMatch) {
+    return new Response(input.renderTaskPrompt(decodeURIComponent(promptMatch[1])), {
+      headers: { "content-type": "text/plain; charset=utf-8" },
+    });
+  }
+  return new Response("not found", { status: 404 });
 }
 
 function escapeHtml(value: string) {

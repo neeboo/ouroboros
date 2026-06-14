@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { Harness } from "../packages/harness/src";
+import { Harness, withDatabase } from "../packages/harness/src";
 
 describe("Harness", () => {
   let dir: string;
@@ -46,6 +46,12 @@ describe("Harness", () => {
       status: "todo",
       role: "planner",
     });
+  });
+
+  test("configures sqlite connections to wait briefly on busy databases", () => {
+    const value = withDatabase(harness.dbPath, (db) => db.query("pragma busy_timeout").get() as { timeout: number });
+
+    expect(value.timeout).toBeGreaterThanOrEqual(5000);
   });
 
   test("seeds and updates prompt templates", () => {

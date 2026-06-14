@@ -156,6 +156,22 @@ switch (parsed.command) {
     printJson(result);
     break;
   }
+  case "autopilot": {
+    const executorName = parseExecutorName(required(parsed, "executor"));
+    if (executorName !== "codex-resumable") {
+      fail("autopilot currently supports codex-resumable");
+    }
+    printJson(
+      await runAutopilot({
+        runId: required(parsed, "run-id"),
+        limit: parsePositiveInteger(flag(parsed, "limit") ?? "1", "--limit"),
+        maxRounds: parsePositiveInteger(flag(parsed, "max-rounds") ?? "1", "--max-rounds"),
+        maxCycles: parsePositiveInteger(flag(parsed, "max-cycles") ?? "100", "--max-cycles"),
+        intervalMs: parseNonNegativeInteger(flag(parsed, "interval-ms") ?? "1500", "--interval-ms"),
+      }),
+    );
+    break;
+  }
   case "record-attempt": {
     const taskId = required(parsed, "task-id");
     const input = parseObject(flag(parsed, "input-json") ?? "{}");
@@ -237,6 +253,7 @@ switch (parsed.command) {
           runId,
           eventLimit: parsePositiveInteger(flag(parsed, "event-limit") ?? "25", "--event-limit"),
         }),
+      renderTaskPrompt,
     });
     console.log(`Ouroboros dashboard: http://localhost:${server.port}`);
     setInterval(() => {}, 60 * 60 * 1000);
@@ -468,6 +485,42 @@ async function runCodexResumableLoop(input: { runId: string; maxRounds: number; 
   return { rounds };
 }
 
+async function runAutopilot(input: {
+  runId: string;
+  maxCycles: number;
+  maxRounds: number;
+  limit: number;
+  intervalMs: number;
+}) {
+  const cycles = [];
+  for (let index = 0; index < input.maxCycles; index += 1) {
+    const result = await runCodexResumableLoop({
+      runId: input.runId,
+      maxRounds: input.maxRounds,
+      limit: input.limit,
+    });
+    const overview = harness.getRunOverview({ runId: input.runId, eventLimit: 0 });
+    cycles.push({
+      index,
+      rounds: result.rounds,
+      activeTasks: overview.tasks.filter((task) => task.status === "todo" || task.status === "running").length,
+      runStatus: overview.run?.status ?? null,
+    });
+
+    if (overview.run?.status === "done") {
+      return { status: "done" as const, cycles };
+    }
+    if (index < input.maxCycles - 1) {
+      await sleep(input.intervalMs);
+    }
+  }
+  const overview = harness.getRunOverview({ runId: input.runId, eventLimit: 0 });
+  return {
+    status: overview.run?.status ?? "unknown",
+    cycles,
+  };
+}
+
 function ensureGoalReviewTask(runId: string) {
   const run = harness.getRun(runId);
   if (!run) {
@@ -516,6 +569,23 @@ async function resumeRunningCodexAttempts(input: { runId: string; limit: number 
     }
     const sessionId = typeof attempt.input.codexSessionId === "string" ? attempt.input.codexSessionId : "";
     if (!sessionId) {
+      const output: AttemptOutput = {
+        status: "blocked",
+        summary: "Running attempt cannot be resumed because it has no Codex session id",
+        changedFiles: [],
+        checks: [{ name: "codex-resumable session id", status: "failed" }],
+        artifacts: [],
+        problems: ["running attempt is missing codexSessionId; task was returned to todo for a fresh attempt"],
+      };
+      harness.finishAttempt({ attemptId: attempt.id, output });
+      harness.retryTask({ taskId: task.id });
+      tasks.push({
+        taskId: task.id,
+        attemptId: attempt.id,
+        sessionName: typeof attempt.input.sessionName === "string" ? attempt.input.sessionName : `attempt-${attempt.id}`,
+        status: "blocked",
+        codexSessionId: null,
+      });
       continue;
     }
     const sessionName = typeof attempt.input.sessionName === "string" ? attempt.input.sessionName : `attempt-${attempt.id}`;
@@ -838,6 +908,18 @@ function parsePositiveInteger(raw: string, name: string) {
     fail(`${name} must be a positive integer`);
   }
   return value;
+}
+
+function parseNonNegativeInteger(raw: string, name: string) {
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value < 0) {
+    fail(`${name} must be a non-negative integer`);
+  }
+  return value;
+}
+
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function runnerCwd() {

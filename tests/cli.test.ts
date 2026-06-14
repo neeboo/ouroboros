@@ -994,6 +994,134 @@ describe("CLI", () => {
     });
   });
 
+  test("autopilot drains active queue and then completes goal review", async () => {
+    await runCli("init");
+    const run = await runCliJson("create-run", "--goal", "Bootstrap ouroboros");
+    const worker = await runCliJson(
+      "create-task",
+      "--run-id",
+      run.id,
+      "--role",
+      "worker",
+      "--goal",
+      "Finish active queue item",
+      "--prompt",
+      "Complete the queued item.",
+    );
+    const codexBin = join(dir, "fake-codex-autopilot");
+    await writeFile(
+      codexBin,
+      [
+        "#!/usr/bin/env bun",
+        "const prompt = await new Response(Bun.stdin.stream()).text();",
+        "console.log(JSON.stringify({ type: 'session.started', session_id: prompt.includes('Role: goal-review') ? 'session_goal' : 'session_worker' }));",
+        "if (prompt.includes('Role: goal-review')) {",
+        "  console.log(JSON.stringify({ type: 'agent.message', message: '{\"status\":\"done\",\"runDecision\":\"complete\",\"summary\":\"goal reached\",\"changedFiles\":[],\"checks\":[],\"artifacts\":[],\"problems\":[]}' }));",
+        "  process.exit(0);",
+        "}",
+        "console.log(JSON.stringify({ type: 'agent.message', message: '{\"status\":\"done\",\"summary\":\"worker done\",\"changedFiles\":[],\"checks\":[],\"artifacts\":[],\"problems\":[]}' }));",
+      ].join("\n"),
+    );
+    await chmod(codexBin, 0o755);
+
+    const result = await runCliJson(
+      "autopilot",
+      "--run-id",
+      run.id,
+      "--executor",
+      "codex-resumable",
+      "--codex-bin",
+      codexBin,
+      "--cwd",
+      "/repo",
+      "--max-cycles",
+      "4",
+      "--max-rounds",
+      "1",
+      "--interval-ms",
+      "1",
+    );
+    const overview = await runCliJson("run-overview", "--run-id", run.id);
+
+    expect(result.cycles).toHaveLength(2);
+    expect(result.status).toBe("done");
+    expect(overview.run.status).toBe("done");
+    expect(overview.tasks).toContainEqual(
+      expect.objectContaining({
+        id: worker.id,
+        status: "done",
+      }),
+    );
+    expect(overview.tasks).toContainEqual(
+      expect.objectContaining({
+        role: "goal-review",
+        status: "done",
+      }),
+    );
+    expect(await runCliJson("next-task", "--run-id", run.id)).toBeNull();
+  });
+
+  test("autopilot retries stale running attempts without a codex session id", async () => {
+    await runCli("init");
+    const run = await runCliJson("create-run", "--goal", "Bootstrap ouroboros");
+    const task = await runCliJson(
+      "create-task",
+      "--run-id",
+      run.id,
+      "--role",
+      "worker",
+      "--goal",
+      "Recover stale task",
+      "--prompt",
+      "Recover this task.",
+    );
+    const stale = await runCliJson(
+      "start-attempt",
+      "--task-id",
+      task.id,
+      "--input-json",
+      '{"sessionName":"stale-session","executor":"codex-resumable"}',
+    );
+    const codexBin = join(dir, "fake-codex-stale");
+    await writeFile(
+      codexBin,
+      [
+        "#!/usr/bin/env bun",
+        "console.log(JSON.stringify({ type: 'session.started', session_id: 'session_recovered' }));",
+        "console.log(JSON.stringify({ type: 'agent.message', message: '{\"status\":\"done\",\"summary\":\"recovered stale task\",\"changedFiles\":[],\"checks\":[],\"artifacts\":[],\"problems\":[]}' }));",
+      ].join("\n"),
+    );
+    await chmod(codexBin, 0o755);
+
+    const result = await runCliJson(
+      "autopilot",
+      "--run-id",
+      run.id,
+      "--executor",
+      "codex-resumable",
+      "--codex-bin",
+      codexBin,
+      "--cwd",
+      "/repo",
+      "--max-cycles",
+      "2",
+      "--max-rounds",
+      "1",
+      "--interval-ms",
+      "1",
+    );
+    const harness = new Harness(dbPath);
+
+    expect(result.cycles[0].rounds[0].tasks).toContainEqual(
+      expect.objectContaining({
+        attemptId: stale.attemptId,
+        status: "blocked",
+      }),
+    );
+    expect(harness.getAttempt(stale.attemptId)?.status).toBe("blocked");
+    expect(harness.getTask(task.id)?.status).toBe("done");
+  });
+
   test("lists lessons recorded from attempts", async () => {
     await runCli("init");
     const run = await runCliJson("create-run", "--goal", "Bootstrap ouroboros");
