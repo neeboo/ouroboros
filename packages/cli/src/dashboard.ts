@@ -23,11 +23,9 @@ export function dashboardHtml(input: { runId: string }) {
       --ink: #f0f0eb;
       --muted: #aaa9a3;
       --muted-2: #787772;
-      --chip: #3a3a38;
-      --chip-strong: #4a4a47;
-      --ok: #c9c9c3;
-      --warn: #b8b7b0;
-      --danger: #d4d3cc;
+      --ok: #b8d4c2;
+      --warn: #d4c7a8;
+      --danger: #d2aaa8;
       --mono: "JetBrains Mono", "SFMono-Regular", Consolas, monospace;
       color: var(--ink);
       background: var(--app);
@@ -74,11 +72,13 @@ export function dashboardHtml(input: { runId: string }) {
     .run-status {
       min-width: 0;
       max-width: 160px;
-      padding: 4px 8px;
-      border: 1px solid rgba(255, 255, 255, 0.12);
-      border-radius: 999px;
-      color: #e5e5df;
+      padding: 0;
+      border: 0;
+      color: var(--ok);
       font-size: 11px;
+      font-weight: 760;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
@@ -96,14 +96,13 @@ export function dashboardHtml(input: { runId: string }) {
     .sidebar-stats {
       display: grid;
       grid-template-columns: repeat(2, minmax(0, 1fr));
-      gap: 8px;
+      gap: 0;
       padding: 14px 6px;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.08);
     }
     .stat {
-      padding: 9px 10px;
-      border-radius: 9px;
-      background: rgba(255, 255, 255, 0.08);
-      border: 1px solid rgba(255, 255, 255, 0.08);
+      padding: 9px 10px 11px;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.08);
     }
     .stat b {
       display: block;
@@ -138,17 +137,18 @@ export function dashboardHtml(input: { runId: string }) {
     }
     .task-list {
       display: grid;
-      gap: 5px;
+      gap: 0;
     }
     .task-row {
       width: 100%;
       display: grid;
-      grid-template-columns: 1fr auto;
-      gap: 8px;
+      grid-template-columns: 12px 1fr auto;
+      gap: 9px;
       align-items: start;
-      padding: 9px 10px;
+      padding: 10px 6px 11px;
       border: 1px solid transparent;
-      border-radius: 9px;
+      border-bottom-color: rgba(255, 255, 255, 0.07);
+      border-radius: 0;
       background: transparent;
       color: #e4e3dd;
       text-align: left;
@@ -157,14 +157,13 @@ export function dashboardHtml(input: { runId: string }) {
       transition: transform 160ms cubic-bezier(0.16, 1, 0.3, 1), background 160ms, border-color 160ms;
     }
     .task-row:hover {
-      transform: translateY(-1px);
-      background: rgba(255, 255, 255, 0.08);
-      border-color: rgba(255, 255, 255, 0.08);
+      transform: translateX(2px);
+      background: rgba(255, 255, 255, 0.055);
     }
     .task-row:active { transform: translateY(0) scale(0.995); }
     .task-row.selected {
-      background: rgba(255, 255, 255, 0.14);
-      border-color: rgba(255, 255, 255, 0.16);
+      background: rgba(255, 255, 255, 0.09);
+      border-bottom-color: rgba(255, 255, 255, 0.11);
     }
     .task-row strong {
       display: block;
@@ -225,16 +224,14 @@ export function dashboardHtml(input: { runId: string }) {
       margin: 0 auto;
     }
     .flow-card {
-      margin-bottom: 18px;
-      padding: 16px 18px;
-      border: 1px solid rgba(255, 255, 255, 0.09);
-      border-radius: 14px;
-      background: var(--canvas-soft);
+      padding: 18px 0 20px;
+      border-top: 1px solid rgba(255, 255, 255, 0.09);
+      background: transparent;
       animation: liftIn 260ms cubic-bezier(0.16, 1, 0.3, 1) both;
     }
     .flow-card.primary {
-      background: transparent;
-      border-color: rgba(255, 255, 255, 0.12);
+      padding-top: 0;
+      border-top: 0;
     }
     .flow-card-head, .inspector-row {
       display: flex;
@@ -264,11 +261,13 @@ export function dashboardHtml(input: { runId: string }) {
       overflow: auto;
     }
     .inspector-card {
-      margin-bottom: 14px;
-      padding: 14px 16px;
-      border: 1px solid rgba(255, 255, 255, 0.1);
-      border-radius: 18px;
-      background: var(--panel);
+      padding: 16px 0 18px;
+      border-top: 1px solid rgba(255, 255, 255, 0.09);
+      background: transparent;
+    }
+    .inspector-card:first-child {
+      padding-top: 0;
+      border-top: 0;
     }
     .inspector-card h2 {
       margin: 0 0 12px;
@@ -303,9 +302,8 @@ export function dashboardHtml(input: { runId: string }) {
     }
     .checkbox.done { background: #deded8; border-color: #deded8; }
     .lesson {
-      padding: 10px;
-      border-radius: 11px;
-      background: rgba(255, 255, 255, 0.045);
+      padding: 9px 0 11px;
+      border-top: 1px solid rgba(255, 255, 255, 0.07);
       color: #d6d5cf;
       font-size: 14px;
       line-height: 1.55;
@@ -314,44 +312,62 @@ export function dashboardHtml(input: { runId: string }) {
       display: inline-flex;
       align-items: center;
       justify-content: center;
-      min-height: 30px;
-      padding: 0 11px;
-      border: 1px solid rgba(255, 255, 255, 0.15);
-      border-radius: 999px;
-      color: #efeee8;
-      background: rgba(255, 255, 255, 0.07);
+      min-height: 24px;
+      padding: 0;
+      border: 0;
+      border-radius: 0;
+      color: #d9d9d4;
+      background: transparent;
       font-size: 14px;
       font-weight: 720;
-      text-decoration: none;
-      transition: transform 160ms cubic-bezier(0.16, 1, 0.3, 1), background 160ms;
+      text-decoration: underline;
+      text-decoration-color: rgba(255, 255, 255, 0.28);
+      text-underline-offset: 3px;
+      transition: color 160ms, text-decoration-color 160ms;
     }
     .prompt-link:hover {
-      transform: translateY(-1px);
-      background: rgba(255, 255, 255, 0.11);
+      color: #ffffff;
+      text-decoration-color: rgba(255, 255, 255, 0.72);
     }
-    .prompt-link:active { transform: translateY(0) scale(0.98); }
-    .badge {
+    .prompt-link:active { color: #cfcfc9; }
+    .status-dot {
+      width: 8px;
+      height: 8px;
+      margin-top: 6px;
+      border-radius: 999px;
+      background: #8f8f88;
+    }
+    .status-dot.done { background: var(--ok); }
+    .status-dot.running { background: #d8d0a8; animation: breathe 1.8s ease-in-out infinite; }
+    .status-dot.blocked { background: var(--danger); }
+    .status-dot.todo { background: var(--warn); }
+    .status-text {
       display: inline-flex;
       align-items: center;
       justify-content: center;
-      height: 22px;
-      padding: 0 8px;
-      border: 1px solid rgba(255, 255, 255, 0.12);
-      border-radius: 999px;
-      background: var(--chip);
-      color: #e8e7e1;
+      color: var(--muted);
       font-size: 11px;
-      font-weight: 720;
+      font-weight: 760;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
       white-space: nowrap;
     }
-    .badge.running { animation: breathe 1.8s ease-in-out infinite; }
-    .badge.done { color: #d8d7d0; }
-    .badge.blocked { background: var(--chip-strong); }
-    .badge.todo { color: #c9c8c2; }
+    .status-text.done { color: var(--ok); }
+    .status-text.running { color: #d8d0a8; }
+    .status-text.blocked { color: var(--danger); }
+    .status-text.todo { color: var(--warn); }
+    .role-label, .kind-label {
+      color: var(--muted-2);
+      font-size: 11px;
+      font-weight: 760;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
     .empty {
       padding: 16px;
-      border: 1px dashed rgba(255, 255, 255, 0.14);
-      border-radius: 12px;
+      border-top: 1px dashed rgba(255, 255, 255, 0.14);
+      border-bottom: 1px dashed rgba(255, 255, 255, 0.14);
+      border-radius: 0;
       color: #aaa9a3;
       font-size: 14px;
       line-height: 1.6;
@@ -372,9 +388,9 @@ export function dashboardHtml(input: { runId: string }) {
       margin: 12px 0 0;
       max-height: 240px;
       overflow: hidden;
-      border-radius: 10px;
-      padding: 10px;
-      border: 1px solid rgba(255, 255, 255, 0.08);
+      padding: 10px 0 0 12px;
+      border: 0;
+      border-left: 1px solid rgba(255, 255, 255, 0.16);
       background: #171717;
       color: #efefea;
       font-family: var(--mono);
@@ -475,19 +491,20 @@ export function dashboardHtml(input: { runId: string }) {
     };
     const lessonList = (lessons) => lessons.length
       ? '<div class="lesson-list">' + lessons.map((lesson) =>
-        '<div class="lesson ' + escapeHtml(lesson.kind) + '"><span class="badge">' + escapeHtml(lesson.kind) + '</span> ' +
+        '<div class="lesson ' + escapeHtml(lesson.kind) + '"><span class="kind-label">' + escapeHtml(lesson.kind) + '</span> ' +
         escapeHtml(lesson.summary) + '<div class="meta code-meta">task ' + escapeHtml(lesson.taskId) + '<br>attempt ' + escapeHtml(lesson.attemptId) + '</div></div>'
       ).join("") + '</div>'
       : '<div class="empty">No lessons or experiences</div>';
     const taskMeta = (task) => '<span class="code-meta">id ' + escapeHtml(task.id) + '</span>' + (task.dependsOn.length ? ' · depends on ' + task.dependsOn.map((id) => '<span class="code-meta">' + escapeHtml(id) + '</span>').join(", ") : '');
     const taskRow = (task) =>
       '<button class="task-row ' + (task.id === selectedTaskId ? 'selected' : '') + '" data-task-id="' + escapeHtml(task.id) + '">' +
+      '<span class="status-dot ' + escapeHtml(task.status) + '"></span>' +
       '<span><strong>' + escapeHtml(task.goal) + '</strong><span class="row-meta">' + escapeHtml(task.role) + ' · ' + escapeHtml(task.status) + '</span></span>' +
-      '<span class="badge ' + task.status + '">' + escapeHtml(task.status) + '</span></button>';
+      '<span class="status-text ' + escapeHtml(task.status) + '">' + escapeHtml(task.status) + '</span></button>';
     const sessionFlowCard = (session) =>
-      '<article class="flow-card"><div class="flow-card-head"><div><span class="badge">' + escapeHtml(session.role) + '</span>' +
+      '<article class="flow-card"><div class="flow-card-head"><div><span class="role-label">' + escapeHtml(session.role) + '</span>' +
       '<div class="flow-card-title">' + escapeHtml(session.taskGoal) + '</div></div>' +
-      '<span class="badge ' + session.status + '">' + escapeHtml(session.status) + '</span></div>' +
+      '<span class="status-text ' + escapeHtml(session.status) + '">' + escapeHtml(session.status) + '</span></div>' +
       '<div class="meta code-meta">task ' + escapeHtml(session.taskId) + '<br>attempt ' + escapeHtml(session.attemptId) +
       '<br>session ' + escapeHtml(session.sessionName || "") + '<br>codex ' + escapeHtml(session.codexSessionId || "") + '</div>' +
       (latestText(session) ? '<pre>' + escapeHtml(latestText(session)) + '</pre>' : '<div class="flow-card-text">No stream output recorded.</div>') +
@@ -497,7 +514,7 @@ export function dashboardHtml(input: { runId: string }) {
       const sessions = sessionsForTaskChain(overview, task);
       const lessons = lessonsForTaskChain(overview, task);
       return '<div class="flow-inner"><article class="flow-card primary"><div class="flow-card-head"><div>' +
-        '<span class="badge ' + task.status + '">' + escapeHtml(task.status) + '</span> <span class="badge">' + escapeHtml(task.role) + '</span>' +
+        '<span class="status-text ' + escapeHtml(task.status) + '">' + escapeHtml(task.status) + '</span> <span class="role-label">' + escapeHtml(task.role) + '</span>' +
         '<div class="flow-card-title">' + escapeHtml(task.goal) + '</div></div>' + promptLink(task) + '</div>' +
         '<div class="meta">' + taskMeta(task) + '</div><div class="flow-card-text">' + escapeHtml(task.prompt) + '</div></article>' +
         (sessions.length ? sessions.map(sessionFlowCard).join("") : '<div class="empty">No sessions recorded for this task yet.</div>') +
@@ -512,7 +529,7 @@ export function dashboardHtml(input: { runId: string }) {
         (doneWhen.length ? '<ul class="todo-list">' + doneWhen.map((item) =>
           '<li class="todo-item"><span class="checkbox ' + (task.status === "done" ? "done" : "") + '"></span><span>' + escapeHtml(item) + '</span></li>'
         ).join("") + '</ul>' : '<div class="empty">No todos recorded</div>') + '</section>' +
-        '<section class="inspector-card"><h2>Task</h2><div class="inspector-row"><span class="badge ' + task.status + '">' + escapeHtml(task.status) + '</span>' + promptLink(task) + '</div>' +
+        '<section class="inspector-card"><h2>Task</h2><div class="inspector-row"><span class="status-text ' + escapeHtml(task.status) + '">' + escapeHtml(task.status) + '</span>' + promptLink(task) + '</div>' +
         '<div class="meta" style="margin-top:10px">' + taskMeta(task) + '</div><div class="meta" style="margin-top:10px">' + escapeHtml(compact(task.prompt, 420)) + '</div></section>' +
         '<section class="inspector-card"><h2>Lessons</h2>' + lessonList(lessons.slice(-8)) + '</section>' +
         '<section class="inspector-card"><h2>Run Info</h2><ul class="info-list">' +
