@@ -965,6 +965,12 @@ describe("CLI", () => {
         "#!/usr/bin/env bun",
         "const prompt = await new Response(Bun.stdin.stream()).text();",
         "if (!prompt.includes('Role: goal-review')) process.exit(2);",
+        "if (!prompt.includes('cite concrete evidence')) process.exit(3);",
+        "if (!prompt.includes('repository files or docs')) process.exit(4);",
+        "if (!prompt.includes('tests or commands')) process.exit(5);",
+        "if (!prompt.includes('dashboard or run overview state')) process.exit(6);",
+        "if (!prompt.includes('recent lessons')) process.exit(7);",
+        "if (!prompt.includes('before declaring complete')) process.exit(8);",
         "console.log(JSON.stringify({ status: 'done', runDecision: 'complete', summary: 'goal reached', changedFiles: [], checks: [], artifacts: [], problems: [] }));",
       ].join("\n"),
     );
@@ -998,6 +1004,45 @@ describe("CLI", () => {
       }),
     ]);
     expect(await runCliJson("next-task", "--run-id", run.id)).toBeNull();
+  });
+
+  test("goal-review prompt keeps continue and verify constrained to exactly one next task", async () => {
+    await runCli("init");
+    const run = await runCliJson("create-run", "--goal", "Bootstrap ouroboros");
+    const codexBin = join(dir, "fake-codex-goal-prompt-contract");
+    await writeFile(
+      codexBin,
+      [
+        "#!/usr/bin/env bun",
+        "const prompt = await new Response(Bun.stdin.stream()).text();",
+        "if (!prompt.includes('runDecision continue:')) process.exit(2);",
+        "if (!prompt.includes('include exactly one nextTasks item')) process.exit(3);",
+        "if (!prompt.includes('runDecision verify:')) process.exit(4);",
+        "if (!prompt.includes('include exactly one verifier nextTasks item')) process.exit(5);",
+        "console.log(JSON.stringify({ status: 'done', runDecision: 'verify', summary: 'needs independent check', changedFiles: [], checks: [], artifacts: [], problems: [], nextTasks: [{ role: 'verifier', goal: 'Verify goal completion evidence', prompt: 'Inspect the evidence.', doneWhen: ['evidence checked'] }] }));",
+      ].join("\n"),
+    );
+    await chmod(codexBin, 0o755);
+
+    await runCliJson(
+      "run-loop",
+      "--run-id",
+      run.id,
+      "--executor",
+      "codex-resumable",
+      "--codex-bin",
+      codexBin,
+      "--cwd",
+      "/repo",
+      "--max-rounds",
+      "1",
+    );
+    const next = await runCliJson("next-task", "--run-id", run.id);
+
+    expect(next).toMatchObject({
+      role: "verifier",
+      goal: "Verify goal completion evidence",
+    });
   });
 
   test("run-loop reviews the goal when idle and can create a planner when more work remains", async () => {

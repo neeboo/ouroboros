@@ -791,6 +791,8 @@ function ensureGoalReviewTask(runId: string, maxTries: number) {
       "Answer this before creating more work: are we sure the original run goal has been reached?",
       "",
       "Inspect the repository, README, tests, dashboard state, recent attempts, and run lessons.",
+      "Before choosing a runDecision, cite concrete evidence from repository files or docs, tests or commands, dashboard or run overview state, and recent lessons.",
+      "Do not declare runDecision complete unless the summary, checks, artifacts, or problems cite that evidence before declaring complete.",
       "Return structured JSON with one of these decisions:",
       "- runDecision complete: the run goal is satisfied; do not include nextTasks.",
       "- runDecision continue: the run goal is not satisfied; include exactly one nextTasks item, usually a planner.",
@@ -798,6 +800,7 @@ function ensureGoalReviewTask(runId: string, maxTries: number) {
     ].join("\n"),
     doneWhen: [
       "runDecision is complete, continue, or verify",
+      "completion decision cites concrete evidence from repository files or docs, tests or commands, dashboard or run overview state, and recent lessons",
       "complete does not create nextTasks",
       "continue or verify includes exactly one nextTasks item",
     ],
