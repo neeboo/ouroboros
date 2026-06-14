@@ -1,4 +1,5 @@
 import type { RunOverview } from "@ouroboros/harness";
+import { fileURLToPath } from "node:url";
 
 interface DashboardActionResult {
   attemptId?: string;
@@ -27,6 +28,126 @@ interface DashboardRunnerStatus {
   lastOutput?: string;
 }
 
+interface DashboardTaskGraphNode {
+  id: string;
+  type: "task";
+  position: { x: number; y: number };
+  data: {
+    role: string;
+    status: string;
+    goal: string;
+    taskId: string;
+    doneWhenCount: number;
+    latestSession: {
+      status: string;
+      attemptId: string;
+      sessionName: string | null;
+      codexSessionId: string | null;
+      latestText: string;
+    } | null;
+  };
+}
+
+interface DashboardTaskGraphEdge {
+  id: string;
+  source: string;
+  target: string;
+  label: "dependsOn" | "parentId";
+  type: "smoothstep";
+  animated: boolean;
+  markerEnd: { type: "arrowclosed" };
+}
+
+export interface DashboardTaskGraph {
+  nodes: DashboardTaskGraphNode[];
+  edges: DashboardTaskGraphEdge[];
+}
+
+export function buildDashboardTaskGraph(overview: RunOverview, groupId?: string | null): DashboardTaskGraph {
+  const selectedTasks = groupId
+    ? overview.tasks.filter((task) => (task.cycleId || task.id) === groupId)
+    : overview.tasks;
+  const taskIds = new Set(selectedTasks.map((task) => task.id));
+  const latestSessionByTask = new Map(
+    overview.sessions
+      .filter((session) => taskIds.has(session.taskId))
+      .map((session) => [
+        session.taskId,
+        {
+          status: session.status,
+          attemptId: session.attemptId,
+          sessionName: session.sessionName,
+          codexSessionId: session.codexSessionId,
+          latestText: session.latestText,
+        },
+      ]),
+  );
+  const columns = new Map<string, number>();
+  const nodes = selectedTasks.map((task, index) => {
+    const column = roleColumn(task.role);
+    const row = columns.get(column) ?? 0;
+    columns.set(column, row + 1);
+    return {
+      id: task.id,
+      type: "task" as const,
+      position: { x: columnX(column), y: row * 190 + (index % 2) * 12 },
+      data: {
+        role: task.role,
+        status: task.status,
+        goal: compactText(task.goal, 118),
+        taskId: task.id,
+        doneWhenCount: Array.isArray(task.doneWhen) ? task.doneWhen.length : 0,
+        latestSession: latestSessionByTask.get(task.id) ?? null,
+      },
+    };
+  });
+  const edges = selectedTasks.flatMap((task) => {
+    const dependencyEdges = (task.dependsOn || [])
+      .filter((sourceId) => taskIds.has(sourceId))
+      .map((sourceId) => taskGraphEdge("dependsOn", sourceId, task.id, task.status === "running"));
+    const parentEdges =
+      task.parentId && taskIds.has(task.parentId)
+        ? [taskGraphEdge("parentId", task.parentId, task.id, task.status === "running")]
+        : [];
+    return [...dependencyEdges, ...parentEdges];
+  });
+  return { nodes, edges };
+}
+
+function taskGraphEdge(
+  label: DashboardTaskGraphEdge["label"],
+  source: string,
+  target: string,
+  animated: boolean,
+): DashboardTaskGraphEdge {
+  return {
+    id: `${label}:${source}->${target}`,
+    source,
+    target,
+    label,
+    type: "smoothstep",
+    animated,
+    markerEnd: { type: "arrowclosed" },
+  };
+}
+
+function roleColumn(role: string) {
+  if (role === "planner" || role === "goal-review") return "planner";
+  if (role === "verifier") return "verifier";
+  return "worker";
+}
+
+function columnX(column: string) {
+  if (column === "planner") return 0;
+  if (column === "verifier") return 720;
+  return 360;
+}
+
+function compactText(value: string, max: number) {
+  const text = String(value ?? "").replace(/\s+/g, " ").trim();
+  return text.length > max ? `${text.slice(0, max - 1)}…` : text;
+}
+
 export function dashboardHtml(input: { runId: string }) {
   return `<!doctype html>
 <html lang="en">
@@ -34,6 +155,7 @@ export function dashboardHtml(input: { runId: string }) {
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Ouroboros Dashboard</title>
+  <link rel="stylesheet" href="/assets/dashboard-canvas.css">
   <style>
     :root {
       color-scheme: light;
@@ -406,71 +528,79 @@ export function dashboardHtml(input: { runId: string }) {
       display: grid;
     }
     .canvas-inner {
-      width: min(100%, 1040px);
+      width: min(100%, 1120px);
+      min-height: 620px;
+      height: calc(100dvh - 166px);
       margin: 0 auto;
-      display: grid;
-      gap: 18px;
-    }
-    .graph-board {
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
-      gap: 14px;
-      align-items: stretch;
-    }
-    .graph-node {
-      min-height: 174px;
-      display: grid;
-      grid-template-rows: auto 1fr auto;
-      gap: 12px;
-      padding: 16px;
-      border: 1px solid rgba(255, 255, 255, 0.12);
+      border: 1px solid rgba(255, 255, 255, 0.1);
       border-radius: 8px;
-      background: #222221;
-      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.045);
+      overflow: hidden;
+      background: #f6f6f3;
     }
-    .graph-node-head {
+    #dashboard-canvas-root {
+      width: 100%;
+      height: 100%;
+    }
+    .of-node {
+      width: 250px;
+      display: grid;
+      gap: 10px;
+      padding: 13px 14px 14px;
+      border: 1px solid #c7c7c2;
+      border-radius: 8px;
+      background: #ffffff;
+      color: #151515;
+      box-shadow: 0 8px 20px rgba(0, 0, 0, 0.08);
+    }
+    .of-node-running { border-color: #777773; }
+    .of-node-done { border-color: #222222; }
+    .of-node-blocked { border-color: #8b8b8b; border-style: dashed; }
+    .of-node-todo { border-color: #adadad; }
+    .of-node-head {
       display: flex;
-      align-items: center;
       justify-content: space-between;
       gap: 10px;
-    }
-    .graph-node-title {
-      color: #f1f0eb;
-      font-size: 14px;
-      font-weight: 700;
-      line-height: 1.45;
-      overflow-wrap: anywhere;
-    }
-    .graph-node-meta {
-      display: grid;
-      gap: 4px;
-      color: var(--muted);
-      font-family: var(--mono);
-      font-size: 10.5px;
-      line-height: 1.55;
-      overflow-wrap: anywhere;
-    }
-    .graph-relations {
-      display: grid;
-      gap: 8px;
-      padding: 14px 0 2px;
-    }
-    .graph-edge {
-      display: grid;
-      grid-template-columns: 88px minmax(0, 1fr);
-      gap: 12px;
-      align-items: start;
-      padding: 10px 0;
-      border-top: 1px solid rgba(255, 255, 255, 0.075);
-      color: #cbc9c2;
-      font-size: 12px;
-      line-height: 1.55;
-    }
-    .graph-edge-kind {
-      color: var(--muted-2);
+      color: #5b5b57;
+      font-size: 10px;
       font-weight: 760;
       letter-spacing: 0.08em;
       text-transform: uppercase;
+    }
+    .of-node-goal {
+      color: #181818;
+      font-size: 13px;
+      font-weight: 720;
+      line-height: 1.45;
+      overflow-wrap: anywhere;
+    }
+    .of-node-meta {
+      display: grid;
+      gap: 3px;
+      color: #666661;
+      font-family: var(--mono);
+      font-size: 10px;
+      line-height: 1.45;
+      overflow-wrap: anywhere;
+    }
+    .of-handle {
+      width: 8px;
+      height: 8px;
+      border: 1px solid #5f5f5b;
+      background: #ffffff;
+    }
+    .react-flow__edge-text {
+      font-size: 10px;
+      fill: #3f3f3d;
+    }
+    .react-flow__controls button {
+      border-color: #dededa;
+      background: #ffffff;
+      color: #1b1b1b;
+    }
+    .react-flow__minimap {
+      border: 1px solid #d7d7d2;
+      border-radius: 6px;
+      background: #fbfbf8;
     }
     .turn {
       display: grid;
@@ -770,15 +900,13 @@ export function dashboardHtml(input: { runId: string }) {
       }
       .workspace-flow { padding: 18px 16px 32px; }
       .workspace-head { padding: 16px; }
-      .graph-board {
-        grid-template-columns: 1fr;
-      }
-      .graph-edge {
-        grid-template-columns: 1fr;
-        gap: 3px;
+      .canvas-inner {
+        height: 560px;
+        min-height: 560px;
       }
     }
   </style>
+  <script type="module" src="/assets/dashboard-canvas.js"></script>
 </head>
 <body>
   <div class="app-shell">
@@ -976,34 +1104,77 @@ export function dashboardHtml(input: { runId: string }) {
       ...((task.dependsOn || []).filter((id) => groupTaskIds.has(id)).map((sourceId) => ({ kind: "dependsOn", sourceId, targetId: task.id }))),
       ...(task.parentId && groupTaskIds.has(task.parentId) ? [{ kind: "parentId", sourceId: task.parentId, targetId: task.id }] : []),
     ];
+    const graphColumn = (role) => role === "planner" || role === "goal-review" ? "planner" : role === "verifier" ? "verifier" : "worker";
+    const graphColumnX = (column) => column === "planner" ? 0 : column === "verifier" ? 720 : 360;
+    const canvasGraphFor = (group) => {
+      if (!group) return { nodes: [], edges: [] };
+      const groupTaskIds = new Set(group.tasks.map((task) => task.id));
+      const sessions = new Map(group.sessions.map((session) => [session.taskId, {
+        status: session.status,
+        attemptId: session.attemptId,
+        sessionName: session.sessionName,
+        codexSessionId: session.codexSessionId,
+        latestText: latestText(session),
+      }]));
+      const columns = new Map();
+      const nodes = group.tasks.map((task, index) => {
+        const column = graphColumn(task.role);
+        const row = columns.get(column) || 0;
+        columns.set(column, row + 1);
+        return {
+          id: task.id,
+          type: "task",
+          position: { x: graphColumnX(column), y: row * 190 + (index % 2) * 12 },
+          data: {
+            role: task.role,
+            status: task.status,
+            goal: compact(task.goal, 118),
+            taskId: task.id,
+            doneWhenCount: Array.isArray(task.doneWhen) ? task.doneWhen.length : 0,
+            latestSession: sessions.get(task.id) || null,
+          },
+        };
+      });
+      const edges = group.tasks.flatMap((task) => graphEdgesFor(task, groupTaskIds).map((edge) => ({
+        id: edge.kind + ":" + edge.sourceId + "->" + edge.targetId,
+        source: edge.sourceId,
+        target: edge.targetId,
+        label: edge.kind,
+        type: "smoothstep",
+        animated: task.status === "running",
+        markerEnd: { type: "arrowclosed" },
+      })));
+      return { nodes, edges };
+    };
     const renderCanvasWorkspace = (group) => {
       if (!group) return '<div class="canvas-inner"><div class="empty">No goal selected</div></div>';
-      const groupTaskIds = new Set(group.tasks.map((task) => task.id));
-      const edges = group.tasks.flatMap((task) => graphEdgesFor(task, groupTaskIds));
+      const graph = canvasGraphFor(group);
       return '<div class="canvas-inner" data-canvas-goal-id="' + escapeHtml(group.id) + '">' +
-        '<div class="graph-board">' + group.tasks.map((task) => {
-          const incoming = edges.filter((edge) => edge.targetId === task.id);
-          const outgoing = edges.filter((edge) => edge.sourceId === task.id);
-          return '<article class="graph-node ' + escapeHtml(task.status) + '" data-canvas-task-id="' + escapeHtml(task.id) + '">' +
-            '<div class="graph-node-head"><span class="role-label">' + escapeHtml(task.role) + '</span><span class="status-text ' + escapeHtml(task.status) + '">' + escapeHtml(task.status) + '</span></div>' +
-            '<div class="graph-node-title">' + escapeHtml(compact(task.goal, 120)) + '</div>' +
-            '<div class="graph-node-meta">' +
-              '<span>id ' + escapeHtml(task.id) + '</span>' +
-              '<span>dependsOn ' + relationText(task.dependsOn || []) + '</span>' +
-              '<span>parentId ' + (task.parentId ? '<span class="code-meta">' + escapeHtml(task.parentId) + '</span>' : '<span class="meta">none</span>') + '</span>' +
-              '<span>in ' + incoming.length + ' · out ' + outgoing.length + '</span>' +
-            '</div>' +
-            promptLink(task) +
-          '</article>';
-        }).join("") + '</div>' +
-        (edges.length ? '<div class="graph-relations" aria-label="Task graph relationships">' + edges.map((edge) =>
-          '<div class="graph-edge" data-edge-kind="' + escapeHtml(edge.kind) + '" data-edge-source="' + escapeHtml(edge.sourceId) + '" data-edge-target="' + escapeHtml(edge.targetId) + '">' +
-            '<span class="graph-edge-kind">' + escapeHtml(edge.kind) + '</span><span><span class="code-meta">' + escapeHtml(edge.sourceId) + '</span> -> <span class="code-meta">' + escapeHtml(edge.targetId) + '</span></span>' +
-          '</div>'
-        ).join("") + '</div>' : '<div class="empty">No dependency or parent relationships recorded for this goal.</div>') +
+        '<div id="dashboard-canvas-root" data-canvas-graph="' + escapeHtml(JSON.stringify(graph)) + '"></div>' +
+        '<div hidden>' + group.tasks.map((task) =>
+          '<span data-canvas-task-id="' + escapeHtml(task.id) + '">' + escapeHtml(task.role) + ' ' + escapeHtml(task.status) + ' dependsOn ' + relationText(task.dependsOn || []) + ' parentId ' + escapeHtml(task.parentId || "none") + '</span>'
+        ).join("") + '</div>' +
         '</div>';
     };
     const renderWorkspace = (group) => workspaceMode === "canvas" ? renderCanvasWorkspace(group) : renderFlowWorkspace(group);
+    const mountReactFlowCanvas = () => {
+      if (workspaceMode !== "canvas") return;
+      const mount = document.getElementById("dashboard-canvas-root");
+      if (!mount) return;
+      const graphJson = mount.getAttribute("data-canvas-graph") || '{"nodes":[],"edges":[]}';
+      const mountGraph = () => {
+        try {
+          window.OuroborosCanvas?.render(mount, JSON.parse(graphJson));
+        } catch (error) {
+          mount.innerHTML = '<div class="empty">Canvas failed to render: ' + escapeHtml(error && error.message ? error.message : String(error)) + '</div>';
+        }
+      };
+      if (window.OuroborosCanvas) {
+        mountGraph();
+      } else {
+        window.addEventListener("ouroboros-canvas-ready", mountGraph, { once: true });
+      }
+    };
     const renderInspector = (overview, group) => {
       if (!group) return '<section class="inspector-card"><h2>Detail</h2><div class="empty">Select a goal</div></section>';
       const doneWhen = group.tasks.flatMap((task) => (Array.isArray(task.doneWhen) ? task.doneWhen : []).map((item) => ({ task, item })));
@@ -1195,6 +1366,7 @@ export function dashboardHtml(input: { runId: string }) {
       setHtmlIfChanged("active-goal-list", activeGroups.length ? activeGroups.map(goalRow).join("") : '<div class="empty"><strong>Idle</strong>No active tasks. Open a blocked history goal and rerun it, or add a new goal.</div>');
       setHtmlIfChanged("history-goal-list", [...goalGroups].reverse().filter((group) => group.activeTasks.length === 0).map(goalRow).join(""));
       patchWorkspace(renderWorkspace(selectedGroup));
+      mountReactFlowCanvas();
       setHtmlIfChanged("inspector-panel", renderInspector(overview, selectedGroup) + renderRunner(overview));
     }
     document.addEventListener("click", (event) => {
@@ -1315,7 +1487,7 @@ export function serveDashboard(input: {
   });
 }
 
-export function handleDashboardRequest(
+export async function handleDashboardRequest(
   request: Request,
   input: {
     runId: string;
@@ -1329,6 +1501,16 @@ export function handleDashboardRequest(
   if (url.pathname === "/") {
     return new Response(dashboardHtml({ runId: input.runId }), {
       headers: { "content-type": "text/html; charset=utf-8" },
+    });
+  }
+  if (url.pathname === "/assets/dashboard-canvas.js") {
+    return new Response(await bundledDashboardCanvasScript(), {
+      headers: { "content-type": "text/javascript; charset=utf-8" },
+    });
+  }
+  if (url.pathname === "/assets/dashboard-canvas.css") {
+    return new Response(await bundledDashboardCanvasCss(), {
+      headers: { "content-type": "text/css; charset=utf-8" },
     });
   }
   if (url.pathname === `/api/runs/${input.runId}/overview`) {
@@ -1447,4 +1629,43 @@ function escapeHtml(value: string) {
         return char;
     }
   });
+}
+
+let canvasScriptCache: Promise<string> | null = null;
+let canvasCssCache: Promise<string> | null = null;
+
+function bundledDashboardCanvasScript() {
+  canvasScriptCache ??= buildDashboardCanvasScript();
+  return canvasScriptCache;
+}
+
+async function buildDashboardCanvasScript() {
+  const result = await Bun.build({
+    entrypoints: [fileURLToPath(new URL("./dashboard-canvas.tsx", import.meta.url))],
+    target: "browser",
+    format: "esm",
+    minify: false,
+    sourcemap: "none",
+  });
+  if (!result.success) {
+    throw new Error(result.logs.map((log) => log.message).join("\n") || "dashboard canvas bundle failed");
+  }
+  const artifact = result.outputs.find((output) => output.path.endsWith(".js")) ?? result.outputs[0];
+  return artifact.text();
+}
+
+function bundledDashboardCanvasCss() {
+  canvasCssCache ??= buildDashboardCanvasCss();
+  return canvasCssCache;
+}
+
+async function buildDashboardCanvasCss() {
+  const xyflowCssUrl = import.meta.resolve("@xyflow/react/dist/style.css");
+  const xyflowCss = await Bun.file(fileURLToPath(xyflowCssUrl)).text();
+  return `${xyflowCss}
+
+.react-flow {
+  font-family: "Aptos", "Segoe UI Variable", ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+}
+`;
 }

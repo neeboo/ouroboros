@@ -3,10 +3,11 @@
     "target": "ES2022",
     "module": "ESNext",
     "moduleResolution": "Bundler",
+    "jsx": "react-jsx",
     "strict": true,
     "types": ["bun"],
     "skipLibCheck": true,
     "noEmit": true
   },
-  "include": ["packages/**/*.ts", "tests/**/*.ts"]
+  "include": ["packages/**/*.ts", "packages/**/*.tsx", "tests/**/*.ts"]
 }

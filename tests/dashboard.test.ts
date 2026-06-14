@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Harness } from "../packages/harness/src";
 import { buildTaskPrompt } from "../packages/runner/src";
-import { dashboardHtml, handleDashboardRequest } from "../packages/cli/src/dashboard";
+import { buildDashboardTaskGraph, dashboardHtml, handleDashboardRequest } from "../packages/cli/src/dashboard";
 
 describe("dashboard", () => {
   test("renders Codex-style goal navigation for active and history goals", () => {
@@ -52,18 +52,125 @@ describe("dashboard", () => {
 
     expect(html).toContain('data-workspace-mode="canvas"');
     expect(html).toContain('data-workspace-mode="flow"');
+    expect(html).toContain('id="dashboard-canvas-root"');
+    expect(html).toContain("/assets/dashboard-canvas.js");
+    expect(html).toContain("/assets/dashboard-canvas.css");
+    expect(html).toContain("mountReactFlowCanvas");
     expect(html).toContain("workspaceMode");
     expect(html).toContain("renderCanvasWorkspace");
     expect(html).toContain("renderFlowWorkspace");
-    expect(html).toContain("graph-node");
     expect(html).toContain("data-canvas-task-id");
-    expect(html).toContain("graph-edge");
-    expect(html).toContain("data-edge-kind");
     expect(html).toContain("dependsOn");
     expect(html).toContain("parentId");
     expect(html).toContain("task.cycleId");
     expect(html).toContain("transcript");
     expect(html).toContain("stream-output");
+  });
+
+  test("serves bundled React Flow canvas assets", async () => {
+    const dashboardInput = {
+      runId: "run_123",
+      overview: () => ({ run: null, tasks: [], sessions: [], lessons: [] }),
+      renderTaskPrompt: () => "",
+    };
+
+    const jsResponse = await handleDashboardRequest(
+      new Request("http://localhost/assets/dashboard-canvas.js"),
+      dashboardInput,
+    );
+    const jsBody = await jsResponse.text();
+    expect(jsResponse.status).toBe(200);
+    expect(jsResponse.headers.get("content-type")).toContain("text/javascript");
+    expect(jsBody).toContain("ReactFlow");
+
+    const cssResponse = await handleDashboardRequest(
+      new Request("http://localhost/assets/dashboard-canvas.css"),
+      dashboardInput,
+    );
+    const cssBody = await cssResponse.text();
+    expect(cssResponse.status).toBe(200);
+    expect(cssResponse.headers.get("content-type")).toContain("text/css");
+    expect(cssBody).toContain("react-flow");
+  });
+
+  test("builds React Flow graph data for planner worker verifier relationships", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "ouroboros-dashboard-graph-"));
+    const harness = new Harness(join(dir, "ouroboros.db"));
+    harness.init();
+    const runId = harness.createRun({ goal: "Render planner worker verifier graph" });
+    const plannerId = harness.createTask({
+      runId,
+      role: "planner",
+      goal: "Plan a graph",
+      prompt: "Plan the work.",
+      doneWhen: ["plan emitted"],
+    });
+    harness.recordAttempt({
+      taskId: plannerId,
+      input: { sessionName: "planner-session", codexSessionId: "codex_planner" },
+      output: {
+        status: "done",
+        summary: "Planner created worker",
+        changedFiles: [],
+        checks: [],
+        artifacts: [],
+        problems: [],
+      },
+    });
+    const workerId = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Implement graph island",
+      prompt: "Build it.",
+      dependsOn: [plannerId],
+      doneWhen: ["canvas mounts", "graph renders"],
+    });
+    harness.recordAttempt({
+      taskId: workerId,
+      input: { sessionName: "worker-session", codexSessionId: "codex_worker" },
+      output: {
+        status: "done",
+        summary: "Worker implemented graph",
+        changedFiles: ["packages/cli/src/dashboard.ts"],
+        checks: [],
+        artifacts: [],
+        problems: [],
+      },
+    });
+    const verifierId = harness.createTask({
+      runId,
+      role: "verifier",
+      goal: "Verify graph island",
+      prompt: "Verify it.",
+      dependsOn: [workerId],
+      parentId: workerId,
+      doneWhen: ["verified"],
+    });
+    harness.startAttempt({
+      taskId: verifierId,
+      input: { sessionName: "verifier-session", codexSessionId: "codex_verifier" },
+    });
+
+    try {
+      const graph = buildDashboardTaskGraph(harness.getRunOverview({ runId }), plannerId);
+
+      expect(graph.nodes.map((node) => node.id)).toEqual([plannerId, workerId, verifierId]);
+      expect(graph.nodes.find((node) => node.id === plannerId)?.data.role).toBe("planner");
+      expect(graph.nodes.find((node) => node.id === workerId)?.data.status).toBe("done");
+      expect(graph.nodes.find((node) => node.id === workerId)?.data.doneWhenCount).toBe(2);
+      expect(graph.nodes.find((node) => node.id === verifierId)?.data.latestSession?.status).toBe("running");
+      expect(graph.edges).toContainEqual(
+        expect.objectContaining({ source: plannerId, target: workerId, label: "dependsOn" }),
+      );
+      expect(graph.edges).toContainEqual(
+        expect.objectContaining({ source: workerId, target: verifierId, label: "dependsOn" }),
+      );
+      expect(graph.edges).toContainEqual(
+        expect.objectContaining({ source: workerId, target: verifierId, label: "parentId" }),
+      );
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 
   test("renders task doneWhen items in the todo inspector", () => {
