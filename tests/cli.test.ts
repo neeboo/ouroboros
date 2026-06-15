@@ -3,6 +3,7 @@ import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { Harness } from "../packages/harness/src";
+import { Database } from "bun:sqlite";
 
 describe("CLI", () => {
   let dir: string;
@@ -2356,6 +2357,11 @@ describe("CLI", () => {
       "--input-json",
       '{"sessionName":"stale-session","executor":"codex-resumable"}',
     );
+    const db = new Database(dbPath);
+    db.query("update attempts set started_at = datetime('now', '-10 minutes') where id = $attemptId").run({
+      $attemptId: stale.attemptId,
+    });
+    db.close();
     const codexBin = join(dir, "fake-codex-stale");
     await writeFile(
       codexBin,
@@ -2394,6 +2400,60 @@ describe("CLI", () => {
     );
     expect(harness.getAttempt(stale.attemptId)?.status).toBe("blocked");
     expect(harness.getTask(task.id)?.status).toBe("done");
+  });
+
+  test("run-loop waits for fresh running attempts without a codex session id", async () => {
+    await runCli("init");
+    const run = await runCliJson("create-run", "--goal", "Bootstrap ouroboros");
+    const task = await runCliJson(
+      "create-task",
+      "--run-id",
+      run.id,
+      "--role",
+      "worker",
+      "--goal",
+      "Wait for in-flight task",
+      "--prompt",
+      "Continue the in-flight task.",
+    );
+    const fresh = await runCliJson(
+      "start-attempt",
+      "--task-id",
+      task.id,
+      "--input-json",
+      '{"sessionName":"fresh-session","executor":"codex-resumable"}',
+    );
+    new Harness(dbPath).recordAttemptEvent({
+      attemptId: fresh.attemptId,
+      sequence: 1,
+      stream: "stdout",
+      text: "still working",
+    });
+
+    const result = await runCliJson(
+      "run-loop",
+      "--run-id",
+      run.id,
+      "--executor",
+      "codex-resumable",
+      "--codex-bin",
+      join(dir, "missing-codex-should-not-run"),
+      "--cwd",
+      "/repo",
+      "--max-rounds",
+      "1",
+    );
+    const harness = new Harness(dbPath);
+
+    expect(result.rounds[0].tasks).toContainEqual(
+      expect.objectContaining({
+        attemptId: fresh.attemptId,
+        status: "running",
+        codexSessionId: null,
+      }),
+    );
+    expect(harness.getAttempt(fresh.attemptId)?.status).toBe("running");
+    expect(harness.getTask(task.id)?.status).toBe("running");
   });
 
   test("lists lessons recorded from attempts", async () => {

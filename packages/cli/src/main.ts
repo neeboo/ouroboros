@@ -35,6 +35,7 @@ const harness = new Harness(parsed.db);
 const DEFAULT_MAX_TRIES = 3;
 const DEFAULT_SELF_ITERATION_CONCURRENCY = 3;
 const DEFAULT_SELF_ITERATION_WORKTREE_ROOT = ".ouroboros/worktrees";
+const RUNNING_ATTEMPT_STALE_MS = 5 * 60 * 1000;
 const SELF_ITERATION_GOAL = "Use Ouroboros to plan its own next self-iteration cycle";
 const SELF_ITERATION_PLAN_DOC = "docs/self-iteration-plan.md";
 const DEFAULT_STOP_HOOKS = "create-runs,create-tasks,create-verifier,create-repair,context-summary";
@@ -1586,6 +1587,9 @@ function createDashboardRuntime(input: {
 
 async function resumeRunningCodexAttempts(input: { runId: string; limit: number }) {
   const attempts = harness.listRunningAttempts({ runId: input.runId }).slice(0, input.limit);
+  const sessionsByAttemptId = new Map(
+    harness.getRunOverview({ runId: input.runId, eventLimit: 1 }).sessions.map((session) => [session.attemptId, session]),
+  );
   const tasks = await Promise.all(attempts.map(async (attempt) => {
     const task = harness.getTask(attempt.taskId);
     if (!task) {
@@ -1597,12 +1601,31 @@ async function resumeRunningCodexAttempts(input: { runId: string; limit: number 
     }
     const sessionId = typeof attempt.input.codexSessionId === "string" ? attempt.input.codexSessionId : "";
     if (!sessionId) {
+      const sessionName = typeof attempt.input.sessionName === "string" ? attempt.input.sessionName : `attempt-${attempt.id}`;
+      const cwd = typeof attempt.input.cwd === "string" ? attempt.input.cwd : task.worktreePath ?? runnerCwd();
+      if (runningAttemptIsFresh(sessionsByAttemptId.get(attempt.id))) {
+        upsertAttemptThread({
+          runId: run.id,
+          task,
+          attemptId: attempt.id,
+          sessionName,
+          cwd,
+          status: "running",
+        });
+        return {
+          taskId: task.id,
+          attemptId: attempt.id,
+          sessionName,
+          status: "running",
+          codexSessionId: null,
+        };
+      }
       upsertAttemptThread({
         runId: run.id,
         task,
         attemptId: attempt.id,
-        sessionName: typeof attempt.input.sessionName === "string" ? attempt.input.sessionName : `attempt-${attempt.id}`,
-        cwd: typeof attempt.input.cwd === "string" ? attempt.input.cwd : task.worktreePath ?? runnerCwd(),
+        sessionName,
+        cwd,
         status: "orphaned",
       });
       const output: AttemptOutput = {
@@ -1618,7 +1641,7 @@ async function resumeRunningCodexAttempts(input: { runId: string; limit: number 
       return {
         taskId: task.id,
         attemptId: attempt.id,
-        sessionName: typeof attempt.input.sessionName === "string" ? attempt.input.sessionName : `attempt-${attempt.id}`,
+        sessionName,
         status: "blocked",
         codexSessionId: null,
       };
@@ -1698,6 +1721,21 @@ async function resumeRunningCodexAttempts(input: { runId: string; limit: number 
     };
   }));
   return tasks.filter((task) => task !== null);
+}
+
+function runningAttemptIsFresh(session: { startedAt: string | null; events: Array<{ createdAt: string }> } | undefined) {
+  const lastEventAt = session?.events.at(-1)?.createdAt;
+  const heartbeatAt = parseTimestampMs(lastEventAt) ?? parseTimestampMs(session?.startedAt);
+  return heartbeatAt !== null && Date.now() - heartbeatAt < RUNNING_ATTEMPT_STALE_MS;
+}
+
+function parseTimestampMs(value: string | null | undefined) {
+  if (!value) {
+    return null;
+  }
+  const normalized = value.includes("T") ? value : `${value.replace(" ", "T")}Z`;
+  const ms = Date.parse(normalized);
+  return Number.isFinite(ms) ? ms : null;
 }
 
 async function startReadyCodexAttempts(input: { runId: string; limit: number }) {
