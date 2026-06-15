@@ -111,6 +111,37 @@ describe("Harness actions", () => {
     );
   });
 
+  test("retires a stale run from the active queue without deleting task evidence", () => {
+    const runId = harness.createRun({ goal: "Old duplicate self-iteration" });
+    const taskId = harness.createTask({
+      runId,
+      role: "planner",
+      goal: "Old planner",
+      prompt: "Old duplicate planner.",
+    });
+
+    const result = applyHarnessAction(harness, {
+      type: "retireRun",
+      runId,
+      reason: "duplicate historical self-iteration run",
+    });
+    const event = harness.listHarnessActionEvents({ limit: 1 })[0];
+
+    expect(result).toMatchObject({
+      status: "done",
+      actionType: "retireRun",
+      eventId: expect.any(String),
+    });
+    expect(harness.getRun(runId)?.status).toBe("blocked");
+    expect(harness.getTask(taskId)?.status).toBe("todo");
+    expect(result.artifacts).toContainEqual(expect.objectContaining({ kind: "active_task", taskId }));
+    expect(event).toMatchObject({
+      actionType: "retireRun",
+      status: "done",
+      request: expect.objectContaining({ reason: "duplicate historical self-iteration run" }),
+    });
+  });
+
   test("HTTP proxy validates bearer token before applying actions", async () => {
     const runId = harness.createRun({ goal: "Remote action" });
     const denied = await handleHarnessActionRequest(

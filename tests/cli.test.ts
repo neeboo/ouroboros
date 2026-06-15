@@ -2095,6 +2095,38 @@ describe("CLI", () => {
     });
   });
 
+  test("supervise-daemon runs bounded ticks and reports queue counts", async () => {
+    await runCli("init");
+    const result = await runCliJson(
+      "supervise-daemon",
+      "--executor",
+      "codex-resumable",
+      "--run-concurrency",
+      "2",
+      "--concurrency",
+      "1",
+      "--max-ticks",
+      "2",
+      "--tick-cycles",
+      "1",
+      "--max-rounds",
+      "1",
+      "--idle-ms",
+      "1",
+      "--interval-ms",
+      "1",
+    );
+
+    expect(result.status).toBe("tick_limit");
+    expect(result.ticks).toHaveLength(2);
+    expect(result.ticks[0]).toMatchObject({
+      type: "daemon.tick",
+      index: 0,
+      result: expect.objectContaining({ status: "idle" }),
+      runCounts: expect.objectContaining({ todo: 0 }),
+    });
+  });
+
   test("autopilot retries stale running attempts without a codex session id", async () => {
     await runCli("init");
     const run = await runCliJson("create-run", "--goal", "Bootstrap ouroboros");
@@ -2259,6 +2291,38 @@ describe("CLI", () => {
       actionType: "reclaimRunningTasks",
       status: "done",
     });
+  });
+
+  test("retires stale runs through the harness action CLI", async () => {
+    await runCli("init");
+    const run = await runCliJson("create-run", "--goal", "Duplicate historical self-iteration");
+    await runCliJson(
+      "create-task",
+      "--run-id",
+      run.id,
+      "--role",
+      "planner",
+      "--goal",
+      "Old planner",
+      "--prompt",
+      "Old duplicate planner.",
+    );
+
+    const result = await runCliJson(
+      "action",
+      "--action-json",
+      JSON.stringify({ type: "retireRun", runId: run.id, reason: "duplicate historical self-iteration run" }),
+    );
+    const overview = await runCliJson("run-overview", "--run-id", run.id);
+    const todoRuns = await runCliJson("list-runs", "--status", "todo");
+
+    expect(result).toMatchObject({
+      status: "done",
+      actionType: "retireRun",
+    });
+    expect(overview.run.status).toBe("blocked");
+    expect(overview.tasks[0].status).toBe("todo");
+    expect(todoRuns.some((todoRun: { id: string }) => todoRun.id === run.id)).toBe(false);
   });
 
   async function runCli(...rawArgs: Array<string | Record<string, string>>) {

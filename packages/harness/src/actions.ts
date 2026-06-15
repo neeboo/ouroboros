@@ -5,6 +5,7 @@ export type HarnessAction =
   | { type: "reclaimRunningTasks"; runId: string; reason?: string }
   | { type: "retryTask"; taskId: string; reason?: string }
   | { type: "markRunTodo"; runId: string; reason?: string }
+  | { type: "retireRun"; runId: string; reason: string }
   | { type: "prepareRunDrain"; runId: string; maxTries?: number; reason?: string }
   | { type: "completeSystemTask"; taskId: string; actionEventId: string; reason?: string };
 
@@ -29,6 +30,9 @@ export function parseHarnessAction(value: unknown): HarnessAction {
   if (type === "markRunTodo") {
     return { type, runId: stringField(record, "runId"), reason: optionalStringField(record, "reason") };
   }
+  if (type === "retireRun") {
+    return { type, runId: stringField(record, "runId"), reason: stringField(record, "reason") };
+  }
   if (type === "prepareRunDrain") {
     return {
       type,
@@ -45,7 +49,7 @@ export function parseHarnessAction(value: unknown): HarnessAction {
       reason: optionalStringField(record, "reason"),
     };
   }
-  throw new Error("harness action type must be reclaimRunningTasks, retryTask, markRunTodo, prepareRunDrain, or completeSystemTask");
+  throw new Error("harness action type must be reclaimRunningTasks, retryTask, markRunTodo, retireRun, prepareRunDrain, or completeSystemTask");
 }
 
 export function applyHarnessAction(harness: Harness, rawAction: unknown): HarnessActionResult & { eventId: string } {
@@ -108,6 +112,32 @@ function applyParsedHarnessAction(harness: Harness, action: HarnessAction): Harn
       { name: "run exists", status: "passed", evidence: action.runId },
       { name: "run status", status: "passed", evidence: "todo" },
     ], [{ kind: "run", runId: action.runId, previousStatus: run.status, status: "todo", reason: action.reason ?? null }]);
+  }
+
+  if (action.type === "retireRun") {
+    const run = harness.getRun(action.runId);
+    if (!run) {
+      return blockedResult(action.type, `Run not found: ${action.runId}`, [`run not found: ${action.runId}`]);
+    }
+    const overview = harness.getRunOverview({ runId: action.runId, eventLimit: 0 });
+    const active = overview.tasks.filter((task) => task.status === "todo" || task.status === "running");
+    harness.updateRunStatus({ runId: action.runId, status: "blocked" });
+    return doneResult(action.type, `Run ${action.runId} retired from the active queue.`, [
+      { name: "run exists", status: "passed", evidence: action.runId },
+      { name: "previous run status", status: "passed", evidence: run.status },
+      { name: "retired run status", status: "passed", evidence: "blocked" },
+      { name: "active tasks preserved", status: "passed", evidence: String(active.length) },
+    ], [
+      {
+        kind: "run",
+        runId: action.runId,
+        previousStatus: run.status,
+        status: "blocked",
+        reason: action.reason,
+        activeTasksPreserved: active.length,
+      },
+      ...active.map((task) => ({ kind: "active_task", taskId: task.id, role: task.role, status: task.status })),
+    ]);
   }
 
   if (action.type === "completeSystemTask") {

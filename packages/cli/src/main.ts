@@ -430,6 +430,25 @@ switch (parsed.command) {
     );
     break;
   }
+  case "supervise-daemon": {
+    const executorName = parseExecutorName(required(parsed, "executor"));
+    if (executorName !== "codex-resumable") {
+      fail("supervise-daemon currently supports codex-resumable");
+    }
+    const result = await superviseDaemon({
+      rootRunId: flag(parsed, "root-run-id") ?? null,
+      runConcurrency: parsePositiveInteger(flag(parsed, "run-concurrency") ?? "2", "--run-concurrency"),
+      taskConcurrency: parseConcurrency(),
+      tickCycles: parsePositiveInteger(flag(parsed, "tick-cycles") ?? flag(parsed, "max-cycles") ?? "1", "--tick-cycles"),
+      maxRounds: parsePositiveInteger(flag(parsed, "max-rounds") ?? "1", "--max-rounds"),
+      maxTries: parsePositiveInteger(flag(parsed, "max-tries") ?? String(DEFAULT_MAX_TRIES), "--max-tries"),
+      intervalMs: parseNonNegativeInteger(flag(parsed, "interval-ms") ?? "1500", "--interval-ms"),
+      idleMs: parseNonNegativeInteger(flag(parsed, "idle-ms") ?? flag(parsed, "interval-ms") ?? "1500", "--idle-ms"),
+      maxTicks: parseNonNegativeInteger(flag(parsed, "max-ticks") ?? "0", "--max-ticks"),
+    });
+    printJson(result);
+    break;
+  }
   case "record-attempt": {
     const taskId = required(parsed, "task-id");
     const input = parseObject(flag(parsed, "input-json") ?? "{}");
@@ -1077,6 +1096,70 @@ async function superviseRuns(input: {
     }
   }
   return { status: "cycle_limit" as const, cycles };
+}
+
+async function superviseDaemon(input: {
+  rootRunId?: string | null;
+  runConcurrency: number;
+  taskConcurrency: number;
+  tickCycles: number;
+  maxRounds: number;
+  maxTries: number;
+  intervalMs: number;
+  idleMs: number;
+  maxTicks: number;
+}) {
+  let stopping = false;
+  const stop = () => {
+    stopping = true;
+  };
+  process.once("SIGINT", stop);
+  process.once("SIGTERM", stop);
+
+  const ticks = [];
+  let index = 0;
+  while (!stopping && (input.maxTicks === 0 || index < input.maxTicks)) {
+    const result = await superviseRuns({
+      rootRunId: input.rootRunId ?? null,
+      runConcurrency: input.runConcurrency,
+      taskConcurrency: input.taskConcurrency,
+      maxCycles: input.tickCycles,
+      maxRounds: input.maxRounds,
+      maxTries: input.maxTries,
+      intervalMs: input.intervalMs,
+    });
+    const tick = {
+      type: "daemon.tick",
+      index,
+      result,
+      runCounts: runStatusCounts(),
+      createdAt: new Date().toISOString(),
+    };
+    ticks.push(tick);
+    if (input.maxTicks === 0) {
+      console.log(JSON.stringify(tick));
+    }
+    index += 1;
+    if (!stopping && (input.maxTicks === 0 || index < input.maxTicks)) {
+      await sleep(result.status === "idle" ? input.idleMs : input.intervalMs);
+    }
+  }
+
+  process.off("SIGINT", stop);
+  process.off("SIGTERM", stop);
+  return {
+    status: stopping ? "stopped" as const : input.maxTicks > 0 ? "tick_limit" as const : "stopped" as const,
+    ticks,
+    runCounts: runStatusCounts(),
+  };
+}
+
+function runStatusCounts() {
+  const counts = { todo: 0, running: 0, done: 0, blocked: 0 };
+  for (const run of harness.listRuns({ limit: 1000 })) {
+    counts[run.status] += 1;
+  }
+  return counts;
 }
 
 function runnableRuns(input: { limit: number; rootRunId?: string | null }) {
@@ -1889,7 +1972,7 @@ function supervisorCommand(
     Bun.argv[1],
     "--db",
     parsed.db,
-    "supervise-runs",
+    "supervise-daemon",
     "--executor",
     "codex-resumable",
     "--stop-hook",
