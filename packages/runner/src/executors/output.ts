@@ -155,6 +155,13 @@ function optionalModelPreference(record: Record<string, unknown>, index: number,
   if (value === undefined) {
     return undefined;
   }
+  if (typeof value === "string") {
+    const model = value.trim();
+    if (!looksLikeModelId(model)) {
+      return undefined;
+    }
+    return { model };
+  }
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new Error(`${label} ${index} modelPreference must be an object`);
   }
@@ -172,6 +179,10 @@ function optionalModelPreference(record: Record<string, unknown>, index: number,
     preference.reason = preferenceRecord.reason;
   }
   return preference;
+}
+
+function looksLikeModelId(value: string) {
+  return /^(gpt-|o\d|claude|gemini|deepseek|codex)/i.test(value);
 }
 
 function extractJsonObject(raw: string) {

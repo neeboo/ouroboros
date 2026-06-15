@@ -1171,6 +1171,30 @@ describe("runner", () => {
     ]);
   });
 
+  test("ignores non-model string preferences in planner next runs", () => {
+    const output = parseAttemptOutput(
+      JSON.stringify({
+        status: "done",
+        summary: "planned runs",
+        nextRuns: [
+          {
+            goal: "Build React dashboard composer",
+            prompt: "Plan the child run.",
+            modelPreference: "balanced",
+          },
+        ],
+      }),
+    );
+
+    expect(output.nextRuns?.[0]).toEqual({
+      goal: "Build React dashboard composer",
+      prompt: "Plan the child run.",
+      doneWhen: undefined,
+      context: undefined,
+      modelPreference: undefined,
+    });
+  });
+
   test.each([
     ["missing role", { goal: "Goal", prompt: "Prompt" }],
     ["empty goal", { role: "worker", goal: "", prompt: "Prompt" }],
