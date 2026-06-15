@@ -1843,6 +1843,92 @@ describe("CLI", () => {
     expect(overview.sessions.filter((session: { taskId: string }) => session.taskId === review.id)).toHaveLength(3);
   });
 
+  test("run-loop creates a fresh goal review after newer work supersedes a maxed blocked review", async () => {
+    await runCli("init");
+    const run = await runCliJson("create-run", "--goal", "Bootstrap ouroboros");
+    const staleReview = await runCliJson(
+      "create-task",
+      "--run-id",
+      run.id,
+      "--role",
+      "goal-review",
+      "--goal",
+      "Review whether the run goal is complete",
+      "--prompt",
+      "Review the goal.",
+    );
+    for (const problem of ["first timeout", "second timeout", "third timeout"]) {
+      await runCliJson(
+        "record-attempt",
+        "--task-id",
+        staleReview.id,
+        "--input-json",
+        "{}",
+        "--output-json",
+        JSON.stringify({ status: "blocked", summary: problem, problems: [problem] }),
+      );
+    }
+    const newerWorker = await runCliJson(
+      "create-task",
+      "--run-id",
+      run.id,
+      "--role",
+      "worker",
+      "--goal",
+      "Repair after stale review",
+      "--prompt",
+      "Repair.",
+    );
+    await runCliJson(
+      "record-attempt",
+      "--task-id",
+      newerWorker.id,
+      "--input-json",
+      "{}",
+      "--output-json",
+      '{"status":"done","summary":"newer work done","changedFiles":[],"checks":[],"artifacts":[],"problems":[]}',
+    );
+    const codexBin = join(dir, "fake-codex-fresh-review");
+    await writeFile(
+      codexBin,
+      [
+        "#!/usr/bin/env bun",
+        "const prompt = await new Response(Bun.stdin.stream()).text();",
+        "if (!prompt.includes('Role: goal-review')) process.exit(2);",
+        "console.log(JSON.stringify({ type: 'agent.message', message: '{\"status\":\"done\",\"runDecision\":\"complete\",\"summary\":\"fresh review completed\",\"changedFiles\":[],\"checks\":[],\"artifacts\":[],\"problems\":[]}' }));",
+      ].join("\n"),
+    );
+    await chmod(codexBin, 0o755);
+
+    const result = await runCliJson(
+      "run-loop",
+      "--run-id",
+      run.id,
+      "--executor",
+      "codex-resumable",
+      "--codex-bin",
+      codexBin,
+      "--cwd",
+      "/repo",
+      "--max-rounds",
+      "1",
+      "--max-tries",
+      "3",
+    );
+    const overview = await runCliJson("run-overview", "--run-id", run.id);
+    const freshReview = overview.tasks.find(
+      (task: { role: string; id: string }) => task.role === "goal-review" && task.id !== staleReview.id,
+    );
+
+    expect(freshReview).toBeDefined();
+    expect(result.rounds[0].tasks[0].taskId).toBe(freshReview!.id);
+    expect(freshReview!).toMatchObject({
+      role: "goal-review",
+      status: "done",
+    });
+    expect(overview.run.status).toBe("done");
+  });
+
   test("autopilot drains active queue and then completes goal review", async () => {
     await runCli("init");
     const run = await runCliJson("create-run", "--goal", "Bootstrap ouroboros");

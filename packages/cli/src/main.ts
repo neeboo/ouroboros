@@ -446,6 +446,11 @@ switch (parsed.command) {
         problems: Array.isArray(output.problems) ? output.problems.map(String) : [],
       },
     });
+    const attempt = harness.getAttempt(attemptId);
+    const task = attempt ? harness.getTask(attempt.taskId) : null;
+    if (attempt && task) {
+      applyCliPostAttemptRunEffects(task.runId, task, attempt.output);
+    }
     printJson({
       attemptId,
       taskId,
@@ -481,6 +486,11 @@ switch (parsed.command) {
         problems: Array.isArray(output.problems) ? output.problems.map(String) : [],
       },
     });
+    const attempt = harness.getAttempt(attemptId);
+    const task = attempt ? harness.getTask(attempt.taskId) : null;
+    if (attempt && task) {
+      applyCliPostAttemptRunEffects(task.runId, task, attempt.output);
+    }
     printJson({
       attemptId,
       status: output.status,
@@ -888,6 +898,10 @@ function ensureGoalReviewTask(runId: string, maxTries: number) {
     (task) => task.role === "goal-review" && task.status === "blocked",
   );
   if (blockedReview) {
+    const lastTask = overview.tasks[overview.tasks.length - 1];
+    if (lastTask && lastTask.id !== blockedReview.id) {
+      return createGoalReviewTask(runId);
+    }
     const tries = overview.sessions.filter((session) => session.taskId === blockedReview.id).length;
     if (tries >= maxTries) {
       return { created: false as const, reason: "max_tries", taskId: blockedReview.id, tries, maxTries };
@@ -895,6 +909,10 @@ function ensureGoalReviewTask(runId: string, maxTries: number) {
     harness.retryTask({ taskId: blockedReview.id });
     return { created: true as const, taskId: blockedReview.id, retried: true as const, tries: tries + 1, maxTries };
   }
+  return createGoalReviewTask(runId);
+}
+
+function createGoalReviewTask(runId: string) {
   const taskId = harness.createTask({
     runId,
     role: "goal-review",
@@ -1471,6 +1489,7 @@ async function resumeRunningCodexAttempts(input: { runId: string; limit: number 
       output: withCodexArtifacts(result.output, result.sessionId),
     });
     harness.finishAttempt({ attemptId: attempt.id, output });
+    applyCliPostAttemptRunEffects(run.id, task, output);
     updateAttemptThread({
       attemptId: attempt.id,
       status: output.status,
@@ -1608,6 +1627,8 @@ async function startReadyCodexAttempts(input: { runId: string; limit: number }) 
         artifacts: [...(startResult.artifacts ?? []), ...(output.artifacts ?? [])],
       },
     });
+    const finishedAttempt = harness.getAttempt(attemptId);
+    applyCliPostAttemptRunEffects(run.id, task, finishedAttempt?.output ?? output);
     updateAttemptThread({
       attemptId,
       status: output.status,
@@ -1630,6 +1651,12 @@ async function startReadyCodexAttempts(input: { runId: string; limit: number }) 
 
 function threadIdForAttempt(attemptId: string) {
   return `thread_${attemptId}`;
+}
+
+function applyCliPostAttemptRunEffects(runId: string, task: Pick<Task, "role">, output: AttemptOutput) {
+  if (task.role === "goal-review" && output.status === "done" && output.runDecision === "complete") {
+    harness.updateRunStatus({ runId, status: "done" });
+  }
 }
 
 function upsertAttemptThread(input: {
