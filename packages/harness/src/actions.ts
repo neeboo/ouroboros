@@ -5,7 +5,8 @@ export type HarnessAction =
   | { type: "reclaimRunningTasks"; runId: string; reason?: string }
   | { type: "retryTask"; taskId: string; reason?: string }
   | { type: "markRunTodo"; runId: string; reason?: string }
-  | { type: "prepareRunDrain"; runId: string; maxTries?: number; reason?: string };
+  | { type: "prepareRunDrain"; runId: string; maxTries?: number; reason?: string }
+  | { type: "completeSystemTask"; taskId: string; actionEventId: string; reason?: string };
 
 export interface HarnessActionResult {
   status: "done" | "blocked";
@@ -36,7 +37,15 @@ export function parseHarnessAction(value: unknown): HarnessAction {
       reason: optionalStringField(record, "reason"),
     };
   }
-  throw new Error("harness action type must be reclaimRunningTasks, retryTask, markRunTodo, or prepareRunDrain");
+  if (type === "completeSystemTask") {
+    return {
+      type,
+      taskId: stringField(record, "taskId"),
+      actionEventId: stringField(record, "actionEventId"),
+      reason: optionalStringField(record, "reason"),
+    };
+  }
+  throw new Error("harness action type must be reclaimRunningTasks, retryTask, markRunTodo, prepareRunDrain, or completeSystemTask");
 }
 
 export function applyHarnessAction(harness: Harness, rawAction: unknown): HarnessActionResult & { eventId: string } {
@@ -101,7 +110,66 @@ function applyParsedHarnessAction(harness: Harness, action: HarnessAction): Harn
     ], [{ kind: "run", runId: action.runId, previousStatus: run.status, status: "todo", reason: action.reason ?? null }]);
   }
 
+  if (action.type === "completeSystemTask") {
+    return completeSystemTask(harness, action);
+  }
+
   return prepareRunDrain(harness, action);
+}
+
+function completeSystemTask(
+  harness: Harness,
+  action: Extract<HarnessAction, { type: "completeSystemTask" }>,
+): HarnessActionResult {
+  const task = harness.getTask(action.taskId);
+  if (!task) {
+    return blockedResult(action.type, `Task not found: ${action.taskId}`, [`task not found: ${action.taskId}`]);
+  }
+  const event = harness.getHarnessActionEvent({ id: action.actionEventId });
+  if (!event) {
+    return blockedResult(action.type, `Harness action event not found: ${action.actionEventId}`, [
+      `harness action event not found: ${action.actionEventId}`,
+    ]);
+  }
+  const resultSummary = typeof event.result.summary === "string" ? event.result.summary : `${event.actionType} ${event.status}`;
+  const eventChecks = Array.isArray(event.result.checks) ? event.result.checks : [];
+  const eventArtifacts = Array.isArray(event.result.artifacts) ? event.result.artifacts : [];
+  const eventProblems = Array.isArray(event.result.problems)
+    ? event.result.problems.filter((problem): problem is string => typeof problem === "string")
+    : [];
+  const output = {
+    status: event.status,
+    summary: `System task completed from harness action ${event.id}: ${resultSummary}`,
+    changedFiles: [],
+    checks: [
+      { name: "harness action event", status: "passed", evidence: event.id },
+      { name: "harness action type", status: "passed", evidence: event.actionType },
+      ...eventChecks,
+    ],
+    artifacts: [
+      { kind: "harness_action_event", actionEventId: event.id, actionType: event.actionType, reason: action.reason ?? null },
+      ...eventArtifacts,
+    ],
+    problems: event.status === "blocked" ? eventProblems.length > 0 ? eventProblems : [resultSummary] : [],
+  };
+  const attemptId = harness.recordAttempt({
+    taskId: action.taskId,
+    input: {
+      executor: "harness-action",
+      actionType: action.type,
+      actionEventId: event.id,
+      reason: action.reason ?? null,
+    },
+    output,
+  });
+  return doneResult(action.type, `Recorded ${event.status} system attempt ${attemptId} for task ${action.taskId}.`, [
+    { name: "task exists", status: "passed", evidence: action.taskId },
+    { name: "harness action event exists", status: "passed", evidence: event.id },
+    { name: "system attempt recorded", status: "passed", evidence: attemptId },
+  ], [
+    { kind: "attempt", attemptId, taskId: action.taskId, status: event.status },
+    { kind: "harness_action_event", actionEventId: event.id, actionType: event.actionType },
+  ]);
 }
 
 function prepareRunDrain(harness: Harness, action: Extract<HarnessAction, { type: "prepareRunDrain" }>): HarnessActionResult {

@@ -398,9 +398,12 @@ Supported actions:
 { "type": "retryTask", "taskId": "task_...", "reason": "optional" }
 { "type": "markRunTodo", "runId": "run_...", "reason": "optional" }
 { "type": "prepareRunDrain", "runId": "run_...", "maxTries": 3, "reason": "optional" }
+{ "type": "completeSystemTask", "taskId": "task_...", "actionEventId": "action_...", "reason": "optional" }
 ```
 
 `prepareRunDrain` reclaims orphaned task leases, marks the run `todo`, and creates or retries a bounded `goal-review` task when the queue is otherwise empty. It does not mark a run complete and does not weaken the verifier contract.
+
+`completeSystemTask` records a task attempt from an existing `harness_action_events` row. It derives the attempt status, summary, checks, artifacts, and problems from the audited action result, so a system task can be closed without giving a worktree broad database write access or arbitrary attempt-writing power.
 
 Every action writes a `harness_action_events` audit row with the validated request, result, checks, artifacts, and problems. Verifiers should cite these rows when checking whether a system-level repair actually happened.
 

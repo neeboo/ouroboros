@@ -73,6 +73,44 @@ describe("Harness actions", () => {
     expect(overview.tasks).toContainEqual(expect.objectContaining({ role: "goal-review", status: "todo" }));
   });
 
+  test("completes a system task from a recorded harness action event", () => {
+    const runId = harness.createRun({ goal: "Repair run state" });
+    const taskId = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Run DB-writable repair",
+      prompt: "Use a harness action.",
+    });
+    const drainResult = applyHarnessAction(harness, {
+      type: "prepareRunDrain",
+      runId,
+      reason: "system repair",
+    });
+
+    const result = applyHarnessAction(harness, {
+      type: "completeSystemTask",
+      taskId,
+      actionEventId: drainResult.eventId,
+      reason: "bind DB-writable repair evidence",
+    });
+    const attempts = harness.listLatestAttemptsForTasks([taskId]);
+
+    expect(result).toMatchObject({
+      status: "done",
+      actionType: "completeSystemTask",
+    });
+    expect(result.artifacts).toContainEqual(expect.objectContaining({ kind: "attempt", taskId, status: "done" }));
+    expect(harness.getTask(taskId)?.status).toBe("done");
+    expect(attempts[0]).toMatchObject({
+      taskId,
+      status: "done",
+      summary: expect.stringContaining(drainResult.eventId),
+    });
+    expect(attempts[0].checks).toContainEqual(
+      expect.objectContaining({ name: "harness action event", evidence: drainResult.eventId }),
+    );
+  });
+
   test("HTTP proxy validates bearer token before applying actions", async () => {
     const runId = harness.createRun({ goal: "Remote action" });
     const denied = await handleHarnessActionRequest(

@@ -39,6 +39,7 @@ import type {
   CreateTaskInput,
   DependencyAttempt,
   FinishAttemptInput,
+  GetHarnessActionEventInput,
   GetRunOverviewInput,
   LeaseReadyTasksInput,
   ListExecutionThreadsInput,
@@ -701,6 +702,16 @@ export class Harness {
         )
         .all({ $limit: input.limit ?? 50 }) as HarnessActionEventRow[];
       return rows.map(harnessActionEventFromRow);
+    });
+  }
+
+  getHarnessActionEvent(input: GetHarnessActionEventInput) {
+    return withDatabase(this.dbPath, (db) => {
+      ensureHarnessActionEvents(db);
+      const row = db.query("select * from harness_action_events where id = $id").get({ $id: input.id }) as
+        | HarnessActionEventRow
+        | null;
+      return row ? harnessActionEventFromRow(row) : null;
     });
   }
 

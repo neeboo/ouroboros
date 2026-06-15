@@ -22,6 +22,7 @@ export type {
   ExecutionThreadStatus,
   ExternalRef,
   GetRunOverviewInput,
+  GetHarnessActionEventInput,
   HarnessActionEvent,
   LeaseReadyTasksInput,
   ListHarnessActionEventsInput,

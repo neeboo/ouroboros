@@ -362,3 +362,7 @@ export interface RecordHarnessActionEventInput {
 export interface ListHarnessActionEventsInput {
   limit?: number;
 }
+
+export interface GetHarnessActionEventInput {
+  id: string;
+}
