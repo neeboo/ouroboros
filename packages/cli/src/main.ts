@@ -1478,6 +1478,9 @@ function createDashboardRuntime(input: {
     runnerStatus,
     supervisorStatus,
     autoStartRunner: (overview, runner) => {
+      if (flag(parsed, "disable-auto-runner") !== undefined) {
+        return false;
+      }
       if (runnerAutoPaused || overview.run?.status === "done" || runner?.status === "running") {
         return false;
       }

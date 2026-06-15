@@ -8,7 +8,7 @@
     "test": "bun test",
     "cli": "bun run packages/cli/src/main.ts",
     "orbs": "bun run packages/cli/src/main.ts",
-    "typecheck": "bunx tsc --noEmit"
+    "typecheck": "bun x tsc --noEmit"
   },
   "devDependencies": {
     "@types/bun": "latest",
