@@ -461,6 +461,7 @@ switch (parsed.command) {
       input,
       output: {
         status: output.status as "done" | "blocked",
+        runDecision: parseOptionalRunDecision(output.runDecision),
         summary: String(output.summary ?? ""),
         changedFiles: Array.isArray(output.changedFiles) ? output.changedFiles : [],
         checks: Array.isArray(output.checks) ? output.checks : [],
@@ -720,6 +721,16 @@ function parseExecutorName(raw: string) {
   return raw;
 }
 
+function parseOptionalRunDecision(raw: unknown): AttemptOutput["runDecision"] | undefined {
+  if (raw === undefined || raw === null) {
+    return undefined;
+  }
+  if (raw !== "complete" && raw !== "continue" && raw !== "verify") {
+    fail("attempt output runDecision must be complete, continue, or verify");
+  }
+  return raw;
+}
+
 function cliExecutorName() {
   const executor = flag(parsed, "executor");
   if (executor) {
@@ -975,6 +986,20 @@ function ensureGoalReviewTask(runId: string, maxTries: number) {
   const overview = harness.getRunOverview({ runId, eventLimit: 0 });
   if (overview.tasks.some((task) => task.status === "todo" || task.status === "running")) {
     return { created: false as const, reason: "active_tasks" };
+  }
+  const completedReview = [...overview.sessions].reverse().find(
+    (session) =>
+      session.role === "goal-review" &&
+      session.status === "done" &&
+      session.output.runDecision === "complete",
+  );
+  if (completedReview) {
+    harness.updateRunStatus({ runId, status: "done" });
+    return {
+      created: false as const,
+      reason: "completed_by_existing_goal_review",
+      taskId: completedReview.taskId,
+    };
   }
   const blockedReview = [...overview.tasks].reverse().find(
     (task) => task.role === "goal-review" && task.status === "blocked",

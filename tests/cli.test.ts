@@ -1727,6 +1727,48 @@ describe("CLI", () => {
     expect(await runCliJson("next-task", "--run-id", run.id)).toBeNull();
   });
 
+  test("run-loop restores a run completed by an existing goal review", async () => {
+    await runCli("init");
+    const run = await runCliJson("create-run", "--goal", "Bootstrap ouroboros");
+    const review = await runCliJson(
+      "create-task",
+      "--run-id",
+      run.id,
+      "--role",
+      "goal-review",
+      "--goal",
+      "Review whether the run goal is complete",
+      "--prompt",
+      "Review the completed run.",
+    );
+    await runCliJson(
+      "record-attempt",
+      "--task-id",
+      review.id,
+      "--input-json",
+      "{}",
+      "--output-json",
+      '{"status":"done","runDecision":"complete","summary":"goal reached","changedFiles":[],"checks":[],"artifacts":[],"problems":[]}',
+    );
+
+    const result = await runCliJson(
+      "run-loop",
+      "--run-id",
+      run.id,
+      "--executor",
+      "codex-resumable",
+      "--codex-bin",
+      join(dir, "missing-codex-should-not-run"),
+      "--max-rounds",
+      "1",
+    );
+    const overview = await runCliJson("run-overview", "--run-id", run.id);
+
+    expect(result.rounds).toEqual([]);
+    expect(overview.run.status).toBe("done");
+    expect(overview.tasks).toHaveLength(1);
+  });
+
   test("goal-review prompt allows bounded multi-task continue and verify plans", async () => {
     await runCli("init");
     const run = await runCliJson("create-run", "--goal", "Bootstrap ouroboros");
