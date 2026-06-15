@@ -316,6 +316,56 @@ describe("CLI", () => {
     }
   });
 
+  test("rejects Linear project ref for a missing local run", async () => {
+    await runCli("init");
+    const tokenPath = join(dir, "linear-token");
+    const configPath = join(dir, "ouroboros.toml");
+    const projectUrl = "https://linear.app/pancat/project/ouroboros-acd5df2ef1da/overview";
+    const server = Bun.serve({
+      port: 0,
+      fetch() {
+        return Response.json({
+          data: {
+            viewer: { id: "viewer_1", name: "Ouroboros Bot", email: "bot@example.com" },
+            projects: {
+              nodes: [
+                {
+                  id: "project_1",
+                  name: "Ouroboros",
+                  slugId: "ouroboros-acd5df2ef1da",
+                  url: projectUrl,
+                  teams: { nodes: [{ id: "team_1", key: "PAN", name: "PanCat" }] },
+                },
+              ],
+            },
+          },
+        });
+      },
+    });
+    try {
+      await writeFile(tokenPath, "lin_api_test_token");
+      await writeFile(
+        configPath,
+        [
+          "[linear]",
+          `api_url = "http://127.0.0.1:${server.port}/graphql"`,
+          `token_file = "${tokenPath}"`,
+          `project_url = "${projectUrl}"`,
+          'project_id = "ouroboros-acd5df2ef1da"',
+          'team_key = "PAN"',
+          "",
+        ].join("\n"),
+      );
+
+      const missingRun = await runCliRaw("linear-check", "--config", configPath, "--run-id", "run_missing");
+
+      expect(missingRun.exitCode).toBe(1);
+      expect(missingRun.stderr).toContain("run not found: run_missing");
+    } finally {
+      server.stop(true);
+    }
+  });
+
   test("maps a local run to a Linear issue", async () => {
     await runCli("init");
     const run = await runCliJson("create-run", "--goal", "Bootstrap ouroboros");

@@ -78,6 +78,9 @@ export async function checkLinearAccess(input: LinearCheckInput) {
 
   let externalRef = null;
   if (input.runId) {
+    if (!input.harness.getRun(input.runId)) {
+      throw new Error(`run not found: ${input.runId}`);
+    }
     externalRef = ensureRunProjectRef(input.harness, {
       runId: input.runId,
       project,
