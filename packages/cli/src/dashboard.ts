@@ -1821,17 +1821,20 @@ export function dashboardHtml(input: { runId: string }) {
       const issue = latestRunnerSignal(overview);
       const status = runner?.status || "idle";
       const runDone = overview.run?.status === "done";
-      const hasQueuedWork = (overview.tasks || []).some((task) => task.status === "todo" || task.status === "running");
+      const queuedTasks = (overview.tasks || []).filter((task) => task.status === "todo" || task.status === "running");
+      const hasQueuedWork = queuedTasks.length > 0;
+      const stalledQueue = !runDone && status !== "running" && hasQueuedWork;
       const canStart = status !== "running" && !runDone && hasQueuedWork;
       const canStop = status === "running";
       const output = runnerOutputSnippet(runner, runDone);
-      const statusClass = status === "running" ? "running" : runDone || runner?.exitCode === 0 ? "done" : status === "exited" ? "blocked" : "todo";
-      const title = runDone ? "Run complete" : status === "running" ? "Background runner" : "Runner idle";
-      const meta = runDone ? "goal reached" : status === "running" ? "background loop is active" : canStart ? "ready to process queued work" : "no queued work";
+      const statusClass = status === "running" ? "running" : stalledQueue ? "blocked" : runDone || runner?.exitCode === 0 ? "done" : status === "exited" ? "blocked" : "todo";
+      const title = runDone ? "Run complete" : status === "running" ? "Background runner" : stalledQueue ? "Queue waiting for runner" : "Runner idle";
+      const meta = runDone ? "goal reached" : status === "running" ? "background loop is active" : stalledQueue ? queuedTasks.length + " active task" + (queuedTasks.length === 1 ? "" : "s") + " waiting; dashboard is only observing because the runner is " + status : "no queued work";
       return '<section class="inspector-card" data-inspector-section="runner"><h2>Runner</h2>' +
         '<div class="current-task"><div class="current-task-title">' + escapeHtml(title) + '</div><div class="current-task-meta">' + escapeHtml(meta) + ' · <span class="status-text ' + escapeHtml(statusClass) + '">' + escapeHtml(status) + '</span>' +
         (runner?.pid ? '<br><span class="code-meta">pid ' + escapeHtml(runner.pid) + '</span>' : '') +
         (runner?.exitCode !== undefined && runner?.exitCode !== null ? '<br><span class="code-meta">exit ' + escapeHtml(runner.exitCode) + '</span>' : '') +
+        (stalledQueue && queuedTasks[0] ? '<br><span class="code-meta">next ' + escapeHtml(queuedTasks[0].role) + ' · ' + escapeHtml(queuedTasks[0].id) + '</span>' : '') +
         '</div></div>' +
         (issue ? '<div class="current-task"><div class="current-task-title">' + escapeHtml(issue.timedOut ? "Connection timed out" : "Latest runner issue") + '</div><div class="current-task-meta">' + escapeHtml(issue.taskGoal) + '<br><span class="code-meta">' + escapeHtml(issue.attemptId) + '</span></div><div class="stream-output">' + escapeHtml(issue.text) + '</div></div>' : '') +
         (output ? '<div class="stream-output">' + escapeHtml(output) + '</div>' : '') +

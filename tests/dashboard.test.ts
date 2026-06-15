@@ -482,6 +482,16 @@ describe("dashboard", () => {
     expect(html).not.toContain('setHtmlIfChanged("inspector-panel", renderInspector(overview, selectedGroup) + renderRunner(overview));');
   });
 
+  test("explains when queued work is waiting for an idle runner", () => {
+    const html = dashboardHtml({ runId: "run_123" });
+
+    expect(html).toContain("stalledQueue");
+    expect(html).toContain("Queue waiting for runner");
+    expect(html).toContain("dashboard is only observing because the runner is");
+    expect(html).toContain("next ");
+    expect(html).toContain('status !== "running" && hasQueuedWork');
+  });
+
   test("patches stream output in place instead of replacing the whole flow turn", () => {
     const html = dashboardHtml({ runId: "run_123" });
 
