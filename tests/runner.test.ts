@@ -431,6 +431,7 @@ describe("runner", () => {
 
     const attempt = harness.getAttempt(result!.attemptId)!;
     expect(attempt.status).toBe("blocked");
+    expect(result?.stopDecision).toBe("retry");
     expect(harness.getTask(taskId)?.status).toBe("todo");
     expect(attempt.output.problems).toEqual(["subagent output was not specific enough"]);
   });
@@ -660,6 +661,7 @@ describe("runner", () => {
 
     const attempt = harness.getAttempt(result!.attemptId)!;
     const next = harness.nextReadyTask(runId);
+    expect(result?.stopDecision).toBe("continue");
     expect(next?.role).toBe("worker");
     expect(next?.goal).toBe("Implement planner output hook");
     expect(next?.dependsOn).toEqual([plannerTask]);
@@ -681,7 +683,7 @@ describe("runner", () => {
       prompt: "Plan one cheap task.",
     });
 
-    await runNextReadyTask({
+    const result = await runNextReadyTask({
       harness,
       runId,
       executor: async () => ({
@@ -727,7 +729,7 @@ describe("runner", () => {
       prompt: "Plan dependent tasks.",
     });
 
-    await runNextReadyTask({
+    const result = await runNextReadyTask({
       harness,
       runId,
       executor: async () => ({
@@ -898,6 +900,7 @@ describe("runner", () => {
 
     const attempt = harness.getAttempt(result!.attemptId)!;
     const verifier = harness.nextReadyTask(runId)!;
+    expect(result?.stopDecision).toBe("continue");
     expect(verifier.role).toBe("verifier");
     expect(verifier.goal).toBe("Verify: Implement runner");
     expect(verifier.dependsOn).toEqual([workerTask]);
@@ -924,7 +927,7 @@ describe("runner", () => {
       prompt: "Implement the smallest runner.",
     });
 
-    await runNextReadyTask({
+    const result = await runNextReadyTask({
       harness,
       runId,
       executor: async () => ({
@@ -949,7 +952,7 @@ describe("runner", () => {
       prompt: "Verify the runner.",
     });
 
-    await runNextReadyTask({
+    const result = await runNextReadyTask({
       harness,
       runId,
       executor: async () => ({
@@ -962,6 +965,7 @@ describe("runner", () => {
       stopHooks: [createVerifierTaskHook({ harness })],
     });
 
+    expect(result?.stopDecision).toBe("exit");
     expect(harness.nextReadyTask(runId)).toBeNull();
   });
 
@@ -989,6 +993,7 @@ describe("runner", () => {
 
     const attempt = harness.getAttempt(result!.attemptId)!;
     const repair = harness.nextReadyTask(runId)!;
+    expect(result?.stopDecision).toBe("continue");
     expect(repair.role).toBe("worker");
     expect(repair.goal).toBe("Repair: Verify runner");
     expect(repair.parentId).toBe(verifierTask);

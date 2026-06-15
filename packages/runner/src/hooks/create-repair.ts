@@ -22,7 +22,7 @@ export function createRepairTaskHook(options: { harness: Harness }): StopHook {
     });
 
     return {
-      decision: "exit",
+      decision: "continue",
       artifacts: [
         {
           kind: "created_repair_task",

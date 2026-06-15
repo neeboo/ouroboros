@@ -46,7 +46,7 @@ export function createTasksFromOutputHook(options: { harness: Harness }): StopHo
     });
 
     return {
-      decision: "exit",
+      decision: created.length > 0 ? "continue" : "exit",
       artifacts: created,
     };
   };

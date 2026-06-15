@@ -30,6 +30,7 @@ export interface RunNextReadyTaskInput {
 export interface RunNextReadyTaskResult {
   taskId: string;
   attemptId: string;
+  stopDecision: StopDecision;
 }
 
 export interface ExecutorFactoryInput {
@@ -60,6 +61,7 @@ export interface RunReadyTasksResult {
   taskId: string;
   attemptId: string;
   sessionName: string;
+  stopDecision: StopDecision;
 }
 
 export interface RunUntilIdleInput extends RunReadyTasksInput {

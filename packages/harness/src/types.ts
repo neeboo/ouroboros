@@ -66,6 +66,29 @@ export interface AttemptEvent {
   createdAt: string;
 }
 
+export type ExecutionThreadStatus = "running" | "done" | "blocked" | "interrupted" | "orphaned";
+
+export interface ExecutionThread {
+  id: string;
+  runId: string;
+  taskId: string | null;
+  attemptId: string | null;
+  parentThreadId: string | null;
+  ownerType: string;
+  ownerId: string | null;
+  role: string;
+  status: ExecutionThreadStatus;
+  pid: number | null;
+  sessionName: string | null;
+  agentSessionId: string | null;
+  worktreePath: string | null;
+  heartbeatAt: string;
+  interruptedAt: string | null;
+  interruptReason: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface AttemptOutput {
   status: "done" | "blocked";
   runDecision?: "complete" | "continue" | "verify";
@@ -214,6 +237,7 @@ export interface RunOverview {
   project: Project | null;
   tasks: Task[];
   sessions: ObservableSession[];
+  threads: ExecutionThread[];
   lessons: Lesson[];
 }
 
@@ -255,4 +279,37 @@ export interface ListLessonsInput {
 export interface SetPromptTemplateInput {
   key: string;
   contentMd: string;
+}
+
+export interface UpsertExecutionThreadInput {
+  id?: string;
+  runId: string;
+  taskId?: string | null;
+  attemptId?: string | null;
+  parentThreadId?: string | null;
+  ownerType: string;
+  ownerId?: string | null;
+  role: string;
+  status?: ExecutionThreadStatus;
+  pid?: number | null;
+  sessionName?: string | null;
+  agentSessionId?: string | null;
+  worktreePath?: string | null;
+  interruptReason?: string | null;
+}
+
+export interface UpdateExecutionThreadInput {
+  id: string;
+  status?: ExecutionThreadStatus;
+  ownerId?: string | null;
+  pid?: number | null;
+  sessionName?: string | null;
+  agentSessionId?: string | null;
+  worktreePath?: string | null;
+  interruptReason?: string | null;
+  heartbeat?: boolean;
+}
+
+export interface ListExecutionThreadsInput {
+  runId: string;
 }

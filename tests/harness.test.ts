@@ -205,6 +205,64 @@ describe("Harness", () => {
     });
   });
 
+  test("migrates old execution thread codex session ids to agent session ids", () => {
+    const dbPath = join(dir, "old-execution-threads.db");
+    const legacyHarness = new Harness(dbPath);
+    legacyHarness.init();
+    const runId = legacyHarness.createRun({ goal: "Migrate thread sessions" });
+    const taskId = legacyHarness.createTask({
+      runId,
+      role: "worker",
+      goal: "Run legacy session",
+      prompt: "Work.",
+    });
+    const attemptId = legacyHarness.startAttempt({
+      taskId,
+      input: { sessionName: "legacy-worker", codexSessionId: "codex-legacy" },
+    });
+
+    withDatabase(dbPath, (db) => {
+      db.exec(`
+        drop table execution_threads;
+        create table execution_threads (
+          id text primary key,
+          run_id text not null references runs(id) on delete cascade,
+          task_id text references tasks(id) on delete set null,
+          attempt_id text references attempts(id) on delete set null,
+          parent_thread_id text references execution_threads(id) on delete set null,
+          owner_type text not null,
+          owner_id text,
+          role text not null,
+          status text not null check (status in ('running', 'done', 'blocked', 'interrupted', 'orphaned')),
+          pid integer,
+          session_name text,
+          codex_session_id text,
+          worktree_path text,
+          heartbeat_at text not null default current_timestamp,
+          interrupted_at text,
+          interrupt_reason text,
+          created_at text not null default current_timestamp,
+          updated_at text not null default current_timestamp
+        );
+      `);
+      db.query(
+        `
+        insert into execution_threads (
+          id, run_id, task_id, attempt_id, owner_type, role, status, session_name, codex_session_id
+        )
+        values ('thread_legacy', $runId, $taskId, $attemptId, 'runner', 'worker', 'running', 'legacy-worker', 'codex-legacy')
+        `,
+      ).run({ $runId: runId, $taskId: taskId, $attemptId: attemptId });
+    });
+
+    const overview = legacyHarness.getRunOverview({ runId });
+
+    expect(overview.threads[0]).toMatchObject({
+      id: "thread_legacy",
+      agentSessionId: "codex-legacy",
+    });
+  });
+
   test("configures sqlite connections to wait briefly on busy databases", () => {
     const value = withDatabase(harness.dbPath, (db) => db.query("pragma busy_timeout").get() as { timeout: number });
 
@@ -497,6 +555,63 @@ describe("Harness", () => {
         latestText: "implementing",
       }),
     ]);
+  });
+
+  test("records execution threads for supervisor visibility", () => {
+    const runId = harness.createRun({ goal: "Supervise execution" });
+    const taskId = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Implement supervised work",
+      prompt: "Work.",
+    });
+    const attemptId = harness.startAttempt({
+      taskId,
+      input: {
+        sessionName: "worker-session",
+        codexSessionId: "codex-worker",
+      },
+    });
+    const threadId = harness.upsertExecutionThread({
+      runId,
+      taskId,
+      attemptId,
+      ownerType: "runner",
+      ownerId: "runner-1",
+      role: "worker",
+      pid: 1234,
+      sessionName: "worker-session",
+      agentSessionId: "codex-worker",
+      worktreePath: "/tmp/worktree",
+    });
+
+    harness.updateExecutionThread({
+      id: threadId,
+      status: "interrupted",
+      interruptReason: "user stopped current task",
+      heartbeat: true,
+    });
+
+    const [thread] = harness.listExecutionThreads({ runId });
+    const overview = harness.getRunOverview({ runId });
+
+    expect(thread).toMatchObject({
+      id: threadId,
+      runId,
+      taskId,
+      attemptId,
+      ownerType: "runner",
+      ownerId: "runner-1",
+      role: "worker",
+      status: "interrupted",
+      pid: 1234,
+      sessionName: "worker-session",
+      agentSessionId: "codex-worker",
+      worktreePath: "/tmp/worktree",
+      interruptReason: "user stopped current task",
+    });
+    expect(thread?.interruptedAt).toBeString();
+    expect(overview.threads).toContainEqual(expect.objectContaining({ id: threadId, status: "interrupted" }));
   });
 
   test("records experiences and lessons from attempts", () => {

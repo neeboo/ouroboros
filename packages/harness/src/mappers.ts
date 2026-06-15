@@ -1,8 +1,9 @@
 import { parseJson } from "./json";
-import type { Attempt, AttemptEvent, AttemptOutput, ExternalRef, Lesson, Project, PromptTemplate, Run, Task, TaskConfig } from "./types";
+import type { Attempt, AttemptEvent, AttemptOutput, ExecutionThread, ExternalRef, Lesson, Project, PromptTemplate, Run, Task, TaskConfig } from "./types";
 import type {
   AttemptEventRow,
   AttemptRow,
+  ExecutionThreadRow,
   ExternalRefRow,
   LessonRow,
   ProjectRow,
@@ -73,6 +74,29 @@ export function attemptEventFromRow(row: AttemptEventRow): AttemptEvent {
     text: row.text,
     payload: parseJson<Record<string, unknown>>(row.payload_json),
     createdAt: row.created_at,
+  };
+}
+
+export function executionThreadFromRow(row: ExecutionThreadRow): ExecutionThread {
+  return {
+    id: row.id,
+    runId: row.run_id,
+    taskId: row.task_id,
+    attemptId: row.attempt_id,
+    parentThreadId: row.parent_thread_id,
+    ownerType: row.owner_type,
+    ownerId: row.owner_id,
+    role: row.role,
+    status: row.status,
+    pid: row.pid,
+    sessionName: row.session_name,
+    agentSessionId: row.agent_session_id,
+    worktreePath: row.worktree_path,
+    heartbeatAt: row.heartbeat_at,
+    interruptedAt: row.interrupted_at,
+    interruptReason: row.interrupt_reason,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
   };
 }
 

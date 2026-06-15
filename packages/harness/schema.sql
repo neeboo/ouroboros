@@ -68,6 +68,30 @@ create table if not exists attempt_events (
 
 create index if not exists idx_attempt_events_attempt on attempt_events(attempt_id, sequence);
 
+create table if not exists execution_threads (
+  id text primary key,
+  run_id text not null references runs(id) on delete cascade,
+  task_id text references tasks(id) on delete set null,
+  attempt_id text references attempts(id) on delete set null,
+  parent_thread_id text references execution_threads(id) on delete set null,
+  owner_type text not null,
+  owner_id text,
+  role text not null,
+  status text not null check (status in ('running', 'done', 'blocked', 'interrupted', 'orphaned')),
+  pid integer,
+  session_name text,
+  agent_session_id text,
+  worktree_path text,
+  heartbeat_at text not null default current_timestamp,
+  interrupted_at text,
+  interrupt_reason text,
+  created_at text not null default current_timestamp,
+  updated_at text not null default current_timestamp
+);
+
+create index if not exists idx_execution_threads_run_status on execution_threads(run_id, status);
+create index if not exists idx_execution_threads_attempt on execution_threads(attempt_id);
+
 create table if not exists lessons (
   id text primary key,
   run_id text not null references runs(id) on delete cascade,

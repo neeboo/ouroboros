@@ -505,7 +505,7 @@ describe("dashboard", () => {
   test("serves bundled React Flow canvas assets", async () => {
     const dashboardInput = {
       runId: "run_123",
-      overview: () => ({ run: null, project: null, tasks: [], sessions: [], lessons: [] }),
+      overview: () => ({ run: null, project: null, tasks: [], sessions: [], threads: [], lessons: [] }),
       renderTaskPrompt: () => "",
     };
 
@@ -758,6 +758,51 @@ describe("dashboard", () => {
       expect(body).toContain("src/dependency.ts");
       expect(body).toContain("Run Lessons");
       expect(body).toContain("Dependency implemented summary");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("auto-starts an idle runner when overview has ready work", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "ouroboros-dashboard-autostart-"));
+    const harness = new Harness(join(dir, "ouroboros.db"));
+    harness.init();
+    const runId = harness.createRun({ goal: "Drain queued work" });
+    harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Ready work",
+      prompt: "Run the ready task.",
+    });
+    let runnerStatus: { status: "idle" | "running" | "exited"; pid: number | null } = {
+      status: "idle",
+      pid: null,
+    };
+    let starts = 0;
+
+    try {
+      const response = await handleDashboardRequest(
+        new Request(`http://localhost/api/runs/${runId}/overview`),
+        {
+          runId,
+          overview: () => harness.getRunOverview({ runId }),
+          runnerStatus: () => runnerStatus,
+          autoStartRunner: () => true,
+          renderTaskPrompt: () => "",
+          actions: {
+            startRunner: () => {
+              starts += 1;
+              runnerStatus = { status: "running", pid: 4321 };
+              return { status: "running", pid: 4321 };
+            },
+          },
+        },
+      );
+      const body = await response.json();
+
+      expect(response.status).toBe(200);
+      expect(starts).toBe(1);
+      expect(body.runner).toEqual({ status: "running", pid: 4321 });
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

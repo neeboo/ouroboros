@@ -25,6 +25,7 @@ import { parseArray, parseObject, printJson } from "./json";
 import { checkLinearAccess, linkLinearIssue } from "./linear";
 import { serveDashboard } from "./dashboard";
 import { join } from "node:path";
+import type { ExecutionThreadStatus, Task } from "@ouroboros/harness";
 
 const parsed = parseArgs(Bun.argv.slice(2));
 const harness = new Harness(parsed.db);
@@ -864,6 +865,7 @@ function createDashboardRuntime(input: {
   defaultStartHook?: string;
 }) {
   let runnerProcess: ReturnType<typeof Bun.spawn> | null = null;
+  let runnerAutoPaused = false;
   const runnerState: {
     status: "idle" | "running" | "exited";
     pid: number | null;
@@ -897,10 +899,12 @@ function createDashboardRuntime(input: {
           problems: [problem],
         },
       });
+      markAttemptThreadInterrupted(attempt.id, problem);
     }
     harness.updateRunStatus({ runId: input.runId, status: "todo" });
   };
   const startRunner = () => {
+    runnerAutoPaused = false;
     if (runnerProcess && runnerState.status === "running") {
       return { status: "running", pid: runnerState.pid ?? undefined };
     }
@@ -938,6 +942,7 @@ function createDashboardRuntime(input: {
     return { status: "running", pid: runnerState.pid ?? undefined };
   };
   const stopRunner = () => {
+    runnerAutoPaused = true;
     const pid = runnerState.pid;
     if (runnerProcess && runnerState.status === "running") {
       killDashboardRunnerChildren(pid);
@@ -953,6 +958,9 @@ function createDashboardRuntime(input: {
     );
     return { status: "blocked", pid: pid ?? undefined };
   };
+  const resumeAutomaticRunner = () => {
+    runnerAutoPaused = false;
+  };
   const server = serveDashboard({
     runId: input.runId,
     port: input.port,
@@ -962,16 +970,27 @@ function createDashboardRuntime(input: {
         eventLimit: parsePositiveInteger(flag(parsed, "event-limit") ?? "25", "--event-limit"),
       }),
     runnerStatus,
+    autoStartRunner: (overview, runner) => {
+      if (runnerAutoPaused || overview.run?.status === "done" || runner?.status === "running") {
+        return false;
+      }
+      if (harness.listRunningAttempts({ runId: input.runId }).length > 0) {
+        return true;
+      }
+      return harness.nextReadyTask(input.runId) !== null;
+    },
     renderTaskPrompt,
     actions: {
       startRunner,
       stopRunner,
       createGoal: (goal) => {
+        resumeAutomaticRunner();
         harness.updateRunStatus({ runId: input.runId, status: "todo" });
         const taskId = createPlannerFromUserGoal({ runId: input.runId, goal, interrupted: false });
         return { taskId, status: "todo" };
       },
       interruptAndCreateGoal: (goal) => {
+        resumeAutomaticRunner();
         harness.updateRunStatus({ runId: input.runId, status: "todo" });
         const running = harness.listRunningAttempts({ runId: input.runId });
         for (const attempt of running) {
@@ -984,16 +1003,19 @@ function createDashboardRuntime(input: {
             problems: [goal],
           };
           harness.finishAttempt({ attemptId: attempt.id, output });
+          markAttemptThreadInterrupted(attempt.id, goal);
         }
         const taskId = createPlannerFromUserGoal({ runId: input.runId, goal, interrupted: true });
         return { taskId, status: "todo", interrupted: running.length };
       },
       resumeTask: (taskId) => {
+        resumeAutomaticRunner();
         harness.updateRunStatus({ runId: input.runId, status: "todo" });
         harness.retryTask({ taskId });
         return { taskId, status: "todo" };
       },
       rerunTask: (taskId) => {
+        resumeAutomaticRunner();
         const task = harness.getTask(taskId);
         if (!task) {
           fail(`task not found: ${taskId}`);
@@ -1006,6 +1028,7 @@ function createDashboardRuntime(input: {
         return { taskId, status: "todo" };
       },
       stopAttempt: (attemptId) => {
+        runnerAutoPaused = true;
         const attempt = harness.getAttempt(attemptId);
         if (!attempt) {
           fail(`attempt not found: ${attemptId}`);
@@ -1025,6 +1048,7 @@ function createDashboardRuntime(input: {
             problems: ["user stopped the current task from the dashboard"],
           },
         });
+        markAttemptThreadInterrupted(attemptId, "user stopped the current task from the dashboard");
         harness.updateRunStatus({ runId: input.runId, status: "todo" });
         return { attemptId, taskId: task.id, status: "blocked" };
       },
@@ -1059,6 +1083,14 @@ async function resumeRunningCodexAttempts(input: { runId: string; limit: number 
     }
     const sessionId = typeof attempt.input.codexSessionId === "string" ? attempt.input.codexSessionId : "";
     if (!sessionId) {
+      upsertAttemptThread({
+        runId: run.id,
+        task,
+        attemptId: attempt.id,
+        sessionName: typeof attempt.input.sessionName === "string" ? attempt.input.sessionName : `attempt-${attempt.id}`,
+        cwd: typeof attempt.input.cwd === "string" ? attempt.input.cwd : task.worktreePath ?? runnerCwd(),
+        status: "orphaned",
+      });
       const output: AttemptOutput = {
         status: "blocked",
         summary: "Running attempt cannot be resumed because it has no Codex session id",
@@ -1085,6 +1117,15 @@ async function resumeRunningCodexAttempts(input: { runId: string; limit: number 
     const recorder = createAttemptEventRecorder(attempt.id);
     const resolvedModel = attemptModelPreference(attempt.input);
     const cwd = typeof attempt.input.cwd === "string" ? attempt.input.cwd : task.worktreePath ?? runnerCwd();
+    upsertAttemptThread({
+      runId: run.id,
+      task,
+      attemptId: attempt.id,
+      sessionName,
+      cwd,
+      agentSessionId: sessionId,
+      status: "running",
+    });
     const result = await codexResumableClient(resolvedModel?.model, cwd).resume({
       sessionId,
       sessionName,
@@ -1098,7 +1139,14 @@ async function resumeRunningCodexAttempts(input: { runId: string; limit: number 
       input: {
         ...attempt.input,
         ...codexAttemptInput({ prompt, sessionName, result, model: resolvedModel, cwd }),
+        threadId: threadIdForAttempt(attempt.id),
       },
+    });
+    updateAttemptThread({
+      attemptId: attempt.id,
+      status: result.status === "running" ? "running" : undefined,
+      agentSessionId: result.sessionId,
+      heartbeat: true,
     });
     if (result.status === "running") {
       return {
@@ -1117,6 +1165,12 @@ async function resumeRunningCodexAttempts(input: { runId: string; limit: number 
       output: withCodexArtifacts(result.output, result.sessionId),
     });
     harness.finishAttempt({ attemptId: attempt.id, output });
+    updateAttemptThread({
+      attemptId: attempt.id,
+      status: output.status,
+      agentSessionId: result.sessionId,
+      heartbeat: true,
+    });
     if (decision === "retry") {
       harness.retryTask({ taskId: task.id });
     }
@@ -1180,6 +1234,14 @@ async function startReadyCodexAttempts(input: { runId: string; limit: number }) 
           problems: startResult.problems ?? [],
         },
       });
+      upsertAttemptThread({
+        runId: run.id,
+        task,
+        attemptId,
+        sessionName,
+        cwd,
+        status: "blocked",
+      });
       return {
         taskId: task.id,
         attemptId,
@@ -1189,6 +1251,14 @@ async function startReadyCodexAttempts(input: { runId: string; limit: number }) 
       };
     }
     const attemptId = harness.startAttempt({ taskId: task.id, input: baseInput });
+    upsertAttemptThread({
+      runId: run.id,
+      task,
+      attemptId,
+      sessionName,
+      cwd,
+      status: "running",
+    });
     const recorder = createAttemptEventRecorder(attemptId);
     const result = await codexResumableClient(resolvedModel?.model, cwd).start({
       prompt,
@@ -1197,8 +1267,17 @@ async function startReadyCodexAttempts(input: { runId: string; limit: number }) 
       onStderr: recorder.stderr,
       onEvent: recorder.event,
     });
-    const attemptInput = codexAttemptInput({ prompt, sessionName, result, model: resolvedModel, cwd });
+    const attemptInput = {
+      ...codexAttemptInput({ prompt, sessionName, result, model: resolvedModel, cwd }),
+      threadId: threadIdForAttempt(attemptId),
+    };
     harness.updateAttemptInput({ attemptId, input: attemptInput });
+    updateAttemptThread({
+      attemptId,
+      status: result.status === "running" ? "running" : undefined,
+      agentSessionId: result.sessionId,
+      heartbeat: true,
+    });
     if (result.status === "running") {
       return {
         taskId: task.id,
@@ -1223,6 +1302,12 @@ async function startReadyCodexAttempts(input: { runId: string; limit: number }) 
         artifacts: [...(startResult.artifacts ?? []), ...(output.artifacts ?? [])],
       },
     });
+    updateAttemptThread({
+      attemptId,
+      status: output.status,
+      agentSessionId: result.sessionId,
+      heartbeat: true,
+    });
     if (decision === "retry") {
       harness.retryTask({ taskId: task.id });
     }
@@ -1235,6 +1320,60 @@ async function startReadyCodexAttempts(input: { runId: string; limit: number }) 
     };
   }));
   return tasks;
+}
+
+function threadIdForAttempt(attemptId: string) {
+  return `thread_${attemptId}`;
+}
+
+function upsertAttemptThread(input: {
+  runId: string;
+  task: Task;
+  attemptId: string;
+  sessionName: string;
+  cwd: string;
+  status?: ExecutionThreadStatus;
+  agentSessionId?: string | null;
+}) {
+  return harness.upsertExecutionThread({
+    id: threadIdForAttempt(input.attemptId),
+    runId: input.runId,
+    taskId: input.task.id,
+    attemptId: input.attemptId,
+    ownerType: "runner",
+    ownerId: String(process.pid),
+    role: input.task.role,
+    status: input.status ?? "running",
+    pid: process.pid,
+    sessionName: input.sessionName,
+    agentSessionId: input.agentSessionId ?? null,
+    worktreePath: input.cwd,
+  });
+}
+
+function updateAttemptThread(input: {
+  attemptId: string;
+  status?: ExecutionThreadStatus;
+  agentSessionId?: string | null;
+  heartbeat?: boolean;
+}) {
+  harness.updateExecutionThread({
+    id: threadIdForAttempt(input.attemptId),
+    status: input.status,
+    ownerId: String(process.pid),
+    pid: process.pid,
+    agentSessionId: input.agentSessionId ?? null,
+    heartbeat: input.heartbeat,
+  });
+}
+
+function markAttemptThreadInterrupted(attemptId: string, reason: string) {
+  harness.updateExecutionThread({
+    id: threadIdForAttempt(attemptId),
+    status: "interrupted",
+    interruptReason: reason,
+    heartbeat: true,
+  });
 }
 
 async function applyCliStopHooks(input: {

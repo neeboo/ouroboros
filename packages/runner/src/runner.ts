@@ -48,7 +48,7 @@ export async function runNextReadyTask(input: RunNextReadyTaskInput) {
     input.harness.retryTask({ taskId: task.id });
   }
 
-  return { taskId: task.id, attemptId };
+  return { taskId: task.id, attemptId, stopDecision: decision };
 }
 
 export async function runReadyTasks(input: RunReadyTasksInput) {
@@ -87,7 +87,7 @@ export async function runReadyTasks(input: RunReadyTasksInput) {
             problems: startResult.problems ?? [],
           },
         });
-        return { taskId: task.id, attemptId, sessionName };
+        return { taskId: task.id, attemptId, sessionName, stopDecision: "exit" as const };
       }
       const prompt = buildTaskPrompt({
         run,
@@ -118,7 +118,7 @@ export async function runReadyTasks(input: RunReadyTasksInput) {
         input.harness.retryTask({ taskId: task.id });
       }
 
-      return { taskId: task.id, attemptId, sessionName };
+      return { taskId: task.id, attemptId, sessionName, stopDecision: decision };
     }),
   );
 }

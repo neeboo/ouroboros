@@ -150,6 +150,38 @@ The execution loop continues until:
 - a contract amendment is required;
 - no tasks remain and goal review is needed.
 
+The loop is not allowed to rely only on each program politely continuing. Ouroboros is a harness, so the system must supervise the loop at the run level.
+
+## Harness Supervision
+
+Runner logic, stop hooks, and dashboard controls are local actors inside a larger control system. The harness must maintain system-level supervision over them.
+
+Minimum supervision responsibilities:
+
+- detect ready work: a run has `todo` tasks whose dependencies are satisfied;
+- detect resumable work: a run has running attempts that can be resumed or safely marked stale;
+- detect orphaned work: queued or running work exists but no runner process owns it;
+- detect stale runner state: the runner exited while the run remains unfinished;
+- keep a bounded restart policy: restart or resume only within max cycle, retry, and stop-policy limits;
+- respect explicit human stops: a manual stop should pause automatic restart until a new goal, resume, rerun, or start command clears the pause;
+- report causes in the control surface: show whether the run is waiting on dependencies, blocked evidence, runner ownership, retry budget, or human pause.
+
+This supervision is separate from prompt quality. A prompt can be correct and a worker can finish successfully, but the harness is still wrong if the resulting verifier, repair, integrator, or goal-review task is left unowned.
+
+Suggested state model:
+
+```ts
+type RunSupervisorState =
+  | "draining"       // runner owns ready or resumable work
+  | "waiting"        // todo exists but dependencies are not satisfied
+  | "orphaned"       // ready or resumable work exists without a live runner
+  | "paused"         // human stopped automatic execution
+  | "blocked"        // only unresolved blocked work remains
+  | "complete";      // run status is done
+```
+
+The dashboard should display this state, but it should not be the only place where it exists. A future daemon or desktop shell should use the same supervision rules.
+
 Pseudocode:
 
 ```ts

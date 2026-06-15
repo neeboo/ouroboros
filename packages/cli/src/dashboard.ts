@@ -20,6 +20,8 @@ interface DashboardActions {
   stopRunner?: () => DashboardActionResult;
 }
 
+type DashboardAutoStartRunner = (overview: RunOverview, runner: DashboardRunnerStatus | null) => boolean;
+
 interface DashboardRunnerStatus {
   status: "idle" | "running" | "exited";
   pid?: number | null;
@@ -2253,6 +2255,7 @@ export function serveDashboard(input: {
   overview: () => RunOverview;
   renderTaskPrompt: (taskId: string) => string;
   runnerStatus?: () => DashboardRunnerStatus | null;
+  autoStartRunner?: DashboardAutoStartRunner;
   actions?: DashboardActions;
 }) {
   return Bun.serve({
@@ -2270,6 +2273,7 @@ export async function handleDashboardRequest(
     overview: () => RunOverview;
     renderTaskPrompt: (taskId: string) => string;
     runnerStatus?: () => DashboardRunnerStatus | null;
+    autoStartRunner?: DashboardAutoStartRunner;
     actions?: DashboardActions;
   },
 ) {
@@ -2290,7 +2294,14 @@ export async function handleDashboardRequest(
     });
   }
   if (url.pathname === `/api/runs/${input.runId}/overview`) {
-    return Response.json({ ...input.overview(), runner: input.runnerStatus?.() ?? null });
+    let overview = input.overview();
+    let runner = input.runnerStatus?.() ?? null;
+    if (input.actions?.startRunner && input.autoStartRunner?.(overview, runner)) {
+      input.actions.startRunner();
+      overview = input.overview();
+      runner = input.runnerStatus?.() ?? runner;
+    }
+    return Response.json({ ...overview, runner });
   }
   if (url.pathname === `/api/runs/${input.runId}/changed-files`) {
     return Response.json(changedFilesPayload(input.overview()));

@@ -95,6 +95,34 @@ Optional but useful fields:
 - `artifacts_json`
 - `error`
 
+### ExecutionThread
+
+An execution thread is the harness-owned record for a live or recently live agent process/session. It is intentionally agent-neutral: Codex, Claude Code, opencode, Reasonix, or another ACP-compatible agent may all write the same shape.
+
+Required fields:
+
+- `id`
+- `run_id`
+- `owner_type`
+- `role`
+- `status`
+
+Optional but useful fields:
+
+- `task_id`
+- `attempt_id`
+- `parent_thread_id`
+- `owner_id`
+- `pid`
+- `session_name`
+- `agent_session_id`
+- `worktree_path`
+- `heartbeat_at`
+- `interrupted_at`
+- `interrupt_reason`
+
+`agent_session_id` is the external agent session identifier when the executor has one. For the current Codex resumable executor, this value is copied from the Codex session id. Future agent adapters should not add tool-specific columns unless the field is genuinely not portable.
+
 ### ExternalRef
 
 An external ref maps a local run or task to an outside collaboration object.
@@ -267,25 +295,29 @@ Stop hooks are for turn-end control:
 - append checks
 - append artifacts
 - append problems
-- decide whether the task should exit or retry
+- decide whether the scheduler may exit, must continue, or should retry
 
 Hook decisions:
 
 ```text
 exit      record the attempt and keep the resulting task status
 retry     record a blocked attempt, then move the task back to todo
-continue  append information without forcing retry
+continue  record the attempt and guarantee scheduler re-entry for newly created or confirmed follow-up work
 ```
+
+`continue` is a protocol guarantee, not a display hint. A stop hook that creates a ready task, verifier, repair task, or non-complete goal-review follow-up must return `continue`. The runner must surface that decision in its round result and must not treat that hook boundary as idle. If a hard budget prevents immediate execution, the run remains unfinished and the control surface must keep or restart the runner until the ready work is consumed.
+
+The harness also needs a supervisor layer above individual runner processes. The supervisor is responsible for noticing orphaned ready work, resumable attempts without owners, stale runner exits, and human-paused runs. Stop-hook guarantees tell the supervisor what must continue; supervisor state tells the system whether something is actually continuing.
 
 Commit hooks should be explicit and opt-in. The default stop hook behavior should inspect and summarize, not create commits.
 
-The `create-tasks` stop hook reads `nextTasks` from the subagent output and inserts those tasks into the harness database. If a planned task omits `dependsOn`, the hook makes it depend on the planner task that produced it.
+The `create-tasks` stop hook reads `nextTasks` from the subagent output and inserts those tasks into the harness database. If a planned task omits `dependsOn`, the hook makes it depend on the planner task that produced it. When it creates tasks, it returns `continue`.
 
 Goal review is also a stop-hook path. A `goal-review` output with `runDecision: "complete"` marks the run done. A `continue` or `verify` decision can carry one to five `nextTasks`; `create-tasks` then inserts those follow-up tasks so a run can keep working through multiple remaining goals. Independent ready tasks can run together when the runner is started with `--concurrency <n>`; `--limit <n>` is retained as an alias.
 
-The `create-verifier` stop hook reads a successful worker output and inserts a verifier task with `dependsOn` set to the worker task. It does not create verifier tasks for verifier attempts, which gives the loop a natural exit.
+The `create-verifier` stop hook reads a successful worker output and inserts a verifier task with `dependsOn` set to the worker task. It returns `continue` when it creates that verifier. It does not create verifier tasks for verifier attempts, which gives the loop a natural exit.
 
-The `create-repair` stop hook reads a blocked verifier output and inserts a worker repair task. A successful repair task may then create another verifier through `create-verifier`.
+The `create-repair` stop hook reads a blocked verifier output and inserts a worker repair task. It returns `continue` when it creates that repair. A successful repair task may then create another verifier through `create-verifier`.
 
 Multiple stop hooks may be applied in order. The CLI accepts a comma-separated list such as:
 

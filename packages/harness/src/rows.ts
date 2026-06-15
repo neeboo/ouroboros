@@ -1,4 +1,4 @@
-import type { Status } from "./types";
+import type { ExecutionThreadStatus, Status } from "./types";
 
 export interface RunRow {
   id: string;
@@ -52,6 +52,27 @@ export interface AttemptEventRow {
   text: string | null;
   payload_json: string;
   created_at: string;
+}
+
+export interface ExecutionThreadRow {
+  id: string;
+  run_id: string;
+  task_id: string | null;
+  attempt_id: string | null;
+  parent_thread_id: string | null;
+  owner_type: string;
+  owner_id: string | null;
+  role: string;
+  status: ExecutionThreadStatus;
+  pid: number | null;
+  session_name: string | null;
+  agent_session_id: string | null;
+  worktree_path: string | null;
+  heartbeat_at: string;
+  interrupted_at: string | null;
+  interrupt_reason: string | null;
+  created_at: string;
+  updated_at: string;
 }
 
 export interface ExternalRefRow {

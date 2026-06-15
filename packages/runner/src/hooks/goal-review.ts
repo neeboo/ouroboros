@@ -56,6 +56,6 @@ export function createGoalReviewDecisionHook(options: { harness: Harness }): Sto
       };
     }
 
-    return { decision: "exit", artifacts };
+    return { decision: "continue", artifacts };
   };
 }

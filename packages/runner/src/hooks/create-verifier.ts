@@ -25,7 +25,7 @@ export function createVerifierTaskHook(options: { harness: Harness; sourceRoles?
     });
 
     return {
-      decision: "exit",
+      decision: "continue",
       artifacts: [
         {
           kind: "created_verifier_task",

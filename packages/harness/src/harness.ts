@@ -10,6 +10,7 @@ import { toJson } from "./json";
 import {
   attemptEventFromRow,
   attemptFromRow,
+  executionThreadFromRow,
   externalRefFromRow,
   lessonFromRow,
   projectFromRow,
@@ -20,6 +21,7 @@ import {
 import type {
   AttemptEventRow,
   AttemptRow,
+  ExecutionThreadRow,
   ExternalRefRow,
   LessonRow,
   ProjectRow,
@@ -37,6 +39,7 @@ import type {
   FinishAttemptInput,
   GetRunOverviewInput,
   LeaseReadyTasksInput,
+  ListExecutionThreadsInput,
   ListRunningAttemptsInput,
   ListExternalRefsInput,
   ListLessonsInput,
@@ -47,6 +50,8 @@ import type {
   Status,
   UpdateRunStatusInput,
   UpdateAttemptInputInput,
+  UpdateExecutionThreadInput,
+  UpsertExecutionThreadInput,
 } from "./types";
 import { basename, resolve } from "node:path";
 
@@ -544,6 +549,116 @@ export class Harness {
     });
   }
 
+  upsertExecutionThread(input: UpsertExecutionThreadInput) {
+    const id = input.id ?? makeId("thread");
+    return withDatabase(this.dbPath, (db) => {
+      ensureExecutionThreads(db);
+      db.query(
+        `
+        insert into execution_threads (
+          id, run_id, task_id, attempt_id, parent_thread_id,
+          owner_type, owner_id, role, status, pid,
+          session_name, agent_session_id, worktree_path, interrupt_reason
+        )
+        values (
+          $id, $runId, $taskId, $attemptId, $parentThreadId,
+          $ownerType, $ownerId, $role, $status, $pid,
+          $sessionName, $agentSessionId, $worktreePath, $interruptReason
+        )
+        on conflict(id) do update set
+          run_id = excluded.run_id,
+          task_id = excluded.task_id,
+          attempt_id = excluded.attempt_id,
+          parent_thread_id = excluded.parent_thread_id,
+          owner_type = excluded.owner_type,
+          owner_id = excluded.owner_id,
+          role = excluded.role,
+          status = excluded.status,
+          pid = excluded.pid,
+          session_name = excluded.session_name,
+          agent_session_id = excluded.agent_session_id,
+          worktree_path = excluded.worktree_path,
+          heartbeat_at = current_timestamp,
+          interrupt_reason = excluded.interrupt_reason,
+          updated_at = current_timestamp
+        `,
+      ).run({
+        $id: id,
+        $runId: input.runId,
+        $taskId: input.taskId ?? null,
+        $attemptId: input.attemptId ?? null,
+        $parentThreadId: input.parentThreadId ?? null,
+        $ownerType: input.ownerType,
+        $ownerId: input.ownerId ?? null,
+        $role: input.role,
+        $status: input.status ?? "running",
+        $pid: input.pid ?? null,
+        $sessionName: input.sessionName ?? null,
+        $agentSessionId: input.agentSessionId ?? null,
+        $worktreePath: input.worktreePath ?? null,
+        $interruptReason: input.interruptReason ?? null,
+      });
+      return id;
+    });
+  }
+
+  updateExecutionThread(input: UpdateExecutionThreadInput) {
+    return withDatabase(this.dbPath, (db) => {
+      ensureExecutionThreads(db);
+      const existing = db.query("select * from execution_threads where id = $id").get({ $id: input.id }) as
+        | ExecutionThreadRow
+        | null;
+      if (!existing) {
+        return;
+      }
+      const status = input.status ?? existing.status;
+      db.query(
+        `
+        update execution_threads
+        set status = $status,
+            owner_id = $ownerId,
+            pid = $pid,
+            session_name = $sessionName,
+            agent_session_id = $agentSessionId,
+            worktree_path = $worktreePath,
+            heartbeat_at = case when $heartbeat then current_timestamp else heartbeat_at end,
+            interrupted_at = case when $interrupted then current_timestamp else interrupted_at end,
+            interrupt_reason = $interruptReason,
+            updated_at = current_timestamp
+        where id = $id
+        `,
+      ).run({
+        $id: input.id,
+        $status: status,
+        $ownerId: input.ownerId ?? existing.owner_id,
+        $pid: input.pid ?? existing.pid,
+        $sessionName: input.sessionName ?? existing.session_name,
+        $agentSessionId: input.agentSessionId ?? existing.agent_session_id,
+        $worktreePath: input.worktreePath ?? existing.worktree_path,
+        $heartbeat: input.heartbeat === true ? 1 : 0,
+        $interrupted: status === "interrupted" ? 1 : 0,
+        $interruptReason: input.interruptReason ?? existing.interrupt_reason,
+      });
+    });
+  }
+
+  listExecutionThreads(input: ListExecutionThreadsInput) {
+    return withDatabase(this.dbPath, (db) => {
+      ensureExecutionThreads(db);
+      const rows = db
+        .query(
+          `
+          select *
+          from execution_threads
+          where run_id = $runId
+          order by created_at, id
+          `,
+        )
+        .all({ $runId: input.runId }) as ExecutionThreadRow[];
+      return rows.map(executionThreadFromRow);
+    });
+  }
+
   getRunOverview(input: GetRunOverviewInput) {
     return withDatabase(this.dbPath, (db) => {
       const runRow = db
@@ -630,11 +745,23 @@ export class Harness {
           `,
         )
         .all({ $runId: input.runId }) as LessonRow[];
+      ensureExecutionThreads(db);
+      const threadRows = db
+        .query(
+          `
+          select *
+          from execution_threads
+          where run_id = $runId
+          order by created_at, id
+          `,
+        )
+        .all({ $runId: input.runId }) as ExecutionThreadRow[];
       return {
         run: runRow ? runFromRow(runRow) : null,
         project: projectRow ? projectFromRow(projectRow) : null,
         tasks,
         sessions,
+        threads: threadRows.map(executionThreadFromRow),
         lessons: lessonRows.map(lessonFromRow),
       };
     });
@@ -800,6 +927,43 @@ function resolveRunProjectId(
 
 function stringOrNull(value: unknown) {
   return typeof value === "string" && value.trim().length > 0 ? value : null;
+}
+
+function ensureExecutionThreads(db: { exec: (sql: string) => void }) {
+  db.exec(`
+    create table if not exists execution_threads (
+      id text primary key,
+      run_id text not null references runs(id) on delete cascade,
+      task_id text references tasks(id) on delete set null,
+      attempt_id text references attempts(id) on delete set null,
+      parent_thread_id text references execution_threads(id) on delete set null,
+      owner_type text not null,
+      owner_id text,
+      role text not null,
+      status text not null check (status in ('running', 'done', 'blocked', 'interrupted', 'orphaned')),
+      pid integer,
+      session_name text,
+      agent_session_id text,
+      worktree_path text,
+      heartbeat_at text not null default current_timestamp,
+      interrupted_at text,
+      interrupt_reason text,
+      created_at text not null default current_timestamp,
+      updated_at text not null default current_timestamp
+    );
+    create index if not exists idx_execution_threads_run_status on execution_threads(run_id, status);
+    create index if not exists idx_execution_threads_attempt on execution_threads(attempt_id);
+  `);
+  try {
+    db.exec("alter table execution_threads add column agent_session_id text");
+  } catch {
+    // The column already exists on databases created after the thread registry landed.
+  }
+  try {
+    db.exec("update execution_threads set agent_session_id = codex_session_id where agent_session_id is null");
+  } catch {
+    // Older and newer schemas only have one of these columns.
+  }
 }
 
 function resolveTaskCycleId(
