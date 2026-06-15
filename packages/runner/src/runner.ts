@@ -57,6 +57,7 @@ export async function runReadyTasks(input: RunReadyTasksInput) {
     throw new Error(`run not found: ${input.runId}`);
   }
 
+  input.harness.reclaimRunningTasksWithoutAttempts({ runId: input.runId });
   const tasks = input.harness.leaseReadyTasks({
     runId: input.runId,
     limit: input.limit,

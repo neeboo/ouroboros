@@ -260,6 +260,17 @@ export interface ListRunningAttemptsInput {
   runId: string;
 }
 
+export interface ReclaimRunningTasksInput {
+  runId: string;
+}
+
+export interface ReclaimedRunningTask {
+  taskId: string;
+  sessionRef: string | null;
+  worktreePath: string | null;
+  reason: string;
+}
+
 export interface LeaseReadyTasksInput {
   runId: string;
   limit: number;

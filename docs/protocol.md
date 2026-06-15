@@ -368,7 +368,9 @@ continue  record the attempt and guarantee scheduler re-entry for newly created 
 
 `continue` is a protocol guarantee, not a display hint. A stop hook that creates a ready task, verifier, repair task, or non-complete goal-review follow-up must return `continue`. The runner must surface that decision in its round result and must not treat that hook boundary as idle. If a hard budget prevents immediate execution, the run remains unfinished and the control surface must keep or restart the runner until the ready work is consumed.
 
-The harness also needs a supervisor layer above individual runner processes. The supervisor is responsible for noticing orphaned ready work, resumable attempts without owners, stale runner exits, and human-paused runs. Stop-hook guarantees tell the supervisor what must continue; supervisor state tells the system whether something is actually continuing.
+The harness also needs a supervisor layer above individual runner processes. The supervisor is responsible for noticing orphaned ready work, resumable attempts without owners, stale runner exits, human-paused runs, and leased tasks that are marked `running` without a running attempt. Stop-hook guarantees tell the supervisor what must continue; supervisor state tells the system whether something is actually continuing.
+
+A task lease is not complete until an attempt exists. If a runner exits after leasing a task but before recording or starting an attempt, the next runner loop must reclaim that task back to `todo`. This keeps the queue drainable even when a start hook, process, or host session exits in the middle of the handoff.
 
 Commit hooks should be explicit and opt-in. The default stop hook behavior should inspect and summarize, not create commits.
 

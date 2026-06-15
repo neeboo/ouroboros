@@ -507,6 +507,39 @@ describe("Harness", () => {
     ]);
   });
 
+  test("reclaims running tasks that never recorded an attempt", () => {
+    const runId = harness.createRun({ goal: "Build loop" });
+    const taskId = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Recover leased task",
+      prompt: "Do the work.",
+    });
+
+    const leased = harness.leaseReadyTasks({
+      runId,
+      limit: 1,
+      sessionForTask: (task) => `task-${task.id}`,
+    });
+
+    expect(leased.map((task) => task.id)).toEqual([taskId]);
+    expect(harness.getTask(taskId)?.status).toBe("running");
+    expect(harness.listRunningAttempts({ runId })).toEqual([]);
+
+    const reclaimed = harness.reclaimRunningTasksWithoutAttempts({ runId });
+
+    expect(reclaimed).toEqual([
+      {
+        taskId,
+        sessionRef: `task-${taskId}`,
+        worktreePath: null,
+        reason: "running task has no running attempt",
+      },
+    ]);
+    expect(harness.getTask(taskId)?.status).toBe("todo");
+    expect(harness.nextReadyTask(runId)?.id).toBe(taskId);
+  });
+
   test("updates running attempt input for resumable session ids", () => {
     const runId = harness.createRun({ goal: "Build loop" });
     const taskId = harness.createTask({

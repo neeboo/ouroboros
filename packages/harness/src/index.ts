@@ -35,6 +35,8 @@ export type {
   PromptTemplate,
   RecordAttemptEventInput,
   RecordAttemptInput,
+  ReclaimedRunningTask,
+  ReclaimRunningTasksInput,
   RetryTaskInput,
   Run,
   RunOverview,

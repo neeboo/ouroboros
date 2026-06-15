@@ -760,9 +760,10 @@ function executorFactory(executorName: "noop" | "acpx-codex" | "codex-cli" | "co
 async function runCodexResumableLoop(input: { runId: string; maxRounds: number; limit: number; maxTries: number }) {
   const rounds = [];
   for (let index = 0; index < input.maxRounds; index += 1) {
+    const reclaimed = harness.reclaimRunningTasksWithoutAttempts({ runId: input.runId });
     const resumed = await resumeRunningCodexAttempts({ runId: input.runId, limit: input.limit });
     if (resumed.length > 0) {
-      rounds.push({ index, tasks: resumed });
+      rounds.push({ index, tasks: resumed, reclaimed });
       if (resumed.some((task) => task.status === "running")) {
         break;
       }
@@ -775,7 +776,7 @@ async function runCodexResumableLoop(input: { runId: string; maxRounds: number; 
       if (review.created) {
         const reviewed = await startReadyCodexAttempts({ runId: input.runId, limit: input.limit });
         if (reviewed.length > 0) {
-          rounds.push({ index, tasks: reviewed, goalReview: review });
+          rounds.push({ index, tasks: reviewed, goalReview: review, reclaimed });
           if (reviewed.some((task) => task.status === "running")) {
             break;
           }
@@ -784,7 +785,7 @@ async function runCodexResumableLoop(input: { runId: string; maxRounds: number; 
       }
       break;
     }
-    rounds.push({ index, tasks: started });
+    rounds.push({ index, tasks: started, reclaimed });
     if (started.some((task) => task.status === "running")) {
       break;
     }

@@ -46,6 +46,8 @@ import type {
   ListRunsInput,
   RecordAttemptEventInput,
   RecordAttemptInput,
+  ReclaimedRunningTask,
+  ReclaimRunningTasksInput,
   RetryTaskInput,
   StartAttemptInput,
   Status,
@@ -223,6 +225,56 @@ export class Harness {
         )
         .all({ $runId: input.runId }) as AttemptRow[];
       return rows.map(attemptFromRow);
+    });
+  }
+
+  reclaimRunningTasksWithoutAttempts(input: ReclaimRunningTasksInput): ReclaimedRunningTask[] {
+    return withDatabase(this.dbPath, (db) => {
+      ensureExecutionThreads(db);
+      const rows = db
+        .query(
+          `
+          select tasks.*
+          from tasks
+          left join attempts on attempts.task_id = tasks.id and attempts.status = 'running'
+          where tasks.run_id = $runId
+            and tasks.status = 'running'
+            and attempts.id is null
+          order by tasks.created_at, tasks.id
+          `,
+        )
+        .all({ $runId: input.runId }) as TaskRow[];
+      const reclaimed = rows.map(taskFromRow).map((task) => ({
+        taskId: task.id,
+        sessionRef: task.sessionRef,
+        worktreePath: task.worktreePath,
+        reason: "running task has no running attempt",
+      }));
+      if (reclaimed.length === 0) {
+        return reclaimed;
+      }
+      return db.transaction(() => {
+        for (const task of reclaimed) {
+          db.query(
+            `
+            update tasks
+            set status = 'todo', updated_at = current_timestamp
+            where id = $taskId and status = 'running'
+            `,
+          ).run({ $taskId: task.taskId });
+          db.query(
+            `
+            update execution_threads
+            set status = 'orphaned',
+                interrupt_reason = $reason,
+                interrupted_at = coalesce(interrupted_at, current_timestamp),
+                updated_at = current_timestamp
+            where task_id = $taskId and attempt_id is null and status = 'running'
+            `,
+          ).run({ $taskId: task.taskId, $reason: task.reason });
+        }
+        return reclaimed;
+      })();
     });
   }
 

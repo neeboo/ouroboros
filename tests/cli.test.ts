@@ -1542,6 +1542,69 @@ describe("CLI", () => {
     });
   });
 
+  test("run-loop reclaims leased tasks that have no running attempt", async () => {
+    await runCli("init");
+    const run = await runCliJson("create-run", "--goal", "Bootstrap ouroboros");
+    const task = await runCliJson(
+      "create-task",
+      "--run-id",
+      run.id,
+      "--role",
+      "worker",
+      "--goal",
+      "Recover orphaned lease",
+      "--prompt",
+      "Finish recovered task.",
+    );
+    new Harness(dbPath).leaseReadyTasks({
+      runId: run.id,
+      limit: 1,
+      sessionForTask: (leased) => `task-${leased.id}`,
+    });
+    const codexBin = join(dir, "fake-codex-reclaimed-lease");
+    await writeFile(
+      codexBin,
+      [
+        "#!/usr/bin/env bun",
+        "console.log(JSON.stringify({ type: 'session.started', session_id: 'session_reclaimed' }));",
+        "console.log(JSON.stringify({ type: 'agent.message', message: '{\"status\":\"done\",\"summary\":\"recovered orphaned lease\",\"changedFiles\":[],\"checks\":[],\"artifacts\":[],\"problems\":[]}' }));",
+      ].join("\n"),
+    );
+    await chmod(codexBin, 0o755);
+
+    const result = await runCliJson(
+      "run-loop",
+      "--run-id",
+      run.id,
+      "--executor",
+      "codex-resumable",
+      "--codex-bin",
+      codexBin,
+      "--cwd",
+      "/repo",
+      "--sandbox",
+      "read-only",
+      "--max-rounds",
+      "1",
+    );
+    const harness = new Harness(dbPath);
+
+    expect(result.rounds[0].reclaimed).toEqual([
+      expect.objectContaining({
+        taskId: task.id,
+        reason: "running task has no running attempt",
+      }),
+    ]);
+    expect(result.rounds[0].tasks).toEqual([
+      expect.objectContaining({
+        taskId: task.id,
+        status: "done",
+        codexSessionId: "session_reclaimed",
+      }),
+    ]);
+    expect(harness.getTask(task.id)?.status).toBe("done");
+  });
+
   test("run-loop reviews the goal when the queue is empty and can complete the run", async () => {
     await runCli("init");
     const run = await runCliJson("create-run", "--goal", "Bootstrap ouroboros");
