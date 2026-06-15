@@ -5,15 +5,19 @@ import { tmpdir } from "node:os";
 import { Harness } from "../packages/harness/src";
 import {
   buildTaskPrompt,
+  createRunsAction,
   createContextSummaryHook,
   createGitWorktreeHook,
   createRepairTaskHook,
   createRunsFromOutputHook,
+  createTasksAction,
   createTasksFromOutputHook,
   createVerifierTaskHook,
+  doneOutput,
   parseAttemptOutput,
   runNextReadyTask,
   runReadyTasks,
+  setRunDecisionAction,
   runUntilIdle,
 } from "../packages/runner/src";
 
@@ -1213,43 +1217,27 @@ describe("runner", () => {
 
   test("parses fixed action payloads into planner outputs", () => {
     const output = parseAttemptOutput(
-      JSON.stringify({
-        status: "done",
+      JSON.stringify(doneOutput({
         summary: "planned with actions",
         actions: [
-          {
-            type: "createTasks",
-            payload: {
-              tasks: [
-                {
-                  role: "worker",
-                  goal: "Implement action parser",
-                  prompt: "Add action schema support.",
-                  doneWhen: ["parser accepts actions"],
-                },
-              ],
+          createTasksAction([
+            {
+              role: "worker",
+              goal: "Implement action parser",
+              prompt: "Add action schema support.",
+              doneWhen: ["parser accepts actions"],
             },
-          },
-          {
-            type: "create_runs",
-            payload: {
-              runs: [
-                {
-                  goal: "Child planning run",
-                  prompt: "Plan the child run.",
-                  context: { source: "action" },
-                },
-              ],
+          ]),
+          createRunsAction([
+            {
+              goal: "Child planning run",
+              prompt: "Plan the child run.",
+              context: { source: "action" },
             },
-          },
-          {
-            type: "setRunDecision",
-            payload: {
-              decision: "continue",
-            },
-          },
+          ]),
+          setRunDecisionAction("continue"),
         ],
-      }),
+      })),
     );
 
     expect(output.runDecision).toBe("continue");
@@ -1289,6 +1277,11 @@ describe("runner", () => {
         }),
       ),
     ).toThrow("payload.tasks must be an array");
+  });
+
+  test("fixed action builders reject invalid control values", () => {
+    expect(() => setRunDecisionAction("pause" as never)).toThrow("decision must be complete, continue, or verify");
+    expect(() => doneOutput({ summary: "" })).toThrow("summary must be a non-empty string");
   });
 
   test("ignores non-model string preferences in planner next runs", () => {

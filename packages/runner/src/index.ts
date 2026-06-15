@@ -1,4 +1,11 @@
 export { buildTaskPrompt } from "./prompt";
+export {
+  blockedOutput,
+  createRunsAction,
+  createTasksAction,
+  doneOutput,
+  setRunDecisionAction,
+} from "./agent-actions";
 export { applyStartHooks, runNextReadyTask, runReadyTasks, runUntilIdle } from "./runner";
 export { createAcpxCodexExecutor } from "./executors/acpx";
 export { createCodexCliExecutor } from "./executors/codex-cli";
@@ -14,6 +21,14 @@ export { createTasksFromOutputHook } from "./hooks/create-tasks";
 export { createVerifierTaskHook } from "./hooks/create-verifier";
 export { createGitWorktreeHook } from "./hooks/git-worktree";
 export { createGoalReviewDecisionHook } from "./hooks/goal-review";
+export type {
+  AgentAction,
+  AgentOutput,
+  AgentOutputInput,
+  CreateRunsAction,
+  CreateTasksAction,
+  SetRunDecisionAction,
+} from "./agent-actions";
 export type {
   ExecutorInput,
   PromptInput,

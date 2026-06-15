@@ -252,11 +252,22 @@ The agent must return structured output matching:
 
 `modelPreference` is optional. Planners that omit it remain compatible; the harness falls back to role defaults or the global executor model.
 
-### Fixed actions
+### Fixed action methods
 
-Agents should prefer the fixed `actions` array over loose top-level fields when they want the harness to create follow-up work or change run flow. The parser validates each action payload and converts it into the existing internal fields before stop hooks run. This keeps old outputs compatible while giving new prompts a safer method-style contract.
+Agents and adapters should prefer fixed action methods over loose top-level fields when they want the harness to create follow-up work or change run flow. The runner exports small builders:
 
-Supported actions:
+```ts
+import {
+  createRunsAction,
+  createTasksAction,
+  doneOutput,
+  setRunDecisionAction,
+} from "@ouroboros/runner";
+```
+
+These methods produce the `actions` wire format below. The parser validates each action payload and converts it into the existing internal fields before stop hooks run. This keeps old outputs compatible while giving new prompts a safer method-style contract.
+
+Supported wire actions:
 
 ```json
 {

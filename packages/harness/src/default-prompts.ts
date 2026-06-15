@@ -31,6 +31,7 @@ export const DEFAULT_TASK_PROMPT_TEMPLATE = [
   "",
   "## Required Output",
   "Return only JSON with this shape:",
+  "Prefer the `actions` array for follow-up work and run decisions. Supported action types are createTasks, createRuns, and setRunDecision.",
   "```json",
   "{{requiredOutputJson}}",
   "```",
