@@ -1,4 +1,4 @@
-import type { AttemptOutput, PlannedTask } from "@ouroboros/harness";
+import type { AttemptOutput, PlannedRun, PlannedTask } from "@ouroboros/harness";
 
 export function parseAttemptOutputOrBlocked(input: {
   raw: string;
@@ -33,6 +33,7 @@ export function parseAttemptOutput(raw: string): AttemptOutput {
     artifacts: Array.isArray(parsed.artifacts) ? parsed.artifacts : [],
     problems: Array.isArray(parsed.problems) ? parsed.problems.map(String) : [],
     nextTasks: validatePlannedTasks(parsed.nextTasks),
+    nextRuns: validatePlannedRuns(parsed.nextRuns),
   };
 }
 
@@ -44,6 +45,63 @@ function validateRunDecision(value: unknown) {
     throw new Error("agent output runDecision must be 'complete', 'continue', or 'verify'");
   }
   return value;
+}
+
+export function validatePlannedRuns(nextRuns: unknown): PlannedRun[] {
+  if (nextRuns === undefined) {
+    return [];
+  }
+  if (!Array.isArray(nextRuns)) {
+    throw new Error("planned run nextRuns must be an array");
+  }
+
+  return nextRuns.map((run, index) => validatePlannedRun(run, index));
+}
+
+function validatePlannedRun(run: unknown, index: number): PlannedRun {
+  if (!run || typeof run !== "object" || Array.isArray(run)) {
+    throw new Error(`planned run ${index} must be an object`);
+  }
+
+  const record = run as Record<string, unknown>;
+  const plannedRun: PlannedRun = {
+    goal: requiredPlannedRunString(record, "goal", index),
+    prompt: requiredPlannedRunString(record, "prompt", index),
+    doneWhen: optionalRunStringArray(record, "doneWhen", index),
+    context: optionalRunContext(record, index),
+    modelPreference: optionalModelPreference(record, index, "planned run"),
+  };
+  return plannedRun;
+}
+
+function requiredPlannedRunString(run: Record<string, unknown>, key: "goal" | "prompt", index: number) {
+  const value = run[key];
+  if (typeof value !== "string" || value.trim().length === 0) {
+    throw new Error(`planned run ${index} must include a non-empty ${key}`);
+  }
+  return value;
+}
+
+function optionalRunStringArray(run: Record<string, unknown>, key: "doneWhen", index: number) {
+  const value = run[key];
+  if (value === undefined) {
+    return undefined;
+  }
+  if (!Array.isArray(value) || value.some((item) => typeof item !== "string")) {
+    throw new Error(`planned run ${index} ${key} must be an array of strings`);
+  }
+  return value;
+}
+
+function optionalRunContext(run: Record<string, unknown>, index: number) {
+  const value = run.context;
+  if (value === undefined) {
+    return undefined;
+  }
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error(`planned run ${index} context must be an object`);
+  }
+  return value as Record<string, unknown>;
 }
 
 export function validatePlannedTasks(nextTasks: unknown): PlannedTask[] {
@@ -69,7 +127,7 @@ function validatePlannedTask(task: unknown, index: number): PlannedTask {
     prompt: requiredPlannedTaskString(record, "prompt", index),
     dependsOn: optionalStringArray(record, "dependsOn", index),
     doneWhen: optionalStringArray(record, "doneWhen", index),
-    modelPreference: optionalModelPreference(record, index),
+    modelPreference: optionalModelPreference(record, index, "planned task"),
   };
 }
 
@@ -92,26 +150,26 @@ function optionalStringArray(task: Record<string, unknown>, key: "dependsOn" | "
   return value;
 }
 
-function optionalModelPreference(task: Record<string, unknown>, index: number) {
-  const value = task.modelPreference;
+function optionalModelPreference(record: Record<string, unknown>, index: number, label: "planned task" | "planned run") {
+  const value = record.modelPreference;
   if (value === undefined) {
     return undefined;
   }
   if (!value || typeof value !== "object" || Array.isArray(value)) {
-    throw new Error(`planned task ${index} modelPreference must be an object`);
+    throw new Error(`${label} ${index} modelPreference must be an object`);
   }
-  const record = value as Record<string, unknown>;
-  if (typeof record.model !== "string" || record.model.trim().length === 0) {
-    throw new Error(`planned task ${index} modelPreference must include a non-empty model`);
+  const preferenceRecord = value as Record<string, unknown>;
+  if (typeof preferenceRecord.model !== "string" || preferenceRecord.model.trim().length === 0) {
+    throw new Error(`${label} ${index} modelPreference must include a non-empty model`);
   }
   const preference: { model: string; reason?: string } = {
-    model: record.model,
+    model: preferenceRecord.model,
   };
-  if (record.reason !== undefined) {
-    if (typeof record.reason !== "string") {
-      throw new Error(`planned task ${index} modelPreference reason must be a string`);
+  if (preferenceRecord.reason !== undefined) {
+    if (typeof preferenceRecord.reason !== "string") {
+      throw new Error(`${label} ${index} modelPreference reason must be a string`);
     }
-    preference.reason = record.reason;
+    preference.reason = preferenceRecord.reason;
   }
   return preference;
 }

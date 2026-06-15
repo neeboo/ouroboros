@@ -8,6 +8,7 @@ import {
   createContextSummaryHook,
   createGitWorktreeHook,
   createRepairTaskHook,
+  createRunsFromOutputHook,
   createTasksFromOutputHook,
   createVerifierTaskHook,
   parseAttemptOutput,
@@ -675,6 +676,78 @@ describe("runner", () => {
     ]);
   });
 
+  test("planner stop hook creates child runs from structured nextRuns output", async () => {
+    const runId = harness.createRun({ goal: "Intake requirement document" });
+    const plannerTask = harness.createTask({
+      runId,
+      role: "planner",
+      goal: "Split document into runs",
+      prompt: "Read the document and create child runs.",
+    });
+
+    const result = await runNextReadyTask({
+      harness,
+      runId,
+      executor: async () => ({
+        status: "done",
+        summary: "Split into child runs",
+        artifacts: [],
+        checks: [],
+        problems: [],
+        nextRuns: [
+          {
+            goal: "Build React dashboard composer",
+            prompt: "Plan the React dashboard composer work.",
+            doneWhen: ["composer is planned", "verifier is planned"],
+            context: { area: "dashboard" },
+            modelPreference: {
+              model: "gpt-5.4-mini",
+              reason: "planning child run",
+            },
+          },
+        ],
+      }),
+      stopHooks: [createRunsFromOutputHook({ harness })],
+    });
+
+    const childRuns = harness.listRuns({ statuses: ["todo"] }).filter((run) => run.id !== runId);
+    const childOverview = harness.getRunOverview({ runId: childRuns[0].id, eventLimit: 0 });
+    const childPlanner = childOverview.tasks[0];
+
+    expect(result?.stopDecision).toBe("continue");
+    expect(childRuns).toHaveLength(1);
+    expect(childRuns[0]).toMatchObject({
+      goal: "Build React dashboard composer",
+      context: expect.objectContaining({
+        area: "dashboard",
+        parentRunId: runId,
+        sourceTaskId: plannerTask,
+        source: "nextRuns",
+      }),
+    });
+    expect(childPlanner).toMatchObject({
+      role: "planner",
+      goal: "Plan run: Build React dashboard composer",
+      prompt: "Plan the React dashboard composer work.",
+      doneWhen: ["composer is planned", "verifier is planned"],
+      config: {
+        modelPreference: {
+          model: "gpt-5.4-mini",
+          reason: "planning child run",
+        },
+      },
+    });
+    expect(harness.getAttempt(result!.attemptId)?.output.artifacts).toContainEqual(
+      expect.objectContaining({
+        kind: "created_run",
+        runId: childRuns[0].id,
+        plannerTaskId: childPlanner.id,
+        sourceRunId: runId,
+        sourceTaskId: plannerTask,
+      }),
+    );
+  });
+
   test("planner stop hook preserves next task model preference", async () => {
     const runId = harness.createRun({ goal: "Build loop" });
     const plannerTask = harness.createTask({
@@ -1062,6 +1135,38 @@ describe("runner", () => {
         prompt: "Validate nextTasks before task creation.",
         dependsOn: ["task_1"],
         doneWhen: ["tests pass"],
+      },
+    ]);
+  });
+
+  test("parses valid planner next runs", () => {
+    const output = parseAttemptOutput(
+      JSON.stringify({
+        status: "done",
+        summary: "planned runs",
+        nextRuns: [
+          {
+            goal: "Build React dashboard composer",
+            prompt: "Plan the child run.",
+            doneWhen: ["child run planned"],
+            context: { phase: "ui" },
+            modelPreference: {
+              model: "gpt-5.4-mini",
+            },
+          },
+        ],
+      }),
+    );
+
+    expect(output.nextRuns).toEqual([
+      {
+        goal: "Build React dashboard composer",
+        prompt: "Plan the child run.",
+        doneWhen: ["child run planned"],
+        context: { phase: "ui" },
+        modelPreference: {
+          model: "gpt-5.4-mini",
+        },
       },
     ]);
   });

@@ -9,6 +9,7 @@ export { runLocalCommand } from "./executors/command";
 export { proxyEnvForChildProcess, proxyEnvFromScutilOutput } from "./executors/proxy-env";
 export { createContextSubagentHook, createContextSummaryHook } from "./hooks/context-summary";
 export { createRepairTaskHook } from "./hooks/create-repair";
+export { createRunsFromOutputHook } from "./hooks/create-runs";
 export { createTasksFromOutputHook } from "./hooks/create-tasks";
 export { createVerifierTaskHook } from "./hooks/create-verifier";
 export { createGitWorktreeHook } from "./hooks/git-worktree";

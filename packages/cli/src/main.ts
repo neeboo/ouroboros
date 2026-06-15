@@ -11,6 +11,7 @@ import {
   createGitWorktreeHook,
   createGoalReviewDecisionHook,
   createRepairTaskHook,
+  createRunsFromOutputHook,
   createTasksFromOutputHook,
   createVerifierTaskHook,
   proxyEnvForChildProcess,
@@ -34,6 +35,7 @@ const DEFAULT_SELF_ITERATION_CONCURRENCY = 3;
 const DEFAULT_SELF_ITERATION_WORKTREE_ROOT = ".ouroboros/worktrees";
 const SELF_ITERATION_GOAL = "Use Ouroboros to plan its own next self-iteration cycle";
 const SELF_ITERATION_PLAN_DOC = "docs/self-iteration-plan.md";
+const DEFAULT_STOP_HOOKS = "create-runs,create-tasks,create-verifier,create-repair,context-summary";
 const SELF_ITERATION_PLANNER_DONE_WHEN = [
   "Planner output contains a small nextTasks graph, usually two to five tasks across two to three independent areas when possible",
   "Every planned task has one role, one concrete goal, and one prompt with exact files or commands to inspect first",
@@ -65,7 +67,7 @@ switch (parsed.command) {
         "--sandbox",
         "workspace-write",
         "--stop-hook",
-        "create-tasks,create-verifier,create-repair,context-summary",
+        DEFAULT_STOP_HOOKS,
         "--concurrency",
         String(DEFAULT_SELF_ITERATION_CONCURRENCY),
         "--worktree-root",
@@ -119,7 +121,7 @@ switch (parsed.command) {
         "--sandbox",
         "workspace-write",
         "--stop-hook",
-        "create-tasks,create-verifier,create-repair,context-summary",
+        DEFAULT_STOP_HOOKS,
         "--concurrency",
         flag(parsed, "concurrency") ?? flag(parsed, "limit") ?? String(DEFAULT_SELF_ITERATION_CONCURRENCY),
         ...selfIterationWorktreeArgs,
@@ -150,6 +152,45 @@ switch (parsed.command) {
     });
     const run = harness.getRun(id);
     printJson({ id, goal, status: "todo", projectId: run?.projectId ?? null, projectRoot: run?.projectRoot ?? null });
+    break;
+  }
+  case "list-runs": {
+    const statuses = (flag(parsed, "status") ?? "")
+      .split(",")
+      .map((status) => status.trim())
+      .filter(Boolean) as Array<"todo" | "running" | "done" | "blocked">;
+    printJson(harness.listRuns({
+      statuses: statuses.length ? statuses : undefined,
+      limit: parsePositiveInteger(flag(parsed, "limit") ?? "100", "--limit"),
+    }));
+    break;
+  }
+  case "intake": {
+    const document = required(parsed, "document");
+    const title = flag(parsed, "title") ?? compactForTitle(document, 80);
+    const result = createIntakeRun({ title, document });
+    printJson({
+      ...result,
+      supervisorCommand: cliCommand(
+        "supervise-runs",
+        "--executor",
+        "codex-resumable",
+        "--root-run-id",
+        result.runId,
+        "--sandbox",
+        "workspace-write",
+        "--stop-hook",
+        DEFAULT_STOP_HOOKS,
+        "--run-concurrency",
+        "2",
+        "--concurrency",
+        String(DEFAULT_SELF_ITERATION_CONCURRENCY),
+        "--worktree-root",
+        DEFAULT_SELF_ITERATION_WORKTREE_ROOT,
+        "--start-hook",
+        "git-worktree",
+      ),
+    });
     break;
   }
   case "create-task": {
@@ -324,6 +365,24 @@ switch (parsed.command) {
         limit: parseConcurrency(),
         maxRounds: parsePositiveInteger(flag(parsed, "max-rounds") ?? "1", "--max-rounds"),
         maxCycles: parsePositiveInteger(flag(parsed, "max-cycles") ?? "100", "--max-cycles"),
+        maxTries: parsePositiveInteger(flag(parsed, "max-tries") ?? String(DEFAULT_MAX_TRIES), "--max-tries"),
+        intervalMs: parseNonNegativeInteger(flag(parsed, "interval-ms") ?? "1500", "--interval-ms"),
+      }),
+    );
+    break;
+  }
+  case "supervise-runs": {
+    const executorName = parseExecutorName(required(parsed, "executor"));
+    if (executorName !== "codex-resumable") {
+      fail("supervise-runs currently supports codex-resumable");
+    }
+    printJson(
+      await superviseRuns({
+        rootRunId: flag(parsed, "root-run-id") ?? null,
+        runConcurrency: parsePositiveInteger(flag(parsed, "run-concurrency") ?? "2", "--run-concurrency"),
+        taskConcurrency: parseConcurrency(),
+        maxCycles: parsePositiveInteger(flag(parsed, "max-cycles") ?? "100", "--max-cycles"),
+        maxRounds: parsePositiveInteger(flag(parsed, "max-rounds") ?? "1", "--max-rounds"),
         maxTries: parsePositiveInteger(flag(parsed, "max-tries") ?? String(DEFAULT_MAX_TRIES), "--max-tries"),
         intervalMs: parseNonNegativeInteger(flag(parsed, "interval-ms") ?? "1500", "--interval-ms"),
       }),
@@ -614,6 +673,14 @@ function cliCommand(command: string, ...args: string[]) {
   return ["bun", "run", "orbs", "--", "--db", parsed.db, command, ...args].map(shellQuote).join(" ");
 }
 
+function compactForTitle(value: string, max: number) {
+  const text = value.replace(/\s+/g, " ").trim();
+  if (text.length <= max) {
+    return text || "Requirement document";
+  }
+  return `${text.slice(0, max - 1)}…`;
+}
+
 function defaultSelfIterationWorktreeArgs() {
   const startHook = flag(parsed, "start-hook") ?? "git-worktree";
   if (startHook === "none") {
@@ -857,6 +924,123 @@ function createSelfIterationBootstrap() {
   return { runId, taskId };
 }
 
+function createIntakeRun(input: { title: string; document: string }) {
+  harness.init();
+  const runId = harness.createRun({
+    goal: `Intake: ${input.title}`,
+    context: {
+      source: "intake",
+      title: input.title,
+      document: input.document,
+    },
+  });
+  const taskId = harness.createTask({
+    runId,
+    role: "planner",
+    goal: "Split requirement document into executable runs",
+    prompt: intakePlannerPrompt(input.document),
+    doneWhen: [
+      "Planner output includes one to five nextRuns items unless the document is too small to split",
+      "Every nextRuns item has a concrete goal and a prompt that tells its child planner what files or docs to inspect first",
+      "Each child run has three to five doneWhen checks or a clear reason it needs another planner pass",
+      "The split avoids overlapping ownership between child runs",
+      "The generated runs can be supervised without manual run-id selection",
+    ],
+  });
+  return { runId, taskId };
+}
+
+function intakePlannerPrompt(document: string) {
+  return [
+    "You are the portfolio planner for Ouroboros.",
+    "",
+    "Split the following requirement document into multiple executable Ouroboros runs.",
+    "",
+    "Return structured JSON with `status: \"done\"` and a `nextRuns` array.",
+    "Use `nextRuns`, not `nextTasks`, when the work contains multiple independent goals or phases.",
+    "Each nextRuns item must include:",
+    "- `goal`: the child run goal",
+    "- `prompt`: the initial planner prompt for that child run",
+    "- `doneWhen`: three to five completion checks for the child run",
+    "- optional `context`: small metadata such as phase, area, priority, or source",
+    "- optional `modelPreference`",
+    "",
+    "For each child run prompt, instruct the child planner to create a small `nextTasks` graph with verifiers and repair paths.",
+    "Keep child runs independent where possible so the global supervisor can run two or three runs at the same time.",
+    "If the document is too small for multiple runs, create one nextRuns item rather than doing implementation in this intake run.",
+    "",
+    "Requirement document:",
+    "```text",
+    document,
+    "```",
+  ].join("\n");
+}
+
+async function superviseRuns(input: {
+  rootRunId?: string | null;
+  runConcurrency: number;
+  taskConcurrency: number;
+  maxCycles: number;
+  maxRounds: number;
+  maxTries: number;
+  intervalMs: number;
+}) {
+  const cycles = [];
+  for (let index = 0; index < input.maxCycles; index += 1) {
+    const candidates = runnableRuns({ limit: input.runConcurrency, rootRunId: input.rootRunId ?? null });
+    if (candidates.length === 0) {
+      return { status: "idle" as const, cycles };
+    }
+    const results = await Promise.all(candidates.map(async (run) => {
+      const result = await runCodexResumableLoop({
+        runId: run.id,
+        maxRounds: input.maxRounds,
+        limit: input.taskConcurrency,
+        maxTries: input.maxTries,
+      });
+      const overview = harness.getRunOverview({ runId: run.id, eventLimit: 0 });
+      return {
+        runId: run.id,
+        goal: run.goal,
+        status: overview.run?.status ?? run.status,
+        rounds: result.rounds,
+        activeTasks: overview.tasks.filter((task) => task.status === "todo" || task.status === "running").length,
+      };
+    }));
+    cycles.push({ index, runs: results });
+    if (results.some((run) => run.status !== "done" && run.activeTasks > 0) && index < input.maxCycles - 1) {
+      await sleep(input.intervalMs);
+      continue;
+    }
+    if (index < input.maxCycles - 1) {
+      await sleep(input.intervalMs);
+    }
+  }
+  return { status: "cycle_limit" as const, cycles };
+}
+
+function runnableRuns(input: { limit: number; rootRunId?: string | null }) {
+  const runs = harness.listRuns({ statuses: ["todo", "running"], limit: 500 });
+  const scoped = input.rootRunId ? runsInScope(runs, input.rootRunId) : runs;
+  return scoped.filter((run) => run.status !== "done").slice(0, input.limit);
+}
+
+function runsInScope(runs: ReturnType<Harness["listRuns"]>, rootRunId: string) {
+  const included = new Set([rootRunId]);
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const run of runs) {
+      const parentRunId = typeof run.context.parentRunId === "string" ? run.context.parentRunId : null;
+      if (parentRunId && included.has(parentRunId) && !included.has(run.id)) {
+        included.add(run.id);
+        changed = true;
+      }
+    }
+  }
+  return runs.filter((run) => included.has(run.id));
+}
+
 function createDashboardRuntime(input: {
   runId: string;
   port: number;
@@ -865,6 +1049,7 @@ function createDashboardRuntime(input: {
   defaultStartHook?: string;
 }) {
   let runnerProcess: ReturnType<typeof Bun.spawn> | null = null;
+  let supervisorProcess: ReturnType<typeof Bun.spawn> | null = null;
   let runnerAutoPaused = false;
   const runnerState: {
     status: "idle" | "running" | "exited";
@@ -882,9 +1067,29 @@ function createDashboardRuntime(input: {
     lastOutput: "",
   };
   const runnerStatus = () => ({ ...runnerState });
+  const supervisorState: {
+    status: "idle" | "running" | "exited";
+    pid: number | null;
+    startedAt: string | null;
+    finishedAt: string | null;
+    exitCode: number | null;
+    lastOutput: string;
+  } = {
+    status: "idle",
+    pid: null,
+    startedAt: null,
+    finishedAt: null,
+    exitCode: null,
+    lastOutput: "",
+  };
+  const supervisorStatus = () => ({ ...supervisorState });
   const appendRunnerOutput = (chunk: string) => {
     const next = `${runnerState.lastOutput}${chunk}`;
     runnerState.lastOutput = next.length > 2000 ? next.slice(next.length - 2000) : next;
+  };
+  const appendSupervisorOutput = (chunk: string) => {
+    const next = `${supervisorState.lastOutput}${chunk}`;
+    supervisorState.lastOutput = next.length > 2000 ? next.slice(next.length - 2000) : next;
   };
   const finishRunningAttemptsFromDashboard = (summary: string, problem: string) => {
     for (const attempt of harness.listRunningAttempts({ runId: input.runId })) {
@@ -941,6 +1146,43 @@ function createDashboardRuntime(input: {
     });
     return { status: "running", pid: runnerState.pid ?? undefined };
   };
+  const startSupervisor = () => {
+    if (supervisorProcess && supervisorState.status === "running") {
+      return { status: "running", pid: supervisorState.pid ?? undefined };
+    }
+    supervisorState.status = "running";
+    supervisorState.startedAt = new Date().toISOString();
+    supervisorState.finishedAt = null;
+    supervisorState.exitCode = null;
+    supervisorState.lastOutput = "";
+    const cmd = supervisorCommand({
+      defaultConcurrency: input.defaultConcurrency,
+      defaultWorktreeRoot: input.defaultWorktreeRoot,
+      defaultStartHook: input.defaultStartHook,
+    });
+    supervisorProcess = Bun.spawn({
+      cmd,
+      cwd: process.cwd(),
+      env: proxyEnvForChildProcess(),
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    supervisorState.pid = supervisorProcess.pid;
+    if (supervisorProcess.stdout instanceof ReadableStream) {
+      drainDashboardRunnerStream(supervisorProcess.stdout, appendSupervisorOutput);
+    }
+    if (supervisorProcess.stderr instanceof ReadableStream) {
+      drainDashboardRunnerStream(supervisorProcess.stderr, appendSupervisorOutput);
+    }
+    supervisorProcess.exited.then((exitCode) => {
+      supervisorState.status = "exited";
+      supervisorState.finishedAt = new Date().toISOString();
+      supervisorState.exitCode = exitCode;
+      supervisorProcess = null;
+    });
+    return { status: "running", pid: supervisorState.pid ?? undefined };
+  };
   const stopRunner = () => {
     runnerAutoPaused = true;
     const pid = runnerState.pid;
@@ -958,6 +1200,18 @@ function createDashboardRuntime(input: {
     );
     return { status: "blocked", pid: pid ?? undefined };
   };
+  const stopSupervisor = () => {
+    const pid = supervisorState.pid;
+    if (supervisorProcess && supervisorState.status === "running") {
+      killDashboardRunnerChildren(pid);
+      supervisorProcess.kill();
+    }
+    supervisorProcess = null;
+    supervisorState.status = "exited";
+    supervisorState.finishedAt = new Date().toISOString();
+    supervisorState.exitCode = null;
+    return { status: "stopped", pid: pid ?? undefined };
+  };
   const resumeAutomaticRunner = () => {
     runnerAutoPaused = false;
   };
@@ -970,6 +1224,7 @@ function createDashboardRuntime(input: {
         eventLimit: parsePositiveInteger(flag(parsed, "event-limit") ?? "25", "--event-limit"),
       }),
     runnerStatus,
+    supervisorStatus,
     autoStartRunner: (overview, runner) => {
       if (runnerAutoPaused || overview.run?.status === "done" || runner?.status === "running") {
         return false;
@@ -983,6 +1238,13 @@ function createDashboardRuntime(input: {
     actions: {
       startRunner,
       stopRunner,
+      startSupervisor,
+      stopSupervisor,
+      createIntake: (document, title) => {
+        const result = createIntakeRun({ title: title || compactForTitle(document, 80), document });
+        startSupervisor();
+        return { ...result, status: "todo" };
+      },
       createGoal: (goal) => {
         resumeAutomaticRunner();
         harness.updateRunStatus({ runId: input.runId, status: "todo" });
@@ -1056,6 +1318,7 @@ function createDashboardRuntime(input: {
   });
   const shutdown = once(() => {
     stopRunner();
+    stopSupervisor();
     server.stop();
     process.exit(0);
   });
@@ -1500,7 +1763,7 @@ function dashboardRunnerCommand(
   runId: string,
   options: { defaultConcurrency?: number; defaultWorktreeRoot?: string; defaultStartHook?: string } = {},
 ) {
-  const stopHook = flag(parsed, "stop-hook") ?? "create-tasks,create-verifier,create-repair,context-summary";
+  const stopHook = flag(parsed, "stop-hook") ?? DEFAULT_STOP_HOOKS;
   const cmd = [
     Bun.argv[0],
     Bun.argv[1],
@@ -1517,6 +1780,55 @@ function dashboardRunnerCommand(
   for (const name of [
     "limit",
     "concurrency",
+    "max-rounds",
+    "max-cycles",
+    "max-tries",
+    "interval-ms",
+    "codex-bin",
+    "sandbox",
+    "timeout-ms",
+    "idle-timeout-ms",
+    "model",
+    "cwd",
+    "start-hook",
+    "worktree-root",
+  ]) {
+    const value = flag(parsed, name);
+    if (value !== undefined) {
+      cmd.push(`--${name}`, value);
+    }
+  }
+  if (flag(parsed, "concurrency") === undefined && flag(parsed, "limit") === undefined && options.defaultConcurrency) {
+    cmd.push("--concurrency", String(options.defaultConcurrency));
+  }
+  if (flag(parsed, "worktree-root") === undefined && options.defaultWorktreeRoot && flag(parsed, "start-hook") !== "none") {
+    cmd.push("--worktree-root", options.defaultWorktreeRoot);
+  }
+  if (flag(parsed, "start-hook") === undefined && options.defaultStartHook) {
+    cmd.push("--start-hook", options.defaultStartHook);
+  }
+  return cmd;
+}
+
+function supervisorCommand(
+  options: { defaultConcurrency?: number; defaultWorktreeRoot?: string; defaultStartHook?: string } = {},
+) {
+  const stopHook = flag(parsed, "stop-hook") ?? DEFAULT_STOP_HOOKS;
+  const cmd = [
+    Bun.argv[0],
+    Bun.argv[1],
+    "--db",
+    parsed.db,
+    "supervise-runs",
+    "--executor",
+    "codex-resumable",
+    "--stop-hook",
+    stopHook,
+  ];
+  for (const name of [
+    "limit",
+    "concurrency",
+    "run-concurrency",
     "max-rounds",
     "max-cycles",
     "max-tries",
@@ -1629,22 +1941,22 @@ function worktreeForTask() {
 function stopHooksByRole() {
   const raw = flag(parsed, "stop-hook");
   const taskCreationHook = createTasksFromOutputHook({ harness });
+  const runCreationHook = createRunsFromOutputHook({ harness });
   const goalReviewDecisionHook = createGoalReviewDecisionHook({ harness });
   const hooks = {
     planner: [],
     worker: [],
     verifier: [],
     "goal-review": [goalReviewDecisionHook, taskCreationHook],
-  } as {
-    planner: ReturnType<typeof createTasksFromOutputHook>[];
-    worker: ReturnType<typeof createVerifierTaskHook>[];
-    verifier: Array<ReturnType<typeof createRepairTaskHook> | ReturnType<typeof createContextSummaryHook>>;
-    "goal-review": Array<ReturnType<typeof createGoalReviewDecisionHook> | ReturnType<typeof createTasksFromOutputHook>>;
-  };
+  } as Record<string, StopHook[]>;
   if (!raw) {
     return hooks;
   }
   for (const hook of raw.split(",")) {
+    if (hook === "create-runs") {
+      hooks.planner.push(runCreationHook);
+      continue;
+    }
     if (hook === "create-tasks") {
       hooks.planner.push(taskCreationHook);
       continue;
@@ -1661,7 +1973,7 @@ function stopHooksByRole() {
       hooks.verifier.push(createContextSummaryHook());
       continue;
     }
-    fail("--stop-hook must contain create-tasks, create-verifier, create-repair, or context-summary");
+    fail("--stop-hook must contain create-runs, create-tasks, create-verifier, create-repair, or context-summary");
   }
   return hooks;
 }

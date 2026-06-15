@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 
 interface DashboardActionResult {
   attemptId?: string;
+  runId?: string;
   taskId?: string;
   status?: string;
   interrupted?: number;
@@ -18,6 +19,9 @@ interface DashboardActions {
   stopAttempt?: (attemptId: string) => DashboardActionResult;
   startRunner?: () => DashboardActionResult;
   stopRunner?: () => DashboardActionResult;
+  startSupervisor?: () => DashboardActionResult;
+  stopSupervisor?: () => DashboardActionResult;
+  createIntake?: (document: string, title?: string) => DashboardActionResult;
 }
 
 type DashboardAutoStartRunner = (overview: RunOverview, runner: DashboardRunnerStatus | null) => boolean;
@@ -2346,6 +2350,7 @@ export function serveDashboard(input: {
   overview: () => RunOverview;
   renderTaskPrompt: (taskId: string) => string;
   runnerStatus?: () => DashboardRunnerStatus | null;
+  supervisorStatus?: () => DashboardRunnerStatus | null;
   autoStartRunner?: DashboardAutoStartRunner;
   actions?: DashboardActions;
 }) {
@@ -2364,6 +2369,7 @@ export async function handleDashboardRequest(
     overview: () => RunOverview;
     renderTaskPrompt: (taskId: string) => string;
     runnerStatus?: () => DashboardRunnerStatus | null;
+    supervisorStatus?: () => DashboardRunnerStatus | null;
     autoStartRunner?: DashboardAutoStartRunner;
     actions?: DashboardActions;
   },
@@ -2392,7 +2398,7 @@ export async function handleDashboardRequest(
       overview = input.overview();
       runner = input.runnerStatus?.() ?? runner;
     }
-    return Response.json({ ...overview, runner });
+    return Response.json({ ...overview, runner, supervisor: input.supervisorStatus?.() ?? null });
   }
   if (url.pathname === `/api/runs/${input.runId}/changed-files`) {
     return Response.json(changedFilesPayload(input.overview()));

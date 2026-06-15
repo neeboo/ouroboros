@@ -66,6 +66,11 @@ export interface AttemptEvent {
   createdAt: string;
 }
 
+export interface ListRunsInput {
+  statuses?: Status[];
+  limit?: number;
+}
+
 export type ExecutionThreadStatus = "running" | "done" | "blocked" | "interrupted" | "orphaned";
 
 export interface ExecutionThread {
@@ -98,6 +103,7 @@ export interface AttemptOutput {
   artifacts?: unknown[];
   problems?: string[];
   nextTasks?: PlannedTask[];
+  nextRuns?: PlannedRun[];
 }
 
 export interface DependencyAttempt {
@@ -239,6 +245,14 @@ export interface RunOverview {
   sessions: ObservableSession[];
   threads: ExecutionThread[];
   lessons: Lesson[];
+}
+
+export interface PlannedRun {
+  goal: string;
+  prompt: string;
+  doneWhen?: string[];
+  context?: Record<string, unknown>;
+  modelPreference?: ModelPreference;
 }
 
 export interface ListRunningAttemptsInput {

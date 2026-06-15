@@ -104,7 +104,7 @@ describe("CLI", () => {
     expect(result.runnerCommand).toContain("--concurrency 3");
     expect(result.runnerCommand).toContain("--worktree-root .ouroboros/worktrees");
     expect(result.runnerCommand).toContain("--start-hook git-worktree");
-    expect(result.runnerCommand).toContain("--stop-hook create-tasks,create-verifier,create-repair,context-summary");
+    expect(result.runnerCommand).toContain("--stop-hook create-runs,create-tasks,create-verifier,create-repair,context-summary");
 
     expect(overview.run).toMatchObject({
       id: result.runId,
@@ -215,6 +215,38 @@ describe("CLI", () => {
       proc.kill();
       await proc.exited;
     }
+  });
+
+  test("intakes a requirement document into a planner run", async () => {
+    await runCli("init");
+
+    const result = await runCliJson(
+      "intake",
+      "--title",
+      "React dashboard migration",
+      "--document",
+      "Migrate the dashboard to React and add a Vercel AI Elements style composer.",
+    );
+    const runId = result.runId;
+    const overview = await runCliJson("run-overview", "--run-id", runId);
+    const runs = await runCliJson("list-runs", "--status", "todo");
+
+    expect(result).toMatchObject({
+      runId: expect.any(String),
+      taskId: expect.any(String),
+    });
+    expect(result.supervisorCommand).toContain("supervise-runs");
+    expect(result.supervisorCommand).toContain(`--root-run-id ${runId}`);
+    expect(result.supervisorCommand).toContain("create-runs");
+    expect(overview.run.goal).toBe("Intake: React dashboard migration");
+    expect(overview.run.context.document).toContain("Vercel AI Elements style composer");
+    expect(overview.tasks[0]).toMatchObject({
+      id: result.taskId,
+      role: "planner",
+      goal: "Split requirement document into executable runs",
+      status: "todo",
+    });
+    expect(runs.some((run: { id: string }) => run.id === runId)).toBe(true);
   });
 
   test("links a local run to a Linear project", async () => {
@@ -1813,6 +1845,93 @@ describe("CLI", () => {
       }),
     );
     expect(await runCliJson("next-task", "--run-id", run.id)).toBeNull();
+  });
+
+  test("supervise-runs drains an intake run and generated child run", async () => {
+    await runCli("init");
+    const stale = await runCliJson("create-run", "--goal", "Unrelated stale run");
+    await runCliJson(
+      "create-task",
+      "--run-id",
+      stale.id,
+      "--role",
+      "worker",
+      "--goal",
+      "Should not run",
+      "--prompt",
+      "This task is outside the supervisor root scope.",
+    );
+    const intake = await runCliJson(
+      "intake",
+      "--title",
+      "React dashboard migration",
+      "--document",
+      "Migrate dashboard to React shadcn and add an attachment composer.",
+    );
+    const codexBin = join(dir, "fake-codex-supervisor");
+    await writeFile(
+      codexBin,
+      [
+        "#!/usr/bin/env bun",
+        "const prompt = await new Response(Bun.stdin.stream()).text();",
+        "console.log(JSON.stringify({ type: 'session.started', session_id: prompt.includes('Role: goal-review') ? 'session_goal' : prompt.includes('Split requirement document') ? 'session_intake' : 'session_child' }));",
+        "if (prompt.includes('Role: goal-review')) {",
+        "  console.log(JSON.stringify({ type: 'agent.message', message: '{\"status\":\"done\",\"runDecision\":\"complete\",\"summary\":\"goal reached\",\"changedFiles\":[],\"checks\":[],\"artifacts\":[],\"problems\":[]}' }));",
+        "  process.exit(0);",
+        "}",
+        "if (prompt.includes('Split requirement document')) {",
+        "  console.log(JSON.stringify({ type: 'agent.message', message: '{\"status\":\"done\",\"summary\":\"split runs\",\"changedFiles\":[],\"checks\":[],\"artifacts\":[],\"problems\":[],\"nextRuns\":[{\"goal\":\"Build React shadcn dashboard composer\",\"prompt\":\"Plan the React dashboard composer work.\",\"doneWhen\":[\"composer planned\",\"verifier planned\"],\"context\":{\"area\":\"dashboard\"}}]}' }));",
+        "  process.exit(0);",
+        "}",
+        "console.log(JSON.stringify({ type: 'agent.message', message: '{\"status\":\"done\",\"summary\":\"child planner finished\",\"changedFiles\":[],\"checks\":[],\"artifacts\":[],\"problems\":[]}' }));",
+      ].join("\n"),
+    );
+    await chmod(codexBin, 0o755);
+
+    const result = await runCliJson(
+      "supervise-runs",
+      "--executor",
+      "codex-resumable",
+      "--root-run-id",
+      intake.runId,
+      "--codex-bin",
+      codexBin,
+      "--cwd",
+      "/repo",
+      "--sandbox",
+      "read-only",
+      "--stop-hook",
+      "create-runs,create-tasks,create-verifier,create-repair,context-summary",
+      "--run-concurrency",
+      "2",
+      "--concurrency",
+      "1",
+      "--max-cycles",
+      "6",
+      "--max-rounds",
+      "1",
+      "--interval-ms",
+      "1",
+    );
+    const runs = await runCliJson("list-runs");
+    const staleOverview = await runCliJson("run-overview", "--run-id", stale.id);
+    const intakeOverview = await runCliJson("run-overview", "--run-id", intake.runId);
+    const child = runs.find((run: { goal: string }) => run.goal === "Build React shadcn dashboard composer");
+
+    expect(result.cycles.length).toBeGreaterThanOrEqual(3);
+    expect(result.status).toBe("idle");
+    expect(intakeOverview.run.status).toBe("done");
+    expect(staleOverview.run.status).toBe("todo");
+    expect(staleOverview.tasks[0].status).toBe("todo");
+    expect(child).toMatchObject({
+      goal: "Build React shadcn dashboard composer",
+      status: "done",
+      context: expect.objectContaining({
+        parentRunId: intake.runId,
+        source: "nextRuns",
+        area: "dashboard",
+      }),
+    });
   });
 
   test("autopilot retries stale running attempts without a codex session id", async () => {
