@@ -24,13 +24,20 @@ export function buildTaskPrompt(input: PromptInput) {
       checks: [],
       artifacts: [],
       problems: [],
-      nextTasks: [
+      actions: [
         {
-          role: "worker",
-          goal: "Optional next task goal",
-          prompt: "Optional next task instructions",
-          dependsOn: [],
-          doneWhen: [],
+          type: "createTasks",
+          payload: {
+            tasks: [
+              {
+                role: "worker",
+                goal: "Optional next task goal",
+                prompt: "Optional next task instructions",
+                dependsOn: [],
+                doneWhen: [],
+              },
+            ],
+          },
         },
       ],
     }),

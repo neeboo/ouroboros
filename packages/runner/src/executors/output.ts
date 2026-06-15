@@ -24,17 +24,106 @@ export function parseAttemptOutput(raw: string): AttemptOutput {
   if (parsed.status !== "done" && parsed.status !== "blocked") {
     throw new Error("agent output status must be 'done' or 'blocked'");
   }
+  const actionOutput = validateActions(parsed.actions);
   return {
     status: parsed.status,
-    runDecision: validateRunDecision(parsed.runDecision),
+    runDecision: mergeRunDecision(validateRunDecision(parsed.runDecision), actionOutput.runDecision),
     summary: String(parsed.summary ?? ""),
     changedFiles: Array.isArray(parsed.changedFiles) ? parsed.changedFiles.map(String) : [],
     checks: Array.isArray(parsed.checks) ? parsed.checks : [],
     artifacts: Array.isArray(parsed.artifacts) ? parsed.artifacts : [],
     problems: Array.isArray(parsed.problems) ? parsed.problems.map(String) : [],
-    nextTasks: validatePlannedTasks(parsed.nextTasks),
-    nextRuns: validatePlannedRuns(parsed.nextRuns),
+    nextTasks: [...validatePlannedTasks(parsed.nextTasks), ...actionOutput.nextTasks],
+    nextRuns: [...validatePlannedRuns(parsed.nextRuns), ...actionOutput.nextRuns],
   };
+}
+
+function validateActions(actions: unknown): {
+  runDecision?: AttemptOutput["runDecision"];
+  nextTasks: PlannedTask[];
+  nextRuns: PlannedRun[];
+} {
+  if (actions === undefined) {
+    return { nextTasks: [], nextRuns: [] };
+  }
+  if (!Array.isArray(actions)) {
+    throw new Error("agent output actions must be an array");
+  }
+
+  const output: {
+    runDecision?: AttemptOutput["runDecision"];
+    nextTasks: PlannedTask[];
+    nextRuns: PlannedRun[];
+  } = { nextTasks: [], nextRuns: [] };
+
+  actions.forEach((action, index) => {
+    if (!action || typeof action !== "object" || Array.isArray(action)) {
+      throw new Error(`agent output action ${index} must be an object`);
+    }
+    const record = action as Record<string, unknown>;
+    const type = normalizeActionType(record.type);
+    const payload = requiredActionPayload(record.payload, index);
+
+    if (type === "createTasks") {
+      output.nextTasks.push(...validatePlannedTasks(requiredPayloadArray(payload, "tasks", index, type)));
+      return;
+    }
+    if (type === "createRuns") {
+      output.nextRuns.push(...validatePlannedRuns(requiredPayloadArray(payload, "runs", index, type)));
+      return;
+    }
+
+    const decision = validateRunDecision(payload.decision);
+    if (output.runDecision !== undefined && output.runDecision !== decision) {
+      throw new Error("agent output actions contain conflicting run decisions");
+    }
+    output.runDecision = decision;
+  });
+
+  return output;
+}
+
+function normalizeActionType(type: unknown): "createTasks" | "createRuns" | "setRunDecision" {
+  if (type === "createTasks" || type === "create_tasks") {
+    return "createTasks";
+  }
+  if (type === "createRuns" || type === "create_runs") {
+    return "createRuns";
+  }
+  if (type === "setRunDecision" || type === "set_run_decision" || type === "runDecision" || type === "run_decision") {
+    return "setRunDecision";
+  }
+  throw new Error("agent output action type must be createTasks, createRuns, or setRunDecision");
+}
+
+function requiredActionPayload(payload: unknown, index: number) {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    throw new Error(`agent output action ${index} payload must be an object`);
+  }
+  return payload as Record<string, unknown>;
+}
+
+function requiredPayloadArray(
+  payload: Record<string, unknown>,
+  key: "tasks" | "runs",
+  index: number,
+  type: "createTasks" | "createRuns",
+) {
+  const value = payload[key];
+  if (!Array.isArray(value)) {
+    throw new Error(`agent output action ${index} ${type} payload.${key} must be an array`);
+  }
+  return value;
+}
+
+function mergeRunDecision(
+  direct: AttemptOutput["runDecision"] | undefined,
+  fromActions: AttemptOutput["runDecision"] | undefined,
+) {
+  if (direct !== undefined && fromActions !== undefined && direct !== fromActions) {
+    throw new Error("agent output runDecision conflicts with actions run decision");
+  }
+  return direct ?? fromActions;
 }
 
 function validateRunDecision(value: unknown) {

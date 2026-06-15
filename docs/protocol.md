@@ -252,6 +252,56 @@ The agent must return structured output matching:
 
 `modelPreference` is optional. Planners that omit it remain compatible; the harness falls back to role defaults or the global executor model.
 
+### Fixed actions
+
+Agents should prefer the fixed `actions` array over loose top-level fields when they want the harness to create follow-up work or change run flow. The parser validates each action payload and converts it into the existing internal fields before stop hooks run. This keeps old outputs compatible while giving new prompts a safer method-style contract.
+
+Supported actions:
+
+```json
+{
+  "actions": [
+    {
+      "type": "createTasks",
+      "payload": {
+        "tasks": [
+          {
+            "role": "worker",
+            "goal": "Implement a small change",
+            "prompt": "Concrete instructions",
+            "dependsOn": [],
+            "doneWhen": []
+          }
+        ]
+      }
+    },
+    {
+      "type": "createRuns",
+      "payload": {
+        "runs": [
+          {
+            "goal": "Child run goal",
+            "prompt": "Planner prompt for the child run",
+            "doneWhen": [],
+            "context": {}
+          }
+        ]
+      }
+    },
+    {
+      "type": "setRunDecision",
+      "payload": {
+        "decision": "continue"
+      }
+    }
+  ]
+}
+```
+
+Action aliases are accepted for machine-generated payloads: `create_tasks`, `create_runs`, `set_run_decision`, and `run_decision`.
+
+Invalid action payloads block the attempt during parsing, so missing arrays, unknown action types, invalid task fields, and conflicting run decisions fail early instead of creating unusable graph nodes.
+
 Allowed `status` values in output:
 
 ```text

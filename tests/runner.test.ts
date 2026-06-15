@@ -55,7 +55,8 @@ describe("runner", () => {
     expect(prompt).toContain("Plan the next task");
     expect(prompt).toContain("Read current state and propose one small task.");
     expect(prompt).toContain('"status": "done"');
-    expect(prompt).toContain('"nextTasks"');
+    expect(prompt).toContain('"actions"');
+    expect(prompt).toContain('"createTasks"');
     expect(prompt).toContain("a next task exists");
   });
 
@@ -1208,6 +1209,86 @@ describe("runner", () => {
         },
       },
     ]);
+  });
+
+  test("parses fixed action payloads into planner outputs", () => {
+    const output = parseAttemptOutput(
+      JSON.stringify({
+        status: "done",
+        summary: "planned with actions",
+        actions: [
+          {
+            type: "createTasks",
+            payload: {
+              tasks: [
+                {
+                  role: "worker",
+                  goal: "Implement action parser",
+                  prompt: "Add action schema support.",
+                  doneWhen: ["parser accepts actions"],
+                },
+              ],
+            },
+          },
+          {
+            type: "create_runs",
+            payload: {
+              runs: [
+                {
+                  goal: "Child planning run",
+                  prompt: "Plan the child run.",
+                  context: { source: "action" },
+                },
+              ],
+            },
+          },
+          {
+            type: "setRunDecision",
+            payload: {
+              decision: "continue",
+            },
+          },
+        ],
+      }),
+    );
+
+    expect(output.runDecision).toBe("continue");
+    expect(output.nextTasks).toEqual([
+      {
+        role: "worker",
+        goal: "Implement action parser",
+        prompt: "Add action schema support.",
+        dependsOn: undefined,
+        doneWhen: ["parser accepts actions"],
+        modelPreference: undefined,
+      },
+    ]);
+    expect(output.nextRuns).toEqual([
+      {
+        goal: "Child planning run",
+        prompt: "Plan the child run.",
+        doneWhen: undefined,
+        context: { source: "action" },
+        modelPreference: undefined,
+      },
+    ]);
+  });
+
+  test("rejects invalid fixed action payloads", () => {
+    expect(() =>
+      parseAttemptOutput(
+        JSON.stringify({
+          status: "done",
+          summary: "bad action",
+          actions: [
+            {
+              type: "createTasks",
+              payload: { tasks: { role: "worker" } },
+            },
+          ],
+        }),
+      ),
+    ).toThrow("payload.tasks must be an array");
   });
 
   test("ignores non-model string preferences in planner next runs", () => {
