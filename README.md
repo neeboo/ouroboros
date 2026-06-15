@@ -1,5 +1,7 @@
 # Ouroboros
 
+![Ouroboros pixel game cover](./docs/assets/ouroboros-cover-pixel-game.png)
+
 English · [简体中文](./zh_CN.md)
 
 Loop Engineering for long-running coding-agent work.
