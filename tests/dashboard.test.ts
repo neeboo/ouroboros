@@ -212,6 +212,16 @@ describe("dashboard", () => {
     expect(html).toContain("node.scrollTop = scrollState.shouldFollowBottom ? node.scrollHeight : scrollState.scrollTop");
   });
 
+  test("treats repaired blocked verifier tasks as historical evidence", () => {
+    const html = dashboardHtml({ runId: "run_123" });
+
+    expect(html).toContain("resolvedBlockedTaskIdsFor");
+    expect(html).toContain("effectiveTaskStatus");
+    expect(html).toContain("repaired block");
+    expect(html).toContain("blocked verifier task was repaired and is now historical evidence");
+    expect(html).toContain('task.status === "blocked" && !group.resolvedBlockedTaskIds.has(task.id)');
+  });
+
   test("renders project metadata in the dashboard header", () => {
     const html = dashboardHtml({ runId: "run_123" });
 

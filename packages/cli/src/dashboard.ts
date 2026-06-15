@@ -1392,10 +1392,26 @@ export function dashboardHtml(input: { runId: string }) {
     let latestOverview = null;
     let selectedChangedFilePath = null;
     const diffByPath = new Map();
+    const resolvedBlockedTaskIdsFor = (tasks) => {
+      const repairsByParent = new Map();
+      for (const task of tasks) {
+        if (!task.parentId) continue;
+        if (!repairsByParent.has(task.parentId)) repairsByParent.set(task.parentId, []);
+        repairsByParent.get(task.parentId).push(task);
+      }
+      return new Set(tasks
+        .filter((task) => task.status === "blocked")
+        .filter((task) => (repairsByParent.get(task.id) || []).some((repair) => repair.status === "done"))
+        .map((task) => task.id));
+    };
+    const effectiveTaskStatus = (task, resolvedBlockedTaskIds) =>
+      task.status === "blocked" && resolvedBlockedTaskIds.has(task.id) ? "done" : task.status;
     const groupStatus = (tasks) => {
-      if (tasks.some((task) => task.status === "running")) return "running";
-      if (tasks.some((task) => task.status === "todo")) return "todo";
-      if (tasks.some((task) => task.status === "blocked")) return "blocked";
+      const resolvedBlockedTaskIds = resolvedBlockedTaskIdsFor(tasks);
+      const statuses = tasks.map((task) => effectiveTaskStatus(task, resolvedBlockedTaskIds));
+      if (statuses.some((status) => status === "running")) return "running";
+      if (statuses.some((status) => status === "todo")) return "todo";
+      if (statuses.some((status) => status === "blocked")) return "blocked";
       return "done";
     };
     const isCycleStarter = (task) => task.role === "planner" || task.role === "goal-review";
@@ -1501,6 +1517,7 @@ export function dashboardHtml(input: { runId: string }) {
         const sessions = overview.sessions.filter((session) => ids.has(session.taskId));
         const lessons = (overview.lessons || []).filter((lesson) => ids.has(lesson.taskId));
         const activeTasks = group.tasks.filter((task) => task.status === "todo" || task.status === "running");
+        const resolvedBlockedTaskIds = resolvedBlockedTaskIdsFor(group.tasks);
         return {
           id: group.id,
           root: group.root,
@@ -1509,6 +1526,8 @@ export function dashboardHtml(input: { runId: string }) {
           sessions,
           lessons,
           activeTasks,
+          resolvedBlockedTaskIds,
+          resolvedBlockedCount: resolvedBlockedTaskIds.size,
           status: groupStatus(group.tasks),
         };
       });
@@ -1624,7 +1643,7 @@ export function dashboardHtml(input: { runId: string }) {
     const goalRow = (group) =>
       '<button class="task-row ' + (group.id === selectedGoalId ? 'selected' : '') + '" data-goal-id="' + escapeHtml(group.id) + '">' +
       '<span class="status-dot ' + escapeHtml(group.status) + '"></span>' +
-      '<span class="task-row-text"><strong>' + escapeHtml(group.titleTask.goal) + '</strong><span class="row-meta">' + group.tasks.length + ' tasks · ' + escapeHtml(roleSummary(group.tasks)) + '</span></span>' +
+      '<span class="task-row-text"><strong>' + escapeHtml(group.titleTask.goal) + '</strong><span class="row-meta">' + group.tasks.length + ' tasks · ' + escapeHtml(roleSummary(group.tasks)) + (group.resolvedBlockedCount ? ' · ' + escapeHtml(group.resolvedBlockedCount) + ' repaired block' : '') + '</span></span>' +
       '<span class="status-text ' + escapeHtml(group.status) + '">' + escapeHtml(group.status) + '</span></button>';
     const turn = (input) =>
       '<article class="turn ' + (input.primary ? "primary" : "") + '" data-turn-key="' + escapeHtml(input.key || input.mark) + '"><div class="turn-gutter"><div class="turn-avatar">' + input.mark + '</div><div class="turn-rail"></div></div>' +
@@ -1760,15 +1779,19 @@ export function dashboardHtml(input: { runId: string }) {
       if (!group) return '<section class="inspector-card" data-inspector-section="progress"><h2>Detail</h2><div class="empty">Select a goal</div></section>';
       const doneWhen = group.tasks.flatMap((task) => (Array.isArray(task.doneWhen) ? task.doneWhen : []).map((item) => ({ task, item })));
       const runningSessions = group.sessions.filter((session) => session.status === "running");
+      const unresolvedBlockedTasks = group.tasks.filter((task) => task.status === "blocked" && !group.resolvedBlockedTaskIds.has(task.id));
       const currentTask = group.tasks.find((task) => task.status === "running") ||
         group.tasks.find((task) => task.status === "todo") ||
-        [...group.tasks].reverse().find((task) => task.status === "blocked" || task.status === "done");
-      const rerunnableTask = runningSessions.length ? null : [...group.tasks].reverse().find((task) => task.status === "blocked" || task.status === "done");
+        unresolvedBlockedTasks[unresolvedBlockedTasks.length - 1] ||
+        [...group.tasks].reverse().find((task) => task.status === "done") ||
+        [...group.tasks].reverse().find((task) => task.status === "blocked");
+      const rerunnableTask = runningSessions.length ? null : [...unresolvedBlockedTasks, ...group.tasks.filter((task) => task.status === "done")].reverse()[0] || null;
       return '<section class="inspector-card" data-inspector-section="progress"><h2>Progress</h2>' +
         (currentTask ? '<div class="current-task"><div class="current-task-title">' + escapeHtml(currentTask.goal) + '</div><div class="current-task-meta">' + escapeHtml(currentTask.role) + ' · <span class="status-text ' + escapeHtml(currentTask.status) + '">' + escapeHtml(currentTask.status) + '</span><br><span class="code-meta">' + escapeHtml(currentTask.id) + '</span></div></div>' : '') +
         (doneWhen.length ? '<ul class="todo-list">' + doneWhen.map(({ task, item }) =>
-          '<li class="todo-item ' + (task.status === "done" ? "done" : "") + '"><span class="checkbox ' + (task.status === "done" ? "done" : "") + '" aria-hidden="true"></span><span class="todo-text">' + escapeHtml(item) + '<span class="meta">' + escapeHtml(task.role) + '</span></span></li>'
+          '<li class="todo-item ' + (effectiveTaskStatus(task, group.resolvedBlockedTaskIds) === "done" ? "done" : "") + '"><span class="checkbox ' + (effectiveTaskStatus(task, group.resolvedBlockedTaskIds) === "done" ? "done" : "") + '" aria-hidden="true"></span><span class="todo-text">' + escapeHtml(item) + '<span class="meta">' + escapeHtml(task.role) + '</span></span></li>'
         ).join("") + '</ul>' : '<div class="empty">No todos recorded</div>') +
+        (group.resolvedBlockedCount ? '<div class="meta">' + escapeHtml(group.resolvedBlockedCount) + ' blocked verifier task was repaired and is now historical evidence.</div>' : '') +
         (runningSessions.length ? '<div class="control-row"><button class="plain-button danger" data-stop-attempt-id="' + escapeHtml(runningSessions[0].attemptId) + '">Stop current task</button></div>' : '') +
         (rerunnableTask ? '<div class="control-row"><button class="plain-button" data-rerun-task-id="' + escapeHtml(rerunnableTask.id) + '">Rerun selected task</button></div>' : '') +
         '</section>' + renderChangedFilesSection(group);
