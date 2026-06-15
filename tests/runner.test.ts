@@ -979,12 +979,51 @@ describe("runner", () => {
     expect(verifier.goal).toBe("Verify: Implement runner");
     expect(verifier.dependsOn).toEqual([workerTask]);
     expect(verifier.prompt).toContain(`Source Task ID: ${workerTask}`);
+    expect(verifier.prompt).toContain("Source Worktree Path: not recorded");
     expect(verifier.prompt).toContain("Implemented runner");
     expect(verifier.prompt).toContain("packages/runner/src/runner.ts");
     expect(attempt.output.artifacts).toContainEqual({
       kind: "created_verifier_task",
       taskId: verifier.id,
       sourceTaskId: workerTask,
+      sourceWorktreePath: null,
+    });
+  });
+
+  test("worker stop hook records the source worktree for verifier tasks", async () => {
+    const runId = harness.createRun({ goal: "Build loop" });
+    const workerTask = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Implement in worktree",
+      prompt: "Change files in the task worktree.",
+    });
+
+    const results = await runReadyTasks({
+      harness,
+      runId,
+      limit: 1,
+      worktreeForTask: () => "/tmp/ouroboros-source-worktree",
+      executorFactory: () => async () => ({
+        status: "done",
+        summary: "Implemented in source worktree",
+        changedFiles: ["packages/cli/src/dashboard.ts"],
+        artifacts: [],
+        checks: [],
+        problems: [],
+      }),
+      stopHooks: [createVerifierTaskHook({ harness })],
+    });
+
+    const attempt = harness.getAttempt(results[0].attemptId)!;
+    const verifier = harness.nextReadyTask(runId)!;
+    expect(verifier.prompt).toContain("Source Worktree Path: /tmp/ouroboros-source-worktree");
+    expect(verifier.prompt).toContain('"worktreePath": "/tmp/ouroboros-source-worktree"');
+    expect(attempt.output.artifacts).toContainEqual({
+      kind: "created_verifier_task",
+      taskId: verifier.id,
+      sourceTaskId: workerTask,
+      sourceWorktreePath: "/tmp/ouroboros-source-worktree",
     });
   });
 
