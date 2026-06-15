@@ -12,6 +12,7 @@ import {
   attemptFromRow,
   executionThreadFromRow,
   externalRefFromRow,
+  harnessActionEventFromRow,
   lessonFromRow,
   projectFromRow,
   promptTemplateFromRow,
@@ -23,6 +24,7 @@ import type {
   AttemptRow,
   ExecutionThreadRow,
   ExternalRefRow,
+  HarnessActionEventRow,
   LessonRow,
   ProjectRow,
   PromptTemplateRow,
@@ -40,12 +42,14 @@ import type {
   GetRunOverviewInput,
   LeaseReadyTasksInput,
   ListExecutionThreadsInput,
+  ListHarnessActionEventsInput,
   ListRunningAttemptsInput,
   ListExternalRefsInput,
   ListLessonsInput,
   ListRunsInput,
   RecordAttemptEventInput,
   RecordAttemptInput,
+  RecordHarnessActionEventInput,
   ReclaimedRunningTask,
   ReclaimRunningTasksInput,
   RetryTaskInput,
@@ -640,6 +644,66 @@ export class Harness {
     });
   }
 
+  countRunsByStatus() {
+    return withDatabase(this.dbPath, (db) => {
+      const counts = { todo: 0, running: 0, done: 0, blocked: 0 };
+      const rows = db
+        .query(
+          `
+          select status, count(*) as count
+          from runs
+          group by status
+          `,
+        )
+        .all() as { status: Status; count: number }[];
+      for (const row of rows) {
+        counts[row.status] = Number(row.count);
+      }
+      return counts;
+    });
+  }
+
+  recordHarnessActionEvent(input: RecordHarnessActionEventInput) {
+    const id = input.id ?? makeId("action");
+    return withDatabase(this.dbPath, (db) => {
+      ensureHarnessActionEvents(db);
+      db.query(
+        `
+        insert into harness_action_events (
+          id, action_type, status, request_json, result_json
+        )
+        values (
+          $id, $actionType, $status, $requestJson, $resultJson
+        )
+        `,
+      ).run({
+        $id: id,
+        $actionType: input.actionType,
+        $status: input.status,
+        $requestJson: toJson(input.request),
+        $resultJson: toJson(input.result),
+      });
+      return id;
+    });
+  }
+
+  listHarnessActionEvents(input: ListHarnessActionEventsInput = {}) {
+    return withDatabase(this.dbPath, (db) => {
+      ensureHarnessActionEvents(db);
+      const rows = db
+        .query(
+          `
+          select *
+          from harness_action_events
+          order by created_at desc, id desc
+          limit $limit
+          `,
+        )
+        .all({ $limit: input.limit ?? 50 }) as HarnessActionEventRow[];
+      return rows.map(harnessActionEventFromRow);
+    });
+  }
+
   upsertExecutionThread(input: UpsertExecutionThreadInput) {
     const id = input.id ?? makeId("thread");
     return withDatabase(this.dbPath, (db) => {
@@ -1070,6 +1134,20 @@ function ensureExecutionThreads(db: { exec: (sql: string) => void }) {
   } catch {
     // Older and newer schemas only have one of these columns.
   }
+}
+
+function ensureHarnessActionEvents(db: { exec: (sql: string) => void }) {
+  db.exec(`
+    create table if not exists harness_action_events (
+      id text primary key,
+      action_type text not null,
+      status text not null check (status in ('done', 'blocked')),
+      request_json text not null,
+      result_json text not null,
+      created_at text not null default current_timestamp
+    );
+    create index if not exists idx_harness_action_events_created on harness_action_events(created_at, id);
+  `);
 }
 
 function resolveTaskCycleId(

@@ -9,6 +9,7 @@ export function initDatabase(dbPath: string) {
     ensureProjects(db);
     ensureTaskConfig(db);
     ensureTaskCycles(db);
+    ensureHarnessActionEvents(db);
   });
 }
 
@@ -96,6 +97,20 @@ function ensureTaskConfig(db: Database) {
   if (!columns.some((column) => column.name === "config_json")) {
     db.exec("alter table tasks add column config_json text not null default '{}'");
   }
+}
+
+function ensureHarnessActionEvents(db: Database) {
+  db.exec(`
+    create table if not exists harness_action_events (
+      id text primary key,
+      action_type text not null,
+      status text not null check (status in ('done', 'blocked')),
+      request_json text not null,
+      result_json text not null,
+      created_at text not null default current_timestamp
+    )
+  `);
+  db.exec("create index if not exists idx_harness_action_events_created on harness_action_events(created_at, id)");
 }
 
 function parseStringArray(value: string) {

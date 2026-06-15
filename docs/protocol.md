@@ -372,6 +372,38 @@ The harness also needs a supervisor layer above individual runner processes. The
 
 A task lease is not complete until an attempt exists. If a runner exits after leasing a task but before recording or starting an attempt, the next runner loop must reclaim that task back to `todo`. This keeps the queue drainable even when a start hook, process, or host session exits in the middle of the handoff.
 
+## Harness Actions
+
+Some repairs are system-level database actions, not ordinary worker edits. A worker in an isolated worktree must not write the root harness database directly. Instead it should request a fixed `HarnessAction` from a DB-writable harness process.
+
+The direct tool is:
+
+```text
+orbs action --action-json '{"type":"prepareRunDrain","runId":"run_..."}'
+```
+
+The proxy tool is:
+
+```text
+orbs action-server --host 127.0.0.1 --port 7332
+orbs action-request --url http://127.0.0.1:7332 --action-json '{"type":"prepareRunDrain","runId":"run_..."}'
+```
+
+`action-server` may be protected with `--token` or `ORBS_ACTION_TOKEN`; `action-request` sends the same token. The server is intended to run from the main project process, while subagents in worktrees only call `action-request`.
+
+Supported actions:
+
+```json
+{ "type": "reclaimRunningTasks", "runId": "run_..." }
+{ "type": "retryTask", "taskId": "task_...", "reason": "optional" }
+{ "type": "markRunTodo", "runId": "run_...", "reason": "optional" }
+{ "type": "prepareRunDrain", "runId": "run_...", "maxTries": 3, "reason": "optional" }
+```
+
+`prepareRunDrain` reclaims orphaned task leases, marks the run `todo`, and creates or retries a bounded `goal-review` task when the queue is otherwise empty. It does not mark a run complete and does not weaken the verifier contract.
+
+Every action writes a `harness_action_events` audit row with the validated request, result, checks, artifacts, and problems. Verifiers should cite these rows when checking whether a system-level repair actually happened.
+
 Commit hooks should be explicit and opt-in. The default stop hook behavior should inspect and summarize, not create commits.
 
 The `create-tasks` stop hook reads `nextTasks` from the subagent output and inserts those tasks into the harness database. If a planned task omits `dependsOn`, the hook makes it depend on the planner task that produced it. When it creates tasks, it returns `continue`.

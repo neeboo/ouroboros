@@ -1,4 +1,4 @@
-import type { RunOverview } from "@ouroboros/harness";
+import type { RunOverview, RunStatusCounts } from "@ouroboros/harness";
 import { isAbsolute, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -9,6 +9,13 @@ interface DashboardActionResult {
   status?: string;
   interrupted?: number;
   pid?: number;
+}
+
+interface DashboardIntakeAttachment {
+  name?: string;
+  type?: string;
+  size?: number;
+  content?: string;
 }
 
 interface DashboardActions {
@@ -380,19 +387,19 @@ export function dashboardHtml(input: { runId: string }) {
       text-overflow: ellipsis;
       white-space: nowrap;
     }
-    .goal-composer {
+    .intake-composer {
       display: grid;
       gap: 8px;
       margin-top: 16px;
     }
-    .goal-label {
+    .intake-label {
       color: #bab9b2;
       font-size: 11px;
       font-weight: 760;
       letter-spacing: 0.08em;
       text-transform: uppercase;
     }
-    .goal-input {
+    .intake-input {
       width: 100%;
       min-height: 72px;
       resize: vertical;
@@ -406,14 +413,50 @@ export function dashboardHtml(input: { runId: string }) {
       font-size: 13px;
       line-height: 1.45;
     }
-    .goal-input:focus {
+    .intake-input:focus {
       border-color: rgba(255, 255, 255, 0.32);
       background: rgba(18, 18, 18, 0.44);
     }
-    .goal-actions {
+    .intake-actions {
       display: grid;
-      grid-template-columns: 1fr 1fr;
+      grid-template-columns: auto auto 1fr auto;
       gap: 8px;
+      align-items: center;
+    }
+    .attachment-chips {
+      min-height: 24px;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+    }
+    .attachment-chip {
+      max-width: 100%;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 4px 8px;
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      border-radius: 999px;
+      color: #d7d6cf;
+      background: rgba(255, 255, 255, 0.06);
+      font-size: 11px;
+      line-height: 1.3;
+    }
+    .attachment-chip span {
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .attachment-chip button {
+      width: 18px;
+      height: 18px;
+      padding: 0;
+      border: 0;
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.08);
+      color: inherit;
+      cursor: pointer;
     }
     .plain-button {
       min-width: 0;
@@ -1340,14 +1383,17 @@ export function dashboardHtml(input: { runId: string }) {
           <div class="project-name" data-project-name>Project Workspace</div>
           <div class="project-root" data-project-root></div>
         </div>
-        <form class="goal-composer" id="goal-composer">
-          <label class="goal-label" for="goal-input">New goal</label>
-          <textarea class="goal-input" id="goal-input" name="goal" placeholder="Describe a new goal or change request"></textarea>
-          <div class="goal-actions">
-            <button class="plain-button" type="submit" data-goal-action="add">Add goal</button>
-            <button class="plain-button secondary" type="submit" data-goal-action="interrupt">Interrupt + replan</button>
+        <form class="intake-composer" id="intake-composer">
+          <label class="intake-label" for="intake-input">New intake</label>
+          <input id="attachment-input" type="file" multiple hidden>
+          <div class="attachment-chips" id="attachment-chips" aria-live="polite"></div>
+          <textarea class="intake-input" id="intake-input" name="prompt" placeholder="Describe the next goal or change request"></textarea>
+          <div class="intake-actions">
+            <button class="plain-button secondary" type="button" data-attach-files>+</button>
+            <button class="plain-button secondary" type="button" data-clear-attachments>Clear</button>
+            <div class="form-status" id="intake-form-status"></div>
+            <button class="plain-button" type="submit" data-send-intake>Send</button>
           </div>
-          <div class="form-status" id="goal-form-status"></div>
         </form>
       </div>
       <section class="sidebar-stats" id="sidebar-stats"></section>
@@ -1487,6 +1533,7 @@ export function dashboardHtml(input: { runId: string }) {
     let latestOverview = null;
     let selectedChangedFilePath = null;
     const diffByPath = new Map();
+    let attachments = [];
     const resolvedBlockedTaskIdsFor = (tasks) => {
       const repairsByParent = new Map();
       for (const task of tasks) {
@@ -1913,6 +1960,31 @@ export function dashboardHtml(input: { runId: string }) {
       if (text.startsWith("{") && text.includes('"status":"done"')) return "";
       return compact(text, 900);
     };
+    const renderSupervisor = (overview) => {
+      const supervisor = overview.supervisor;
+      const status = supervisor?.status || "idle";
+      const globalRuns = overview.globalRuns || {};
+      const todoRuns = globalRuns.todo || 0;
+      const runningRuns = globalRuns.running || 0;
+      const output = String(supervisor?.lastOutput || "").trim();
+      const canStart = status !== "running" && (todoRuns > 0 || runningRuns > 0);
+      const canStop = status === "running";
+      const statusClass = status === "running" ? "running" : todoRuns || runningRuns ? "todo" : "done";
+      return '<section class="inspector-card" data-inspector-section="supervisor"><h2>Supervisor</h2>' +
+        '<div class="current-task"><div class="current-task-title">Global supervisor</div><div class="current-task-meta">' +
+        escapeHtml(todoRuns) + ' todo run' + (todoRuns === 1 ? "" : "s") + ' · ' +
+        escapeHtml(runningRuns) + ' running run' + (runningRuns === 1 ? "" : "s") +
+        ' · <span class="status-text ' + escapeHtml(statusClass) + '">' + escapeHtml(status) + '</span>' +
+        (supervisor?.pid ? '<br><span class="code-meta">pid ' + escapeHtml(supervisor.pid) + '</span>' : '') +
+        (supervisor?.exitCode !== undefined && supervisor?.exitCode !== null ? '<br><span class="code-meta">exit ' + escapeHtml(supervisor.exitCode) + '</span>' : '') +
+        '</div></div>' +
+        (output ? '<div class="stream-output">' + escapeHtml(compact(output, 900)) + '</div>' : '') +
+        (canStart || canStop ? '<div class="control-row">' +
+          (canStart ? '<button class="plain-button" data-start-supervisor>Start supervisor</button>' : '') +
+          (canStop ? '<button class="plain-button danger" data-stop-supervisor>Stop supervisor</button>' : '') +
+        '</div>' : '') +
+        '</section>';
+    };
     const renderRunner = (overview) => {
       const runner = overview.runner;
       const issue = latestRunnerSignal(overview);
@@ -1951,6 +2023,38 @@ export function dashboardHtml(input: { runId: string }) {
       if (!response.ok) throw new Error(payload.error || "request failed");
       return payload;
     };
+    const attachmentMetaForFile = (file) => ({
+      name: file.name,
+      type: file.type || "text/plain",
+      size: file.size,
+    });
+    const readAttachment = (file) => new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve({ ...attachmentMetaForFile(file), content: String(reader.result || "") });
+      reader.onerror = () => reject(reader.error || new Error("attachment read failed"));
+      reader.readAsText(file);
+    });
+    const renderAttachmentChips = () => {
+      const node = document.getElementById("attachment-chips");
+      if (!node) return;
+      node.innerHTML = attachments.map((attachment, index) =>
+        '<div class="attachment-chip" data-attachment-index="' + index + '"><span title="' + escapeHtml(attachment.name) + '">' +
+        escapeHtml(attachment.name || "attachment") + '</span><button type="button" aria-label="Remove attachment" data-remove-attachment="' + index + '">x</button></div>'
+      ).join("");
+    };
+    const intakeDocument = (prompt, attachmentList) => {
+      const sections = ["Prompt:\\n" + prompt.trim()];
+      for (const attachment of attachmentList) {
+        sections.push([
+          "Attachment: " + (attachment.name || "attachment"),
+          "type: " + (attachment.type || "text/plain"),
+          "size: " + Number(attachment.size || 0),
+          "",
+          String(attachment.content || ""),
+        ].join("\\n"));
+      }
+      return sections.join("\\n\\n---\\n\\n");
+    };
     const fetchDiffForChangedFile = async (path) => {
       if (!path) return;
       diffByPath.set(path, { status: "loading" });
@@ -1966,10 +2070,11 @@ export function dashboardHtml(input: { runId: string }) {
       if (latestOverview) render(latestOverview);
     };
     const refreshOverview = () => overviewWorker.postMessage({ type: "refresh" });
-    const setGoalFormStatus = (message) => {
-      const node = document.getElementById("goal-form-status");
+    const setIntakeStatus = (message) => {
+      const node = document.getElementById("intake-form-status");
       if (node) node.textContent = message;
     };
+    const setGoalFormStatus = setIntakeStatus;
     const renderedHtml = new Map();
     const setTextIfChanged = (id, value) => {
       const node = document.getElementById(id);
@@ -2153,7 +2258,7 @@ export function dashboardHtml(input: { runId: string }) {
       'let runId = null;',
       'let apiBase = "";',
       'let timer = null;',
-      'const shouldPoll = (overview) => overview.runner?.status === "running" || overview.run?.status !== "done" || overview.tasks.some((task) => task.status === "todo" || task.status === "running") || overview.sessions.some((session) => session.status === "running");',
+      'const shouldPoll = (overview) => overview.supervisor?.status === "running" || overview.runner?.status === "running" || overview.run?.status !== "done" || (overview.globalRuns?.todo || 0) > 0 || (overview.globalRuns?.running || 0) > 0 || overview.sessions.some((session) => session.status === "running");',
       'const schedule = (delay) => { if (timer) clearTimeout(timer); timer = setTimeout(refresh, delay); };',
       'async function refresh() {',
       '  if (!runId) return;',
@@ -2187,6 +2292,7 @@ export function dashboardHtml(input: { runId: string }) {
     function render(overview) {
       latestOverview = overview;
       const taskCounts = byStatus(overview.tasks);
+      const globalRuns = overview.globalRuns || {};
       const sessionCounts = byStatus(overview.sessions);
       const goalGroups = buildGoalGroups(overview);
       const activeGroups = goalGroups.filter((group) => group.activeTasks.length > 0);
@@ -2214,14 +2320,16 @@ export function dashboardHtml(input: { runId: string }) {
       setHtmlIfChanged("sidebar-stats", [
         ["Goals", goalGroups.length],
         ["Active goals", activeGroups.length],
+        ["Global todo runs", globalRuns.todo || 0],
+        ["Global running runs", globalRuns.running || 0],
         ["Queued tasks", (taskCounts.todo || 0) + (taskCounts.running || 0)],
         ["Running sessions", sessionCounts.running || 0]
       ].map(([label, value]) => '<div class="stat"><b>' + value + '</b><span>' + label + '</span></div>').join(""));
-      setHtmlIfChanged("active-goal-list", activeGroups.length ? activeGroups.map(goalRow).join("") : '<div class="empty"><strong>Idle</strong>No active tasks. Open a blocked history goal and rerun it, or add a new goal.</div>');
+      setHtmlIfChanged("active-goal-list", activeGroups.length ? activeGroups.map(goalRow).join("") : '<div class="empty"><strong>Idle</strong>No active tasks. Describe the next goal in the composer.</div>');
       setHtmlIfChanged("history-goal-list", [...goalGroups].reverse().filter((group) => group.activeTasks.length === 0).map(goalRow).join(""));
       patchWorkspace(renderWorkspace(selectedGroup));
       mountReactFlowCanvas();
-      patchInspectorPanel(renderInspector(overview, selectedGroup), renderRunner(overview));
+      patchInspectorPanel(renderInspector(overview, selectedGroup), renderSupervisor(overview) + renderRunner(overview));
     }
     document.addEventListener("click", (event) => {
       if (!event.target || !event.target.closest) return;
@@ -2244,6 +2352,25 @@ export function dashboardHtml(input: { runId: string }) {
         selectedChangedFilePath = changedFileButton.getAttribute("data-changed-file-path");
         if (latestOverview) render(latestOverview);
         fetchDiffForChangedFile(selectedChangedFilePath);
+        return;
+      }
+      const attachButton = event.target.closest("[data-attach-files]");
+      if (attachButton) {
+        document.getElementById("attachment-input")?.click();
+        return;
+      }
+      const clearAttachmentsButton = event.target.closest("[data-clear-attachments]");
+      if (clearAttachmentsButton) {
+        attachments = [];
+        renderAttachmentChips();
+        setIntakeStatus("");
+        return;
+      }
+      const removeAttachmentButton = event.target.closest("[data-remove-attachment]");
+      if (removeAttachmentButton) {
+        const index = Number(removeAttachmentButton.getAttribute("data-remove-attachment"));
+        attachments = attachments.filter((_, attachmentIndex) => attachmentIndex !== index);
+        renderAttachmentChips();
         return;
       }
       const stopButton = event.target.closest("[data-stop-attempt-id]");
@@ -2283,6 +2410,30 @@ export function dashboardHtml(input: { runId: string }) {
           .finally(() => { stopRunnerButton.disabled = false; });
         return;
       }
+      const startSupervisorButton = event.target.closest("[data-start-supervisor]");
+      if (startSupervisorButton) {
+        startSupervisorButton.disabled = true;
+        postJson("/api/supervisor/start", {})
+          .then(() => {
+            setIntakeStatus("Supervisor started.");
+            refreshOverview();
+          })
+          .catch((error) => setIntakeStatus(error.message))
+          .finally(() => { startSupervisorButton.disabled = false; });
+        return;
+      }
+      const stopSupervisorButton = event.target.closest("[data-stop-supervisor]");
+      if (stopSupervisorButton) {
+        stopSupervisorButton.disabled = true;
+        postJson("/api/supervisor/stop", {})
+          .then(() => {
+            setIntakeStatus("Supervisor stopped.");
+            refreshOverview();
+          })
+          .catch((error) => setIntakeStatus(error.message))
+          .finally(() => { stopSupervisorButton.disabled = false; });
+        return;
+      }
       const rerunButton = event.target.closest("[data-rerun-task-id]");
       if (rerunButton) {
         const taskId = rerunButton.getAttribute("data-rerun-task-id");
@@ -2313,30 +2464,50 @@ export function dashboardHtml(input: { runId: string }) {
       writeDashboardState({ selectedGoalId, workspaceMode, workspaceTitleExpanded });
       if (latestOverview) render(latestOverview);
     });
-    document.getElementById("goal-composer").addEventListener("submit", (event) => {
+    document.getElementById("attachment-input").addEventListener("change", async (event) => {
+      const input = event.currentTarget;
+      const files = Array.from(input.files || []);
+      if (files.length === 0) return;
+      setIntakeStatus("Reading attachments...");
+      try {
+        const read = await Promise.all(files.map(readAttachment));
+        attachments = attachments.concat(read);
+        renderAttachmentChips();
+        setIntakeStatus(attachments.length + " attachment" + (attachments.length === 1 ? "" : "s") + " ready.");
+      } catch (error) {
+        setIntakeStatus(error && error.message ? error.message : String(error));
+      } finally {
+        input.value = "";
+      }
+    });
+    document.getElementById("intake-composer").addEventListener("submit", (event) => {
       event.preventDefault();
-      const submitter = event.submitter;
-      const action = submitter?.getAttribute("data-goal-action") || "add";
-      const input = document.getElementById("goal-input");
-      const goal = input.value.trim();
-      if (!goal) {
-        setGoalFormStatus("Write a goal first.");
+      const submitter = event.submitter || document.querySelector("[data-send-intake]");
+      const input = document.getElementById("intake-input");
+      const prompt = input.value.trim();
+      if (!prompt && attachments.length === 0) {
+        setIntakeStatus("Write a prompt or attach a file first.");
         return;
       }
-      submitter.disabled = true;
-      setGoalFormStatus(action === "interrupt" ? "Interrupting and replanning..." : "Adding goal...");
-      const path = action === "interrupt" ? "/api/runs/" + encodeURIComponent(runId) + "/interrupt" : "/api/runs/" + encodeURIComponent(runId) + "/goals";
-      postJson(path, { goal })
+      if (submitter) submitter.disabled = true;
+      setIntakeStatus("Creating intake run...");
+      postJson("/api/runs/" + encodeURIComponent(runId) + "/intake", {
+        prompt,
+        attachments,
+        document: intakeDocument(prompt, attachments),
+      })
         .then((payload) => {
           input.value = "";
-          selectedGoalId = payload.taskId || selectedGoalId;
+          attachments = [];
+          renderAttachmentChips();
+          selectedGoalId = payload.runId || payload.taskId || selectedGoalId;
           workspaceTitleExpanded = false;
           writeDashboardState({ selectedGoalId, workspaceMode, workspaceTitleExpanded });
-          setGoalFormStatus(action === "interrupt" ? "Interrupted. Planner queued." : "Planner queued.");
+          setIntakeStatus("Intake planner queued.");
           refreshOverview();
         })
-        .catch((error) => setGoalFormStatus(error.message))
-        .finally(() => { submitter.disabled = false; });
+        .catch((error) => setIntakeStatus(error.message))
+        .finally(() => { if (submitter) submitter.disabled = false; });
     });
     overviewWorker.postMessage({ type: "start", runId, apiBase: window.location.origin });
   </script>
@@ -2348,6 +2519,7 @@ export function serveDashboard(input: {
   runId: string;
   port: number;
   overview: () => RunOverview;
+  globalRunCounts?: () => RunStatusCounts;
   renderTaskPrompt: (taskId: string) => string;
   runnerStatus?: () => DashboardRunnerStatus | null;
   supervisorStatus?: () => DashboardRunnerStatus | null;
@@ -2367,6 +2539,7 @@ export async function handleDashboardRequest(
   input: {
     runId: string;
     overview: () => RunOverview;
+    globalRunCounts?: () => RunStatusCounts;
     renderTaskPrompt: (taskId: string) => string;
     runnerStatus?: () => DashboardRunnerStatus | null;
     supervisorStatus?: () => DashboardRunnerStatus | null;
@@ -2398,7 +2571,8 @@ export async function handleDashboardRequest(
       overview = input.overview();
       runner = input.runnerStatus?.() ?? runner;
     }
-    return Response.json({ ...overview, runner, supervisor: input.supervisorStatus?.() ?? null });
+    const globalRuns = input.globalRunCounts?.() ?? { todo: 0, running: 0, done: 0, blocked: 0 };
+    return Response.json({ ...overview, runner, supervisor: input.supervisorStatus?.() ?? null, globalRuns });
   }
   if (url.pathname === `/api/runs/${input.runId}/changed-files`) {
     return Response.json(changedFilesPayload(input.overview()));
@@ -2430,6 +2604,32 @@ export async function handleDashboardRequest(
         throw new Error("dashboard runner stop is not configured");
       }
       return input.actions.stopRunner();
+    });
+  }
+  if (request.method === "POST" && url.pathname === "/api/supervisor/start") {
+    return withDashboardAction(async () => {
+      if (!input.actions?.startSupervisor) {
+        throw new Error("dashboard supervisor start is not configured");
+      }
+      return input.actions.startSupervisor();
+    });
+  }
+  if (request.method === "POST" && url.pathname === "/api/supervisor/stop") {
+    return withDashboardAction(async () => {
+      if (!input.actions?.stopSupervisor) {
+        throw new Error("dashboard supervisor stop is not configured");
+      }
+      return input.actions.stopSupervisor();
+    });
+  }
+  if (request.method === "POST" && url.pathname === `/api/runs/${input.runId}/intake`) {
+    return withDashboardAction(async () => {
+      if (!input.actions?.createIntake) {
+        throw new Error("dashboard intake creation is not configured");
+      }
+      const body = await readJsonBody(request);
+      const prompt = optionalBodyString(body, "prompt") || "Dashboard intake";
+      return input.actions.createIntake(dashboardIntakeDocument(body), prompt);
     });
   }
   if (request.method === "POST" && url.pathname === `/api/runs/${input.runId}/goals`) {
@@ -2614,6 +2814,43 @@ function requiredBodyString(body: Record<string, unknown>, key: string) {
     throw new Error(`${key} is required`);
   }
   return value.trim();
+}
+
+function optionalBodyString(body: Record<string, unknown>, key: string) {
+  const value = body[key];
+  return typeof value === "string" ? value.trim() : "";
+}
+
+function bodyAttachments(body: Record<string, unknown>) {
+  const attachments = body.attachments;
+  if (!Array.isArray(attachments)) return [];
+  return attachments.flatMap((attachment): DashboardIntakeAttachment[] => {
+    if (!attachment || typeof attachment !== "object" || Array.isArray(attachment)) return [];
+    const candidate = attachment as Record<string, unknown>;
+    return [{
+      name: typeof candidate.name === "string" ? candidate.name : "attachment",
+      type: typeof candidate.type === "string" ? candidate.type : "text/plain",
+      size: typeof candidate.size === "number" && Number.isFinite(candidate.size) ? candidate.size : 0,
+      content: typeof candidate.content === "string" ? candidate.content : "",
+    }];
+  });
+}
+
+function dashboardIntakeDocument(body: Record<string, unknown>) {
+  const explicitDocument = optionalBodyString(body, "document");
+  if (explicitDocument) return explicitDocument;
+  const prompt = requiredBodyString(body, "prompt");
+  const sections = [`Prompt:\n${prompt}`];
+  for (const attachment of bodyAttachments(body)) {
+    sections.push([
+      `Attachment: ${attachment.name || "attachment"}`,
+      `type: ${attachment.type || "text/plain"}`,
+      `size: ${Number(attachment.size || 0)}`,
+      "",
+      attachment.content || "",
+    ].join("\n"));
+  }
+  return sections.join("\n\n---\n\n");
 }
 
 function escapeHtml(value: string) {

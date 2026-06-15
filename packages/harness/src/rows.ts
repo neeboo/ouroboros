@@ -99,3 +99,12 @@ export interface PromptTemplateRow {
   key: string;
   content_md: string;
 }
+
+export interface HarnessActionEventRow {
+  id: string;
+  action_type: string;
+  status: "done" | "blocked";
+  request_json: string;
+  result_json: string;
+  created_at: string;
+}

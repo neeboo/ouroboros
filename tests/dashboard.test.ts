@@ -168,7 +168,7 @@ verifyDashboardOverflow("desktop and mobile widths");
 `;
 
 describe("dashboard", () => {
-  test("renders Codex-style goal navigation for active and history goals", () => {
+  test("renders Codex-style intake composer and goal navigation", () => {
     const html = dashboardHtml({ runId: "run_123" });
 
     expect(html).toContain("Active Goals");
@@ -177,17 +177,33 @@ describe("dashboard", () => {
     expect(html).toContain("todo");
     expect(html).toContain("running");
     expect(html).toContain("/prompt");
-    expect(html).toContain('id="goal-composer"');
-    expect(html).toContain("Interrupt + replan");
-    expect(html).toContain("No active tasks. Open a blocked history goal and rerun it, or add a new goal.");
+    expect(html).toContain('id="intake-composer"');
+    expect(html).toContain('id="attachment-input"');
+    expect(html).toContain('id="attachment-chips"');
+    expect(html).toContain('id="intake-input"');
+    expect(html).toContain('data-attach-files');
+    expect(html).toContain('data-clear-attachments');
+    expect(html).toContain('data-send-intake');
+    expect(html).toContain("attachmentMetaForFile");
+    expect(html).toContain("readAttachment");
+    expect(html).toContain("attachments.map");
+    expect(html).toContain('/api/runs/" + encodeURIComponent(runId) + "/intake"');
+    expect(html).toContain("No active tasks. Describe the next goal in the composer.");
+    expect(html).not.toContain('id="goal-composer"');
+    expect(html).not.toContain("Interrupt + replan");
+    expect(html).not.toContain('data-goal-action="add"');
     expect(html).toContain("data-stop-attempt-id");
     expect(html).toContain("Stop current task");
     expect(html).toContain("data-rerun-task-id");
     expect(html).toContain("Rerun selected task");
     expect(html).toContain("data-start-runner");
     expect(html).toContain("data-stop-runner");
+    expect(html).toContain("data-start-supervisor");
+    expect(html).toContain("data-stop-supervisor");
     expect(html).toContain("Start background runner");
     expect(html).toContain("Stop background runner");
+    expect(html).toContain("Start supervisor");
+    expect(html).toContain("Stop supervisor");
     expect(html).toContain("Connection timed out");
     expect(html).toContain("latestRunnerSignal");
   });
@@ -308,7 +324,7 @@ describe("dashboard", () => {
     expect(html).toContain("workspaceTitleExpanded: parsed.workspaceTitleExpanded === true");
     expect(html).toContain("workspaceTitleExpanded: state.workspaceTitleExpanded === true");
     expect(html).toContain("writeDashboardState({ selectedGoalId, workspaceMode, workspaceTitleExpanded });");
-    expect(html).toContain("selectedGoalId = payload.taskId || selectedGoalId;");
+    expect(html).toContain("selectedGoalId = payload.runId || payload.taskId || selectedGoalId;");
     expect(html).toContain("workspaceTitleExpanded = false;");
     expect(html).not.toContain('localStorage.setItem("selectedGoalId"');
     expect(html).not.toContain('localStorage.getItem("selectedGoalId"');
@@ -703,6 +719,9 @@ describe("dashboard", () => {
     expect(html).toContain("new Worker");
     expect(html).toContain("new Blob");
     expect(html).toContain('overview.runner?.status === "running"');
+    expect(html).toContain('overview.supervisor?.status === "running"');
+    expect(html).toContain("overview.globalRuns?.todo");
+    expect(html).not.toContain("overview.tasks.some((task) => task.status === \"todo\" || task.status === \"running\")");
     expect(html).not.toContain("setInterval");
   });
 
@@ -812,6 +831,113 @@ describe("dashboard", () => {
       expect(response.status).toBe(200);
       expect(starts).toBe(1);
       expect(body.runner).toEqual({ status: "running", pid: 4321 });
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("serves global supervisor overview state and intake actions", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "ouroboros-dashboard-supervisor-"));
+    const harness = new Harness(join(dir, "ouroboros.db"));
+    harness.init();
+    const runId = harness.createRun({ goal: "Observe global supervision" });
+    harness.createRun({ goal: "Queued sibling run" });
+    const runningRunId = harness.createRun({ goal: "Running sibling run" });
+    harness.updateRunStatus({ runId: runningRunId, status: "running" });
+    let supervisorStatus: { status: "idle" | "running" | "exited"; pid: number | null; lastOutput: string } = {
+      status: "idle",
+      pid: null,
+      lastOutput: "waiting for work",
+    };
+    let intakeDocument = "";
+    let intakeTitle = "";
+    let supervisorStarts = 0;
+    let supervisorStops = 0;
+    const dashboardInput = {
+      runId,
+      overview: () => harness.getRunOverview({ runId }),
+      renderTaskPrompt: () => "",
+      globalRunCounts: () => harness.countRunsByStatus(),
+      supervisorStatus: () => supervisorStatus,
+      actions: {
+        startSupervisor: () => {
+          supervisorStarts += 1;
+          supervisorStatus = { status: "running", pid: 2468, lastOutput: "supervising runs" };
+          return { status: "running", pid: 2468 };
+        },
+        stopSupervisor: () => {
+          supervisorStops += 1;
+          supervisorStatus = { status: "exited", pid: 2468, lastOutput: "stopped by dashboard" };
+          return { status: "stopped", pid: 2468 };
+        },
+        createIntake: (document: string, title?: string) => {
+          intakeDocument = document;
+          intakeTitle = title || "";
+          return { runId: "run_intake_child", status: "todo" };
+        },
+      },
+    };
+
+    try {
+      const overviewResponse = await handleDashboardRequest(
+        new Request(`http://localhost/api/runs/${runId}/overview`),
+        dashboardInput,
+      );
+      const overviewBody = await overviewResponse.json();
+      expect(overviewResponse.status).toBe(200);
+      expect(overviewBody.globalRuns).toEqual({ todo: 2, running: 1, done: 0, blocked: 0 });
+      expect(overviewBody.supervisor).toEqual({ status: "idle", pid: null, lastOutput: "waiting for work" });
+
+      const intakeResponse = await handleDashboardRequest(
+        new Request(`http://localhost/api/runs/${runId}/intake`, {
+          method: "POST",
+          body: JSON.stringify({
+            prompt: "Plan a React dashboard migration",
+            attachments: [
+              {
+                name: "notes.md",
+                type: "text/markdown",
+                size: 128,
+                content: "# Notes\nUse one composer.",
+              },
+            ],
+          }),
+        }),
+        dashboardInput,
+      );
+      const intakeBody = await intakeResponse.json();
+      expect(intakeResponse.status).toBe(200);
+      expect(intakeBody.runId).toBe("run_intake_child");
+      expect(intakeTitle).toBe("Plan a React dashboard migration");
+      expect(intakeDocument).toContain("Plan a React dashboard migration");
+      expect(intakeDocument).toContain("Attachment: notes.md");
+      expect(intakeDocument).toContain("type: text/markdown");
+      expect(intakeDocument).toContain("size: 128");
+      expect(intakeDocument).toContain("# Notes");
+
+      const startResponse = await handleDashboardRequest(
+        new Request(`http://localhost/api/supervisor/start`, {
+          method: "POST",
+          body: JSON.stringify({}),
+        }),
+        dashboardInput,
+      );
+      const startBody = await startResponse.json();
+      expect(startResponse.status).toBe(200);
+      expect(startBody).toEqual({ status: "running", pid: 2468 });
+      expect(supervisorStarts).toBe(1);
+
+      const stopResponse = await handleDashboardRequest(
+        new Request(`http://localhost/api/supervisor/stop`, {
+          method: "POST",
+          body: JSON.stringify({}),
+        }),
+        dashboardInput,
+      );
+      const stopBody = await stopResponse.json();
+      expect(stopResponse.status).toBe(200);
+      expect(stopBody).toEqual({ status: "stopped", pid: 2468 });
+      expect(supervisorStops).toBe(1);
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

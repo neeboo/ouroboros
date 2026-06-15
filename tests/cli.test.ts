@@ -2123,6 +2123,46 @@ describe("CLI", () => {
     expect((await runCliJson("next-task", "--run-id", run.id)).id).toBe(task.id);
   });
 
+  test("applies harness actions from the CLI and records action events", async () => {
+    await runCli("init");
+    const run = await runCliJson("create-run", "--goal", "Repair leased task");
+    const task = await runCliJson(
+      "create-task",
+      "--run-id",
+      run.id,
+      "--role",
+      "worker",
+      "--goal",
+      "Recover lease",
+      "--prompt",
+      "Recover this task.",
+    );
+    new Harness(dbPath).leaseReadyTasks({
+      runId: run.id,
+      limit: 1,
+      sessionForTask: (leased) => `task-${leased.id}`,
+    });
+
+    const result = await runCliJson(
+      "action",
+      "--action-json",
+      JSON.stringify({ type: "reclaimRunningTasks", runId: run.id }),
+    );
+    const events = await runCliJson("action-events", "--limit", "1");
+
+    expect(result).toMatchObject({
+      status: "done",
+      actionType: "reclaimRunningTasks",
+      eventId: expect.any(String),
+    });
+    expect(result.artifacts).toContainEqual(expect.objectContaining({ kind: "reclaimed_task", taskId: task.id }));
+    expect((await runCliJson("next-task", "--run-id", run.id)).id).toBe(task.id);
+    expect(events[0]).toMatchObject({
+      actionType: "reclaimRunningTasks",
+      status: "done",
+    });
+  });
+
   async function runCli(...rawArgs: Array<string | Record<string, string>>) {
     const result = await runCliRaw(...rawArgs);
     if (result.exitCode !== 0) {

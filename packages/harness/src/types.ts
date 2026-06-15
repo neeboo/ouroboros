@@ -71,6 +71,17 @@ export interface ListRunsInput {
   limit?: number;
 }
 
+export type RunStatusCounts = Record<Status, number>;
+
+export interface HarnessActionEvent {
+  id: string;
+  actionType: string;
+  status: "done" | "blocked";
+  request: Record<string, unknown>;
+  result: Record<string, unknown>;
+  createdAt: string;
+}
+
 export type ExecutionThreadStatus = "running" | "done" | "blocked" | "interrupted" | "orphaned";
 
 export interface ExecutionThread {
@@ -338,4 +349,16 @@ export interface UpdateExecutionThreadInput {
 
 export interface ListExecutionThreadsInput {
   runId: string;
+}
+
+export interface RecordHarnessActionEventInput {
+  actionType: string;
+  status: "done" | "blocked";
+  request: Record<string, unknown>;
+  result: Record<string, unknown>;
+  id?: string;
+}
+
+export interface ListHarnessActionEventsInput {
+  limit?: number;
 }

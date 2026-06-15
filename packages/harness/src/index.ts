@@ -6,6 +6,8 @@ export {
 } from "./default-prompts";
 export { initDatabase, withDatabase } from "./database";
 export { makeId } from "./ids";
+export { applyHarnessAction, parseHarnessAction } from "./actions";
+export type { HarnessAction, HarnessActionResult } from "./actions";
 export type {
   Attempt,
   AttemptEvent,
@@ -20,7 +22,9 @@ export type {
   ExecutionThreadStatus,
   ExternalRef,
   GetRunOverviewInput,
+  HarnessActionEvent,
   LeaseReadyTasksInput,
+  ListHarnessActionEventsInput,
   Lesson,
   LessonKind,
   ListExecutionThreadsInput,
@@ -35,11 +39,13 @@ export type {
   PromptTemplate,
   RecordAttemptEventInput,
   RecordAttemptInput,
+  RecordHarnessActionEventInput,
   ReclaimedRunningTask,
   ReclaimRunningTasksInput,
   RetryTaskInput,
   Run,
   RunOverview,
+  RunStatusCounts,
   SetPromptTemplateInput,
   Status,
   Task,

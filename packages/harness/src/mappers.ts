@@ -1,10 +1,24 @@
 import { parseJson } from "./json";
-import type { Attempt, AttemptEvent, AttemptOutput, ExecutionThread, ExternalRef, Lesson, Project, PromptTemplate, Run, Task, TaskConfig } from "./types";
+import type {
+  Attempt,
+  AttemptEvent,
+  AttemptOutput,
+  ExecutionThread,
+  ExternalRef,
+  HarnessActionEvent,
+  Lesson,
+  Project,
+  PromptTemplate,
+  Run,
+  Task,
+  TaskConfig,
+} from "./types";
 import type {
   AttemptEventRow,
   AttemptRow,
   ExecutionThreadRow,
   ExternalRefRow,
+  HarnessActionEventRow,
   LessonRow,
   ProjectRow,
   PromptTemplateRow,
@@ -128,6 +142,17 @@ export function promptTemplateFromRow(row: PromptTemplateRow): PromptTemplate {
   return {
     key: row.key,
     contentMd: row.content_md,
+  };
+}
+
+export function harnessActionEventFromRow(row: HarnessActionEventRow): HarnessActionEvent {
+  return {
+    id: row.id,
+    actionType: row.action_type,
+    status: row.status,
+    request: parseJson<Record<string, unknown>>(row.request_json),
+    result: parseJson<Record<string, unknown>>(row.result_json),
+    createdAt: row.created_at,
   };
 }
 

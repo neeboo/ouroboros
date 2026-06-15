@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-import { Harness } from "@ouroboros/harness";
+import { applyHarnessAction, Harness } from "@ouroboros/harness";
 import type { AttemptOutput } from "@ouroboros/harness";
 import {
   buildTaskPrompt,
@@ -25,6 +25,7 @@ import { loadOuroborosConfig } from "./config";
 import { parseArray, parseObject, printJson } from "./json";
 import { checkLinearAccess, linkLinearIssue } from "./linear";
 import { serveDashboard } from "./dashboard";
+import { requestHarnessAction, serveHarnessActions } from "./action-server";
 import { join } from "node:path";
 import type { ExecutionThreadStatus, Task } from "@ouroboros/harness";
 
@@ -243,6 +244,46 @@ switch (parsed.command) {
       externalId,
       externalUrl,
     });
+    break;
+  }
+  case "action": {
+    harness.init();
+    const action = parseObject(required(parsed, "action-json"));
+    printJson(applyHarnessAction(harness, action));
+    break;
+  }
+  case "action-events": {
+    harness.init();
+    printJson(harness.listHarnessActionEvents({
+      limit: parsePositiveInteger(flag(parsed, "limit") ?? "50", "--limit"),
+    }));
+    break;
+  }
+  case "action-server": {
+    harness.init();
+    const host = flag(parsed, "host") ?? "127.0.0.1";
+    const port = parsePositiveInteger(flag(parsed, "port") ?? "7332", "--port");
+    const token = flag(parsed, "token") ?? process.env.ORBS_ACTION_TOKEN ?? null;
+    const server = serveHarnessActions({ harness, host, port, token });
+    printJson({
+      status: "running",
+      url: `http://${host}:${server.port}`,
+      host,
+      port: server.port,
+      tokenRequired: Boolean(token),
+    });
+    setInterval(() => {}, 60 * 60 * 1000);
+    await new Promise(() => {});
+    break;
+  }
+  case "action-request": {
+    const action = parseObject(required(parsed, "action-json"));
+    const result = await requestHarnessAction({
+      url: required(parsed, "url"),
+      action,
+      token: flag(parsed, "token") ?? process.env.ORBS_ACTION_TOKEN ?? null,
+    });
+    printJson(result);
     break;
   }
   case "linear-check": {
@@ -1224,6 +1265,7 @@ function createDashboardRuntime(input: {
         runId: input.runId,
         eventLimit: parsePositiveInteger(flag(parsed, "event-limit") ?? "25", "--event-limit"),
       }),
+    globalRunCounts: () => harness.countRunsByStatus(),
     runnerStatus,
     supervisorStatus,
     autoStartRunner: (overview, runner) => {
