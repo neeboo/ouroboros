@@ -10,6 +10,7 @@ export function initDatabase(dbPath: string) {
     ensureTaskConfig(db);
     ensureTaskCycles(db);
     ensureHarnessActionEvents(db);
+    ensureRunLifecycleGuards(db);
   });
 }
 
@@ -111,6 +112,42 @@ function ensureHarnessActionEvents(db: Database) {
     )
   `);
   db.exec("create index if not exists idx_harness_action_events_created on harness_action_events(created_at, id)");
+}
+
+function ensureRunLifecycleGuards(db: Database) {
+  db.exec(`
+    update runs
+    set status = 'todo', updated_at = current_timestamp
+    where status = 'done'
+      and exists (
+        select 1
+        from tasks
+        where tasks.run_id = runs.id and tasks.status in ('todo', 'running')
+      )
+  `);
+  db.exec(`
+    create trigger if not exists reopen_done_run_after_active_task_insert
+    after insert on tasks
+    when new.status in ('todo', 'running')
+    begin
+      update runs
+      set status = 'todo', updated_at = current_timestamp
+      where id = new.run_id and status = 'done';
+    end;
+  `);
+  db.exec(`
+    create trigger if not exists prevent_done_run_with_active_tasks
+    before update of status on runs
+    when new.status = 'done'
+      and exists (
+        select 1
+        from tasks
+        where run_id = new.id and status in ('todo', 'running')
+      )
+    begin
+      select raise(abort, 'cannot mark run done while active tasks exist');
+    end;
+  `);
 }
 
 function parseStringArray(value: string) {

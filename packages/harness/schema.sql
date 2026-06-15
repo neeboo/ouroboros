@@ -40,6 +40,27 @@ create table if not exists tasks (
 
 create index if not exists idx_tasks_run_status on tasks(run_id, status);
 
+create trigger if not exists reopen_done_run_after_active_task_insert
+after insert on tasks
+when new.status in ('todo', 'running')
+begin
+  update runs
+  set status = 'todo', updated_at = current_timestamp
+  where id = new.run_id and status = 'done';
+end;
+
+create trigger if not exists prevent_done_run_with_active_tasks
+before update of status on runs
+when new.status = 'done'
+  and exists (
+    select 1
+    from tasks
+    where run_id = new.id and status in ('todo', 'running')
+  )
+begin
+  select raise(abort, 'cannot mark run done while active tasks exist');
+end;
+
 create table if not exists attempts (
   id text primary key,
   task_id text not null references tasks(id) on delete cascade,

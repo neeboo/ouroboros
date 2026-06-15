@@ -78,6 +78,35 @@ describe("Harness", () => {
     });
   });
 
+  test("prevents marking a run done while active tasks remain", () => {
+    const runId = harness.createRun({ goal: "Build loop" });
+    harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Implement active work",
+      prompt: "Implement.",
+    });
+
+    expect(() => harness.updateRunStatus({ runId, status: "done" })).toThrow(
+      "cannot mark run done while active tasks exist",
+    );
+    expect(harness.getRun(runId)?.status).toBe("todo");
+  });
+
+  test("reopens a done run when a new active task is created", () => {
+    const runId = harness.createRun({ goal: "Build loop" });
+    harness.updateRunStatus({ runId, status: "done" });
+
+    harness.createTask({
+      runId,
+      role: "verifier",
+      goal: "Verify late evidence",
+      prompt: "Verify.",
+    });
+
+    expect(harness.getRun(runId)?.status).toBe("todo");
+  });
+
   test("creates projects and binds runs to project metadata", () => {
     const projectId = harness.createProject({
       name: "Ouroboros",

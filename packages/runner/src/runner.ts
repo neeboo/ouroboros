@@ -44,6 +44,7 @@ export async function runNextReadyTask(input: RunNextReadyTaskInput) {
     input: { prompt, model: resolvedModel },
     output,
   });
+  applyPostAttemptRunEffects(input.harness, input.runId, task, output);
   if (decision === "retry") {
     input.harness.retryTask({ taskId: task.id });
   }
@@ -115,6 +116,7 @@ export async function runReadyTasks(input: RunReadyTasksInput) {
         input: { prompt, sessionName, model: resolvedModel },
         output,
       });
+      applyPostAttemptRunEffects(input.harness, input.runId, task, output);
       if (decision === "retry") {
         input.harness.retryTask({ taskId: task.id });
       }
@@ -166,6 +168,17 @@ function latestDependencyAttempts(harness: Pick<Harness, "listLatestAttemptsForT
     return [];
   }
   return harness.listLatestAttemptsForTasks(task.dependsOn);
+}
+
+function applyPostAttemptRunEffects(
+  harness: Pick<Harness, "updateRunStatus">,
+  runId: string,
+  task: Pick<Task, "role">,
+  output: { status: string; runDecision?: string },
+) {
+  if (task.role === "goal-review" && output.status === "done" && output.runDecision === "complete") {
+    harness.updateRunStatus({ runId, status: "done" });
+  }
 }
 
 function hooksForTask(globalHooks: StopHook[] | undefined, hooksByRole: Record<string, StopHook[]> | undefined, task: Task) {

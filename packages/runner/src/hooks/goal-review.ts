@@ -3,7 +3,7 @@ import type { StopHook } from "../types";
 
 const MAX_GOAL_REVIEW_NEXT_TASKS = 5;
 
-export function createGoalReviewDecisionHook(options: { harness: Harness }): StopHook {
+export function createGoalReviewDecisionHook(_options: { harness: Harness }): StopHook {
   return ({ run, task, output }) => {
     if (task.role !== "goal-review") {
       return { decision: "exit" };
@@ -33,7 +33,6 @@ export function createGoalReviewDecisionHook(options: { harness: Harness }): Sto
           problems: ["complete goal-review must not include nextTasks"],
         };
       }
-      options.harness.updateRunStatus({ runId: run.id, status: "done" });
       return { decision: "exit", artifacts };
     }
 
