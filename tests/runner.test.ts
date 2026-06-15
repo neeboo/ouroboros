@@ -1022,6 +1022,7 @@ describe("runner", () => {
 
     const attempt = harness.getAttempt(results[0].attemptId)!;
     const verifier = harness.nextReadyTask(runId)!;
+    expect(verifier.worktreePath).toBe("/tmp/ouroboros-source-worktree");
     expect(verifier.prompt).toContain("Source Worktree Path: /tmp/ouroboros-source-worktree");
     expect(verifier.prompt).toContain('"worktreePath": "/tmp/ouroboros-source-worktree"');
     expect(attempt.output.artifacts).toContainEqual({

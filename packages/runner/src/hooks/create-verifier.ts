@@ -22,6 +22,7 @@ export function createVerifierTaskHook(options: { harness: Harness; sourceRoles?
         output,
       ),
       dependsOn: [task.id],
+      worktreePath: task.worktreePath,
       doneWhen: [
         "source task output is checked against real changed files and artifacts",
         "relevant checks are rerun or explained",

@@ -180,6 +180,7 @@ export interface CreateTaskInput {
   prompt: string;
   dependsOn?: string[];
   doneWhen?: string[];
+  worktreePath?: string | null;
   config?: TaskConfig;
   parentId?: string | null;
   cycleId?: string | null;

@@ -1935,7 +1935,7 @@ function worktreeForTask() {
   if (!root) {
     return undefined;
   }
-  return (task: { id: string }) => join(root, task.id);
+  return (task: { id: string; worktreePath?: string | null }) => task.worktreePath ?? join(root, task.id);
 }
 
 function stopHooksByRole() {

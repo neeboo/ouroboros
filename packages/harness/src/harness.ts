@@ -155,11 +155,11 @@ export class Harness {
         `
         insert into tasks (
           id, run_id, parent_id, cycle_id, status, role, goal, prompt,
-          depends_on_json, done_when_json, config_json
+          depends_on_json, done_when_json, worktree_path, config_json
         )
         values (
           $id, $runId, $parentId, $cycleId, 'todo', $role, $goal, $prompt,
-          $dependsOnJson, $doneWhenJson, $configJson
+          $dependsOnJson, $doneWhenJson, $worktreePath, $configJson
         )
         `,
       ).run({
@@ -172,6 +172,7 @@ export class Harness {
         $prompt: input.prompt,
         $dependsOnJson: toJson(input.dependsOn ?? []),
         $doneWhenJson: toJson(input.doneWhen ?? []),
+        $worktreePath: input.worktreePath ?? null,
         $configJson: toJson(input.config ?? {}),
       });
       return id;
