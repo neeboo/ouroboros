@@ -1,14 +1,14 @@
-# Orbs
+# Ouroboros
 
 English · [简体中文](./zh_CN.md)
 
-Local-first control system for long-running coding-agent work.
+Loop Engineering for long-running coding-agent work.
 
-Orbs turns a goal into planned tasks, isolated worktree sessions, verifier checks, repair loops, and reviewable artifacts. It is built for agent runs that last longer than a single prompt and need observable state, resumable execution, and a clear path from "work happened" to "this can be reviewed".
+Ouroboros turns a goal into planned tasks, isolated worktree sessions, verifier checks, repair loops, and reviewable artifacts. It is built for agent runs that last longer than a single prompt and need observable state, resumable execution, and a clear path from "work happened" to "this can be reviewed".
 
-> Internal codename: Ouroboros. Public CLI target: `orbs`.
+The project is called Ouroboros because its core pattern is a self-improving loop. The CLI is shortened to `orbs`.
 
-## Why Orbs
+## Why Ouroboros
 
 Coding agents are good at doing focused work, but long-running work often fails around control:
 
@@ -19,7 +19,7 @@ Coding agents are good at doing focused work, but long-running work often fails 
 - logs are too raw for humans to understand
 - finished worktrees are hard to integrate safely
 
-Orbs keeps the control plane local and explicit:
+Ouroboros keeps the control plane local and explicit:
 
 - SQLite stores runs, tasks, attempts, sessions, lessons, artifacts, and external refs.
 - Planner tasks create a task graph.
@@ -41,7 +41,7 @@ goal
 
 ## Status
 
-Orbs is early, but it already has the core loop needed for self-iteration:
+Ouroboros is early, but it already has the core loop needed for self-iteration:
 
 - SQLite-backed harness
 - prompt templates stored in the database
@@ -109,7 +109,7 @@ Create a project-scoped run manually:
 
 ```bash
 bun run orbs -- create-project --name "Ouroboros" --root-path "$(pwd)"
-bun run orbs -- create-run --goal "Use Orbs to improve this repository" --project-root "$(pwd)"
+bun run orbs -- create-run --goal "Use Ouroboros to improve this repository" --project-root "$(pwd)"
 ```
 
 Create a planner task:
@@ -141,7 +141,7 @@ bun run orbs -- run-loop \
 
 ## Configuration
 
-Orbs uses local TOML config plus environment variables. Do not commit real tokens.
+Ouroboros uses local TOML config plus environment variables. Do not commit real tokens.
 
 ```bash
 cp ouroboros.example.toml ouroboros.toml
@@ -166,7 +166,7 @@ Model preference can live on the run or on a single task:
 
 ```bash
 bun run orbs -- create-run \
-  --goal "Use Orbs to iterate on Orbs" \
+  --goal "Use Ouroboros to iterate on Ouroboros" \
   --context-json '{"modelDefaults":{"roles":{"worker":{"model":"gpt-5.4-mini"},"verifier":{"model":"gpt-5.5"}}}}'
 ```
 
@@ -260,7 +260,7 @@ GET /api/runs/<run_id>/diff?path=<tracked_path>
 
 ## Linear Bridge
 
-Linear is the collaboration surface. GitHub is the code surface. The local Orbs database is the control plane.
+Linear is the collaboration surface. GitHub is the code surface. The local Ouroboros database is the control plane.
 
 Current bridge scope:
 
