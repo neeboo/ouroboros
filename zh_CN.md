@@ -1,33 +1,31 @@
 # Orbs
 
-English · [简体中文](./zh_CN.md)
+[English](./README.md) · 简体中文
 
-Local-first control system for long-running coding-agent work.
+Orbs 是一个本地优先的编码 agent 控制系统，用来承载长时间运行的目标、任务、会话、验证、修复和最终可审查产物。
 
-Orbs turns a goal into planned tasks, isolated worktree sessions, verifier checks, repair loops, and reviewable artifacts. It is built for agent runs that last longer than a single prompt and need observable state, resumable execution, and a clear path from "work happened" to "this can be reviewed".
+它的内部代号仍然是 Ouroboros，面向用户的命令行目标是 `orbs`。
 
-> Internal codename: Ouroboros. Public CLI target: `orbs`.
+## 为什么做
 
-## Why Orbs
+编码 agent 很擅长完成聚焦任务，但长程工作常常卡在控制层：
 
-Coding agents are good at doing focused work, but long-running work often fails around control:
+- 任务状态只存在提示词里，没有持久记录。
+- 多个 worker 在同一个目录里互相影响。
+- verifier 的标准在 execution 期间漂移。
+- retry 会重复同样的失败。
+- stdout 信息量很大，但很难作为人类会话阅读。
+- worker worktree 做完之后，很难安全合成 PR 或 patch。
 
-- task state lives in prompts instead of durable storage
-- workers run in the same directory and step on each other
-- verifier criteria drift while execution is already underway
-- retries repeat the same failure
-- logs are too raw for humans to understand
-- finished worktrees are hard to integrate safely
+Orbs 把控制面放在本地：
 
-Orbs keeps the control plane local and explicit:
-
-- SQLite stores runs, tasks, attempts, sessions, lessons, artifacts, and external refs.
-- Planner tasks create a task graph.
-- Worker tasks run in resumable sessions, usually in separate git worktrees.
-- Verifier tasks check evidence against a contract.
-- Repair tasks continue from verifier failures without redefining success.
-- Integrator tasks collect verified work into reviewable output.
-- Dashboard shows the live run, sessions, todos, changed files, diffs, and runner state.
+- SQLite 保存 runs、tasks、attempts、sessions、lessons、artifacts 和 external refs。
+- planner 生成任务图。
+- worker 在可恢复 session 中执行，通常分配独立 git worktree。
+- verifier 根据契约和证据验证结果。
+- repair 基于 verifier 的失败证据继续修复。
+- integrator 把验证通过的 worktree 产物整理成可审查输出。
+- dashboard 展示当前 run、sessions、todos、changed files、diff 和 runner 状态。
 
 ```text
 goal
@@ -39,58 +37,58 @@ goal
   -> goal review
 ```
 
-## Status
+## 当前状态
 
-Orbs is early, but it already has the core loop needed for self-iteration:
+Orbs 还在早期，但已经具备最小自举循环：
 
 - SQLite-backed harness
-- prompt templates stored in the database
-- role-scoped stop hooks
-- resumable Codex executor
-- acpx/Codex executor foundation
+- 数据库中的 prompt templates
+- 按角色生效的 stop hooks
+- 可恢复 Codex executor
+- acpx/Codex executor 基础
 - git worktree start hook
-- dashboard with task graph, flow view, sessions, todos, changed files, and diff inspection
+- dashboard：task graph、flow view、sessions、todos、changed files、diff inspection
 - Linear mapping skeleton
 - self-iteration command
 
-Active areas:
+正在推进：
 
-- integrator stage for merging verified worktree output into a reviewable patch, branch, or PR
-- multi-agent backend through ACP/acpx for Codex, Claude Code, Reasonix, OpenCode, OpenClaw, and similar coding agents
-- persistent dashboard history loaded from the database
-- conversation view that turns raw stdout into a readable coding-agent stream
+- integrator stage：把已验证 worktree 产物合成可审查 patch、branch 或 PR。
+- multi-agent backend：通过 ACP/acpx 接入 Codex、Claude Code、Reasonix、OpenCode、OpenClaw 等 coding agent。
+- dashboard history：左侧 run history 从数据库读取并持久切换。
+- conversation view：把 raw stdout 转成更像 coding-agent 会话的可读流。
 
-## Install
+## 安装
 
-Development:
+开发态：
 
 ```bash
 bun install
 bun run orbs -- init
 ```
 
-Distribution target:
+目标分发形态：
 
 ```bash
 brew install orbs
 orbs init
 ```
 
-## Quick Start
+## 快速开始
 
-Initialize the local database:
+初始化本地数据库：
 
 ```bash
 bun run orbs -- init
 ```
 
-Create a self-iteration run:
+创建一个自迭代 run：
 
 ```bash
 bun run orbs -- self-iterate
 ```
 
-Launch the dashboard and background runner:
+启动 dashboard 和后台 runner：
 
 ```bash
 bun run orbs -- self-iterate-launch \
@@ -99,20 +97,20 @@ bun run orbs -- self-iterate-launch \
   --start-hook git-worktree
 ```
 
-Open:
+打开：
 
 ```text
 http://localhost:7331
 ```
 
-Create a project-scoped run manually:
+手动创建项目和 run：
 
 ```bash
 bun run orbs -- create-project --name "Ouroboros" --root-path "$(pwd)"
 bun run orbs -- create-run --goal "Use Orbs to improve this repository" --project-root "$(pwd)"
 ```
 
-Create a planner task:
+创建 planner task：
 
 ```bash
 bun run orbs -- create-task \
@@ -122,7 +120,7 @@ bun run orbs -- create-task \
   --prompt "Inspect the repo and propose the smallest useful task graph."
 ```
 
-Run the loop:
+运行队列：
 
 ```bash
 bun run orbs -- run-loop \
@@ -139,15 +137,15 @@ bun run orbs -- run-loop \
   --max-rounds 8
 ```
 
-## Configuration
+## 配置
 
-Orbs uses local TOML config plus environment variables. Do not commit real tokens.
+Orbs 使用本地 TOML 配置和环境变量。真实 token 不要提交进仓库。
 
 ```bash
 cp ouroboros.example.toml ouroboros.toml
 ```
 
-Linear example:
+Linear 示例：
 
 ```toml
 [linear]
@@ -156,13 +154,13 @@ team_key = "<team-key>"
 token_file = ".linear"
 ```
 
-Environment override:
+也可以用环境变量：
 
 ```bash
 LINEAR_API_KEY=lin_api_... bun run orbs -- linear-check --run-id <run_id>
 ```
 
-Model preference can live on the run or on a single task:
+模型偏好可以放在 run context 或 task config：
 
 ```bash
 bun run orbs -- create-run \
@@ -179,7 +177,7 @@ bun run orbs -- create-task \
   --config-json '{"modelPreference":{"model":"gpt-5.4-mini","reason":"low-risk worker"}}'
 ```
 
-Resolution order:
+解析顺序：
 
 ```text
 task.config.modelPreference
@@ -188,7 +186,7 @@ then run.context.modelDefaults.global
 then CLI --model
 ```
 
-## Common Commands
+## 常用命令
 
 ```bash
 # observability
@@ -222,35 +220,35 @@ bun run orbs -- linear-link-issue --local-type run --local-id <run_id> --issue-k
 bun run orbs -- linear-link-issue --local-type task --local-id <task_id> --issue-url https://linear.app/<workspace>/issue/LIN-123/title
 ```
 
-## Roles
+## 角色
 
-| Role | Responsibility |
+| Role | 责任 |
 | --- | --- |
-| `planner` | Reads the goal, constraints, and prior lessons; creates an executable task graph. |
-| `worker` | Implements one scoped task in its own session and, usually, its own worktree. |
-| `verifier` | Checks evidence through tests, commands, diff review, browser checks, or contract-specific criteria. |
-| `repair` | Fixes verifier failures while preserving the original success contract. |
-| `goal-review` | Runs when the queue is empty and decides whether the original goal is complete. |
-| `integrator` | Planned stage that turns verified worktree output into reviewable integration output. |
+| `planner` | 读取目标、约束和历史经验，生成可执行任务图。 |
+| `worker` | 在自己的 session/worktree 里实现一个明确任务。 |
+| `verifier` | 通过测试、命令、diff、浏览器或契约标准验证结果。 |
+| `repair` | 根据 verifier 的失败证据修复，同时保留原成功标准。 |
+| `goal-review` | 队列清空后判断原始目标是否已经满足。 |
+| `integrator` | 规划中：收集已验证 worktree 产物，生成可审查的集成结果。 |
 
 ## Dashboard
 
-The dashboard is the live control surface for a run. It should make these questions easy to answer:
+Dashboard 是 Orbs 的运行控制界面。它应该快速回答：
 
-- What is the current goal?
-- Which tasks are running, done, blocked, or waiting for repair?
-- What are the planner, worker, verifier, and integrator sessions doing?
-- Which files changed?
-- What evidence did the verifier produce?
-- Is the runner still active, resumable, or stopped?
+- 当前 goal 是什么？
+- 哪些 task 正在跑、完成、阻塞或等待 repair？
+- planner、worker、verifier、integrator session 正在做什么？
+- 哪些文件改了？
+- verifier 的证据是什么？
+- runner 是否还在运行、可恢复或已停止？
 
-Start it with:
+启动：
 
 ```bash
 bun run orbs -- dashboard --run-id <run_id> --port 7331
 ```
 
-Useful local APIs:
+本地接口：
 
 ```text
 GET /api/runs/<run_id>/overview
@@ -260,23 +258,23 @@ GET /api/runs/<run_id>/diff?path=<tracked_path>
 
 ## Linear Bridge
 
-Linear is the collaboration surface. GitHub is the code surface. The local Orbs database is the control plane.
+Linear 是协作入口，GitHub 是代码入口，本地 Orbs 数据库是控制面。
 
-Current bridge scope:
+当前 bridge 范围：
 
-- `linear-check` validates Linear access and records the run-to-project reference.
-- `linear-link-issue` maps a local run or task to an external Linear issue.
+- `linear-check` 校验 Linear token，并记录 run 到 project 的引用。
+- `linear-link-issue` 把本地 run/task 映射到外部 Linear issue。
 
-Not implemented yet:
+暂未实现：
 
-- automatic issue creation
+- 自动创建 issue
 - webhook/event listening
 - comment sync
 - PR status sync
 
-Those events should enter through the harness inbox so the local control loop can decide what they mean.
+这些事件之后应该进入 harness inbox，再由本地控制循环判断它们对 run 和 task 意味着什么。
 
-## Project Layout
+## 项目结构
 
 ```text
 docs/protocol.md                 Minimal runtime protocol
@@ -289,7 +287,7 @@ packages/runner/src/             Prompt builder, executors, hooks
 packages/cli/src/                CLI and dashboard
 ```
 
-## Development
+## 开发
 
 ```bash
 bun install
@@ -297,7 +295,7 @@ bun run typecheck
 bun test
 ```
 
-Focused checks:
+定向检查：
 
 ```bash
 bun test tests/dashboard.test.ts
