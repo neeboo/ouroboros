@@ -272,9 +272,9 @@ export class Harness {
         )
         .all({ $runId: runId }) as TaskRow[];
       const statusRows = db
-        .query("select id, status from tasks where run_id = $runId")
-        .all({ $runId: runId }) as Array<{ id: string; status: Status }>;
-      const statuses = new Map(statusRows.map((row) => [row.id, row.status]));
+        .query("select id, parent_id, status from tasks where run_id = $runId")
+        .all({ $runId: runId }) as Array<{ id: string; parent_id: string | null; status: Status }>;
+      const statuses = effectiveDependencyStatuses(statusRows);
 
       for (const row of taskRows) {
         const task = taskFromRow(row);
@@ -299,9 +299,9 @@ export class Harness {
         )
         .all({ $runId: input.runId }) as TaskRow[];
       const statusRows = db
-        .query("select id, status from tasks where run_id = $runId")
-        .all({ $runId: input.runId }) as Array<{ id: string; status: Status }>;
-      const statuses = new Map(statusRows.map((row) => [row.id, row.status]));
+        .query("select id, parent_id, status from tasks where run_id = $runId")
+        .all({ $runId: input.runId }) as Array<{ id: string; parent_id: string | null; status: Status }>;
+      const statuses = effectiveDependencyStatuses(statusRows);
       const ready = taskRows
         .map(taskFromRow)
         .filter((task) => task.dependsOn.every((id) => statuses.get(id) === "done"))
@@ -927,6 +927,21 @@ function resolveRunProjectId(
 
 function stringOrNull(value: unknown) {
   return typeof value === "string" && value.trim().length > 0 ? value : null;
+}
+
+function effectiveDependencyStatuses(rows: Array<{ id: string; parent_id: string | null; status: Status }>) {
+  const statuses = new Map(rows.map((row) => [row.id, row.status]));
+  const repairedBlockedIds = new Set(
+    rows
+      .filter((row) => row.parent_id && row.status === "done")
+      .map((row) => row.parent_id as string),
+  );
+  for (const id of repairedBlockedIds) {
+    if (statuses.get(id) === "blocked") {
+      statuses.set(id, "done");
+    }
+  }
+  return statuses;
 }
 
 function ensureExecutionThreads(db: { exec: (sql: string) => void }) {
