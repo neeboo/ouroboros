@@ -22,6 +22,7 @@ goal -> task graph -> ready task -> prompt -> agent attempt
 
 ```text
 docs/protocol.md                 Minimal runtime protocol
+docs/control-loop-contracts.md   Planning, verification, guardrails, and experience
 packages/harness/schema.sql      SQLite schema for the harness and bridge
 packages/harness/src/            Local harness library
 packages/runner/src/             Prompt builder and task runner

@@ -41,6 +41,7 @@ The initial planner should inspect:
 
 - `README.md`
 - `docs/protocol.md`
+- `docs/control-loop-contracts.md`
 - this document
 - `packages/cli/src/dashboard.ts`
 - `packages/cli/src/main.ts`
@@ -65,6 +66,8 @@ The planner should choose as many areas as can be split into independent, verifi
 - expose the generated task graph as a simple graph view;
 - add a Linear bridge skeleton that maps local runs and tasks to external issues;
 - improve run completion review so it can cite evidence from docs, tests, dashboard state, and lessons.
+- add a planning loop that freezes a verifier contract before execution starts;
+- promote repeated lessons into guardrails and keep repeated experiences as reusable evidence patterns.
 
 ## Human Checkpoints
 
