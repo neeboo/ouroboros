@@ -1,11 +1,12 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { Harness } from "../packages/harness/src";
 import {
   buildTaskPrompt,
   createContextSummaryHook,
+  createGitWorktreeHook,
   createRepairTaskHook,
   createTasksFromOutputHook,
   createVerifierTaskHook,
@@ -1203,6 +1204,49 @@ describe("runner", () => {
     expect(harness.getAttempt(result.attemptId)?.output.checks).toEqual([
       { name: "start hook", status: "passed" },
     ]);
+  });
+
+  test("git worktree start hook reuses an existing task worktree", async () => {
+    const runId = harness.createRun({ goal: "Build loop" });
+    const taskId = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Reuse worktree",
+      prompt: "Reuse existing worktree.",
+    });
+    const cwd = join(dir, "worktrees", taskId);
+    await mkdir(cwd, { recursive: true });
+    const commands: string[][] = [];
+
+    const hook = createGitWorktreeHook({
+      repoPath: dir,
+      runCommand: async ({ cmd }) => {
+        commands.push(cmd);
+        if (cmd.includes("rev-parse")) {
+          return { exitCode: 0, stdout: "true\n", stderr: "" };
+        }
+        if (cmd[0] === "bun") {
+          return { exitCode: 0, stdout: "", stderr: "" };
+        }
+        return { exitCode: 1, stdout: "", stderr: "unexpected command" };
+      },
+    });
+
+    const result = await hook({
+      run: harness.getRun(runId)!,
+      task: harness.getTask(taskId)!,
+      sessionName: "task-session",
+      cwd,
+    });
+
+    expect(commands.some((cmd) => cmd.includes("worktree") && cmd.includes("add"))).toBe(false);
+    expect(result.problems).toBeUndefined();
+    expect(result.checks).toContainEqual({
+      name: "git worktree reuse",
+      status: "passed",
+      summary: "existing task worktree reused",
+    });
+    expect(result.checks).toContainEqual({ name: "bun install", status: "passed" });
   });
 
   test("runs task rounds until no ready task remains", async () => {

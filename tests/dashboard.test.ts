@@ -200,8 +200,10 @@ describe("dashboard", () => {
     expect(html).toContain("buildGoalGroups");
     expect(html).toContain("task.cycleId");
     expect(html).toContain("transcript");
-    expect(html).toContain("stream-output");
-    expect(html).toContain("stream-line");
+    expect(html).toContain("readableSummary");
+    expect(html).toContain("conversationEvidence");
+    expect(html).toContain("evidenceSection");
+    expect(html).toContain("rawStreamDetails");
     expect(html).toContain("eventText");
     expect(html).toContain("streamOutput");
     expect(html).toContain("renderWorkspace");
@@ -405,12 +407,16 @@ describe("dashboard", () => {
     expectCssRule(html, ".turn-author", ["overflow-wrap: anywhere;"]);
     expectCssRule(html, ".turn-summary", ["overflow-wrap: anywhere;"]);
     expectCssRule(html, ".turn-text", ["white-space: pre-wrap;", "overflow-wrap: anywhere;"]);
+    expectCssRule(html, ".conversation-evidence", ["display: grid;", "gap: 12px;"]);
+    expectCssRule(html, ".evidence-item", ["font-size: 12px;", "overflow-wrap: anywhere;"]);
+    expectCssRule(html, ".raw-stream", ["font-size: 11px;"]);
     expectCssRule(html, ".stream-output", ["overflow: auto;", "white-space: pre-wrap;", "overflow-wrap: anywhere;"]);
     expectCssRule(html, ".inspector-panel", ["width: clamp(380px, 30vw, 520px);", "min-width: 380px;", "max-width: 520px;", "overflow-y: auto;", "overflow-x: hidden;", "scrollbar-gutter: stable;"]);
     expectCssRule(html, ".inspector-card", ["min-width: 0;", "border-radius: 0;", "background: transparent;"]);
     expectCssRule(html, ".current-task-title", ["overflow-wrap: anywhere;"]);
     expectCssRule(html, ".current-task-meta", ["overflow-wrap: anywhere;"]);
-    expectCssRule(html, ".todo-item", ["grid-template-columns: 22px minmax(0, 1fr);"]);
+    expectCssRule(html, ".todo-list, .lesson-list, .info-list", ["gap: 9px;"]);
+    expectCssRule(html, ".todo-item", ["grid-template-columns: 18px minmax(0, 1fr);", "gap: 9px;", "font-size: 13px;", "line-height: 1.42;"]);
     expectCssRule(html, ".todo-text", ["min-width: 0;", "overflow-wrap: anywhere;"]);
     expectCssRule(html, ".meta", ["overflow-wrap: anywhere;"]);
     expectCssRule(html, ".changed-files-section", ["min-width: 0;"]);
@@ -498,6 +504,7 @@ describe("dashboard", () => {
     expect(html).toContain("patchWorkspaceTurn");
     expect(html).toContain("patchStreamOutput");
     expect(html).toContain("[data-event-index]");
+    expect(html).toContain("<summary>Raw output</summary>");
     expect(html).toContain("currentStream.appendChild(nextLine.cloneNode(true));");
     expect(html).not.toContain("currentTurn.replaceWith(nextTurn.cloneNode(true));");
   });
@@ -679,6 +686,8 @@ describe("dashboard", () => {
     expect(html).toContain("doneWhen");
     expect(html).toContain("checkbox");
     expect(html).toContain(".todo-item.done");
+    expect(html).toContain("font-size: 13px;");
+    expect(html).toContain("font-size: 10.5px;");
     expect(html).toContain("current-task");
     expect(html).toContain("aria-hidden");
     expect(html).toContain("Progress");

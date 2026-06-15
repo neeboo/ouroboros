@@ -852,6 +852,51 @@ export function dashboardHtml(input: { runId: string }) {
       white-space: pre-wrap;
       overflow-wrap: anywhere;
     }
+    .conversation-evidence {
+      display: grid;
+      gap: 12px;
+      margin-top: 16px;
+    }
+    .evidence-group {
+      min-width: 0;
+      padding-top: 12px;
+      border-top: 1px solid rgba(255, 255, 255, 0.08);
+    }
+    .evidence-title {
+      color: #aaa9a2;
+      font-size: 11px;
+      font-weight: 700;
+      line-height: 1.35;
+    }
+    .evidence-list {
+      display: grid;
+      gap: 6px;
+      margin: 8px 0 0;
+      padding: 0;
+      list-style: none;
+    }
+    .evidence-item {
+      min-width: 0;
+      color: #d3d2cc;
+      font-size: 12px;
+      line-height: 1.55;
+      overflow-wrap: anywhere;
+    }
+    .evidence-item .meta {
+      margin-top: 2px;
+      font-size: 10.5px;
+    }
+    .raw-stream {
+      margin-top: 14px;
+      color: var(--muted);
+      font-size: 11px;
+      line-height: 1.45;
+    }
+    .raw-stream summary {
+      cursor: pointer;
+      color: #aaa9a2;
+      font-weight: 650;
+    }
     .stream-output {
       margin: 18px 0 0;
       max-height: 320px;
@@ -912,7 +957,7 @@ export function dashboardHtml(input: { runId: string }) {
     }
     .todo-list, .lesson-list, .info-list {
       display: grid;
-      gap: 16px;
+      gap: 9px;
       margin: 0;
       padding: 0;
       list-style: none;
@@ -938,12 +983,12 @@ export function dashboardHtml(input: { runId: string }) {
     }
     .todo-item {
       display: grid;
-      grid-template-columns: 22px minmax(0, 1fr);
-      gap: 12px;
+      grid-template-columns: 18px minmax(0, 1fr);
+      gap: 9px;
       align-items: start;
       color: #d9d8d1;
-      font-size: 16px;
-      line-height: 1.48;
+      font-size: 13px;
+      line-height: 1.42;
     }
     .todo-text {
       min-width: 0;
@@ -959,6 +1004,7 @@ export function dashboardHtml(input: { runId: string }) {
     .todo-item .meta {
       display: block;
       margin-top: 2px;
+      font-size: 10.5px;
     }
     .control-row {
       margin-top: 20px;
@@ -1354,6 +1400,47 @@ export function dashboardHtml(input: { runId: string }) {
       return "";
     };
     const latestText = (session) => session.latestText || session.events.map(eventText).filter(Boolean).slice(-1)[0] || "";
+    const readableSummary = (session) => {
+      const summary = session.output?.summary;
+      if (typeof summary === "string" && summary.trim()) return summary.trim();
+      const fallback = latestText(session);
+      return fallback ? compact(fallback, 360) : "No summary recorded yet.";
+    };
+    const evidenceItemText = (item) => {
+      if (typeof item === "string") return item;
+      if (!item || typeof item !== "object") return String(item ?? "");
+      return item.summary || item.evidence || item.name || item.path || item.kind || JSON.stringify(item);
+    };
+    const evidenceItemMeta = (item) => {
+      if (!item || typeof item !== "object") return "";
+      const parts = [];
+      if (item.status) parts.push(String(item.status));
+      if (item.name && item.summary) parts.push(String(item.name));
+      if (item.kind && item.path) parts.push(String(item.kind));
+      return parts.join(" · ");
+    };
+    const evidenceSection = (title, items) => {
+      const list = Array.isArray(items) ? items.filter((item) => item !== null && item !== undefined) : [];
+      if (list.length === 0) return "";
+      return '<section class="evidence-group"><div class="evidence-title">' + escapeHtml(title) + '</div><ul class="evidence-list">' +
+        list.slice(0, 8).map((item) => {
+          const meta = evidenceItemMeta(item);
+          return '<li class="evidence-item">' + escapeHtml(evidenceItemText(item)) +
+            (meta ? '<div class="meta">' + escapeHtml(meta) + '</div>' : '') + '</li>';
+        }).join("") +
+        (list.length > 8 ? '<li class="evidence-item meta">' + escapeHtml(list.length - 8) + ' more</li>' : '') +
+        '</ul></section>';
+    };
+    const conversationEvidence = (session) => {
+      const output = session.output || {};
+      const groups = [
+        evidenceSection("Problems", output.problems),
+        evidenceSection("Checks", output.checks),
+        evidenceSection("Changed files", output.changedFiles),
+        evidenceSection("Artifacts", output.artifacts),
+      ].filter(Boolean).join("");
+      return groups ? '<div class="conversation-evidence">' + groups + '</div>' : "";
+    };
     const streamOutput = (session) => {
       const lines = (session.events || []).map(eventText).filter(Boolean).slice(-20);
       if (lines.length === 0 && latestText(session)) lines.push(latestText(session));
@@ -1362,6 +1449,8 @@ export function dashboardHtml(input: { runId: string }) {
         lines.map((line, index) => '<div class="stream-line" data-event-index="' + index + '">' + escapeHtml(line) + '</div>').join("") +
         '</div>';
     };
+    const rawStreamDetails = (session) =>
+      '<details class="raw-stream"><summary>Raw output</summary>' + streamOutput(session) + '</details>';
     const promptLink = (task) => '<a class="prompt-link" target="_blank" rel="noreferrer" href="/tasks/' + encodeURIComponent(task.id) + '/prompt">Prompt</a>';
     const dashboardStorageKey = "ouroboros:dashboard:" + runId;
     const isWorkspaceMode = (value) => value === "canvas" || value === "flow";
@@ -1663,7 +1752,9 @@ export function dashboardHtml(input: { runId: string }) {
           '<div class="tool-line code-meta">task ' + escapeHtml(session.taskId) + ' · attempt ' + escapeHtml(session.attemptId) +
           (session.sessionName ? '<br>session ' + escapeHtml(session.sessionName) : '') +
           (session.codexSessionId ? '<br>codex ' + escapeHtml(session.codexSessionId) : '') + '</div>' +
-          streamOutput(session),
+          '<div class="turn-text">' + escapeHtml(readableSummary(session)) + '</div>' +
+          conversationEvidence(session) +
+          rawStreamDetails(session),
       });
     const renderFlowWorkspace = (group) => {
       if (!group) return '<div class="flow-inner"><div class="empty">No goal selected</div></div>';
