@@ -1195,6 +1195,26 @@ describe("runner", () => {
     });
   });
 
+  test("ignores reason-only model preference objects in planner next runs", () => {
+    const output = parseAttemptOutput(
+      JSON.stringify({
+        status: "done",
+        summary: "planned runs",
+        nextRuns: [
+          {
+            goal: "Build React dashboard composer",
+            prompt: "Plan the child run.",
+            modelPreference: {
+              reason: "balanced effort",
+            },
+          },
+        ],
+      }),
+    );
+
+    expect(output.nextRuns?.[0]?.modelPreference).toBeUndefined();
+  });
+
   test.each([
     ["missing role", { goal: "Goal", prompt: "Prompt" }],
     ["empty goal", { role: "worker", goal: "", prompt: "Prompt" }],

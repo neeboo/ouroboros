@@ -167,7 +167,7 @@ function optionalModelPreference(record: Record<string, unknown>, index: number,
   }
   const preferenceRecord = value as Record<string, unknown>;
   if (typeof preferenceRecord.model !== "string" || preferenceRecord.model.trim().length === 0) {
-    throw new Error(`${label} ${index} modelPreference must include a non-empty model`);
+    return undefined;
   }
   const preference: { model: string; reason?: string } = {
     model: preferenceRecord.model,
