@@ -44,6 +44,7 @@ export const DEFAULT_VERIFIER_TASK_PROMPT_TEMPLATE = [
   "Source Worktree Path: {{sourceTaskWorktreePath}}",
   "",
   "Use the source worktree path above when it is recorded. Do not treat the verifier task's own fresh worktree as source evidence.",
+  "When checking whether work remains, exclude the current verifier task and current running attempt from active-work counts.",
   "",
   "## Source Output",
   "```json",

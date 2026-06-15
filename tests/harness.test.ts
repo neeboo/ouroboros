@@ -307,6 +307,7 @@ describe("Harness", () => {
     expect(seeded?.contentMd).toContain("# Ouroboros Task");
     expect(seeded?.contentMd).toContain("{{runLessonsJson}}");
     expect(verifierSeeded?.contentMd).toContain("{{sourceTaskId}}");
+    expect(verifierSeeded?.contentMd).toContain("exclude the current verifier task");
     expect(repairSeeded?.contentMd).toContain("{{verifierTaskId}}");
     expect(contextSeeded?.contentMd).toContain("{{attemptOutputJson}}");
 
