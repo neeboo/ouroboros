@@ -1,21 +1,24 @@
 import { parseAttemptOutputOrBlocked } from "./output";
 import { commandProblem, runLocalCommand } from "./command";
-import type { AcpxCodexExecutorFactory, ApprovalMode, RunCommand } from "./types";
+import type { AcpxAgentExecutorFactory, AcpxCodexExecutorFactory, ApprovalMode, RunCommand } from "./types";
 
 export const createAcpxCodexExecutor: AcpxCodexExecutorFactory = (options) => {
+  return createAcpxAgentExecutor({ ...options, agent: "codex" });
+};
+
+export const createAcpxAgentExecutor: AcpxAgentExecutorFactory = (options) => {
   const approval = options.approval ?? "approve-reads";
   const runCommand = options.runCommand ?? runLocalCommand;
+  const label = agentLabel(options);
 
   return async ({ prompt, sessionName }) => {
-    const base = [
-      "acpx",
-      "--cwd",
-      options.cwd,
-      approvalFlag(approval),
-      "--format",
-      "text",
-      "codex",
-    ];
+    const base = acpxBaseCommand({
+      cwd: options.cwd,
+      approval,
+      model: options.model,
+      agent: options.agent,
+      agentCommand: options.agentCommand,
+    });
     const session = await ensureSession({
       base,
       runCommand,
@@ -66,9 +69,9 @@ export const createAcpxCodexExecutor: AcpxCodexExecutorFactory = (options) => {
     if (commandFailed(result)) {
       return {
         status: "blocked",
-        summary: "acpx codex executor failed",
+        summary: `acpx ${label} executor failed`,
         changedFiles: [],
-        checks: [{ name: "acpx codex exec", status: "failed" }],
+        checks: [{ name: `acpx ${label} exec`, status: "failed" }],
         artifacts: [],
         problems: [commandProblem(result)],
       };
@@ -76,11 +79,27 @@ export const createAcpxCodexExecutor: AcpxCodexExecutorFactory = (options) => {
 
     return parseAttemptOutputOrBlocked({
       raw: result.stdout,
-      summary: "acpx codex executor produced invalid output",
+      summary: `acpx ${label} executor produced invalid output`,
       checkName: "acpx output parse",
     });
   };
 };
+
+function acpxBaseCommand(input: {
+  cwd: string;
+  approval: ApprovalMode;
+  model?: string;
+  agent?: string;
+  agentCommand?: string;
+}) {
+  const modelArgs = input.model ? ["--model", input.model] : [];
+  const agentArgs = input.agentCommand ? ["--agent", input.agentCommand] : [input.agent ?? "codex"];
+  return ["acpx", "--cwd", input.cwd, approvalFlag(input.approval), "--format", "text", ...modelArgs, ...agentArgs];
+}
+
+function agentLabel(input: { agent?: string; agentCommand?: string }) {
+  return input.agent ?? input.agentCommand ?? "codex";
+}
 
 async function ensureSession(input: {
   base: string[];

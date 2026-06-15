@@ -284,6 +284,18 @@ export interface ReclaimedRunningTask {
   reason: string;
 }
 
+export interface BlockedUnfinishedTask {
+  taskId: string;
+  role: string;
+  previousStatus: Extract<Status, "todo" | "running">;
+  reason: string;
+}
+
+export interface BlockUnfinishedTasksForRunInput {
+  runId: string;
+  reason: string;
+}
+
 export interface LeaseReadyTasksInput {
   runId: string;
   limit: number;

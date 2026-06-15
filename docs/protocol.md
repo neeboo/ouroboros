@@ -185,7 +185,7 @@ The scheduler then:
 7. records an attempt
 8. updates task status from the attempt result
 
-The current v0 runner supports the same shape with an injectable executor. The `noop` executor is only for testing the loop. The `acpx-codex` executor creates or reuses a named acpx Codex session per task and returns the same structured output. The `codex-cli` executor can run one-shot Codex subagents when named ACP sessions are unavailable.
+The current v0 runner supports the same shape with an injectable executor. The `noop` executor is only for testing the loop. The `acpx-codex` executor creates or reuses a named acpx Codex session per task and returns the same structured output. The generic `acpx` backend path can select other ACP/acpx-backed agents through backend config. The `codex-cli` executor can run one-shot Codex subagents when named ACP sessions are unavailable.
 
 Model resolution is protocol-level state, not only an executor flag. The resolver uses this precedence:
 
@@ -197,6 +197,44 @@ then CLI --model
 ```
 
 The resolved model object is recorded in `attempts.input_json.model`. `codex-cli` passes it to `codex exec -m <model>`. `codex-resumable` passes it on both `codex exec` start and `codex exec resume`, and resumed attempts reuse the model stored on the running attempt.
+
+Agent backend resolution is also protocol-level state. A run can define named backends in `context_json.agentBackends`, choose defaults in `context_json.agentDefaults`, and a task can override with `config_json.agentBackend`:
+
+```json
+{
+  "agentDefaults": {
+    "global": "codex",
+    "roles": {
+      "worker": "opencode",
+      "verifier": "claude-code"
+    }
+  },
+  "agentBackends": {
+    "opencode": { "kind": "acpx", "agent": "opencode" },
+    "claude-code": { "kind": "acpx", "agent": "claude" },
+    "hermes": { "kind": "acpx", "agentCommand": "hermes acp" },
+    "codex-resumable": { "kind": "codex-resumable" }
+  }
+}
+```
+
+```json
+{
+  "agentBackend": "claude-code"
+}
+```
+
+Backend selection precedence is:
+
+```text
+task.config.agentBackend
+then run.context.agentDefaults.roles[task.role]
+then run.context.agentDefaults.global
+then CLI --agent-backend
+then CLI --executor
+```
+
+Supported backend kinds are `acpx`, `codex-cli`, `codex-resumable`, and `noop`. For `acpx`, built-in agent ids are `codex`, `claude`, `opencode`, and `openclaw`; custom ACP servers use `agentCommand`. Agent event streams are supplemental evidence only. Attempt status, checks, artifacts, problems, and changed files still come from the final Orbs structured JSON plus Orbs stop hooks. See `docs/agent-backends.md` for the researched boundaries, including the warning that remote or Gateway agents must prove cwd/worktree behavior before write tasks.
 
 Runs may be bound to a project by `project_id`, or by a project root path that creates/reuses a matching `projects.root_path` row. Old databases keep `runs.project_id` nullable, and existing `context_json` remains compatible.
 

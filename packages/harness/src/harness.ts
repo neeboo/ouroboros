@@ -51,6 +51,8 @@ import type {
   RecordAttemptEventInput,
   RecordAttemptInput,
   RecordHarnessActionEventInput,
+  BlockedUnfinishedTask,
+  BlockUnfinishedTasksForRunInput,
   ReclaimedRunningTask,
   ReclaimRunningTasksInput,
   RetryTaskInput,
@@ -341,6 +343,78 @@ export class Harness {
         }
       }
       return null;
+    });
+  }
+
+  blockUnfinishedTasksForRun(input: BlockUnfinishedTasksForRunInput): BlockedUnfinishedTask[] {
+    return withDatabase(this.dbPath, (db) => {
+      ensureExecutionThreads(db);
+      const rows = db
+        .query(
+          `
+          select *
+          from tasks
+          where run_id = $runId and status in ('todo', 'running')
+          order by created_at, id
+          `,
+        )
+        .all({ $runId: input.runId }) as TaskRow[];
+      const blocked = rows.map(taskFromRow).map((task) => ({
+        taskId: task.id,
+        role: task.role,
+        previousStatus: task.status as Extract<Status, "todo" | "running">,
+        reason: input.reason,
+      }));
+      if (blocked.length === 0) {
+        return blocked;
+      }
+      const output = {
+        status: "blocked",
+        summary: `Task was blocked because its run was retired: ${input.reason}`,
+        changedFiles: [],
+        checks: [{ name: "run retirement", status: "blocked", evidence: input.reason }],
+        artifacts: [],
+        problems: [input.reason],
+      };
+      return db.transaction(() => {
+        for (const task of blocked) {
+          db.query(
+            `
+            update attempts
+            set status = 'blocked',
+                output_json = $outputJson,
+                checks_json = $checksJson,
+                artifacts_json = '[]',
+                error = $error,
+                finished_at = current_timestamp
+            where task_id = $taskId and status = 'running'
+            `,
+          ).run({
+            $taskId: task.taskId,
+            $outputJson: toJson(output),
+            $checksJson: toJson(output.checks),
+            $error: input.reason,
+          });
+          db.query(
+            `
+            update tasks
+            set status = 'blocked', updated_at = current_timestamp
+            where id = $taskId and status in ('todo', 'running')
+            `,
+          ).run({ $taskId: task.taskId });
+          db.query(
+            `
+            update execution_threads
+            set status = 'interrupted',
+                interrupt_reason = $reason,
+                interrupted_at = coalesce(interrupted_at, current_timestamp),
+                updated_at = current_timestamp
+            where task_id = $taskId and status = 'running'
+            `,
+          ).run({ $taskId: task.taskId, $reason: input.reason });
+        }
+        return blocked;
+      })();
     });
   }
 

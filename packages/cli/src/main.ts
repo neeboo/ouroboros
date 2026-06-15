@@ -4,7 +4,7 @@ import type { AttemptOutput } from "@ouroboros/harness";
 import {
   buildTaskPrompt,
   applyStartHooks,
-  createAcpxCodexExecutor,
+  createAcpxAgentExecutor,
   createCodexCliExecutor,
   createCodexResumableClient,
   createContextSummaryHook,
@@ -15,11 +15,12 @@ import {
   createTasksFromOutputHook,
   createVerifierTaskHook,
   proxyEnvForChildProcess,
+  resolveAgentBackend,
   resolveModelPreference,
   runReadyTasks,
   runUntilIdle,
 } from "@ouroboros/runner";
-import type { StopHook } from "@ouroboros/runner";
+import type { ResolvedAgentBackend, StopHook } from "@ouroboros/runner";
 import { fail, flag, parseArgs, required } from "./args";
 import { loadOuroborosConfig } from "./config";
 import { parseArray, parseObject, printJson } from "./json";
@@ -345,10 +346,10 @@ switch (parsed.command) {
     break;
   }
   case "run-next": {
-    const executorName = parseExecutorName(required(parsed, "executor"));
+    const executorName = cliExecutorName();
     const runId = required(parsed, "run-id");
     const limit = parseConcurrency();
-    if (executorName === "codex-resumable") {
+    if (usesCodexResumablePath(executorName)) {
       const maxTries = parsePositiveInteger(flag(parsed, "max-tries") ?? String(DEFAULT_MAX_TRIES), "--max-tries");
       const result = await runCodexResumableLoop({ runId, maxRounds: 1, limit, maxTries });
       printJson({ tasks: result.rounds.flatMap((round) => round.tasks) });
@@ -364,18 +365,19 @@ switch (parsed.command) {
       worktreeForTask: worktreeForTask(),
       startHooks: startHooks(),
       executorFactory: executorFactory(executorName),
+      attemptInput: attemptInputFactory(executorName),
       stopHooksByRole: stopHooksByRole(),
     });
     printJson({ tasks: result });
     break;
   }
   case "run-loop": {
-    const executorName = parseExecutorName(required(parsed, "executor"));
+    const executorName = cliExecutorName();
     const runId = required(parsed, "run-id");
     const limit = parseConcurrency();
     const maxRounds = parsePositiveInteger(flag(parsed, "max-rounds") ?? "10", "--max-rounds");
     const maxTries = parsePositiveInteger(flag(parsed, "max-tries") ?? String(DEFAULT_MAX_TRIES), "--max-tries");
-    if (executorName === "codex-resumable") {
+    if (usesCodexResumablePath(executorName)) {
       printJson(await runCodexResumableLoop({ runId, maxRounds, limit, maxTries }));
       break;
     }
@@ -390,6 +392,7 @@ switch (parsed.command) {
       worktreeForTask: worktreeForTask(),
       startHooks: startHooks(),
       executorFactory: executorFactory(executorName),
+      attemptInput: attemptInputFactory(executorName),
       stopHooksByRole: stopHooksByRole(),
     });
     printJson(result);
@@ -717,6 +720,21 @@ function parseExecutorName(raw: string) {
   return raw;
 }
 
+function cliExecutorName() {
+  const executor = flag(parsed, "executor");
+  if (executor) {
+    return parseExecutorName(executor);
+  }
+  if (flag(parsed, "agent-backend")) {
+    return "codex-cli" as const;
+  }
+  return parseExecutorName(required(parsed, "executor"));
+}
+
+function usesCodexResumablePath(executorName: "noop" | "acpx-codex" | "codex-cli" | "codex-resumable") {
+  return executorName === "codex-resumable" || flag(parsed, "agent-backend") === "codex-resumable";
+}
+
 function selfIterationPlannerPrompt() {
   return [
     "Create the first task for the next Ouroboros self-iteration planning cycle.",
@@ -794,8 +812,18 @@ function renderTaskPrompt(taskId: string) {
 }
 
 function executorFactory(executorName: "noop" | "acpx-codex" | "codex-cli" | "codex-resumable") {
-  return ({ cwd, resolvedModel }: { cwd: string; resolvedModel: { model: string } | null }) => {
-    if (executorName === "noop") {
+  return (input: {
+    run: NonNullable<ReturnType<Harness["getRun"]>>;
+    task: NonNullable<ReturnType<Harness["getTask"]>>;
+    cwd: string;
+    resolvedModel: { model: string } | null;
+  }) => {
+    const backend = resolvedBackendForTask({
+      run: input.run,
+      task: input.task,
+      cliExecutor: executorName,
+    });
+    if (backend.kind === "noop") {
       return async ({ task }: { task: { id: string } }) => ({
         status: "done" as const,
         summary: `Noop executor completed ${task.id}`,
@@ -805,26 +833,61 @@ function executorFactory(executorName: "noop" | "acpx-codex" | "codex-cli" | "co
         problems: [],
       });
     }
-    if (executorName === "acpx-codex") {
-      return createAcpxCodexExecutor({
-        cwd,
-        approval: parseApproval(flag(parsed, "approval") ?? "approve-reads"),
+    if (backend.kind === "acpx") {
+      return createAcpxAgentExecutor({
+        cwd: input.cwd,
+        ...acpxAgentConfig(backend),
+        approval: backend.approval ?? parseApproval(flag(parsed, "approval") ?? "approve-reads"),
+        model: input.resolvedModel?.model,
         timeoutMs: parseTimeoutMs(flag(parsed, "timeout-ms")),
         idleTimeoutMs: parseTimeoutMs(flag(parsed, "idle-timeout-ms"), "--idle-timeout-ms"),
       });
     }
-    if (executorName === "codex-resumable") {
+    if (backend.kind === "codex-resumable") {
       fail("codex-resumable uses the resumable loop path");
     }
     return createCodexCliExecutor({
-      cwd,
+      cwd: input.cwd,
       sandbox: parseSandbox(flag(parsed, "sandbox") ?? "read-only"),
       codexBin: flag(parsed, "codex-bin"),
-      model: resolvedModel?.model,
+      model: input.resolvedModel?.model,
       timeoutMs: parseTimeoutMs(flag(parsed, "timeout-ms")),
       idleTimeoutMs: parseTimeoutMs(flag(parsed, "idle-timeout-ms"), "--idle-timeout-ms"),
     });
   };
+}
+
+function attemptInputFactory(executorName: "noop" | "acpx-codex" | "codex-cli" | "codex-resumable") {
+  return (input: {
+    run: NonNullable<ReturnType<Harness["getRun"]>>;
+    task: NonNullable<ReturnType<Harness["getTask"]>>;
+    cwd: string;
+    resolvedModel: unknown;
+  }) => ({
+    backend: resolvedBackendForTask({ run: input.run, task: input.task, cliExecutor: executorName }),
+    cwd: input.cwd,
+    model: input.resolvedModel,
+  });
+}
+
+function resolvedBackendForTask(input: {
+  run: NonNullable<ReturnType<Harness["getRun"]>>;
+  task: NonNullable<ReturnType<Harness["getTask"]>>;
+  cliExecutor: "noop" | "acpx-codex" | "codex-cli" | "codex-resumable";
+}) {
+  return resolveAgentBackend({
+    run: input.run,
+    task: input.task,
+    cliAgentBackend: flag(parsed, "agent-backend"),
+    cliExecutor: input.cliExecutor,
+  });
+}
+
+function acpxAgentConfig(backend: ResolvedAgentBackend) {
+  if (backend.agentCommand) {
+    return { agentCommand: backend.agentCommand };
+  }
+  return { agent: backend.agent ?? "codex" };
 }
 
 async function runCodexResumableLoop(input: { runId: string; maxRounds: number; limit: number; maxTries: number }) {
@@ -1119,29 +1182,44 @@ async function superviseDaemon(input: {
   const ticks = [];
   let index = 0;
   while (!stopping && (input.maxTicks === 0 || index < input.maxTicks)) {
-    const result = await superviseRuns({
-      rootRunId: input.rootRunId ?? null,
-      runConcurrency: input.runConcurrency,
-      taskConcurrency: input.taskConcurrency,
-      maxCycles: input.tickCycles,
-      maxRounds: input.maxRounds,
-      maxTries: input.maxTries,
-      intervalMs: input.intervalMs,
-    });
-    const tick = {
-      type: "daemon.tick",
-      index,
-      result,
-      runCounts: runStatusCounts(),
-      createdAt: new Date().toISOString(),
-    };
+    let waitMs = input.intervalMs;
+    let tick;
+    try {
+      const result = await superviseRuns({
+        rootRunId: input.rootRunId ?? null,
+        runConcurrency: input.runConcurrency,
+        taskConcurrency: input.taskConcurrency,
+        maxCycles: input.tickCycles,
+        maxRounds: input.maxRounds,
+        maxTries: input.maxTries,
+        intervalMs: input.intervalMs,
+      });
+      waitMs = result.status === "idle" ? input.idleMs : input.intervalMs;
+      tick = {
+        type: "daemon.tick",
+        index,
+        status: "ok" as const,
+        result,
+        runCounts: runStatusCounts(),
+        createdAt: new Date().toISOString(),
+      };
+    } catch (error) {
+      tick = {
+        type: "daemon.tick",
+        index,
+        status: "error" as const,
+        error: cliErrorMessage(error),
+        runCounts: runStatusCounts(),
+        createdAt: new Date().toISOString(),
+      };
+    }
     ticks.push(tick);
     if (input.maxTicks === 0) {
       console.log(JSON.stringify(tick));
     }
     index += 1;
     if (!stopping && (input.maxTicks === 0 || index < input.maxTicks)) {
-      await sleep(result.status === "idle" ? input.idleMs : input.intervalMs);
+      await sleep(waitMs);
     }
   }
 
@@ -1152,6 +1230,10 @@ async function superviseDaemon(input: {
     ticks,
     runCounts: runStatusCounts(),
   };
+}
+
+function cliErrorMessage(error: unknown) {
+  return error instanceof Error ? error.message : String(error);
 }
 
 function runStatusCounts() {
@@ -1834,12 +1916,16 @@ async function applyCliStopHooks(input: {
 function codexResumableClient(model?: string | null, cwd = runnerCwd()) {
   return createCodexResumableClient({
     cwd,
-    sandbox: parseSandbox(flag(parsed, "sandbox") ?? "read-only"),
+    sandbox: parseCodexResumableSandbox(),
     codexBin: flag(parsed, "codex-bin"),
     model: model ?? undefined,
     timeoutMs: parseTimeoutMs(flag(parsed, "timeout-ms")),
     idleTimeoutMs: parseTimeoutMs(flag(parsed, "idle-timeout-ms"), "--idle-timeout-ms"),
   });
+}
+
+function parseCodexResumableSandbox() {
+  return parseSandbox(flag(parsed, "sandbox") ?? "workspace-write");
 }
 
 function codexAttemptInput(input: {

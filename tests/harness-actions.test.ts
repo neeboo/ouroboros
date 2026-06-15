@@ -133,8 +133,8 @@ describe("Harness actions", () => {
       eventId: expect.any(String),
     });
     expect(harness.getRun(runId)?.status).toBe("blocked");
-    expect(harness.getTask(taskId)?.status).toBe("todo");
-    expect(result.artifacts).toContainEqual(expect.objectContaining({ kind: "active_task", taskId }));
+    expect(harness.getTask(taskId)?.status).toBe("blocked");
+    expect(result.artifacts).toContainEqual(expect.objectContaining({ kind: "blocked_task", taskId }));
     expect(event).toMatchObject({
       actionType: "retireRun",
       status: "done",

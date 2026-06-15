@@ -43,6 +43,8 @@ export interface ExecutorFactoryInput {
 
 export type TaskExecutorFactory = (input: ExecutorFactoryInput) => TaskExecutor;
 
+export type AttemptInputFactory = (input: ExecutorFactoryInput) => Record<string, unknown>;
+
 export interface RunReadyTasksInput {
   harness: Harness;
   runId: string;
@@ -51,6 +53,7 @@ export interface RunReadyTasksInput {
   sessionForTask?: (task: Task) => string;
   worktreeForTask?: (task: Task) => string | null;
   executorFactory: TaskExecutorFactory;
+  attemptInput?: AttemptInputFactory;
   model?: string | null;
   startHooks?: StartHook[];
   stopHooks?: StopHook[];

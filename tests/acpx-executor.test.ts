@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { createAcpxCodexExecutor, parseAttemptOutput } from "../packages/runner/src";
+import { createAcpxAgentExecutor, createAcpxCodexExecutor, parseAttemptOutput } from "../packages/runner/src";
 
 const runFixture = {
   id: "run_1",
@@ -103,6 +103,149 @@ describe("acpx executor", () => {
     ]);
     expect(output.status).toBe("blocked");
     expect(output.problems).toEqual(["missing token"]);
+  });
+
+  test("runs a built-in acpx agent through the generic executor", async () => {
+    const calls: Array<{ cmd: string[]; stdin: string }> = [];
+    const executor = createAcpxAgentExecutor({
+      cwd: "/repo",
+      agent: "opencode",
+      model: "sonnet",
+      runCommand: async ({ cmd, stdin }) => {
+        calls.push({ cmd, stdin });
+        return {
+          exitCode: 0,
+          stdout: cmd.includes("-s")
+            ? '{"status":"done","summary":"opencode ok","changedFiles":[],"checks":[],"artifacts":[],"problems":[]}'
+            : "",
+          stderr: "",
+        };
+      },
+    });
+
+    const output = await executor({
+      prompt: "Do the task",
+      sessionName: "task_1",
+      run: runFixture,
+      task: {
+        id: "task_1",
+        runId: "run_1",
+        parentId: null,
+        cycleId: "task_1",
+        status: "todo",
+        role: "worker",
+        goal: "Task",
+        prompt: "Do it",
+        dependsOn: [],
+        doneWhen: [],
+        worktreePath: null,
+        sessionRef: null,
+        contextVersion: 1,
+      },
+    });
+
+    expect(calls.map((call) => call.cmd)).toEqual([
+      ["acpx", "--cwd", "/repo", "--approve-reads", "--format", "text", "--model", "sonnet", "opencode", "sessions", "show", "task_1"],
+      ["acpx", "--cwd", "/repo", "--approve-reads", "--format", "text", "--model", "sonnet", "opencode", "-s", "task_1"],
+    ]);
+    expect(output.summary).toBe("opencode ok");
+  });
+
+  test("constructs acpx commands for the built-in claude agent", async () => {
+    const calls: Array<{ cmd: string[]; stdin: string }> = [];
+    const executor = createAcpxAgentExecutor({
+      agent: "claude",
+      cwd: "/repo",
+      approval: "approve-all",
+      model: "sonnet",
+      runCommand: async ({ cmd, stdin }) => {
+        calls.push({ cmd, stdin });
+        if (cmd.includes("show")) {
+          return { exitCode: calls.length === 1 ? 1 : 0, stdout: "", stderr: calls.length === 1 ? "missing session" : "" };
+        }
+        return {
+          exitCode: 0,
+          stdout: cmd.includes("-s")
+            ? '{"status":"done","summary":"claude ok","changedFiles":[],"checks":[],"artifacts":[],"problems":[]}'
+            : "",
+          stderr: "",
+        };
+      },
+    });
+
+    const output = await executor({
+      prompt: "Do the task",
+      sessionName: "task_1",
+      run: runFixture,
+      task: {
+        id: "task_1",
+        runId: "run_1",
+        parentId: null,
+        cycleId: "task_1",
+        status: "todo",
+        role: "worker",
+        goal: "Task",
+        prompt: "Do it",
+        dependsOn: [],
+        doneWhen: [],
+        worktreePath: null,
+        sessionRef: null,
+        contextVersion: 1,
+      },
+    });
+
+    expect(calls.map((call) => call.cmd)).toEqual([
+      ["acpx", "--cwd", "/repo", "--approve-all", "--format", "text", "--model", "sonnet", "claude", "sessions", "show", "task_1"],
+      ["acpx", "--cwd", "/repo", "--approve-all", "--format", "text", "--model", "sonnet", "claude", "sessions", "new", "--name", "task_1"],
+      ["acpx", "--cwd", "/repo", "--approve-all", "--format", "text", "--model", "sonnet", "claude", "sessions", "show", "task_1"],
+      ["acpx", "--cwd", "/repo", "--approve-all", "--format", "text", "--model", "sonnet", "claude", "-s", "task_1"],
+    ]);
+    expect(output.summary).toBe("claude ok");
+  });
+
+  test("runs a raw acpx agent command through the generic executor", async () => {
+    const calls: string[][] = [];
+    const executor = createAcpxAgentExecutor({
+      cwd: "/repo",
+      agentCommand: "reasonix acp",
+      approval: "deny-all",
+      runCommand: async ({ cmd }) => {
+        calls.push(cmd);
+        return {
+          exitCode: 0,
+          stdout: cmd.includes("-s")
+            ? '{"status":"done","summary":"reasonix ok","changedFiles":[],"checks":[],"artifacts":[],"problems":[]}'
+            : "",
+          stderr: "",
+        };
+      },
+    });
+
+    await executor({
+      prompt: "Do the task",
+      sessionName: "task_1",
+      run: runFixture,
+      task: {
+        id: "task_1",
+        runId: "run_1",
+        parentId: null,
+        cycleId: "task_1",
+        status: "todo",
+        role: "worker",
+        goal: "Task",
+        prompt: "Do it",
+        dependsOn: [],
+        doneWhen: [],
+        worktreePath: null,
+        sessionRef: null,
+        contextVersion: 1,
+      },
+    });
+
+    expect(calls).toEqual([
+      ["acpx", "--cwd", "/repo", "--deny-all", "--format", "text", "--agent", "reasonix acp", "sessions", "show", "task_1"],
+      ["acpx", "--cwd", "/repo", "--deny-all", "--format", "text", "--agent", "reasonix acp", "-s", "task_1"],
+    ]);
   });
 
   test("reuses an existing acpx session when show succeeds", async () => {

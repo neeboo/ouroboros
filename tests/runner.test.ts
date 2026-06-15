@@ -15,6 +15,7 @@ import {
   createVerifierTaskHook,
   doneOutput,
   parseAttemptOutput,
+  resolveAgentBackend,
   runNextReadyTask,
   runReadyTasks,
   setRunDecisionAction,
@@ -1067,6 +1068,134 @@ describe("runner", () => {
       model: "gpt-5-codex",
       source: "run-default",
       role: "planner",
+    });
+  });
+
+  test("resolves agent backend with task, role, run, cli backend, and executor precedence", () => {
+    const run = {
+      id: "run_1",
+      projectId: null,
+      projectRoot: null,
+      goal: "Build loop",
+      status: "todo" as const,
+      context: {
+        agentDefaults: {
+          global: "global-acpx",
+          roles: {
+            worker: "role-acpx",
+          },
+        },
+        agentBackends: {
+          "task-acpx": { kind: "acpx", agent: "claude" },
+          "role-acpx": { kind: "acpx", agent: "opencode" },
+          "global-acpx": { kind: "acpx", agentCommand: "reasonix acp" },
+        },
+      },
+    };
+    const baseTask = {
+      id: "task_1",
+      runId: "run_1",
+      parentId: null,
+      cycleId: "task_1",
+      status: "todo" as const,
+      role: "worker",
+      goal: "Work",
+      prompt: "Work.",
+      dependsOn: [],
+      doneWhen: [],
+      worktreePath: null,
+      sessionRef: null,
+      contextVersion: 1,
+    };
+
+    expect(resolveAgentBackend({ run, task: { ...baseTask, config: { agentBackend: "task-acpx" } } })).toMatchObject({
+      id: "task-acpx",
+      kind: "acpx",
+      agent: "claude",
+      source: "task",
+    });
+    expect(resolveAgentBackend({ run, task: baseTask })).toMatchObject({
+      id: "role-acpx",
+      kind: "acpx",
+      agent: "opencode",
+      source: "role-default",
+    });
+    expect(resolveAgentBackend({ run, task: { ...baseTask, role: "planner" } })).toMatchObject({
+      id: "global-acpx",
+      kind: "acpx",
+      agentCommand: "reasonix acp",
+      source: "run-default",
+    });
+    expect(resolveAgentBackend({ run: { ...run, context: {} }, task: baseTask, cliAgentBackend: "claude" })).toMatchObject({
+      id: "claude",
+      kind: "acpx",
+      agent: "claude",
+      source: "cli-agent-backend",
+    });
+    expect(resolveAgentBackend({ run: { ...run, context: {} }, task: baseTask, cliAgentBackend: "claude-code" })).toMatchObject({
+      id: "claude-code",
+      kind: "acpx",
+      agent: "claude",
+      source: "cli-agent-backend",
+    });
+    expect(resolveAgentBackend({ run: { ...run, context: {} }, task: baseTask, cliExecutor: "codex-cli" })).toMatchObject({
+      id: "codex-cli",
+      kind: "codex-cli",
+      source: "cli-executor",
+    });
+  });
+
+  test("records resolved backend in attempt input", async () => {
+    const runId = harness.createRun({
+      goal: "Build loop",
+      context: {
+        agentDefaults: {
+          roles: {
+            worker: "opencode",
+          },
+        },
+      },
+    });
+    const taskId = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Use opencode",
+      prompt: "Work.",
+    });
+
+    const result = await runReadyTasks({
+      harness,
+      runId,
+      limit: 1,
+      model: "global-model",
+      executorFactory: () => async () => ({
+        status: "done",
+        summary: "ok",
+        artifacts: [],
+        checks: [],
+        problems: [],
+      }),
+      attemptInput: ({ run, task, cwd, resolvedModel }) => ({
+        backend: resolveAgentBackend({ run, task, cliExecutor: "codex-cli" }),
+        cwd,
+        model: resolvedModel,
+      }),
+    });
+
+    expect(harness.getAttempt(result[0].attemptId)?.input).toMatchObject({
+      sessionName: `task-${taskId}`,
+      cwd: process.cwd(),
+      backend: {
+        id: "opencode",
+        kind: "acpx",
+        agent: "opencode",
+        source: "role-default",
+      },
+      model: {
+        model: "global-model",
+        source: "global",
+        role: "worker",
+      },
     });
   });
 

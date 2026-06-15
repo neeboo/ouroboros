@@ -119,14 +119,13 @@ function applyParsedHarnessAction(harness: Harness, action: HarnessAction): Harn
     if (!run) {
       return blockedResult(action.type, `Run not found: ${action.runId}`, [`run not found: ${action.runId}`]);
     }
-    const overview = harness.getRunOverview({ runId: action.runId, eventLimit: 0 });
-    const active = overview.tasks.filter((task) => task.status === "todo" || task.status === "running");
+    const blockedTasks = harness.blockUnfinishedTasksForRun({ runId: action.runId, reason: action.reason });
     harness.updateRunStatus({ runId: action.runId, status: "blocked" });
     return doneResult(action.type, `Run ${action.runId} retired from the active queue.`, [
       { name: "run exists", status: "passed", evidence: action.runId },
       { name: "previous run status", status: "passed", evidence: run.status },
       { name: "retired run status", status: "passed", evidence: "blocked" },
-      { name: "active tasks preserved", status: "passed", evidence: String(active.length) },
+      { name: "unfinished tasks blocked", status: "passed", evidence: String(blockedTasks.length) },
     ], [
       {
         kind: "run",
@@ -134,9 +133,15 @@ function applyParsedHarnessAction(harness: Harness, action: HarnessAction): Harn
         previousStatus: run.status,
         status: "blocked",
         reason: action.reason,
-        activeTasksPreserved: active.length,
+        unfinishedTasksBlocked: blockedTasks.length,
       },
-      ...active.map((task) => ({ kind: "active_task", taskId: task.id, role: task.role, status: task.status })),
+      ...blockedTasks.map((task) => ({
+        kind: "blocked_task",
+        taskId: task.taskId,
+        role: task.role,
+        previousStatus: task.previousStatus,
+        reason: task.reason,
+      })),
     ]);
   }
 

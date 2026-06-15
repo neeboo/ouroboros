@@ -1216,6 +1216,65 @@ describe("CLI", () => {
     expect(result.tasks[0].attemptId).toBeString();
   });
 
+  test("selects an acpx backend from run role defaults and records it", async () => {
+    await runCli("init");
+    const run = await runCliJson(
+      "create-run",
+      "--goal",
+      "Bootstrap ouroboros",
+      "--context-json",
+      '{"agentDefaults":{"roles":{"worker":"opencode"}}}',
+    );
+    const task = await runCliJson(
+      "create-task",
+      "--run-id",
+      run.id,
+      "--role",
+      "worker",
+      "--goal",
+      "Run through opencode",
+      "--prompt",
+      "Use the fake opencode executor.",
+    );
+    const binDir = join(dir, "bin-agent-backend");
+    const logPath = join(dir, "acpx-args.json");
+    await mkdir(binDir);
+    await writeFile(
+      join(binDir, "acpx"),
+      [
+        "#!/usr/bin/env bun",
+        "const { writeFileSync } = await import('node:fs');",
+        "const args = Bun.argv.slice(2);",
+        `writeFileSync(${JSON.stringify(logPath)}, JSON.stringify(args));`,
+        "await new Response(Bun.stdin.stream()).text();",
+        "console.log(JSON.stringify({ status: 'done', summary: 'opencode selected', changedFiles: [], checks: [], artifacts: [], problems: [] }));",
+      ].join("\n"),
+    );
+    await chmod(join(binDir, "acpx"), 0o755);
+
+    const result = await runCliJson(
+      "run-next",
+      "--run-id",
+      run.id,
+      "--executor",
+      "codex-cli",
+      "--cwd",
+      "/repo",
+      { PATH: `${binDir}:${process.env.PATH}` },
+    );
+    const attempt = new Harness(dbPath).getAttempt(result.tasks[0].attemptId)!;
+
+    expect(result.tasks[0].taskId).toBe(task.id);
+    expect(JSON.parse(await Bun.file(logPath).text())).toContain("opencode");
+    expect(attempt.input.backend).toMatchObject({
+      id: "opencode",
+      kind: "acpx",
+      agent: "opencode",
+      source: "role-default",
+    });
+    expect(attempt.input.cwd).toBe("/repo");
+  });
+
   test("records a structured attempt from JSON", async () => {
     await runCli("init");
     const run = await runCliJson("create-run", "--goal", "Bootstrap ouroboros");
@@ -2127,6 +2186,113 @@ describe("CLI", () => {
     });
   });
 
+  test("supervise-daemon records failed ticks without crashing", async () => {
+    await runCli("init");
+    const run = await runCliJson("create-run", "--goal", "Run with missing executor");
+    await runCliJson(
+      "create-task",
+      "--run-id",
+      run.id,
+      "--role",
+      "worker",
+      "--goal",
+      "Attempt work with a missing codex binary",
+      "--prompt",
+      "Return structured JSON after this simulated executor call.",
+    );
+
+    const result = await runCliJson(
+      "supervise-daemon",
+      "--executor",
+      "codex-resumable",
+      "--codex-bin",
+      join(dir, "missing-codex"),
+      "--run-concurrency",
+      "1",
+      "--concurrency",
+      "1",
+      "--max-ticks",
+      "1",
+      "--tick-cycles",
+      "1",
+      "--max-rounds",
+      "1",
+      "--idle-ms",
+      "1",
+      "--interval-ms",
+      "1",
+    );
+
+    expect(result.status).toBe("tick_limit");
+    expect(result.ticks).toHaveLength(1);
+    expect(result.ticks[0]).toMatchObject({
+      type: "daemon.tick",
+      index: 0,
+      status: "error",
+      error: expect.any(String),
+      runCounts: expect.objectContaining({ todo: 1 }),
+    });
+  });
+
+  test("supervise-daemon defaults resumable codex to workspace-write sandbox", async () => {
+    await runCli("init");
+    const run = await runCliJson("create-run", "--goal", "Run with writable daemon default");
+    await runCliJson(
+      "create-task",
+      "--run-id",
+      run.id,
+      "--role",
+      "worker",
+      "--goal",
+      "Capture daemon sandbox",
+      "--prompt",
+      "Capture sandbox arguments.",
+    );
+    const argsPath = join(dir, "codex-args.json");
+    const codexBin = join(dir, "fake-codex-sandbox");
+    await writeFile(
+      codexBin,
+      [
+        "#!/usr/bin/env bun",
+        "import { writeFileSync } from 'node:fs';",
+        `writeFileSync(${JSON.stringify(argsPath)}, JSON.stringify(Bun.argv.slice(2)));`,
+        "const outputFlag = Bun.argv.indexOf('--output-last-message');",
+        "const outputPath = outputFlag >= 0 ? Bun.argv[outputFlag + 1] : '';",
+        "const payload = { status: 'done', summary: 'captured sandbox', changedFiles: [], checks: [], artifacts: [], problems: [] };",
+        "if (outputPath) writeFileSync(outputPath, JSON.stringify(payload));",
+        "console.log(JSON.stringify({ type: 'session.started', session_id: 'session_sandbox_default' }));",
+      ].join("\n"),
+    );
+    await chmod(codexBin, 0o755);
+
+    await runCliJson(
+      "supervise-daemon",
+      "--executor",
+      "codex-resumable",
+      "--codex-bin",
+      codexBin,
+      "--run-concurrency",
+      "1",
+      "--concurrency",
+      "1",
+      "--max-ticks",
+      "1",
+      "--tick-cycles",
+      "1",
+      "--max-rounds",
+      "1",
+      "--idle-ms",
+      "1",
+      "--interval-ms",
+      "1",
+    );
+    const args = JSON.parse(await Bun.file(argsPath).text());
+    const sandboxIndex = args.indexOf("--sandbox");
+
+    expect(sandboxIndex).toBeGreaterThanOrEqual(0);
+    expect(args[sandboxIndex + 1]).toBe("workspace-write");
+  });
+
   test("autopilot retries stale running attempts without a codex session id", async () => {
     await runCli("init");
     const run = await runCliJson("create-run", "--goal", "Bootstrap ouroboros");
@@ -2321,7 +2487,7 @@ describe("CLI", () => {
       actionType: "retireRun",
     });
     expect(overview.run.status).toBe("blocked");
-    expect(overview.tasks[0].status).toBe("todo");
+    expect(overview.tasks[0].status).toBe("blocked");
     expect(todoRuns.some((todoRun: { id: string }) => todoRun.id === run.id)).toBe(false);
   });
 

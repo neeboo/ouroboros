@@ -7,10 +7,11 @@ export {
   setRunDecisionAction,
 } from "./agent-actions";
 export { applyStartHooks, runNextReadyTask, runReadyTasks, runUntilIdle } from "./runner";
-export { createAcpxCodexExecutor } from "./executors/acpx";
+export { createAcpxAgentExecutor, createAcpxCodexExecutor } from "./executors/acpx";
 export { createCodexCliExecutor } from "./executors/codex-cli";
 export { createCodexResumableClient } from "./executors/codex-resumable";
 export { parseAttemptOutput } from "./executors/output";
+export { resolveAgentBackend } from "./agent-backends";
 export { resolveModelPreference } from "./model-preferences";
 export { runLocalCommand } from "./executors/command";
 export { proxyEnvForChildProcess, proxyEnvFromScutilOutput } from "./executors/proxy-env";
@@ -30,6 +31,7 @@ export type {
   SetRunDecisionAction,
 } from "./agent-actions";
 export type {
+  AttemptInputFactory,
   ExecutorInput,
   PromptInput,
   RunNextReadyTaskInput,
@@ -49,8 +51,11 @@ export type {
   TaskExecutor,
   TaskExecutorFactory,
 } from "./types";
+export type { AgentBackendKind, AgentBackendSource, ResolvedAgentBackend } from "./agent-backends";
 export type { ResolvedModelPreference, ResolvedModelPreferenceSource } from "./model-preferences";
 export type {
+  AcpxAgentExecutorOptions,
+  AcpxBuiltInAgent,
   AcpxCodexExecutorOptions,
   ApprovalMode,
   CodexCliExecutorOptions,

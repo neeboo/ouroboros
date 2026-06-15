@@ -50,6 +50,7 @@ Ouroboros is early, but it already has the core loop needed for self-iteration:
 - role-scoped stop hooks
 - resumable Codex executor
 - acpx/Codex executor foundation
+- configurable ACP/acpx agent backend selection per role or task
 - git worktree start hook
 - dashboard with task graph, flow view, sessions, todos, changed files, and diff inspection
 - Linear mapping skeleton
@@ -58,7 +59,7 @@ Ouroboros is early, but it already has the core loop needed for self-iteration:
 Active areas:
 
 - integrator stage for merging verified worktree output into a reviewable patch, branch, or PR
-- multi-agent backend through ACP/acpx for Codex, Claude Code, Reasonix, OpenCode, OpenClaw, and similar coding agents
+- smoke-tested agent-specific adapters beyond the generic ACP/acpx backend foundation
 - persistent dashboard history loaded from the database
 - conversation view that turns raw stdout into a readable coding-agent stream
 
@@ -189,6 +190,25 @@ then run.context.modelDefaults.roles[task.role]
 then run.context.modelDefaults.global
 then CLI --model
 ```
+
+Agent backend selection can also live on the run or on a single task:
+
+```bash
+bun run orbs -- create-run \
+  --goal "Use Ouroboros to iterate on Ouroboros" \
+  --context-json '{"agentDefaults":{"roles":{"worker":"opencode","verifier":"claude-code"}},"agentBackends":{"opencode":{"kind":"acpx","agent":"opencode"},"claude-code":{"kind":"acpx","agent":"claude"}}}'
+```
+
+```bash
+bun run orbs -- create-task \
+  --run-id <run_id> \
+  --role worker \
+  --goal "Run through Claude Code" \
+  --prompt "Implement the scoped change." \
+  --config-json '{"agentBackend":"claude-code"}'
+```
+
+See `docs/agent-backends.md` for capability boundaries, smoke testing, and custom `agentCommand` examples for ACP servers such as Hermes or Reasonix.
 
 ## Common Commands
 
