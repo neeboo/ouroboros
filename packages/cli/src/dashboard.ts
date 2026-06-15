@@ -1,6 +1,7 @@
 import type { RunOverview, RunStatusCounts } from "@ouroboros/harness";
 import { isAbsolute, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { DASHBOARD_REACT_MODULES } from "./dashboard-app";
 
 interface DashboardActionResult {
   attemptId?: string;
@@ -242,6 +243,7 @@ export function dashboardHtml(input: { runId: string }) {
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Ouroboros Dashboard</title>
+  <meta name="ouroboros-dashboard-react-modules" content="${escapeHtml(DASHBOARD_REACT_MODULES.map((module) => module.id).join(","))}">
   <link rel="stylesheet" href="/assets/dashboard-canvas.css">
   <style>
     :root {
@@ -2479,6 +2481,11 @@ export function dashboardHtml(input: { runId: string }) {
       } finally {
         input.value = "";
       }
+    });
+    document.getElementById("intake-input").addEventListener("keydown", (event) => {
+      if (event.key !== "Enter" || (!event.metaKey && !event.ctrlKey)) return;
+      event.preventDefault();
+      document.getElementById("intake-composer").requestSubmit(document.querySelector("[data-send-intake]"));
     });
     document.getElementById("intake-composer").addEventListener("submit", (event) => {
       event.preventDefault();

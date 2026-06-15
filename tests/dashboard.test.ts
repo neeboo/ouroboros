@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { Harness } from "../packages/harness/src";
 import { buildTaskPrompt } from "../packages/runner/src";
 import { buildDashboardTaskGraph, dashboardHtml, handleDashboardRequest } from "../packages/cli/src/dashboard";
+import { DASHBOARD_REACT_MODULES } from "../packages/cli/src/dashboard-app";
 
 const pathologicalText = {
   token: "SupercalifragilisticDashboardOverflowRegressionToken".repeat(6),
@@ -168,6 +169,28 @@ verifyDashboardOverflow("desktop and mobile widths");
 `;
 
 describe("dashboard", () => {
+  test("exposes a React dashboard module boundary for the incremental migration", () => {
+    expect(DASHBOARD_REACT_MODULES.map((module) => module.id)).toEqual([
+      "shell",
+      "sidebar",
+      "flow-view",
+      "inspector",
+      "controls",
+    ]);
+    expect(DASHBOARD_REACT_MODULES.every((module) => module.status === "active")).toBe(true);
+    expect(DASHBOARD_REACT_MODULES.flatMap((module) => module.owns)).toEqual(
+      expect.arrayContaining([
+        "intake-composer",
+        "supervisor-controls",
+        "workspace-flow",
+        "dashboard-canvas-root",
+        "inspector-panel",
+        "changed-files",
+        "diff-panel",
+      ]),
+    );
+  });
+
   test("renders Codex-style intake composer and goal navigation", () => {
     const html = dashboardHtml({ runId: "run_123" });
 
@@ -187,6 +210,10 @@ describe("dashboard", () => {
     expect(html).toContain("attachmentMetaForFile");
     expect(html).toContain("readAttachment");
     expect(html).toContain("attachments.map");
+    expect(html).toContain('event.key !== "Enter"');
+    expect(html).toContain("event.metaKey");
+    expect(html).toContain("event.ctrlKey");
+    expect(html).toContain('requestSubmit(document.querySelector("[data-send-intake]"))');
     expect(html).toContain('/api/runs/" + encodeURIComponent(runId) + "/intake"');
     expect(html).toContain("No active tasks. Describe the next goal in the composer.");
     expect(html).not.toContain('id="goal-composer"');
