@@ -11,6 +11,7 @@ export function createVerifierTaskHook(options: { harness: Harness; sourceRoles?
       return { decision: "exit" };
     }
 
+    const verifierContract = verifierContractFromTask(task);
     const taskId = options.harness.createTask({
       runId: run.id,
       role: "verifier",
@@ -20,6 +21,7 @@ export function createVerifierTaskHook(options: { harness: Harness; sourceRoles?
         task.id,
         task.worktreePath,
         output,
+        verifierContract,
       ),
       dependsOn: [task.id],
       worktreePath: task.worktreePath,
@@ -38,6 +40,7 @@ export function createVerifierTaskHook(options: { harness: Harness; sourceRoles?
           taskId,
           sourceTaskId: task.id,
           sourceWorktreePath: task.worktreePath,
+          ...artifactVerifierContract(verifierContract),
         },
       ],
     };
@@ -49,20 +52,42 @@ function buildVerifierPrompt(
   sourceTaskId: string,
   sourceTaskWorktreePath: string | null,
   output: AttemptOutput,
+  verifierContract: Record<string, unknown> | undefined,
 ) {
   const sourceOutput = {
-      summary: output.summary,
-      changedFiles: output.changedFiles ?? [],
-      checks: output.checks ?? [],
-      artifacts: output.artifacts ?? [],
-      problems: output.problems ?? [],
-      worktreePath: sourceTaskWorktreePath,
-    };
-  return renderPromptTemplate(template ?? DEFAULT_VERIFIER_TASK_PROMPT_TEMPLATE, {
+    summary: output.summary,
+    changedFiles: output.changedFiles ?? [],
+    checks: output.checks ?? [],
+    artifacts: output.artifacts ?? [],
+    problems: output.problems ?? [],
+    worktreePath: sourceTaskWorktreePath,
+  };
+  const contractSection = verifierContract
+    ? ["## Frozen Verifier Contract", "```json", prettyJson(verifierContract), "```"].join("\n")
+    : "";
+  const rendered = renderPromptTemplate(template ?? DEFAULT_VERIFIER_TASK_PROMPT_TEMPLATE, {
     sourceTaskId,
     sourceTaskWorktreePath: sourceTaskWorktreePath ?? "not recorded",
     sourceSummary: output.summary,
     sourceOutputJson: prettyJson(sourceOutput),
     sourceProblemsJson: prettyJson(output.problems ?? []),
+    sourceVerifierContractJson: verifierContract ? prettyJson(verifierContract) : "null",
+    sourceVerifierContractSection: contractSection,
   });
+  if (!verifierContract || rendered.includes(contractSection)) {
+    return rendered;
+  }
+  return `${rendered}\n\n${contractSection}`;
+}
+
+function verifierContractFromTask(task: { config?: { verifierContract?: unknown } }) {
+  const value = task.config?.verifierContract;
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return undefined;
+  }
+  return value as Record<string, unknown>;
+}
+
+function artifactVerifierContract(verifierContract: Record<string, unknown> | undefined) {
+  return verifierContract ? { verifierContract } : {};
 }

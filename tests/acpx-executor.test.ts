@@ -24,6 +24,8 @@ describe("acpx executor", () => {
       artifacts: [],
       problems: [],
       nextTasks: [],
+      nextRuns: [],
+      runDecision: undefined,
     });
   });
 

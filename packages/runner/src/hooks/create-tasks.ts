@@ -28,6 +28,10 @@ export function createTasksFromOutputHook(options: { harness: Harness }): StopHo
     }
 
     const created = plannedEntries.map(({ id, plannedTask }, index) => {
+      const config = {
+        ...(plannedTask.modelPreference ? { modelPreference: plannedTask.modelPreference } : {}),
+        ...(plannedTask.verifierContract ? { verifierContract: plannedTask.verifierContract } : {}),
+      };
       const taskId = options.harness.createTask({
         id,
         runId: run.id,
@@ -36,7 +40,7 @@ export function createTasksFromOutputHook(options: { harness: Harness }): StopHo
         prompt: plannedTask.prompt,
         dependsOn: resolved.dependsOnByIndex[index] ?? [task.id],
         doneWhen: plannedTask.doneWhen ?? [],
-        config: plannedTask.modelPreference ? { modelPreference: plannedTask.modelPreference } : {},
+        config,
       });
       return {
         kind: "created_task",

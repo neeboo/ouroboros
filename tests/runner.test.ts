@@ -799,6 +799,74 @@ describe("runner", () => {
     });
   });
 
+  test("planner stop hook persists next task verifier contract with model preference", async () => {
+    const runId = harness.createRun({ goal: "Build loop" });
+    const plannerTask = harness.createTask({
+      runId,
+      role: "planner",
+      goal: "Plan next work",
+      prompt: "Plan one contracted task.",
+    });
+
+    await runNextReadyTask({
+      harness,
+      runId,
+      executor: async () => ({
+        status: "done",
+        summary: "Planned contracted task",
+        artifacts: [],
+        checks: [],
+        problems: [],
+        nextTasks: [
+          {
+            role: "worker",
+            goal: "Implement frozen verifier contract",
+            prompt: "Persist the planner-supplied verifier contract.",
+            modelPreference: {
+              model: "gpt-5-mini",
+              reason: "focused change",
+            },
+            verifierContract: {
+              successCriteria: ["worker task config stores the contract"],
+              deterministicChecks: [
+                {
+                  name: "runner tests",
+                  command: "bun test tests/runner.test.ts",
+                  expected: "passes",
+                },
+              ],
+              agentReviewRubric: ["verify prompt cites the frozen contract"],
+            },
+          },
+        ],
+      }),
+      stopHooks: [createTasksFromOutputHook({ harness })],
+    });
+
+    const next = harness.nextReadyTask(runId);
+    expect(next).toMatchObject({
+      role: "worker",
+      dependsOn: [plannerTask],
+      config: {
+        modelPreference: {
+          model: "gpt-5-mini",
+          reason: "focused change",
+        },
+        verifierContract: {
+          successCriteria: ["worker task config stores the contract"],
+          deterministicChecks: [
+            {
+              name: "runner tests",
+              command: "bun test tests/runner.test.ts",
+              expected: "passes",
+            },
+          ],
+          agentReviewRubric: ["verify prompt cites the frozen contract"],
+        },
+      },
+    });
+  });
+
   test("planner stop hook resolves next task goal titles in dependsOn", async () => {
     const runId = harness.createRun({ goal: "Build loop" });
     harness.createTask({
@@ -1081,6 +1149,55 @@ describe("runner", () => {
     });
   });
 
+  test("worker stop hook injects frozen verifier contract into verifier prompt and artifact", async () => {
+    const runId = harness.createRun({ goal: "Build loop" });
+    const verifierContract = {
+      successCriteria: ["created verifier prompt contains this exact criterion"],
+      deterministicChecks: [
+        {
+          name: "runner tests",
+          command: "bun test tests/runner.test.ts",
+          expected: "passes",
+          required: true,
+        },
+      ],
+      agentReviewRubric: ["review against persisted task config"],
+    };
+    const workerTask = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Implement contracted worker",
+      prompt: "Do contracted work.",
+      config: { verifierContract },
+    });
+
+    const result = await runNextReadyTask({
+      harness,
+      runId,
+      executor: async () => ({
+        status: "done",
+        summary: "Implemented contracted worker",
+        artifacts: [],
+        checks: [],
+        problems: [],
+      }),
+      stopHooks: [createVerifierTaskHook({ harness })],
+    });
+
+    const verifier = harness.nextReadyTask(runId)!;
+    const attempt = harness.getAttempt(result!.attemptId)!;
+    expect(verifier.prompt).toContain("## Frozen Verifier Contract");
+    expect(verifier.prompt).toContain("created verifier prompt contains this exact criterion");
+    expect(verifier.prompt).toContain("bun test tests/runner.test.ts");
+    expect(attempt.output.artifacts).toContainEqual({
+      kind: "created_verifier_task",
+      taskId: verifier.id,
+      sourceTaskId: workerTask,
+      sourceWorktreePath: null,
+      verifierContract,
+    });
+  });
+
   test("verifier task hook uses the database template", async () => {
     const runId = harness.createRun({ goal: "Build loop" });
     harness.setPromptTemplate({
@@ -1230,6 +1347,59 @@ describe("runner", () => {
         doneWhen: ["tests pass"],
       },
     ]);
+  });
+
+  test("parses optional planner next task verifier contracts", () => {
+    const verifierContract = {
+      successCriteria: ["tests pass"],
+      deterministicChecks: [{ name: "runner tests", expected: "passes" }],
+      agentReviewRubric: ["contract is included in verifier prompt"],
+      requiredArtifacts: ["created_verifier_task artifact"],
+    };
+    const output = parseAttemptOutput(
+      JSON.stringify({
+        status: "done",
+        summary: "planned",
+        actions: [
+          createTasksAction([
+            {
+              role: "worker",
+              goal: "Implement verifier contract path",
+              prompt: "Persist contract and inject it.",
+              verifierContract,
+            },
+          ]),
+        ],
+      }),
+    );
+
+    expect(output.nextTasks?.[0]).toEqual({
+      role: "worker",
+      goal: "Implement verifier contract path",
+      prompt: "Persist contract and inject it.",
+      dependsOn: undefined,
+      doneWhen: undefined,
+      modelPreference: undefined,
+      verifierContract,
+    });
+  });
+
+  test("keeps planner next tasks compatible when verifier contract is omitted", () => {
+    const output = parseAttemptOutput(
+      JSON.stringify({
+        status: "done",
+        summary: "planned",
+        nextTasks: [
+          {
+            role: "worker",
+            goal: "Implement without verifier contract",
+            prompt: "Keep old planner output working.",
+          },
+        ],
+      }),
+    );
+
+    expect(output.nextTasks?.[0]?.verifierContract).toBeUndefined();
   });
 
   test("parses valid planner next runs", () => {
@@ -1383,6 +1553,19 @@ describe("runner", () => {
     ["empty prompt", { role: "worker", goal: "Goal", prompt: "  " }],
     ["invalid dependsOn", { role: "worker", goal: "Goal", prompt: "Prompt", dependsOn: "task_1" }],
     ["invalid doneWhen", { role: "worker", goal: "Goal", prompt: "Prompt", doneWhen: [1] }],
+    ["invalid verifierContract", { role: "worker", goal: "Goal", prompt: "Prompt", verifierContract: [] }],
+    [
+      "missing verifierContract successCriteria",
+      {
+        role: "worker",
+        goal: "Goal",
+        prompt: "Prompt",
+        verifierContract: {
+          deterministicChecks: [],
+          agentReviewRubric: [],
+        },
+      },
+    ],
   ])("rejects planner next tasks with %s", (_name, plannedTask) => {
     expect(() =>
       parseAttemptOutput(

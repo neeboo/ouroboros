@@ -16,6 +16,7 @@ export interface ModelPreference {
 
 export interface TaskConfig {
   modelPreference?: ModelPreference;
+  verifierContract?: Record<string, unknown>;
   [key: string]: unknown;
 }
 
@@ -135,6 +136,7 @@ export interface PlannedTask {
   dependsOn?: string[];
   doneWhen?: string[];
   modelPreference?: ModelPreference;
+  verifierContract?: Record<string, unknown>;
 }
 
 export interface ExternalRef {

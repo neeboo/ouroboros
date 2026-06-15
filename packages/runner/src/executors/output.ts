@@ -217,6 +217,7 @@ function validatePlannedTask(task: unknown, index: number): PlannedTask {
     dependsOn: optionalStringArray(record, "dependsOn", index),
     doneWhen: optionalStringArray(record, "doneWhen", index),
     modelPreference: optionalModelPreference(record, index, "planned task"),
+    verifierContract: optionalVerifierContract(record, index),
   };
 }
 
@@ -237,6 +238,28 @@ function optionalStringArray(task: Record<string, unknown>, key: "dependsOn" | "
     throw new Error(`planned task ${index} ${key} must be an array of strings`);
   }
   return value;
+}
+
+function optionalVerifierContract(task: Record<string, unknown>, index: number) {
+  const value = task.verifierContract;
+  if (value === undefined) {
+    return undefined;
+  }
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error(`planned task ${index} verifierContract must be an object`);
+  }
+
+  const contract = value as Record<string, unknown>;
+  requireContractArray(contract, "successCriteria", index);
+  requireContractArray(contract, "deterministicChecks", index);
+  requireContractArray(contract, "agentReviewRubric", index);
+  return contract;
+}
+
+function requireContractArray(contract: Record<string, unknown>, key: string, index: number) {
+  if (!Array.isArray(contract[key])) {
+    throw new Error(`planned task ${index} verifierContract.${key} must be an array`);
+  }
 }
 
 function optionalModelPreference(record: Record<string, unknown>, index: number, label: "planned task" | "planned run") {

@@ -14,12 +14,15 @@ Ouroboros already has the minimum working loop:
 - Resumable Codex execution with streaming attempt events.
 - Dashboard visibility for goals, task flow, todos, sessions, runner state, and manual interruption.
 - Bounded goal-review retries and proxy-aware child process execution.
+- A first-class self-iteration bootstrap command that creates a self-iteration run, seeds the planner task, and can launch the dashboard and runner together.
 
 ## Next Iteration Goal
 
 Make Ouroboros able to plan and drain its own next improvement cycle before it asks for human intervention.
 
-The first self-planning run should produce a task graph that is narrow enough to execute safely, but complete enough that a human can understand why each task exists and watch the run-loop finish every task.
+The current self-iteration state is past bootstrap: the self-iteration command exists, and the active implementation cycle is frozen verifier contracts before execution. The next slice is to let planner-created worker tasks carry a verifier contract in task config, then force worker-created verifier tasks to check against that frozen contract instead of redefining success after the worker finishes.
+
+This cycle should keep planner output backward-compatible when `verifierContract` is omitted. When a planner supplies one, it should be persisted with the task, included in the verifier prompt, and cited in the `created_verifier_task` artifact so a human can audit which contract was used.
 
 ## Split-Enough Rule
 
@@ -66,7 +69,7 @@ The planner should choose as many areas as can be split into independent, verifi
 - expose the generated task graph as a simple graph view;
 - add a Linear bridge skeleton that maps local runs and tasks to external issues;
 - improve run completion review so it can cite evidence from docs, tests, dashboard state, and lessons.
-- add a planning loop that freezes a verifier contract before execution starts;
+- add a planning loop that freezes a verifier contract before execution starts; the active first slice is persisting task-level verifier contracts and injecting them into verifier tasks.
 - promote repeated lessons into guardrails and keep repeated experiences as reusable evidence patterns.
 
 ## Human Checkpoints

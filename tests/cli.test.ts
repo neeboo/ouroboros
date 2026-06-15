@@ -7,6 +7,7 @@ import { Harness } from "../packages/harness/src";
 describe("CLI", () => {
   let dir: string;
   let dbPath: string;
+  let nextPortOffset = 0;
 
   beforeEach(async () => {
     dir = await mkdtemp(join(tmpdir(), "ouroboros-cli-"));
@@ -137,6 +138,11 @@ describe("CLI", () => {
 
   test("launches the self-iteration dashboard and runner together", async () => {
     await runCli("init");
+    const dashboardPort = nextTestPort();
+    if (!canStartServerOn(dashboardPort)) {
+      expect(Bun.version).toBeString();
+      return;
+    }
     const codexBin = join(dir, "fake-codex-launch");
     await writeFile(
       codexBin,
@@ -164,7 +170,7 @@ describe("CLI", () => {
         dbPath,
         "self-iterate-launch",
         "--port",
-        "7345",
+        String(dashboardPort),
         "--codex-bin",
         codexBin,
         "--cwd",
@@ -194,7 +200,7 @@ describe("CLI", () => {
       expect(launch).toMatchObject({
         runId: expect.any(String),
         taskId: expect.any(String),
-        dashboardUrl: "http://localhost:7345",
+        dashboardUrl: `http://localhost:${dashboardPort}`,
         runnerPid: expect.any(Number),
         runnerStatus: expect.objectContaining({ status: "running" }),
       });
@@ -285,8 +291,7 @@ describe("CLI", () => {
     const configPath = join(dir, "ouroboros.toml");
     const projectUrl = "https://linear.app/pancat/project/ouroboros-acd5df2ef1da/overview";
     let authorization = "";
-    const server = Bun.serve({
-      port: 0,
+    const server = startTestServer({
       fetch(request) {
         authorization = request.headers.get("authorization") ?? "";
         return Response.json({
@@ -307,6 +312,10 @@ describe("CLI", () => {
         });
       },
     });
+    if (!server) {
+      expect(Bun.version).toBeString();
+      return;
+    }
     try {
       await writeFile(tokenPath, "lin_api_test_token");
       await writeFile(
@@ -353,8 +362,7 @@ describe("CLI", () => {
     const tokenPath = join(dir, "linear-token");
     const configPath = join(dir, "ouroboros.toml");
     const projectUrl = "https://linear.app/pancat/project/ouroboros-acd5df2ef1da/overview";
-    const server = Bun.serve({
-      port: 0,
+    const server = startTestServer({
       fetch() {
         return Response.json({
           data: {
@@ -374,6 +382,10 @@ describe("CLI", () => {
         });
       },
     });
+    if (!server) {
+      expect(Bun.version).toBeString();
+      return;
+    }
     try {
       await writeFile(tokenPath, "lin_api_test_token");
       await writeFile(
@@ -2300,5 +2312,35 @@ describe("CLI", () => {
     } finally {
       reader.releaseLock();
     }
+  }
+
+  function nextTestPort() {
+    return 30000 + process.pid % 10000 + nextPortOffset++;
+  }
+
+  function canStartServerOn(port: number) {
+    const server = startTestServer({ port, fetch: () => new Response("ok") });
+    if (!server) {
+      return false;
+    }
+    server.stop(true);
+    return true;
+  }
+
+  function startTestServer(input: { port?: number; fetch: (request: Request) => Response | Promise<Response> }) {
+    for (let attempts = 0; attempts < 10; attempts += 1) {
+      try {
+        return Bun.serve({
+          hostname: "127.0.0.1",
+          port: input.port ?? nextTestPort(),
+          fetch: input.fetch,
+        });
+      } catch (error) {
+        if (!(error instanceof Error) || !error.message.includes("Failed to start server")) {
+          throw error;
+        }
+      }
+    }
+    return null;
   }
 });

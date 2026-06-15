@@ -51,6 +51,8 @@ export const DEFAULT_VERIFIER_TASK_PROMPT_TEMPLATE = [
   "{{sourceOutputJson}}",
   "```",
   "",
+  "{{sourceVerifierContractSection}}",
+  "",
   "Return structured JSON. Use status blocked with concrete problems when verification cannot pass.",
 ].join("\n");
 
