@@ -1538,14 +1538,25 @@ export function dashboardHtml(input: { runId: string }) {
     let attachments = [];
     const resolvedBlockedTaskIdsFor = (tasks) => {
       const repairsByParent = new Map();
+      const doneVerifiersByDependency = new Map();
       for (const task of tasks) {
-        if (!task.parentId) continue;
-        if (!repairsByParent.has(task.parentId)) repairsByParent.set(task.parentId, []);
-        repairsByParent.get(task.parentId).push(task);
+        if (task.parentId && task.role === "worker" && task.status === "done") {
+          if (!repairsByParent.has(task.parentId)) repairsByParent.set(task.parentId, []);
+          repairsByParent.get(task.parentId).push(task);
+        }
+        if (task.role !== "verifier" || task.status !== "done") continue;
+        for (const dependencyId of task.dependsOn || []) {
+          if (!doneVerifiersByDependency.has(dependencyId)) doneVerifiersByDependency.set(dependencyId, []);
+          doneVerifiersByDependency.get(dependencyId).push(task);
+        }
       }
       return new Set(tasks
         .filter((task) => task.status === "blocked")
-        .filter((task) => (repairsByParent.get(task.id) || []).some((repair) => repair.status === "done"))
+        .filter((task) =>
+          (repairsByParent.get(task.id) || []).some(
+            (repair) => (doneVerifiersByDependency.get(repair.id) || []).length > 0,
+          )
+        )
         .map((task) => task.id));
     };
     const effectiveTaskStatus = (task, resolvedBlockedTaskIds) =>

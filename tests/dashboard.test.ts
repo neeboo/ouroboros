@@ -98,6 +98,13 @@ function longTextDashboardFixture() {
   };
 }
 
+function dashboardResolvedBlockedTaskIdsForTest(tasks: Array<Record<string, unknown>>) {
+  const html = dashboardHtml({ runId: "run_123" });
+  const match = html.match(/const resolvedBlockedTaskIdsFor = \(tasks\) => \{([\s\S]*?)\n    \};/);
+  if (!match) throw new Error("resolvedBlockedTaskIdsFor script not found");
+  return new Function("tasks", `${match[1]}; return resolvedBlockedTaskIdsFor(tasks);`)(tasks) as Set<string>;
+}
+
 function styleBlock(html: string) {
   const match = html.match(/<style>([\s\S]*?)<\/style>/);
   if (!match) throw new Error("dashboard style block not found");
@@ -265,6 +272,55 @@ describe("dashboard", () => {
     expect(html).toContain("repaired block");
     expect(html).toContain("blocked verifier task was repaired and is now historical evidence");
     expect(html).toContain('task.status === "blocked" && !group.resolvedBlockedTaskIds.has(task.id)');
+  });
+
+  test("does not resolve a blocked task when only the repair worker is done", () => {
+    const resolved = dashboardResolvedBlockedTaskIdsForTest([
+      {
+        id: "task_blocked_verifier",
+        role: "verifier",
+        status: "blocked",
+        parentId: "task_worker",
+        dependsOn: ["task_worker"],
+      },
+      {
+        id: "task_repair_worker",
+        role: "worker",
+        status: "done",
+        parentId: "task_blocked_verifier",
+        dependsOn: [],
+      },
+    ]);
+
+    expect(resolved.has("task_blocked_verifier")).toBe(false);
+  });
+
+  test("resolves a blocked task only after a repair worker has a done verifier", () => {
+    const resolved = dashboardResolvedBlockedTaskIdsForTest([
+      {
+        id: "task_blocked_verifier",
+        role: "verifier",
+        status: "blocked",
+        parentId: "task_worker",
+        dependsOn: ["task_worker"],
+      },
+      {
+        id: "task_repair_worker",
+        role: "worker",
+        status: "done",
+        parentId: "task_blocked_verifier",
+        dependsOn: [],
+      },
+      {
+        id: "task_repair_verifier",
+        role: "verifier",
+        status: "done",
+        parentId: "task_repair_worker",
+        dependsOn: ["task_repair_worker"],
+      },
+    ]);
+
+    expect(resolved.has("task_blocked_verifier")).toBe(true);
   });
 
   test("renders project metadata in the dashboard header", () => {

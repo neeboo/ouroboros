@@ -56,6 +56,7 @@ import type {
   RetryTaskInput,
   StartAttemptInput,
   Status,
+  Task,
   UpdateRunStatusInput,
   UpdateAttemptInputInput,
   UpdateExecutionThreadInput,
@@ -330,14 +331,12 @@ export class Harness {
           `,
         )
         .all({ $runId: runId }) as TaskRow[];
-      const statusRows = db
-        .query("select id, parent_id, status from tasks where run_id = $runId")
-        .all({ $runId: runId }) as Array<{ id: string; parent_id: string | null; status: Status }>;
-      const statuses = effectiveDependencyStatuses(statusRows);
+      const allTaskRows = db.query("select * from tasks where run_id = $runId").all({ $runId: runId }) as TaskRow[];
+      const dependencyIsSatisfied = createDependencyReadiness(allTaskRows.map(taskFromRow));
 
       for (const row of taskRows) {
         const task = taskFromRow(row);
-        if (task.dependsOn.every((id) => statuses.get(id) === "done")) {
+        if (task.dependsOn.every(dependencyIsSatisfied)) {
           return task;
         }
       }
@@ -357,13 +356,13 @@ export class Harness {
           `,
         )
         .all({ $runId: input.runId }) as TaskRow[];
-      const statusRows = db
-        .query("select id, parent_id, status from tasks where run_id = $runId")
-        .all({ $runId: input.runId }) as Array<{ id: string; parent_id: string | null; status: Status }>;
-      const statuses = effectiveDependencyStatuses(statusRows);
+      const allTaskRows = db
+        .query("select * from tasks where run_id = $runId")
+        .all({ $runId: input.runId }) as TaskRow[];
+      const dependencyIsSatisfied = createDependencyReadiness(allTaskRows.map(taskFromRow));
       const ready = taskRows
         .map(taskFromRow)
-        .filter((task) => task.dependsOn.every((id) => statuses.get(id) === "done"))
+        .filter((task) => task.dependsOn.every(dependencyIsSatisfied))
         .slice(0, input.limit);
 
       return db.transaction(() => {
@@ -1095,19 +1094,36 @@ function stringOrNull(value: unknown) {
   return typeof value === "string" && value.trim().length > 0 ? value : null;
 }
 
-function effectiveDependencyStatuses(rows: Array<{ id: string; parent_id: string | null; status: Status }>) {
-  const statuses = new Map(rows.map((row) => [row.id, row.status]));
-  const repairedBlockedIds = new Set(
-    rows
-      .filter((row) => row.parent_id && row.status === "done")
-      .map((row) => row.parent_id as string),
-  );
-  for (const id of repairedBlockedIds) {
-    if (statuses.get(id) === "blocked") {
-      statuses.set(id, "done");
+function createDependencyReadiness(tasks: Task[]) {
+  const statuses = new Map(tasks.map((task) => [task.id, task.status]));
+  const repairTasksByParent = new Map<string, Task[]>();
+  const verifiedRepairIds = new Set<string>();
+
+  for (const task of tasks) {
+    if (task.role === "worker" && task.status === "done" && task.parentId) {
+      const repairTasks = repairTasksByParent.get(task.parentId) ?? [];
+      repairTasks.push(task);
+      repairTasksByParent.set(task.parentId, repairTasks);
+    }
+
+    if (task.role === "verifier" && task.status === "done") {
+      for (const dependencyId of task.dependsOn) {
+        verifiedRepairIds.add(dependencyId);
+      }
     }
   }
-  return statuses;
+
+  return (taskId: string) => {
+    const status = statuses.get(taskId);
+    if (status === "done") {
+      return true;
+    }
+    if (status !== "blocked") {
+      return false;
+    }
+
+    return (repairTasksByParent.get(taskId) ?? []).some((repairTask) => verifiedRepairIds.has(repairTask.id));
+  };
 }
 
 function ensureExecutionThreads(db: { exec: (sql: string) => void }) {

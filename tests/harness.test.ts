@@ -18,6 +18,51 @@ describe("Harness", () => {
     await rm(dir, { recursive: true, force: true });
   });
 
+  function createBlockedVerifierRepairGraph() {
+    const runId = harness.createRun({ goal: "Build loop" });
+    const verifier = harness.createTask({
+      runId,
+      role: "verifier",
+      goal: "Verify implementation",
+      prompt: "Verify.",
+    });
+    const downstream = harness.createTask({
+      runId,
+      role: "planner",
+      goal: "Plan next",
+      prompt: "Plan next.",
+      dependsOn: [verifier],
+    });
+    const repair = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Repair verifier failure",
+      prompt: "Repair.",
+      parentId: verifier,
+    });
+    const repairVerifier = harness.createTask({
+      runId,
+      role: "verifier",
+      goal: "Verify repair",
+      prompt: "Verify repair.",
+      dependsOn: [repair],
+    });
+
+    return { runId, verifier, downstream, repair, repairVerifier };
+  }
+
+  function recordTaskStatus(taskId: string, status: "done" | "blocked", summary: string) {
+    harness.recordAttempt({
+      taskId,
+      input: {},
+      output: {
+        status,
+        summary,
+        problems: status === "blocked" ? [summary] : [],
+      },
+    });
+  }
+
   test("creates a run and task", () => {
     const runId = harness.createRun({
       goal: "Bootstrap this repository",
@@ -426,62 +471,34 @@ describe("Harness", () => {
     expect(harness.nextReadyTask(runId)?.id).toBe(second);
   });
 
-  test("treats blocked dependencies with done repair children as resolved", () => {
-    const runId = harness.createRun({ goal: "Build loop" });
-    const verifier = harness.createTask({
-      runId,
-      role: "verifier",
-      goal: "Verify",
-      prompt: "Verify.",
-    });
-    const downstream = harness.createTask({
-      runId,
-      role: "worker",
-      goal: "Continue after repair",
-      prompt: "Continue.",
-      dependsOn: [verifier],
-    });
-    harness.recordAttempt({
-      taskId: verifier,
-      input: {},
-      output: {
-        status: "blocked",
-        summary: "Verification failed",
-        changedFiles: [],
-        checks: [],
-        artifacts: [],
-        problems: ["needs repair"],
-      },
-    });
-    expect(harness.nextReadyTask(runId)).toBeNull();
+  test("repaired blocked verifier unlocks dependent work without changing blocked status", () => {
+    const { runId, verifier, downstream, repair, repairVerifier } = createBlockedVerifierRepairGraph();
 
-    const repair = harness.createTask({
-      runId,
-      role: "worker",
-      goal: "Repair verifier failure",
-      prompt: "Repair.",
-      parentId: verifier,
-    });
-    harness.recordAttempt({
-      taskId: repair,
-      input: {},
-      output: {
-        status: "done",
-        summary: "Repair complete",
-        changedFiles: [],
-        checks: [],
-        artifacts: [],
-        problems: [],
-      },
-    });
+    recordTaskStatus(verifier, "blocked", "Verifier failed");
+    recordTaskStatus(repair, "done", "Added evidence");
+    recordTaskStatus(repairVerifier, "done", "Repair verified");
 
+    expect(harness.getTask(verifier)?.status).toBe("blocked");
     expect(harness.nextReadyTask(runId)?.id).toBe(downstream);
-    const leased = harness.leaseReadyTasks({
-      runId,
-      limit: 1,
-      sessionForTask: (task) => `task-${task.id}`,
-    });
-    expect(leased.map((task) => task.id)).toEqual([downstream]);
+  });
+
+  test("done repair worker without done repair verifier does not unlock dependent work", () => {
+    const { runId, verifier, downstream, repair } = createBlockedVerifierRepairGraph();
+
+    recordTaskStatus(verifier, "blocked", "Verifier failed");
+    recordTaskStatus(repair, "done", "Added evidence");
+
+    expect(harness.nextReadyTask(runId)?.id).not.toBe(downstream);
+  });
+
+  test("blocked repair verifier does not unlock dependent work", () => {
+    const { runId, verifier, downstream, repair, repairVerifier } = createBlockedVerifierRepairGraph();
+
+    recordTaskStatus(verifier, "blocked", "Verifier failed");
+    recordTaskStatus(repair, "done", "Added evidence");
+    recordTaskStatus(repairVerifier, "blocked", "Repair verifier failed");
+
+    expect(harness.nextReadyTask(runId)?.id).not.toBe(downstream);
   });
 
   test("starts and finishes a resumable running attempt", () => {
@@ -846,6 +863,24 @@ describe("Harness", () => {
     expect(harness.getTask(first)?.status).toBe("running");
     expect(harness.getTask(first)?.sessionRef).toBe(`session-${first}`);
     expect(harness.getTask(second)?.status).toBe("todo");
+  });
+
+  test("leases tasks unlocked by verified repair paths", () => {
+    const { runId, verifier, downstream, repair, repairVerifier } = createBlockedVerifierRepairGraph();
+
+    recordTaskStatus(verifier, "blocked", "Verifier failed");
+    recordTaskStatus(repair, "done", "Added evidence");
+    recordTaskStatus(repairVerifier, "done", "Repair verified");
+
+    const leased = harness.leaseReadyTasks({
+      runId,
+      limit: 1,
+      sessionForTask: (task) => `session-${task.id}`,
+    });
+
+    expect(leased.map((task) => task.id)).toEqual([downstream]);
+    expect(harness.getTask(downstream)?.status).toBe("running");
+    expect(harness.getTask(verifier)?.status).toBe("blocked");
   });
 
   test("leases ready tasks with worktree paths", () => {
