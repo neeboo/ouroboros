@@ -958,6 +958,51 @@ describe("runner", () => {
     expect(verifier.dependsOn).toEqual(workers.map((task) => task.id));
   });
 
+  test("planner stop hook preserves explicit empty verifier dependencies", async () => {
+    const runId = harness.createRun({ goal: "Build loop" });
+    const plannerTask = harness.createTask({
+      runId,
+      role: "planner",
+      goal: "Plan next work",
+      prompt: "Plan independent verifier and dependent work.",
+    });
+
+    await runNextReadyTask({
+      harness,
+      runId,
+      executor: async () => ({
+        status: "done",
+        summary: "Planned an independent baseline verifier",
+        artifacts: [],
+        checks: [],
+        problems: [],
+        nextTasks: [
+          {
+            role: "verifier",
+            goal: "Verify baseline first",
+            prompt: "Verify the baseline before downstream work.",
+            dependsOn: [],
+          },
+          {
+            role: "worker",
+            goal: "Implement downstream update",
+            prompt: "Implement after baseline verification.",
+            dependsOn: ["Verify baseline first"],
+          },
+        ],
+      }),
+      stopHooks: [createTasksFromOutputHook({ harness })],
+    });
+
+    const overview = harness.getRunOverview({ runId, eventLimit: 1 });
+    const verifier = overview.tasks.find((task) => task.goal === "Verify baseline first")!;
+    const worker = overview.tasks.find((task) => task.goal === "Implement downstream update")!;
+
+    expect(verifier.dependsOn).toEqual([]);
+    expect(worker.dependsOn).toEqual([verifier.id]);
+    expect(overview.tasks.find((task) => task.id === plannerTask)?.status).toBe("done");
+  });
+
   test("planner stop hook blocks unresolved dependsOn instead of creating stuck tasks", async () => {
     const runId = harness.createRun({ goal: "Build loop" });
     const plannerTask = harness.createTask({

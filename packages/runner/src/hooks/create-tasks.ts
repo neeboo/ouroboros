@@ -113,7 +113,7 @@ function resolvePlannedDependencies(input: {
 }
 
 function explicitDependencyRefs(plannedTask: PlannedTask) {
-  if (plannedTask.dependsOn && plannedTask.dependsOn.length > 0) {
+  if ("dependsOn" in plannedTask && Array.isArray(plannedTask.dependsOn)) {
     return plannedTask.dependsOn;
   }
   return undefined;
