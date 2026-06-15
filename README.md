@@ -31,55 +31,62 @@ packages/cli/src/                Local CLI wrapper
 
 ## Local Commands
 
+Local development uses `bun run orbs -- ...`. The distribution target is a Homebrew-installed binary:
+
 ```bash
-bun run cli -- init
-bun run cli -- self-iterate
-bun run cli -- self-iterate-launch --concurrency 3 --worktree-root .ouroboros/worktrees --start-hook git-worktree
-bun run cli -- create-project --name "Ouroboros" --root-path "$(pwd)"
-bun run cli -- create-run --goal "Use Ouroboros to iterate on Ouroboros"
-bun run cli -- create-run --goal "Use Ouroboros to iterate on Ouroboros" --project-root "$(pwd)"
-bun run cli -- create-run --goal "Use Ouroboros to iterate on Ouroboros" --context-json '{"modelDefaults":{"roles":{"worker":{"model":"gpt-5-mini"},"verifier":{"model":"gpt-5-mini"}}}}'
-bun run cli -- create-task --run-id <run_id> --role planner --goal "Plan next step" --prompt "Propose one small task."
-bun run cli -- create-task --run-id <run_id> --role worker --goal "Cheap follow-up" --prompt "Implement the follow-up." --config-json '{"modelPreference":{"model":"gpt-5-mini","reason":"low-risk task"}}'
-bun run cli -- next-task --run-id <run_id>
+brew install orbs
+orbs init
+```
+
+```bash
+bun run orbs -- init
+bun run orbs -- self-iterate
+bun run orbs -- self-iterate-launch --concurrency 3 --worktree-root .ouroboros/worktrees --start-hook git-worktree
+bun run orbs -- create-project --name "Ouroboros" --root-path "$(pwd)"
+bun run orbs -- create-run --goal "Use Ouroboros to iterate on Ouroboros"
+bun run orbs -- create-run --goal "Use Ouroboros to iterate on Ouroboros" --project-root "$(pwd)"
+bun run orbs -- create-run --goal "Use Ouroboros to iterate on Ouroboros" --context-json '{"modelDefaults":{"roles":{"worker":{"model":"gpt-5-mini"},"verifier":{"model":"gpt-5-mini"}}}}'
+bun run orbs -- create-task --run-id <run_id> --role planner --goal "Plan next step" --prompt "Propose one small task."
+bun run orbs -- create-task --run-id <run_id> --role worker --goal "Cheap follow-up" --prompt "Implement the follow-up." --config-json '{"modelPreference":{"model":"gpt-5-mini","reason":"low-risk task"}}'
+bun run orbs -- next-task --run-id <run_id>
 
 # synchronous task execution
-bun run cli -- run-next --run-id <run_id> --executor noop --limit 2
-bun run cli -- run-next --run-id <run_id> --executor acpx-codex --cwd "$(pwd)" --approval approve-reads --limit 2
-bun run cli -- run-next --run-id <run_id> --executor codex-cli --cwd "$(pwd)" --sandbox read-only --codex-bin "$(command -v codex)" --model gpt-5-codex --limit 2
-bun run cli -- run-next --run-id <run_id> --executor codex-cli --cwd "$(pwd)" --timeout-ms 1800000 --idle-timeout-ms 300000
-bun run cli -- run-next --run-id <run_id> --executor codex-cli --worktree-root ".ouroboros/worktrees" --limit 2
-bun run cli -- run-next --run-id <run_id> --executor codex-cli --worktree-root ".ouroboros/worktrees" --start-hook git-worktree
-bun run cli -- run-loop --run-id <run_id> --executor codex-cli --cwd "$(pwd)" --stop-hook create-tasks,create-verifier,create-repair,context-summary --max-rounds 8
+bun run orbs -- run-next --run-id <run_id> --executor noop --limit 2
+bun run orbs -- run-next --run-id <run_id> --executor acpx-codex --cwd "$(pwd)" --approval approve-reads --limit 2
+bun run orbs -- run-next --run-id <run_id> --executor codex-cli --cwd "$(pwd)" --sandbox read-only --codex-bin "$(command -v codex)" --model gpt-5-codex --limit 2
+bun run orbs -- run-next --run-id <run_id> --executor codex-cli --cwd "$(pwd)" --timeout-ms 1800000 --idle-timeout-ms 300000
+bun run orbs -- run-next --run-id <run_id> --executor codex-cli --worktree-root ".ouroboros/worktrees" --limit 2
+bun run orbs -- run-next --run-id <run_id> --executor codex-cli --worktree-root ".ouroboros/worktrees" --start-hook git-worktree
+bun run orbs -- run-loop --run-id <run_id> --executor codex-cli --cwd "$(pwd)" --stop-hook create-tasks,create-verifier,create-repair,context-summary --max-rounds 8
 
 # resumable Codex CLI execution
-bun run cli -- run-loop --run-id <run_id> --executor codex-resumable --cwd "$(pwd)" --sandbox workspace-write --timeout-ms 1800000 --idle-timeout-ms 300000 --stop-hook create-tasks,create-verifier,create-repair,context-summary --max-rounds 8
-bun run cli -- codex-start-attempt --task-id <task_id> --cwd "$(pwd)" --sandbox workspace-write --timeout-ms 1800000 --idle-timeout-ms 300000
-bun run cli -- list-running-attempts --run-id <run_id>
-bun run cli -- codex-resume-attempt --attempt-id <attempt_id> --cwd "$(pwd)" --sandbox workspace-write --timeout-ms 1800000 --idle-timeout-ms 300000
+bun run orbs -- run-loop --run-id <run_id> --executor codex-resumable --cwd "$(pwd)" --sandbox workspace-write --timeout-ms 1800000 --idle-timeout-ms 300000 --stop-hook create-tasks,create-verifier,create-repair,context-summary --max-rounds 8
+bun run orbs -- codex-start-attempt --task-id <task_id> --cwd "$(pwd)" --sandbox workspace-write --timeout-ms 1800000 --idle-timeout-ms 300000
+bun run orbs -- list-running-attempts --run-id <run_id>
+bun run orbs -- codex-resume-attempt --attempt-id <attempt_id> --cwd "$(pwd)" --sandbox workspace-write --timeout-ms 1800000 --idle-timeout-ms 300000
 
 # observability
-bun run cli -- run-overview --run-id <run_id>
-bun run cli -- dashboard --run-id <run_id> --port 7331
+bun run orbs -- run-overview --run-id <run_id>
+bun run orbs -- dashboard --run-id <run_id> --port 7331
 
 # Linear bridge setup
 cp ouroboros.example.toml ouroboros.toml
-LINEAR_API_KEY=lin_api_... bun run cli -- linear-check --run-id <run_id>
-bun run cli -- linear-link-issue --local-type run --local-id <run_id> --issue-key LIN-123
-bun run cli -- linear-link-issue --local-type task --local-id <task_id> --issue-id <linear_issue_id> --issue-url https://linear.app/<workspace>/issue/LIN-123/title
+LINEAR_API_KEY=lin_api_... bun run orbs -- linear-check --run-id <run_id>
+bun run orbs -- linear-link-issue --local-type run --local-id <run_id> --issue-key LIN-123
+bun run orbs -- linear-link-issue --local-type task --local-id <task_id> --issue-id <linear_issue_id> --issue-url https://linear.app/<workspace>/issue/LIN-123/title
 
 # manual attempt control
-bun run cli -- start-attempt --task-id <task_id> --input-json '{}'
-bun run cli -- finish-attempt --attempt-id <attempt_id> --output-json '{"status":"done","summary":"..."}'
-bun run cli -- record-attempt --task-id <task_id> --input-json '{}' --output-json '{"status":"done","summary":"..."}'
-bun run cli -- retry-task --task-id <task_id>
+bun run orbs -- start-attempt --task-id <task_id> --input-json '{}'
+bun run orbs -- finish-attempt --attempt-id <attempt_id> --output-json '{"status":"done","summary":"..."}'
+bun run orbs -- record-attempt --task-id <task_id> --input-json '{}' --output-json '{"status":"done","summary":"..."}'
+bun run orbs -- retry-task --task-id <task_id>
 
 # lessons and editable prompt templates
-bun run cli -- list-lessons --run-id <run_id>
-bun run cli -- show-task-prompt --task-id <task_id>
-bun run cli -- show-prompt-template --key task
-bun run cli -- show-prompt-template --key context-summary
-bun run cli -- set-prompt-template --key task --content "# Custom template..."
+bun run orbs -- list-lessons --run-id <run_id>
+bun run orbs -- show-task-prompt --task-id <task_id>
+bun run orbs -- show-prompt-template --key task
+bun run orbs -- show-prompt-template --key context-summary
+bun run orbs -- set-prompt-template --key task --content "# Custom template..."
 ```
 
 `self-iterate` initializes the local harness database if needed, creates a run for `Use Ouroboros to plan its own next self-iteration cycle`, and adds one planner task seeded from `docs/self-iteration-plan.md`. It prints JSON with the created `runId`, planner `taskId`, plus the exact commands to run next:
@@ -88,9 +95,9 @@ bun run cli -- set-prompt-template --key task --content "# Custom template..."
 {
   "runId": "run_...",
   "taskId": "task_...",
-  "dashboardCommand": "bun run cli -- --db .ouroboros/ouroboros.db dashboard --run-id run_... --port 7331",
-  "runnerCommand": "bun run cli -- --db .ouroboros/ouroboros.db run-loop --run-id run_... --executor codex-resumable --cwd $(pwd) --sandbox workspace-write --stop-hook create-tasks,create-verifier,create-repair,context-summary --concurrency 3 --worktree-root .ouroboros/worktrees --start-hook git-worktree --max-rounds 8",
-  "launchCommand": "bun run cli -- --db .ouroboros/ouroboros.db self-iterate-launch --port 7331 --concurrency 3 --worktree-root .ouroboros/worktrees --start-hook git-worktree"
+  "dashboardCommand": "bun run orbs -- --db .ouroboros/ouroboros.db dashboard --run-id run_... --port 7331",
+  "runnerCommand": "bun run orbs -- --db .ouroboros/ouroboros.db run-loop --run-id run_... --executor codex-resumable --cwd $(pwd) --sandbox workspace-write --stop-hook create-tasks,create-verifier,create-repair,context-summary --concurrency 3 --worktree-root .ouroboros/worktrees --start-hook git-worktree --max-rounds 8",
+  "launchCommand": "bun run orbs -- --db .ouroboros/ouroboros.db self-iterate-launch --port 7331 --concurrency 3 --worktree-root .ouroboros/worktrees --start-hook git-worktree"
 }
 ```
 
@@ -119,9 +126,9 @@ Use `--timeout-ms` as a generous hard runtime cap. Use `--idle-timeout-ms` to st
 Project Workspace phase 1 is web-dashboard-first. A project is a local folder recorded in SQLite with `id`, `name`, `root_path`, and optional JSON context. Runs can bind to a project with `--project-id`, or create/reuse one from a folder with `--project-root`.
 
 ```bash
-bun run cli -- create-project --name "Ouroboros" --root-path "$(pwd)"
-bun run cli -- create-run --goal "Add a project-scoped feature" --project-root "$(pwd)"
-bun run cli -- run-overview --run-id <run_id>
+bun run orbs -- create-project --name "Ouroboros" --root-path "$(pwd)"
+bun run orbs -- create-run --goal "Add a project-scoped feature" --project-root "$(pwd)"
+bun run orbs -- run-overview --run-id <run_id>
 ```
 
 `run-overview` includes `project` metadata, and the dashboard shows the project name and root path in the header. The dashboard also exposes local APIs for project-scoped file inspection:
@@ -174,7 +181,7 @@ Linear integration uses local configuration plus a secret source. Do not commit 
 1. Copy `ouroboros.example.toml` to `ouroboros.toml`.
 2. Set `LINEAR_API_KEY`, or set `linear.token_file` to a local ignored file such as `.linear`.
 3. Set `linear.project_url`, `linear.project_id`, and `linear.team_key`.
-4. Run `bun run cli -- linear-check --run-id <run_id>`.
+4. Run `bun run orbs -- linear-check --run-id <run_id>`.
 
 `linear-check` verifies the token through Linear GraphQL, resolves the project and team, and records the run-to-project mapping in `external_refs`. It never prints the token.
 
@@ -183,12 +190,12 @@ Linear integration uses local configuration plus a secret source. Do not commit 
 Concrete examples:
 
 ```bash
-bun run cli -- linear-link-issue \
+bun run orbs -- linear-link-issue \
   --local-type run \
   --local-id run_123 \
   --issue-key PAN-42
 
-bun run cli -- linear-link-issue \
+bun run orbs -- linear-link-issue \
   --local-type task \
   --local-id task_456 \
   --issue-id issue_abc \
@@ -200,7 +207,7 @@ This is only a mapping skeleton. It validates that the local run or task exists 
 CLI flags override config values:
 
 ```bash
-bun run cli -- linear-check \
+bun run orbs -- linear-check \
   --config ouroboros.toml \
   --run-id <run_id> \
   --project-url https://linear.app/<workspace>/project/<project-slug>/overview \

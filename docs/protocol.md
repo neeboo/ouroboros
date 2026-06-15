@@ -113,8 +113,8 @@ For Linear issue skeletons, `provider` is `linear`, `external_type` is `issue`, 
 The implemented CLI command is:
 
 ```bash
-bun run cli -- linear-link-issue --local-type run --local-id <run_id> --issue-key LIN-123
-bun run cli -- linear-link-issue --local-type task --local-id <task_id> --issue-url https://linear.app/<workspace>/issue/LIN-123/title
+bun run orbs -- linear-link-issue --local-type run --local-id <run_id> --issue-key LIN-123
+bun run orbs -- linear-link-issue --local-type task --local-id <task_id> --issue-url https://linear.app/<workspace>/issue/LIN-123/title
 ```
 
 Only `run` and `task` are valid local types for this command. The command validates that the local entity exists, accepts one identifier from `--issue-id`, `--issue-key`, or `--issue-url`, and stores the mapping in `external_refs`. It does not fetch, create, or update the Linear issue.

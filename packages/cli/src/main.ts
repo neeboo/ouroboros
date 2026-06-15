@@ -599,7 +599,7 @@ function selfIterationPlannerPrompt() {
     "- `packages/cli/src/dashboard.ts`",
     "- `packages/cli/src/main.ts`",
     "- `packages/runner/src/runner.ts`",
-    "- recent run lessons from the harness database using `bun run cli -- list-lessons --run-id <run_id>`",
+    "- recent run lessons from the harness database using `bun run orbs -- list-lessons --run-id <run_id>`",
     "",
     `Use the split-enough rule and first planning prompt in \`${SELF_ITERATION_PLAN_DOC}\`.`,
     "",
@@ -610,7 +610,7 @@ function selfIterationPlannerPrompt() {
 }
 
 function cliCommand(command: string, ...args: string[]) {
-  return ["bun", "run", "cli", "--", "--db", parsed.db, command, ...args].map(shellQuote).join(" ");
+  return ["bun", "run", "orbs", "--", "--db", parsed.db, command, ...args].map(shellQuote).join(" ");
 }
 
 function defaultSelfIterationWorktreeArgs() {

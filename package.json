@@ -1,5 +1,5 @@
 {
-  "name": "ouroboros",
+  "name": "orbs",
   "version": "0.0.0",
   "type": "module",
   "private": true,
@@ -7,6 +7,7 @@
   "scripts": {
     "test": "bun test",
     "cli": "bun run packages/cli/src/main.ts",
+    "orbs": "bun run packages/cli/src/main.ts",
     "typecheck": "bunx tsc --noEmit"
   },
   "devDependencies": {
