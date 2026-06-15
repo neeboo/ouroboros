@@ -1,6 +1,15 @@
 import { describe, expect, test } from "bun:test";
 import { createAcpxCodexExecutor, parseAttemptOutput } from "../packages/runner/src";
 
+const runFixture = {
+  id: "run_1",
+  projectId: "project_1",
+  projectRoot: "/repo",
+  goal: "Goal",
+  status: "todo" as const,
+  context: {},
+};
+
 describe("acpx executor", () => {
   test("parses structured attempt output from agent text", () => {
     const output = parseAttemptOutput(`
@@ -54,12 +63,7 @@ describe("acpx executor", () => {
     const output = await executor({
       prompt: "Do the task",
       sessionName: "task_1",
-      run: {
-        id: "run_1",
-        goal: "Goal",
-        status: "todo",
-        context: {},
-      },
+      run: runFixture,
       task: {
         id: "task_1",
         runId: "run_1",
@@ -118,12 +122,7 @@ describe("acpx executor", () => {
     await executor({
       prompt: "Do the task",
       sessionName: "existing",
-      run: {
-        id: "run_1",
-        goal: "Goal",
-        status: "todo",
-        context: {},
-      },
+      run: runFixture,
       task: {
         id: "task_1",
         runId: "run_1",
@@ -168,12 +167,7 @@ describe("acpx executor", () => {
     await executor({
       prompt: "Do the task",
       sessionName: "task_1",
-      run: {
-        id: "run_1",
-        goal: "Goal",
-        status: "todo",
-        context: {},
-      },
+      run: runFixture,
       task: {
         id: "task_1",
         runId: "run_1",
@@ -231,12 +225,7 @@ describe("acpx executor", () => {
     const output = await executor({
       prompt: "Do the task",
       sessionName: "task_1",
-      run: {
-        id: "run_1",
-        goal: "Goal",
-        status: "todo",
-        context: {},
-      },
+      run: runFixture,
       task: {
         id: "task_1",
         runId: "run_1",
@@ -297,12 +286,7 @@ describe("acpx executor", () => {
     const output = await executor({
       prompt: "Do the task",
       sessionName: "task_1",
-      run: {
-        id: "run_1",
-        goal: "Goal",
-        status: "todo",
-        context: {},
-      },
+      run: runFixture,
       task: {
         id: "task_1",
         runId: "run_1",
@@ -364,12 +348,7 @@ describe("acpx executor", () => {
     const output = await executor({
       prompt: "Do the task",
       sessionName: "task_1",
-      run: {
-        id: "run_1",
-        goal: "Goal",
-        status: "todo",
-        context: {},
-      },
+      run: runFixture,
       task: {
         id: "task_1",
         runId: "run_1",
@@ -423,12 +402,7 @@ describe("acpx executor", () => {
     const output = await executor({
       prompt: "Do the task",
       sessionName: "task_1",
-      run: {
-        id: "run_1",
-        goal: "Goal",
-        status: "todo",
-        context: {},
-      },
+      run: runFixture,
       task: {
         id: "task_1",
         runId: "run_1",
@@ -499,12 +473,7 @@ describe("acpx executor", () => {
     const output = await executor({
       prompt: "Do the task",
       sessionName: "task_1",
-      run: {
-        id: "run_1",
-        goal: "Goal",
-        status: "todo",
-        context: {},
-      },
+      run: runFixture,
       task: {
         id: "task_1",
         runId: "run_1",
@@ -547,12 +516,7 @@ describe("acpx executor", () => {
     const output = await executor({
       prompt: "Do the task",
       sessionName: "task_1",
-      run: {
-        id: "run_1",
-        goal: "Goal",
-        status: "todo",
-        context: {},
-      },
+      run: runFixture,
       task: {
         id: "task_1",
         runId: "run_1",
@@ -593,12 +557,7 @@ describe("acpx executor", () => {
     const output = await executor({
       prompt: "Do the task",
       sessionName: "task_1",
-      run: {
-        id: "run_1",
-        goal: "Goal",
-        status: "todo",
-        context: {},
-      },
+      run: runFixture,
       task: {
         id: "task_1",
         runId: "run_1",

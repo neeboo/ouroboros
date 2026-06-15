@@ -69,6 +69,7 @@ function validatePlannedTask(task: unknown, index: number): PlannedTask {
     prompt: requiredPlannedTaskString(record, "prompt", index),
     dependsOn: optionalStringArray(record, "dependsOn", index),
     doneWhen: optionalStringArray(record, "doneWhen", index),
+    modelPreference: optionalModelPreference(record, index),
   };
 }
 
@@ -89,6 +90,30 @@ function optionalStringArray(task: Record<string, unknown>, key: "dependsOn" | "
     throw new Error(`planned task ${index} ${key} must be an array of strings`);
   }
   return value;
+}
+
+function optionalModelPreference(task: Record<string, unknown>, index: number) {
+  const value = task.modelPreference;
+  if (value === undefined) {
+    return undefined;
+  }
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error(`planned task ${index} modelPreference must be an object`);
+  }
+  const record = value as Record<string, unknown>;
+  if (typeof record.model !== "string" || record.model.trim().length === 0) {
+    throw new Error(`planned task ${index} modelPreference must include a non-empty model`);
+  }
+  const preference: { model: string; reason?: string } = {
+    model: record.model,
+  };
+  if (record.reason !== undefined) {
+    if (typeof record.reason !== "string") {
+      throw new Error(`planned task ${index} modelPreference reason must be a string`);
+    }
+    preference.reason = record.reason;
+  }
+  return preference;
 }
 
 function extractJsonObject(raw: string) {

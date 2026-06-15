@@ -2,8 +2,27 @@ export type Status = "todo" | "running" | "done" | "blocked";
 
 export interface Run {
   id: string;
+  projectId: string | null;
+  projectRoot: string | null;
   goal: string;
   status: Status;
+  context: Record<string, unknown>;
+}
+
+export interface ModelPreference {
+  model: string;
+  reason?: string;
+}
+
+export interface TaskConfig {
+  modelPreference?: ModelPreference;
+  [key: string]: unknown;
+}
+
+export interface Project {
+  id: string;
+  name: string;
+  rootPath: string;
   context: Record<string, unknown>;
 }
 
@@ -18,6 +37,7 @@ export interface Task {
   prompt: string;
   dependsOn: string[];
   doneWhen: string[];
+  config?: TaskConfig;
   worktreePath: string | null;
   sessionRef: string | null;
   contextVersion: number;
@@ -74,6 +94,7 @@ export interface PlannedTask {
   prompt: string;
   dependsOn?: string[];
   doneWhen?: string[];
+  modelPreference?: ModelPreference;
 }
 
 export interface ExternalRef {
@@ -106,6 +127,15 @@ export interface PromptTemplate {
 export interface CreateRunInput {
   goal: string;
   context?: Record<string, unknown>;
+  projectId?: string | null;
+  projectRoot?: string | null;
+  id?: string;
+}
+
+export interface CreateProjectInput {
+  name: string;
+  rootPath: string;
+  context?: Record<string, unknown>;
   id?: string;
 }
 
@@ -121,6 +151,7 @@ export interface CreateTaskInput {
   prompt: string;
   dependsOn?: string[];
   doneWhen?: string[];
+  config?: TaskConfig;
   parentId?: string | null;
   cycleId?: string | null;
   id?: string;
@@ -180,6 +211,7 @@ export interface ObservableSession {
 
 export interface RunOverview {
   run: Run | null;
+  project: Project | null;
   tasks: Task[];
   sessions: ObservableSession[];
   lessons: Lesson[];

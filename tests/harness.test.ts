@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { Harness, withDatabase } from "../packages/harness/src";
+import { Harness, initDatabase, withDatabase } from "../packages/harness/src";
 
 describe("Harness", () => {
   let dir: string;
@@ -45,6 +45,163 @@ describe("Harness", () => {
       runId,
       status: "todo",
       role: "planner",
+      config: {},
+    });
+  });
+
+  test("stores task model preference in task config", () => {
+    const runId = harness.createRun({ goal: "Build loop" });
+    const taskId = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Cheap worker",
+      prompt: "Use a mini model.",
+      config: {
+        modelPreference: {
+          model: "gpt-5-mini",
+          reason: "cheap implementation pass",
+        },
+      },
+    });
+
+    expect(harness.getTask(taskId)?.config).toEqual({
+      modelPreference: {
+        model: "gpt-5-mini",
+        reason: "cheap implementation pass",
+      },
+    });
+    expect(harness.nextReadyTask(runId)?.config).toEqual({
+      modelPreference: {
+        model: "gpt-5-mini",
+        reason: "cheap implementation pass",
+      },
+    });
+  });
+
+  test("creates projects and binds runs to project metadata", () => {
+    const projectId = harness.createProject({
+      name: "Ouroboros",
+      rootPath: dir,
+      context: { linearProject: "ouroboros-acd5df2ef1da" },
+    });
+    const runId = harness.createRun({
+      goal: "Add project workspace",
+      projectId,
+      context: { source: "test" },
+    });
+
+    expect(harness.getProject(projectId)).toMatchObject({
+      id: projectId,
+      name: "Ouroboros",
+      rootPath: dir,
+      context: { linearProject: "ouroboros-acd5df2ef1da" },
+    });
+    expect(harness.listProjects()).toEqual([
+      expect.objectContaining({
+        id: projectId,
+        name: "Ouroboros",
+      }),
+    ]);
+    expect(harness.getRun(runId)).toMatchObject({
+      id: runId,
+      projectId,
+      projectRoot: dir,
+    });
+    expect(harness.getRunOverview({ runId }).project).toMatchObject({
+      id: projectId,
+      name: "Ouroboros",
+      rootPath: dir,
+    });
+  });
+
+  test("creates or reuses a project when creating a run from project root", () => {
+    const runId = harness.createRun({
+      goal: "Bind by root",
+      projectRoot: dir,
+    });
+    const run = harness.getRun(runId);
+    const projects = harness.listProjects();
+
+    expect(projects).toHaveLength(1);
+    expect(projects[0]).toMatchObject({
+      name: "ouroboros-" + dir.split("ouroboros-")[1],
+      rootPath: dir,
+    });
+    expect(run?.projectId).toBe(projects[0].id);
+    expect(run?.projectRoot).toBe(dir);
+  });
+
+  test("migrates old databases with nullable project bindings", async () => {
+    const oldDbPath = join(dir, "old.db");
+    withDatabase(oldDbPath, (db) => {
+      db.exec(`
+        create table runs (
+          id text primary key,
+          goal text not null,
+          status text not null,
+          context_json text not null default '{}',
+          created_at text not null default current_timestamp,
+          updated_at text not null default current_timestamp
+        );
+        insert into runs (id, goal, status, context_json)
+        values ('run_old', 'Legacy run', 'todo', '{"projectRoot":"/legacy/root"}');
+      `);
+    });
+
+    initDatabase(oldDbPath);
+    const reopened = new Harness(oldDbPath);
+
+    expect(reopened.getRun("run_old")).toMatchObject({
+      id: "run_old",
+      projectId: null,
+      projectRoot: "/legacy/root",
+      context: { projectRoot: "/legacy/root" },
+    });
+    expect(reopened.getRunOverview({ runId: "run_old" }).project).toBeNull();
+  });
+
+  test("migrates old task tables with default empty task config", async () => {
+    const oldDbPath = join(dir, "old-tasks.db");
+    withDatabase(oldDbPath, (db) => {
+      db.exec(`
+        create table runs (
+          id text primary key,
+          goal text not null,
+          status text not null,
+          context_json text not null default '{}',
+          created_at text not null default current_timestamp,
+          updated_at text not null default current_timestamp
+        );
+        create table tasks (
+          id text primary key,
+          run_id text not null references runs(id) on delete cascade,
+          parent_id text references tasks(id) on delete set null,
+          cycle_id text,
+          status text not null,
+          role text not null,
+          goal text not null,
+          prompt text not null,
+          depends_on_json text not null default '[]',
+          done_when_json text not null default '[]',
+          worktree_path text,
+          session_ref text,
+          context_version integer not null default 1,
+          created_at text not null default current_timestamp,
+          updated_at text not null default current_timestamp
+        );
+        insert into runs (id, goal, status, context_json)
+        values ('run_old', 'Legacy run', 'todo', '{}');
+        insert into tasks (id, run_id, status, role, goal, prompt)
+        values ('task_old', 'run_old', 'todo', 'worker', 'Legacy task', 'Work.');
+      `);
+    });
+
+    initDatabase(oldDbPath);
+    const reopened = new Harness(oldDbPath);
+
+    expect(reopened.getTask("task_old")).toMatchObject({
+      id: "task_old",
+      config: {},
     });
   });
 

@@ -12,6 +12,7 @@ import {
   attemptFromRow,
   externalRefFromRow,
   lessonFromRow,
+  projectFromRow,
   promptTemplateFromRow,
   runFromRow,
   taskFromRow,
@@ -21,11 +22,13 @@ import type {
   AttemptRow,
   ExternalRefRow,
   LessonRow,
+  ProjectRow,
   PromptTemplateRow,
   RunRow,
   TaskRow,
 } from "./rows";
 import type {
+  CreateProjectInput,
   CreateExternalRefInput,
   SetPromptTemplateInput,
   CreateRunInput,
@@ -45,6 +48,7 @@ import type {
   UpdateRunStatusInput,
   UpdateAttemptInputInput,
 } from "./types";
+import { basename, resolve } from "node:path";
 
 export class Harness {
   readonly dbPath: string;
@@ -58,16 +62,57 @@ export class Harness {
     this.seedPromptTemplates();
   }
 
-  createRun(input: CreateRunInput) {
-    const id = input.id ?? makeId("run");
+  createProject(input: CreateProjectInput) {
+    const id = input.id ?? makeId("project");
+    const rootPath = resolve(input.rootPath);
     return withDatabase(this.dbPath, (db) => {
+      const existing = db.query("select * from projects where root_path = $rootPath").get({ $rootPath: rootPath }) as
+        | ProjectRow
+        | null;
+      if (existing) {
+        return existing.id;
+      }
       db.query(
         `
-        insert into runs (id, goal, status, context_json)
-        values ($id, $goal, 'todo', $contextJson)
+        insert into projects (id, name, root_path, context_json)
+        values ($id, $name, $rootPath, $contextJson)
         `,
       ).run({
         $id: id,
+        $name: input.name,
+        $rootPath: rootPath,
+        $contextJson: toJson(input.context ?? {}),
+      });
+      return id;
+    });
+  }
+
+  getProject(id: string) {
+    return withDatabase(this.dbPath, (db) => {
+      const row = db.query("select * from projects where id = $id").get({ $id: id }) as ProjectRow | null;
+      return row ? projectFromRow(row) : null;
+    });
+  }
+
+  listProjects() {
+    return withDatabase(this.dbPath, (db) => {
+      const rows = db.query("select * from projects order by created_at, id").all() as ProjectRow[];
+      return rows.map(projectFromRow);
+    });
+  }
+
+  createRun(input: CreateRunInput) {
+    const id = input.id ?? makeId("run");
+    return withDatabase(this.dbPath, (db) => {
+      const projectId = resolveRunProjectId(db, input);
+      db.query(
+        `
+        insert into runs (id, project_id, goal, status, context_json)
+        values ($id, $projectId, $goal, 'todo', $contextJson)
+        `,
+      ).run({
+        $id: id,
+        $projectId: projectId,
         $goal: input.goal,
         $contextJson: toJson(input.context ?? {}),
       });
@@ -104,11 +149,11 @@ export class Harness {
         `
         insert into tasks (
           id, run_id, parent_id, cycle_id, status, role, goal, prompt,
-          depends_on_json, done_when_json
+          depends_on_json, done_when_json, config_json
         )
         values (
           $id, $runId, $parentId, $cycleId, 'todo', $role, $goal, $prompt,
-          $dependsOnJson, $doneWhenJson
+          $dependsOnJson, $doneWhenJson, $configJson
         )
         `,
       ).run({
@@ -121,6 +166,7 @@ export class Harness {
         $prompt: input.prompt,
         $dependsOnJson: toJson(input.dependsOn ?? []),
         $doneWhenJson: toJson(input.doneWhen ?? []),
+        $configJson: toJson(input.config ?? {}),
       });
       return id;
     });
@@ -128,7 +174,16 @@ export class Harness {
 
   getRun(id: string) {
     return withDatabase(this.dbPath, (db) => {
-      const row = db.query("select * from runs where id = $id").get({ $id: id }) as RunRow | null;
+      const row = db
+        .query(
+          `
+          select runs.*, projects.root_path as project_root
+          from runs
+          left join projects on projects.id = runs.project_id
+          where runs.id = $id
+          `,
+        )
+        .get({ $id: id }) as RunRow | null;
       return row ? runFromRow(row) : null;
     });
   }
@@ -491,7 +546,21 @@ export class Harness {
 
   getRunOverview(input: GetRunOverviewInput) {
     return withDatabase(this.dbPath, (db) => {
-      const runRow = db.query("select * from runs where id = $runId").get({ $runId: input.runId }) as RunRow | null;
+      const runRow = db
+        .query(
+          `
+          select runs.*, projects.root_path as project_root
+          from runs
+          left join projects on projects.id = runs.project_id
+          where runs.id = $runId
+          `,
+        )
+        .get({ $runId: input.runId }) as RunRow | null;
+      const projectRow = runRow?.project_id
+        ? (db.query("select * from projects where id = $projectId").get({ $projectId: runRow.project_id }) as
+            | ProjectRow
+            | null)
+        : null;
       const taskRows = db
         .query(
           `
@@ -563,6 +632,7 @@ export class Harness {
         .all({ $runId: input.runId }) as LessonRow[];
       return {
         run: runRow ? runFromRow(runRow) : null,
+        project: projectRow ? projectFromRow(projectRow) : null,
         tasks,
         sessions,
         lessons: lessonRows.map(lessonFromRow),
@@ -689,6 +759,43 @@ export class Harness {
       }
     });
   }
+}
+
+function resolveRunProjectId(
+  db: Parameters<Parameters<typeof withDatabase>[1]>[0],
+  input: CreateRunInput,
+) {
+  if (input.projectId) {
+    const row = db.query("select id from projects where id = $projectId").get({ $projectId: input.projectId }) as
+      | { id: string }
+      | null;
+    if (!row) {
+      throw new Error(`project not found: ${input.projectId}`);
+    }
+    return input.projectId;
+  }
+  if (!input.projectRoot) {
+    return null;
+  }
+  const rootPath = resolve(input.projectRoot);
+  const existing = db.query("select id from projects where root_path = $rootPath").get({ $rootPath: rootPath }) as
+    | { id: string }
+    | null;
+  if (existing) {
+    return existing.id;
+  }
+  const id = makeId("project");
+  db.query(
+    `
+    insert into projects (id, name, root_path, context_json)
+    values ($id, $name, $rootPath, '{}')
+    `,
+  ).run({
+    $id: id,
+    $name: basename(rootPath) || rootPath,
+    $rootPath: rootPath,
+  });
+  return id;
 }
 
 function stringOrNull(value: unknown) {

@@ -57,7 +57,7 @@ Use `dependsOn` to express graph order. Independent worker tasks can run in para
 
 ## Candidate Improvement Areas
 
-The planner should choose only one area per cycle:
+The planner should choose as many areas as can be split into independent, verifiable tasks without making the graph vague. Prefer one area when dependencies or product decisions are still unclear. Prefer multiple areas when they can run independently under the configured concurrency:
 
 - make the dashboard explain task-level actions versus runner-level actions more clearly;
 - add a first-class self-iteration command that creates the run, planner task, dashboard, and runner together;

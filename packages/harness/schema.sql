@@ -1,7 +1,17 @@
 pragma foreign_keys = on;
 
+create table if not exists projects (
+  id text primary key,
+  name text not null,
+  root_path text not null unique,
+  context_json text not null default '{}',
+  created_at text not null default current_timestamp,
+  updated_at text not null default current_timestamp
+);
+
 create table if not exists runs (
   id text primary key,
+  project_id text references projects(id) on delete set null,
   goal text not null,
   status text not null check (status in ('todo', 'running', 'done', 'blocked')),
   context_json text not null default '{}',
@@ -20,6 +30,7 @@ create table if not exists tasks (
   prompt text not null,
   depends_on_json text not null default '[]',
   done_when_json text not null default '[]',
+  config_json text not null default '{}',
   worktree_path text,
   session_ref text,
   context_version integer not null default 1,

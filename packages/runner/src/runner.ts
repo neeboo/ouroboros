@@ -1,5 +1,6 @@
 import type { Harness, Task } from "@ouroboros/harness";
 import { buildTaskPrompt } from "./prompt";
+import { resolveModelPreference } from "./model-preferences";
 import type {
   RunNextReadyTaskInput,
   RunReadyTasksInput,
@@ -28,7 +29,8 @@ export async function runNextReadyTask(input: RunNextReadyTaskInput) {
     template: input.harness.getPromptTemplate("task")?.contentMd,
   });
   const sessionName = task.sessionRef ?? defaultSessionName(task.id);
-  const rawOutput = await input.executor({ prompt, run, task, sessionName });
+  const resolvedModel = resolveModelPreference({ run, task });
+  const rawOutput = await input.executor({ prompt, run, task, sessionName, resolvedModel });
   const { output, decision } = await applyStopHooks({
     hooks: hooksForTask(input.stopHooks, input.stopHooksByRole, task),
     run,
@@ -39,7 +41,7 @@ export async function runNextReadyTask(input: RunNextReadyTaskInput) {
   });
   const attemptId = input.harness.recordAttempt({
     taskId: task.id,
-    input: { prompt },
+    input: { prompt, model: resolvedModel },
     output,
   });
   if (decision === "retry") {
@@ -94,8 +96,9 @@ export async function runReadyTasks(input: RunReadyTasksInput) {
         lessons: input.harness.listLessons({ runId: input.runId }),
         template: input.harness.getPromptTemplate("task")?.contentMd,
       });
-      const executor = input.executorFactory({ run, task, sessionName, cwd });
-      const rawOutput = await executor({ prompt, run, task, sessionName });
+      const resolvedModel = resolveModelPreference({ run, task, globalModel: input.model });
+      const executor = input.executorFactory({ run, task, sessionName, cwd, resolvedModel });
+      const rawOutput = await executor({ prompt, run, task, sessionName, resolvedModel });
       const { output, decision } = await applyStopHooks({
         hooks: hooksForTask(input.stopHooks, input.stopHooksByRole, task),
         run,
@@ -108,7 +111,7 @@ export async function runReadyTasks(input: RunReadyTasksInput) {
       output.artifacts = [...(startResult.artifacts ?? []), ...(output.artifacts ?? [])];
       const attemptId = input.harness.recordAttempt({
         taskId: task.id,
-        input: { prompt, sessionName },
+        input: { prompt, sessionName, model: resolvedModel },
         output,
       });
       if (decision === "retry") {
@@ -132,7 +135,7 @@ export async function runUntilIdle(input: RunUntilIdleInput) {
   return { rounds };
 }
 
-async function applyStartHooks(input: {
+export async function applyStartHooks(input: {
   hooks: StartHook[];
   run: Parameters<StartHook>[0]["run"];
   task: Parameters<StartHook>[0]["task"];

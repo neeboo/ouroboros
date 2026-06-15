@@ -1,4 +1,5 @@
 import type { RunOverview } from "@ouroboros/harness";
+import { isAbsolute, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 interface DashboardActionResult {
@@ -285,7 +286,8 @@ export function dashboardHtml(input: { runId: string }) {
     .app-shell {
       min-height: 100dvh;
       display: grid;
-      grid-template-columns: 300px minmax(520px, 1fr) 326px;
+      grid-template-columns: 300px minmax(0, 1fr) clamp(380px, 30vw, 520px);
+      overflow-x: hidden;
       background: var(--app);
     }
     .task-sidebar {
@@ -348,6 +350,30 @@ export function dashboardHtml(input: { runId: string }) {
       -webkit-box-orient: vertical;
       overflow: hidden;
     }
+    .project-title {
+      margin-top: 7px;
+      color: #aaa9a3;
+      font-family: var(--mono);
+      font-size: 11px;
+      line-height: 1.45;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .project-header {
+      min-width: 0;
+      overflow: hidden;
+    }
+    .project-name {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .project-root {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
     .goal-composer {
       display: grid;
       gap: 8px;
@@ -394,6 +420,9 @@ export function dashboardHtml(input: { runId: string }) {
       font: inherit;
       font-size: 12px;
       font-weight: 680;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
       cursor: pointer;
       transition: transform 160ms cubic-bezier(0.16, 1, 0.3, 1), background 160ms, border-color 160ms;
     }
@@ -456,12 +485,22 @@ export function dashboardHtml(input: { runId: string }) {
       text-transform: uppercase;
     }
     .task-nav {
+      width: 100%;
+      min-width: 0;
+      max-width: 100%;
       min-height: 0;
-      overflow: auto;
+      overflow-x: hidden;
+      overflow-y: auto;
       padding: 0 8px 24px 4px;
       scrollbar-gutter: stable;
     }
-    .nav-section { margin-bottom: 18px; }
+    .nav-section {
+      width: 100%;
+      min-width: 0;
+      max-width: 100%;
+      margin-bottom: 18px;
+      overflow-x: hidden;
+    }
     .section-label {
       margin: 0 0 8px;
       padding: 0 4px;
@@ -472,13 +511,18 @@ export function dashboardHtml(input: { runId: string }) {
       text-transform: uppercase;
     }
     .task-list {
+      width: 100%;
+      min-width: 0;
+      max-width: 100%;
       display: grid;
       gap: 0;
+      overflow-x: hidden;
     }
     .task-row {
       width: 100%;
+      min-width: 0;
       display: grid;
-      grid-template-columns: 12px 1fr auto;
+      grid-template-columns: 12px minmax(0, 1fr) minmax(0, 72px);
       gap: 9px;
       align-items: start;
       padding: 10px 6px 11px;
@@ -489,6 +533,7 @@ export function dashboardHtml(input: { runId: string }) {
       color: #e4e3dd;
       text-align: left;
       font: inherit;
+      overflow: hidden;
       cursor: pointer;
       transition: transform 160ms cubic-bezier(0.16, 1, 0.3, 1), background 160ms, border-color 160ms;
     }
@@ -500,6 +545,10 @@ export function dashboardHtml(input: { runId: string }) {
     .task-row.selected {
       background: rgba(255, 255, 255, 0.09);
       border-bottom-color: rgba(255, 255, 255, 0.11);
+    }
+    .task-row-text {
+      min-width: 0;
+      overflow: hidden;
     }
     .task-row strong {
       display: block;
@@ -542,7 +591,9 @@ export function dashboardHtml(input: { runId: string }) {
       gap: 18px;
     }
     .workspace-title-block {
+      flex: 1 1 auto;
       min-width: 0;
+      max-width: 760px;
     }
     .workspace-kicker {
       color: var(--muted-2);
@@ -553,11 +604,51 @@ export function dashboardHtml(input: { runId: string }) {
     }
     .workspace-title {
       margin-top: 8px;
-      max-width: 760px;
+      min-width: 0;
       color: var(--ink);
       font-size: 24px;
       font-weight: 720;
       line-height: 1.45;
+      overflow-wrap: anywhere;
+    }
+    .workspace-title-row {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 10px;
+      align-items: start;
+    }
+    .workspace-title.is-collapsed {
+      display: -webkit-box;
+      -webkit-line-clamp: 2;
+      -webkit-box-orient: vertical;
+      overflow: hidden;
+    }
+    .workspace-title.is-expanded {
+      display: block;
+      overflow: visible;
+    }
+    .workspace-title-toggle {
+      flex: 0 0 auto;
+      min-width: 0;
+      min-height: 28px;
+      margin-top: 11px;
+      padding: 0 9px;
+      border: 1px solid rgba(255, 255, 255, 0.14);
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.065);
+      color: #d8d7d0;
+      font: inherit;
+      font-size: 11px;
+      font-weight: 720;
+      cursor: pointer;
+    }
+    .workspace-title-toggle:hover {
+      border-color: rgba(255, 255, 255, 0.26);
+      background: rgba(255, 255, 255, 0.11);
+    }
+    .workspace-title-toggle:focus-visible {
+      outline: 2px solid rgba(255, 255, 255, 0.55);
+      outline-offset: 2px;
     }
     .workspace-toggle {
       flex: 0 0 auto;
@@ -600,6 +691,7 @@ export function dashboardHtml(input: { runId: string }) {
     }
     .flow-inner {
       width: min(100%, 720px);
+      min-width: 0;
       margin: 0 auto;
     }
     .transcript {
@@ -621,6 +713,7 @@ export function dashboardHtml(input: { runId: string }) {
     }
     .of-node {
       width: 250px;
+      min-width: 0;
       display: grid;
       gap: 10px;
       padding: 13px 14px 14px;
@@ -635,6 +728,7 @@ export function dashboardHtml(input: { runId: string }) {
     .of-node-blocked { border-color: #8b8b8b; border-style: dashed; }
     .of-node-todo { border-color: #adadad; }
     .of-node-head {
+      min-width: 0;
       display: flex;
       justify-content: space-between;
       gap: 10px;
@@ -643,6 +737,12 @@ export function dashboardHtml(input: { runId: string }) {
       font-weight: 760;
       letter-spacing: 0.08em;
       text-transform: uppercase;
+    }
+    .of-node-head span {
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
     }
     .of-node-goal {
       color: #181818;
@@ -689,6 +789,9 @@ export function dashboardHtml(input: { runId: string }) {
       background: transparent;
       animation: liftIn 260ms cubic-bezier(0.16, 1, 0.3, 1) both;
     }
+    .turn-body {
+      min-width: 0;
+    }
     .turn.primary {
       padding-top: 12px;
       border-top: 0;
@@ -730,12 +833,14 @@ export function dashboardHtml(input: { runId: string }) {
       font-size: 16px;
       font-weight: 720;
       line-height: 1.45;
+      overflow-wrap: anywhere;
     }
     .turn-summary {
       margin-top: 6px;
       color: var(--muted);
       font-size: 11px;
       line-height: 1.55;
+      overflow-wrap: anywhere;
     }
     .turn-text {
       margin-top: 18px;
@@ -743,6 +848,7 @@ export function dashboardHtml(input: { runId: string }) {
       font-size: 14px;
       line-height: 1.85;
       white-space: pre-wrap;
+      overflow-wrap: anywhere;
     }
     .stream-output {
       margin: 18px 0 0;
@@ -755,6 +861,7 @@ export function dashboardHtml(input: { runId: string }) {
       font-size: 11px;
       line-height: 1.6;
       white-space: pre-wrap;
+      overflow-wrap: anywhere;
     }
     .stream-line + .stream-line {
       margin-top: 8px;
@@ -767,29 +874,36 @@ export function dashboardHtml(input: { runId: string }) {
     }
     .turn .meta { margin-top: 10px; }
     .inspector-panel {
+      width: clamp(380px, 30vw, 520px);
+      min-width: 380px;
+      max-width: 520px;
       height: 100dvh;
-      padding: 58px 24px 24px;
+      min-height: 0;
+      padding: 46px 26px 28px;
       background: var(--app);
       border-left: 1px solid rgba(255, 255, 255, 0.08);
-      overflow: auto;
+      overflow-x: hidden;
+      overflow-y: auto;
       scrollbar-gutter: stable;
     }
     .inspector-card {
-      padding: 24px 26px 28px;
-      border: 1px solid rgba(255, 255, 255, 0.12);
-      border-radius: 28px;
-      background: #2a2a29;
+      min-width: 0;
+      padding: 22px 0 24px;
+      border: 0;
+      border-radius: 0;
+      background: transparent;
     }
     .inspector-card:first-child {
-      padding-top: 24px;
+      padding-top: 0;
     }
     .inspector-card + .inspector-card {
-      margin-top: 14px;
+      margin-top: 0;
+      border-top: 1px solid rgba(255, 255, 255, 0.1);
     }
     .inspector-card h2 {
-      margin: 0 0 22px;
+      margin: 0 0 18px;
       color: #a8a7a1;
-      font-size: 15px;
+      font-size: 13px;
       font-weight: 760;
       letter-spacing: 0;
       text-transform: none;
@@ -811,21 +925,27 @@ export function dashboardHtml(input: { runId: string }) {
       font-size: 13px;
       font-weight: 690;
       line-height: 1.5;
+      overflow-wrap: anywhere;
     }
     .current-task-meta {
       margin-top: 8px;
       color: var(--muted);
       font-size: 11px;
       line-height: 1.55;
+      overflow-wrap: anywhere;
     }
     .todo-item {
       display: grid;
-      grid-template-columns: 22px 1fr;
+      grid-template-columns: 22px minmax(0, 1fr);
       gap: 12px;
       align-items: start;
       color: #d9d8d1;
       font-size: 16px;
       line-height: 1.48;
+    }
+    .todo-text {
+      min-width: 0;
+      overflow-wrap: anywhere;
     }
     .todo-item.done {
       color: var(--muted);
@@ -842,6 +962,163 @@ export function dashboardHtml(input: { runId: string }) {
       margin-top: 20px;
       padding-top: 18px;
       border-top: 1px solid rgba(255, 255, 255, 0.1);
+    }
+    .changed-files-section {
+      min-width: 0;
+    }
+    .changed-file-tree {
+      min-width: 0;
+      max-height: 280px;
+      display: grid;
+      gap: 2px;
+      overflow-x: hidden;
+      overflow-y: auto;
+      scrollbar-gutter: stable;
+    }
+    .changed-file-children {
+      display: grid;
+      gap: 2px;
+      margin-left: 8px;
+      padding-left: 12px;
+      border-left: 1px solid rgba(255, 255, 255, 0.08);
+    }
+    .changed-file-node {
+      width: 100%;
+      min-width: 0;
+      display: grid;
+      grid-template-columns: 28px minmax(0, 1fr);
+      gap: 7px;
+      align-items: center;
+      padding: 5px 7px;
+      border: 0;
+      border-radius: 5px;
+      background: transparent;
+      color: #d8d7d0;
+      font: inherit;
+      font-size: 12px;
+      line-height: 1.35;
+      text-align: left;
+    }
+    button.changed-file-node {
+      cursor: pointer;
+    }
+    button.changed-file-node:hover {
+      background: rgba(255, 255, 255, 0.045);
+      color: #f4f3ee;
+    }
+    button.changed-file-node.selected {
+      background: rgba(255, 255, 255, 0.075);
+      color: #ffffff;
+    }
+    button.changed-file-node.selected .changed-file-type {
+      color: #c8c7c1;
+    }
+    .changed-file-type {
+      color: var(--muted-2);
+      font-family: var(--mono);
+      font-size: 10px;
+      line-height: 1.4;
+      text-align: center;
+    }
+    .changed-file-name {
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .changed-file-path {
+      min-width: 0;
+      margin-top: 8px;
+      color: var(--muted);
+      font-family: var(--mono);
+      font-size: 11px;
+      line-height: 1.55;
+      overflow-wrap: anywhere;
+    }
+    .diff-panel {
+      min-width: 0;
+      max-width: 100%;
+      overflow: hidden;
+      margin-top: 16px;
+      padding-top: 16px;
+      border-top: 1px solid rgba(255, 255, 255, 0.1);
+    }
+    .diff-header {
+      position: sticky;
+      top: 0;
+      z-index: 1;
+      overflow: hidden;
+      padding: 0 0 10px;
+      background: var(--app);
+    }
+    .diff-path {
+      min-width: 0;
+      color: #deddd7;
+      font-family: var(--mono);
+      font-size: 11px;
+      line-height: 1.55;
+      overflow-wrap: anywhere;
+    }
+    .diff-output {
+      max-height: 340px;
+      overflow-x: auto;
+      overflow-y: auto;
+      margin: 0;
+      padding: 8px 0;
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      border-radius: 6px;
+      background: rgba(18, 18, 18, 0.22);
+      color: #f0f0eb;
+      font-family: var(--mono);
+      font-size: 11px;
+      line-height: 1.62;
+      white-space: pre;
+      overflow-wrap: normal;
+    }
+    .diff-row {
+      display: grid;
+      grid-template-columns: 42px max-content;
+      min-width: max-content;
+      align-items: start;
+    }
+    .diff-gutter {
+      user-select: none;
+      padding: 0 10px 0 12px;
+      color: var(--muted-2);
+      text-align: right;
+    }
+    .diff-line {
+      white-space: pre;
+      font-family: var(--mono);
+      padding-right: 18px;
+    }
+    .diff-row.added {
+      background: rgba(111, 160, 122, 0.12);
+    }
+    .diff-row.added .diff-gutter {
+      color: #a9c7b1;
+    }
+    .diff-row.removed {
+      background: rgba(184, 113, 111, 0.12);
+    }
+    .diff-row.removed .diff-gutter {
+      color: #d6aaa8;
+    }
+    .diff-row.hunk {
+      background: rgba(255, 255, 255, 0.055);
+      color: #cfcec8;
+    }
+    .diff-row.context {
+      background: transparent;
+    }
+    .diff-state {
+      min-width: 0;
+      padding: 12px;
+      color: var(--muted);
+      font-family: var(--mono);
+      font-size: 11px;
+      line-height: 1.6;
+      white-space: normal;
     }
     .checkbox {
       width: 18px;
@@ -905,11 +1182,15 @@ export function dashboardHtml(input: { runId: string }) {
       display: inline-flex;
       align-items: center;
       justify-content: center;
+      width: 100%;
+      max-width: 100%;
       color: var(--muted);
       font-size: 11px;
       font-weight: 760;
       letter-spacing: 0.08em;
       text-transform: uppercase;
+      overflow: hidden;
+      text-overflow: ellipsis;
       white-space: nowrap;
     }
     .status-text.done { color: var(--ok); }
@@ -963,13 +1244,20 @@ export function dashboardHtml(input: { runId: string }) {
       body { overflow: auto; }
       .app-shell {
         min-height: 100dvh;
-        grid-template-columns: 1fr;
+        grid-template-columns: minmax(0, 1fr);
       }
       .task-sidebar, .workspace, .inspector-panel {
         height: auto;
         max-height: none;
         overflow: visible;
       }
+      .inspector-panel { width: auto; min-width: 0; max-width: none; }
+      .inspector-panel {
+        padding: 24px 18px 30px;
+        border-left: 0;
+        border-top: 1px solid rgba(255, 255, 255, 0.08);
+      }
+      .task-sidebar { min-width: 0; overflow-x: hidden; overflow-y: visible; }
       .workspace-head-row {
         display: grid;
       }
@@ -996,6 +1284,10 @@ export function dashboardHtml(input: { runId: string }) {
           <div class="run-status" id="run-status">Loading</div>
         </div>
         <div id="run-title">Loading ${escapeHtml(input.runId)}</div>
+        <div class="project-title project-header" id="project-title" data-project-header>
+          <div class="project-name" data-project-name>Project Workspace</div>
+          <div class="project-root" data-project-root></div>
+        </div>
         <form class="goal-composer" id="goal-composer">
           <label class="goal-label" for="goal-input">New goal</label>
           <textarea class="goal-input" id="goal-input" name="goal" placeholder="Describe a new goal or change request"></textarea>
@@ -1023,7 +1315,10 @@ export function dashboardHtml(input: { runId: string }) {
         <div class="workspace-head-row">
           <div class="workspace-title-block">
             <div class="workspace-kicker" id="workspace-kicker">Task Flow</div>
-            <div class="workspace-title" id="workspace-title">Loading</div>
+            <div class="workspace-title-row">
+              <div class="workspace-title is-collapsed" id="workspace-title" title="Loading">Loading</div>
+              <button class="workspace-title-toggle" id="workspace-title-toggle" type="button" data-workspace-title-toggle aria-expanded="false" aria-controls="workspace-title" aria-label="Expand workspace title">Expand</button>
+            </div>
           </div>
           <div class="workspace-toggle" aria-label="Workspace view">
             <button type="button" data-workspace-mode="canvas" aria-pressed="false">Canvas</button>
@@ -1074,9 +1369,10 @@ export function dashboardHtml(input: { runId: string }) {
         return {
           selectedGoalId: typeof parsed.selectedGoalId === "string" ? parsed.selectedGoalId : null,
           workspaceMode: isWorkspaceMode(parsed.workspaceMode) ? parsed.workspaceMode : null,
+          workspaceTitleExpanded: parsed.workspaceTitleExpanded === true,
         };
       } catch {
-        return { selectedGoalId: null, workspaceMode: null };
+        return { selectedGoalId: null, workspaceMode: null, workspaceTitleExpanded: false };
       }
     };
     const writeDashboardState = (state) => {
@@ -1084,6 +1380,7 @@ export function dashboardHtml(input: { runId: string }) {
         window.localStorage?.setItem(dashboardStorageKey, JSON.stringify({
           selectedGoalId: typeof state.selectedGoalId === "string" ? state.selectedGoalId : null,
           workspaceMode: isWorkspaceMode(state.workspaceMode) ? state.workspaceMode : "flow",
+          workspaceTitleExpanded: state.workspaceTitleExpanded === true,
         }));
       } catch {
       }
@@ -1091,7 +1388,10 @@ export function dashboardHtml(input: { runId: string }) {
     const restoredDashboardState = readDashboardState();
     let selectedGoalId = restoredDashboardState.selectedGoalId || null;
     let workspaceMode = restoredDashboardState.workspaceMode || "flow";
+    let workspaceTitleExpanded = restoredDashboardState.workspaceTitleExpanded === true;
     let latestOverview = null;
+    let selectedChangedFilePath = null;
+    const diffByPath = new Map();
     const groupStatus = (tasks) => {
       if (tasks.some((task) => task.status === "running")) return "running";
       if (tasks.some((task) => task.status === "todo")) return "todo";
@@ -1223,6 +1523,100 @@ export function dashboardHtml(input: { runId: string }) {
         escapeHtml(lesson.summary) + '<div class="meta code-meta">task ' + escapeHtml(lesson.taskId) + '<br>attempt ' + escapeHtml(lesson.attemptId) + '</div></div>'
       ).join("") + '</div>'
       : '<div class="empty">No lessons or experiences</div>';
+    const normalizeChangedFilePath = (value) => {
+      if (typeof value !== "string") return null;
+      const trimmed = value.trim().replaceAll("\\\\", "/");
+      if (!trimmed || trimmed.startsWith("/") || /^[A-Za-z]:\\//.test(trimmed)) return null;
+      const normalized = trimmed.split("/").filter((part) => part && part !== ".").join("/");
+      if (!normalized || normalized.split("/").some((part) => part === "..")) return null;
+      return normalized;
+    };
+    const changedFilesForGroup = (group) => {
+      const seen = new Set();
+      return (group?.sessions || []).flatMap((session) => {
+        const changedFiles = Array.isArray(session.output?.changedFiles) ? session.output.changedFiles : [];
+        return changedFiles.flatMap((rawPath) => {
+          const path = normalizeChangedFilePath(rawPath);
+          if (!path || seen.has(path)) return [];
+          seen.add(path);
+          return [{ path, taskId: session.taskId, attemptId: session.attemptId }];
+        });
+      }).sort((left, right) => left.path.localeCompare(right.path));
+    };
+    const changedFilesTree = (files) => {
+      const root = [];
+      const directories = new Map([["", root]]);
+      for (const file of files) {
+        const parts = file.path.split("/");
+        let parentPath = "";
+        for (let index = 0; index < parts.length; index += 1) {
+          const name = parts[index];
+          const nodePath = parentPath ? parentPath + "/" + name : name;
+          const parent = directories.get(parentPath) || root;
+          const isFile = index === parts.length - 1;
+          let node = parent.find((candidate) => candidate.path === nodePath);
+          if (!node) {
+            node = isFile
+              ? { name, path: nodePath, type: "file", file }
+              : { name, path: nodePath, type: "directory", children: [] };
+            parent.push(node);
+            parent.sort((left, right) => left.type === right.type ? left.path.localeCompare(right.path) : left.type === "file" ? -1 : 1);
+          }
+          if (!isFile) directories.set(nodePath, node.children || []);
+          parentPath = nodePath;
+        }
+      }
+      return root;
+    };
+    const renderChangedFilesTree = (nodes) => nodes.map((node) => {
+      if (node.type === "directory") {
+        return '<div data-changed-file-node="directory" data-changed-file-path="' + escapeHtml(node.path) + '">' +
+          '<div class="changed-file-node"><span class="changed-file-type" aria-hidden="true">dir</span><span class="changed-file-name" title="' + escapeHtml(node.path) + '">' + escapeHtml(node.name) + '</span></div>' +
+          '<div class="changed-file-children">' + renderChangedFilesTree(node.children || []) + '</div></div>';
+      }
+      const selected = node.path === selectedChangedFilePath;
+      return '<button type="button" class="changed-file-node ' + (selected ? "selected" : "") + '" data-changed-file-node="file" data-changed-file-path="' + escapeHtml(node.path) + '"' + (selected ? ' data-selected-changed-file="true" aria-current="true"' : "") + ' title="' + escapeHtml(node.path) + '">' +
+        '<span class="changed-file-type" aria-hidden="true">file</span><span class="changed-file-name">' + escapeHtml(node.name) + '</span></button>';
+    }).join("");
+    const diffLineType = (line) => {
+      if (line.startsWith("@@")) return "hunk";
+      if (line.startsWith("+") && !line.startsWith("+++")) return "added";
+      if (line.startsWith("-") && !line.startsWith("---")) return "removed";
+      return "context";
+    };
+    const renderDiffRows = (diff) => {
+      const lines = String(diff || "").split("\\n");
+      if (lines[lines.length - 1] === "") lines.pop();
+      if (lines.length === 0) return '<div class="diff-state" data-diff-state="no-diff">No working tree diff for this file.</div>';
+      return lines.map((line, index) => {
+        const type = diffLineType(line);
+        const mark = type === "added" ? "+" : type === "removed" ? "-" : type === "hunk" ? "@" : "";
+        return '<div class="diff-row ' + type + '" data-diff-row data-diff-row-type="' + type + '" data-diff-line="' + index + '">' +
+          '<span class="diff-gutter">' + escapeHtml(mark) + '</span><span class="diff-line">' + escapeHtml(line) + '</span></div>';
+      }).join("");
+    };
+    const renderDiffState = (state, message) =>
+      '<div class="diff-output" data-diff-output><div class="diff-state" data-diff-state="' + escapeHtml(state) + '">' + escapeHtml(message) + '</div></div>';
+    const renderDiffPanel = (path) => {
+      if (!path) return '<div class="diff-panel" data-diff-panel>' + renderDiffState("empty-selection", "Select a changed file to inspect its diff.") + '</div>';
+      const state = diffByPath.get(path);
+      const body = !state || state.status === "loading"
+        ? renderDiffState("loading", "Loading diff...")
+        : state.status === "error"
+          ? renderDiffState("error", state.error || "Unable to load diff.")
+          : '<div class="diff-output" data-diff-output>' + renderDiffRows(state.diff || "") + '</div>';
+      return '<div class="diff-panel" data-diff-panel data-diff-path="' + escapeHtml(path) + '">' +
+        '<div class="diff-header" data-diff-header><div class="diff-path" title="' + escapeHtml(path) + '">' + escapeHtml(path) + '</div></div>' + body + '</div>';
+    };
+    const renderChangedFilesSection = (group) => {
+      const files = changedFilesForGroup(group);
+      if (!files.some((file) => file.path === selectedChangedFilePath)) selectedChangedFilePath = files[0]?.path || null;
+      const tree = changedFilesTree(files);
+      return '<section class="inspector-card changed-files-section" data-inspector-section="changed-files" data-changed-files-section><h2>Changed Files</h2>' +
+        (files.length ? '<div class="changed-file-tree" data-changed-file-tree>' + renderChangedFilesTree(tree) + '</div>' : '<div class="empty">No changed files reported for this goal.</div>') +
+        renderDiffPanel(selectedChangedFilePath) +
+        '</section>';
+    };
     const taskMeta = (task) => '<span class="code-meta">id ' + escapeHtml(task.id) + '</span>' + (task.dependsOn.length ? ' · depends on ' + task.dependsOn.map((id) => '<span class="code-meta">' + escapeHtml(id) + '</span>').join(", ") : '');
     const relationText = (ids) => ids.length ? ids.map((id) => '<span class="code-meta">' + escapeHtml(id) + '</span>').join(", ") : '<span class="meta">none</span>';
     const roleSummary = (tasks) => [...new Set(tasks.map((task) => task.role))].join(" / ");
@@ -1230,7 +1624,7 @@ export function dashboardHtml(input: { runId: string }) {
     const goalRow = (group) =>
       '<button class="task-row ' + (group.id === selectedGoalId ? 'selected' : '') + '" data-goal-id="' + escapeHtml(group.id) + '">' +
       '<span class="status-dot ' + escapeHtml(group.status) + '"></span>' +
-      '<span><strong>' + escapeHtml(group.titleTask.goal) + '</strong><span class="row-meta">' + group.tasks.length + ' tasks · ' + escapeHtml(roleSummary(group.tasks)) + '</span></span>' +
+      '<span class="task-row-text"><strong>' + escapeHtml(group.titleTask.goal) + '</strong><span class="row-meta">' + group.tasks.length + ' tasks · ' + escapeHtml(roleSummary(group.tasks)) + '</span></span>' +
       '<span class="status-text ' + escapeHtml(group.status) + '">' + escapeHtml(group.status) + '</span></button>';
     const turn = (input) =>
       '<article class="turn ' + (input.primary ? "primary" : "") + '" data-turn-key="' + escapeHtml(input.key || input.mark) + '"><div class="turn-gutter"><div class="turn-avatar">' + input.mark + '</div><div class="turn-rail"></div></div>' +
@@ -1377,7 +1771,7 @@ export function dashboardHtml(input: { runId: string }) {
         ).join("") + '</ul>' : '<div class="empty">No todos recorded</div>') +
         (runningSessions.length ? '<div class="control-row"><button class="plain-button danger" data-stop-attempt-id="' + escapeHtml(runningSessions[0].attemptId) + '">Stop current task</button></div>' : '') +
         (rerunnableTask ? '<div class="control-row"><button class="plain-button" data-rerun-task-id="' + escapeHtml(rerunnableTask.id) + '">Rerun selected task</button></div>' : '') +
-        '</section>';
+        '</section>' + renderChangedFilesSection(group);
     };
     const latestRunnerSignal = (overview) => {
       const session = [...(overview.sessions || [])].reverse()[0];
@@ -1434,6 +1828,20 @@ export function dashboardHtml(input: { runId: string }) {
       if (!response.ok) throw new Error(payload.error || "request failed");
       return payload;
     };
+    const fetchDiffForChangedFile = async (path) => {
+      if (!path) return;
+      diffByPath.set(path, { status: "loading" });
+      if (latestOverview) render(latestOverview);
+      try {
+        const response = await fetch("/api/runs/" + encodeURIComponent(runId) + "/diff?path=" + encodeURIComponent(path));
+        const diff = await response.text();
+        if (!response.ok) throw new Error(diff || "diff request failed");
+        diffByPath.set(path, { status: "done", diff });
+      } catch (error) {
+        diffByPath.set(path, { status: "error", error: error && error.message ? error.message : String(error) });
+      }
+      if (latestOverview) render(latestOverview);
+    };
     const refreshOverview = () => overviewWorker.postMessage({ type: "refresh" });
     const setGoalFormStatus = (message) => {
       const node = document.getElementById("goal-form-status");
@@ -1485,14 +1893,30 @@ export function dashboardHtml(input: { runId: string }) {
       }
       renderedHtml.set(id, html);
     };
-    const patchInspectorPanel = (progressHtml, runnerHtml) => {
-      patchKeyedChildren("inspector-panel", progressHtml + runnerHtml, "data-inspector-section");
+    const patchInspectorPanel = (inspectorHtml, runnerHtml) => {
+      patchKeyedChildren("inspector-panel", inspectorHtml + runnerHtml, "data-inspector-section");
     };
     const syncWorkspaceToggle = () => {
       for (const button of document.querySelectorAll("[data-workspace-mode]")) {
         const active = button.getAttribute("data-workspace-mode") === workspaceMode;
         button.classList.toggle("active", active);
         button.setAttribute("aria-pressed", active ? "true" : "false");
+      }
+    };
+    const syncWorkspaceTitle = (title) => {
+      const titleNode = document.getElementById("workspace-title");
+      const toggle = document.getElementById("workspace-title-toggle");
+      const next = String(title ?? "");
+      if (titleNode && titleNode.textContent !== next) titleNode.textContent = next;
+      if (titleNode) {
+        titleNode.setAttribute("title", next);
+        titleNode.classList.toggle("is-expanded", workspaceTitleExpanded);
+        titleNode.classList.toggle("is-collapsed", !workspaceTitleExpanded);
+      }
+      if (toggle) {
+        toggle.setAttribute("aria-expanded", workspaceTitleExpanded ? "true" : "false");
+        toggle.setAttribute("aria-label", workspaceTitleExpanded ? "Collapse workspace title" : "Expand workspace title");
+        toggle.textContent = workspaceTitleExpanded ? "Collapse" : "Expand";
       }
     };
     const captureFlowScrollState = () => {
@@ -1606,7 +2030,7 @@ export function dashboardHtml(input: { runId: string }) {
       'let runId = null;',
       'let apiBase = "";',
       'let timer = null;',
-      'const shouldPoll = (overview) => overview.run?.status !== "done" || overview.tasks.some((task) => task.status === "todo" || task.status === "running") || overview.sessions.some((session) => session.status === "running");',
+      'const shouldPoll = (overview) => overview.runner?.status === "running" || overview.run?.status !== "done" || overview.tasks.some((task) => task.status === "todo" || task.status === "running") || overview.sessions.some((session) => session.status === "running");',
       'const schedule = (delay) => { if (timer) clearTimeout(timer); timer = setTimeout(refresh, delay); };',
       'async function refresh() {',
       '  if (!runId) return;',
@@ -1645,13 +2069,23 @@ export function dashboardHtml(input: { runId: string }) {
       const activeGroups = goalGroups.filter((group) => group.activeTasks.length > 0);
       if (!selectedGoalId || !goalGroups.some((group) => group.id === selectedGoalId)) {
         selectedGoalId = (activeGroups[0] || goalGroups[goalGroups.length - 1] || {}).id || null;
-        writeDashboardState({ selectedGoalId, workspaceMode });
+        workspaceTitleExpanded = false;
+        writeDashboardState({ selectedGoalId, workspaceMode, workspaceTitleExpanded });
       }
       const selectedGroup = goalGroups.find((group) => group.id === selectedGoalId);
+      const projectName = overview.project ? overview.project.name : "Project Workspace";
+      const projectRoot = overview.project ? overview.project.rootPath : "";
+      const projectTitle = projectRoot ? projectName + " · " + projectRoot : projectName;
       setTextIfChanged("run-status", overview.run?.status || "unknown");
       setTextIfChanged("run-title", overview.run ? overview.run.goal : runId);
+      const projectHeader = document.querySelector("[data-project-header]");
+      if (projectHeader) projectHeader.setAttribute("title", projectTitle);
+      const projectNameNode = document.querySelector("[data-project-name]");
+      if (projectNameNode && projectNameNode.textContent !== projectName) projectNameNode.textContent = projectName;
+      const projectRootNode = document.querySelector("[data-project-root]");
+      if (projectRootNode && projectRootNode.textContent !== projectRoot) projectRootNode.textContent = projectRoot;
       setTextIfChanged("workspace-kicker", selectedGroup ? selectedGroup.status + " / " + selectedGroup.tasks.length + " tasks" : "Goal Flow");
-      setTextIfChanged("workspace-title", selectedGroup ? selectedGroup.titleTask.goal : "No goal selected");
+      syncWorkspaceTitle(selectedGroup ? selectedGroup.titleTask.goal : "No goal selected");
       syncWorkspaceToggle();
       document.getElementById("workspace-flow")?.classList.toggle("canvas-workspace", workspaceMode === "canvas");
       setHtmlIfChanged("sidebar-stats", [
@@ -1668,11 +2102,25 @@ export function dashboardHtml(input: { runId: string }) {
     }
     document.addEventListener("click", (event) => {
       if (!event.target || !event.target.closest) return;
+      const titleToggle = event.target.closest("[data-workspace-title-toggle]");
+      if (titleToggle) {
+        workspaceTitleExpanded = !workspaceTitleExpanded;
+        writeDashboardState({ selectedGoalId, workspaceMode, workspaceTitleExpanded });
+        syncWorkspaceTitle(document.getElementById("workspace-title")?.textContent || "");
+        return;
+      }
       const modeButton = event.target.closest("[data-workspace-mode]");
       if (modeButton) {
         workspaceMode = modeButton.getAttribute("data-workspace-mode") || "flow";
-        writeDashboardState({ selectedGoalId, workspaceMode });
+        writeDashboardState({ selectedGoalId, workspaceMode, workspaceTitleExpanded });
         if (latestOverview) render(latestOverview);
+        return;
+      }
+      const changedFileButton = event.target.closest("[data-changed-file-node='file'][data-changed-file-path]");
+      if (changedFileButton) {
+        selectedChangedFilePath = changedFileButton.getAttribute("data-changed-file-path");
+        if (latestOverview) render(latestOverview);
+        fetchDiffForChangedFile(selectedChangedFilePath);
         return;
       }
       const stopButton = event.target.closest("[data-stop-attempt-id]");
@@ -1738,7 +2186,8 @@ export function dashboardHtml(input: { runId: string }) {
       const row = event.target.closest("[data-goal-id]");
       if (!row) return;
       selectedGoalId = row.getAttribute("data-goal-id");
-      writeDashboardState({ selectedGoalId, workspaceMode });
+      workspaceTitleExpanded = false;
+      writeDashboardState({ selectedGoalId, workspaceMode, workspaceTitleExpanded });
       if (latestOverview) render(latestOverview);
     });
     document.getElementById("goal-composer").addEventListener("submit", (event) => {
@@ -1758,7 +2207,8 @@ export function dashboardHtml(input: { runId: string }) {
         .then((payload) => {
           input.value = "";
           selectedGoalId = payload.taskId || selectedGoalId;
-          writeDashboardState({ selectedGoalId, workspaceMode });
+          workspaceTitleExpanded = false;
+          writeDashboardState({ selectedGoalId, workspaceMode, workspaceTitleExpanded });
           setGoalFormStatus(action === "interrupt" ? "Interrupted. Planner queued." : "Planner queued.");
           refreshOverview();
         })
@@ -1815,6 +2265,22 @@ export async function handleDashboardRequest(
   }
   if (url.pathname === `/api/runs/${input.runId}/overview`) {
     return Response.json({ ...input.overview(), runner: input.runnerStatus?.() ?? null });
+  }
+  if (url.pathname === `/api/runs/${input.runId}/changed-files`) {
+    return Response.json(changedFilesPayload(input.overview()));
+  }
+  if (url.pathname === `/api/runs/${input.runId}/diff`) {
+    const format = url.searchParams.get("format");
+    const asJson = format === "json";
+    const result = diffForChangedPath(input.overview(), url.searchParams.get("path"));
+    if (!result.ok) {
+      return asJson
+        ? Response.json({ error: result.error }, { status: result.status })
+        : new Response(result.error, { status: result.status, headers: { "content-type": "text/plain; charset=utf-8" } });
+    }
+    return asJson
+      ? Response.json({ path: result.path, diff: result.diff })
+      : new Response(result.diff, { headers: { "content-type": "text/plain; charset=utf-8" } });
   }
   if (request.method === "POST" && url.pathname === `/api/runs/${input.runId}/runner/start`) {
     return withDashboardAction(async () => {
@@ -1886,6 +2352,110 @@ export async function handleDashboardRequest(
     });
   }
   return new Response("not found", { status: 404 });
+}
+
+function changedFilesPayload(overview: RunOverview) {
+  const seen = new Set<string>();
+  const files = overview.sessions
+    .flatMap((session) => {
+      const changedFiles = Array.isArray(session.output?.changedFiles) ? session.output.changedFiles : [];
+      return changedFiles.flatMap((rawPath) => {
+        const path = normalizeTrackedPath(rawPath);
+        if (!path || seen.has(path)) {
+          return [];
+        }
+        seen.add(path);
+        return [{ path, taskId: session.taskId, attemptId: session.attemptId, worktreePath: session.worktreePath ?? null }];
+      });
+    })
+    .sort((left, right) => left.path.localeCompare(right.path));
+  return { files, tree: changedFilesTree(files.map((file) => file.path)) };
+}
+
+function changedFilesTree(paths: string[]) {
+  type TreeNode = { name: string; path: string; type: "directory" | "file"; children?: TreeNode[] };
+  const root: TreeNode[] = [];
+  const directories = new Map<string, TreeNode[]>();
+  directories.set("", root);
+  for (const path of paths) {
+    const parts = path.split("/");
+    let parentPath = "";
+    for (let index = 0; index < parts.length; index += 1) {
+      const name = parts[index];
+      const nodePath = parentPath ? `${parentPath}/${name}` : name;
+      const parent = directories.get(parentPath) ?? root;
+      const isFile = index === parts.length - 1;
+      let node = parent.find((candidate) => candidate.path === nodePath);
+      if (!node) {
+        node = isFile ? { name, path: nodePath, type: "file" } : { name, path: nodePath, type: "directory", children: [] };
+        parent.push(node);
+        parent.sort(compareTreeNodes);
+      }
+      if (!isFile) {
+        directories.set(nodePath, node.children ?? []);
+      }
+      parentPath = nodePath;
+    }
+  }
+  return root;
+}
+
+function compareTreeNodes(left: { type: string; path: string }, right: { type: string; path: string }) {
+  if (left.type !== right.type) {
+    return left.type === "file" ? -1 : 1;
+  }
+  return left.path.localeCompare(right.path);
+}
+
+function diffForChangedPath(overview: RunOverview, rawPath: string | null):
+  | { ok: true; path: string; diff: string }
+  | { ok: false; status: number; error: string } {
+  const path = normalizeTrackedPath(rawPath);
+  if (!path) {
+    return { ok: false, status: 400, error: rawPath ? "path traversal is not allowed" : "path is required" };
+  }
+  const payload = changedFilesPayload(overview);
+  const file = payload.files.find((candidate) => candidate.path === path);
+  if (!file) {
+    return { ok: false, status: 404, error: `changed file not tracked: ${path}` };
+  }
+  const root = file.worktreePath ?? overview.project?.rootPath ?? overview.sessions.find((session) => session.worktreePath)?.worktreePath;
+  if (!root) {
+    return { ok: false, status: 400, error: "project root or task worktree is required for diffs" };
+  }
+  const rootPath = resolve(root);
+  const filePath = resolve(rootPath, path);
+  const rel = relative(rootPath, filePath);
+  if (!rel || rel.startsWith("..") || isAbsolute(rel)) {
+    return { ok: false, status: 400, error: "path traversal is not allowed" };
+  }
+  const result = Bun.spawnSync({
+    cmd: ["git", "diff", "--", path],
+    cwd: rootPath,
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const stdout = new TextDecoder().decode(result.stdout);
+  const stderr = new TextDecoder().decode(result.stderr).trim();
+  if (result.exitCode !== 0) {
+    return { ok: false, status: 400, error: stderr || `git diff failed for ${path}` };
+  }
+  return { ok: true, path, diff: stdout };
+}
+
+function normalizeTrackedPath(value: unknown) {
+  if (typeof value !== "string") {
+    return null;
+  }
+  const trimmed = value.trim().replaceAll("\\", "/");
+  if (!trimmed || trimmed.startsWith("/") || /^[A-Za-z]:\//.test(trimmed)) {
+    return null;
+  }
+  const normalized = trimmed.split("/").filter((part) => part && part !== ".").join("/");
+  if (!normalized || normalized.split("/").some((part) => part === "..")) {
+    return null;
+  }
+  return normalized;
 }
 
 async function withDashboardAction(input: () => DashboardActionResult | Promise<DashboardActionResult>) {

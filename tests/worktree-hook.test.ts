@@ -16,6 +16,8 @@ describe("git worktree hook", () => {
     const result = await hook({
       run: {
         id: "run_1",
+        projectId: "project_1",
+        projectRoot: "/repo",
         goal: "Goal",
         status: "todo",
         context: {},
@@ -41,9 +43,13 @@ describe("git worktree hook", () => {
 
     expect(calls).toEqual([
       ["git", "-C", "/repo", "worktree", "add", "/tmp/wt/task_1", "-b", "ouroboros/task_1", "main"],
+      ["bun", "install", "--cwd", "/tmp/wt/task_1", "--frozen-lockfile"],
     ]);
     expect(result).toEqual({
-      checks: [{ name: "git worktree add", status: "passed" }],
+      checks: [
+        { name: "git worktree add", status: "passed" },
+        { name: "bun install", status: "passed" },
+      ],
       artifacts: [{ kind: "worktree", path: "/tmp/wt/task_1", branch: "ouroboros/task_1" }],
     });
   });

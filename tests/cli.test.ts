@@ -41,6 +41,50 @@ describe("CLI", () => {
     expect(ready.role).toBe("planner");
   });
 
+  test("creates projects and shows project metadata in run overview", async () => {
+    await runCli("init");
+    const project = await runCliJson(
+      "create-project",
+      "--name",
+      "Ouroboros",
+      "--root-path",
+      dir,
+      "--context-json",
+      '{"source":"cli-test"}',
+    );
+    const run = await runCliJson("create-run", "--goal", "Project scoped run", "--project-id", project.id);
+    const overview = await runCliJson("run-overview", "--run-id", run.id);
+
+    expect(project).toMatchObject({
+      name: "Ouroboros",
+      rootPath: dir,
+      context: { source: "cli-test" },
+    });
+    expect(run).toMatchObject({
+      goal: "Project scoped run",
+      projectId: project.id,
+      projectRoot: dir,
+    });
+    expect(overview.project).toMatchObject({
+      id: project.id,
+      name: "Ouroboros",
+      rootPath: dir,
+    });
+  });
+
+  test("creates a project-bound run from project root", async () => {
+    await runCli("init");
+    const run = await runCliJson("create-run", "--goal", "Root scoped run", "--project-root", dir);
+    const overview = await runCliJson("run-overview", "--run-id", run.id);
+
+    expect(run.projectId).toBeString();
+    expect(run.projectRoot).toBe(dir);
+    expect(overview.project).toMatchObject({
+      id: run.projectId,
+      rootPath: dir,
+    });
+  });
+
   test("bootstraps a self-iteration planning run", async () => {
     const result = await runCliJson("self-iterate");
     const overview = await runCliJson("run-overview", "--run-id", result.runId);
@@ -51,8 +95,15 @@ describe("CLI", () => {
     expect(result.runnerCommand).toBeString();
     expect(result.dashboardCommand).toContain(`dashboard --run-id ${result.runId}`);
     expect(result.runnerCommand).toContain(`run-loop --run-id ${result.runId}`);
+    expect(result.launchCommand).toContain("self-iterate-launch");
+    expect(result.launchCommand).toContain("--concurrency 3");
+    expect(result.launchCommand).toContain("--worktree-root .ouroboros/worktrees");
+    expect(result.launchCommand).toContain("--start-hook git-worktree");
     expect(result.dashboardCommand).toContain("--port 7331");
     expect(result.runnerCommand).toContain("--executor codex-resumable");
+    expect(result.runnerCommand).toContain("--concurrency 3");
+    expect(result.runnerCommand).toContain("--worktree-root .ouroboros/worktrees");
+    expect(result.runnerCommand).toContain("--start-hook git-worktree");
     expect(result.runnerCommand).toContain("--stop-hook create-tasks,create-verifier,create-repair,context-summary");
 
     expect(overview.run).toMatchObject({
@@ -74,13 +125,96 @@ describe("CLI", () => {
     expect(overview.tasks[0].prompt).toContain("docs/self-iteration-plan.md");
     expect(overview.tasks[0].prompt).toContain("recent run lessons from the harness database");
     expect(overview.tasks[0].prompt).toContain("small `nextTasks` graph");
+    expect(overview.tasks[0].prompt).toContain("two to three independent improvement areas");
     expect(overview.tasks[0].doneWhen).toEqual([
-      "Planner output contains a small nextTasks graph, usually two to five tasks",
+      "Planner output contains a small nextTasks graph, usually two to five tasks across two to three independent areas when possible",
       "Every planned task has one role, one concrete goal, and one prompt with exact files or commands to inspect first",
       "The task graph includes explicit dependsOn when ordering matters and each task has three to five doneWhen checks",
       "Every planned task identifies a clear artifact, code change, test, or decision",
       "The graph includes natural failure paths through verifier, repair, or another planner and can be drained by run-loop",
     ]);
+  });
+
+  test("launches the self-iteration dashboard and runner together", async () => {
+    await runCli("init");
+    const codexBin = join(dir, "fake-codex-launch");
+    await writeFile(
+      codexBin,
+      [
+        "#!/usr/bin/env bun",
+        "const args = Bun.argv.slice(2);",
+        "if (args.includes('resume')) {",
+        "  console.log(JSON.stringify({ type: 'session.started', session_id: 'session_launch_resume' }));",
+        "  console.log(JSON.stringify({ type: 'agent.message', message: '{\"status\":\"done\",\"summary\":\"launch resumed\",\"changedFiles\":[],\"checks\":[],\"artifacts\":[],\"problems\":[]}' }));",
+        "  process.exit(0);",
+        "}",
+        "console.log(JSON.stringify({ type: 'session.started', session_id: 'session_launch' }));",
+        "await new Promise((resolve) => setTimeout(resolve, 1500));",
+        "console.log(JSON.stringify({ type: 'agent.message', message: '{\"status\":\"done\",\"summary\":\"launch started\",\"changedFiles\":[],\"checks\":[],\"artifacts\":[],\"problems\":[]}' }));",
+      ].join("\n"),
+    );
+    await chmod(codexBin, 0o755);
+
+    const proc = Bun.spawn({
+      cmd: [
+        "bun",
+        "run",
+        "packages/cli/src/main.ts",
+        "--db",
+        dbPath,
+        "self-iterate-launch",
+        "--port",
+        "7345",
+        "--codex-bin",
+        codexBin,
+        "--cwd",
+        "/repo",
+        "--sandbox",
+        "read-only",
+        "--max-cycles",
+        "1",
+        "--max-rounds",
+        "1",
+        "--interval-ms",
+        "1",
+        "--start-hook",
+        "none",
+      ],
+      cwd: process.cwd(),
+      env: { ...process.env },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+
+    try {
+      const launch = JSON.parse(await readFirstLine(proc.stdout));
+      const overviewResponse = await fetch(`${launch.dashboardUrl}/api/runs/${launch.runId}/overview`);
+      const overview = await overviewResponse.json();
+
+      expect(launch).toMatchObject({
+        runId: expect.any(String),
+        taskId: expect.any(String),
+        dashboardUrl: "http://localhost:7345",
+        runnerPid: expect.any(Number),
+        runnerStatus: expect.objectContaining({ status: "running" }),
+      });
+      expect(launch.runnerCommand).toContain("--concurrency 3");
+      expect(launch.runnerCommand).toContain("--start-hook none");
+      expect(overview.runner).toMatchObject({ status: "running" });
+      expect(overview.run).toMatchObject({
+        id: launch.runId,
+        goal: "Use Ouroboros to plan its own next self-iteration cycle",
+      });
+      expect(overview.tasks).toHaveLength(1);
+      expect(overview.tasks[0]).toMatchObject({
+        id: launch.taskId,
+        role: "planner",
+        status: "todo",
+      });
+    } finally {
+      proc.kill();
+      await proc.exited;
+    }
   });
 
   test("links a local run to a Linear project", async () => {
@@ -110,6 +244,206 @@ describe("CLI", () => {
       externalType: "project",
       externalId: "ouroboros-acd5df2ef1da",
     });
+  });
+
+  test("checks Linear access from config and records the run project ref", async () => {
+    await runCli("init");
+    const run = await runCliJson("create-run", "--goal", "Bootstrap ouroboros");
+    const tokenPath = join(dir, "linear-token");
+    const configPath = join(dir, "ouroboros.toml");
+    const projectUrl = "https://linear.app/pancat/project/ouroboros-acd5df2ef1da/overview";
+    let authorization = "";
+    const server = Bun.serve({
+      port: 0,
+      fetch(request) {
+        authorization = request.headers.get("authorization") ?? "";
+        return Response.json({
+          data: {
+            viewer: { id: "viewer_1", name: "Ouroboros Bot", email: "bot@example.com" },
+            projects: {
+              nodes: [
+                {
+                  id: "project_1",
+                  name: "Ouroboros",
+                  slugId: "ouroboros-acd5df2ef1da",
+                  url: projectUrl,
+                  teams: { nodes: [{ id: "team_1", key: "PAN", name: "PanCat" }] },
+                },
+              ],
+            },
+          },
+        });
+      },
+    });
+    try {
+      await writeFile(tokenPath, "lin_api_test_token");
+      await writeFile(
+        configPath,
+        [
+          "[linear]",
+          `api_url = "http://127.0.0.1:${server.port}/graphql"`,
+          `token_file = "${tokenPath}"`,
+          `project_url = "${projectUrl}"`,
+          'project_id = "ouroboros-acd5df2ef1da"',
+          'team_key = "PAN"',
+          "",
+        ].join("\n"),
+      );
+
+      const result = await runCliJson("linear-check", "--config", configPath, "--run-id", run.id);
+      const harness = new Harness(dbPath);
+
+      expect(authorization).toBe("lin_api_test_token");
+      expect(result).toMatchObject({
+        status: "ok",
+        tokenSource: tokenPath,
+        viewer: { name: "Ouroboros Bot" },
+        project: { name: "Ouroboros", slugId: "ouroboros-acd5df2ef1da", url: projectUrl },
+        team: { key: "PAN" },
+      });
+      expect(harness.listExternalRefs({ localType: "run", localId: run.id })).toEqual([
+        expect.objectContaining({
+          localType: "run",
+          localId: run.id,
+          provider: "linear",
+          externalType: "project",
+          externalId: "ouroboros-acd5df2ef1da",
+          externalUrl: projectUrl,
+        }),
+      ]);
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  test("maps a local run to a Linear issue", async () => {
+    await runCli("init");
+    const run = await runCliJson("create-run", "--goal", "Bootstrap ouroboros");
+
+    const ref = await runCliJson(
+      "linear-link-issue",
+      "--local-type",
+      "run",
+      "--local-id",
+      run.id,
+      "--issue-id",
+      "LIN-123",
+      "--issue-url",
+      "https://linear.app/pancat/issue/LIN-123/bootstrap-ouroboros",
+    );
+
+    expect(ref).toMatchObject({
+      localType: "run",
+      localId: run.id,
+      provider: "linear",
+      externalType: "issue",
+      externalId: "LIN-123",
+      externalUrl: "https://linear.app/pancat/issue/LIN-123/bootstrap-ouroboros",
+      created: true,
+    });
+    expect(new Harness(dbPath).listExternalRefs({ localType: "run", localId: run.id })).toEqual([
+      expect.objectContaining({
+        id: ref.id,
+        provider: "linear",
+        externalType: "issue",
+        externalId: "LIN-123",
+      }),
+    ]);
+  });
+
+  test("maps a local task to a Linear issue by key", async () => {
+    await runCli("init");
+    const run = await runCliJson("create-run", "--goal", "Bootstrap ouroboros");
+    const task = await runCliJson(
+      "create-task",
+      "--run-id",
+      run.id,
+      "--role",
+      "worker",
+      "--goal",
+      "Implement issue mapping",
+      "--prompt",
+      "Map the task.",
+    );
+
+    const ref = await runCliJson(
+      "linear-link-issue",
+      "--local-type",
+      "task",
+      "--local-id",
+      task.id,
+      "--issue-key",
+      "LIN-456",
+    );
+
+    expect(ref).toMatchObject({
+      localType: "task",
+      localId: task.id,
+      provider: "linear",
+      externalType: "issue",
+      externalId: "LIN-456",
+      externalUrl: null,
+      created: true,
+    });
+  });
+
+  test("reuses an existing Linear issue mapping for the same local entity", async () => {
+    await runCli("init");
+    const run = await runCliJson("create-run", "--goal", "Bootstrap ouroboros");
+
+    const first = await runCliJson(
+      "linear-link-issue",
+      "--local-type",
+      "run",
+      "--local-id",
+      run.id,
+      "--issue-url",
+      "https://linear.app/pancat/issue/LIN-789/reuse-mapping",
+    );
+    const second = await runCliJson(
+      "linear-link-issue",
+      "--local-type",
+      "run",
+      "--local-id",
+      run.id,
+      "--issue-url",
+      "https://linear.app/pancat/issue/LIN-789/reuse-mapping",
+    );
+    const refs = new Harness(dbPath).listExternalRefs({ localType: "run", localId: run.id });
+
+    expect(second).toMatchObject({
+      id: first.id,
+      externalId: "https://linear.app/pancat/issue/LIN-789/reuse-mapping",
+      created: false,
+    });
+    expect(refs).toHaveLength(1);
+  });
+
+  test("rejects invalid Linear issue mapping input", async () => {
+    await runCli("init");
+    const run = await runCliJson("create-run", "--goal", "Bootstrap ouroboros");
+
+    const invalidType = await runCliRaw(
+      "linear-link-issue",
+      "--local-type",
+      "attempt",
+      "--local-id",
+      run.id,
+      "--issue-id",
+      "LIN-999",
+    );
+    const missingIssue = await runCliRaw(
+      "linear-link-issue",
+      "--local-type",
+      "run",
+      "--local-id",
+      run.id,
+    );
+
+    expect(invalidType.exitCode).toBe(1);
+    expect(invalidType.stderr).toContain("--local-type must be run or task");
+    expect(missingIssue.exitCode).toBe(1);
+    expect(missingIssue.stderr).toContain("Linear issue identifier is required");
   });
 
   test("shows and updates prompt templates", async () => {
@@ -296,7 +630,7 @@ describe("CLI", () => {
       "Do B.",
     );
 
-    const result = await runCliJson("run-next", "--run-id", run.id, "--executor", "noop", "--limit", "2");
+    const result = await runCliJson("run-next", "--run-id", run.id, "--executor", "noop", "--concurrency", "2");
 
     expect(result.tasks.map((task: { taskId: string }) => task.taskId).sort()).toEqual(
       [first.id, second.id].sort(),
@@ -351,7 +685,19 @@ describe("CLI", () => {
     );
     const binDir = join(dir, "bin");
     await mkdir(binDir);
-    await writeFile(join(binDir, "git"), "#!/usr/bin/env bun\nprocess.exit(0);\n");
+    await writeFile(
+      join(binDir, "git"),
+      [
+        "#!/bin/sh",
+        "set -eu",
+        "target=\"$5\"",
+        "mkdir -p \"$target/packages/cli\" \"$target/packages/harness\" \"$target/packages/runner\"",
+        "cp package.json bun.lock \"$target/\"",
+        "cp packages/cli/package.json \"$target/packages/cli/package.json\"",
+        "cp packages/harness/package.json \"$target/packages/harness/package.json\"",
+        "cp packages/runner/package.json \"$target/packages/runner/package.json\"",
+      ].join("\n"),
+    );
     await chmod(join(binDir, "git"), 0o755);
 
     const result = await runCliJson(
@@ -374,9 +720,91 @@ describe("CLI", () => {
     const attempt = new Harness(dbPath).getAttempt(result.tasks[0].attemptId)!;
     expect(result.tasks[0].taskId).toBe(task.id);
     expect(attempt.output.checks).toContainEqual({ name: "git worktree add", status: "passed" });
+    expect(attempt.output.checks).toContainEqual({ name: "bun install", status: "passed" });
     expect(attempt.output.artifacts).toContainEqual({
       kind: "worktree",
       path: join(dir, "worktrees", task.id),
+      branch: `ouroboros/${task.id}`,
+    });
+  });
+
+  test("runs git worktree start hook before codex-resumable attempts", async () => {
+    await runCli("init");
+    const run = await runCliJson("create-run", "--goal", "Bootstrap ouroboros");
+    const task = await runCliJson(
+      "create-task",
+      "--run-id",
+      run.id,
+      "--role",
+      "worker",
+      "--goal",
+      "Task with resumable worktree",
+      "--prompt",
+      "Do work.",
+    );
+    const binDir = join(dir, "bin-resumable-worktree");
+    const codexBin = join(dir, "fake-codex-resumable-worktree");
+    const worktreeRoot = join(dir, "worktrees");
+    const expectedCwd = join(worktreeRoot, task.id);
+    await mkdir(binDir);
+    await writeFile(
+      join(binDir, "git"),
+      [
+        "#!/bin/sh",
+        "set -eu",
+        "target=\"$5\"",
+        "mkdir -p \"$target/packages/cli\" \"$target/packages/harness\" \"$target/packages/runner\"",
+        "cp package.json bun.lock \"$target/\"",
+        "cp packages/cli/package.json \"$target/packages/cli/package.json\"",
+        "cp packages/harness/package.json \"$target/packages/harness/package.json\"",
+        "cp packages/runner/package.json \"$target/packages/runner/package.json\"",
+      ].join("\n"),
+    );
+    await chmod(join(binDir, "git"), 0o755);
+    await writeFile(
+      codexBin,
+      [
+        "#!/usr/bin/env bun",
+        "const args = Bun.argv.slice(2);",
+        "const cwdIndex = args.indexOf('-C');",
+        `if (cwdIndex === -1 || args[cwdIndex + 1] !== ${JSON.stringify(expectedCwd)}) process.exit(9);`,
+        "console.log(JSON.stringify({ type: 'session.started', session_id: 'session_worktree' }));",
+        "console.log(JSON.stringify({ type: 'agent.message', message: '{\"status\":\"done\",\"summary\":\"worktree cwd used\",\"changedFiles\":[],\"checks\":[],\"artifacts\":[],\"problems\":[]}' }));",
+      ].join("\n"),
+    );
+    await chmod(codexBin, 0o755);
+
+    const result = await runCliJson(
+      "run-loop",
+      "--run-id",
+      run.id,
+      "--executor",
+      "codex-resumable",
+      "--worktree-root",
+      worktreeRoot,
+      "--start-hook",
+      "git-worktree",
+      "--cwd",
+      "/repo",
+      "--codex-bin",
+      codexBin,
+      "--max-rounds",
+      "1",
+      { PATH: `${binDir}:${process.env.PATH}` },
+    );
+    const attempt = new Harness(dbPath).getAttempt(result.rounds[0].tasks[0].attemptId)!;
+
+    expect(result.rounds[0].tasks[0]).toMatchObject({
+      taskId: task.id,
+      status: "done",
+      codexSessionId: "session_worktree",
+    });
+    expect(attempt.input.cwd).toBe(expectedCwd);
+    expect(attempt.output.checks).toContainEqual({ name: "git worktree add", status: "passed" });
+    expect(attempt.output.checks).toContainEqual({ name: "bun install", status: "passed" });
+    expect(attempt.output.artifacts).toContainEqual({
+      kind: "worktree",
+      path: expectedCwd,
       branch: `ouroboros/${task.id}`,
     });
   });
@@ -770,7 +1198,13 @@ describe("CLI", () => {
 
   test("starts and resumes a codex running attempt", async () => {
     await runCli("init");
-    const run = await runCliJson("create-run", "--goal", "Bootstrap ouroboros");
+    const run = await runCliJson(
+      "create-run",
+      "--goal",
+      "Bootstrap ouroboros",
+      "--context-json",
+      '{"modelDefaults":{"roles":{"planner":{"model":"gpt-5-mini","reason":"cheap planning"}}}}',
+    );
     const task = await runCliJson(
       "create-task",
       "--run-id",
@@ -788,6 +1222,7 @@ describe("CLI", () => {
       [
         "#!/usr/bin/env bun",
         "const args = Bun.argv.slice(2);",
+        "if (!args.includes('-m') || !args.includes('gpt-5-mini')) process.exit(9);",
         "if (args.includes('resume')) {",
         "  console.log(JSON.stringify({ type: 'session.started', session_id: 'session_123' }));",
         "  console.log(JSON.stringify({ type: 'agent.message', message: '{\"status\":\"done\",\"summary\":\"resumed planner\",\"changedFiles\":[],\"checks\":[],\"artifacts\":[],\"problems\":[]}' }));",
@@ -811,6 +1246,8 @@ describe("CLI", () => {
       "900000",
       "--idle-timeout-ms",
       "300000",
+      "--model",
+      "gpt-5-codex",
     );
     const running = await runCliJson("list-running-attempts", "--run-id", run.id);
     const resumed = await runCliJson(
@@ -823,6 +1260,8 @@ describe("CLI", () => {
       "900000",
       "--idle-timeout-ms",
       "300000",
+      "--model",
+      "gpt-5-codex",
     );
 
     expect(started).toMatchObject({
@@ -840,7 +1279,73 @@ describe("CLI", () => {
       attemptId: started.attemptId,
       status: "done",
     });
+    expect(new Harness(dbPath).getAttempt(started.attemptId)?.input.model).toEqual({
+      model: "gpt-5-mini",
+      reason: "cheap planning",
+      source: "role-default",
+      role: "planner",
+    });
     expect(new Harness(dbPath).getAttempt(started.attemptId)?.output.summary).toBe("resumed planner");
+  });
+
+  test("uses task model preference before role defaults and cli model", async () => {
+    await runCli("init");
+    const run = await runCliJson(
+      "create-run",
+      "--goal",
+      "Bootstrap ouroboros",
+      "--context-json",
+      '{"modelDefaults":{"roles":{"worker":{"model":"gpt-5-mini","reason":"cheap worker default"}}}}',
+    );
+    const task = await runCliJson(
+      "create-task",
+      "--run-id",
+      run.id,
+      "--role",
+      "worker",
+      "--goal",
+      "Async worker",
+      "--prompt",
+      "Work asynchronously.",
+      "--config-json",
+      '{"modelPreference":{"model":"gpt-5-task","reason":"task needs stronger model"}}',
+    );
+    const codexBin = join(dir, "fake-codex-task-model");
+    await writeFile(
+      codexBin,
+      [
+        "#!/usr/bin/env bun",
+        "const args = Bun.argv.slice(2);",
+        "const modelIndex = args.indexOf('-m');",
+        "if (modelIndex === -1 || args[modelIndex + 1] !== 'gpt-5-task') process.exit(9);",
+        "if (args.includes('gpt-5-mini') || args.includes('gpt-5-codex')) process.exit(8);",
+        "console.log(JSON.stringify({ type: 'session.started', session_id: 'session_task_model' }));",
+        "console.log(JSON.stringify({ type: 'agent.message', message: '{\"status\":\"done\",\"summary\":\"task model used\",\"changedFiles\":[],\"checks\":[],\"artifacts\":[],\"problems\":[]}' }));",
+      ].join("\n"),
+    );
+    await chmod(codexBin, 0o755);
+
+    const started = await runCliJson(
+      "codex-start-attempt",
+      "--task-id",
+      task.id,
+      "--codex-bin",
+      codexBin,
+      "--model",
+      "gpt-5-codex",
+    );
+
+    expect(started).toMatchObject({
+      taskId: task.id,
+      status: "done",
+      codexSessionId: "session_task_model",
+    });
+    expect(new Harness(dbPath).getAttempt(started.attemptId)?.input.model).toEqual({
+      model: "gpt-5-task",
+      reason: "task needs stronger model",
+      source: "task",
+      role: "worker",
+    });
   });
 
   test("run-loop automatically starts and resumes codex attempts", async () => {
@@ -1006,7 +1511,7 @@ describe("CLI", () => {
     expect(await runCliJson("next-task", "--run-id", run.id)).toBeNull();
   });
 
-  test("goal-review prompt keeps continue and verify constrained to exactly one next task", async () => {
+  test("goal-review prompt allows bounded multi-task continue and verify plans", async () => {
     await runCli("init");
     const run = await runCliJson("create-run", "--goal", "Bootstrap ouroboros");
     const codexBin = join(dir, "fake-codex-goal-prompt-contract");
@@ -1016,10 +1521,10 @@ describe("CLI", () => {
         "#!/usr/bin/env bun",
         "const prompt = await new Response(Bun.stdin.stream()).text();",
         "if (!prompt.includes('runDecision continue:')) process.exit(2);",
-        "if (!prompt.includes('include exactly one nextTasks item')) process.exit(3);",
+        "if (!prompt.includes('include one to five nextTasks items')) process.exit(3);",
         "if (!prompt.includes('runDecision verify:')) process.exit(4);",
-        "if (!prompt.includes('include exactly one verifier nextTasks item')) process.exit(5);",
-        "console.log(JSON.stringify({ status: 'done', runDecision: 'verify', summary: 'needs independent check', changedFiles: [], checks: [], artifacts: [], problems: [], nextTasks: [{ role: 'verifier', goal: 'Verify goal completion evidence', prompt: 'Inspect the evidence.', doneWhen: ['evidence checked'] }] }));",
+        "if (!prompt.includes('include one to five verifier nextTasks items')) process.exit(5);",
+        "console.log(JSON.stringify({ status: 'done', runDecision: 'verify', summary: 'needs independent checks', changedFiles: [], checks: [], artifacts: [], problems: [], nextTasks: [{ role: 'verifier', goal: 'Verify goal completion evidence', prompt: 'Inspect the evidence.', doneWhen: ['evidence checked'] }, { role: 'verifier', goal: 'Verify dashboard evidence', prompt: 'Inspect dashboard evidence.', doneWhen: ['dashboard checked'] }] }));",
       ].join("\n"),
     );
     await chmod(codexBin, 0o755);
@@ -1037,12 +1542,10 @@ describe("CLI", () => {
       "--max-rounds",
       "1",
     );
-    const next = await runCliJson("next-task", "--run-id", run.id);
+    const overview = await runCliJson("run-overview", "--run-id", run.id);
 
-    expect(next).toMatchObject({
-      role: "verifier",
-      goal: "Verify goal completion evidence",
-    });
+    expect(overview.tasks).toContainEqual(expect.objectContaining({ role: "verifier", goal: "Verify goal completion evidence" }));
+    expect(overview.tasks).toContainEqual(expect.objectContaining({ role: "verifier", goal: "Verify dashboard evidence" }));
   });
 
   test("run-loop reviews the goal when idle and can create a planner when more work remains", async () => {
@@ -1389,6 +1892,14 @@ describe("CLI", () => {
   });
 
   async function runCli(...rawArgs: Array<string | Record<string, string>>) {
+    const result = await runCliRaw(...rawArgs);
+    if (result.exitCode !== 0) {
+      throw new Error(`CLI failed with ${result.exitCode}\n${result.stdout}\n${result.stderr}`);
+    }
+    return result.stdout.trim();
+  }
+
+  async function runCliRaw(...rawArgs: Array<string | Record<string, string>>) {
     const envOverride =
       typeof rawArgs.at(-1) === "object" ? (rawArgs.pop() as Record<string, string>) : {};
     const args = rawArgs as string[];
@@ -1404,13 +1915,32 @@ describe("CLI", () => {
       new Response(proc.stderr).text(),
       proc.exited,
     ]);
-    if (exitCode !== 0) {
-      throw new Error(`CLI failed with ${exitCode}\n${stdout}\n${stderr}`);
-    }
-    return stdout.trim();
+    return { stdout: stdout.trim(), stderr: stderr.trim(), exitCode };
   }
 
   async function runCliJson(...args: Array<string | Record<string, string>>) {
     return JSON.parse(await runCli(...args));
+  }
+
+  async function readFirstLine(stream: ReadableStream<Uint8Array>) {
+    const reader = stream.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    try {
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) {
+          break;
+        }
+        buffer += decoder.decode(value, { stream: true });
+        const newline = buffer.indexOf("\n");
+        if (newline !== -1) {
+          return buffer.slice(0, newline).trim();
+        }
+      }
+      return buffer.trim();
+    } finally {
+      reader.releaseLock();
+    }
   }
 });

@@ -24,8 +24,26 @@ export function createGitWorktreeHook(options: {
       };
     }
 
+    const installResult = await runCommand({
+      cmd: ["bun", "install", "--cwd", cwd, "--frozen-lockfile"],
+      stdin: "",
+    });
+
+    if (installResult.exitCode !== 0) {
+      return {
+        checks: [
+          { name: "git worktree add", status: "passed" },
+          { name: "bun install", status: "failed" },
+        ],
+        problems: [installResult.stderr || installResult.stdout || `exit code ${installResult.exitCode}`],
+      };
+    }
+
     return {
-      checks: [{ name: "git worktree add", status: "passed" }],
+      checks: [
+        { name: "git worktree add", status: "passed" },
+        { name: "bun install", status: "passed" },
+      ],
       artifacts: [{ kind: "worktree", path: cwd, branch }],
     };
   };

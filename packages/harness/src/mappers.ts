@@ -1,20 +1,33 @@
 import { parseJson } from "./json";
-import type { Attempt, AttemptEvent, AttemptOutput, ExternalRef, Lesson, PromptTemplate, Run, Task } from "./types";
+import type { Attempt, AttemptEvent, AttemptOutput, ExternalRef, Lesson, Project, PromptTemplate, Run, Task, TaskConfig } from "./types";
 import type {
   AttemptEventRow,
   AttemptRow,
   ExternalRefRow,
   LessonRow,
+  ProjectRow,
   PromptTemplateRow,
   RunRow,
   TaskRow,
 } from "./rows";
 
 export function runFromRow(row: RunRow): Run {
+  const context = parseJson<Record<string, unknown>>(row.context_json);
   return {
     id: row.id,
+    projectId: row.project_id ?? null,
+    projectRoot: row.project_root ?? stringOrNull(context.projectRoot) ?? null,
     goal: row.goal,
     status: row.status,
+    context,
+  };
+}
+
+export function projectFromRow(row: ProjectRow): Project {
+  return {
+    id: row.id,
+    name: row.name,
+    rootPath: row.root_path,
     context: parseJson<Record<string, unknown>>(row.context_json),
   };
 }
@@ -31,6 +44,7 @@ export function taskFromRow(row: TaskRow): Task {
     prompt: row.prompt,
     dependsOn: parseJson<string[]>(row.depends_on_json),
     doneWhen: parseJson<string[]>(row.done_when_json),
+    config: parseJson<TaskConfig>(row.config_json),
     worktreePath: row.worktree_path,
     sessionRef: row.session_ref,
     contextVersion: row.context_version,
@@ -91,4 +105,8 @@ export function promptTemplateFromRow(row: PromptTemplateRow): PromptTemplate {
     key: row.key,
     contentMd: row.content_md,
   };
+}
+
+function stringOrNull(value: unknown) {
+  return typeof value === "string" && value.trim().length > 0 ? value : null;
 }

@@ -1,0 +1,11 @@
+[linear]
+# Prefer an environment variable for shared or open-source setups.
+token_env = "LINEAR_API_KEY"
+
+# For local-only development you may also use a token file. Keep that file ignored.
+# token_file = ".linear"
+
+api_url = "https://api.linear.app/graphql"
+project_url = "https://linear.app/<workspace>/project/<project-slug>/overview"
+project_id = "<project-slug-or-id>"
+team_key = "<team-key>"

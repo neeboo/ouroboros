@@ -5,7 +5,7 @@ Ouroboros is a minimal local harness for self-prompting agent loops.
 The system has two separate parts:
 
 - **local harness**: owns runs, tasks, attempts, worktrees, sessions, verification, and repair loops.
-- **Linear bridge**: listens to external collaboration events and mirrors useful progress back to Linear and PRs.
+- **Linear bridge skeleton**: records local mappings to Linear projects and issues so later sync work has stable anchors.
 
 Linear is the collaboration surface. GitHub is the code surface. The harness database is the local control plane.
 
@@ -33,8 +33,13 @@ packages/cli/src/                Local CLI wrapper
 ```bash
 bun run cli -- init
 bun run cli -- self-iterate
+bun run cli -- self-iterate-launch --concurrency 3 --worktree-root .ouroboros/worktrees --start-hook git-worktree
+bun run cli -- create-project --name "Ouroboros" --root-path "$(pwd)"
 bun run cli -- create-run --goal "Use Ouroboros to iterate on Ouroboros"
+bun run cli -- create-run --goal "Use Ouroboros to iterate on Ouroboros" --project-root "$(pwd)"
+bun run cli -- create-run --goal "Use Ouroboros to iterate on Ouroboros" --context-json '{"modelDefaults":{"roles":{"worker":{"model":"gpt-5-mini"},"verifier":{"model":"gpt-5-mini"}}}}'
 bun run cli -- create-task --run-id <run_id> --role planner --goal "Plan next step" --prompt "Propose one small task."
+bun run cli -- create-task --run-id <run_id> --role worker --goal "Cheap follow-up" --prompt "Implement the follow-up." --config-json '{"modelPreference":{"model":"gpt-5-mini","reason":"low-risk task"}}'
 bun run cli -- next-task --run-id <run_id>
 
 # synchronous task execution
@@ -55,6 +60,12 @@ bun run cli -- codex-resume-attempt --attempt-id <attempt_id> --cwd "$(pwd)" --s
 # observability
 bun run cli -- run-overview --run-id <run_id>
 bun run cli -- dashboard --run-id <run_id> --port 7331
+
+# Linear bridge setup
+cp ouroboros.example.toml ouroboros.toml
+LINEAR_API_KEY=lin_api_... bun run cli -- linear-check --run-id <run_id>
+bun run cli -- linear-link-issue --local-type run --local-id <run_id> --issue-key LIN-123
+bun run cli -- linear-link-issue --local-type task --local-id <task_id> --issue-id <linear_issue_id> --issue-url https://linear.app/<workspace>/issue/LIN-123/title
 
 # manual attempt control
 bun run cli -- start-attempt --task-id <task_id> --input-json '{}'
@@ -77,19 +88,22 @@ bun run cli -- set-prompt-template --key task --content "# Custom template..."
   "runId": "run_...",
   "taskId": "task_...",
   "dashboardCommand": "bun run cli -- --db .ouroboros/ouroboros.db dashboard --run-id run_... --port 7331",
-  "runnerCommand": "bun run cli -- --db .ouroboros/ouroboros.db run-loop --run-id run_... --executor codex-resumable --cwd $(pwd) --sandbox workspace-write --stop-hook create-tasks,create-verifier,create-repair,context-summary --max-rounds 8"
+  "runnerCommand": "bun run cli -- --db .ouroboros/ouroboros.db run-loop --run-id run_... --executor codex-resumable --cwd $(pwd) --sandbox workspace-write --stop-hook create-tasks,create-verifier,create-repair,context-summary --concurrency 3 --worktree-root .ouroboros/worktrees --start-hook git-worktree --max-rounds 8",
+  "launchCommand": "bun run cli -- --db .ouroboros/ouroboros.db self-iterate-launch --port 7331 --concurrency 3 --worktree-root .ouroboros/worktrees --start-hook git-worktree"
 }
 ```
 
-`run-next` leases ready tasks first, assigns each task a separate session name, then runs the selected executor for each leased task. The `acpx-codex` executor creates or reuses an `acpx codex` named session per task. The `codex-cli` executor is a one-shot fallback for environments where the ACP adapter cannot create sessions.
+`self-iterate-launch` runs the same bootstrap, starts the dashboard, and starts the background runner/autopilot in one long-lived command. It defaults self-iteration to `--concurrency 3`, `--worktree-root .ouroboros/worktrees`, and `--start-hook git-worktree`, so independent planner-selected goals can run together in separate git worktrees. Pass `--start-hook none` for single-worktree tests or local debugging.
+
+`run-next` leases ready tasks first, assigns each task a separate session name, then runs the selected executor for each leased task. Use `--concurrency <n>` to run multiple ready tasks in parallel; `--limit <n>` remains as the older alias. The `acpx-codex` executor creates or reuses an `acpx codex` named session per task. The `codex-cli` executor is a one-shot fallback for environments where the ACP adapter cannot create sessions.
 
 `run-loop` repeats the same leasing and execution flow until there are no ready tasks, or until `--max-rounds` is reached.
 
-For `codex-resumable`, an idle run does not blindly create another planner. When there are no `todo` or `running` tasks, `run-loop` creates a `goal-review` task that asks whether the original run goal is complete. A `goal-review` attempt must return `runDecision: "complete"`, `"continue"`, or `"verify"`. `complete` marks the run done and creates no tasks. `continue` or `verify` must include exactly one `nextTasks` item.
+For `codex-resumable`, an idle run does not blindly create another planner. When there are no `todo` or `running` tasks, `run-loop` creates a `goal-review` task that asks whether the original run goal is complete. A `goal-review` attempt must return `runDecision: "complete"`, `"continue"`, or `"verify"`. `complete` marks the run done and creates no tasks. `continue` or `verify` can include one to five `nextTasks` items, so the loop can keep planning multiple remaining goals instead of stopping after one small increment.
 
 Use `--worktree-root` to assign each leased task a separate working directory path. The executor receives that path as its cwd.
 
-Use `--start-hook git-worktree` with `--worktree-root` to create a real git worktree before the subagent runs.
+Use `--start-hook git-worktree` with `--worktree-root` to create a real git worktree before the subagent runs. Use `--start-hook none` to disable start hooks explicitly.
 
 Use `--timeout-ms` as a generous hard runtime cap. Use `--idle-timeout-ms` to stop commands only after they stop producing stdout or stderr. Long-running Codex work should use a large hard cap and rely on idle timeout for stuck-process detection.
 
@@ -98,6 +112,27 @@ Use `--timeout-ms` as a generous hard runtime cap. Use `--idle-timeout-ms` to st
 `list-running-attempts` shows attempts that can be resumed. `start-attempt` and `finish-attempt` are lower-level commands for tools that want to manage running attempts themselves.
 
 `run-overview` returns the run, tasks, observable sessions, and recent attempt events as JSON. `dashboard` starts a local web page that polls the same overview data so planner, worker, and verifier sessions can be watched side by side while they run.
+
+## Project Workspaces
+
+Project Workspace phase 1 is web-dashboard-first. A project is a local folder recorded in SQLite with `id`, `name`, `root_path`, and optional JSON context. Runs can bind to a project with `--project-id`, or create/reuse one from a folder with `--project-root`.
+
+```bash
+bun run cli -- create-project --name "Ouroboros" --root-path "$(pwd)"
+bun run cli -- create-run --goal "Add a project-scoped feature" --project-root "$(pwd)"
+bun run cli -- run-overview --run-id <run_id>
+```
+
+`run-overview` includes `project` metadata, and the dashboard shows the project name and root path in the header. The dashboard also exposes local APIs for project-scoped file inspection:
+
+```text
+GET /api/runs/<run_id>/changed-files
+GET /api/runs/<run_id>/diff?path=<tracked_path>
+```
+
+Changed files are currently derived from attempt `changedFiles` output and normalized into a flat list plus a tree-friendly payload. Diffs use `git diff -- <path>` under the project root, or a task worktree when no project root is present, and reject path traversal.
+
+Native desktop shells such as Tauri or Electron are out of scope for this phase. The project model is intentionally small so a future desktop host can reuse the same database and dashboard APIs.
 
 When the dashboard starts its background runner, it launches `autopilot` with the standard stop hooks by default:
 
@@ -119,6 +154,8 @@ verifier -> create-repair, context-summary
 
 The `create-tasks` stop hook turns planner `nextTasks` output into real DB tasks.
 
+Planner-created `nextTasks` may include an optional `modelPreference` object. Tasks also have `config_json`, so manual tasks can carry the same preference through `--config-json`. At execution time Ouroboros resolves the model from task preference, then role defaults in `run.context.modelDefaults.roles`, then `run.context.modelDefaults.global`, then the CLI `--model` fallback. The resolved model is recorded in attempt input and passed to Codex for both one-shot and resumable execution.
+
 The `create-verifier` stop hook turns a successful worker attempt into a verifier task that depends on the worker. Multiple stop hooks can be enabled with a comma-separated list, for example `--stop-hook create-tasks,create-verifier`.
 
 The `create-repair` stop hook turns a blocked verifier attempt into a ready worker repair task. A successful repair can then create another verifier through `create-verifier`.
@@ -128,6 +165,46 @@ The `context-summary` stop hook runs for verifier tasks. It rewrites verbose att
 Every finished attempt also creates a run lesson. Successful attempts become `experience`; blocked attempts become `lesson`. Future prompts include compact lessons so the next loop can reuse working patterns and avoid known failures without growing prompts indefinitely. The task prompt currently includes the latest 12 lessons, with each summary compacted to 320 characters.
 
 Prompt Markdown is stored in SQLite under `prompt_templates`. The default keys are `task`, `verifier-task`, `repair-task`, and `context-summary`, so the loop prompt, verifier prompt, repair prompt, and context-summary prompt can be edited without changing code.
+
+## Linear Configuration
+
+Linear integration uses local configuration plus a secret source. Do not commit real tokens.
+
+1. Copy `ouroboros.example.toml` to `ouroboros.toml`.
+2. Set `LINEAR_API_KEY`, or set `linear.token_file` to a local ignored file such as `.linear`.
+3. Set `linear.project_url`, `linear.project_id`, and `linear.team_key`.
+4. Run `bun run cli -- linear-check --run-id <run_id>`.
+
+`linear-check` verifies the token through Linear GraphQL, resolves the project and team, and records the run-to-project mapping in `external_refs`. It never prints the token.
+
+`linear-link-issue` records a local run or task to Linear issue mapping in `external_refs` with `provider=linear` and `external_type=issue`. Pass exactly one local entity with `--local-type run|task` and `--local-id`, plus one issue identifier through `--issue-id`, `--issue-key`, or `--issue-url`. Repeating the same local entity and issue identifier reuses the existing ref and returns `created: false`.
+
+Concrete examples:
+
+```bash
+bun run cli -- linear-link-issue \
+  --local-type run \
+  --local-id run_123 \
+  --issue-key PAN-42
+
+bun run cli -- linear-link-issue \
+  --local-type task \
+  --local-id task_456 \
+  --issue-id issue_abc \
+  --issue-url https://linear.app/pancat/issue/PAN-42/map-ouroboros-task
+```
+
+This is only a mapping skeleton. It validates that the local run or task exists and stores the supplied Linear issue id, key, or URL as the external id. It does not create Linear issues, listen for webhooks, consume Linear events, or automatically sync comments/status.
+
+CLI flags override config values:
+
+```bash
+bun run cli -- linear-check \
+  --config ouroboros.toml \
+  --run-id <run_id> \
+  --project-url https://linear.app/<workspace>/project/<project-slug>/overview \
+  --team-key <team-key>
+```
 
 ## Boundaries
 
@@ -142,12 +219,9 @@ The local harness handles:
 - verification result handling
 - repair task creation
 
-The Linear bridge handles:
+The implemented Linear bridge skeleton handles:
 
-- Linear issue events
-- Linear comments
-- PR status updates
+- checking Linear API access and recording a run-to-project ref
 - mapping external issues to local runs or tasks
-- posting progress and verifier summaries back to Linear
 
-The bridge writes external events into the harness inbox. The harness decides what those events mean.
+Future bridge work may handle Linear issue events, Linear comments, PR status updates, and progress posts back to Linear. Webhook/event sync and issue creation are out of scope for the current implementation. When those events are added, they should enter through the harness inbox and the harness should decide what they mean.

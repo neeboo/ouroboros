@@ -2,8 +2,17 @@ import type { Status } from "./types";
 
 export interface RunRow {
   id: string;
+  project_id: string | null;
+  project_root?: string | null;
   goal: string;
   status: Status;
+  context_json: string;
+}
+
+export interface ProjectRow {
+  id: string;
+  name: string;
+  root_path: string;
   context_json: string;
 }
 
@@ -18,6 +27,7 @@ export interface TaskRow {
   prompt: string;
   depends_on_json: string;
   done_when_json: string;
+  config_json: string;
   worktree_path: string | null;
   session_ref: string | null;
   context_version: number;

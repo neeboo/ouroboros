@@ -4,6 +4,15 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { createCodexCliExecutor, createCodexResumableClient } from "../packages/runner/src";
 
+const runFixture = {
+  id: "run_1",
+  projectId: "project_1",
+  projectRoot: "/repo",
+  goal: "Goal",
+  status: "todo" as const,
+  context: {},
+};
+
 describe("codex cli executor", () => {
   test("runs codex exec through an injectable command runner", async () => {
     const calls: Array<{ cmd: string[]; stdin: string }> = [];
@@ -29,12 +38,7 @@ describe("codex cli executor", () => {
     const output = await executor({
       prompt: "Plan next task",
       sessionName: "task_1",
-      run: {
-        id: "run_1",
-        goal: "Goal",
-        status: "todo",
-        context: {},
-      },
+      run: runFixture,
       task: {
         id: "task_1",
         runId: "run_1",
@@ -90,12 +94,7 @@ describe("codex cli executor", () => {
       const output = await executor({
         prompt: "Plan next task",
         sessionName: "task_1",
-        run: {
-          id: "run_1",
-          goal: "Goal",
-          status: "todo",
-          context: {},
-        },
+        run: runFixture,
         task: {
           id: "task_1",
           runId: "run_1",
@@ -137,12 +136,7 @@ describe("codex cli executor", () => {
     await executor({
       prompt: "Plan next task",
       sessionName: "task_1",
-      run: {
-        id: "run_1",
-        goal: "Goal",
-        status: "todo",
-        context: {},
-      },
+      run: runFixture,
       task: {
         id: "task_1",
         runId: "run_1",
@@ -183,12 +177,7 @@ describe("codex cli executor", () => {
     await executor({
       prompt: "Plan next task",
       sessionName: "task_1",
-      run: {
-        id: "run_1",
-        goal: "Goal",
-        status: "todo",
-        context: {},
-      },
+      run: runFixture,
       task: {
         id: "task_1",
         runId: "run_1",
@@ -225,12 +214,7 @@ describe("codex cli executor", () => {
       const output = await executor({
         prompt: "Plan next task",
         sessionName: "task_1",
-        run: {
-          id: "run_1",
-          goal: "Goal",
-          status: "todo",
-          context: {},
-        },
+        run: runFixture,
         task: {
           id: "task_1",
           runId: "run_1",
@@ -274,12 +258,7 @@ describe("codex cli executor", () => {
     const output = await executor({
       prompt: "Plan next task",
       sessionName: "task_1",
-      run: {
-        id: "run_1",
-        goal: "Goal",
-        status: "todo",
-        context: {},
-      },
+      run: runFixture,
       task: {
         id: "task_1",
         runId: "run_1",
@@ -305,6 +284,7 @@ describe("codex cli executor", () => {
     const client = createCodexResumableClient({
       cwd: "/repo",
       codexBin: "/custom/codex",
+      model: "gpt-5-mini",
       timeoutMs: 900000,
       idleTimeoutMs: 300000,
       runCommand: async ({ cmd, stdin, timeoutMs, idleTimeoutMs }) => {
@@ -340,6 +320,8 @@ describe("codex cli executor", () => {
       cmd: [
         "/custom/codex",
         "exec",
+        "-m",
+        "gpt-5-mini",
         "--json",
         "--skip-git-repo-check",
         "--ignore-user-config",
@@ -396,6 +378,7 @@ describe("codex cli executor", () => {
     const client = createCodexResumableClient({
       cwd: "/repo",
       codexBin: "/custom/codex",
+      model: "gpt-5-codex",
       runCommand: async ({ cmd, stdin }) => {
         calls.push({ cmd, stdin });
         return {
@@ -427,11 +410,13 @@ describe("codex cli executor", () => {
       status: "done",
       summary: "planned",
     });
-    expect(calls[0].cmd.slice(0, 6)).toEqual([
+    expect(calls[0].cmd.slice(0, 8)).toEqual([
       "/custom/codex",
       "exec",
       "resume",
       "session_123",
+      "-m",
+      "gpt-5-codex",
       "--json",
       "--skip-git-repo-check",
     ]);

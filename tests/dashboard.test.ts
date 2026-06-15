@@ -1,10 +1,171 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Harness } from "../packages/harness/src";
 import { buildTaskPrompt } from "../packages/runner/src";
 import { buildDashboardTaskGraph, dashboardHtml, handleDashboardRequest } from "../packages/cli/src/dashboard";
+
+const pathologicalText = {
+  token: "SupercalifragilisticDashboardOverflowRegressionToken".repeat(6),
+  prose: "Reusable dashboard overflow discovery needs long prose with spaces ".repeat(12),
+  status: "running-with-pathological-status-label".repeat(4),
+  id: "task_" + "pathological_identifier_".repeat(8),
+  projectRoot: join(
+    tmpdir(),
+    "ouroboros-dashboard-project-root-" + "deeply_nested_segment_".repeat(8),
+    "workspace-with-a-long-name-" + "ownership_boundary_".repeat(6),
+  ),
+  filePath: [
+    "packages",
+    "dashboard",
+    "src",
+    "features",
+    "project-workspace",
+    "changed-files",
+    "extremely-long-file-name-" + "diff-inspection-contract-".repeat(5) + ".ts",
+  ].join("/"),
+};
+
+function longTextDashboardFixture() {
+  const workerId = pathologicalText.id;
+  const verifierId = "task_" + "verifier_identifier_".repeat(8);
+  return {
+    run: {
+      id: "run_long_text",
+      goal: `${pathologicalText.prose} ${pathologicalText.token}`,
+      status: "running",
+    },
+    tasks: [
+      {
+        id: workerId,
+        runId: "run_long_text",
+        role: "worker",
+        goal: `Worker goal ${pathologicalText.token} ${pathologicalText.prose}`,
+        prompt: `Prompt body ${pathologicalText.token}\n${pathologicalText.prose}`,
+        status: "running",
+        dependsOn: [],
+        parentId: null,
+        cycleId: "cycle_long_text",
+        doneWhen: [
+          `Inspector todo item ${pathologicalText.token}`,
+          `Metadata and status row stays readable ${pathologicalText.prose}`,
+        ],
+      },
+      {
+        id: verifierId,
+        runId: "run_long_text",
+        role: "verifier",
+        goal: `Verifier goal ${pathologicalText.prose}`,
+        prompt: `Verifier prompt ${pathologicalText.token}`,
+        status: "todo",
+        dependsOn: [workerId],
+        parentId: workerId,
+        cycleId: "cycle_long_text",
+        doneWhen: [`Verifier doneWhen ${pathologicalText.token}`],
+      },
+    ],
+    sessions: [
+      {
+        taskId: workerId,
+        taskGoal: `Stream task goal ${pathologicalText.token}`,
+        role: "worker",
+        status: "running",
+        attemptId: "attempt_" + "long_attempt_".repeat(6),
+        sessionName: "session-" + pathologicalText.token,
+        codexSessionId: "codex_" + "long_codex_".repeat(6),
+        latestText: `Stream latest text ${pathologicalText.token}`,
+        events: [
+          { text: `Stream line ${pathologicalText.token}` },
+          { payload: { delta: `Code-like output ${pathologicalText.token}` } },
+        ],
+        output: {
+          artifacts: [
+            { kind: "created_task", sourceTaskId: workerId, taskId: verifierId },
+          ],
+        },
+      },
+    ],
+    lessons: [
+      {
+        taskId: workerId,
+        attemptId: "attempt_" + "lesson_attempt_".repeat(6),
+        kind: "experience",
+        summary: `Lesson summary ${pathologicalText.prose}`,
+      },
+    ],
+  };
+}
+
+function styleBlock(html: string) {
+  const match = html.match(/<style>([\s\S]*?)<\/style>/);
+  if (!match) throw new Error("dashboard style block not found");
+  return match[1];
+}
+
+function cssRule(html: string, selector: string) {
+  for (const block of styleBlock(html).split("}")) {
+    const [rawSelector, rule] = block.split("{");
+    if (!rawSelector || !rule) continue;
+    if (rawSelector.trim() === selector) return rule;
+  }
+  throw new Error(`CSS rule not found: ${selector}`);
+}
+
+function expectCssRule(html: string, selector: string, declarations: string[]) {
+  const rule = cssRule(html, selector);
+  for (const declaration of declarations) {
+    expect(rule).toContain(declaration);
+  }
+}
+
+const browserOverflowVerifierSnippet = `
+// Run in a local browser verifier after loading the dashboard at desktop and mobile widths.
+// Example labels: verifyDashboardOverflow("desktop 1440x900") and verifyDashboardOverflow("mobile 390x844").
+function verifyDashboardOverflow(label) {
+  const selectors = ["html", "body", ".app-shell", ".task-sidebar", ".task-nav", ".workspace", ".workspace-head", ".inspector-panel", ".changed-file-tree", ".diff-panel"];
+  const rows = selectors.map((selector) => {
+    const node = document.querySelector(selector) || document.scrollingElement;
+    return {
+      label,
+      selector,
+      clientWidth: node.clientWidth,
+      scrollWidth: node.scrollWidth,
+      horizontalOverflow: node.scrollWidth > node.clientWidth,
+      "scrollWidth <= node.clientWidth": node.scrollWidth <= node.clientWidth,
+    };
+  });
+  const inspector = document.querySelector(".inspector-panel");
+  const appShell = document.querySelector(".app-shell");
+  const workspace = document.querySelector(".workspace");
+  const changedFileTree = document.querySelector(".changed-file-tree");
+  const diffPanel = document.querySelector(".diff-panel");
+  const diffOutput = document.querySelector(".diff-output");
+  const workspaceRect = workspace?.getBoundingClientRect();
+  const inspectorRect = inspector?.getBoundingClientRect();
+  const diffScrollContained = !!diffOutput && diffOutput.scrollWidth >= diffOutput.clientWidth && diffOutput.clientWidth <= (diffPanel?.clientWidth || diffOutput.clientWidth);
+  const mobileStacked = !!workspaceRect && !!inspectorRect && window.innerWidth <= 900 && inspectorRect.top >= workspaceRect.bottom - 1;
+  console.table(rows);
+  console.log("dashboard-overflow-summary", {
+    label,
+    viewportWidth: window.innerWidth,
+    appShellClientWidth: appShell?.clientWidth,
+    appShellScrollWidth: appShell?.scrollWidth,
+    inspectorClientWidth: inspector?.clientWidth,
+    inspectorScrollWidth: inspector?.scrollWidth,
+    changedFileTreeClientWidth: changedFileTree?.clientWidth,
+    changedFileTreeScrollWidth: changedFileTree?.scrollWidth,
+    diffPanelClientWidth: diffPanel?.clientWidth,
+    diffPanelScrollWidth: diffPanel?.scrollWidth,
+    diffOutputClientWidth: diffOutput?.clientWidth,
+    diffOutputScrollWidth: diffOutput?.scrollWidth,
+    diffScrollContained,
+    mobileStacked,
+    pageHasHorizontalOverflow: rows.some((row) => row.horizontalOverflow && row.selector !== ".diff-output"),
+  });
+}
+verifyDashboardOverflow("desktop and mobile widths");
+`;
 
 describe("dashboard", () => {
   test("renders Codex-style goal navigation for active and history goals", () => {
@@ -51,6 +212,54 @@ describe("dashboard", () => {
     expect(html).toContain("node.scrollTop = scrollState.shouldFollowBottom ? node.scrollHeight : scrollState.scrollTop");
   });
 
+  test("renders project metadata in the dashboard header", () => {
+    const html = dashboardHtml({ runId: "run_123" });
+
+    expect(html).toContain('data-project-header');
+    expect(html).toContain('data-project-name');
+    expect(html).toContain('data-project-root');
+    expect(html).toContain('id="project-title"');
+    expect(html).toContain("Project Workspace");
+    expect(html).toContain("overview.project");
+    expect(html).toContain("projectTitle");
+    expect(html).toContain("projectName");
+    expect(html).toContain("projectRoot");
+  });
+
+  test("renders changed-file tree controls and diff inspection hooks for the selected goal", () => {
+    const html = dashboardHtml({ runId: "run_123" });
+
+    expect(html).toContain("Changed Files");
+    expect(html).toContain("changedFilesForGroup");
+    expect(html).toContain("changedFilesTree");
+    expect(html).toContain("renderChangedFilesTree");
+    expect(html).toContain("selectedChangedFilePath");
+    expect(html).toContain('data-changed-files-section');
+    expect(html).toContain('data-changed-file-tree');
+    expect(html).toContain('data-changed-file-node');
+    expect(html).toContain('data-changed-file-path');
+    expect(html).toContain('data-selected-changed-file');
+    expect(html).toContain('data-diff-panel');
+    expect(html).toContain('data-diff-path');
+    expect(html).toContain('data-diff-header');
+    expect(html).toContain("data-diff-state");
+    expect(html).toContain('"empty-selection"');
+    expect(html).toContain('"loading"');
+    expect(html).toContain('"error"');
+    expect(html).toContain('"no-diff"');
+    expect(html).toContain('data-diff-row');
+    expect(html).toContain("data-diff-row-type");
+    expect(html).toContain(".diff-row.added");
+    expect(html).toContain(".diff-row.removed");
+    expect(html).toContain(".diff-row.hunk");
+    expect(html).toContain(".diff-row.context");
+    expect(html).toContain("renderDiffRows");
+    expect(html).toContain("diffLineType");
+    expect(html).toContain('aria-current="true"');
+    expect(html).toContain('/api/runs/" + encodeURIComponent(runId) + "/diff?path=" + encodeURIComponent(path)');
+    expect(html).toContain("fetchDiffForChangedFile");
+  });
+
   test("renders Canvas and Flow workspace modes for the selected task graph", () => {
     const html = dashboardHtml({ runId: "run_123" });
 
@@ -74,7 +283,7 @@ describe("dashboard", () => {
     expect(html).toContain("stream-output");
   });
 
-  test("persists selected goal and workspace mode in run-scoped browser storage", () => {
+  test("persists selected goal workspace mode and title expansion in run-scoped browser storage", () => {
     const html = dashboardHtml({ runId: "run_123" });
 
     expect(html).toContain('const dashboardStorageKey = "ouroboros:dashboard:" + runId;');
@@ -83,11 +292,161 @@ describe("dashboard", () => {
     expect(html).toContain("const restoredDashboardState = readDashboardState();");
     expect(html).toContain("let selectedGoalId = restoredDashboardState.selectedGoalId || null;");
     expect(html).toContain('let workspaceMode = restoredDashboardState.workspaceMode || "flow";');
-    expect(html).toContain("writeDashboardState({ selectedGoalId, workspaceMode });");
+    expect(html).toContain("let workspaceTitleExpanded = restoredDashboardState.workspaceTitleExpanded === true;");
+    expect(html).toContain("workspaceTitleExpanded: parsed.workspaceTitleExpanded === true");
+    expect(html).toContain("workspaceTitleExpanded: state.workspaceTitleExpanded === true");
+    expect(html).toContain("writeDashboardState({ selectedGoalId, workspaceMode, workspaceTitleExpanded });");
     expect(html).toContain("selectedGoalId = payload.taskId || selectedGoalId;");
-    expect(html).toContain("writeDashboardState({ selectedGoalId, workspaceMode });");
+    expect(html).toContain("workspaceTitleExpanded = false;");
     expect(html).not.toContain('localStorage.setItem("selectedGoalId"');
     expect(html).not.toContain('localStorage.getItem("selectedGoalId"');
+  });
+
+  test("keeps sidebar goal row titles shrink-safe and truncated", () => {
+    const html = dashboardHtml({ runId: "run_123" });
+
+    expect(html).toContain("grid-template-columns: 12px minmax(0, 1fr) minmax(0, 72px);");
+    expect(html).toContain(".task-row-text");
+    expect(html).toContain("min-width: 0;");
+    expect(html).toContain("overflow: hidden;");
+    expect(html).toContain('<span class="task-row-text"><strong>');
+    expect(html).toContain(".task-row strong");
+    expect(html).toContain(".task-row .row-meta");
+    expect(html).toContain("text-overflow: ellipsis;");
+    expect(html).toContain("white-space: nowrap;");
+  });
+
+  test("truncates workspace title by default and exposes an accessible expander", () => {
+    const html = dashboardHtml({ runId: "run_123" });
+
+    expect(html).toContain('class="workspace-title is-collapsed" id="workspace-title"');
+    expect(html).toContain('id="workspace-title-toggle"');
+    expect(html).toContain('data-workspace-title-toggle');
+    expect(html).toContain('aria-expanded="false"');
+    expect(html).toContain('aria-controls="workspace-title"');
+    expect(html).toContain('aria-label="Expand workspace title"');
+    expect(html).toContain("-webkit-line-clamp: 2;");
+    expect(html).toContain("workspaceTitleExpanded");
+  });
+
+  test("updates workspace title expander aria state without replacing selected goal or mode", () => {
+    const html = dashboardHtml({ runId: "run_123" });
+
+    expect(html).toContain("const syncWorkspaceTitle = (title) =>");
+    expect(html).toContain('titleNode.classList.toggle("is-expanded", workspaceTitleExpanded);');
+    expect(html).toContain('titleNode.classList.toggle("is-collapsed", !workspaceTitleExpanded);');
+    expect(html).toContain('toggle.setAttribute("aria-expanded", workspaceTitleExpanded ? "true" : "false");');
+    expect(html).toContain('toggle.setAttribute("aria-label", workspaceTitleExpanded ? "Collapse workspace title" : "Expand workspace title");');
+    expect(html).toContain('toggle.textContent = workspaceTitleExpanded ? "Collapse" : "Expand";');
+    expect(html).toContain("workspaceTitleExpanded = !workspaceTitleExpanded;");
+    expect(html).toContain("writeDashboardState({ selectedGoalId, workspaceMode, workspaceTitleExpanded });");
+    expect(html).toContain("selectedGoalId, workspaceMode, workspaceTitleExpanded");
+  });
+
+  test("provides a reusable long-text dashboard overflow fixture", () => {
+    const fixture = longTextDashboardFixture();
+    const graph = buildDashboardTaskGraph(fixture as never, "cycle_long_text");
+
+    expect(fixture.run.goal).toContain(pathologicalText.token);
+    expect(fixture.tasks[0].goal).toContain(pathologicalText.token);
+    expect(fixture.tasks[0].prompt).toContain(pathologicalText.token);
+    expect(fixture.tasks[0].doneWhen[0]).toContain(pathologicalText.token);
+    expect(fixture.sessions[0].taskGoal).toContain(pathologicalText.token);
+    expect(fixture.sessions[0].sessionName).toContain(pathologicalText.token);
+    expect(fixture.sessions[0].latestText).toContain(pathologicalText.token);
+    expect(fixture.sessions[0].events[1]!.payload!.delta).toContain(pathologicalText.token);
+    expect(fixture.lessons[0].summary).toContain(pathologicalText.prose.trim().slice(0, 40));
+    expect(pathologicalText.projectRoot).toContain("deeply_nested_segment_");
+    expect(pathologicalText.filePath).toContain("diff-inspection-contract-");
+    expect(graph.nodes).toHaveLength(2);
+    expect(graph.nodes[0].data.goal.length).toBeLessThanOrEqual(118);
+    expect(graph.nodes[0].data.latestSession?.latestText).toContain(pathologicalText.token);
+    expect(graph.nodes[0].data.latestSession?.sessionName).toContain(pathologicalText.token);
+    expect(graph.edges).toContainEqual(expect.objectContaining({ source: fixture.tasks[0].id, target: fixture.tasks[1].id }));
+  });
+
+  test("defines reusable static overflow contracts for dashboard long text surfaces", () => {
+    const html = dashboardHtml({ runId: "run_123" });
+
+    expectCssRule(html, "body", ["overflow: hidden;"]);
+    expectCssRule(html, ".app-shell", ["display: grid;", "grid-template-columns: 300px minmax(0, 1fr) clamp(380px, 30vw, 520px);", "overflow-x: hidden;"]);
+    expectCssRule(html, ".task-sidebar", ["min-width: 0;", "overflow: hidden;"]);
+    expectCssRule(html, ".project-header", ["min-width: 0;", "overflow: hidden;"]);
+    expectCssRule(html, ".project-name", ["overflow: hidden;", "text-overflow: ellipsis;", "white-space: nowrap;"]);
+    expectCssRule(html, ".project-root", ["overflow: hidden;", "text-overflow: ellipsis;", "white-space: nowrap;"]);
+    expectCssRule(html, ".task-nav", ["width: 100%;", "min-width: 0;", "max-width: 100%;", "min-height: 0;", "overflow-x: hidden;", "overflow-y: auto;", "scrollbar-gutter: stable;"]);
+    expectCssRule(html, ".nav-section", ["width: 100%;", "min-width: 0;", "max-width: 100%;", "overflow-x: hidden;"]);
+    expectCssRule(html, ".task-list", ["width: 100%;", "min-width: 0;", "max-width: 100%;", "overflow-x: hidden;"]);
+    expectCssRule(html, ".workspace", ["min-width: 0;", "overflow: hidden;"]);
+    expectCssRule(html, ".workspace-title-block", ["min-width: 0;"]);
+    expectCssRule(html, ".workspace-title-row", ["grid-template-columns: minmax(0, 1fr) auto;"]);
+    expectCssRule(html, ".workspace-title", ["min-width: 0;", "overflow-wrap: anywhere;"]);
+    expectCssRule(html, ".workspace-title.is-collapsed", ["-webkit-line-clamp: 2;", "overflow: hidden;"]);
+    expectCssRule(html, ".task-row", ["min-width: 0;", "grid-template-columns: 12px minmax(0, 1fr) minmax(0, 72px);", "overflow: hidden;"]);
+    expectCssRule(html, ".task-row-text", ["min-width: 0;", "overflow: hidden;"]);
+    expectCssRule(html, ".task-row strong", ["text-overflow: ellipsis;", "white-space: nowrap;"]);
+    expectCssRule(html, ".task-row .row-meta", ["text-overflow: ellipsis;", "white-space: nowrap;"]);
+    expectCssRule(html, ".status-text", ["width: 100%;", "max-width: 100%;", "overflow: hidden;", "text-overflow: ellipsis;", "white-space: nowrap;"]);
+    expectCssRule(html, ".plain-button", ["min-width: 0;", "overflow: hidden;", "text-overflow: ellipsis;", "white-space: nowrap;"]);
+    expectCssRule(html, ".workspace-flow", ["min-height: 0;", "overflow: auto;"]);
+    expectCssRule(html, ".flow-inner", ["min-width: 0;"]);
+    expectCssRule(html, ".turn", ["grid-template-columns: 34px minmax(0, 1fr);"]);
+    expectCssRule(html, ".turn-body", ["min-width: 0;"]);
+    expectCssRule(html, ".turn-author", ["overflow-wrap: anywhere;"]);
+    expectCssRule(html, ".turn-summary", ["overflow-wrap: anywhere;"]);
+    expectCssRule(html, ".turn-text", ["white-space: pre-wrap;", "overflow-wrap: anywhere;"]);
+    expectCssRule(html, ".stream-output", ["overflow: auto;", "white-space: pre-wrap;", "overflow-wrap: anywhere;"]);
+    expectCssRule(html, ".inspector-panel", ["width: clamp(380px, 30vw, 520px);", "min-width: 380px;", "max-width: 520px;", "overflow-y: auto;", "overflow-x: hidden;", "scrollbar-gutter: stable;"]);
+    expectCssRule(html, ".inspector-card", ["min-width: 0;", "border-radius: 0;", "background: transparent;"]);
+    expectCssRule(html, ".current-task-title", ["overflow-wrap: anywhere;"]);
+    expectCssRule(html, ".current-task-meta", ["overflow-wrap: anywhere;"]);
+    expectCssRule(html, ".todo-item", ["grid-template-columns: 22px minmax(0, 1fr);"]);
+    expectCssRule(html, ".todo-text", ["min-width: 0;", "overflow-wrap: anywhere;"]);
+    expectCssRule(html, ".meta", ["overflow-wrap: anywhere;"]);
+    expectCssRule(html, ".changed-files-section", ["min-width: 0;"]);
+    expectCssRule(html, ".changed-file-tree", ["min-width: 0;", "overflow-x: hidden;"]);
+    expectCssRule(html, ".changed-file-node", ["min-width: 0;", "grid-template-columns: 28px minmax(0, 1fr);"]);
+    expectCssRule(html, ".changed-file-name", ["min-width: 0;", "overflow: hidden;", "text-overflow: ellipsis;", "white-space: nowrap;"]);
+    expectCssRule(html, ".changed-file-type", ["color: var(--muted-2);", "font-family: var(--mono);"]);
+    expectCssRule(html, ".diff-panel", ["min-width: 0;", "max-width: 100%;", "overflow: hidden;"]);
+    expectCssRule(html, ".diff-header", ["position: sticky;", "top: 0;", "overflow: hidden;"]);
+    expectCssRule(html, ".diff-path", ["overflow-wrap: anywhere;"]);
+    expectCssRule(html, ".diff-output", ["overflow-x: auto;", "overflow-y: auto;", "white-space: pre;", "overflow-wrap: normal;"]);
+    expectCssRule(html, ".diff-row", ["display: grid;", "grid-template-columns: 42px max-content;", "min-width: max-content;"]);
+    expectCssRule(html, ".diff-line", ["white-space: pre;", "font-family: var(--mono);"]);
+    expectCssRule(html, ".diff-row.added", ["background: rgba(111, 160, 122, 0.12);"]);
+    expectCssRule(html, ".diff-row.removed", ["background: rgba(184, 113, 111, 0.12);"]);
+    expectCssRule(html, ".diff-row.hunk", ["background: rgba(255, 255, 255, 0.055);"]);
+    expectCssRule(html, ".diff-row.context", ["background: transparent;"]);
+    expect(html).toContain("grid-template-columns: minmax(0, 1fr);");
+    expect(html).toContain(".inspector-panel { width: auto; min-width: 0; max-width: none; }");
+    expect(html).toContain(".task-sidebar { min-width: 0; overflow-x: hidden; overflow-y: visible; }");
+  });
+
+  test("defines reusable static overflow contracts for canvas node surfaces", () => {
+    const html = dashboardHtml({ runId: "run_123" });
+
+    expectCssRule(html, ".workspace-flow.canvas-workspace", ["overflow: hidden;"]);
+    expectCssRule(html, ".canvas-inner", ["overflow: hidden;"]);
+    expectCssRule(html, "#dashboard-canvas-root", ["width: 100%;", "height: 100%;"]);
+    expectCssRule(html, ".of-node", ["width: 250px;"]);
+    expectCssRule(html, ".of-node-head", ["min-width: 0;"]);
+    expectCssRule(html, ".of-node-head span", ["min-width: 0;", "overflow: hidden;", "text-overflow: ellipsis;", "white-space: nowrap;"]);
+    expectCssRule(html, ".of-node-goal", ["overflow-wrap: anywhere;"]);
+    expectCssRule(html, ".of-node-meta", ["overflow-wrap: anywhere;"]);
+  });
+
+  test("documents browser overflow measurement for dashboard verifiers without adding dependencies", () => {
+    expect(browserOverflowVerifierSnippet).toContain(".task-sidebar");
+    expect(browserOverflowVerifierSnippet).toContain(".workspace-head");
+    expect(browserOverflowVerifierSnippet).toContain(".changed-file-tree");
+    expect(browserOverflowVerifierSnippet).toContain(".diff-panel");
+    expect(browserOverflowVerifierSnippet).toContain(".diff-output");
+    expect(browserOverflowVerifierSnippet).toContain("inspectorClientWidth");
+    expect(browserOverflowVerifierSnippet).toContain("diffScrollContained");
+    expect(browserOverflowVerifierSnippet).toContain("mobileStacked");
+    expect(browserOverflowVerifierSnippet).toContain("scrollWidth <= node.clientWidth");
+    expect(browserOverflowVerifierSnippet).toContain("desktop and mobile widths");
   });
 
   test("preserves flow scroll position across refresh patches unless already near bottom", () => {
@@ -126,7 +485,7 @@ describe("dashboard", () => {
   test("serves bundled React Flow canvas assets", async () => {
     const dashboardInput = {
       runId: "run_123",
-      overview: () => ({ run: null, tasks: [], sessions: [], lessons: [] }),
+      overview: () => ({ run: null, project: null, tasks: [], sessions: [], lessons: [] }),
       renderTaskPrompt: () => "",
     };
 
@@ -314,6 +673,7 @@ describe("dashboard", () => {
     expect(html).toContain("overviewWorkerSource");
     expect(html).toContain("new Worker");
     expect(html).toContain("new Blob");
+    expect(html).toContain('overview.runner?.status === "running"');
     expect(html).not.toContain("setInterval");
   });
 
@@ -378,6 +738,197 @@ describe("dashboard", () => {
       expect(body).toContain("src/dependency.ts");
       expect(body).toContain("Run Lessons");
       expect(body).toContain("Dependency implemented summary");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("serves changed files for a run as flat entries and a tree payload", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "ouroboros-dashboard-files-"));
+    const harness = new Harness(join(dir, "ouroboros.db"));
+    harness.init();
+    const projectId = harness.createProject({ name: "Files Project", rootPath: dir });
+    const runId = harness.createRun({ goal: "Track changed files", projectId });
+    const taskId = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Change files",
+      prompt: "Change files.",
+    });
+    const attemptId = harness.recordAttempt({
+      taskId,
+      input: {},
+      output: {
+        status: "done",
+        summary: "Changed files",
+        changedFiles: ["src/app.ts", "./src/app.ts", "README.md"],
+        checks: [],
+        artifacts: [],
+        problems: [],
+      },
+    });
+
+    try {
+      const response = await handleDashboardRequest(
+        new Request(`http://localhost/api/runs/${runId}/changed-files`),
+        {
+          runId,
+          overview: () => harness.getRunOverview({ runId }),
+          renderTaskPrompt: () => "",
+        },
+      );
+      const body = await response.json();
+
+      expect(response.status).toBe(200);
+      expect(body.files).toEqual([
+        { path: "README.md", taskId, attemptId, worktreePath: null },
+        { path: "src/app.ts", taskId, attemptId, worktreePath: null },
+      ]);
+      expect(body.tree).toEqual([
+        { name: "README.md", path: "README.md", type: "file" },
+        {
+          name: "src",
+          path: "src",
+          type: "directory",
+          children: [{ name: "app.ts", path: "src/app.ts", type: "file" }],
+        },
+      ]);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("serves git diff for tracked changed files and rejects traversal", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "ouroboros-dashboard-diff-"));
+    const harness = new Harness(join(dir, "ouroboros.db"));
+    harness.init();
+    await mkdir(join(dir, "src"), { recursive: true });
+    await writeFile(join(dir, "src/app.ts"), "export const value = 1;\n");
+    Bun.spawnSync({ cmd: ["git", "init"], cwd: dir, stdout: "ignore", stderr: "ignore" });
+    Bun.spawnSync({ cmd: ["git", "add", "src/app.ts"], cwd: dir, stdout: "ignore", stderr: "ignore" });
+    Bun.spawnSync({
+      cmd: ["git", "-c", "user.email=test@example.com", "-c", "user.name=Test", "commit", "-m", "initial"],
+      cwd: dir,
+      stdout: "ignore",
+      stderr: "ignore",
+    });
+    await writeFile(join(dir, "src/app.ts"), "export const value = 2;\n");
+    const projectId = harness.createProject({ name: "Diff Project", rootPath: dir });
+    const runId = harness.createRun({ goal: "View diff", projectId });
+    const taskId = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Change app",
+      prompt: "Change app.",
+    });
+    harness.recordAttempt({
+      taskId,
+      input: {},
+      output: {
+        status: "done",
+        summary: "Changed app",
+        changedFiles: ["src/app.ts"],
+        checks: [],
+        artifacts: [],
+        problems: [],
+      },
+    });
+    const dashboardInput = {
+      runId,
+      overview: () => harness.getRunOverview({ runId }),
+      renderTaskPrompt: () => "",
+    };
+
+    try {
+      const diffResponse = await handleDashboardRequest(
+        new Request(`http://localhost/api/runs/${runId}/diff?path=src%2Fapp.ts`),
+        dashboardInput,
+      );
+      const diffBody = await diffResponse.text();
+      expect(diffResponse.status).toBe(200);
+      expect(diffResponse.headers.get("content-type")).toContain("text/plain");
+      expect(diffBody).toContain("-export const value = 1;");
+      expect(diffBody).toContain("+export const value = 2;");
+
+      const traversalResponse = await handleDashboardRequest(
+        new Request(`http://localhost/api/runs/${runId}/diff?path=..%2Fsecret.txt&format=json`),
+        dashboardInput,
+      );
+      const traversalBody = await traversalResponse.json();
+      expect(traversalResponse.status).toBe(400);
+      expect(traversalBody.error).toContain("path traversal");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("serves changed-file diffs from the task worktree that reported the file", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "ouroboros-dashboard-worktree-diff-"));
+    const harness = new Harness(join(dir, "ouroboros.db"));
+    const worktreeA = join(dir, "worktree-a");
+    const worktreeB = join(dir, "worktree-b");
+    harness.init();
+    for (const root of [worktreeA, worktreeB]) {
+      await mkdir(join(root, "src"), { recursive: true });
+      await writeFile(join(root, "src/app.ts"), "export const value = 1;\n");
+      Bun.spawnSync({ cmd: ["git", "init"], cwd: root, stdout: "ignore", stderr: "ignore" });
+      Bun.spawnSync({ cmd: ["git", "add", "src/app.ts"], cwd: root, stdout: "ignore", stderr: "ignore" });
+      Bun.spawnSync({
+        cmd: ["git", "-c", "user.email=test@example.com", "-c", "user.name=Test", "commit", "-m", "initial"],
+        cwd: root,
+        stdout: "ignore",
+        stderr: "ignore",
+      });
+    }
+    await writeFile(join(worktreeA, "src/app.ts"), "export const value = 2;\n");
+    await writeFile(join(worktreeB, "src/app.ts"), "export const value = 99;\n");
+    const runId = harness.createRun({ goal: "View worktree diff" });
+    const taskId = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Change app in worktree A",
+      prompt: "Change app.",
+    });
+    harness.leaseReadyTasks({
+      runId,
+      limit: 1,
+      sessionForTask: (task) => `task-${task.id}`,
+      worktreeForTask: () => worktreeA,
+    });
+    const attemptId = harness.recordAttempt({
+      taskId,
+      input: {},
+      output: {
+        status: "done",
+        summary: "Changed app",
+        changedFiles: ["src/app.ts"],
+        checks: [],
+        artifacts: [],
+        problems: [],
+      },
+    });
+    const dashboardInput = {
+      runId,
+      overview: () => harness.getRunOverview({ runId }),
+      renderTaskPrompt: () => "",
+    };
+
+    try {
+      const changedResponse = await handleDashboardRequest(
+        new Request(`http://localhost/api/runs/${runId}/changed-files`),
+        dashboardInput,
+      );
+      const changedBody = await changedResponse.json();
+      const diffResponse = await handleDashboardRequest(
+        new Request(`http://localhost/api/runs/${runId}/diff?path=src%2Fapp.ts`),
+        dashboardInput,
+      );
+      const diffBody = await diffResponse.text();
+
+      expect(changedBody.files).toEqual([{ path: "src/app.ts", taskId, attemptId, worktreePath: worktreeA }]);
+      expect(diffResponse.status).toBe(200);
+      expect(diffBody).toContain("+export const value = 2;");
+      expect(diffBody).not.toContain("+export const value = 99;");
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

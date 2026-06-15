@@ -1,6 +1,7 @@
 node_modules/
 .ouroboros/
 .linear
+ouroboros.toml
 *.db
 *.db-shm
 *.db-wal

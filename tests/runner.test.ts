@@ -672,6 +672,207 @@ describe("runner", () => {
     ]);
   });
 
+  test("planner stop hook preserves next task model preference", async () => {
+    const runId = harness.createRun({ goal: "Build loop" });
+    const plannerTask = harness.createTask({
+      runId,
+      role: "planner",
+      goal: "Plan next work",
+      prompt: "Plan one cheap task.",
+    });
+
+    await runNextReadyTask({
+      harness,
+      runId,
+      executor: async () => ({
+        status: "done",
+        summary: "Planned cheap task",
+        artifacts: [],
+        checks: [],
+        problems: [],
+        nextTasks: [
+          {
+            role: "worker",
+            goal: "Implement with mini model",
+            prompt: "Use cheaper model for this task.",
+            modelPreference: {
+              model: "gpt-5-mini",
+              reason: "low risk change",
+            },
+          },
+        ],
+      }),
+      stopHooks: [createTasksFromOutputHook({ harness })],
+    });
+
+    const next = harness.nextReadyTask(runId);
+    expect(next).toMatchObject({
+      role: "worker",
+      dependsOn: [plannerTask],
+      config: {
+        modelPreference: {
+          model: "gpt-5-mini",
+          reason: "low risk change",
+        },
+      },
+    });
+  });
+
+  test("planner stop hook resolves next task goal titles in dependsOn", async () => {
+    const runId = harness.createRun({ goal: "Build loop" });
+    harness.createTask({
+      runId,
+      role: "planner",
+      goal: "Plan next work",
+      prompt: "Plan dependent tasks.",
+    });
+
+    await runNextReadyTask({
+      harness,
+      runId,
+      executor: async () => ({
+        status: "done",
+        summary: "Planned dependent tasks",
+        artifacts: [],
+        checks: [],
+        problems: [],
+        nextTasks: [
+          {
+            role: "worker",
+            goal: "Implement protocol-level task and role model selection",
+            prompt: "Implement model selection.",
+          },
+          {
+            role: "verifier",
+            goal: "Verify model selection behavior",
+            prompt: "Verify model selection.",
+            dependsOn: ["Implement protocol-level task and role model selection"],
+          },
+        ],
+      }),
+      stopHooks: [createTasksFromOutputHook({ harness })],
+    });
+
+    const overview = harness.getRunOverview({ runId, eventLimit: 1 });
+    const worker = overview.tasks.find((task) => task.goal === "Implement protocol-level task and role model selection")!;
+    const verifier = overview.tasks.find((task) => task.goal === "Verify model selection behavior")!;
+
+    expect(verifier.dependsOn).toEqual([worker.id]);
+  });
+
+  test("planner stop hook blocks unresolved dependsOn instead of creating stuck tasks", async () => {
+    const runId = harness.createRun({ goal: "Build loop" });
+    const plannerTask = harness.createTask({
+      runId,
+      role: "planner",
+      goal: "Plan next work",
+      prompt: "Plan a task with a bad dependency.",
+    });
+
+    const result = await runNextReadyTask({
+      harness,
+      runId,
+      executor: async () => ({
+        status: "done",
+        summary: "Planned bad task",
+        artifacts: [],
+        checks: [],
+        problems: [],
+        nextTasks: [
+          {
+            role: "worker",
+            goal: "Generated worker",
+            prompt: "Do generated work.",
+            dependsOn: ["Missing task title"],
+          },
+        ],
+      }),
+      stopHooks: [createTasksFromOutputHook({ harness })],
+    });
+
+    const attempt = harness.getAttempt(result!.attemptId)!;
+    const overview = harness.getRunOverview({ runId, eventLimit: 1 });
+
+    expect(attempt.output.status).toBe("blocked");
+    expect(attempt.output.problems).toEqual([
+      'planned task 0 dependsOn "Missing task title" does not match a task id or planned task goal',
+    ]);
+    expect(overview.tasks.map((task) => task.id)).toEqual([plannerTask]);
+  });
+
+  test("records resolved model in attempt input with task, role, and global precedence", async () => {
+    const runId = harness.createRun({
+      goal: "Build loop",
+      context: {
+        modelDefaults: {
+          global: { model: "gpt-5-codex" },
+          roles: {
+            worker: { model: "gpt-5-mini" },
+          },
+        },
+      },
+    });
+    const worker = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Use role model",
+      prompt: "Work.",
+    });
+    const verifier = harness.createTask({
+      runId,
+      role: "verifier",
+      goal: "Use task model",
+      prompt: "Verify.",
+      config: {
+        modelPreference: {
+          model: "gpt-5",
+        },
+      },
+    });
+    const planner = harness.createTask({
+      runId,
+      role: "planner",
+      goal: "Use global model",
+      prompt: "Plan.",
+    });
+
+    const seenModels: Array<string | null> = [];
+    const results = await runReadyTasks({
+      harness,
+      runId,
+      limit: 3,
+      model: "global-flag-model",
+      executorFactory: ({ resolvedModel }) => {
+        seenModels.push(resolvedModel?.model ?? null);
+        return async () => ({
+          status: "done",
+          summary: "ok",
+          artifacts: [],
+          checks: [],
+          problems: [],
+        });
+      },
+    });
+
+    const attemptsByTask = new Map(results.map((result) => [result.taskId, harness.getAttempt(result.attemptId)!]));
+    expect(seenModels.sort()).toEqual(["gpt-5", "gpt-5-mini", "gpt-5-codex"].sort());
+    expect(attemptsByTask.get(worker)?.input.model).toEqual({
+      model: "gpt-5-mini",
+      source: "role-default",
+      role: "worker",
+    });
+    expect(attemptsByTask.get(verifier)?.input.model).toEqual({
+      model: "gpt-5",
+      source: "task",
+      role: "verifier",
+    });
+    expect(attemptsByTask.get(planner)?.input.model).toEqual({
+      model: "gpt-5-codex",
+      source: "run-default",
+      role: "planner",
+    });
+  });
+
   test("worker stop hook creates a verifier task", async () => {
     const runId = harness.createRun({ goal: "Build loop" });
     const workerTask = harness.createTask({

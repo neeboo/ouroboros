@@ -6,6 +6,8 @@ export function initDatabase(dbPath: string) {
   mkdirSync(dirname(dbPath), { recursive: true });
   withDatabase(dbPath, (db) => {
     db.exec(readFileSync(join(import.meta.dir, "..", "schema.sql"), "utf8"));
+    ensureProjects(db);
+    ensureTaskConfig(db);
     ensureTaskCycles(db);
   });
 }
@@ -69,6 +71,31 @@ function ensureTaskCycles(db: Database) {
       }
     }
   })();
+}
+
+function ensureProjects(db: Database) {
+  db.exec(`
+    create table if not exists projects (
+      id text primary key,
+      name text not null,
+      root_path text not null unique,
+      context_json text not null default '{}',
+      created_at text not null default current_timestamp,
+      updated_at text not null default current_timestamp
+    )
+  `);
+  const columns = db.query("pragma table_info(runs)").all() as Array<{ name: string }>;
+  if (!columns.some((column) => column.name === "project_id")) {
+    db.exec("alter table runs add column project_id text references projects(id) on delete set null");
+  }
+  db.exec("create index if not exists idx_runs_project on runs(project_id)");
+}
+
+function ensureTaskConfig(db: Database) {
+  const columns = db.query("pragma table_info(tasks)").all() as Array<{ name: string }>;
+  if (!columns.some((column) => column.name === "config_json")) {
+    db.exec("alter table tasks add column config_json text not null default '{}'");
+  }
 }
 
 function parseStringArray(value: string) {
