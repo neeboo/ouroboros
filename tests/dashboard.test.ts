@@ -919,6 +919,48 @@ describe("dashboard", () => {
     }
   });
 
+  test("does not auto-start an idle runner while the supervisor is running", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "ouroboros-dashboard-supervisor-autostart-"));
+    const harness = new Harness(join(dir, "ouroboros.db"));
+    harness.init();
+    const runId = harness.createRun({ goal: "Observe queued work" });
+    harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Ready work",
+      prompt: "Run the ready task.",
+    });
+    let starts = 0;
+
+    try {
+      const response = await handleDashboardRequest(
+        new Request(`http://localhost/api/runs/${runId}/overview`),
+        {
+          runId,
+          overview: () => harness.getRunOverview({ runId }),
+          runnerStatus: () => ({ status: "idle", pid: null }),
+          supervisorStatus: () => ({ status: "running", pid: 2468, lastOutput: "supervising runs" }),
+          autoStartRunner: () => true,
+          renderTaskPrompt: () => "",
+          actions: {
+            startRunner: () => {
+              starts += 1;
+              return { status: "running", pid: 4321 };
+            },
+          },
+        },
+      );
+      const body = await response.json();
+
+      expect(response.status).toBe(200);
+      expect(starts).toBe(0);
+      expect(body.runner).toEqual({ status: "idle", pid: null });
+      expect(body.supervisor).toEqual({ status: "running", pid: 2468, lastOutput: "supervising runs" });
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   test("serves global supervisor overview state and intake actions", async () => {
     const dir = await mkdtemp(join(tmpdir(), "ouroboros-dashboard-supervisor-"));
     const harness = new Harness(join(dir, "ouroboros.db"));

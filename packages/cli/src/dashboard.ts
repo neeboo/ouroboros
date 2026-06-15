@@ -2584,13 +2584,15 @@ export async function handleDashboardRequest(
   if (url.pathname === `/api/runs/${input.runId}/overview`) {
     let overview = input.overview();
     let runner = input.runnerStatus?.() ?? null;
-    if (input.actions?.startRunner && input.autoStartRunner?.(overview, runner)) {
+    let supervisor = input.supervisorStatus?.() ?? null;
+    if (input.actions?.startRunner && supervisor?.status !== "running" && input.autoStartRunner?.(overview, runner)) {
       input.actions.startRunner();
       overview = input.overview();
       runner = input.runnerStatus?.() ?? runner;
+      supervisor = input.supervisorStatus?.() ?? supervisor;
     }
     const globalRuns = input.globalRunCounts?.() ?? { todo: 0, running: 0, done: 0, blocked: 0 };
-    return Response.json({ ...overview, runner, supervisor: input.supervisorStatus?.() ?? null, globalRuns });
+    return Response.json({ ...overview, runner, supervisor, globalRuns });
   }
   if (url.pathname === `/api/runs/${input.runId}/changed-files`) {
     return Response.json(changedFilesPayload(input.overview()));
