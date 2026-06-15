@@ -85,9 +85,7 @@ function resolvePlannedDependencies(input: {
 
   const problems: string[] = [];
   const dependsOnByIndex = input.plannedEntries.map((entry, index) => {
-    const refs = entry.plannedTask.dependsOn && entry.plannedTask.dependsOn.length > 0
-      ? entry.plannedTask.dependsOn
-      : [input.sourceTask.id];
+    const refs = explicitDependencyRefs(entry.plannedTask) ?? defaultDependencyRefs(input, index);
     return refs.flatMap((ref) => {
       const normalized = ref.trim();
       if (ambiguous.has(normalized)) {
@@ -108,4 +106,30 @@ function resolvePlannedDependencies(input: {
   });
 
   return { dependsOnByIndex, problems };
+}
+
+function explicitDependencyRefs(plannedTask: PlannedTask) {
+  if (plannedTask.dependsOn && plannedTask.dependsOn.length > 0) {
+    return plannedTask.dependsOn;
+  }
+  return undefined;
+}
+
+function defaultDependencyRefs(
+  input: {
+    sourceTask: Task;
+    plannedEntries: Array<{ id: string; plannedTask: PlannedTask }>;
+  },
+  index: number,
+) {
+  const plannedTask = input.plannedEntries[index].plannedTask;
+  if (plannedTask.role.trim().toLowerCase() !== "verifier") {
+    return [input.sourceTask.id];
+  }
+
+  const siblingProducerIds = input.plannedEntries
+    .filter((entry, entryIndex) => entryIndex !== index && entry.plannedTask.role.trim().toLowerCase() !== "verifier")
+    .map((entry) => entry.id);
+
+  return siblingProducerIds.length > 0 ? siblingProducerIds : [input.sourceTask.id];
 }

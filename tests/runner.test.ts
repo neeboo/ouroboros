@@ -841,6 +841,54 @@ describe("runner", () => {
     expect(verifier.dependsOn).toEqual([worker.id]);
   });
 
+  test("planner stop hook makes same-batch verifiers wait for producer tasks by default", async () => {
+    const runId = harness.createRun({ goal: "Build loop" });
+    const plannerTask = harness.createTask({
+      runId,
+      role: "planner",
+      goal: "Plan next work",
+      prompt: "Plan worker and verifier tasks.",
+    });
+
+    await runNextReadyTask({
+      harness,
+      runId,
+      executor: async () => ({
+        status: "done",
+        summary: "Planned producer and verifier",
+        artifacts: [],
+        checks: [],
+        problems: [],
+        nextTasks: [
+          {
+            role: "worker",
+            goal: "Implement dashboard shell",
+            prompt: "Implement the dashboard shell.",
+          },
+          {
+            role: "worker",
+            goal: "Implement dashboard streaming",
+            prompt: "Implement streaming updates.",
+          },
+          {
+            role: "verifier",
+            goal: "Verify dashboard behavior",
+            prompt: "Verify both dashboard changes.",
+          },
+        ],
+      }),
+      stopHooks: [createTasksFromOutputHook({ harness })],
+    });
+
+    const overview = harness.getRunOverview({ runId, eventLimit: 1 });
+    const workers = overview.tasks.filter((task) => task.role === "worker");
+    const verifier = overview.tasks.find((task) => task.goal === "Verify dashboard behavior")!;
+
+    expect(workers).toHaveLength(2);
+    expect(workers.map((task) => task.dependsOn)).toEqual([[plannerTask], [plannerTask]]);
+    expect(verifier.dependsOn).toEqual(workers.map((task) => task.id));
+  });
+
   test("planner stop hook blocks unresolved dependsOn instead of creating stuck tasks", async () => {
     const runId = harness.createRun({ goal: "Build loop" });
     const plannerTask = harness.createTask({
