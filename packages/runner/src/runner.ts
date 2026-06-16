@@ -180,6 +180,9 @@ function applyPostAttemptRunEffects(
   if (task.role === "goal-review" && output.status === "done" && output.runDecision === "complete") {
     harness.updateRunStatus({ runId, status: "done" });
   }
+  if (task.role === "goal-review" && output.status === "done" && output.runDecision === "defer") {
+    harness.updateRunStatus({ runId, status: "blocked" });
+  }
 }
 
 function hooksForTask(globalHooks: StopHook[] | undefined, hooksByRole: Record<string, StopHook[]> | undefined, task: Task) {

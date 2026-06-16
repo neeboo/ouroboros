@@ -112,7 +112,7 @@ export interface ExecutionThread {
 
 export interface AttemptOutput {
   status: "done" | "blocked";
-  runDecision?: "complete" | "continue" | "verify";
+  runDecision?: "complete" | "continue" | "verify" | "defer";
   summary: string;
   changedFiles?: string[];
   checks?: unknown[];

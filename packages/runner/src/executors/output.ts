@@ -131,8 +131,8 @@ function validateRunDecision(value: unknown) {
   if (value === undefined) {
     return undefined;
   }
-  if (value !== "complete" && value !== "continue" && value !== "verify") {
-    throw new Error("agent output runDecision must be 'complete', 'continue', or 'verify'");
+  if (value !== "complete" && value !== "continue" && value !== "verify" && value !== "defer") {
+    throw new Error("agent output runDecision must be 'complete', 'continue', 'verify', or 'defer'");
   }
   return value;
 }

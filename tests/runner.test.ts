@@ -1848,6 +1848,42 @@ describe("runner", () => {
     });
   });
 
+  test("goal-review defer blocks the run without follow-up tasks", async () => {
+    const runId = harness.createRun({ goal: "Prove external provider readiness" });
+    const taskId = harness.createTask({
+      runId,
+      role: "goal-review",
+      goal: "Review whether the run goal is complete",
+      prompt: "Review the goal.",
+    });
+
+    const result = await runNextReadyTask({
+      harness,
+      runId,
+      stopHooksByRole: {
+        "goal-review": [createGoalReviewDecisionHook({ harness })],
+      },
+      executor: async () => ({
+        status: "done",
+        runDecision: "defer",
+        summary: "Provider connectivity is down; wait for external recovery.",
+        changedFiles: [],
+        checks: [{ name: "provider smoke", status: "failed" }],
+        artifacts: [],
+        problems: ["API call failed after 3 retries."],
+      }),
+    });
+    const attempt = harness.getAttempt(result!.attemptId)!;
+
+    expect(result?.taskId).toBe(taskId);
+    expect(harness.getRun(runId)?.status).toBe("blocked");
+    expect(harness.nextReadyTask(runId)).toBeNull();
+    expect(attempt.output).toMatchObject({
+      status: "done",
+      runDecision: "defer",
+    });
+  });
+
   test("repair task hook uses the database template", async () => {
     const runId = harness.createRun({ goal: "Build loop" });
     harness.setPromptTemplate({
@@ -2127,7 +2163,7 @@ describe("runner", () => {
   });
 
   test("fixed action builders reject invalid control values", () => {
-    expect(() => setRunDecisionAction("pause" as never)).toThrow("decision must be complete, continue, or verify");
+    expect(() => setRunDecisionAction("pause" as never)).toThrow("decision must be complete, continue, verify, or defer");
     expect(() => doneOutput({ summary: "" })).toThrow("summary must be a non-empty string");
   });
 

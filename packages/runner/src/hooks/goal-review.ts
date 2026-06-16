@@ -39,6 +39,18 @@ export function createGoalReviewDecisionHook(_options: { harness: Harness }): St
       return { decision: "exit", artifacts, outputPatch };
     }
 
+    if (inferredRunDecision === "defer") {
+      if ((output.nextTasks ?? []).length > 0) {
+        return {
+          decision: "exit",
+          artifacts,
+          outputPatch,
+          problems: ["defer goal-review must not include nextTasks"],
+        };
+      }
+      return { decision: "exit", artifacts, outputPatch };
+    }
+
     const nextTasks = output.nextTasks ?? [];
     if (nextTasks.length < 1 || nextTasks.length > MAX_GOAL_REVIEW_NEXT_TASKS) {
       return {
@@ -73,9 +85,9 @@ export function inferExplicitRunDecision(output: {
   const haystack = [output.summary, ...(output.checks ?? []), ...(output.artifacts ?? []), ...(output.problems ?? [])]
     .map((value) => (typeof value === "string" ? value : JSON.stringify(value)))
     .join("\n");
-  const match = haystack.match(/\brunDecision\s*[:=]?\s*(complete|continue|verify)\b/i);
+  const match = haystack.match(/\brunDecision\s*[:=]?\s*(complete|continue|verify|defer)\b/i);
   if (!match) {
     return undefined;
   }
-  return match[1].toLowerCase() as "complete" | "continue" | "verify";
+  return match[1].toLowerCase() as "complete" | "continue" | "verify" | "defer";
 }

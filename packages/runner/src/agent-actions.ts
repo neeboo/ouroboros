@@ -47,8 +47,8 @@ export function createRunsAction(runs: PlannedRun[]): CreateRunsAction {
 }
 
 export function setRunDecisionAction(decision: NonNullable<AttemptOutput["runDecision"]>): SetRunDecisionAction {
-  if (decision !== "complete" && decision !== "continue" && decision !== "verify") {
-    throw new Error("setRunDecisionAction decision must be complete, continue, or verify");
+  if (decision !== "complete" && decision !== "continue" && decision !== "verify" && decision !== "defer") {
+    throw new Error("setRunDecisionAction decision must be complete, continue, verify, or defer");
   }
   return { type: "setRunDecision", payload: { decision } };
 }

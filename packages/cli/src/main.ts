@@ -741,8 +741,8 @@ function parseOptionalRunDecision(raw: unknown): AttemptOutput["runDecision"] | 
   if (raw === undefined || raw === null) {
     return undefined;
   }
-  if (raw !== "complete" && raw !== "continue" && raw !== "verify") {
-    fail("attempt output runDecision must be complete, continue, or verify");
+  if (raw !== "complete" && raw !== "continue" && raw !== "verify" && raw !== "defer") {
+    fail("attempt output runDecision must be complete, continue, verify, or defer");
   }
   return raw;
 }
@@ -1024,6 +1024,9 @@ function ensureGoalReviewTask(runId: string, maxTries: number) {
   if (run.status === "done") {
     return { created: false as const, reason: "run_done" };
   }
+  if (run.status === "blocked") {
+    return { created: false as const, reason: "run_blocked" };
+  }
   const overview = harness.getRunOverview({ runId, eventLimit: 0 });
   if (overview.tasks.some((task) => task.status === "todo" || task.status === "running")) {
     return { created: false as const, reason: "active_tasks" };
@@ -1075,11 +1078,13 @@ function createGoalReviewTask(runId: string) {
       "- runDecision complete: the run goal is satisfied; do not include nextTasks.",
       "- runDecision continue: the run goal is not satisfied; include one to five nextTasks items, usually planners or workers with verifiers.",
       "- runDecision verify: completion is uncertain; include one to five verifier nextTasks items.",
+      "- runDecision defer: the run goal is not satisfied, but progress is blocked by an external dependency or missing user/system action; do not include nextTasks.",
     ].join("\n"),
     doneWhen: [
-      "runDecision is complete, continue, or verify",
+      "runDecision is complete, continue, verify, or defer",
       "completion decision cites concrete evidence from repository files or docs, tests or commands, dashboard or run overview state, and recent lessons",
       "complete does not create nextTasks",
+      "defer does not create nextTasks and cites the external dependency or missing action",
       "continue or verify includes one to five nextTasks items",
     ],
   });
@@ -2089,6 +2094,9 @@ function threadIdForAttempt(attemptId: string) {
 function applyCliPostAttemptRunEffects(runId: string, task: Pick<Task, "role">, output: AttemptOutput) {
   if (task.role === "goal-review" && output.status === "done" && output.runDecision === "complete") {
     harness.updateRunStatus({ runId, status: "done" });
+  }
+  if (task.role === "goal-review" && output.status === "done" && output.runDecision === "defer") {
+    harness.updateRunStatus({ runId, status: "blocked" });
   }
 }
 

@@ -2156,6 +2156,58 @@ describe("CLI", () => {
     });
   });
 
+  test("run-loop defers a run when goal-review is waiting on external recovery", async () => {
+    await runCli("init");
+    const run = await runCliJson("create-run", "--goal", "Prove Hermes provider readiness");
+    const codexBin = join(dir, "fake-codex-goal-defer");
+    await writeFile(
+      codexBin,
+      [
+        "#!/usr/bin/env bun",
+        "const prompt = await new Response(Bun.stdin.stream()).text();",
+        "if (!prompt.includes('runDecision defer:')) process.exit(2);",
+        "console.log(JSON.stringify({ status: 'done', runDecision: 'defer', summary: 'Provider connectivity is down; pause until external recovery.', changedFiles: [], checks: [{ name: 'provider smoke', status: 'failed' }], artifacts: [], problems: ['API call failed after 3 retries.'] }));",
+      ].join("\n"),
+    );
+    await chmod(codexBin, 0o755);
+
+    await runCliJson(
+      "run-loop",
+      "--run-id",
+      run.id,
+      "--executor",
+      "codex-resumable",
+      "--codex-bin",
+      codexBin,
+      "--cwd",
+      "/repo",
+      "--max-rounds",
+      "1",
+    );
+    const overview = await runCliJson("run-overview", "--run-id", run.id);
+    const second = await runCliJson(
+      "run-loop",
+      "--run-id",
+      run.id,
+      "--executor",
+      "codex-resumable",
+      "--codex-bin",
+      codexBin,
+      "--cwd",
+      "/repo",
+      "--max-rounds",
+      "1",
+    );
+
+    expect(overview.run.status).toBe("blocked");
+    expect(overview.tasks).toHaveLength(1);
+    expect(overview.sessions[0].output).toMatchObject({
+      status: "done",
+      runDecision: "defer",
+    });
+    expect(second.rounds).toEqual([]);
+  });
+
   test("run-loop restores a maxed blocked goal review with explicit textual completion", async () => {
     await runCli("init");
     const run = await runCliJson("create-run", "--goal", "Bootstrap role model defaults");
@@ -2259,6 +2311,7 @@ describe("CLI", () => {
         "if (!prompt.includes('include one to five nextTasks items')) process.exit(3);",
         "if (!prompt.includes('runDecision verify:')) process.exit(4);",
         "if (!prompt.includes('include one to five verifier nextTasks items')) process.exit(5);",
+        "if (!prompt.includes('runDecision defer:')) process.exit(6);",
         "console.log(JSON.stringify({ status: 'done', runDecision: 'verify', summary: 'needs independent checks', changedFiles: [], checks: [], artifacts: [], problems: [], nextTasks: [{ role: 'verifier', goal: 'Verify goal completion evidence', prompt: 'Inspect the evidence.', doneWhen: ['evidence checked'] }, { role: 'verifier', goal: 'Verify dashboard evidence', prompt: 'Inspect dashboard evidence.', doneWhen: ['dashboard checked'] }] }));",
       ].join("\n"),
     );
