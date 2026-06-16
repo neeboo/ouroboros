@@ -42,6 +42,7 @@ interface DashboardRunnerStatus {
   finishedAt?: string | null;
   exitCode?: number | null;
   lastOutput?: string;
+  externallyManaged?: boolean;
 }
 
 interface DashboardTaskGraphNode {
@@ -129,6 +130,108 @@ export function buildDashboardTaskGraph(overview: RunOverview, groupId?: string 
       ),
     );
   return { nodes, edges };
+}
+
+export function aggregateDashboardOverview(rootOverview: RunOverview, childOverviews: RunOverview[] = []): RunOverview {
+  if (childOverviews.length === 0) {
+    return rootOverview;
+  }
+  const overviews = [rootOverview, ...childOverviews];
+  const tasks = uniqueDashboardItems(overviews.flatMap((overview) => overview.tasks));
+  const sessions = uniqueDashboardItems(overviews.flatMap((overview) => overview.sessions), (session) => session.attemptId);
+  const threads = uniqueDashboardItems(overviews.flatMap((overview) => overview.threads));
+  const lessons = uniqueDashboardItems(overviews.flatMap((overview) => overview.lessons));
+  const run = rootOverview.run
+    ? {
+      ...rootOverview.run,
+      status: aggregateDashboardRunStatus(overviews, tasks, sessions, threads),
+    }
+    : null;
+  return {
+    ...rootOverview,
+    run,
+    tasks,
+    sessions,
+    threads,
+    lessons,
+  };
+}
+
+function uniqueDashboardItems<T>(
+  items: T[],
+  keyFor: (item: T) => string | null | undefined = (item) => {
+    const id = (item as { id?: unknown }).id;
+    return typeof id === "string" ? id : null;
+  },
+) {
+  const seen = new Set<string>();
+  const result: T[] = [];
+  for (const item of items) {
+    const key = keyFor(item);
+    if (!key || seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    result.push(item);
+  }
+  return result;
+}
+
+function aggregateDashboardRunStatus(
+  overviews: RunOverview[],
+  tasks: RunOverview["tasks"],
+  sessions: RunOverview["sessions"],
+  threads: RunOverview["threads"],
+): NonNullable<RunOverview["run"]>["status"] {
+  const runs = overviews.map((overview) => overview.run).filter((run): run is NonNullable<RunOverview["run"]> => run !== null);
+  if (
+    tasks.some((task) => task.status === "running") ||
+    sessions.some((session) => session.status === "running") ||
+    threads.some((thread) => thread.status === "running") ||
+    runs.some((run) => run.status === "running")
+  ) {
+    return "running";
+  }
+  if (tasks.some((task) => task.status === "todo") || runs.some((run) => run.status === "todo")) {
+    return "todo";
+  }
+  if (tasks.some((task) => task.status === "blocked") || runs.some((run) => run.status === "blocked")) {
+    return "blocked";
+  }
+  return "done";
+}
+
+function inferDashboardSupervisorStatus(
+  supervisor: DashboardRunnerStatus | null,
+  overview: RunOverview,
+  globalRuns: RunStatusCounts,
+): DashboardRunnerStatus | null {
+  if (supervisor?.status === "running") {
+    return supervisor;
+  }
+  const activeThreads = overview.threads.filter((thread) => thread.status === "running");
+  const activeTasks = overview.tasks.filter((task) => task.status === "running");
+  const hasQueuedGlobalRuns = (globalRuns.todo || 0) > 0 || (globalRuns.running || 0) > 0;
+  if (activeThreads.length > 0 || activeTasks.length > 0) {
+    return {
+      ...(supervisor ?? {}),
+      status: "running",
+      pid: supervisor?.pid ?? activeThreads.find((thread) => thread.pid)?.pid ?? null,
+      lastOutput: supervisor?.lastOutput || "External supervisor inferred from active tasks.",
+      externallyManaged: true,
+    };
+  }
+  if (supervisor) {
+    return supervisor;
+  }
+  if (hasQueuedGlobalRuns) {
+    return {
+      status: "idle",
+      pid: null,
+      lastOutput: "",
+    };
+  }
+  return null;
 }
 
 function collectRelatedTaskIds(overview: RunOverview, groupId?: string | null) {
@@ -2067,7 +2170,7 @@ export function dashboardHtml(input: { runId: string }) {
       const runningRuns = globalRuns.running || 0;
       const output = String(supervisor?.lastOutput || "").trim();
       const canStart = status !== "running" && (todoRuns > 0 || runningRuns > 0);
-      const canStop = status === "running";
+      const canStop = status === "running" && !supervisor?.externallyManaged;
       const statusClass = status === "running" ? "running" : todoRuns || runningRuns ? "todo" : "done";
       return '<section class="inspector-card" data-inspector-section="supervisor"><h2>Supervisor</h2>' +
         '<div class="current-task"><div class="current-task-title">Global supervisor</div><div class="current-task-meta">' +
@@ -2075,6 +2178,7 @@ export function dashboardHtml(input: { runId: string }) {
         escapeHtml(runningRuns) + ' running run' + (runningRuns === 1 ? "" : "s") +
         ' · <span class="status-text ' + escapeHtml(statusClass) + '">' + escapeHtml(status) + '</span>' +
         (supervisor?.pid ? '<br><span class="code-meta">pid ' + escapeHtml(supervisor.pid) + '</span>' : '') +
+        (supervisor?.externallyManaged ? '<br><span class="code-meta">external supervisor observed</span>' : '') +
         (supervisor?.exitCode !== undefined && supervisor?.exitCode !== null ? '<br><span class="code-meta">exit ' + escapeHtml(supervisor.exitCode) + '</span>' : '') +
         '</div></div>' +
         (output ? '<div class="stream-output">' + escapeHtml(compact(output, 900)) + '</div>' : '') +
@@ -2623,6 +2727,7 @@ export function serveDashboard(input: {
   runId: string;
   port: number;
   overview: () => RunOverview;
+  childOverviews?: () => RunOverview[];
   globalRunCounts?: () => RunStatusCounts;
   renderTaskPrompt: (taskId: string) => string;
   runnerStatus?: () => DashboardRunnerStatus | null;
@@ -2643,6 +2748,7 @@ export async function handleDashboardRequest(
   input: {
     runId: string;
     overview: () => RunOverview;
+    childOverviews?: () => RunOverview[];
     globalRunCounts?: () => RunStatusCounts;
     renderTaskPrompt: (taskId: string) => string;
     runnerStatus?: () => DashboardRunnerStatus | null;
@@ -2668,25 +2774,26 @@ export async function handleDashboardRequest(
     });
   }
   if (url.pathname === `/api/runs/${input.runId}/overview`) {
-    let overview = input.overview();
+    let overview = aggregateDashboardOverview(input.overview(), input.childOverviews?.() ?? []);
     let runner = input.runnerStatus?.() ?? null;
     let supervisor = input.supervisorStatus?.() ?? null;
     if (input.actions?.startRunner && supervisor?.status !== "running" && input.autoStartRunner?.(overview, runner)) {
       input.actions.startRunner();
-      overview = input.overview();
+      overview = aggregateDashboardOverview(input.overview(), input.childOverviews?.() ?? []);
       runner = input.runnerStatus?.() ?? runner;
       supervisor = input.supervisorStatus?.() ?? supervisor;
     }
     const globalRuns = input.globalRunCounts?.() ?? { todo: 0, running: 0, done: 0, blocked: 0 };
+    supervisor = inferDashboardSupervisorStatus(supervisor, overview, globalRuns);
     return Response.json({ ...overview, runner, supervisor, globalRuns });
   }
   if (url.pathname === `/api/runs/${input.runId}/changed-files`) {
-    return Response.json(changedFilesPayload(input.overview()));
+    return Response.json(changedFilesPayload(aggregateDashboardOverview(input.overview(), input.childOverviews?.() ?? [])));
   }
   if (url.pathname === `/api/runs/${input.runId}/diff`) {
     const format = url.searchParams.get("format");
     const asJson = format === "json";
-    const result = diffForChangedPath(input.overview(), url.searchParams.get("path"));
+    const result = diffForChangedPath(aggregateDashboardOverview(input.overview(), input.childOverviews?.() ?? []), url.searchParams.get("path"));
     if (!result.ok) {
       return asJson
         ? Response.json({ error: result.error }, { status: result.status })

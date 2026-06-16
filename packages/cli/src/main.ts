@@ -1262,14 +1262,22 @@ function createDashboardRuntime(input: {
   const resumeAutomaticRunner = () => {
     runnerAutoPaused = false;
   };
+  const dashboardEventLimit = () => parsePositiveInteger(flag(parsed, "event-limit") ?? "25", "--event-limit");
+  const childRunOverviews = () =>
+    harness
+      .listRuns({ limit: 500 })
+      .filter((run) => run.id !== input.runId)
+      .filter((run) => run.context.parentRunId === input.runId || run.context.rootRunId === input.runId)
+      .map((run) => harness.getRunOverview({ runId: run.id, eventLimit: dashboardEventLimit() }));
   const server = serveDashboard({
     runId: input.runId,
     port: input.port,
     overview: () =>
       harness.getRunOverview({
         runId: input.runId,
-        eventLimit: parsePositiveInteger(flag(parsed, "event-limit") ?? "25", "--event-limit"),
+        eventLimit: dashboardEventLimit(),
       }),
+    childOverviews: childRunOverviews,
     globalRunCounts: () => harness.countRunsByStatus(),
     runnerStatus,
     supervisorStatus,

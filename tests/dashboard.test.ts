@@ -1018,6 +1018,65 @@ describe("dashboard", () => {
     }
   });
 
+  test("aggregates child run activity into a root dashboard overview", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "ouroboros-dashboard-child-overview-"));
+    const harness = new Harness(join(dir, "ouroboros.db"));
+    harness.init();
+    const rootRunId = harness.createRun({ goal: "Root intake" });
+    harness.updateRunStatus({ runId: rootRunId, status: "done" });
+    const childRunId = harness.createRun({
+      goal: "Child implementation goal",
+      context: { parentRunId: rootRunId },
+    });
+    const childTaskId = harness.createTask({
+      runId: childRunId,
+      role: "worker",
+      goal: "Implement child work",
+      prompt: "Do the child work.",
+    });
+    const childAttemptId = harness.startAttempt({ taskId: childTaskId, input: {} });
+    harness.upsertExecutionThread({
+      id: `thread_${childAttemptId}`,
+      runId: childRunId,
+      taskId: childTaskId,
+      attemptId: childAttemptId,
+      ownerType: "runner",
+      role: "worker",
+      status: "running",
+      pid: 12345,
+    });
+
+    try {
+      const response = await handleDashboardRequest(
+        new Request(`http://localhost/api/runs/${rootRunId}/overview`),
+        {
+          runId: rootRunId,
+          overview: () => harness.getRunOverview({ runId: rootRunId }),
+          childOverviews: () => [harness.getRunOverview({ runId: childRunId })],
+          globalRunCounts: () => harness.countRunsByStatus(),
+          runnerStatus: () => ({ status: "idle", pid: null }),
+          supervisorStatus: () => ({ status: "idle", pid: null, lastOutput: "" }),
+          renderTaskPrompt: () => "",
+        },
+      );
+      const body = await response.json();
+
+      expect(response.status).toBe(200);
+      expect(body.run.status).toBe("running");
+      expect(body.tasks.map((task: { id: string }) => task.id)).toContain(childTaskId);
+      expect(body.sessions.map((session: { attemptId: string }) => session.attemptId)).toContain(childAttemptId);
+      expect(body.threads.map((thread: { id: string }) => thread.id)).toContain(`thread_${childAttemptId}`);
+      expect(body.supervisor).toMatchObject({
+        status: "running",
+        pid: 12345,
+        externallyManaged: true,
+      });
+      expect(body.runner).toMatchObject({ status: "idle" });
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   test("serves global supervisor overview state and intake actions", async () => {
     const dir = await mkdtemp(join(tmpdir(), "ouroboros-dashboard-supervisor-"));
     const harness = new Harness(join(dir, "ouroboros.db"));

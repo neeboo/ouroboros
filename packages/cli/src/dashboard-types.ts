@@ -27,6 +27,7 @@ export interface DashboardSupervisorState {
   exitCode?: number | null;
   lastOutput?: string;
   globalRuns?: RunStatusCounts;
+  externallyManaged?: boolean;
 }
 
 export interface DashboardGoalSummary {

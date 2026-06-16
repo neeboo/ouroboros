@@ -59,7 +59,7 @@ export function SupervisorControls({ supervisor }: { supervisor: DashboardSuperv
   const todoRuns = supervisor.globalRuns?.todo ?? 0;
   const runningRuns = supervisor.globalRuns?.running ?? 0;
   const canStart = supervisor.status !== "running" && (todoRuns > 0 || runningRuns > 0);
-  const canStop = supervisor.status === "running";
+  const canStop = supervisor.status === "running" && !supervisor.externallyManaged;
 
   return (
     <section className="inspector-card" data-inspector-section="supervisor">
@@ -69,6 +69,7 @@ export function SupervisorControls({ supervisor }: { supervisor: DashboardSuperv
         <div className="current-task-meta">
           {todoRuns} todo runs - {runningRuns} running runs -{" "}
           <span className={`status-text ${supervisor.status}`}>{supervisor.status}</span>
+          {supervisor.externallyManaged ? <span className="code-meta"> external supervisor observed</span> : null}
         </div>
       </div>
       {supervisor.lastOutput ? <div className="stream-output">{supervisor.lastOutput}</div> : null}
