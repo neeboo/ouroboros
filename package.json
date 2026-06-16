@@ -3,6 +3,9 @@
   "version": "0.0.0",
   "type": "module",
   "private": true,
+  "bin": {
+    "orbs": "./bin/orbs"
+  },
   "workspaces": ["packages/*"],
   "scripts": {
     "test": "bun test",

@@ -69,8 +69,11 @@ Development:
 
 ```bash
 bun install
-bun run orbs -- init
+bun link
+orbs init
 ```
+
+Before linking, the repo-local fallback is still available as `bun run orbs -- <command>`.
 
 Distribution target:
 
@@ -84,19 +87,19 @@ orbs init
 Initialize the local database:
 
 ```bash
-bun run orbs -- init
+orbs init
 ```
 
 Create a self-iteration run:
 
 ```bash
-bun run orbs -- self-iterate
+orbs self-iterate
 ```
 
 Launch the dashboard and background runner:
 
 ```bash
-bun run orbs -- self-iterate-launch \
+orbs self-iterate-launch \
   --concurrency 3 \
   --worktree-root .ouroboros/worktrees \
   --start-hook git-worktree

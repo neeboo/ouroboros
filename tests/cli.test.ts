@@ -43,6 +43,15 @@ describe("CLI", () => {
     expect(ready.role).toBe("planner");
   });
 
+  test("runs through the root orbs executable wrapper", async () => {
+    const result = await runRootOrbsJson("init");
+
+    expect(result).toMatchObject({
+      db: dbPath,
+      status: "initialized",
+    });
+  });
+
   test("creates projects and shows project metadata in run overview", async () => {
     await runCli("init");
     const project = await runCliJson(
@@ -3339,6 +3348,25 @@ describe("CLI", () => {
 
   async function runCliJson(...args: Array<string | Record<string, string>>) {
     return JSON.parse(await runCli(...args));
+  }
+
+  async function runRootOrbsJson(...args: string[]) {
+    const proc = Bun.spawn({
+      cmd: ["bun", "./bin/orbs", "--db", dbPath, ...args],
+      cwd: process.cwd(),
+      env: process.env,
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const [stdout, stderr, exitCode] = await Promise.all([
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+      proc.exited,
+    ]);
+    if (exitCode !== 0) {
+      throw new Error(`orbs wrapper failed with ${exitCode}\n${stdout}\n${stderr}`);
+    }
+    return JSON.parse(stdout.trim());
   }
 
   async function readFirstLine(stream: ReadableStream<Uint8Array>) {
