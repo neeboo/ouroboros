@@ -1,4 +1,7 @@
 import { describe, expect, test } from "bun:test";
+import { access, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import { buildAgentMatrix, doctorHermes, parseAgentOutput, runSmokeMatrix } from "../scripts/acpx-agent-smoke";
 
@@ -138,6 +141,60 @@ describe("acpx agent smoke script", () => {
     expect(calls[0].stdin).toContain("Return only final Orbs JSON");
     expect(calls[0].stdin).toContain("/tmp/orbs-smoke-test");
     expect(calls[0].stdin).toContain("Do not write, edit, delete, move, or create files.");
+  });
+
+  test("runs Hermes smoke with a writable temporary HERMES_HOME", async () => {
+    const sourceHome = await mkdtemp(join(tmpdir(), "orbs-hermes-source-"));
+    const previousHome = process.env.HERMES_HOME;
+    const envs: Array<Record<string, string | undefined> | undefined> = [];
+    let preparedHome: string | undefined;
+    process.env.HERMES_HOME = sourceHome;
+    await writeFile(join(sourceHome, ".env"), "HERMES_TEST=1\n");
+
+    try {
+      const results = await runSmokeMatrix({
+        agents: [
+          {
+            id: "hermes",
+            rawAgentCommand: "hermes acp",
+            requiredCommands: ["hermes"],
+            experimental: true,
+          },
+        ],
+        commandExists: async () => true,
+        makeTempCwd: async () => "/tmp/orbs-smoke-test",
+        cleanupTempCwd: async () => undefined,
+        runCommand: async ({ env }) => {
+          envs.push(env);
+          preparedHome = env?.HERMES_HOME;
+          expect(preparedHome).toBeDefined();
+          expect(preparedHome).not.toBe(sourceHome);
+          expect(await readFile(join(preparedHome!, ".env"), "utf8")).toBe("HERMES_TEST=1\n");
+          return {
+            exitCode: 0,
+            stdout:
+              '{"status":"done","summary":"hermes smoke ok","changedFiles":[],"checks":[{"name":"cwd","status":"passed"},{"name":"read-only prompt","status":"passed"},{"name":"final Orbs JSON","status":"passed"}],"artifacts":[],"problems":[]}',
+            stderr: "",
+          };
+        },
+      });
+
+      expect(results[0]).toMatchObject({
+        agent: "hermes",
+        status: "passed",
+        experimental: true,
+        summary: "hermes smoke ok",
+      });
+      expect(envs[0]?.HERMES_HOME).toMatch(/orbs-hermes-smoke-/);
+      await expect(access(preparedHome!)).rejects.toThrow();
+    } finally {
+      if (previousHome === undefined) {
+        delete process.env.HERMES_HOME;
+      } else {
+        process.env.HERMES_HOME = previousHome;
+      }
+      await rm(sourceHome, { recursive: true, force: true });
+    }
   });
 
   test("skips claude-code when the local ACP adapter is unavailable offline", async () => {

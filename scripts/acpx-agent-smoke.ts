@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { access, copyFile, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { childEnvForProcess } from "../packages/runner/src/executors/proxy-env";
@@ -27,6 +27,7 @@ type RunCommandInput = {
   cmd: string[];
   stdin: string;
   cwd?: string;
+  env?: Record<string, string | undefined>;
   timeoutMs?: number;
 };
 
@@ -235,12 +236,19 @@ async function smokeAgent(input: {
 }): Promise<SmokeResult> {
   const base = acpxBaseCommand(input.agent, input.cwd);
   const prompt = smokePrompt(input.cwd, input.agent);
-  const response = await input.runCommand({
-    cmd: [...base, "exec"],
-    stdin: prompt,
-    cwd: input.cwd,
-    timeoutMs: input.timeoutMs,
-  });
+  const hermesEnv = await prepareHermesSmokeEnv(input.agent);
+  let response: CommandResult;
+  try {
+    response = await input.runCommand({
+      cmd: [...base, "exec"],
+      stdin: prompt,
+      cwd: input.cwd,
+      env: hermesEnv.env,
+      timeoutMs: input.timeoutMs,
+    });
+  } finally {
+    await hermesEnv.cleanup();
+  }
   if (response.exitCode !== 0) {
     return failed(input.agent, ["prompt failed", commandDiagnostic(response)]);
   }
@@ -366,7 +374,7 @@ async function defaultAdapterAvailable(agent: SmokeAgent) {
 async function defaultRunCommand(input: RunCommandInput): Promise<CommandResult> {
   const proc = Bun.spawn(input.cmd, {
     cwd: input.cwd,
-    env: childEnvForProcess(),
+    env: { ...childEnvForProcess(), ...(input.env ?? {}) },
     stdin: "pipe",
     stdout: "pipe",
     stderr: "pipe",
@@ -399,6 +407,42 @@ async function defaultMakeTempCwd() {
 
 async function defaultCleanupTempCwd(cwd: string) {
   await rm(cwd, { recursive: true, force: true });
+}
+
+async function prepareHermesSmokeEnv(agent: SmokeAgent) {
+  if (!isHermesAgentCommand(agent.rawAgentCommand)) {
+    return { env: undefined, cleanup: async () => undefined };
+  }
+
+  const sourceHome = process.env.HERMES_HOME?.trim() || join(homedir(), ".hermes");
+  const target = await mkdtemp(join(tmpdir(), "orbs-hermes-smoke-"));
+  await mkdir(join(target, "logs"), { recursive: true });
+  await mkdir(join(target, "sessions"), { recursive: true });
+  await copyIfExists(join(sourceHome, ".env"), join(target, ".env"));
+  await copyIfExists(join(sourceHome, "config.yaml"), join(target, "config.yaml"));
+  await copyIfExists(join(sourceHome, "auth.json"), join(target, "auth.json"));
+
+  return {
+    env: { HERMES_HOME: target },
+    cleanup: async () => {
+      await rm(target, { recursive: true, force: true });
+    },
+  };
+}
+
+function isHermesAgentCommand(agentCommand: string | undefined) {
+  return agentCommand?.trim() === "hermes acp" || agentCommand?.trim() === "hermes-acp";
+}
+
+async function copyIfExists(from: string, to: string) {
+  try {
+    await access(from);
+    await copyFile(from, to);
+  } catch (error) {
+    if ((error as { code?: string }).code !== "ENOENT") {
+      throw error;
+    }
+  }
 }
 
 function failed(agent: SmokeAgent, diagnostics: string[]): SmokeResult {
