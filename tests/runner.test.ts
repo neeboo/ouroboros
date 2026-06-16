@@ -1669,6 +1669,44 @@ describe("runner", () => {
     });
   });
 
+  test("blocked verifier stop hook skips repair for external setup blockers", async () => {
+    const runId = harness.createRun({ goal: "Prove Hermes support" });
+    const verifierTask = harness.createTask({
+      runId,
+      role: "verifier",
+      goal: "Verify Hermes readiness",
+      prompt: "Verify Hermes.",
+    });
+
+    const result = await runNextReadyTask({
+      harness,
+      runId,
+      executor: async () => ({
+        status: "blocked",
+        summary: "Hermes readiness is blocked by an external setup blocker.",
+        artifacts: [
+          {
+            kind: "external_setup_blocker",
+            command: "bun run scripts/acpx-agent-smoke.ts hermes --doctor",
+            diagnostic: "setup blocker: install Hermes CLI or expose hermes/hermes-acp on the normalized child PATH",
+          },
+        ],
+        checks: [{ name: "Hermes doctor", status: "failed", evidence: "missing command: hermes" }],
+        problems: ["missing command: hermes; install or expose it on PATH"],
+      }),
+      stopHooks: [createRepairTaskHook({ harness })],
+    });
+
+    const attempt = harness.getAttempt(result!.attemptId)!;
+    expect(result?.stopDecision).toBe("exit");
+    expect(harness.nextReadyTask(runId)).toBeNull();
+    expect(attempt.output.artifacts).toContainEqual({
+      kind: "repair_skipped_external_setup_blocker",
+      verifierTaskId: verifierTask,
+      reason: "external setup blocker",
+    });
+  });
+
   test("goal-review hook patches an explicitly written runDecision from readable text", async () => {
     const runId = harness.createRun({ goal: "Configure worker model defaults" });
     const taskId = harness.createTask({

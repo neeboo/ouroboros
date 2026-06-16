@@ -56,6 +56,7 @@ export type {
   TaskConfig,
   UpdateAttemptInputInput,
   UpdateExecutionThreadInput,
+  UpdateRunInput,
   UpdateRunStatusInput,
   UpsertExecutionThreadInput,
 } from "./types";

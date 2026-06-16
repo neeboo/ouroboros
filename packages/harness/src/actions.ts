@@ -5,6 +5,14 @@ export type HarnessAction =
   | { type: "reclaimRunningTasks"; runId: string; reason?: string }
   | { type: "retryTask"; taskId: string; reason?: string }
   | { type: "markRunTodo"; runId: string; reason?: string }
+  | {
+      type: "updateRunContext";
+      runId: string;
+      contextPatch: Record<string, unknown>;
+      goal?: string;
+      status?: "todo" | "running" | "done" | "blocked";
+      reason?: string;
+    }
   | { type: "retireRun"; runId: string; reason: string }
   | { type: "prepareRunDrain"; runId: string; maxTries?: number; reason?: string }
   | { type: "completeSystemTask"; taskId: string; actionEventId: string; reason?: string }
@@ -52,6 +60,16 @@ export function parseHarnessAction(value: unknown): HarnessAction {
   if (type === "markRunTodo") {
     return { type, runId: stringField(record, "runId"), reason: optionalStringField(record, "reason") };
   }
+  if (type === "updateRunContext") {
+    return {
+      type,
+      runId: stringField(record, "runId"),
+      contextPatch: objectRecord(record["contextPatch"], "contextPatch"),
+      goal: optionalStringField(record, "goal"),
+      status: optionalStatusField(record, "status"),
+      reason: optionalStringField(record, "reason"),
+    };
+  }
   if (type === "retireRun") {
     return { type, runId: stringField(record, "runId"), reason: stringField(record, "reason") };
   }
@@ -88,7 +106,7 @@ export function parseHarnessAction(value: unknown): HarnessAction {
     };
   }
   throw new Error(
-    "harness action type must be reclaimRunningTasks, retryTask, markRunTodo, retireRun, prepareRunDrain, completeSystemTask, interruptAttemptAndCreateTask, or interruptRunningAttemptsAndCreateTask",
+    "harness action type must be reclaimRunningTasks, retryTask, markRunTodo, updateRunContext, retireRun, prepareRunDrain, completeSystemTask, interruptAttemptAndCreateTask, or interruptRunningAttemptsAndCreateTask",
   );
 }
 
@@ -152,6 +170,39 @@ function applyParsedHarnessAction(harness: Harness, action: HarnessAction): Harn
       { name: "run exists", status: "passed", evidence: action.runId },
       { name: "run status", status: "passed", evidence: "todo" },
     ], [{ kind: "run", runId: action.runId, previousStatus: run.status, status: "todo", reason: action.reason ?? null }]);
+  }
+
+  if (action.type === "updateRunContext") {
+    const run = harness.getRun(action.runId);
+    if (!run) {
+      return blockedResult(action.type, `Run not found: ${action.runId}`, [`run not found: ${action.runId}`]);
+    }
+    const updated = harness.updateRun({
+      runId: action.runId,
+      goal: action.goal,
+      status: action.status,
+      contextPatch: action.contextPatch,
+    });
+    if (!updated) {
+      return blockedResult(action.type, `Run not found: ${action.runId}`, [`run not found: ${action.runId}`]);
+    }
+    const patchedKeys = Object.keys(action.contextPatch).sort();
+    return doneResult(action.type, `Run ${action.runId} context updated.`, [
+      { name: "run exists", status: "passed", evidence: action.runId },
+      { name: "patched context keys", status: "passed", evidence: patchedKeys.join(",") || "none" },
+      { name: "run status", status: "passed", evidence: updated.status },
+    ], [
+      {
+        kind: "run_context_update",
+        runId: action.runId,
+        previousGoal: run.goal,
+        goal: updated.goal,
+        previousStatus: run.status,
+        status: updated.status,
+        patchedKeys,
+        reason: action.reason ?? null,
+      },
+    ]);
   }
 
   if (action.type === "retireRun") {
@@ -655,6 +706,17 @@ function optionalStringField(record: Record<string, unknown>, key: string) {
     throw new Error(`${key} must be a string`);
   }
   return value.trim();
+}
+
+function optionalStatusField(record: Record<string, unknown>, key: string) {
+  const value = record[key];
+  if (value === undefined) {
+    return undefined;
+  }
+  if (value !== "todo" && value !== "running" && value !== "done" && value !== "blocked") {
+    throw new Error(`${key} must be todo, running, done, or blocked`);
+  }
+  return value;
 }
 
 function followUpTaskField(record: Record<string, unknown>, key: string) {

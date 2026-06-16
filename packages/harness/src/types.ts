@@ -190,6 +190,13 @@ export interface UpdateRunStatusInput {
   status: Status;
 }
 
+export interface UpdateRunInput {
+  runId: string;
+  goal?: string;
+  status?: Status;
+  contextPatch?: Record<string, unknown>;
+}
+
 export interface CreateTaskInput {
   runId: string;
   role: string;

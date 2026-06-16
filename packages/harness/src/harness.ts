@@ -61,6 +61,7 @@ import type {
   Status,
   Task,
   UpdateRunStatusInput,
+  UpdateRunInput,
   UpdateAttemptInputInput,
   UpdateExecutionThreadInput,
   UpsertExecutionThreadInput,
@@ -150,6 +151,33 @@ export class Harness {
         $status: input.status,
         $runId: input.runId,
       });
+    });
+  }
+
+  updateRun(input: UpdateRunInput) {
+    return withDatabase(this.dbPath, (db) => {
+      const existing = db.query("select * from runs where id = $runId").get({ $runId: input.runId }) as RunRow | null;
+      if (!existing) {
+        return null;
+      }
+      const current = runFromRow(existing);
+      const nextContext = input.contextPatch ? { ...current.context, ...input.contextPatch } : current.context;
+      db.query(
+        `
+        update runs
+        set goal = $goal,
+            status = $status,
+            context_json = $contextJson,
+            updated_at = current_timestamp
+        where id = $runId
+        `,
+      ).run({
+        $goal: input.goal ?? current.goal,
+        $status: input.status ?? current.status,
+        $contextJson: toJson(nextContext),
+        $runId: input.runId,
+      });
+      return this.getRun(input.runId);
     });
   }
 

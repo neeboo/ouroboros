@@ -142,6 +142,56 @@ describe("Harness actions", () => {
     });
   });
 
+  test("updates run context through an audited action", () => {
+    const runId = harness.createRun({
+      goal: "Prove backend support",
+      context: {
+        targetBackends: ["codex", "hermes"],
+        keep: true,
+      },
+    });
+
+    const result = applyHarnessAction(harness, {
+      type: "updateRunContext",
+      runId,
+      goal: "Prove Hermes support first",
+      contextPatch: {
+        targetBackends: ["hermes"],
+        scope: "hermes-first",
+      },
+      reason: "narrow user scope to Hermes",
+    });
+    const run = harness.getRun(runId)!;
+    const event = harness.listHarnessActionEvents({ limit: 1 })[0];
+
+    expect(result).toMatchObject({
+      status: "done",
+      actionType: "updateRunContext",
+      eventId: expect.any(String),
+    });
+    expect(run.goal).toBe("Prove Hermes support first");
+    expect(run.status).toBe("todo");
+    expect(run.context).toEqual({
+      targetBackends: ["hermes"],
+      keep: true,
+      scope: "hermes-first",
+    });
+    expect(result.artifacts).toContainEqual(
+      expect.objectContaining({
+        kind: "run_context_update",
+        runId,
+        previousGoal: "Prove backend support",
+        goal: "Prove Hermes support first",
+        patchedKeys: ["scope", "targetBackends"],
+      }),
+    );
+    expect(event).toMatchObject({
+      actionType: "updateRunContext",
+      status: "done",
+      request: expect.objectContaining({ runId, reason: "narrow user scope to Hermes" }),
+    });
+  });
+
   test("interrupts a running attempt, records overseer evidence, and creates a follow-up task", () => {
     const runId = harness.createRun({ goal: "Interrupt and replan" });
     const taskId = harness.createTask({

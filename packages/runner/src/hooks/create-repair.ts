@@ -7,6 +7,19 @@ export function createRepairTaskHook(options: { harness: Harness }): StopHook {
     if (task.role !== "verifier" || output.status !== "blocked") {
       return { decision: "exit" };
     }
+    const externalBlocker = externalSetupBlockerReason(output);
+    if (externalBlocker) {
+      return {
+        decision: "exit",
+        artifacts: [
+          {
+            kind: "repair_skipped_external_setup_blocker",
+            verifierTaskId: task.id,
+            reason: externalBlocker,
+          },
+        ],
+      };
+    }
 
     const taskId = options.harness.createTask({
       runId: run.id,
@@ -32,6 +45,32 @@ export function createRepairTaskHook(options: { harness: Harness }): StopHook {
       ],
     };
   };
+}
+
+function externalSetupBlockerReason(output: AttemptOutput) {
+  const haystack = [
+    output.summary,
+    ...(output.problems ?? []),
+    ...(output.checks ?? []),
+    ...(output.artifacts ?? []),
+  ]
+    .map((value) => readableValue(value))
+    .join("\n")
+    .toLowerCase();
+
+  if (haystack.includes("external_setup_blocker") || haystack.includes("external setup blocker")) {
+    return "external setup blocker";
+  }
+  if (haystack.includes("setup blocker") && (haystack.includes("install") || haystack.includes("expose") || haystack.includes("path"))) {
+    return "setup blocker requires external environment change";
+  }
+  if (
+    (haystack.includes("missing command") || haystack.includes("missing from the normalized child path")) &&
+    (haystack.includes("install") || haystack.includes("expose") || haystack.includes("path"))
+  ) {
+    return "missing external command";
+  }
+  return null;
 }
 
 function buildRepairPrompt(template: string | undefined, verifierTaskId: string, output: AttemptOutput) {
