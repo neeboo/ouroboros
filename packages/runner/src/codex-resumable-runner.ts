@@ -334,9 +334,9 @@ class CodexResumableOrchestrator {
 
   async resumeRunningAttempts(input: { runId: string; limit: number }) {
     const attempts = this.harness.listRunningAttempts({ runId: input.runId }).slice(0, input.limit);
-    const sessionsByAttemptId = new Map(
-      this.harness.getRunOverview({ runId: input.runId, eventLimit: 1 }).sessions.map((session) => [session.attemptId, session]),
-    );
+    const overview = this.harness.getRunOverview({ runId: input.runId, eventLimit: 1 });
+    const sessionsByAttemptId = new Map(overview.sessions.map((session) => [session.attemptId, session]));
+    const threadsByAttemptId = new Map(overview.threads.map((thread) => [thread.attemptId, thread]));
     const tasks = await Promise.all(attempts.map(async (attempt) => {
       const task = this.harness.getTask(attempt.taskId);
       if (!task) return null;
@@ -346,7 +346,8 @@ class CodexResumableOrchestrator {
       if (!sessionId) {
         const sessionName = typeof attempt.input.sessionName === "string" ? attempt.input.sessionName : `attempt-${attempt.id}`;
         const cwd = typeof attempt.input.cwd === "string" ? attempt.input.cwd : task.worktreePath ?? this.cwd;
-        if (this.runningAttemptIsFresh(sessionsByAttemptId.get(attempt.id))) {
+        const thread = threadsByAttemptId.get(attempt.id);
+        if (this.runningAttemptIsFresh(sessionsByAttemptId.get(attempt.id), thread)) {
           this.upsertAttemptThread({ runId: run.id, task, attemptId: attempt.id, sessionName, cwd, status: "running" });
           return { taskId: task.id, attemptId: attempt.id, sessionName, status: "running" as const, codexSessionId: null };
         }
@@ -843,7 +844,13 @@ class CodexResumableOrchestrator {
     });
   }
 
-  private runningAttemptIsFresh(session: { startedAt: string | null; events: Array<{ createdAt: string }> } | undefined) {
+  private runningAttemptIsFresh(
+    session: { startedAt: string | null; events: Array<{ createdAt: string }> } | undefined,
+    thread?: { pid: number | null },
+  ) {
+    if (thread?.pid && !processIsAlive(thread.pid)) {
+      return false;
+    }
     const lastEventAt = session?.events.at(-1)?.createdAt;
     const heartbeatAt = parseTimestampMs(lastEventAt) ?? parseTimestampMs(session?.startedAt);
     return heartbeatAt !== null && Date.now() - heartbeatAt < this.staleMs;
@@ -1017,6 +1024,15 @@ function parseTimestampMs(value: string | null | undefined) {
   const normalized = value.includes("T") ? value : `${value.replace(" ", "T")}Z`;
   const ms = Date.parse(normalized);
   return Number.isFinite(ms) ? ms : null;
+}
+
+function processIsAlive(pid: number) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function sleep(ms: number) {

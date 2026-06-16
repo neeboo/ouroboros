@@ -574,6 +574,63 @@ describe("runner", () => {
     expect(thread.status).toBe("blocked");
   });
 
+  test("runner-owned codex loop orphans running attempts when the owner pid is gone", async () => {
+    const runId = harness.createRun({ goal: "Recover dead owner" });
+    const taskId = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Recover stale running attempt",
+      prompt: "Continue.",
+    });
+    const attemptId = harness.startAttempt({
+      taskId,
+      input: { sessionName: "dead-owner", executor: "codex-resumable" },
+    });
+    harness.upsertExecutionThread({
+      id: `thread_${attemptId}`,
+      runId,
+      taskId,
+      attemptId,
+      ownerType: "runner",
+      ownerId: "dead-owner-test",
+      role: "worker",
+      status: "running",
+      pid: 99999999,
+      sessionName: "dead-owner",
+    });
+
+    const result = await runCodexResumableLoop({
+      harness,
+      runId,
+      limit: 1,
+      maxRounds: 1,
+      maxTries: 3,
+      cwd: dir,
+      clientFactory: () => ({
+        start: async () => {
+          throw new Error("start should not be called");
+        },
+        resume: async () => {
+          throw new Error("resume should not be called");
+        },
+      }),
+    });
+
+    const attempt = harness.getAttempt(attemptId)!;
+    const task = harness.getTask(taskId)!;
+    const thread = harness.getRunOverview({ runId, eventLimit: 1 }).threads.find((candidate) => candidate.attemptId === attemptId)!;
+
+    expect(result.rounds[0].tasks[0]).toMatchObject({
+      taskId,
+      attemptId,
+      status: "blocked",
+      codexSessionId: null,
+    });
+    expect(attempt.status).toBe("blocked");
+    expect(task.status).toBe("todo");
+    expect(thread.status).toBe("orphaned");
+  });
+
   test("supervisor integrates a completed verified run when enabled", async () => {
     const repoPath = join(dir, "repo");
     const worktreePath = join(dir, "verified-worker");
