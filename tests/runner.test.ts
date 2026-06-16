@@ -1777,6 +1777,43 @@ describe("runner", () => {
     });
   });
 
+  test("blocked verifier stop hook skips repair for Hermes provider connection blockers", async () => {
+    const runId = harness.createRun({ goal: "Prove Hermes support" });
+    const verifierTask = harness.createTask({
+      runId,
+      role: "verifier",
+      goal: "Verify Hermes smoke",
+      prompt: "Verify Hermes acpx read-only prompt.",
+    });
+
+    const result = await runNextReadyTask({
+      harness,
+      runId,
+      executor: async () => ({
+        status: "blocked",
+        summary: "Hermes ACP/acpx read-only prompt readiness remains unproven because provider connectivity failed.",
+        checks: [
+          {
+            name: "bun run scripts/acpx-agent-smoke.ts hermes",
+            status: "failed",
+            evidence: "API call failed after 3 retries: Connection error.",
+          },
+        ],
+        problems: ["Hermes smoke reached session/new, then the provider returned APIConnectionError."],
+      }),
+      stopHooks: [createRepairTaskHook({ harness })],
+    });
+
+    const attempt = harness.getAttempt(result!.attemptId)!;
+    expect(result?.stopDecision).toBe("exit");
+    expect(harness.nextReadyTask(runId)).toBeNull();
+    expect(attempt.output.artifacts).toContainEqual({
+      kind: "repair_skipped_external_setup_blocker",
+      verifierTaskId: verifierTask,
+      reason: "provider connectivity requires external environment change",
+    });
+  });
+
   test("goal-review hook patches an explicitly written runDecision from readable text", async () => {
     const runId = harness.createRun({ goal: "Configure worker model defaults" });
     const taskId = harness.createTask({

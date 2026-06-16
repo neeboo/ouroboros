@@ -78,6 +78,15 @@ function externalSetupBlockerReason(output: AttemptOutput) {
   ) {
     return "missing external command";
   }
+  if (
+    (haystack.includes("api call failed") ||
+      haystack.includes("apiconnectionerror") ||
+      haystack.includes("connection error") ||
+      haystack.includes("provider connectivity")) &&
+    (haystack.includes("hermes") || haystack.includes("acpx") || haystack.includes("provider"))
+  ) {
+    return "provider connectivity requires external environment change";
+  }
   return null;
 }
 
