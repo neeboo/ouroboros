@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { Harness } from "../packages/harness/src";
@@ -22,6 +22,7 @@ import {
   runNextReadyTask,
   runReadyTasks,
   setRunDecisionAction,
+  superviseCodexRuns,
   runUntilIdle,
 } from "../packages/runner/src";
 
@@ -524,6 +525,117 @@ describe("runner", () => {
       env_key: "OPENAI_API_KEY",
     });
     expect(attempt.output.artifacts).toContainEqual({ kind: "codex_session", sessionId: "session_runner" });
+  });
+
+  test("supervisor integrates a completed verified run when enabled", async () => {
+    const repoPath = join(dir, "repo");
+    const worktreePath = join(dir, "verified-worker");
+    await mkdir(repoPath, { recursive: true });
+    await writeFile(join(repoPath, "README.md"), "initial\n");
+    git(repoPath, ["init", "-b", "main"]);
+    git(repoPath, ["add", "README.md"]);
+    git(repoPath, ["-c", "user.name=Ouroboros Test", "-c", "user.email=test@example.com", "commit", "-m", "Initial commit"]);
+    git(repoPath, ["worktree", "add", "-b", "task-verified-worker", worktreePath, "main"]);
+    await mkdir(join(worktreePath, "src"), { recursive: true });
+    await writeFile(join(worktreePath, "src", "supervised.ts"), "export const supervised = true;\n");
+
+    const runId = harness.createRun({ goal: "Integrate supervised work", projectRoot: repoPath });
+    const workerTaskId = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Implement supervised file",
+      prompt: "Create src/supervised.ts.",
+      worktreePath,
+    });
+    harness.recordAttempt({
+      taskId: workerTaskId,
+      input: { executor: "test" },
+      output: {
+        status: "done",
+        summary: "Created supervised file",
+        changedFiles: ["src/supervised.ts"],
+        checks: [{ name: "worker check", status: "passed" }],
+        artifacts: [],
+        problems: [],
+      },
+    });
+    const verifierTaskId = harness.createTask({
+      runId,
+      role: "verifier",
+      goal: "Verify supervised file",
+      prompt: "Verify worker output.",
+      dependsOn: [workerTaskId],
+    });
+    harness.recordAttempt({
+      taskId: verifierTaskId,
+      input: { executor: "test" },
+      output: {
+        status: "done",
+        summary: "Verified supervised file",
+        changedFiles: [],
+        checks: [{ name: "verify", status: "passed" }],
+        artifacts: [],
+        problems: [],
+      },
+    });
+    harness.createTask({
+      runId,
+      role: "goal-review",
+      goal: "Review completion",
+      prompt: "Return runDecision complete.",
+      dependsOn: [verifierTaskId],
+    });
+
+    const result = await superviseCodexRuns({
+      harness,
+      cwd: repoPath,
+      rootRunId: runId,
+      runConcurrency: 1,
+      taskConcurrency: 1,
+      maxCycles: 1,
+      maxRounds: 1,
+      maxTries: 3,
+      intervalMs: 1,
+      integrateCompletedRuns: true,
+      clientFactory: () => ({
+        start: async () => ({
+          status: "done" as const,
+          sessionId: "session_goal_review",
+          outputPath: join(dir, "goal-review-output.json"),
+          stdout: "",
+          stderr: "",
+          events: [],
+          output: {
+            status: "done" as const,
+            runDecision: "complete" as const,
+            summary: "Goal reached",
+            changedFiles: [],
+            checks: [{ name: "goal", status: "passed" }],
+            artifacts: [],
+            problems: [],
+          },
+        }),
+        resume: async () => {
+          throw new Error("resume should not be called");
+        },
+      }),
+    });
+    const mergedFile = await readFile(join(repoPath, "src", "supervised.ts"), "utf8");
+    const actionEvent = harness.listHarnessActionEvents({ limit: 1 })[0];
+
+    expect(result.cycles[0].runs[0]).toMatchObject({
+      runId,
+      status: "done",
+      integration: expect.objectContaining({
+        status: "done",
+        actionType: "integrateVerifiedRun",
+      }),
+    });
+    expect(mergedFile.trim()).toBe("export const supervised = true;");
+    expect(actionEvent).toMatchObject({
+      actionType: "integrateVerifiedRun",
+      status: "done",
+    });
   });
 
   test("runner keeps dependency attempts empty for tasks without dependencies", async () => {
@@ -2613,3 +2725,16 @@ describe("runner", () => {
     expect(harness.nextReadyTask(runId)).toBeNull();
   });
 });
+
+function git(cwd: string, args: string[]) {
+  const result = Bun.spawnSync({
+    cmd: ["git", ...args],
+    cwd,
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const stdout = new TextDecoder().decode(result.stdout);
+  const stderr = new TextDecoder().decode(result.stderr);
+  expect(result.exitCode, `git ${args.join(" ")}\n${stderr || stdout}`).toBe(0);
+  return { stdout, stderr };
+}

@@ -490,6 +490,8 @@ Supported actions:
 
 `integrateVerifiedRun` is the overseer-owned integration path. It only runs after the run is `done`, an execution task has changed-file evidence and a worktree, a verifier depending on that task has completed without failed checks, and a `goal-review` task has returned `runDecision: "complete"`. The action may commit dirty worker worktree changes, merge the worker branch into the target branch, and optionally push. If any preflight or git command fails, it records a blocked action event and leaves integration for repair or human review.
 
+`supervise-runs` and `supervise-daemon` can call this action automatically with `--integrate-complete-runs`. The default remains off so planning-only runs and read-only experiments do not unexpectedly touch git. `--integration-target-branch <branch>` defaults to `main`; `--integration-push` opts into pushing after a successful local merge.
+
 Every action writes a `harness_action_events` audit row with the validated request, result, checks, artifacts, and problems. Verifiers should cite these rows when checking whether a system-level repair actually happened.
 
 Commit hooks should be explicit and opt-in. The default stop hook behavior should inspect and summarize, not create commits.

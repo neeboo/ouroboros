@@ -1,4 +1,4 @@
-import type { AttemptOutput, Harness, Task } from "@ouroboros/harness";
+import { applyHarnessAction, type AttemptOutput, type Harness, type HarnessActionResult, type RunOverview, type Task } from "@ouroboros/harness";
 import { buildTaskPrompt } from "./prompt";
 import { applyStartHooks } from "./runner";
 import { createCodexResumableClient } from "./executors/codex-resumable";
@@ -117,6 +117,9 @@ export interface SuperviseCodexRunsInput extends CodexResumableOrchestrationInpu
   maxRounds: number;
   maxTries: number;
   intervalMs: number;
+  integrateCompletedRuns?: boolean;
+  integrationTargetBranch?: string;
+  integrationPush?: boolean;
 }
 
 export async function superviseCodexRuns(input: SuperviseCodexRunsInput) {
@@ -135,12 +138,14 @@ export async function superviseCodexRuns(input: SuperviseCodexRunsInput) {
         maxTries: input.maxTries,
       });
       const overview = input.harness.getRunOverview({ runId: run.id, eventLimit: 0 });
+      const integration = maybeIntegrateCompletedRun(input, overview);
       return {
         runId: run.id,
         goal: run.goal,
         status: overview.run?.status ?? run.status,
         rounds: result.rounds,
         activeTasks: overview.tasks.filter((task) => task.status === "todo" || task.status === "running").length,
+        integration,
       };
     }));
     cycles.push({ index, runs: results });
@@ -161,6 +166,9 @@ export interface SuperviseCodexDaemonInput extends CodexResumableOrchestrationIn
   intervalMs: number;
   idleMs: number;
   maxTicks: number;
+  integrateCompletedRuns?: boolean;
+  integrationTargetBranch?: string;
+  integrationPush?: boolean;
   onTick?: (tick: Record<string, unknown>) => void;
 }
 
@@ -888,6 +896,37 @@ function runnableRuns(harness: Harness, input: { limit: number; rootRunId?: stri
   const runs = harness.listRuns({ statuses: ["todo", "running"], limit: 500 });
   const scoped = input.rootRunId ? runsInScope(runs, input.rootRunId) : runs;
   return scoped.filter((run) => run.status !== "done").slice(0, input.limit);
+}
+
+function maybeIntegrateCompletedRun(
+  input: Pick<SuperviseCodexRunsInput, "harness" | "integrateCompletedRuns" | "integrationTargetBranch" | "integrationPush">,
+  overview: RunOverview,
+): (HarnessActionResult & { eventId: string }) | null {
+  if (!input.integrateCompletedRuns || overview.run?.status !== "done") {
+    return null;
+  }
+  const worker = selectIntegrationCandidate(overview);
+  if (!worker) {
+    return null;
+  }
+  return applyHarnessAction(input.harness, {
+    type: "integrateVerifiedRun",
+    runId: overview.run.id,
+    workerTaskId: worker.id,
+    targetBranch: input.integrationTargetBranch ?? "main",
+    push: input.integrationPush ?? false,
+    reason: "supervisor integrated a completed verified run",
+  });
+}
+
+function selectIntegrationCandidate(overview: RunOverview): Task | null {
+  return [...overview.tasks].reverse().find((task) => {
+    if (["planner", "verifier", "goal-review"].includes(task.role) || task.status !== "done" || !task.worktreePath) {
+      return false;
+    }
+    const session = [...overview.sessions].reverse().find((candidate) => candidate.taskId === task.id && candidate.status === "done");
+    return Array.isArray(session?.output.changedFiles) && session.output.changedFiles.length > 0;
+  }) ?? null;
 }
 
 function runsInScope(runs: ReturnType<Harness["listRuns"]>, rootRunId: string) {

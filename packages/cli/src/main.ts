@@ -455,6 +455,9 @@ switch (parsed.command) {
         maxRounds: parsePositiveInteger(flag(parsed, "max-rounds") ?? "1", "--max-rounds"),
         maxTries: parsePositiveInteger(flag(parsed, "max-tries") ?? String(DEFAULT_MAX_TRIES), "--max-tries"),
         intervalMs: parseNonNegativeInteger(flag(parsed, "interval-ms") ?? "1500", "--interval-ms"),
+        integrateCompletedRuns: flag(parsed, "integrate-complete-runs") !== undefined,
+        integrationTargetBranch: flag(parsed, "integration-target-branch") ?? "main",
+        integrationPush: flag(parsed, "integration-push") !== undefined,
       }),
     );
     break;
@@ -476,6 +479,9 @@ switch (parsed.command) {
       intervalMs: parseNonNegativeInteger(flag(parsed, "interval-ms") ?? "1500", "--interval-ms"),
       idleMs: parseNonNegativeInteger(flag(parsed, "idle-ms") ?? flag(parsed, "interval-ms") ?? "1500", "--idle-ms"),
       maxTicks,
+      integrateCompletedRuns: flag(parsed, "integrate-complete-runs") !== undefined,
+      integrationTargetBranch: flag(parsed, "integration-target-branch") ?? "main",
+      integrationPush: flag(parsed, "integration-push") !== undefined,
       onTick: maxTicks === 0 ? (tick) => console.log(JSON.stringify(tick)) : undefined,
     });
     printJson(result);
