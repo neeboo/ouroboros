@@ -18,6 +18,7 @@ import {
   parseAttemptOutput,
   resolveAgentBackend,
   resolveExecutionRoute,
+  runCodexResumableLoop,
   runNextReadyTask,
   runReadyTasks,
   setRunDecisionAction,
@@ -444,6 +445,85 @@ describe("runner", () => {
     expect(dependencySection).toContain('"status": "passed"');
     expect(dependencySection).not.toContain(olderAttempt);
     expect(dependencySection).not.toContain("Older implementation attempt");
+  });
+
+  test("runner-owned codex loop starts ready resumable tasks and preserves inert model metadata", async () => {
+    const runId = harness.createRun({
+      goal: "Build loop",
+      context: {
+        modelDefaults: {
+          roles: {
+            worker: {
+              model: "gpt-5-mini",
+              reason: "cheap worker",
+              provider: "openai",
+              profile: "fast",
+              base_url: "https://api.example.test/v1",
+              env_key: "OPENAI_API_KEY",
+            },
+          },
+        },
+      },
+    });
+    const taskId = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Implement runner",
+      prompt: "Implement the smallest runner.",
+    });
+    const clientModels: Array<string | undefined> = [];
+
+    const result = await runCodexResumableLoop({
+      harness,
+      runId,
+      limit: 1,
+      maxRounds: 1,
+      maxTries: 3,
+      cwd: dir,
+      clientFactory: ({ model }) => {
+        clientModels.push(model);
+        return {
+          start: async () => ({
+            status: "done" as const,
+            sessionId: "session_runner",
+            outputPath: join(dir, "output.json"),
+            stdout: "",
+            stderr: "",
+            events: [],
+            output: {
+              status: "done" as const,
+              summary: "Implemented runner",
+              changedFiles: [],
+              checks: [],
+              artifacts: [],
+              problems: [],
+            },
+          }),
+          resume: async () => {
+            throw new Error("resume should not be called");
+          },
+        };
+      },
+    });
+
+    const attemptId = result.rounds[0].tasks[0].attemptId;
+    const attempt = harness.getAttempt(attemptId)!;
+
+    expect(result.rounds[0].tasks[0]).toMatchObject({
+      taskId,
+      status: "done",
+      codexSessionId: "session_runner",
+    });
+    expect(clientModels).toEqual(["gpt-5-mini"]);
+    expect(attempt.input.model).toMatchObject({
+      model: "gpt-5-mini",
+      reason: "cheap worker",
+      provider: "openai",
+      profile: "fast",
+      base_url: "https://api.example.test/v1",
+      env_key: "OPENAI_API_KEY",
+    });
+    expect(attempt.output.artifacts).toContainEqual({ kind: "codex_session", sessionId: "session_runner" });
   });
 
   test("runner keeps dependency attempts empty for tasks without dependencies", async () => {
