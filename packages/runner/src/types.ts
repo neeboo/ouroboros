@@ -1,4 +1,5 @@
 import type { AttemptOutput, Harness, Lesson, Run, Task } from "@ouroboros/harness";
+import type { ResolvedExecutionRoute } from "./execution-routing";
 import type { ResolvedModelPreference } from "./model-preferences";
 
 export interface PromptInput {
@@ -14,6 +15,7 @@ export interface ExecutorInput {
   run: Run;
   task: Task;
   sessionName: string;
+  route?: ResolvedExecutionRoute;
   resolvedModel?: ResolvedModelPreference | null;
 }
 
@@ -38,6 +40,7 @@ export interface ExecutorFactoryInput {
   task: Task;
   sessionName: string;
   cwd: string;
+  route: ResolvedExecutionRoute;
   resolvedModel: ResolvedModelPreference | null;
 }
 
@@ -55,6 +58,8 @@ export interface RunReadyTasksInput {
   executorFactory: TaskExecutorFactory;
   attemptInput?: AttemptInputFactory;
   model?: string | null;
+  cliAgentBackend?: string | null;
+  cliExecutor?: string | null;
   startHooks?: StartHook[];
   stopHooks?: StopHook[];
   stopHooksByRole?: StopHooksByRole;

@@ -380,6 +380,8 @@ switch (parsed.command) {
       runId,
       limit,
       model: flag(parsed, "model"),
+      cliAgentBackend: flag(parsed, "agent-backend"),
+      cliExecutor: executorName,
       cwd: runnerCwd(),
       sessionForTask: (task) => task.sessionRef ?? `task-${task.id}`,
       worktreeForTask: worktreeForTask(),
@@ -407,6 +409,8 @@ switch (parsed.command) {
       limit,
       maxRounds,
       model: flag(parsed, "model"),
+      cliAgentBackend: flag(parsed, "agent-backend"),
+      cliExecutor: executorName,
       cwd: runnerCwd(),
       sessionForTask: (task) => task.sessionRef ?? `task-${task.id}`,
       worktreeForTask: worktreeForTask(),
@@ -879,14 +883,10 @@ function executorFactory(executorName: "noop" | "acpx-codex" | "codex-cli" | "co
     run: NonNullable<ReturnType<Harness["getRun"]>>;
     task: NonNullable<ReturnType<Harness["getTask"]>>;
     cwd: string;
+    route: ResolvedExecutionRoute;
     resolvedModel: ResolvedExecutionRoute["model"];
   }) => {
-    const route = resolveCliExecutionRoute({
-      run: input.run,
-      task: input.task,
-      cliExecutor: executorName,
-    });
-    const backend = route.backend;
+    const backend = input.route.backend;
     if (backend.kind === "noop") {
       return async ({ task }: { task: { id: string } }) => ({
         status: "done" as const,
@@ -902,7 +902,7 @@ function executorFactory(executorName: "noop" | "acpx-codex" | "codex-cli" | "co
         cwd: input.cwd,
         ...acpxAgentConfig(backend),
         approval: backend.approval ?? parseApproval(flag(parsed, "approval") ?? "approve-reads"),
-        model: route.model?.model,
+        model: input.route.model?.model,
         env: backend.env,
         timeoutMs: parseTimeoutMs(flag(parsed, "timeout-ms")),
         idleTimeoutMs: parseTimeoutMs(flag(parsed, "idle-timeout-ms"), "--idle-timeout-ms"),
@@ -915,7 +915,7 @@ function executorFactory(executorName: "noop" | "acpx-codex" | "codex-cli" | "co
       cwd: input.cwd,
       sandbox: parseSandbox(flag(parsed, "sandbox") ?? "read-only"),
       codexBin: flag(parsed, "codex-bin"),
-      model: route.model?.model,
+      model: input.route.model?.model,
       timeoutMs: parseTimeoutMs(flag(parsed, "timeout-ms")),
       idleTimeoutMs: parseTimeoutMs(flag(parsed, "idle-timeout-ms"), "--idle-timeout-ms"),
     });
@@ -927,8 +927,9 @@ function attemptInputFactory(executorName: "noop" | "acpx-codex" | "codex-cli" |
     run: NonNullable<ReturnType<Harness["getRun"]>>;
     task: NonNullable<ReturnType<Harness["getTask"]>>;
     cwd: string;
+    route: ResolvedExecutionRoute;
     resolvedModel: unknown;
-  }) => attemptInputForRoute(resolveCliExecutionRoute({ run: input.run, task: input.task, cliExecutor: executorName }), input.cwd);
+  }) => attemptInputForRoute(input.route, input.cwd);
 }
 
 function resolveCliExecutionRoute(input: {
@@ -2131,6 +2132,7 @@ async function runLeasedGenericAttempt(input: {
     task: input.task,
     sessionName: input.sessionName,
     cwd: input.cwd,
+    route: input.route,
     resolvedModel: input.route.model,
   };
   const attemptId = harness.startAttempt({

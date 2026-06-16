@@ -1,6 +1,6 @@
 import type { Harness, Task } from "@ouroboros/harness";
 import { buildTaskPrompt } from "./prompt";
-import { resolveModelPreference } from "./model-preferences";
+import { resolveExecutionRoute } from "./execution-routing";
 import type {
   RunNextReadyTaskInput,
   RunReadyTasksInput,
@@ -29,8 +29,8 @@ export async function runNextReadyTask(input: RunNextReadyTaskInput) {
     template: input.harness.getPromptTemplate("task")?.contentMd,
   });
   const sessionName = task.sessionRef ?? defaultSessionName(task.id);
-  const resolvedModel = resolveModelPreference({ run, task });
-  const rawOutput = await input.executor({ prompt, run, task, sessionName, resolvedModel });
+  const route = resolveExecutionRoute({ run, task });
+  const rawOutput = await input.executor({ prompt, run, task, sessionName, route, resolvedModel: route.model });
   const { output, decision } = await applyStopHooks({
     hooks: hooksForTask(input.stopHooks, input.stopHooksByRole, task),
     run,
@@ -41,7 +41,7 @@ export async function runNextReadyTask(input: RunNextReadyTaskInput) {
   });
   const attemptId = input.harness.recordAttempt({
     taskId: task.id,
-    input: { prompt, model: resolvedModel },
+    input: { prompt, route, model: route.model },
     output,
   });
   applyPostAttemptRunEffects(input.harness, input.runId, task, output);
@@ -98,10 +98,17 @@ export async function runReadyTasks(input: RunReadyTasksInput) {
         lessons: input.harness.listLessons({ runId: input.runId }),
         template: input.harness.getPromptTemplate("task")?.contentMd,
       });
-      const resolvedModel = resolveModelPreference({ run, task, globalModel: input.model });
-      const factoryInput = { run, task, sessionName, cwd, resolvedModel };
+      const route = resolveExecutionRoute({
+        run,
+        task,
+        cliAgentBackend: input.cliAgentBackend,
+        cliExecutor: input.cliExecutor,
+        globalModel: input.model,
+      });
+      const resolvedModel = route.model;
+      const factoryInput = { run, task, sessionName, cwd, route, resolvedModel };
       const executor = input.executorFactory(factoryInput);
-      const rawOutput = await executor({ prompt, run, task, sessionName, resolvedModel });
+      const rawOutput = await executor({ prompt, run, task, sessionName, route, resolvedModel });
       const { output, decision } = await applyStopHooks({
         hooks: hooksForTask(input.stopHooks, input.stopHooksByRole, task),
         run,
@@ -114,7 +121,7 @@ export async function runReadyTasks(input: RunReadyTasksInput) {
       output.artifacts = [...(startResult.artifacts ?? []), ...(output.artifacts ?? [])];
       const attemptId = input.harness.recordAttempt({
         taskId: task.id,
-        input: { prompt, sessionName, model: resolvedModel, ...(input.attemptInput?.(factoryInput) ?? {}) },
+        input: { prompt, sessionName, route, model: resolvedModel, ...(input.attemptInput?.(factoryInput) ?? {}) },
         output,
       });
       applyPostAttemptRunEffects(input.harness, input.runId, task, output);

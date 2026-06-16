@@ -1491,8 +1491,8 @@ describe("runner", () => {
         checks: [],
         problems: [],
       }),
-      attemptInput: ({ run, task, cwd }) => {
-        const route = resolveExecutionRoute({ run, task, cliExecutor: "codex-cli", globalModel: "global-model" });
+      cliExecutor: "codex-cli",
+      attemptInput: ({ cwd, route }) => {
         return {
           route,
           backend: route.backend,
