@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { Harness } from "../packages/harness/src";
 import { Database } from "bun:sqlite";
 
@@ -1511,13 +1511,23 @@ describe("CLI", () => {
       attemptId: started.attemptId,
       status: "done",
     });
-    expect(new Harness(dbPath).getAttempt(started.attemptId)?.input.model).toEqual({
+    const attempt = new Harness(dbPath).getAttempt(started.attemptId)!;
+    expect(attempt.input.model).toEqual({
       model: "gpt-5-mini",
       reason: "cheap planning",
       source: "role-default",
       role: "planner",
     });
-    expect(new Harness(dbPath).getAttempt(started.attemptId)?.output.summary).toBe("resumed planner");
+    expect(attempt.input.childEnv).toEqual({
+      PATH: expect.stringContaining(join(homedir(), ".bun/bin")),
+      tools: {
+        bun: expect.any(Object),
+        node: expect.any(Object),
+        npm: expect.any(Object),
+        npx: expect.any(Object),
+      },
+    });
+    expect(attempt.output.summary).toBe("resumed planner");
   });
 
   test("uses task model preference before role defaults and cli model", async () => {

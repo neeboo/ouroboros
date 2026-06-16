@@ -1,10 +1,10 @@
 import type { CommandResult, RunCommand } from "./types";
-import { proxyEnvForChildProcess } from "./proxy-env";
+import { childEnvForProcess } from "./proxy-env";
 
 export const runLocalCommand: RunCommand = async (input) => {
   const proc = Bun.spawn({
     cmd: input.cmd,
-    env: proxyEnvForChildProcess(),
+    env: childEnvForProcess(),
     stdin: "pipe",
     stdout: "pipe",
     stderr: "pipe",

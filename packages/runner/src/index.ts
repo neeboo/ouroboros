@@ -14,7 +14,12 @@ export { parseAttemptOutput } from "./executors/output";
 export { resolveAgentBackend } from "./agent-backends";
 export { resolveModelPreference } from "./model-preferences";
 export { runLocalCommand } from "./executors/command";
-export { proxyEnvForChildProcess, proxyEnvFromScutilOutput } from "./executors/proxy-env";
+export {
+  childEnvForProcess,
+  childToolchainEnvEvidence,
+  proxyEnvForChildProcess,
+  proxyEnvFromScutilOutput,
+} from "./executors/proxy-env";
 export { createContextSubagentHook, createContextSummaryHook } from "./hooks/context-summary";
 export { createRepairTaskHook } from "./hooks/create-repair";
 export { createRunsFromOutputHook } from "./hooks/create-runs";

@@ -14,7 +14,8 @@ import {
   createRunsFromOutputHook,
   createTasksFromOutputHook,
   createVerifierTaskHook,
-  proxyEnvForChildProcess,
+  childEnvForProcess,
+  childToolchainEnvEvidence,
   resolveAgentBackend,
   resolveModelPreference,
   runReadyTasks,
@@ -1377,7 +1378,7 @@ function createDashboardRuntime(input: {
     runnerProcess = Bun.spawn({
       cmd,
       cwd: process.cwd(),
-      env: proxyEnvForChildProcess(),
+      env: childEnvForProcess(),
       stdin: "ignore",
       stdout: "pipe",
       stderr: "pipe",
@@ -1414,7 +1415,7 @@ function createDashboardRuntime(input: {
     supervisorProcess = Bun.spawn({
       cmd,
       cwd: process.cwd(),
-      env: proxyEnvForChildProcess(),
+      env: childEnvForProcess(),
       stdin: "ignore",
       stdout: "pipe",
       stderr: "pipe",
@@ -2018,6 +2019,7 @@ function codexAttemptInput(input: {
     stdout: input.result.stdout,
     stderr: input.result.stderr,
     events: input.result.events,
+    childEnv: childToolchainEnvEvidence(),
   };
 }
 

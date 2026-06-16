@@ -1,5 +1,8 @@
 import { describe, expect, test } from "bun:test";
-import { proxyEnvForChildProcess, proxyEnvFromScutilOutput, runLocalCommand } from "../packages/runner/src";
+import { childToolchainEnvEvidence, proxyEnvForChildProcess, proxyEnvFromScutilOutput, runLocalCommand } from "../packages/runner/src";
+
+const testHome = "/tmp/ouroboros-test-home";
+const testBunPath = `${testHome}/.bun/bin`;
 
 describe("command runner", () => {
   test("builds proxy env from macOS system proxy output", () => {
@@ -28,14 +31,89 @@ describe("command runner", () => {
     expect(env.no_proxy).toBe(env.NO_PROXY);
   });
 
-  test("keeps explicit proxy env unchanged", () => {
+  test("normalizes developer PATH while keeping explicit proxy env", () => {
     const env = proxyEnvForChildProcess({
       PATH: "/bin",
+      HOME: testHome,
       HTTPS_PROXY: "http://manual.proxy:8080",
     });
 
     expect(env.HTTPS_PROXY).toBe("http://manual.proxy:8080");
-    expect(env.PATH).toBe("/bin");
+    expect(env.PATH?.split(":").slice(0, 7)).toEqual([
+      testBunPath,
+      "/opt/homebrew/bin",
+      "/usr/local/bin",
+      "/usr/bin",
+      "/bin",
+      "/usr/sbin",
+      "/sbin",
+    ]);
+    expect(env.PATH?.split(":").filter((entry) => entry === "/bin")).toHaveLength(1);
+  });
+
+  test("reports sanitized toolchain env evidence", () => {
+    const env = proxyEnvForChildProcess({
+      PATH: "/bin",
+      HOME: testHome,
+      HTTPS_PROXY: "http://manual.proxy:8080",
+    });
+    const evidence = childToolchainEnvEvidence(env);
+    const path = env.PATH;
+    if (typeof path !== "string") {
+      throw new Error("expected normalized PATH");
+    }
+
+    expect(evidence.PATH).toBe(path);
+    expect(Object.keys(evidence)).toEqual(["PATH", "tools"]);
+    expect(evidence.tools).toEqual({
+      bun: expect.any(Object),
+      node: expect.any(Object),
+      npm: expect.any(Object),
+      npx: expect.any(Object),
+    });
+  });
+
+  test("keeps caller shims before normalized developer PATH entries", () => {
+    const env = proxyEnvForChildProcess({
+      PATH: "/tmp/test-bin:/usr/bin:/bin",
+      HOME: testHome,
+    });
+
+    expect(env.PATH?.split(":").slice(0, 4)).toEqual([
+      "/tmp/test-bin",
+      testBunPath,
+      "/opt/homebrew/bin",
+      "/usr/local/bin",
+    ]);
+  });
+
+  test("normalizes developer PATH from a clean low-PATH process environment", () => {
+    const result = Bun.spawnSync({
+      cmd: [
+        process.execPath,
+        "--cwd",
+        process.cwd(),
+        "-e",
+        [
+          'import { childEnvForProcess } from "./packages/runner/src/executors/proxy-env";',
+          `const env = childEnvForProcess({ HOME: ${JSON.stringify(testHome)}, PATH: "/tmp" });`,
+          `console.log(JSON.stringify({ path: env.PATH, hasBun: env.PATH?.split(":").includes(${JSON.stringify(testBunPath)}) }));`,
+        ].join("\n"),
+      ],
+      env: {
+        HOME: testHome,
+        PATH: "/tmp",
+      },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+
+    expect(result.exitCode).toBe(0);
+    expect(new TextDecoder().decode(result.stderr)).toBe("");
+    expect(JSON.parse(new TextDecoder().decode(result.stdout))).toEqual({
+      path: expect.stringContaining(testBunPath),
+      hasBun: true,
+    });
   });
 
   test("returns a timeout result when a command runs too long", async () => {
