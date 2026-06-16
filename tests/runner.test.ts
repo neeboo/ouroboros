@@ -527,6 +527,53 @@ describe("runner", () => {
     expect(attempt.output.artifacts).toContainEqual({ kind: "codex_session", sessionId: "session_runner" });
   });
 
+  test("runner-owned codex loop blocks running starts that have no resumable session id", async () => {
+    const runId = harness.createRun({ goal: "Build loop" });
+    const taskId = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Implement runner",
+      prompt: "Implement the smallest runner.",
+    });
+
+    const result = await runCodexResumableLoop({
+      harness,
+      runId,
+      limit: 1,
+      maxRounds: 1,
+      maxTries: 3,
+      cwd: dir,
+      clientFactory: () => ({
+        start: async () => ({
+          status: "running" as const,
+          sessionId: null,
+          outputPath: join(dir, "output.json"),
+          stdout: "{\"type\":\"item.started\"}\n",
+          stderr: "",
+          events: [{ type: "item.started" }],
+        }),
+        resume: async () => {
+          throw new Error("resume should not be called");
+        },
+      }),
+    });
+
+    const attemptId = result.rounds[0].tasks[0].attemptId;
+    const attempt = harness.getAttempt(attemptId)!;
+    const task = harness.getTask(taskId)!;
+    const thread = harness.getRunOverview({ runId, eventLimit: 1 }).sessions.find((session) => session.attemptId === attemptId)!;
+
+    expect(result.rounds[0].tasks[0]).toMatchObject({
+      taskId,
+      status: "blocked",
+      codexSessionId: null,
+    });
+    expect(attempt.status).toBe("blocked");
+    expect(attempt.output.summary).toContain("without a resumable session id");
+    expect(task.status).toBe("todo");
+    expect(thread.status).toBe("blocked");
+  });
+
   test("supervisor integrates a completed verified run when enabled", async () => {
     const repoPath = join(dir, "repo");
     const worktreePath = join(dir, "verified-worker");

@@ -315,6 +315,14 @@ class CodexResumableOrchestrator {
       },
     });
     if (result.status === "running") {
+      if (!result.sessionId) {
+        return this.blockAttemptWithoutResumableSession({
+          attemptId,
+          task,
+          sessionName,
+          result,
+        });
+      }
       return { attemptId, status: "running" as const, codexSessionId: result.sessionId };
     }
     this.harness.finishAttempt({
@@ -395,6 +403,14 @@ class CodexResumableOrchestrator {
         heartbeat: true,
       });
       if (result.status === "running") {
+        if (!result.sessionId) {
+          return this.blockAttemptWithoutResumableSession({
+            attemptId: attempt.id,
+            task,
+            sessionName,
+            result,
+          });
+        }
         return { taskId: task.id, attemptId: attempt.id, sessionName, status: "running" as const, codexSessionId: result.sessionId };
       }
       const { output, decision } = await this.applyStopHooks({
@@ -543,6 +559,14 @@ class CodexResumableOrchestrator {
       heartbeat: true,
     });
     if (result.status === "running") {
+      if (!result.sessionId) {
+        return this.blockAttemptWithoutResumableSession({
+          attemptId,
+          task: input.task,
+          sessionName: input.sessionName,
+          result,
+        });
+      }
       return { taskId: input.task.id, attemptId, sessionName: input.sessionName, status: "running" as const, codexSessionId: result.sessionId };
     }
     const { output, decision } = await this.applyStopHooks({
@@ -742,6 +766,39 @@ class CodexResumableOrchestrator {
       event: (event: Record<string, unknown>) => {
         this.harness.recordAttemptEvent({ attemptId, stream: "codex-json", sequence: nextSequence(), payload: event });
       },
+    };
+  }
+
+  private blockAttemptWithoutResumableSession(input: {
+    attemptId: string;
+    task: Task;
+    sessionName: string;
+    result: Extract<CodexResumableResult, { status: "running" }>;
+  }) {
+    const output: AttemptOutput = {
+      status: "blocked",
+      summary: "Codex resumable command returned running without a resumable session id",
+      changedFiles: [],
+      checks: [{ name: "codex-resumable session id", status: "failed" }],
+      artifacts: input.result.outputPath ? [{ kind: "codex_output", path: input.result.outputPath }] : [],
+      problems: [
+        "codex-resumable returned a running state without a session id; task was returned to todo for a fresh attempt",
+      ],
+    };
+    this.harness.finishAttempt({ attemptId: input.attemptId, output });
+    this.harness.retryTask({ taskId: input.task.id });
+    this.updateAttemptThread({
+      attemptId: input.attemptId,
+      status: "blocked",
+      agentSessionId: null,
+      heartbeat: true,
+    });
+    return {
+      taskId: input.task.id,
+      attemptId: input.attemptId,
+      sessionName: input.sessionName,
+      status: "blocked" as const,
+      codexSessionId: null,
     };
   }
 
