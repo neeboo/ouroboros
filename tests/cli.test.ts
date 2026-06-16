@@ -155,6 +155,49 @@ describe("CLI", () => {
     });
   });
 
+  test("seeds create-run agent backend defaults from config without explicit context defaults", async () => {
+    await runCli("init");
+    const configPath = join(dir, "config.toml");
+    await writeFile(
+      configPath,
+      [
+        "[agentDefaults.roles]",
+        'worker = "opencode"',
+        'verifier = "claude-code"',
+        "",
+        "[agentBackends.opencode]",
+        'kind = "acpx"',
+        'agent = "opencode"',
+        'approval = "approve-reads"',
+        "",
+        '["agentBackends"."claude-code"]',
+        'kind = "acpx"',
+        'agent = "claude"',
+      ].join("\n"),
+    );
+
+    const run = await runCliJson("create-run", "--goal", "Config seeded agent run", "--config", configPath);
+    const overview = await runCliJson("run-overview", "--run-id", run.id);
+
+    expect(overview.run.context.agentDefaults).toEqual({
+      roles: {
+        worker: "opencode",
+        verifier: "claude-code",
+      },
+    });
+    expect(overview.run.context.agentBackends).toMatchObject({
+      opencode: {
+        kind: "acpx",
+        agent: "opencode",
+        approval: "approve-reads",
+      },
+      "claude-code": {
+        kind: "acpx",
+        agent: "claude",
+      },
+    });
+  });
+
   test("bootstraps a self-iteration planning run", async () => {
     const configPath = join(dir, "self-iterate.toml");
     await writeFile(configPath, "[models.roles.worker]\nmodel = \"gpt-5.4-mini\"\n");

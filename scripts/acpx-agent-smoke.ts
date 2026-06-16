@@ -252,7 +252,7 @@ async function defaultRunCommand(input: RunCommandInput): Promise<CommandResult>
   }
   proc.stdin.end();
 
-  const timeout = setTimeout(() => proc.kill(), input.timeoutMs);
+  const timeout = input.timeoutMs === undefined ? null : setTimeout(() => proc.kill(), input.timeoutMs);
   try {
     const [stdout, stderr, exitCode] = await Promise.all([
       new Response(proc.stdout).text(),
@@ -261,7 +261,9 @@ async function defaultRunCommand(input: RunCommandInput): Promise<CommandResult>
     ]);
     return { exitCode, stdout, stderr };
   } finally {
-    clearTimeout(timeout);
+    if (timeout) {
+      clearTimeout(timeout);
+    }
   }
 }
 
