@@ -223,6 +223,10 @@ bun run orbs -- run-next --run-id <run_id> --executor noop --limit 2
 bun run orbs -- run-next --run-id <run_id> --executor codex-cli --cwd "$(pwd)" --sandbox read-only
 bun run orbs -- run-loop --run-id <run_id> --executor codex-resumable --cwd "$(pwd)"
 
+# agent readiness
+bun run orbs -- doctor-agent --agent claude-code
+bun run scripts/acpx-agent-smoke.ts claude-code
+
 # resumable Codex
 bun run orbs -- codex-start-attempt --task-id <task_id> --cwd "$(pwd)"
 bun run orbs -- list-running-attempts --run-id <run_id>

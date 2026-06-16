@@ -233,8 +233,8 @@ If the doctor selects `hermes-acp`, mirror that exact command in `agentCommand`.
 Agent readiness checks should start with a doctor before a prompt smoke:
 
 ```bash
-bun run scripts/acpx-agent-smoke.ts claude-code --doctor
-bun run scripts/acpx-agent-smoke.ts hermes --doctor
+bun run orbs -- doctor-agent --agent claude-code
+bun run orbs -- doctor-agent --agent hermes
 ```
 
 The doctor path is intentionally lighter than a smoke. It reports the normalized child `PATH`, local command discovery, acpx discovery, adapter availability, and visible acpx `authMethods` without starting a task ACP session, prompt smoke, or write probe. For non-Hermes acpx backends such as `claude-code`, a passed doctor proves the local commands and adapter are available enough to attempt the separate read-only smoke. It does not prove cwd behavior, tool execution, final Orbs JSON compliance, cancellation, or write safety.

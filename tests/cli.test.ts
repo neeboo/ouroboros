@@ -835,6 +835,48 @@ describe("CLI", () => {
     expect(prompt).toContain("\"kind\": \"lesson\"");
   });
 
+  test("runs Claude Code agent doctor from the CLI without starting a prompt smoke", async () => {
+    const binDir = join(dir, "doctor-bin");
+    await mkdir(binDir, { recursive: true });
+    await writeFile(
+      join(binDir, "acpx"),
+      [
+        "#!/usr/bin/env bun",
+        "const args = Bun.argv.slice(2);",
+        "if (args.join(' ') === 'config show --format json') {",
+        "  console.log(JSON.stringify({ authMethods: ['custom'] }));",
+        "  process.exit(0);",
+        "}",
+        "console.error('unexpected acpx args: ' + args.join(' '));",
+        "process.exit(2);",
+      ].join("\n"),
+    );
+    await writeFile(join(binDir, "claude"), "#!/usr/bin/env bun\nprocess.exit(0);\n");
+    await writeFile(join(binDir, "npm"), "#!/usr/bin/env bun\nprocess.exit(0);\n");
+    await Promise.all(["acpx", "claude", "npm"].map((name) => chmod(join(binDir, name), 0o755)));
+
+    const result = await runCliJson("doctor-agent", "--agent", "claude-code", {
+      PATH: `${binDir}:${process.env.PATH ?? ""}`,
+    });
+
+    expect(result).toMatchObject({
+      agent: "claude-code",
+      status: "passed",
+      experimental: false,
+    });
+    expect(result.artifacts).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining(`acpx: ${binDir}/acpx`),
+        "agent: claude-code",
+        "acpx agent: claude",
+        "adapter: available",
+        "acpx authMethods: custom",
+        expect.stringContaining(`claude: ${binDir}/claude`),
+        "scope: ACP/acpx doctor only; no task session, prompt smoke, or write probe enabled",
+      ]),
+    );
+  });
+
   test("runs the next task with the noop executor", async () => {
     await runCli("init");
     const run = await runCliJson("create-run", "--goal", "Bootstrap ouroboros");

@@ -29,6 +29,7 @@ import { parseArray, parseObject, printJson } from "./json";
 import { checkLinearAccess, linkLinearIssue } from "./linear";
 import { serveDashboard } from "./dashboard";
 import { requestHarnessAction, serveHarnessActions } from "./action-server";
+import { buildAgentMatrix, doctorAgent } from "../../../scripts/acpx-agent-smoke";
 import { join } from "node:path";
 import type { ExecutionThreadStatus, Task } from "@ouroboros/harness";
 
@@ -301,6 +302,10 @@ switch (parsed.command) {
       followUpJson: flag(parsed, "follow-up-json") ?? null,
     });
     printJson(result);
+    break;
+  }
+  case "doctor-agent": {
+    printJson(await doctorAgent(parseDoctorAgentId(required(parsed, "agent"))));
     break;
   }
   case "linear-check": {
@@ -745,6 +750,14 @@ function parseOptionalRunDecision(raw: unknown): AttemptOutput["runDecision"] | 
     fail("attempt output runDecision must be complete, continue, verify, or defer");
   }
   return raw;
+}
+
+function parseDoctorAgentId(raw: string) {
+  const agent = buildAgentMatrix().find((candidate) => candidate.id === raw);
+  if (!agent) {
+    fail(`unsupported doctor agent: ${raw}`);
+  }
+  return agent.id;
 }
 
 function cliExecutorName() {
