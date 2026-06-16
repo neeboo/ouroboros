@@ -91,6 +91,7 @@ function normalizedDeveloperPath(env: Record<string, string | undefined>) {
   const home = env.HOME?.trim() || homedir();
   const candidates = [
     home ? join(home, ".bun/bin") : null,
+    home ? join(home, ".local/bin") : null,
     env.NVM_BIN,
     ...nvmNodeBinPaths(home),
     ...DEFAULT_DEVELOPER_PATHS,
@@ -138,7 +139,12 @@ function splitCustomPathPrefix(entries: string[]) {
 }
 
 function isCommonDeveloperPath(entry: string) {
-  return entry.endsWith("/.bun/bin") || /\/\.nvm\/versions\/node\/v[^/]+\/bin$/.test(entry) || DEFAULT_DEVELOPER_PATHS.includes(entry);
+  return (
+    entry.endsWith("/.bun/bin") ||
+    entry.endsWith("/.local/bin") ||
+    /\/\.nvm\/versions\/node\/v[^/]+\/bin$/.test(entry) ||
+    DEFAULT_DEVELOPER_PATHS.includes(entry)
+  );
 }
 
 function nvmNodeBinPaths(home: string) {

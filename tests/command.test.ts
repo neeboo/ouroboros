@@ -6,6 +6,7 @@ import { childToolchainEnvEvidence, proxyEnvForChildProcess, proxyEnvFromScutilO
 
 const testHome = "/tmp/ouroboros-test-home";
 const testBunPath = `${testHome}/.bun/bin`;
+const testLocalBinPath = `${testHome}/.local/bin`;
 
 describe("command runner", () => {
   test("builds proxy env from macOS system proxy output", () => {
@@ -42,8 +43,9 @@ describe("command runner", () => {
     });
 
     expect(env.HTTPS_PROXY).toBe("http://manual.proxy:8080");
-    expect(env.PATH?.split(":").slice(0, 7)).toEqual([
+    expect(env.PATH?.split(":").slice(0, 8)).toEqual([
       testBunPath,
+      testLocalBinPath,
       "/opt/homebrew/bin",
       "/usr/local/bin",
       "/usr/bin",
@@ -82,9 +84,10 @@ describe("command runner", () => {
       HOME: testHome,
     });
 
-    expect(env.PATH?.split(":").slice(0, 4)).toEqual([
+    expect(env.PATH?.split(":").slice(0, 5)).toEqual([
       "/tmp/test-bin",
       testBunPath,
+      testLocalBinPath,
       "/opt/homebrew/bin",
       "/usr/local/bin",
     ]);
@@ -101,8 +104,9 @@ describe("command runner", () => {
         HOME: home,
       });
 
-      expect(env.PATH?.split(":").slice(0, 4)).toEqual([
+      expect(env.PATH?.split(":").slice(0, 5)).toEqual([
         join(home, ".bun/bin"),
+        join(home, ".local/bin"),
         join(home, ".nvm/versions/node/v22.13.0/bin"),
         join(home, ".nvm/versions/node/v18.20.0/bin"),
         "/opt/homebrew/bin",
@@ -122,7 +126,7 @@ describe("command runner", () => {
         [
           'import { childEnvForProcess } from "./packages/runner/src/executors/proxy-env";',
           `const env = childEnvForProcess({ HOME: ${JSON.stringify(testHome)}, PATH: "/tmp" });`,
-          `console.log(JSON.stringify({ path: env.PATH, hasBun: env.PATH?.split(":").includes(${JSON.stringify(testBunPath)}) }));`,
+          `console.log(JSON.stringify({ path: env.PATH, hasBun: env.PATH?.split(":").includes(${JSON.stringify(testBunPath)}), hasLocalBin: env.PATH?.split(":").includes(${JSON.stringify(testLocalBinPath)}) }));`,
         ].join("\n"),
       ],
       env: {
@@ -138,6 +142,7 @@ describe("command runner", () => {
     expect(JSON.parse(new TextDecoder().decode(result.stdout))).toEqual({
       path: expect.stringContaining(testBunPath),
       hasBun: true,
+      hasLocalBin: true,
     });
   });
 
