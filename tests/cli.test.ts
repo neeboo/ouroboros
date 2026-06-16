@@ -1608,6 +1608,75 @@ describe("CLI", () => {
     expect(attempt.input.cwd).toBe("/repo");
   });
 
+  test("run-loop dispatches role backend workers through acpx even with codex-resumable fallback", async () => {
+    await runCli("init");
+    const run = await runCliJson(
+      "create-run",
+      "--goal",
+      "Bootstrap ouroboros",
+      "--context-json",
+      '{"agentDefaults":{"roles":{"worker":"claude-code"}},"agentBackends":{"claude-code":{"kind":"acpx","agent":"claude","approval":"approve-all"}}}',
+    );
+    const task = await runCliJson(
+      "create-task",
+      "--run-id",
+      run.id,
+      "--role",
+      "worker",
+      "--goal",
+      "Run through Claude Code",
+      "--prompt",
+      "Use the fake Claude Code executor.",
+    );
+    const binDir = join(dir, "bin-resumable-agent-backend");
+    const logPath = join(dir, "acpx-resumable-args.jsonl");
+    await mkdir(binDir);
+    await writeFile(
+      join(binDir, "acpx"),
+      [
+        "#!/usr/bin/env bun",
+        "const { appendFileSync } = await import('node:fs');",
+        "const args = Bun.argv.slice(2);",
+        `appendFileSync(${JSON.stringify(logPath)}, JSON.stringify(args) + '\\n');`,
+        "await new Response(Bun.stdin.stream()).text();",
+        "console.log(JSON.stringify({ status: 'done', summary: 'claude selected', changedFiles: [], checks: [], artifacts: [], problems: [] }));",
+      ].join("\n"),
+    );
+    await chmod(join(binDir, "acpx"), 0o755);
+
+    const result = await runCliJson(
+      "run-loop",
+      "--run-id",
+      run.id,
+      "--executor",
+      "codex-resumable",
+      "--cwd",
+      "/repo",
+      "--max-rounds",
+      "1",
+      { PATH: `${binDir}:${process.env.PATH}` },
+    );
+    const attemptId = result.rounds[0].tasks[0].attemptId;
+    const attempt = new Harness(dbPath).getAttempt(attemptId)!;
+    const loggedCalls = (await Bun.file(logPath).text()).trim().split("\n").map((line) => JSON.parse(line));
+    const promptCall = loggedCalls.find((args: string[]) => args.includes("claude") && args.includes("-s"));
+
+    expect(result.rounds[0].tasks[0].taskId).toBe(task.id);
+    expect(result.rounds[0].tasks[0].status).toBe("done");
+    expect(promptCall).toContain("--approve-all");
+    expect(promptCall).toContain("claude");
+    expect(promptCall).not.toContain("--model");
+    expect(attempt.input.backend).toMatchObject({
+      id: "claude-code",
+      kind: "acpx",
+      agent: "claude",
+      approval: "approve-all",
+      source: "role-default",
+    });
+    expect(attempt.input.executor).toBe("acpx");
+    expect(attempt.output.summary).toBe("claude selected");
+  });
+
   test("records a structured attempt from JSON", async () => {
     await runCli("init");
     const run = await runCliJson("create-run", "--goal", "Bootstrap ouroboros");
@@ -3331,8 +3400,9 @@ describe("CLI", () => {
     const envOverride =
       typeof rawArgs.at(-1) === "object" ? (rawArgs.pop() as Record<string, string>) : {};
     const args = rawArgs as string[];
+    const configArgs = args.includes("--config") ? [] : ["--config", join(dir, "missing-config.toml")];
     const proc = Bun.spawn({
-      cmd: ["bun", "run", "packages/cli/src/main.ts", "--db", dbPath, ...args],
+      cmd: ["bun", "run", "packages/cli/src/main.ts", "--db", dbPath, ...configArgs, ...args],
       cwd: process.cwd(),
       env: { ...process.env, ...envOverride },
       stdout: "pipe",

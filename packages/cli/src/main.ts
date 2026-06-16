@@ -787,7 +787,7 @@ function selfIterationPlannerPrompt() {
     "- `packages/cli/src/dashboard.ts`",
     "- `packages/cli/src/main.ts`",
     "- `packages/runner/src/runner.ts`",
-    "- recent run lessons from the harness database using `bun run orbs -- list-lessons --run-id <run_id>`",
+    "- recent run lessons from the harness database using `orbs list-lessons --run-id <run_id>`",
     "",
     `Use the split-enough rule and first planning prompt in \`${SELF_ITERATION_PLAN_DOC}\`.`,
     "",
@@ -798,7 +798,7 @@ function selfIterationPlannerPrompt() {
 }
 
 function cliCommand(command: string, ...args: string[]) {
-  return ["bun", "run", "orbs", "--", "--db", parsed.db, command, ...args].map(shellQuote).join(" ");
+  return ["orbs", "--db", parsed.db, command, ...args].map(shellQuote).join(" ");
 }
 
 async function loadCliConfig() {
@@ -1983,10 +1983,12 @@ async function startReadyCodexAttempts(input: { runId: string; limit: number }) 
     });
     const resolvedModel = resolveModelPreference({ run, task, globalModel: flag(parsed, "model") });
     const cwd = task.worktreePath ?? runnerCwd();
+    const backend = resolvedBackendForTask({ run, task, cliExecutor: "codex-resumable" });
     const baseInput = {
       prompt,
       sessionName,
-      executor: "codex-resumable",
+      executor: backend.kind,
+      backend,
       model: resolvedModel,
       cwd,
     };
@@ -2025,6 +2027,17 @@ async function startReadyCodexAttempts(input: { runId: string; limit: number }) 
         status: "blocked",
         codexSessionId: null,
       };
+    }
+    if (backend.kind !== "codex-resumable") {
+      return runLeasedGenericAttempt({
+        run,
+        task,
+        sessionName,
+        prompt,
+        cwd,
+        resolvedModel,
+        startResult,
+      });
     }
     const attemptId = harness.startAttempt({ taskId: task.id, input: baseInput });
     upsertAttemptThread({
@@ -2098,6 +2111,76 @@ async function startReadyCodexAttempts(input: { runId: string; limit: number }) 
     };
   }));
   return tasks;
+}
+
+async function runLeasedGenericAttempt(input: {
+  run: NonNullable<ReturnType<Harness["getRun"]>>;
+  task: Task;
+  sessionName: string;
+  prompt: string;
+  cwd: string;
+  resolvedModel: ReturnType<typeof resolveModelPreference>;
+  startResult: Awaited<ReturnType<typeof applyStartHooks>>;
+}) {
+  const factoryInput = {
+    run: input.run,
+    task: input.task,
+    sessionName: input.sessionName,
+    cwd: input.cwd,
+    resolvedModel: input.resolvedModel,
+  };
+  const attemptId = harness.startAttempt({
+    taskId: input.task.id,
+    input: {
+      prompt: input.prompt,
+      sessionName: input.sessionName,
+      executor: resolvedBackendForTask({ run: input.run, task: input.task, cliExecutor: "codex-resumable" }).kind,
+      ...(attemptInputFactory("codex-resumable")(factoryInput) ?? {}),
+    },
+  });
+  upsertAttemptThread({
+    runId: input.run.id,
+    task: input.task,
+    attemptId,
+    sessionName: input.sessionName,
+    cwd: input.cwd,
+    status: "running",
+  });
+  const executor = executorFactory("codex-resumable")(factoryInput);
+  const rawOutput = await executor({
+    prompt: input.prompt,
+    run: input.run,
+    task: input.task,
+    sessionName: input.sessionName,
+    resolvedModel: input.resolvedModel,
+  });
+  const { output, decision } = await applyCliStopHooks({
+    run: input.run,
+    task: input.task,
+    sessionName: input.sessionName,
+    prompt: input.prompt,
+    output: rawOutput,
+  });
+  output.checks = [...(input.startResult.checks ?? []), ...(output.checks ?? [])];
+  output.artifacts = [...(input.startResult.artifacts ?? []), ...(output.artifacts ?? [])];
+  harness.finishAttempt({ attemptId, output });
+  const finishedAttempt = harness.getAttempt(attemptId);
+  applyCliPostAttemptRunEffects(input.run.id, input.task, finishedAttempt?.output ?? output);
+  updateAttemptThread({
+    attemptId,
+    status: output.status,
+    heartbeat: true,
+  });
+  if (decision === "retry") {
+    harness.retryTask({ taskId: input.task.id });
+  }
+  return {
+    taskId: input.task.id,
+    attemptId,
+    sessionName: input.sessionName,
+    status: output.status,
+    codexSessionId: null,
+  };
 }
 
 function threadIdForAttempt(attemptId: string) {

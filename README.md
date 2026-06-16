@@ -114,14 +114,14 @@ http://localhost:7331
 Create a project-scoped run manually:
 
 ```bash
-bun run orbs -- create-project --name "Ouroboros" --root-path "$(pwd)"
-bun run orbs -- create-run --goal "Use Ouroboros to improve this repository" --project-root "$(pwd)"
+orbs create-project --name "Ouroboros" --root-path "$(pwd)"
+orbs create-run --goal "Use Ouroboros to improve this repository" --project-root "$(pwd)"
 ```
 
 Create a planner task:
 
 ```bash
-bun run orbs -- create-task \
+orbs create-task \
   --run-id <run_id> \
   --role planner \
   --goal "Plan next step" \
@@ -131,7 +131,7 @@ bun run orbs -- create-task \
 Run the loop:
 
 ```bash
-bun run orbs -- run-loop \
+orbs run-loop \
   --run-id <run_id> \
   --executor codex-resumable \
   --cwd "$(pwd)" \
@@ -165,19 +165,19 @@ token_file = ".linear"
 Environment override:
 
 ```bash
-LINEAR_API_KEY=lin_api_... bun run orbs -- linear-check --run-id <run_id>
+LINEAR_API_KEY=lin_api_... orbs linear-check --run-id <run_id>
 ```
 
 Model preference can live on the run or on a single task:
 
 ```bash
-bun run orbs -- create-run \
+orbs create-run \
   --goal "Use Ouroboros to iterate on Ouroboros" \
   --context-json '{"modelDefaults":{"roles":{"worker":{"model":"gpt-5.4-mini"},"verifier":{"model":"gpt-5.5"}}}}'
 ```
 
 ```bash
-bun run orbs -- create-task \
+orbs create-task \
   --run-id <run_id> \
   --role worker \
   --goal "Cheap implementation pass" \
@@ -197,13 +197,13 @@ then CLI --model
 Agent backend selection can also live on the run or on a single task:
 
 ```bash
-bun run orbs -- create-run \
+orbs create-run \
   --goal "Use Ouroboros to iterate on Ouroboros" \
   --context-json '{"agentDefaults":{"roles":{"worker":"opencode","verifier":"claude-code"}},"agentBackends":{"opencode":{"kind":"acpx","agent":"opencode"},"claude-code":{"kind":"acpx","agent":"claude"}}}'
 ```
 
 ```bash
-bun run orbs -- create-task \
+orbs create-task \
   --run-id <run_id> \
   --role worker \
   --goal "Run through Claude Code" \
@@ -217,38 +217,38 @@ See `docs/agent-backends.md` for capability boundaries, smoke testing, and custo
 
 ```bash
 # observability
-bun run orbs -- run-overview --run-id <run_id>
-bun run orbs -- dashboard --run-id <run_id> --port 7331
+orbs run-overview --run-id <run_id>
+orbs dashboard --run-id <run_id> --port 7331
 
 # task execution
-bun run orbs -- next-task --run-id <run_id>
-bun run orbs -- run-next --run-id <run_id> --executor noop --limit 2
-bun run orbs -- run-next --run-id <run_id> --executor codex-cli --cwd "$(pwd)" --sandbox read-only
-bun run orbs -- run-loop --run-id <run_id> --executor codex-resumable --cwd "$(pwd)"
+orbs next-task --run-id <run_id>
+orbs run-next --run-id <run_id> --executor noop --limit 2
+orbs run-next --run-id <run_id> --executor codex-cli --cwd "$(pwd)" --sandbox read-only
+orbs run-loop --run-id <run_id> --executor codex-resumable --cwd "$(pwd)"
 
 # agent readiness
-bun run orbs -- doctor-agent --agent claude-code
+orbs doctor-agent --agent claude-code
 bun run scripts/acpx-agent-smoke.ts claude-code
 
 # resumable Codex
-bun run orbs -- codex-start-attempt --task-id <task_id> --cwd "$(pwd)"
-bun run orbs -- list-running-attempts --run-id <run_id>
-bun run orbs -- codex-resume-attempt --attempt-id <attempt_id> --cwd "$(pwd)"
+orbs codex-start-attempt --task-id <task_id> --cwd "$(pwd)"
+orbs list-running-attempts --run-id <run_id>
+orbs codex-resume-attempt --attempt-id <attempt_id> --cwd "$(pwd)"
 
 # manual attempt control
-bun run orbs -- start-attempt --task-id <task_id> --input-json '{}'
-bun run orbs -- finish-attempt --attempt-id <attempt_id> --output-json '{"status":"done","summary":"..."}'
-bun run orbs -- retry-task --task-id <task_id>
+orbs start-attempt --task-id <task_id> --input-json '{}'
+orbs finish-attempt --attempt-id <attempt_id> --output-json '{"status":"done","summary":"..."}'
+orbs retry-task --task-id <task_id>
 
 # prompt templates and lessons
-bun run orbs -- list-lessons --run-id <run_id>
-bun run orbs -- show-task-prompt --task-id <task_id>
-bun run orbs -- show-prompt-template --key task
-bun run orbs -- set-prompt-template --key task --content "# Custom template..."
+orbs list-lessons --run-id <run_id>
+orbs show-task-prompt --task-id <task_id>
+orbs show-prompt-template --key task
+orbs set-prompt-template --key task --content "# Custom template..."
 
 # Linear bridge
-bun run orbs -- linear-link-issue --local-type run --local-id <run_id> --issue-key LIN-123
-bun run orbs -- linear-link-issue --local-type task --local-id <task_id> --issue-url https://linear.app/<workspace>/issue/LIN-123/title
+orbs linear-link-issue --local-type run --local-id <run_id> --issue-key LIN-123
+orbs linear-link-issue --local-type task --local-id <task_id> --issue-url https://linear.app/<workspace>/issue/LIN-123/title
 ```
 
 ## Roles
@@ -276,7 +276,7 @@ The dashboard is the live control surface for a run. It should make these questi
 Start it with:
 
 ```bash
-bun run orbs -- dashboard --run-id <run_id> --port 7331
+orbs dashboard --run-id <run_id> --port 7331
 ```
 
 Useful local APIs:

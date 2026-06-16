@@ -233,8 +233,8 @@ If the doctor selects `hermes-acp`, mirror that exact command in `agentCommand`.
 Agent readiness checks should start with a doctor before a prompt smoke:
 
 ```bash
-bun run orbs -- doctor-agent --agent claude-code
-bun run orbs -- doctor-agent --agent hermes
+orbs doctor-agent --agent claude-code
+orbs doctor-agent --agent hermes
 ```
 
 The doctor path is intentionally lighter than a smoke. It reports the normalized child `PATH`, local command discovery, acpx discovery, adapter availability, and visible acpx `authMethods` without starting a task ACP session, prompt smoke, or write probe. For non-Hermes acpx backends such as `claude-code`, a passed doctor proves the local commands and adapter are available enough to attempt the separate read-only smoke. It does not prove cwd behavior, tool execution, final Orbs JSON compliance, cancellation, or write safety.
@@ -251,42 +251,42 @@ bun run scripts/acpx-agent-smoke.ts claude-code
 
 The script checks for local `acpx` and `claude` commands, then verifies that `@agentclientprotocol/claude-agent-acp@^0.36.1` can start from local npm state with `npm exec --offline`. This keeps the smoke from silently depending on a registry fetch. If those preflight checks pass, it creates a temporary cwd, runs `acpx --cwd <tmp> --auth-policy fail --approve-reads --non-interactive-permissions fail --format text claude exec`, and accepts only final Orbs JSON with passed `cwd`, `read-only prompt`, and `final Orbs JSON` checks. A skipped result means the backend is not proven on that machine. A passed result proves only read-only ACP execution in the temporary cwd; it does not enable write workloads.
 
-Keep Claude Code backend config minimal and role-scoped until stronger evidence exists:
+Keep Claude Code backend config minimal and role-scoped. Use `approve-reads` for read-only trials, and use `approve-all` only for isolated worktree worker runs after the local doctor and smoke both pass:
 
 ```json
 {
   "agentDefaults": {
     "roles": {
-      "verifier": "claude-code"
+      "worker": "claude-code"
     }
   },
   "agentBackends": {
     "claude-code": {
       "kind": "acpx",
       "agent": "claude",
-      "approval": "approve-reads"
+      "approval": "approve-all"
     }
   }
 }
 ```
 
-Do not route worker write tasks to `claude-code` by default until a separate smoke proves cwd/worktree reads, writes, command execution, diff reporting, and final Orbs JSON from the intended task worktree.
+Before expanding Claude Code beyond worker trials, add write-task evidence for cwd/worktree reads, writes, command execution, diff reporting, cancellation, and final Orbs JSON from the intended task worktree.
 
 CLI example:
 
 ```bash
-bun run orbs -- create-run \
+orbs create-run \
   --goal "Try multi-agent execution" \
   --context-json '{"agentDefaults":{"roles":{"worker":"opencode"}},"agentBackends":{"opencode":{"kind":"acpx","agent":"opencode"}}}'
 
-bun run orbs -- create-task \
+orbs create-task \
   --run-id <run_id> \
   --role worker \
   --goal "Run one task through Claude Code" \
   --prompt "Inspect the repo and return the required Orbs JSON." \
   --config-json '{"agentBackend":"claude-code"}'
 
-bun run orbs -- run-next \
+orbs run-next \
   --run-id <run_id> \
   --executor codex-cli \
   --cwd "$(pwd)" \
