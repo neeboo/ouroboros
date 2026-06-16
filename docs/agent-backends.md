@@ -170,6 +170,37 @@ Copy-pasteable `task.config`:
 }
 ```
 
+## Hermes Doctor
+
+Hermes support starts with a read-only doctor, not worker routing:
+
+```bash
+bun run scripts/acpx-agent-smoke.ts hermes --doctor
+```
+
+The doctor reports the normalized child `PATH`, `acpx` discovery, `hermes` discovery, `hermes-acp` discovery, and the selected raw acpx `agentCommand`. It prefers `hermes acp`; it selects `hermes-acp` only when command discovery proves `hermes-acp` is available and `hermes` is not. A skipped result means Hermes is not proven on that machine. The doctor does not start an ACP session, does not run a write probe, and does not enable a worker default.
+
+Keep Hermes config role-scoped and explicit until a separate smoke proves cwd/worktree behavior:
+
+```json
+{
+  "agentDefaults": {
+    "roles": {
+      "verifier": "hermes"
+    }
+  },
+  "agentBackends": {
+    "hermes": {
+      "kind": "acpx",
+      "agentCommand": "hermes acp",
+      "approval": "approve-reads"
+    }
+  }
+}
+```
+
+If the doctor selects `hermes-acp`, mirror that exact command in `agentCommand`. Do not route worker write tasks to `hermes` by default until a separate smoke proves cwd/worktree reads, writes, command execution, diff reporting, and final Orbs JSON from the intended task worktree.
+
 ## Claude Code Smoke
 
 Claude Code support is gated on read-only smoke evidence. The first supported smoke path is a one-shot ACP session through acpx:

@@ -49,6 +49,10 @@ export type RunSmokeMatrixOptions = {
   timeoutMs?: number;
 };
 
+export type HermesDoctorOptions = {
+  commandPath?: (command: string) => Promise<string | null>;
+};
+
 export function buildAgentMatrix(): SmokeAgent[] {
   return [
     { id: "codex", acpxAgent: "codex", requiredCommands: ["codex"], experimental: false },
@@ -109,6 +113,44 @@ export async function runSmokeMatrix(options: RunSmokeMatrixOptions = {}): Promi
   }
 
   return results;
+}
+
+export async function doctorHermes(options: HermesDoctorOptions = {}): Promise<SmokeResult> {
+  const commandPath = options.commandPath ?? defaultCommandPath;
+  const env = childEnvForProcess();
+  const [acpx, hermes, hermesAcp] = await Promise.all([commandPath("acpx"), commandPath("hermes"), commandPath("hermes-acp")]);
+  const selectedRawAgentCommand = hermes ? "hermes acp" : hermesAcp ? "hermes-acp" : "hermes acp";
+  const diagnostics = [`child PATH: ${env.PATH ?? ""}`];
+
+  if (!acpx) {
+    diagnostics.push("missing command: acpx");
+  }
+  if (!hermes) {
+    diagnostics.push("missing command: hermes");
+  }
+  if (!hermesAcp) {
+    diagnostics.push("missing command: hermes-acp");
+  }
+  if (!hermes && !hermesAcp) {
+    diagnostics.push("setup blocker: install Hermes CLI or expose hermes/hermes-acp on the normalized child PATH");
+  } else {
+    diagnostics.push("auth/model/setup blocker: Hermes CLI discovered; run Hermes auth/model setup before enabling execution");
+  }
+
+  return {
+    agent: "hermes",
+    status: "skipped",
+    experimental: true,
+    artifacts: [
+      `child PATH: ${env.PATH ?? ""}`,
+      `acpx: ${acpx ?? "missing"}`,
+      `hermes: ${hermes ?? "missing"}`,
+      `hermes-acp: ${hermesAcp ?? "missing"}`,
+      `selected raw agentCommand: ${selectedRawAgentCommand}`,
+      "scope: Hermes ACP/acpx doctor only; no write probe or worker default enabled",
+    ].map(redact),
+    diagnostics: diagnostics.map(redact),
+  };
 }
 
 async function smokeAgent(input: {
@@ -216,8 +258,16 @@ async function missingCommands(agent: SmokeAgent, commandExists: (command: strin
 }
 
 async function defaultCommandExists(command: string) {
+  return (await defaultCommandPath(command)) !== null;
+}
+
+async function defaultCommandPath(command: string) {
   const result = await defaultRunCommand({ cmd: ["which", command], stdin: "" });
-  return result.exitCode === 0;
+  if (result.exitCode !== 0) {
+    return null;
+  }
+  const path = result.stdout.trim().split("\n")[0]?.trim();
+  return path && path.length > 0 ? path : null;
 }
 
 async function defaultAdapterAvailable(agent: SmokeAgent) {
@@ -306,9 +356,10 @@ function redact(value: string) {
 }
 
 if (import.meta.main) {
-  const selected = new Set(Bun.argv.slice(2).filter((arg) => !arg.startsWith("-")));
-  const agents = selected.size === 0 ? buildAgentMatrix() : buildAgentMatrix().filter((agent) => selected.has(agent.id));
-  const results = await runSmokeMatrix({ agents });
+  const args = Bun.argv.slice(2);
+  const selected = new Set(args.filter((arg) => !arg.startsWith("-")));
+  const doctor = args.includes("--doctor") || selected.has("hermes-doctor");
+  const results = doctor ? [await doctorHermes()] : await runSmokeMatrix({ agents: selected.size === 0 ? buildAgentMatrix() : buildAgentMatrix().filter((agent) => selected.has(agent.id)) });
   console.log(JSON.stringify({ status: results.some((result) => result.status === "failed") ? "failed" : "done", results }, null, 2));
   process.exitCode = results.some((result) => result.status === "failed" && !result.experimental) ? 1 : 0;
 }

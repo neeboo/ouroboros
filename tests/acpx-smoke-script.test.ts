@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-import { buildAgentMatrix, parseAgentOutput, runSmokeMatrix } from "../scripts/acpx-agent-smoke";
+import { buildAgentMatrix, doctorHermes, parseAgentOutput, runSmokeMatrix } from "../scripts/acpx-agent-smoke";
 
 describe("acpx agent smoke script", () => {
   test("builds optional agent matrix with experimental non-builtins", () => {
@@ -166,6 +166,60 @@ describe("acpx agent smoke script", () => {
         diagnostics: ["missing local npm package: @agentclientprotocol/claude-agent-acp@^0.36.1"],
       },
     ]);
+  });
+
+  test("reports Hermes doctor diagnostics without starting ACP when hermes is missing", async () => {
+    const result = await doctorHermes({
+      commandPath: async (command) => (command === "acpx" ? "/opt/homebrew/bin/acpx" : null),
+    });
+
+    expect(result).toMatchObject({
+      agent: "hermes",
+      status: "skipped",
+      experimental: true,
+      artifacts: expect.arrayContaining([
+        "acpx: /opt/homebrew/bin/acpx",
+        "hermes: missing",
+        "hermes-acp: missing",
+        "selected raw agentCommand: hermes acp",
+        "scope: Hermes ACP/acpx doctor only; no write probe or worker default enabled",
+        expect.stringMatching(/^child PATH: /),
+      ]),
+    });
+    expect(result.diagnostics).toEqual(
+      expect.arrayContaining([
+        "missing command: hermes",
+        "missing command: hermes-acp",
+        "setup blocker: install Hermes CLI or expose hermes/hermes-acp on the normalized child PATH",
+        expect.stringMatching(/^child PATH: /),
+      ]),
+    );
+  });
+
+  test("selects hermes-acp only when discovery proves it is the available Hermes command", async () => {
+    const result = await doctorHermes({
+      commandPath: async (command) => {
+        if (command === "acpx") {
+          return "/opt/homebrew/bin/acpx";
+        }
+        if (command === "hermes-acp") {
+          return "/opt/homebrew/bin/hermes-acp";
+        }
+        return null;
+      },
+    });
+
+    expect(result).toMatchObject({
+      agent: "hermes",
+      status: "skipped",
+      artifacts: expect.arrayContaining([
+        "acpx: /opt/homebrew/bin/acpx",
+        "hermes: missing",
+        "hermes-acp: /opt/homebrew/bin/hermes-acp",
+        "selected raw agentCommand: hermes-acp",
+      ]),
+      diagnostics: expect.arrayContaining(["auth/model/setup blocker: Hermes CLI discovered; run Hermes auth/model setup before enabling execution"]),
+    });
   });
 
   test("reports command and JSON failures without credentials", async () => {
