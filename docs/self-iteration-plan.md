@@ -15,14 +15,15 @@ Ouroboros already has the minimum working loop:
 - Dashboard visibility for goals, task flow, todos, sessions, runner state, and manual interruption.
 - Bounded goal-review retries and proxy-aware child process execution.
 - A first-class self-iteration bootstrap command that creates a self-iteration run, seeds the planner task, and can launch the dashboard and runner together.
+- Frozen verifier-contract plumbing for planner-created worker tasks: optional `verifierContract` planner output stays backward-compatible when omitted, is persisted in task config when supplied, is injected into verifier prompts, and is cited on `created_verifier_task` artifacts.
 
 ## Next Iteration Goal
 
 Make Ouroboros able to plan and drain its own next improvement cycle before it asks for human intervention.
 
-The current self-iteration state is past bootstrap: the self-iteration command exists, and the active implementation cycle is frozen verifier contracts before execution. The next slice is to let planner-created worker tasks carry a verifier contract in task config, then force worker-created verifier tasks to check against that frozen contract instead of redefining success after the worker finishes.
+The current self-iteration state is past bootstrap and past the first frozen verifier-contract slice. The self-iteration command exists, and planner-created worker tasks can now carry a frozen verifier contract through task config into verifier creation.
 
-This cycle should keep planner output backward-compatible when `verifierContract` is omitted. When a planner supplies one, it should be persisted with the task, included in the verifier prompt, and cited in the `created_verifier_task` artifact so a human can audit which contract was used.
+The next planning candidate is lesson-to-guardrail promotion: repeated lessons should become candidate guardrails and, after acceptance, active role-scoped rules or preflight checks. Keep this as a planning problem first. Do not change database schema, prompt contracts, or dependency sets until a planner has proposed the smallest verifiable slice and an amendment path.
 
 ## Split-Enough Rule
 
@@ -69,8 +70,8 @@ The planner should choose as many areas as can be split into independent, verifi
 - expose the generated task graph as a simple graph view;
 - add a Linear bridge skeleton that maps local runs and tasks to external issues;
 - improve run completion review so it can cite evidence from docs, tests, dashboard state, and lessons.
-- add a planning loop that freezes a verifier contract before execution starts; the active first slice is persisting task-level verifier contracts and injecting them into verifier tasks.
-- promote repeated lessons into guardrails and keep repeated experiences as reusable evidence patterns.
+- extend the planning loop beyond the verified task-level verifier-contract baseline toward run-level contract amendment and audit paths.
+- promote repeated lessons into guardrails and keep repeated experiences as reusable evidence patterns; this is the next planning candidate.
 
 ## Human Checkpoints
 

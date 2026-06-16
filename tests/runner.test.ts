@@ -140,6 +140,130 @@ describe("runner", () => {
     expect(prompt).not.toContain("large raw evidence");
   });
 
+  test("promotes repeated failure lessons into guardrail prompt context", () => {
+    const runId = harness.createRun({ goal: "Use lessons as guardrails" });
+    const taskId = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Apply repeated failure context",
+      prompt: "Use repeated lessons before implementing.",
+    });
+
+    const prompt = buildTaskPrompt({
+      run: harness.getRun(runId)!,
+      task: harness.getTask(taskId)!,
+      dependencyAttempts: [],
+      lessons: [
+        {
+          id: "lesson_1",
+          runId,
+          taskId: "task_a",
+          attemptId: "attempt_a",
+          kind: "lesson",
+          summary: "Running attempt is missing codexSessionId; task was returned to todo for a fresh attempt",
+          evidence: {},
+        },
+        {
+          id: "lesson_2",
+          runId,
+          taskId: "task_b",
+          attemptId: "attempt_b",
+          kind: "lesson",
+          summary: "running attempt is missing codexSessionId; task was returned to todo for a fresh attempt.",
+          evidence: {},
+        },
+      ],
+    });
+
+    expect(prompt).toContain("## Promoted Guardrails");
+    expect(prompt).toContain("Seen 2 times");
+    expect(prompt).toContain("running attempt is missing codexSessionId");
+  });
+
+  test("renders successful experiences as reusable evidence instead of guardrails", () => {
+    const runId = harness.createRun({ goal: "Use experiences as evidence" });
+    const taskId = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Apply successful procedures",
+      prompt: "Use reusable experience evidence.",
+    });
+
+    const prompt = buildTaskPrompt({
+      run: harness.getRun(runId)!,
+      task: harness.getTask(taskId)!,
+      dependencyAttempts: [],
+      lessons: [
+        {
+          id: "experience_1",
+          runId,
+          taskId: "task_success",
+          attemptId: "attempt_success",
+          kind: "experience",
+          summary: "Ran bun test tests/dashboard.test.ts after keyed DOM patching and confirmed dashboard checks pass.",
+          evidence: {},
+        },
+        {
+          id: "lesson_1",
+          runId,
+          taskId: "task_failed",
+          attemptId: "attempt_failed",
+          kind: "lesson",
+          summary: "Single failure should stay in raw lessons only.",
+          evidence: {},
+        },
+      ],
+    });
+
+    expect(prompt).toContain("## Reusable Experience Evidence");
+    expect(prompt).toContain("Ran bun test tests/dashboard.test.ts");
+    const guardrailSection = prompt.split("## Promoted Guardrails")[1]!.split("## Reusable Experience Evidence")[0]!;
+    expect(guardrailSection).not.toContain("Ran bun test tests/dashboard.test.ts");
+    expect(guardrailSection).not.toContain("Single failure should stay in raw lessons only");
+  });
+
+  test("keeps backward-compatible Run Lessons JSON with promoted sections", () => {
+    const runId = harness.createRun({ goal: "Keep raw lessons compatible" });
+    const taskId = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Render raw and promoted lessons",
+      prompt: "Use prompt context.",
+    });
+
+    const prompt = buildTaskPrompt({
+      run: harness.getRun(runId)!,
+      task: harness.getTask(taskId)!,
+      dependencyAttempts: [],
+      lessons: [
+        {
+          id: "lesson_1",
+          runId,
+          taskId: "task_a",
+          attemptId: "attempt_a",
+          kind: "lesson",
+          summary: "Repeated failure summary",
+          evidence: {},
+        },
+        {
+          id: "lesson_2",
+          runId,
+          taskId: "task_b",
+          attemptId: "attempt_b",
+          kind: "lesson",
+          summary: "Repeated failure summary",
+          evidence: {},
+        },
+      ],
+    });
+
+    const rawLessonsSection = prompt.split("## Run Lessons")[1]!.split("## Required Output")[0]!;
+    expect(rawLessonsSection).toContain('"kind": "lesson"');
+    expect(rawLessonsSection).toContain('"summary": "Repeated failure summary"');
+    expect(rawLessonsSection).toContain('"taskId": "task_a"');
+    expect(rawLessonsSection).toContain('"attemptId": "attempt_a"');
+  });
+
   test("runs the next ready task with an executor and records the attempt", async () => {
     const runId = harness.createRun({ goal: "Build loop" });
     const taskId = harness.createTask({
@@ -268,7 +392,7 @@ describe("runner", () => {
       },
     });
 
-    const dependencySection = prompts[0].split("## Dependency Attempts")[1]!.split("## Run Lessons")[0]!;
+    const dependencySection = prompts[0].split("## Dependency Attempts")[1]!.split("## Promoted Guardrails")[0]!;
     expect(dependencySection).toContain(upstream);
     expect(dependencySection).toContain("Prompt templates stored in SQLite");
     expect(dependencySection).toContain("packages/harness/src/harness.ts");

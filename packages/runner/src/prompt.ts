@@ -7,6 +7,7 @@ const MAX_PROMPT_LESSONS = 12;
 const MAX_LESSON_SUMMARY_CHARS = 320;
 
 export function buildTaskPrompt(input: PromptInput) {
+  const compactRecentLessons = compactLessons(input.lessons ?? []);
   return renderPromptTemplate(input.template ?? DEFAULT_TASK_PROMPT_TEMPLATE, {
     runGoal: input.run.goal,
     runContextJson: prettyJson(input.run.context),
@@ -16,7 +17,9 @@ export function buildTaskPrompt(input: PromptInput) {
     taskPrompt: input.task.prompt,
     doneWhenMarkdown: input.task.doneWhen.map((item) => `- ${item}`).join("\n"),
     dependencyAttemptsJson: prettyJson(input.dependencyAttempts),
-    runLessonsJson: prettyJson(compactLessons(input.lessons ?? [])),
+    promotedGuardrailsMarkdown: renderPromotedGuardrails(compactRecentLessons),
+    reusableExperienceEvidenceMarkdown: renderReusableExperienceEvidence(compactRecentLessons),
+    runLessonsJson: prettyJson(compactRecentLessons),
     requiredOutputJson: prettyJson({
       status: "done",
       summary: "Short completion summary",
@@ -44,6 +47,8 @@ export function buildTaskPrompt(input: PromptInput) {
   });
 }
 
+type CompactLesson = ReturnType<typeof compactLessons>[number];
+
 function compactLessons(lessons: Lesson[]) {
   return lessons.slice(-MAX_PROMPT_LESSONS).map((lesson) => ({
     kind: lesson.kind,
@@ -51,6 +56,65 @@ function compactLessons(lessons: Lesson[]) {
     taskId: lesson.taskId,
     attemptId: lesson.attemptId,
   }));
+}
+
+function renderPromotedGuardrails(lessons: CompactLesson[]) {
+  const repeatedFailureGroups = repeatedLessonGroups(lessons);
+  if (repeatedFailureGroups.length === 0) {
+    return "No repeated failure lessons were detected in the recent lesson window.";
+  }
+
+  return repeatedFailureGroups
+    .map(
+      (group) =>
+        `- Seen ${group.count} times: ${group.summary}\n  Use as a guardrail before execution and verification for this task.`,
+    )
+    .join("\n");
+}
+
+function renderReusableExperienceEvidence(lessons: CompactLesson[]) {
+  const experiences = lessons.filter((lesson) => lesson.kind === "experience");
+  if (experiences.length === 0) {
+    return "No reusable experience summaries were recorded in the recent lesson window.";
+  }
+
+  return experiences
+    .map((experience) => `- ${experience.summary} (source: ${experience.taskId} / ${experience.attemptId})`)
+    .join("\n");
+}
+
+function repeatedLessonGroups(lessons: CompactLesson[]) {
+  const groups = new Map<string, { count: number; summary: string }>();
+  for (const lesson of lessons) {
+    if (lesson.kind !== "lesson") {
+      continue;
+    }
+
+    const key = normalizedLessonSummary(lesson.summary);
+    if (!key) {
+      continue;
+    }
+
+    const group = groups.get(key);
+    if (group) {
+      group.count += 1;
+    } else {
+      groups.set(key, { count: 1, summary: lesson.summary });
+    }
+  }
+
+  return Array.from(groups.values())
+    .filter((group) => group.count >= 2)
+    .sort((left, right) => right.count - left.count || left.summary.localeCompare(right.summary));
+}
+
+function normalizedLessonSummary(value: string) {
+  return value
+    .normalize("NFKC")
+    .toLowerCase()
+    .replace(/[.;:!?]+$/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 function compactText(value: string, maxChars: number) {

@@ -77,6 +77,20 @@ Optional but useful fields:
 }
 ```
 
+Planner-created tasks may also persist a frozen verifier contract in task config:
+
+```json
+{
+  "verifierContract": {
+    "successCriteria": ["The worker evidence satisfies the scoped task goal."],
+    "deterministicChecks": [],
+    "agentReviewRubric": ["Check the worker output against the frozen task scope."]
+  }
+}
+```
+
+`verifierContract` is optional for backward compatibility. When present on planner output, the create-tasks hook stores it in `config_json`; the create-verifier hook reads it from task config, includes it in the verifier prompt, and cites it on the `created_verifier_task` artifact.
+
 ### Attempt
 
 An attempt is one execution of one task by one agent session.
@@ -282,13 +296,18 @@ The agent must return structured output matching:
       "modelPreference": {
         "model": "gpt-5-mini",
         "reason": "cheap task"
+      },
+      "verifierContract": {
+        "successCriteria": ["The implementation matches this task's done criteria."],
+        "deterministicChecks": [],
+        "agentReviewRubric": ["Review changed files and check evidence against the task prompt."]
       }
     }
   ]
 }
 ```
 
-`modelPreference` is optional. Planners that omit it remain compatible; the harness falls back to role defaults or the global executor model.
+`modelPreference` and `verifierContract` are optional. Planners that omit `modelPreference` remain compatible; the harness falls back to role defaults or the global executor model. Planners that omit `verifierContract` remain compatible; the harness creates verifier tasks without a frozen contract section.
 
 ### Fixed action methods
 
