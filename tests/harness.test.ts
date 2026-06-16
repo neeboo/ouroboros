@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { Harness, initDatabase, withDatabase } from "../packages/harness/src";
+import { DEFAULT_TASK_PROMPT_TEMPLATE, Harness, initDatabase, withDatabase } from "../packages/harness/src";
 
 describe("Harness", () => {
   let dir: string;
@@ -365,6 +365,121 @@ describe("Harness", () => {
       key: "task",
       contentMd: "# Custom Task\n{{taskGoal}}\n{{runLessonsJson}}",
     });
+  });
+
+  test("upgrades legacy default task prompt templates", () => {
+    const legacyDefaultTaskTemplate = [
+      "# Ouroboros Task",
+      "",
+      "Run Goal: {{runGoal}}",
+      "",
+      "## Run Context",
+      "```json",
+      "{{runContextJson}}",
+      "```",
+      "",
+      "## Task",
+      "Task ID: {{taskId}}",
+      "Role: {{taskRole}}",
+      "Goal: {{taskGoal}}",
+      "",
+      "## Instructions",
+      "{{taskPrompt}}",
+      "",
+      "## Done When",
+      "{{doneWhenMarkdown}}",
+      "",
+      "## Dependency Attempts",
+      "```json",
+      "{{dependencyAttemptsJson}}",
+      "```",
+      "",
+      "## Run Lessons",
+      "```json",
+      "{{runLessonsJson}}",
+      "```",
+      "",
+      "## Required Output",
+      "Return only JSON with this shape:",
+      "```json",
+      "{{requiredOutputJson}}",
+      "```",
+    ].join("\n");
+    harness.setPromptTemplate({
+      key: "task",
+      contentMd: legacyDefaultTaskTemplate,
+    });
+
+    harness.init();
+
+    expect(harness.getPromptTemplate("task")?.contentMd).toBe(DEFAULT_TASK_PROMPT_TEMPLATE);
+  });
+
+  test("upgrades promoted guardrail default task prompt templates", () => {
+    const promotedGuardrailDefaultTaskTemplate = [
+      "# Ouroboros Task",
+      "",
+      "Run Goal: {{runGoal}}",
+      "",
+      "## Run Context",
+      "```json",
+      "{{runContextJson}}",
+      "```",
+      "",
+      "## Task",
+      "Task ID: {{taskId}}",
+      "Role: {{taskRole}}",
+      "Goal: {{taskGoal}}",
+      "",
+      "## Instructions",
+      "{{taskPrompt}}",
+      "",
+      "## Done When",
+      "{{doneWhenMarkdown}}",
+      "",
+      "## Dependency Attempts",
+      "```json",
+      "{{dependencyAttemptsJson}}",
+      "```",
+      "",
+      "## Promoted Guardrails",
+      "{{promotedGuardrailsMarkdown}}",
+      "",
+      "## Reusable Experience Evidence",
+      "{{reusableExperienceEvidenceMarkdown}}",
+      "",
+      "## Run Lessons",
+      "```json",
+      "{{runLessonsJson}}",
+      "```",
+      "",
+      "## Required Output",
+      "Return only JSON with this shape:",
+      "Prefer the `actions` array for follow-up work and run decisions. Supported action types are createTasks, createRuns, and setRunDecision.",
+      "```json",
+      "{{requiredOutputJson}}",
+      "```",
+    ].join("\n");
+    harness.setPromptTemplate({
+      key: "task",
+      contentMd: promotedGuardrailDefaultTaskTemplate,
+    });
+
+    harness.init();
+
+    expect(harness.getPromptTemplate("task")?.contentMd).toBe(DEFAULT_TASK_PROMPT_TEMPLATE);
+  });
+
+  test("preserves custom task prompt templates during prompt seeding", () => {
+    const customTemplate = "# Custom Task\n{{taskGoal}}\n{{runLessonsJson}}";
+    harness.setPromptTemplate({
+      key: "task",
+      contentMd: customTemplate,
+    });
+
+    harness.init();
+
+    expect(harness.getPromptTemplate("task")?.contentMd).toBe(customTemplate);
   });
 
   test("waits for dependencies before returning the next ready task", () => {

@@ -4,6 +4,7 @@ import {
   DEFAULT_REPAIR_TASK_PROMPT_TEMPLATE,
   DEFAULT_TASK_PROMPT_TEMPLATE,
   DEFAULT_VERIFIER_TASK_PROMPT_TEMPLATE,
+  LEGACY_DEFAULT_TASK_PROMPT_TEMPLATES,
 } from "./default-prompts";
 import { makeId } from "./ids";
 import { toJson } from "./json";
@@ -1108,7 +1109,7 @@ export class Harness {
 
   private seedPromptTemplates() {
     return withDatabase(this.dbPath, (db) => {
-      const query = db.query(`
+      const insertQuery = db.query(`
         insert or ignore into prompt_templates (key, content_md)
         values ($key, $contentMd)
       `);
@@ -1118,10 +1119,24 @@ export class Harness {
         { key: "repair-task", contentMd: DEFAULT_REPAIR_TASK_PROMPT_TEMPLATE },
         { key: "context-summary", contentMd: DEFAULT_CONTEXT_SUMMARY_PROMPT_TEMPLATE },
       ]) {
-        query.run({
+        insertQuery.run({
           $key: template.key,
           $contentMd: template.contentMd,
         });
+      }
+
+      const taskTemplate = db.query("select content_md from prompt_templates where key = 'task'").get() as
+        | { content_md: string }
+        | null;
+      if (taskTemplate && LEGACY_DEFAULT_TASK_PROMPT_TEMPLATES.includes(taskTemplate.content_md)) {
+        db.query(
+          `
+          update prompt_templates
+          set content_md = $contentMd,
+              updated_at = current_timestamp
+          where key = 'task'
+          `,
+        ).run({ $contentMd: DEFAULT_TASK_PROMPT_TEMPLATE });
       }
     });
   }

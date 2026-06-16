@@ -17,7 +17,7 @@ export function buildTaskPrompt(input: PromptInput) {
     taskPrompt: input.task.prompt,
     doneWhenMarkdown: input.task.doneWhen.map((item) => `- ${item}`).join("\n"),
     dependencyAttemptsJson: prettyJson(input.dependencyAttempts),
-    promotedGuardrailsMarkdown: renderPromotedGuardrails(compactRecentLessons),
+    candidateGuardrailsMarkdown: renderCandidateGuardrails(compactRecentLessons),
     reusableExperienceEvidenceMarkdown: renderReusableExperienceEvidence(compactRecentLessons),
     runLessonsJson: prettyJson(compactRecentLessons),
     requiredOutputJson: prettyJson({
@@ -58,29 +58,35 @@ function compactLessons(lessons: Lesson[]) {
   }));
 }
 
-function renderPromotedGuardrails(lessons: CompactLesson[]) {
+function renderCandidateGuardrails(lessons: CompactLesson[]) {
   const repeatedFailureGroups = repeatedLessonGroups(lessons);
   if (repeatedFailureGroups.length === 0) {
-    return "No repeated failure lessons were detected in the recent lesson window.";
+    return "";
   }
 
-  return repeatedFailureGroups
-    .map(
+  return [
+    "## Candidate Guardrails",
+    "Candidate guardrail guidance derived from repeated failure lessons. Treat these as prompt-only candidates unless a later task explicitly accepts them as active guardrails.",
+    "",
+    ...repeatedFailureGroups.map(
       (group) =>
         `- Seen ${group.count} times: ${group.summary}\n  Use as a guardrail before execution and verification for this task.`,
-    )
-    .join("\n");
+    ),
+    "",
+  ].join("\n");
 }
 
 function renderReusableExperienceEvidence(lessons: CompactLesson[]) {
   const experiences = lessons.filter((lesson) => lesson.kind === "experience");
   if (experiences.length === 0) {
-    return "No reusable experience summaries were recorded in the recent lesson window.";
+    return "";
   }
 
-  return experiences
-    .map((experience) => `- ${experience.summary} (source: ${experience.taskId} / ${experience.attemptId})`)
-    .join("\n");
+  return [
+    "## Reusable Experience Evidence",
+    ...experiences.map((experience) => `- ${experience.summary} (source: ${experience.taskId} / ${experience.attemptId})`),
+    "",
+  ].join("\n");
 }
 
 function repeatedLessonGroups(lessons: CompactLesson[]) {
