@@ -55,6 +55,12 @@ export type HermesDoctorOptions = {
   runCommand?: (input: RunCommandInput) => Promise<CommandResult>;
 };
 
+export type AgentDoctorOptions = {
+  commandPath?: (command: string) => Promise<string | null>;
+  runCommand?: (input: RunCommandInput) => Promise<CommandResult>;
+  adapterAvailable?: (agent: SmokeAgent) => Promise<string | null>;
+};
+
 export function buildAgentMatrix(): SmokeAgent[] {
   return [
     { id: "codex", acpxAgent: "codex", requiredCommands: ["codex"], experimental: false },
@@ -171,6 +177,73 @@ export async function doctorHermes(options: HermesDoctorOptions = {}): Promise<S
     agent: "hermes",
     status,
     experimental: true,
+    artifacts: artifacts.map(redact),
+    diagnostics: diagnostics.map(redact),
+  };
+}
+
+export async function doctorAgent(agentId: AgentId, options: AgentDoctorOptions = {}): Promise<SmokeResult> {
+  if (agentId === "hermes") {
+    return doctorHermes(options);
+  }
+  const agent = buildAgentMatrix().find((candidate) => candidate.id === agentId);
+  if (!agent) {
+    throw new Error(`unknown smoke agent: ${agentId}`);
+  }
+  return doctorAcpxAgent(agent, options);
+}
+
+export async function doctorAcpxAgent(agent: SmokeAgent, options: AgentDoctorOptions = {}): Promise<SmokeResult> {
+  const commandPath = options.commandPath ?? defaultCommandPath;
+  const runCommand = options.runCommand ?? defaultRunCommand;
+  const adapterAvailable = options.adapterAvailable ?? defaultAdapterAvailable;
+  const env = childEnvForProcess();
+  const [acpx, ...requiredPaths] = await Promise.all(["acpx", ...agent.requiredCommands].map((command) => commandPath(command)));
+  const diagnostics = [`child PATH: ${env.PATH ?? ""}`];
+  const artifacts = [
+    `child PATH: ${env.PATH ?? ""}`,
+    `acpx: ${acpx ?? "missing"}`,
+    `agent: ${agent.id}`,
+    `acpx agent: ${agent.acpxAgent ?? "n/a"}`,
+    `raw agentCommand: ${agent.rawAgentCommand ?? "n/a"}`,
+    "scope: ACP/acpx doctor only; no task session, prompt smoke, or write probe enabled",
+  ];
+
+  const missing: string[] = [];
+  if (!acpx) {
+    missing.push("acpx");
+  }
+  agent.requiredCommands.forEach((command, index) => {
+    const path = requiredPaths[index] ?? null;
+    artifacts.push(`${command}: ${path ?? "missing"}`);
+    if (!path) {
+      missing.push(command);
+    }
+  });
+
+  let adapterProblem: string | null = null;
+  if (missing.length === 0) {
+    adapterProblem = await adapterAvailable(agent);
+    artifacts.push(`adapter: ${adapterProblem ? "skipped" : "available"}`);
+    if (adapterProblem) {
+      diagnostics.push(adapterProblem);
+    }
+  }
+
+  if (acpx) {
+    const auth = await readAcpxAuthMethods(runCommand);
+    artifacts.push(`acpx authMethods: ${auth.methods.length > 0 ? auth.methods.join(", ") : "none"}`);
+    if (auth.diagnostic) {
+      diagnostics.push(auth.diagnostic);
+    }
+  }
+
+  diagnostics.push(...missing.map((command) => `missing command: ${command}`));
+
+  return {
+    agent: agent.id,
+    status: missing.length === 0 && adapterProblem === null ? "passed" : "skipped",
+    experimental: agent.experimental,
     artifacts: artifacts.map(redact),
     diagnostics: diagnostics.map(redact),
   };
@@ -477,7 +550,13 @@ if (import.meta.main) {
   const args = Bun.argv.slice(2);
   const selected = new Set(args.filter((arg) => !arg.startsWith("-")));
   const doctor = args.includes("--doctor") || selected.has("hermes-doctor");
-  const results = doctor ? [await doctorHermes()] : await runSmokeMatrix({ agents: selected.size === 0 ? buildAgentMatrix() : buildAgentMatrix().filter((agent) => selected.has(agent.id)) });
+  const selectedAgents = buildAgentMatrix().filter((agent) => selected.has(agent.id));
+  const doctorAgentIds = selected.has("hermes-doctor")
+    ? ["hermes" as AgentId]
+    : selectedAgents.length === 0
+      ? ["hermes" as AgentId]
+      : selectedAgents.map((agent) => agent.id);
+  const results = doctor ? await Promise.all(doctorAgentIds.map((agentId) => doctorAgent(agentId))) : await runSmokeMatrix({ agents: selectedAgents.length === 0 ? buildAgentMatrix() : selectedAgents });
   console.log(JSON.stringify({ status: results.some((result) => result.status === "failed") ? "failed" : "done", results }, null, 2));
   process.exitCode = results.some((result) => result.status === "failed" && !result.experimental) ? 1 : 0;
 }

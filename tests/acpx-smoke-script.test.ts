@@ -3,7 +3,7 @@ import { access, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { buildAgentMatrix, doctorHermes, parseAgentOutput, runSmokeMatrix } from "../scripts/acpx-agent-smoke";
+import { buildAgentMatrix, doctorAgent, doctorHermes, parseAgentOutput, runSmokeMatrix } from "../scripts/acpx-agent-smoke";
 
 describe("acpx agent smoke script", () => {
   test("builds optional agent matrix with experimental non-builtins", () => {
@@ -371,6 +371,78 @@ describe("acpx agent smoke script", () => {
       ]),
       diagnostics: [expect.stringMatching(/^child PATH: /)],
     });
+  });
+
+  test("passes Claude Code doctor without starting a prompt smoke", async () => {
+    const calls: string[][] = [];
+    const result = await doctorAgent("claude-code", {
+      commandPath: async (command) => {
+        if (command === "acpx") {
+          return "/opt/homebrew/bin/acpx";
+        }
+        if (command === "claude") {
+          return "/Users/ghostcorn/.nvm/versions/node/v25.5.0/bin/claude";
+        }
+        return null;
+      },
+      adapterAvailable: async (agent) => {
+        expect(agent.id).toBe("claude-code");
+        return null;
+      },
+      runCommand: async ({ cmd }) => {
+        calls.push(cmd);
+        if (cmd.join(" ") === "acpx config show --format json") {
+          return { exitCode: 0, stdout: '{"authMethods":["custom"]}', stderr: "" };
+        }
+        throw new Error(`unexpected command: ${cmd.join(" ")}`);
+      },
+    });
+
+    expect(calls).toEqual([["acpx", "config", "show", "--format", "json"]]);
+    expect(result).toMatchObject({
+      agent: "claude-code",
+      status: "passed",
+      experimental: false,
+      diagnostics: [expect.stringMatching(/^child PATH: /)],
+      artifacts: expect.arrayContaining([
+        "acpx: /opt/homebrew/bin/acpx",
+        "agent: claude-code",
+        "acpx agent: claude",
+        "raw agentCommand: n/a",
+        "claude: /Users/ghostcorn/.nvm/versions/node/v25.5.0/bin/claude",
+        "adapter: available",
+        "acpx authMethods: custom",
+        "scope: ACP/acpx doctor only; no task session, prompt smoke, or write probe enabled",
+      ]),
+    });
+  });
+
+  test("skips Claude Code doctor when the offline ACP adapter is unavailable", async () => {
+    const result = await doctorAgent("claude-code", {
+      commandPath: async (command) => {
+        if (command === "acpx") {
+          return "/opt/homebrew/bin/acpx";
+        }
+        if (command === "claude") {
+          return "/Users/ghostcorn/.nvm/versions/node/v25.5.0/bin/claude";
+        }
+        return null;
+      },
+      adapterAvailable: async () => "missing local npm package: @agentclientprotocol/claude-agent-acp@^0.36.1",
+      runCommand: async ({ cmd }) => {
+        if (cmd.join(" ") === "acpx config show --format json") {
+          return { exitCode: 0, stdout: '{"authMethods":[]}', stderr: "" };
+        }
+        throw new Error(`unexpected command: ${cmd.join(" ")}`);
+      },
+    });
+
+    expect(result.status).toBe("skipped");
+    expect(result.diagnostics).toEqual(
+      expect.arrayContaining([
+        "missing local npm package: @agentclientprotocol/claude-agent-acp@^0.36.1",
+      ]),
+    );
   });
 
   test("reports command and JSON failures without credentials", async () => {
