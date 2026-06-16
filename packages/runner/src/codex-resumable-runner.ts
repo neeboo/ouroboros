@@ -846,13 +846,13 @@ class CodexResumableOrchestrator {
 
   private runningAttemptIsFresh(
     session: { startedAt: string | null; events: Array<{ createdAt: string }> } | undefined,
-    thread?: { pid: number | null },
+    thread?: { pid: number | null; heartbeatAt?: string | null },
   ) {
     if (thread?.pid && !processIsAlive(thread.pid)) {
       return false;
     }
     const lastEventAt = session?.events.at(-1)?.createdAt;
-    const heartbeatAt = parseTimestampMs(lastEventAt) ?? parseTimestampMs(session?.startedAt);
+    const heartbeatAt = parseTimestampMs(lastEventAt) ?? parseTimestampMs(thread?.heartbeatAt) ?? parseTimestampMs(session?.startedAt);
     return heartbeatAt !== null && Date.now() - heartbeatAt < this.staleMs;
   }
 

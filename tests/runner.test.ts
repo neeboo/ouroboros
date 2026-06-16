@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { Database } from "bun:sqlite";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -629,6 +630,99 @@ describe("runner", () => {
     expect(attempt.status).toBe("blocked");
     expect(task.status).toBe("todo");
     expect(thread.status).toBe("orphaned");
+  });
+
+  test("runner-owned loop preserves fresh generic running attempts without Codex session ids", async () => {
+    const runId = harness.createRun({
+      goal: "Keep generic agent running",
+      context: {
+        agentDefaults: {
+          roles: {
+            planner: "claude-code",
+          },
+        },
+        agentBackends: {
+          "claude-code": {
+            kind: "acpx",
+            agent: "claude",
+          },
+        },
+      },
+    });
+    const taskId = harness.createTask({
+      runId,
+      role: "planner",
+      goal: "Plan with Claude Code",
+      prompt: "Plan.",
+    });
+    const route = resolveExecutionRoute({
+      run: harness.getRun(runId)!,
+      task: harness.getTask(taskId)!,
+      cliExecutor: "codex-resumable",
+    });
+    const attemptId = harness.startAttempt({
+      taskId,
+      input: {
+        sessionName: "claude-planner",
+        executor: "acpx",
+        route,
+        backend: route.backend,
+        cwd: dir,
+        model: route.model,
+      },
+    });
+    harness.upsertExecutionThread({
+      id: `thread_${attemptId}`,
+      runId,
+      taskId,
+      attemptId,
+      ownerType: "runner",
+      ownerId: "generic-owner-test",
+      role: "planner",
+      status: "running",
+      pid: process.pid,
+      sessionName: "claude-planner",
+      worktreePath: dir,
+    });
+    const db = new Database(harness.dbPath);
+    db.query("update attempts set started_at = datetime('now', '-10 minutes') where id = $id").run({ $id: attemptId });
+    db.query("update execution_threads set heartbeat_at = current_timestamp where id = $id").run({
+      $id: `thread_${attemptId}`,
+    });
+    db.close();
+
+    const result = await runCodexResumableLoop({
+      harness,
+      runId,
+      limit: 1,
+      maxRounds: 1,
+      maxTries: 3,
+      cwd: dir,
+      runningAttemptStaleMs: 5 * 60 * 1000,
+      clientFactory: () => ({
+        start: async () => {
+          throw new Error("start should not be called");
+        },
+        resume: async () => {
+          throw new Error("generic running attempt should not use codex resume");
+        },
+      }),
+    });
+
+    const attempt = harness.getAttempt(attemptId)!;
+    const task = harness.getTask(taskId)!;
+    const thread = harness.getRunOverview({ runId, eventLimit: 1 }).threads.find((candidate) => candidate.attemptId === attemptId)!;
+
+    expect(result.rounds[0].tasks[0]).toMatchObject({
+      taskId,
+      attemptId,
+      sessionName: "claude-planner",
+      status: "running",
+      codexSessionId: null,
+    });
+    expect(attempt.status).toBe("running");
+    expect(task.status).toBe("running");
+    expect(thread.status).toBe("running");
   });
 
   test("supervisor integrates a completed verified run when enabled", async () => {
