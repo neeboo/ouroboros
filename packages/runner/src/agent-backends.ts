@@ -12,6 +12,7 @@ export interface ResolvedAgentBackend {
   agentCommand?: string;
   approval?: ApprovalMode;
   format?: string;
+  env?: Record<string, string>;
 }
 
 export function resolveAgentBackend(input: {
@@ -81,6 +82,10 @@ function normalizeBackendDefinition(
     if (format) {
       backend.format = format;
     }
+    const env = stringRecordOrNull(definition.env);
+    if (env) {
+      backend.env = env;
+    }
   }
   return backend;
 }
@@ -123,4 +128,16 @@ function objectOrNull(value: unknown): Record<string, unknown> | null {
 
 function stringOrNull(value: unknown) {
   return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
+}
+
+function stringRecordOrNull(value: unknown) {
+  const record = objectOrNull(value);
+  if (!record) {
+    return null;
+  }
+  const entries = Object.entries(record).flatMap(([key, raw]) => {
+    const value = stringOrNull(raw);
+    return value ? [[key, value] as const] : [];
+  });
+  return entries.length > 0 ? Object.fromEntries(entries) : null;
 }

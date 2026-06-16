@@ -248,6 +248,95 @@ describe("acpx executor", () => {
     ]);
   });
 
+  test("passes backend env overrides to acpx commands", async () => {
+    const envs: Array<Record<string, string | undefined> | undefined> = [];
+    const executor = createAcpxAgentExecutor({
+      cwd: "/repo",
+      agentCommand: "reasonix acp",
+      env: { REASONIX_HOME: "/tmp/reasonix-home" },
+      runCommand: async ({ cmd, env }) => {
+        envs.push(env);
+        return {
+          exitCode: 0,
+          stdout: cmd.includes("-s")
+            ? '{"status":"done","summary":"env ok","changedFiles":[],"checks":[],"artifacts":[],"problems":[]}'
+            : "",
+          stderr: "",
+        };
+      },
+    });
+
+    await executor({
+      prompt: "Do the task",
+      sessionName: "task_1",
+      run: runFixture,
+      task: {
+        id: "task_1",
+        runId: "run_1",
+        parentId: null,
+        cycleId: "task_1",
+        status: "todo",
+        role: "worker",
+        goal: "Task",
+        prompt: "Do it",
+        dependsOn: [],
+        doneWhen: [],
+        worktreePath: null,
+        sessionRef: null,
+        contextVersion: 1,
+      },
+    });
+
+    expect(envs.every((env) => env?.REASONIX_HOME === "/tmp/reasonix-home")).toBe(true);
+  });
+
+  test("prepares a writable Hermes home for hermes acp backends", async () => {
+    const envs: Array<Record<string, string | undefined> | undefined> = [];
+    const executor = createAcpxAgentExecutor({
+      cwd: "/repo",
+      agentCommand: "hermes acp",
+      prepareHermesHome: async ({ cwd, sessionName, sourceHome }) => {
+        expect(cwd).toBe("/repo");
+        expect(sessionName).toBe("task_1");
+        expect(sourceHome).toContain(".hermes");
+        return "/tmp/orbs-hermes-task_1";
+      },
+      runCommand: async ({ cmd, env }) => {
+        envs.push(env);
+        return {
+          exitCode: 0,
+          stdout: cmd.includes("-s")
+            ? '{"status":"done","summary":"hermes env ok","changedFiles":[],"checks":[],"artifacts":[],"problems":[]}'
+            : "",
+          stderr: "",
+        };
+      },
+    });
+
+    await executor({
+      prompt: "Do the task",
+      sessionName: "task_1",
+      run: runFixture,
+      task: {
+        id: "task_1",
+        runId: "run_1",
+        parentId: null,
+        cycleId: "task_1",
+        status: "todo",
+        role: "worker",
+        goal: "Task",
+        prompt: "Do it",
+        dependsOn: [],
+        doneWhen: [],
+        worktreePath: null,
+        sessionRef: null,
+        contextVersion: 1,
+      },
+    });
+
+    expect(envs.every((env) => env?.HERMES_HOME === "/tmp/orbs-hermes-task_1")).toBe(true);
+  });
+
   test("reuses an existing acpx session when show succeeds", async () => {
     const calls: string[][] = [];
     const executor = createAcpxCodexExecutor({

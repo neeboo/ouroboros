@@ -72,7 +72,10 @@ Resolved attempts record `attempt.input.model` with `model`, `source`, `role`, a
     "reasonix": {
       "kind": "acpx",
       "agentCommand": "reasonix acp",
-      "approval": "approve-reads"
+      "approval": "approve-reads",
+      "env": {
+        "REASONIX_HOME": "/tmp/reasonix-home"
+      }
     },
     "hermes": {
       "kind": "acpx",
@@ -179,6 +182,8 @@ bun run scripts/acpx-agent-smoke.ts hermes --doctor
 ```
 
 The doctor reports the normalized child `PATH`, `acpx` discovery, `hermes` discovery, `hermes-acp` discovery, the selected raw acpx `agentCommand`, `hermes acp --check`, and acpx `authMethods`. It prefers `hermes acp`; it selects `hermes-acp` only when command discovery proves `hermes-acp` is available and `hermes` is not. When the selected command is `hermes acp`, a missing `hermes-acp` shim is informational only. The doctor passes when `acpx` is available, `hermes acp --check` passes, and acpx exposes a compatible auth method such as `custom` or `hermes-setup`. A skipped result means Hermes is not proven for Orbs on that machine. The doctor does not start a task ACP session, does not run a write probe, and does not enable a worker default.
+
+When Orbs runs `hermes acp` as an acpx backend, it prepares a writable temporary `HERMES_HOME` and copies `.env`, `config.yaml`, and `auth.json` from the current Hermes home when those files exist. This keeps Hermes logs and transient session state out of a read-restricted `~/.hermes` path while preserving the user's local Hermes setup. Other ACP backends can receive explicit environment variables through `agentBackends.<id>.env`.
 
 When `hermes acp --check` passes but acpx reports no compatible auth method, the blocker is acpx configuration, not the Hermes binary:
 

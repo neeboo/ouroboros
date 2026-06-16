@@ -68,6 +68,9 @@ describe("config", () => {
         'agent = "opencode"',
         'approval = "approve-reads"',
         "",
+        "[agentBackends.opencode.env]",
+        'OPENCODE_HOME = "/tmp/opencode-home"',
+        "",
         '["agentBackends"."claude-code"]',
         'kind = "acpx"',
         'agent = "claude"',
@@ -86,6 +89,9 @@ describe("config", () => {
           kind: "acpx",
           agent: "opencode",
           approval: "approve-reads",
+          env: {
+            OPENCODE_HOME: "/tmp/opencode-home",
+          },
         },
         "claude-code": {
           kind: "acpx",

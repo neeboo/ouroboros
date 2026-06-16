@@ -1,3 +1,7 @@
+import { access, copyFile, mkdir, mkdtemp } from "node:fs/promises";
+import { homedir, tmpdir } from "node:os";
+import { join } from "node:path";
+
 import { parseAttemptOutputOrBlocked } from "./output";
 import { commandProblem, runLocalCommand } from "./command";
 import type { AcpxAgentExecutorFactory, AcpxCodexExecutorFactory, ApprovalMode, RunCommand } from "./types";
@@ -12,6 +16,13 @@ export const createAcpxAgentExecutor: AcpxAgentExecutorFactory = (options) => {
   const label = agentLabel(options);
 
   return async ({ prompt, sessionName }) => {
+    const env = await acpxCommandEnv({
+      cwd: options.cwd,
+      sessionName,
+      agentCommand: options.agentCommand,
+      env: options.env,
+      prepareHermesHome: options.prepareHermesHome,
+    });
     const base = acpxBaseCommand({
       cwd: options.cwd,
       approval,
@@ -22,6 +33,7 @@ export const createAcpxAgentExecutor: AcpxAgentExecutorFactory = (options) => {
     const session = await ensureSession({
       base,
       runCommand,
+      env,
       sessionName,
       timeoutMs: options.timeoutMs,
       idleTimeoutMs: options.idleTimeoutMs,
@@ -33,6 +45,7 @@ export const createAcpxAgentExecutor: AcpxAgentExecutorFactory = (options) => {
     let result = await runPrompt({
       base,
       runCommand,
+      env,
       sessionName,
       prompt,
       timeoutMs: options.timeoutMs,
@@ -42,12 +55,14 @@ export const createAcpxAgentExecutor: AcpxAgentExecutorFactory = (options) => {
       await runCommand({
         cmd: [...base, "sessions", "close", sessionName],
         stdin: "",
+        env,
         timeoutMs: options.timeoutMs,
         idleTimeoutMs: options.idleTimeoutMs,
       });
       const recreated = await ensureSession({
         base,
         runCommand,
+        env,
         sessionName,
         timeoutMs: options.timeoutMs,
         idleTimeoutMs: options.idleTimeoutMs,
@@ -59,6 +74,7 @@ export const createAcpxAgentExecutor: AcpxAgentExecutorFactory = (options) => {
       result = await runPrompt({
         base,
         runCommand,
+        env,
         sessionName,
         prompt,
         timeoutMs: options.timeoutMs,
@@ -97,6 +113,54 @@ function acpxBaseCommand(input: {
   return ["acpx", "--cwd", input.cwd, approvalFlag(input.approval), "--format", "text", ...modelArgs, ...agentArgs];
 }
 
+async function acpxCommandEnv(input: {
+  cwd: string;
+  sessionName: string;
+  agentCommand?: string;
+  env?: Record<string, string | undefined>;
+  prepareHermesHome?: (input: { cwd: string; sessionName: string; sourceHome: string }) => Promise<string | null>;
+}) {
+  const env = { ...(input.env ?? {}) };
+  if (isHermesAgentCommand(input.agentCommand) && !env.HERMES_HOME) {
+    const sourceHome = process.env.HERMES_HOME?.trim() || join(homedir(), ".hermes");
+    const prepareHermesHome = input.prepareHermesHome ?? defaultPrepareHermesHome;
+    const hermesHome = await prepareHermesHome({ cwd: input.cwd, sessionName: input.sessionName, sourceHome });
+    if (hermesHome) {
+      env.HERMES_HOME = hermesHome;
+    }
+  }
+  return env;
+}
+
+function isHermesAgentCommand(agentCommand: string | undefined) {
+  return agentCommand?.trim() === "hermes acp" || agentCommand?.trim() === "hermes-acp";
+}
+
+async function defaultPrepareHermesHome(input: { sessionName: string; sourceHome: string }) {
+  const target = await mkdtemp(join(tmpdir(), `orbs-hermes-${safePathPart(input.sessionName)}-`));
+  await mkdir(join(target, "logs"), { recursive: true });
+  await mkdir(join(target, "sessions"), { recursive: true });
+  await copyIfExists(join(input.sourceHome, ".env"), join(target, ".env"));
+  await copyIfExists(join(input.sourceHome, "config.yaml"), join(target, "config.yaml"));
+  await copyIfExists(join(input.sourceHome, "auth.json"), join(target, "auth.json"));
+  return target;
+}
+
+async function copyIfExists(from: string, to: string) {
+  try {
+    await access(from);
+    await copyFile(from, to);
+  } catch (error) {
+    if ((error as { code?: string }).code !== "ENOENT") {
+      throw error;
+    }
+  }
+}
+
+function safePathPart(value: string) {
+  return value.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 48) || "session";
+}
+
 function agentLabel(input: { agent?: string; agentCommand?: string }) {
   return input.agent ?? input.agentCommand ?? "codex";
 }
@@ -104,6 +168,7 @@ function agentLabel(input: { agent?: string; agentCommand?: string }) {
 async function ensureSession(input: {
   base: string[];
   runCommand: RunCommand;
+  env: Record<string, string | undefined>;
   sessionName: string;
   timeoutMs?: number;
   idleTimeoutMs?: number;
@@ -114,6 +179,7 @@ async function ensureSession(input: {
     const existing = await input.runCommand({
       cmd: showSessionCommand,
       stdin: "",
+      env: input.env,
       timeoutMs: input.timeoutMs,
       idleTimeoutMs: input.idleTimeoutMs,
     });
@@ -125,6 +191,7 @@ async function ensureSession(input: {
   const created = await input.runCommand({
     cmd: [...input.base, "sessions", "new", "--name", input.sessionName],
     stdin: "",
+    env: input.env,
     timeoutMs: input.timeoutMs,
     idleTimeoutMs: input.idleTimeoutMs,
   });
@@ -142,6 +209,7 @@ async function ensureSession(input: {
   const verified = await input.runCommand({
     cmd: showSessionCommand,
     stdin: "",
+    env: input.env,
     timeoutMs: input.timeoutMs,
     idleTimeoutMs: input.idleTimeoutMs,
   });
@@ -154,6 +222,7 @@ async function ensureSession(input: {
       ? await input.runCommand({
           cmd: ["acpx", "--verbose", ...input.base.slice(1), "sessions", "new", "--name", input.sessionName],
           stdin: "",
+          env: input.env,
           timeoutMs: input.timeoutMs,
           idleTimeoutMs: input.idleTimeoutMs,
         })
@@ -171,6 +240,7 @@ async function ensureSession(input: {
 function runPrompt(input: {
   base: string[];
   runCommand: RunCommand;
+  env: Record<string, string | undefined>;
   sessionName: string;
   prompt: string;
   timeoutMs?: number;
@@ -179,6 +249,7 @@ function runPrompt(input: {
   return input.runCommand({
     cmd: [...input.base, "-s", input.sessionName],
     stdin: input.prompt,
+    env: input.env,
     timeoutMs: input.timeoutMs,
     idleTimeoutMs: input.idleTimeoutMs,
   });

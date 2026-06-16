@@ -1337,7 +1337,7 @@ describe("runner", () => {
         agentBackends: {
           "task-acpx": { kind: "acpx", agent: "claude" },
           "role-acpx": { kind: "acpx", agent: "opencode" },
-          "global-acpx": { kind: "acpx", agentCommand: "reasonix acp" },
+          "global-acpx": { kind: "acpx", agentCommand: "reasonix acp", env: { REASONIX_HOME: "/tmp/reasonix-home" } },
         },
       },
     };
@@ -1373,6 +1373,7 @@ describe("runner", () => {
       id: "global-acpx",
       kind: "acpx",
       agentCommand: "reasonix acp",
+      env: { REASONIX_HOME: "/tmp/reasonix-home" },
       source: "run-default",
     });
     expect(resolveAgentBackend({ run: { ...run, context: {} }, task: baseTask, cliAgentBackend: "claude" })).toMatchObject({

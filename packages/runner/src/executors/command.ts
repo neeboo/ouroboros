@@ -4,7 +4,7 @@ import { childEnvForProcess } from "./proxy-env";
 export const runLocalCommand: RunCommand = async (input) => {
   const proc = Bun.spawn({
     cmd: input.cmd,
-    env: childEnvForProcess(),
+    env: commandEnv(input.env),
     stdin: "pipe",
     stdout: "pipe",
     stderr: "pipe",
@@ -79,6 +79,21 @@ export const runLocalCommand: RunCommand = async (input) => {
     });
   });
 };
+
+function commandEnv(overrides: Record<string, string | undefined> | undefined) {
+  if (!overrides) {
+    return childEnvForProcess();
+  }
+  const env = { ...childEnvForProcess() };
+  for (const [key, value] of Object.entries(overrides)) {
+    if (value === undefined) {
+      delete env[key];
+    } else {
+      env[key] = value;
+    }
+  }
+  return env;
+}
 
 async function drainStream(stream: ReadableStream<Uint8Array>, onChunk: (chunk: string) => void) {
   const reader = stream.getReader();

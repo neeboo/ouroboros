@@ -11,6 +11,7 @@ export interface CommandResult {
 export interface RunCommandInput {
   cmd: string[];
   stdin: string;
+  env?: Record<string, string | undefined>;
   timeoutMs?: number;
   idleTimeoutMs?: number;
   onStdout?: (chunk: string) => void;
@@ -23,6 +24,8 @@ export interface AcpxCodexExecutorOptions {
   cwd: string;
   approval?: ApprovalMode;
   model?: string;
+  env?: Record<string, string | undefined>;
+  prepareHermesHome?: (input: { cwd: string; sessionName: string; sourceHome: string }) => Promise<string | null>;
   timeoutMs?: number;
   idleTimeoutMs?: number;
   runCommand?: RunCommand;

@@ -890,6 +890,7 @@ function executorFactory(executorName: "noop" | "acpx-codex" | "codex-cli" | "co
         ...acpxAgentConfig(backend),
         approval: backend.approval ?? parseApproval(flag(parsed, "approval") ?? "approve-reads"),
         model: input.resolvedModel?.model,
+        env: backend.env,
         timeoutMs: parseTimeoutMs(flag(parsed, "timeout-ms")),
         idleTimeoutMs: parseTimeoutMs(flag(parsed, "idle-timeout-ms"), "--idle-timeout-ms"),
       });

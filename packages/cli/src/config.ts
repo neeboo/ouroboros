@@ -40,6 +40,7 @@ export interface AgentBackendConfig {
   agentCommand?: string;
   approval?: string;
   format?: string;
+  env?: Record<string, string>;
 }
 
 export async function loadOuroborosConfig(path: string) {
@@ -161,6 +162,7 @@ function agentBackendValue(value: unknown): AgentBackendConfig | undefined {
     ...optionalStringField(record, "agentCommand"),
     ...optionalStringField(record, "approval"),
     ...optionalStringField(record, "format"),
+    ...optionalStringRecordField(record, "env"),
   };
 }
 
@@ -186,5 +188,10 @@ function stringValue(value: unknown) {
 
 function optionalStringField(record: Record<string, unknown>, key: string) {
   const value = stringValue(record[key]);
+  return value ? { [key]: value } : {};
+}
+
+function optionalStringRecordField(record: Record<string, unknown>, key: string) {
+  const value = stringRecordValue(record[key]);
   return value ? { [key]: value } : {};
 }
