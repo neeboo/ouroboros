@@ -51,6 +51,7 @@ export type RunSmokeMatrixOptions = {
 
 export type HermesDoctorOptions = {
   commandPath?: (command: string) => Promise<string | null>;
+  runCommand?: (input: RunCommandInput) => Promise<CommandResult>;
 };
 
 export function buildAgentMatrix(): SmokeAgent[] {
@@ -117,10 +118,19 @@ export async function runSmokeMatrix(options: RunSmokeMatrixOptions = {}): Promi
 
 export async function doctorHermes(options: HermesDoctorOptions = {}): Promise<SmokeResult> {
   const commandPath = options.commandPath ?? defaultCommandPath;
+  const runCommand = options.runCommand ?? defaultRunCommand;
   const env = childEnvForProcess();
   const [acpx, hermes, hermesAcp] = await Promise.all([commandPath("acpx"), commandPath("hermes"), commandPath("hermes-acp")]);
   const selectedRawAgentCommand = hermes ? "hermes acp" : hermesAcp ? "hermes-acp" : "hermes acp";
   const diagnostics = [`child PATH: ${env.PATH ?? ""}`];
+  const artifacts = [
+    `child PATH: ${env.PATH ?? ""}`,
+    `acpx: ${acpx ?? "missing"}`,
+    `hermes: ${hermes ?? "missing"}`,
+    `hermes-acp: ${hermesAcp ?? "missing"}`,
+    `selected raw agentCommand: ${selectedRawAgentCommand}`,
+    "scope: Hermes ACP/acpx doctor only; no write probe or worker default enabled",
+  ];
 
   if (!acpx) {
     diagnostics.push("missing command: acpx");
@@ -134,23 +144,83 @@ export async function doctorHermes(options: HermesDoctorOptions = {}): Promise<S
   if (!hermes && !hermesAcp) {
     diagnostics.push("setup blocker: install Hermes CLI or expose hermes/hermes-acp on the normalized child PATH");
   } else {
-    diagnostics.push("auth/model/setup blocker: Hermes CLI discovered; run Hermes auth/model setup before enabling execution");
+    const hermesCheck = await checkHermesAcp({ hermes, hermesAcp, runCommand });
+    artifacts.push(`Hermes ACP check: ${hermesCheck.status}`);
+    if (hermesCheck.diagnostic) {
+      diagnostics.push(hermesCheck.diagnostic);
+    }
+
+    const auth = acpx ? await readAcpxAuthMethods(runCommand) : { methods: [], diagnostic: "acpx authMethods: skipped because acpx is missing" };
+    artifacts.push(`acpx authMethods: ${auth.methods.length > 0 ? auth.methods.join(", ") : "none"}`);
+    if (auth.diagnostic) {
+      diagnostics.push(auth.diagnostic);
+    }
+    if (hermesCheck.status === "passed" && !hasHermesAcpxAuth(auth.methods, env)) {
+      diagnostics.push(
+        "setup blocker: acpx auth missing for Hermes; add auth.custom or auth.hermes-setup, or export ACPX_AUTH_CUSTOM / ACPX_AUTH_HERMES_SETUP",
+      );
+    }
   }
 
   return {
     agent: "hermes",
     status: "skipped",
     experimental: true,
-    artifacts: [
-      `child PATH: ${env.PATH ?? ""}`,
-      `acpx: ${acpx ?? "missing"}`,
-      `hermes: ${hermes ?? "missing"}`,
-      `hermes-acp: ${hermesAcp ?? "missing"}`,
-      `selected raw agentCommand: ${selectedRawAgentCommand}`,
-      "scope: Hermes ACP/acpx doctor only; no write probe or worker default enabled",
-    ].map(redact),
+    artifacts: artifacts.map(redact),
     diagnostics: diagnostics.map(redact),
   };
+}
+
+async function checkHermesAcp(input: {
+  hermes: string | null;
+  hermesAcp: string | null;
+  runCommand: (input: RunCommandInput) => Promise<CommandResult>;
+}) {
+  if (input.hermes) {
+    const result = await input.runCommand({ cmd: ["hermes", "acp", "--check"], stdin: "", timeoutMs: 20_000 });
+    if (result.exitCode === 0) {
+      return { status: "passed" as const };
+    }
+    return {
+      status: "failed" as const,
+      diagnostic: `setup blocker: Hermes ACP check failed; run hermes acp --check or hermes acp --setup\n${commandDiagnostic(result)}`,
+    };
+  }
+  if (input.hermesAcp) {
+    return {
+      status: "skipped" as const,
+      diagnostic: "Hermes ACP check skipped: hermes-acp was discovered without hermes; verify the adapter command manually before enabling execution",
+    };
+  }
+  return { status: "skipped" as const };
+}
+
+async function readAcpxAuthMethods(runCommand: (input: RunCommandInput) => Promise<CommandResult>) {
+  const result = await runCommand({ cmd: ["acpx", "config", "show", "--format", "json"], stdin: "", timeoutMs: 10_000 });
+  if (result.exitCode !== 0) {
+    return { methods: [] as string[], diagnostic: `acpx authMethods: unavailable\n${commandDiagnostic(result)}` };
+  }
+  try {
+    const parsed = JSON.parse(result.stdout) as { authMethods?: unknown };
+    if (!Array.isArray(parsed.authMethods)) {
+      return { methods: [] as string[], diagnostic: "acpx authMethods: unavailable; config output did not include authMethods[]" };
+    }
+    return { methods: parsed.authMethods.filter((method): method is string => typeof method === "string") };
+  } catch (error) {
+    return {
+      methods: [] as string[],
+      diagnostic: `acpx authMethods: unavailable; ${error instanceof Error ? error.message : String(error)}`,
+    };
+  }
+}
+
+function hasHermesAcpxAuth(methods: string[], env: Record<string, string | undefined>) {
+  return (
+    methods.includes("custom") ||
+    methods.includes("hermes-setup") ||
+    Boolean(env.ACPX_AUTH_CUSTOM?.trim()) ||
+    Boolean(env.ACPX_AUTH_HERMES_SETUP?.trim())
+  );
 }
 
 async function smokeAgent(input: {

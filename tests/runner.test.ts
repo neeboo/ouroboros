@@ -1707,6 +1707,75 @@ describe("runner", () => {
     });
   });
 
+  test("blocked verifier stop hook skips repair for acpx auth setup blockers", async () => {
+    const runId = harness.createRun({ goal: "Prove Hermes support" });
+    const verifierTask = harness.createTask({
+      runId,
+      role: "verifier",
+      goal: "Verify Hermes auth",
+      prompt: "Verify Hermes acpx auth.",
+    });
+
+    const result = await runNextReadyTask({
+      harness,
+      runId,
+      executor: async () => ({
+        status: "blocked",
+        summary: "Hermes ACP is available, but acpx auth is not configured.",
+        artifacts: [
+          {
+            kind: "external_setup_blocker",
+            command: "bun run scripts/acpx-agent-smoke.ts hermes --doctor",
+            diagnostic:
+              "setup blocker: acpx auth missing for Hermes; add auth.custom or auth.hermes-setup, or export ACPX_AUTH_CUSTOM / ACPX_AUTH_HERMES_SETUP",
+          },
+        ],
+        checks: [{ name: "Hermes ACP check", status: "passed", evidence: "Hermes ACP check OK" }],
+        problems: ["setup blocker: acpx auth missing for Hermes"],
+      }),
+      stopHooks: [createRepairTaskHook({ harness })],
+    });
+
+    const attempt = harness.getAttempt(result!.attemptId)!;
+    expect(result?.stopDecision).toBe("exit");
+    expect(harness.nextReadyTask(runId)).toBeNull();
+    expect(attempt.output.artifacts).toContainEqual({
+      kind: "repair_skipped_external_setup_blocker",
+      verifierTaskId: verifierTask,
+      reason: "external setup blocker",
+    });
+  });
+
+  test("blocked verifier stop hook treats setup auth text as external even without artifact kind", async () => {
+    const runId = harness.createRun({ goal: "Prove Hermes support" });
+    const verifierTask = harness.createTask({
+      runId,
+      role: "verifier",
+      goal: "Verify Hermes auth",
+      prompt: "Verify Hermes acpx auth.",
+    });
+
+    const result = await runNextReadyTask({
+      harness,
+      runId,
+      executor: async () => ({
+        status: "blocked",
+        summary: "setup blocker: acpx auth missing for Hermes",
+        problems: ["add auth.custom or auth.hermes-setup before enabling execution"],
+      }),
+      stopHooks: [createRepairTaskHook({ harness })],
+    });
+
+    const attempt = harness.getAttempt(result!.attemptId)!;
+    expect(result?.stopDecision).toBe("exit");
+    expect(harness.nextReadyTask(runId)).toBeNull();
+    expect(attempt.output.artifacts).toContainEqual({
+      kind: "repair_skipped_external_setup_blocker",
+      verifierTaskId: verifierTask,
+      reason: "setup blocker requires external environment change",
+    });
+  });
+
   test("goal-review hook patches an explicitly written runDecision from readable text", async () => {
     const runId = harness.createRun({ goal: "Configure worker model defaults" });
     const taskId = harness.createTask({

@@ -61,7 +61,15 @@ function externalSetupBlockerReason(output: AttemptOutput) {
   if (haystack.includes("external_setup_blocker") || haystack.includes("external setup blocker")) {
     return "external setup blocker";
   }
-  if (haystack.includes("setup blocker") && (haystack.includes("install") || haystack.includes("expose") || haystack.includes("path"))) {
+  if (
+    haystack.includes("setup blocker") &&
+    (haystack.includes("install") ||
+      haystack.includes("expose") ||
+      haystack.includes("path") ||
+      haystack.includes("auth") ||
+      haystack.includes("credential") ||
+      haystack.includes("acpx"))
+  ) {
     return "setup blocker requires external environment change";
   }
   if (

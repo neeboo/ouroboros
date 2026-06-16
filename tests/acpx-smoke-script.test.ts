@@ -171,6 +171,9 @@ describe("acpx agent smoke script", () => {
   test("reports Hermes doctor diagnostics without starting ACP when hermes is missing", async () => {
     const result = await doctorHermes({
       commandPath: async (command) => (command === "acpx" ? "/opt/homebrew/bin/acpx" : null),
+      runCommand: async () => {
+        throw new Error("must not start Hermes ACP checks without a Hermes command");
+      },
     });
 
     expect(result).toMatchObject({
@@ -207,6 +210,12 @@ describe("acpx agent smoke script", () => {
         }
         return null;
       },
+      runCommand: async ({ cmd }) => {
+        if (cmd.join(" ") === "acpx config show --format json") {
+          return { exitCode: 0, stdout: '{"authMethods":["custom"]}', stderr: "" };
+        }
+        throw new Error(`unexpected command: ${cmd.join(" ")}`);
+      },
     });
 
     expect(result).toMatchObject({
@@ -217,9 +226,56 @@ describe("acpx agent smoke script", () => {
         "hermes: missing",
         "hermes-acp: /opt/homebrew/bin/hermes-acp",
         "selected raw agentCommand: hermes-acp",
+        "Hermes ACP check: skipped",
+        "acpx authMethods: custom",
       ]),
-      diagnostics: expect.arrayContaining(["auth/model/setup blocker: Hermes CLI discovered; run Hermes auth/model setup before enabling execution"]),
+      diagnostics: expect.arrayContaining([
+        "Hermes ACP check skipped: hermes-acp was discovered without hermes; verify the adapter command manually before enabling execution",
+      ]),
     });
+  });
+
+  test("reports Hermes ACP check success and missing acpx auth as the real setup blocker", async () => {
+    const calls: string[][] = [];
+    const result = await doctorHermes({
+      commandPath: async (command) => {
+        if (command === "acpx") {
+          return "/opt/homebrew/bin/acpx";
+        }
+        if (command === "hermes") {
+          return "/Users/ghostcorn/.local/bin/hermes";
+        }
+        return null;
+      },
+      runCommand: async ({ cmd }) => {
+        calls.push(cmd);
+        if (cmd.join(" ") === "hermes acp --check") {
+          return { exitCode: 0, stdout: "Hermes ACP check OK\n", stderr: "" };
+        }
+        if (cmd.join(" ") === "acpx config show --format json") {
+          return { exitCode: 0, stdout: '{"authMethods":[]}', stderr: "" };
+        }
+        throw new Error(`unexpected command: ${cmd.join(" ")}`);
+      },
+    });
+
+    expect(calls).toEqual([
+      ["hermes", "acp", "--check"],
+      ["acpx", "config", "show", "--format", "json"],
+    ]);
+    expect(result.artifacts).toEqual(
+      expect.arrayContaining([
+        "hermes: /Users/ghostcorn/.local/bin/hermes",
+        "Hermes ACP check: passed",
+        "acpx authMethods: none",
+      ]),
+    );
+    expect(result.diagnostics).toEqual(
+      expect.arrayContaining([
+        "missing command: hermes-acp",
+        "setup blocker: acpx auth missing for Hermes; add auth.custom or auth.hermes-setup, or export ACPX_AUTH_CUSTOM / ACPX_AUTH_HERMES_SETUP",
+      ]),
+    );
   });
 
   test("reports command and JSON failures without credentials", async () => {

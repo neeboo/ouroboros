@@ -178,7 +178,29 @@ Hermes support starts with a read-only doctor, not worker routing:
 bun run scripts/acpx-agent-smoke.ts hermes --doctor
 ```
 
-The doctor reports the normalized child `PATH`, `acpx` discovery, `hermes` discovery, `hermes-acp` discovery, and the selected raw acpx `agentCommand`. It prefers `hermes acp`; it selects `hermes-acp` only when command discovery proves `hermes-acp` is available and `hermes` is not. A skipped result means Hermes is not proven on that machine. The doctor does not start an ACP session, does not run a write probe, and does not enable a worker default.
+The doctor reports the normalized child `PATH`, `acpx` discovery, `hermes` discovery, `hermes-acp` discovery, the selected raw acpx `agentCommand`, `hermes acp --check`, and acpx `authMethods`. It prefers `hermes acp`; it selects `hermes-acp` only when command discovery proves `hermes-acp` is available and `hermes` is not. A skipped result means Hermes is not proven for Orbs on that machine. The doctor does not start a task ACP session, does not run a write probe, and does not enable a worker default.
+
+When `hermes acp --check` passes but acpx reports no compatible auth method, the blocker is acpx configuration, not the Hermes binary:
+
+```json
+{
+  "auth": {
+    "custom": "<token-or-local-value>"
+  }
+}
+```
+
+or:
+
+```json
+{
+  "auth": {
+    "hermes-setup": "<token-or-local-value>"
+  }
+}
+```
+
+The same can be supplied through `ACPX_AUTH_CUSTOM` or `ACPX_AUTH_HERMES_SETUP` for local experiments. Keep this as an external setup blocker: stop hooks should exit and record the blocker instead of creating a code repair task.
 
 Keep Hermes config role-scoped and explicit until a separate smoke proves cwd/worktree behavior:
 
