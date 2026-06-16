@@ -17,6 +17,7 @@ import {
   doneOutput,
   parseAttemptOutput,
   resolveAgentBackend,
+  resolveExecutionRoute,
   runNextReadyTask,
   runReadyTasks,
   setRunDecisionAction,
@@ -1395,6 +1396,71 @@ describe("runner", () => {
     });
   });
 
+  test("resolves execution route with backend model and execution mode", () => {
+    const run = {
+      id: "run_1",
+      projectId: null,
+      projectRoot: null,
+      goal: "Build loop",
+      status: "todo" as const,
+      context: {
+        modelDefaults: {
+          roles: {
+            worker: { model: "gpt-5.4-mini", reason: "cheap worker" },
+          },
+        },
+        agentDefaults: {
+          roles: {
+            worker: "claude-code",
+            verifier: "codex-resumable",
+          },
+        },
+      },
+    };
+    const task = {
+      id: "task_1",
+      runId: "run_1",
+      parentId: null,
+      cycleId: "task_1",
+      status: "todo" as const,
+      role: "worker",
+      goal: "Work",
+      prompt: "Work.",
+      dependsOn: [],
+      doneWhen: [],
+      config: {},
+      worktreePath: null,
+      sessionRef: null,
+      contextVersion: 1,
+    };
+
+    expect(resolveExecutionRoute({ run, task, cliExecutor: "codex-resumable" })).toMatchObject({
+      role: "worker",
+      executionMode: "generic",
+      backend: {
+        id: "claude-code",
+        kind: "acpx",
+        agent: "claude",
+        source: "role-default",
+      },
+      model: {
+        model: "gpt-5.4-mini",
+        reason: "cheap worker",
+        source: "role-default",
+        role: "worker",
+      },
+    });
+    expect(resolveExecutionRoute({ run, task: { ...task, role: "verifier" }, cliExecutor: "codex-cli" })).toMatchObject({
+      role: "verifier",
+      executionMode: "codex-resumable",
+      backend: {
+        id: "codex-resumable",
+        kind: "codex-resumable",
+        source: "role-default",
+      },
+    });
+  });
+
   test("records resolved backend in attempt input", async () => {
     const runId = harness.createRun({
       goal: "Build loop",
@@ -1425,11 +1491,15 @@ describe("runner", () => {
         checks: [],
         problems: [],
       }),
-      attemptInput: ({ run, task, cwd, resolvedModel }) => ({
-        backend: resolveAgentBackend({ run, task, cliExecutor: "codex-cli" }),
-        cwd,
-        model: resolvedModel,
-      }),
+      attemptInput: ({ run, task, cwd }) => {
+        const route = resolveExecutionRoute({ run, task, cliExecutor: "codex-cli", globalModel: "global-model" });
+        return {
+          route,
+          backend: route.backend,
+          cwd,
+          model: route.model,
+        };
+      },
     });
 
     expect(harness.getAttempt(result[0].attemptId)?.input).toMatchObject({
@@ -1440,6 +1510,14 @@ describe("runner", () => {
         kind: "acpx",
         agent: "opencode",
         source: "role-default",
+      },
+      route: {
+        role: "worker",
+        executionMode: "generic",
+        backend: {
+          id: "opencode",
+          kind: "acpx",
+        },
       },
       model: {
         model: "global-model",

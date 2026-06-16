@@ -17,12 +17,11 @@ import {
   createVerifierTaskHook,
   childEnvForProcess,
   childToolchainEnvEvidence,
-  resolveAgentBackend,
-  resolveModelPreference,
+  resolveExecutionRoute,
   runReadyTasks,
   runUntilIdle,
 } from "@ouroboros/runner";
-import type { ResolvedAgentBackend, StopHook } from "@ouroboros/runner";
+import type { ResolvedAgentBackend, ResolvedExecutionRoute, StopHook } from "@ouroboros/runner";
 import { fail, flag, parseArgs, required } from "./args";
 import { loadOuroborosConfig } from "./config";
 import { parseArray, parseObject, printJson } from "./json";
@@ -582,12 +581,12 @@ switch (parsed.command) {
       lessons: harness.listLessons({ runId: run.id }),
       template: harness.getPromptTemplate("task")?.contentMd,
     });
-    const resolvedModel = resolveModelPreference({ run, task, globalModel: flag(parsed, "model") });
+    const route = resolveCliExecutionRoute({ run, task, cliExecutor: "codex-resumable" });
     const input = {
       prompt,
       sessionName,
       executor: "codex-resumable",
-      model: resolvedModel,
+      model: route.model,
     };
     const cwd = task.worktreePath ?? worktreeForTask()?.(task) ?? runnerCwd();
     const startResult = await applyStartHooks({
@@ -620,7 +619,7 @@ switch (parsed.command) {
     }
     const attemptId = harness.startAttempt({ taskId, input: { ...input, cwd } });
     const recorder = createAttemptEventRecorder(attemptId);
-    const result = await codexResumableClient(resolvedModel?.model, cwd).start({
+    const result = await codexResumableClient(route.model?.model, cwd).start({
       prompt,
       sessionName,
       onStdout: recorder.stdout,
@@ -629,7 +628,7 @@ switch (parsed.command) {
     });
     harness.updateAttemptInput({
       attemptId,
-      input: codexAttemptInput({ prompt, sessionName, result, model: resolvedModel, cwd }),
+      input: codexAttemptInput({ prompt, sessionName, result, model: route.model, cwd }),
     });
     if (result.status === "running") {
       printJson({
@@ -880,13 +879,14 @@ function executorFactory(executorName: "noop" | "acpx-codex" | "codex-cli" | "co
     run: NonNullable<ReturnType<Harness["getRun"]>>;
     task: NonNullable<ReturnType<Harness["getTask"]>>;
     cwd: string;
-    resolvedModel: { model: string } | null;
+    resolvedModel: ResolvedExecutionRoute["model"];
   }) => {
-    const backend = resolvedBackendForTask({
+    const route = resolveCliExecutionRoute({
       run: input.run,
       task: input.task,
       cliExecutor: executorName,
     });
+    const backend = route.backend;
     if (backend.kind === "noop") {
       return async ({ task }: { task: { id: string } }) => ({
         status: "done" as const,
@@ -902,7 +902,7 @@ function executorFactory(executorName: "noop" | "acpx-codex" | "codex-cli" | "co
         cwd: input.cwd,
         ...acpxAgentConfig(backend),
         approval: backend.approval ?? parseApproval(flag(parsed, "approval") ?? "approve-reads"),
-        model: input.resolvedModel?.model,
+        model: route.model?.model,
         env: backend.env,
         timeoutMs: parseTimeoutMs(flag(parsed, "timeout-ms")),
         idleTimeoutMs: parseTimeoutMs(flag(parsed, "idle-timeout-ms"), "--idle-timeout-ms"),
@@ -915,7 +915,7 @@ function executorFactory(executorName: "noop" | "acpx-codex" | "codex-cli" | "co
       cwd: input.cwd,
       sandbox: parseSandbox(flag(parsed, "sandbox") ?? "read-only"),
       codexBin: flag(parsed, "codex-bin"),
-      model: input.resolvedModel?.model,
+      model: route.model?.model,
       timeoutMs: parseTimeoutMs(flag(parsed, "timeout-ms")),
       idleTimeoutMs: parseTimeoutMs(flag(parsed, "idle-timeout-ms"), "--idle-timeout-ms"),
     });
@@ -928,24 +928,30 @@ function attemptInputFactory(executorName: "noop" | "acpx-codex" | "codex-cli" |
     task: NonNullable<ReturnType<Harness["getTask"]>>;
     cwd: string;
     resolvedModel: unknown;
-  }) => ({
-    backend: resolvedBackendForTask({ run: input.run, task: input.task, cliExecutor: executorName }),
-    cwd: input.cwd,
-    model: input.resolvedModel,
-  });
+  }) => attemptInputForRoute(resolveCliExecutionRoute({ run: input.run, task: input.task, cliExecutor: executorName }), input.cwd);
 }
 
-function resolvedBackendForTask(input: {
+function resolveCliExecutionRoute(input: {
   run: NonNullable<ReturnType<Harness["getRun"]>>;
   task: NonNullable<ReturnType<Harness["getTask"]>>;
   cliExecutor: "noop" | "acpx-codex" | "codex-cli" | "codex-resumable";
 }) {
-  return resolveAgentBackend({
+  return resolveExecutionRoute({
     run: input.run,
     task: input.task,
     cliAgentBackend: flag(parsed, "agent-backend"),
     cliExecutor: input.cliExecutor,
+    globalModel: flag(parsed, "model"),
   });
+}
+
+function attemptInputForRoute(route: ResolvedExecutionRoute, cwd: string) {
+  return {
+    route,
+    backend: route.backend,
+    cwd,
+    model: route.model,
+  };
 }
 
 function acpxAgentConfig(backend: ResolvedAgentBackend) {
@@ -1981,16 +1987,14 @@ async function startReadyCodexAttempts(input: { runId: string; limit: number }) 
       lessons: harness.listLessons({ runId: run.id }),
       template: harness.getPromptTemplate("task")?.contentMd,
     });
-    const resolvedModel = resolveModelPreference({ run, task, globalModel: flag(parsed, "model") });
+    const route = resolveCliExecutionRoute({ run, task, cliExecutor: "codex-resumable" });
+    const resolvedModel = route.model;
     const cwd = task.worktreePath ?? runnerCwd();
-    const backend = resolvedBackendForTask({ run, task, cliExecutor: "codex-resumable" });
     const baseInput = {
       prompt,
       sessionName,
-      executor: backend.kind,
-      backend,
-      model: resolvedModel,
-      cwd,
+      executor: route.backend.kind,
+      ...attemptInputForRoute(route, cwd),
     };
     const startResult = await applyStartHooks({
       hooks: startHooks(),
@@ -2028,14 +2032,14 @@ async function startReadyCodexAttempts(input: { runId: string; limit: number }) 
         codexSessionId: null,
       };
     }
-    if (backend.kind !== "codex-resumable") {
+    if (route.executionMode !== "codex-resumable") {
       return runLeasedGenericAttempt({
         run,
         task,
         sessionName,
         prompt,
         cwd,
-        resolvedModel,
+        route,
         startResult,
       });
     }
@@ -2057,7 +2061,7 @@ async function startReadyCodexAttempts(input: { runId: string; limit: number }) 
       onEvent: recorder.event,
     });
     const attemptInput = {
-      ...codexAttemptInput({ prompt, sessionName, result, model: resolvedModel, cwd }),
+      ...codexAttemptInput({ prompt, sessionName, result, model: route.model, cwd }),
       threadId: threadIdForAttempt(attemptId),
     };
     harness.updateAttemptInput({ attemptId, input: attemptInput });
@@ -2119,7 +2123,7 @@ async function runLeasedGenericAttempt(input: {
   sessionName: string;
   prompt: string;
   cwd: string;
-  resolvedModel: ReturnType<typeof resolveModelPreference>;
+  route: ResolvedExecutionRoute;
   startResult: Awaited<ReturnType<typeof applyStartHooks>>;
 }) {
   const factoryInput = {
@@ -2127,15 +2131,15 @@ async function runLeasedGenericAttempt(input: {
     task: input.task,
     sessionName: input.sessionName,
     cwd: input.cwd,
-    resolvedModel: input.resolvedModel,
+    resolvedModel: input.route.model,
   };
   const attemptId = harness.startAttempt({
     taskId: input.task.id,
     input: {
       prompt: input.prompt,
       sessionName: input.sessionName,
-      executor: resolvedBackendForTask({ run: input.run, task: input.task, cliExecutor: "codex-resumable" }).kind,
-      ...(attemptInputFactory("codex-resumable")(factoryInput) ?? {}),
+      executor: input.route.backend.kind,
+      ...attemptInputForRoute(input.route, input.cwd),
     },
   });
   upsertAttemptThread({
@@ -2152,7 +2156,7 @@ async function runLeasedGenericAttempt(input: {
     run: input.run,
     task: input.task,
     sessionName: input.sessionName,
-    resolvedModel: input.resolvedModel,
+    resolvedModel: input.route.model,
   });
   const { output, decision } = await applyCliStopHooks({
     run: input.run,

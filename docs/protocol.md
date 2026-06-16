@@ -267,6 +267,8 @@ then CLI --agent-backend
 then CLI --executor
 ```
 
+Model and backend selection are joined into one execution route before a task runs. The route records the task role, resolved backend, resolved model preference, and execution mode. `executionMode = "codex-resumable"` means the Codex resumable client owns start/resume. `executionMode = "generic"` means the runner uses the resolved backend through the normal executor factory, including ACP/acpx agents such as Claude Code. New role-specific agents should plug into this route layer before executor implementation details.
+
 Supported backend kinds are `acpx`, `codex-cli`, `codex-resumable`, and `noop`. For `acpx`, built-in agent ids are `codex`, `claude`, `opencode`, and `openclaw`; custom ACP servers use `agentCommand`. Agent event streams are supplemental evidence only. Attempt status, checks, artifacts, problems, and changed files still come from the final Orbs structured JSON plus Orbs stop hooks. See `docs/agent-backends.md` for the researched boundaries, including the warning that remote or Gateway agents must prove cwd/worktree behavior before write tasks.
 
 Runs may be bound to a project by `project_id`, or by a project root path that creates/reuses a matching `projects.root_path` row. Old databases keep `runs.project_id` nullable, and existing `context_json` remains compatible.

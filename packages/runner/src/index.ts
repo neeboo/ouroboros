@@ -12,6 +12,7 @@ export { createCodexCliExecutor } from "./executors/codex-cli";
 export { createCodexResumableClient } from "./executors/codex-resumable";
 export { parseAttemptOutput } from "./executors/output";
 export { resolveAgentBackend } from "./agent-backends";
+export { resolveExecutionRoute } from "./execution-routing";
 export { resolveModelPreference } from "./model-preferences";
 export { runLocalCommand } from "./executors/command";
 export {
@@ -57,6 +58,7 @@ export type {
   TaskExecutorFactory,
 } from "./types";
 export type { AgentBackendKind, AgentBackendSource, ResolvedAgentBackend } from "./agent-backends";
+export type { ExecutionRouteMode, ResolvedExecutionRoute } from "./execution-routing";
 export type { ResolvedModelPreference, ResolvedModelPreferenceSource } from "./model-preferences";
 export type {
   AcpxAgentExecutorOptions,
