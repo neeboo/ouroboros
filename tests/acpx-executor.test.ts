@@ -10,6 +10,18 @@ const runFixture = {
   context: {},
 };
 
+const routeFixture = {
+  role: "worker",
+  backend: {
+    id: "acpx-codex",
+    kind: "acpx",
+    source: "cli-executor",
+    agent: "codex",
+  },
+  model: null,
+  executionMode: "generic",
+} as const;
+
 describe("acpx executor", () => {
   test("parses structured attempt output from agent text", () => {
     const output = parseAttemptOutput(`
@@ -66,6 +78,7 @@ describe("acpx executor", () => {
       prompt: "Do the task",
       sessionName: "task_1",
       run: runFixture,
+      route: routeFixture,
       task: {
         id: "task_1",
         runId: "run_1",
@@ -127,6 +140,7 @@ describe("acpx executor", () => {
       prompt: "Do the task",
       sessionName: "task_1",
       run: runFixture,
+      route: routeFixture,
       task: {
         id: "task_1",
         runId: "run_1",
@@ -177,6 +191,7 @@ describe("acpx executor", () => {
       prompt: "Do the task",
       sessionName: "task_1",
       run: runFixture,
+      route: routeFixture,
       task: {
         id: "task_1",
         runId: "run_1",
@@ -225,6 +240,7 @@ describe("acpx executor", () => {
       prompt: "Do the task",
       sessionName: "task_1",
       run: runFixture,
+      route: routeFixture,
       task: {
         id: "task_1",
         runId: "run_1",
@@ -270,6 +286,7 @@ describe("acpx executor", () => {
       prompt: "Do the task",
       sessionName: "task_1",
       run: runFixture,
+      route: routeFixture,
       task: {
         id: "task_1",
         runId: "run_1",
@@ -317,6 +334,7 @@ describe("acpx executor", () => {
       prompt: "Do the task",
       sessionName: "task_1",
       run: runFixture,
+      route: routeFixture,
       task: {
         id: "task_1",
         runId: "run_1",
@@ -357,6 +375,7 @@ describe("acpx executor", () => {
       prompt: "Do the task",
       sessionName: "existing",
       run: runFixture,
+      route: routeFixture,
       task: {
         id: "task_1",
         runId: "run_1",
@@ -402,6 +421,7 @@ describe("acpx executor", () => {
       prompt: "Do the task",
       sessionName: "task_1",
       run: runFixture,
+      route: routeFixture,
       task: {
         id: "task_1",
         runId: "run_1",
@@ -460,6 +480,7 @@ describe("acpx executor", () => {
       prompt: "Do the task",
       sessionName: "task_1",
       run: runFixture,
+      route: routeFixture,
       task: {
         id: "task_1",
         runId: "run_1",
@@ -521,6 +542,7 @@ describe("acpx executor", () => {
       prompt: "Do the task",
       sessionName: "task_1",
       run: runFixture,
+      route: routeFixture,
       task: {
         id: "task_1",
         runId: "run_1",
@@ -583,6 +605,7 @@ describe("acpx executor", () => {
       prompt: "Do the task",
       sessionName: "task_1",
       run: runFixture,
+      route: routeFixture,
       task: {
         id: "task_1",
         runId: "run_1",
@@ -637,6 +660,7 @@ describe("acpx executor", () => {
       prompt: "Do the task",
       sessionName: "task_1",
       run: runFixture,
+      route: routeFixture,
       task: {
         id: "task_1",
         runId: "run_1",
@@ -708,6 +732,7 @@ describe("acpx executor", () => {
       prompt: "Do the task",
       sessionName: "task_1",
       run: runFixture,
+      route: routeFixture,
       task: {
         id: "task_1",
         runId: "run_1",
@@ -751,6 +776,7 @@ describe("acpx executor", () => {
       prompt: "Do the task",
       sessionName: "task_1",
       run: runFixture,
+      route: routeFixture,
       task: {
         id: "task_1",
         runId: "run_1",
@@ -792,6 +818,7 @@ describe("acpx executor", () => {
       prompt: "Do the task",
       sessionName: "task_1",
       run: runFixture,
+      route: routeFixture,
       task: {
         id: "task_1",
         runId: "run_1",

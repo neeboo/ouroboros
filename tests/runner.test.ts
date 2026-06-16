@@ -1290,8 +1290,8 @@ describe("runner", () => {
       runId,
       limit: 3,
       model: "global-flag-model",
-      executorFactory: ({ resolvedModel }) => {
-        seenModels.push(resolvedModel?.model ?? null);
+      executorFactory: ({ route }) => {
+        seenModels.push(route.model?.model ?? null);
         return async () => ({
           status: "done",
           summary: "ok",

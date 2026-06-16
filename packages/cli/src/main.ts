@@ -884,7 +884,6 @@ function executorFactory(executorName: "noop" | "acpx-codex" | "codex-cli" | "co
     task: NonNullable<ReturnType<Harness["getTask"]>>;
     cwd: string;
     route: ResolvedExecutionRoute;
-    resolvedModel: ResolvedExecutionRoute["model"];
   }) => {
     const backend = input.route.backend;
     if (backend.kind === "noop") {
@@ -928,7 +927,6 @@ function attemptInputFactory(executorName: "noop" | "acpx-codex" | "codex-cli" |
     task: NonNullable<ReturnType<Harness["getTask"]>>;
     cwd: string;
     route: ResolvedExecutionRoute;
-    resolvedModel: unknown;
   }) => attemptInputForRoute(input.route, input.cwd);
 }
 
@@ -2133,7 +2131,6 @@ async function runLeasedGenericAttempt(input: {
     sessionName: input.sessionName,
     cwd: input.cwd,
     route: input.route,
-    resolvedModel: input.route.model,
   };
   const attemptId = harness.startAttempt({
     taskId: input.task.id,
@@ -2158,7 +2155,7 @@ async function runLeasedGenericAttempt(input: {
     run: input.run,
     task: input.task,
     sessionName: input.sessionName,
-    resolvedModel: input.route.model,
+    route: input.route,
   });
   const { output, decision } = await applyCliStopHooks({
     run: input.run,

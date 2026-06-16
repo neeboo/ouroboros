@@ -1,6 +1,5 @@
 import type { AttemptOutput, Harness, Lesson, Run, Task } from "@ouroboros/harness";
 import type { ResolvedExecutionRoute } from "./execution-routing";
-import type { ResolvedModelPreference } from "./model-preferences";
 
 export interface PromptInput {
   run: Run;
@@ -15,8 +14,7 @@ export interface ExecutorInput {
   run: Run;
   task: Task;
   sessionName: string;
-  route?: ResolvedExecutionRoute;
-  resolvedModel?: ResolvedModelPreference | null;
+  route: ResolvedExecutionRoute;
 }
 
 export type TaskExecutor = (input: ExecutorInput) => Promise<AttemptOutput>;
@@ -41,7 +39,6 @@ export interface ExecutorFactoryInput {
   sessionName: string;
   cwd: string;
   route: ResolvedExecutionRoute;
-  resolvedModel: ResolvedModelPreference | null;
 }
 
 export type TaskExecutorFactory = (input: ExecutorFactoryInput) => TaskExecutor;

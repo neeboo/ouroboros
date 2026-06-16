@@ -30,7 +30,7 @@ export async function runNextReadyTask(input: RunNextReadyTaskInput) {
   });
   const sessionName = task.sessionRef ?? defaultSessionName(task.id);
   const route = resolveExecutionRoute({ run, task });
-  const rawOutput = await input.executor({ prompt, run, task, sessionName, route, resolvedModel: route.model });
+  const rawOutput = await input.executor({ prompt, run, task, sessionName, route });
   const { output, decision } = await applyStopHooks({
     hooks: hooksForTask(input.stopHooks, input.stopHooksByRole, task),
     run,
@@ -105,10 +105,9 @@ export async function runReadyTasks(input: RunReadyTasksInput) {
         cliExecutor: input.cliExecutor,
         globalModel: input.model,
       });
-      const resolvedModel = route.model;
-      const factoryInput = { run, task, sessionName, cwd, route, resolvedModel };
+      const factoryInput = { run, task, sessionName, cwd, route };
       const executor = input.executorFactory(factoryInput);
-      const rawOutput = await executor({ prompt, run, task, sessionName, route, resolvedModel });
+      const rawOutput = await executor({ prompt, run, task, sessionName, route });
       const { output, decision } = await applyStopHooks({
         hooks: hooksForTask(input.stopHooks, input.stopHooksByRole, task),
         run,
@@ -121,7 +120,7 @@ export async function runReadyTasks(input: RunReadyTasksInput) {
       output.artifacts = [...(startResult.artifacts ?? []), ...(output.artifacts ?? [])];
       const attemptId = input.harness.recordAttempt({
         taskId: task.id,
-        input: { prompt, sessionName, route, model: resolvedModel, ...(input.attemptInput?.(factoryInput) ?? {}) },
+        input: { prompt, sessionName, route, model: route.model, ...(input.attemptInput?.(factoryInput) ?? {}) },
         output,
       });
       applyPostAttemptRunEffects(input.harness, input.runId, task, output);

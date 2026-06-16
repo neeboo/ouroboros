@@ -13,6 +13,17 @@ const runFixture = {
   context: {},
 };
 
+const routeFixture = {
+  role: "worker",
+  backend: {
+    id: "codex-cli",
+    kind: "codex-cli",
+    source: "cli-executor",
+  },
+  model: null,
+  executionMode: "generic",
+} as const;
+
 describe("codex cli executor", () => {
   test("runs codex exec through an injectable command runner", async () => {
     const calls: Array<{ cmd: string[]; stdin: string }> = [];
@@ -39,6 +50,7 @@ describe("codex cli executor", () => {
       prompt: "Plan next task",
       sessionName: "task_1",
       run: runFixture,
+      route: routeFixture,
       task: {
         id: "task_1",
         runId: "run_1",
@@ -95,6 +107,7 @@ describe("codex cli executor", () => {
         prompt: "Plan next task",
         sessionName: "task_1",
         run: runFixture,
+      route: routeFixture,
         task: {
           id: "task_1",
           runId: "run_1",
@@ -137,6 +150,7 @@ describe("codex cli executor", () => {
       prompt: "Plan next task",
       sessionName: "task_1",
       run: runFixture,
+      route: routeFixture,
       task: {
         id: "task_1",
         runId: "run_1",
@@ -178,6 +192,7 @@ describe("codex cli executor", () => {
       prompt: "Plan next task",
       sessionName: "task_1",
       run: runFixture,
+      route: routeFixture,
       task: {
         id: "task_1",
         runId: "run_1",
@@ -215,6 +230,7 @@ describe("codex cli executor", () => {
         prompt: "Plan next task",
         sessionName: "task_1",
         run: runFixture,
+      route: routeFixture,
         task: {
           id: "task_1",
           runId: "run_1",
@@ -259,6 +275,7 @@ describe("codex cli executor", () => {
       prompt: "Plan next task",
       sessionName: "task_1",
       run: runFixture,
+      route: routeFixture,
       task: {
         id: "task_1",
         runId: "run_1",
