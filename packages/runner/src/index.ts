@@ -10,6 +10,7 @@ export { applyStartHooks, runNextReadyTask, runReadyTasks, runUntilIdle } from "
 export { createAcpxAgentExecutor, createAcpxCodexExecutor } from "./executors/acpx";
 export { createCodexCliExecutor } from "./executors/codex-cli";
 export { createCodexResumableClient } from "./executors/codex-resumable";
+export { createRouteExecutor } from "./route-executor";
 export { parseAttemptOutput } from "./executors/output";
 export { resolveAgentBackend } from "./agent-backends";
 export { resolveExecutionRoute } from "./execution-routing";
@@ -71,6 +72,7 @@ export type {
   RunCommand,
   RunCommandInput,
 } from "./executors/types";
+export type { RouteExecutorOptions } from "./route-executor";
 export type {
   CodexResumableClientOptions,
   CodexResumableResumeInput,

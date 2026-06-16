@@ -4,8 +4,6 @@ import type { AttemptOutput } from "@ouroboros/harness";
 import {
   buildTaskPrompt,
   applyStartHooks,
-  createAcpxAgentExecutor,
-  createCodexCliExecutor,
   createCodexResumableClient,
   createContextSummaryHook,
   createGitWorktreeHook,
@@ -17,11 +15,12 @@ import {
   createVerifierTaskHook,
   childEnvForProcess,
   childToolchainEnvEvidence,
+  createRouteExecutor,
   resolveExecutionRoute,
   runReadyTasks,
   runUntilIdle,
 } from "@ouroboros/runner";
-import type { ResolvedAgentBackend, ResolvedExecutionRoute, StopHook } from "@ouroboros/runner";
+import type { ResolvedExecutionRoute, StopHook } from "@ouroboros/runner";
 import { fail, flag, parseArgs, required } from "./args";
 import { loadOuroborosConfig } from "./config";
 import { parseArray, parseObject, printJson } from "./json";
@@ -878,50 +877,25 @@ function renderTaskPrompt(taskId: string) {
   });
 }
 
-function executorFactory(executorName: "noop" | "acpx-codex" | "codex-cli" | "codex-resumable") {
+function executorFactory(_executorName: "noop" | "acpx-codex" | "codex-cli" | "codex-resumable") {
   return (input: {
     run: NonNullable<ReturnType<Harness["getRun"]>>;
     task: NonNullable<ReturnType<Harness["getTask"]>>;
     cwd: string;
     route: ResolvedExecutionRoute;
-  }) => {
-    const backend = input.route.backend;
-    if (backend.kind === "noop") {
-      return async ({ task }: { task: { id: string } }) => ({
-        status: "done" as const,
-        summary: `Noop executor completed ${task.id}`,
-        changedFiles: [],
-        checks: [{ name: "noop executor", status: "passed" as const }],
-        artifacts: [],
-        problems: [],
-      });
-    }
-    if (backend.kind === "acpx") {
-      return createAcpxAgentExecutor({
-        cwd: input.cwd,
-        ...acpxAgentConfig(backend),
-        approval: backend.approval ?? parseApproval(flag(parsed, "approval") ?? "approve-reads"),
-        model: input.route.model?.model,
-        env: backend.env,
-        timeoutMs: parseTimeoutMs(flag(parsed, "timeout-ms")),
-        idleTimeoutMs: parseTimeoutMs(flag(parsed, "idle-timeout-ms"), "--idle-timeout-ms"),
-      });
-    }
-    if (backend.kind === "codex-resumable") {
-      fail("codex-resumable uses the resumable loop path");
-    }
-    return createCodexCliExecutor({
+  }) =>
+    createRouteExecutor({
       cwd: input.cwd,
+      route: input.route,
+      approval: parseApproval(flag(parsed, "approval") ?? "approve-reads"),
       sandbox: parseSandbox(flag(parsed, "sandbox") ?? "read-only"),
       codexBin: flag(parsed, "codex-bin"),
-      model: input.route.model?.model,
       timeoutMs: parseTimeoutMs(flag(parsed, "timeout-ms")),
       idleTimeoutMs: parseTimeoutMs(flag(parsed, "idle-timeout-ms"), "--idle-timeout-ms"),
     });
-  };
 }
 
-function attemptInputFactory(executorName: "noop" | "acpx-codex" | "codex-cli" | "codex-resumable") {
+function attemptInputFactory(_executorName: "noop" | "acpx-codex" | "codex-cli" | "codex-resumable") {
   return (input: {
     run: NonNullable<ReturnType<Harness["getRun"]>>;
     task: NonNullable<ReturnType<Harness["getTask"]>>;
@@ -951,13 +925,6 @@ function attemptInputForRoute(route: ResolvedExecutionRoute, cwd: string) {
     cwd,
     model: route.model,
   };
-}
-
-function acpxAgentConfig(backend: ResolvedAgentBackend) {
-  if (backend.agentCommand) {
-    return { agentCommand: backend.agentCommand };
-  }
-  return { agent: backend.agent ?? "codex" };
 }
 
 async function runCodexResumableLoop(input: { runId: string; maxRounds: number; limit: number; maxTries: number }) {
