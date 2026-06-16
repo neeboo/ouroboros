@@ -170,6 +170,39 @@ Copy-pasteable `task.config`:
 }
 ```
 
+## Claude Code Smoke
+
+Claude Code support is gated on read-only smoke evidence. The first supported smoke path is a one-shot ACP session through acpx:
+
+```bash
+bun run scripts/acpx-agent-smoke.ts claude-code
+```
+
+The script checks for local `acpx` and `claude` commands, then verifies that `@agentclientprotocol/claude-agent-acp@^0.36.1` can start from local npm state with `npm exec --offline`. This keeps the smoke from silently depending on a registry fetch. If those preflight checks pass, it creates a temporary cwd, runs `acpx --cwd <tmp> --auth-policy fail --approve-reads --non-interactive-permissions fail --format text claude exec`, and accepts only final Orbs JSON with passed `cwd`, `read-only prompt`, and `final Orbs JSON` checks. A skipped result means the backend is not proven on that machine. A passed result proves only read-only ACP execution in the temporary cwd; it does not enable write workloads.
+
+Future doctor scope: add a backend doctor that reports normalized child PATH entries, required command locations, auth status, and cwd/worktree capability before any write-task backend is enabled.
+
+Keep Claude Code backend config minimal and role-scoped until stronger evidence exists:
+
+```json
+{
+  "agentDefaults": {
+    "roles": {
+      "verifier": "claude-code"
+    }
+  },
+  "agentBackends": {
+    "claude-code": {
+      "kind": "acpx",
+      "agent": "claude",
+      "approval": "approve-reads"
+    }
+  }
+}
+```
+
+Do not route worker write tasks to `claude-code` by default until a separate smoke proves cwd/worktree reads, writes, command execution, diff reporting, and final Orbs JSON from the intended task worktree.
+
 CLI example:
 
 ```bash

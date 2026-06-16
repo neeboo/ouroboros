@@ -29,6 +29,37 @@ describe("acpx agent smoke script", () => {
     });
   });
 
+  test("parses final Orbs JSON after acpx streaming tool output", () => {
+    const output = `[client] initialize (running)
+[tool] pwd (completed)
+  input: {}
+  output:
+    /tmp/orbs-acpx-smoke
+{
+  "status": "done",
+  "summary": "smoke ok",
+  "changedFiles": [],
+  "checks": [
+    { "name": "cwd", "status": "passed" },
+    { "name": "read-only prompt", "status": "passed" },
+    { "name": "final Orbs JSON", "status": "passed" }
+  ],
+  "artifacts": [],
+  "problems": []
+}
+[done] end_turn`;
+
+    expect(parseAgentOutput(output)).toMatchObject({
+      status: "done",
+      summary: "smoke ok",
+      checks: [
+        { name: "cwd", status: "passed" },
+        { name: "read-only prompt", status: "passed" },
+        { name: "final Orbs JSON", status: "passed" },
+      ],
+    });
+  });
+
   test("skips agents when required commands are unavailable", async () => {
     const results = await runSmokeMatrix({
       agents: [
@@ -45,17 +76,19 @@ describe("acpx agent smoke script", () => {
       },
     });
 
-    expect(results).toEqual([
-      {
-        agent: "codex",
-        status: "skipped",
-        experimental: false,
-        diagnostics: ["missing command: acpx", "missing command: codex"],
-      },
-    ]);
+    expect(results).toHaveLength(1);
+    expect(results[0]).toMatchObject({
+      agent: "codex",
+      status: "skipped",
+      experimental: false,
+      artifacts: [],
+    });
+    expect(results[0].diagnostics).toEqual(
+      expect.arrayContaining(["missing command: acpx", "missing command: codex", expect.stringMatching(/^child PATH: /)]),
+    );
   });
 
-  test("validates cwd, session creation, final JSON parsing, and diagnostics", async () => {
+  test("validates cwd, read-only prompt, final JSON parsing, and diagnostics", async () => {
     const calls: Array<{ cmd: string[]; stdin: string; cwd?: string }> = [];
     const results = await runSmokeMatrix({
       agents: [
@@ -71,12 +104,9 @@ describe("acpx agent smoke script", () => {
       cleanupTempCwd: async () => undefined,
       runCommand: async ({ cmd, stdin, cwd }) => {
         calls.push({ cmd, stdin, cwd });
-        if (cmd.includes("ensure")) {
-          return { exitCode: 0, stdout: "session ensured", stderr: "" };
-        }
         return {
           exitCode: 0,
-          stdout: '{"status":"done","summary":"smoke ok","changedFiles":[],"checks":[{"name":"cwd","status":"passed"},{"name":"session","status":"passed"}],"artifacts":[],"problems":[]}',
+          stdout: '{"status":"done","summary":"smoke ok","changedFiles":[],"checks":[{"name":"cwd","status":"passed"},{"name":"read-only prompt","status":"passed"},{"name":"final Orbs JSON","status":"passed"}],"artifacts":[],"problems":[]}',
           stderr: "",
         };
       },
@@ -88,6 +118,7 @@ describe("acpx agent smoke script", () => {
       experimental: false,
       summary: "smoke ok",
     });
+    expect(results[0].artifacts).toContain("scope: one-shot acpx exec smoke; write workloads remain disabled");
     expect(calls.map((call) => call.cmd)).toEqual([
       [
         "acpx",
@@ -95,35 +126,46 @@ describe("acpx agent smoke script", () => {
         "/tmp/orbs-smoke-test",
         "--auth-policy",
         "fail",
-        "--deny-all",
+        "--approve-reads",
         "--non-interactive-permissions",
-        "deny",
-        "--format",
-        "text",
-        "codex",
-        "sessions",
-        "ensure",
-        "--name",
-        "orbs-smoke-codex",
-      ],
-      [
-        "acpx",
-        "--cwd",
-        "/tmp/orbs-smoke-test",
-        "--auth-policy",
         "fail",
-        "--deny-all",
-        "--non-interactive-permissions",
-        "deny",
         "--format",
         "text",
         "codex",
-        "-s",
-        "orbs-smoke-codex",
+        "exec",
       ],
     ]);
-    expect(calls[1].stdin).toContain("Return only final Orbs JSON");
-    expect(calls[1].stdin).toContain("/tmp/orbs-smoke-test");
+    expect(calls[0].stdin).toContain("Return only final Orbs JSON");
+    expect(calls[0].stdin).toContain("/tmp/orbs-smoke-test");
+    expect(calls[0].stdin).toContain("Do not write, edit, delete, move, or create files.");
+  });
+
+  test("skips claude-code when the local ACP adapter is unavailable offline", async () => {
+    const results = await runSmokeMatrix({
+      agents: [
+        {
+          id: "claude-code",
+          acpxAgent: "claude",
+          requiredCommands: ["claude"],
+          experimental: false,
+        },
+      ],
+      commandExists: async () => true,
+      adapterAvailable: async () => "missing local npm package: @agentclientprotocol/claude-agent-acp@^0.36.1",
+      runCommand: async () => {
+        throw new Error("must not initialize ACP without the local adapter");
+      },
+    });
+
+    expect(results).toEqual([
+      {
+        agent: "claude-code",
+        status: "skipped",
+        experimental: false,
+        artifacts: [],
+        diagnostics: ["missing local npm package: @agentclientprotocol/claude-agent-acp@^0.36.1"],
+      },
+    ]);
   });
 
   test("reports command and JSON failures without credentials", async () => {
@@ -137,12 +179,10 @@ describe("acpx agent smoke script", () => {
         },
       ],
       commandExists: async () => true,
+      adapterAvailable: async () => null,
       makeTempCwd: async () => "/tmp/orbs-smoke-test",
       cleanupTempCwd: async () => undefined,
-      runCommand: async ({ cmd }) => {
-        if (cmd.includes("ensure")) {
-          return { exitCode: 0, stdout: "", stderr: "" };
-        }
+      runCommand: async () => {
         return { exitCode: 0, stdout: "not json", stderr: "auth required; token=secret" };
       },
     });

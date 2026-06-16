@@ -152,7 +152,7 @@ switch (parsed.command) {
     const config = await loadCliConfig();
     const id = harness.createRun({
       goal,
-      context: withConfigModelDefaults(context, config),
+      context: withConfigDefaults(context, config),
       projectId: flag(parsed, "project-id") ?? null,
       projectRoot: flag(parsed, "project-root") ?? null,
     });
@@ -799,18 +799,17 @@ async function loadCliConfig() {
   return loadOuroborosConfig("config.toml");
 }
 
-function withConfigModelDefaults(context: Record<string, unknown>, config: Awaited<ReturnType<typeof loadOuroborosConfig>>) {
-  if (!config.modelDefaults || context.modelDefaults !== undefined) {
-    return context;
-  }
+function withConfigDefaults(context: Record<string, unknown>, config: Awaited<ReturnType<typeof loadOuroborosConfig>>) {
   return {
     ...context,
-    modelDefaults: config.modelDefaults,
+    ...(config.modelDefaults && context.modelDefaults === undefined ? { modelDefaults: config.modelDefaults } : {}),
+    ...(config.agentDefaults && context.agentDefaults === undefined ? { agentDefaults: config.agentDefaults } : {}),
+    ...(config.agentBackends && context.agentBackends === undefined ? { agentBackends: config.agentBackends } : {}),
   };
 }
 
 function hasConfigContent(config: Awaited<ReturnType<typeof loadOuroborosConfig>>) {
-  return Boolean(config.linear || config.modelDefaults);
+  return Boolean(config.linear || config.modelDefaults || config.agentDefaults || config.agentBackends);
 }
 
 function compactForTitle(value: string, max: number) {
@@ -1170,7 +1169,7 @@ async function createSelfIterationBootstrap() {
   const config = await loadCliConfig();
   const runId = harness.createRun({
     goal: SELF_ITERATION_GOAL,
-    context: withConfigModelDefaults({
+    context: withConfigDefaults({
       source: "self-iterate",
       planDoc: SELF_ITERATION_PLAN_DOC,
     }, config),
@@ -1190,7 +1189,7 @@ async function createIntakeRun(input: { title: string; document: string }) {
   const config = await loadCliConfig();
   const runId = harness.createRun({
     goal: `Intake: ${input.title}`,
-    context: withConfigModelDefaults({
+    context: withConfigDefaults({
       source: "intake",
       title: input.title,
       document: input.document,

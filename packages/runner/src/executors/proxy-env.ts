@@ -1,4 +1,4 @@
-import { existsSync } from "node:fs";
+import { existsSync, readdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { delimiter, join } from "node:path";
 
@@ -91,6 +91,8 @@ function normalizedDeveloperPath(env: Record<string, string | undefined>) {
   const home = env.HOME?.trim() || homedir();
   const candidates = [
     home ? join(home, ".bun/bin") : null,
+    env.NVM_BIN,
+    ...nvmNodeBinPaths(home),
     ...DEFAULT_DEVELOPER_PATHS,
   ].filter((entry): entry is string => Boolean(entry));
   const existing = (env.PATH ?? "").split(delimiter).filter(Boolean);
@@ -136,7 +138,40 @@ function splitCustomPathPrefix(entries: string[]) {
 }
 
 function isCommonDeveloperPath(entry: string) {
-  return entry.endsWith("/.bun/bin") || DEFAULT_DEVELOPER_PATHS.includes(entry);
+  return entry.endsWith("/.bun/bin") || /\/\.nvm\/versions\/node\/v[^/]+\/bin$/.test(entry) || DEFAULT_DEVELOPER_PATHS.includes(entry);
+}
+
+function nvmNodeBinPaths(home: string) {
+  const versionsDir = join(home, ".nvm", "versions", "node");
+  try {
+    return readdirSync(versionsDir, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory() && /^v\d+\.\d+\.\d+/.test(entry.name))
+      .map((entry) => entry.name)
+      .sort(compareNodeVersionsDesc)
+      .map((version) => join(versionsDir, version, "bin"));
+  } catch {
+    return [];
+  }
+}
+
+function compareNodeVersionsDesc(left: string, right: string) {
+  const leftParts = parseNodeVersion(left);
+  const rightParts = parseNodeVersion(right);
+  for (let index = 0; index < Math.max(leftParts.length, rightParts.length); index += 1) {
+    const delta = (rightParts[index] ?? 0) - (leftParts[index] ?? 0);
+    if (delta !== 0) {
+      return delta;
+    }
+  }
+  return right.localeCompare(left);
+}
+
+function parseNodeVersion(value: string) {
+  return value
+    .replace(/^v/, "")
+    .split(".")
+    .map((part) => Number.parseInt(part, 10))
+    .filter((part) => Number.isFinite(part));
 }
 
 function proxyFor(output: string, key: "HTTP" | "HTTPS" | "SOCKS", scheme = "http") {

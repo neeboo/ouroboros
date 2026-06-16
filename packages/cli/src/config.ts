@@ -3,6 +3,8 @@ import { readFile } from "node:fs/promises";
 export interface OuroborosConfig {
   linear?: LinearConfig;
   modelDefaults?: ModelDefaultsConfig;
+  agentDefaults?: AgentDefaultsConfig;
+  agentBackends?: Record<string, AgentBackendConfig>;
 }
 
 export interface LinearConfig {
@@ -28,6 +30,18 @@ export interface ModelPreferenceConfig {
   env_key?: string;
 }
 
+export interface AgentDefaultsConfig {
+  roles?: Record<string, string>;
+}
+
+export interface AgentBackendConfig {
+  kind: string;
+  agent?: string;
+  agentCommand?: string;
+  approval?: string;
+  format?: string;
+}
+
 export async function loadOuroborosConfig(path: string) {
   try {
     const raw = await readFile(path, "utf8");
@@ -44,6 +58,8 @@ export async function loadOuroborosConfig(path: string) {
 function normalizeConfig(input: Record<string, unknown>): OuroborosConfig {
   const linear = objectValue(input.linear);
   const modelDefaults = modelDefaultsValue(input.models);
+  const agentDefaults = agentDefaultsValue(input.agentDefaults);
+  const agentBackends = agentBackendsValue(input.agentBackends);
   return {
     linear: linear
       ? {
@@ -56,6 +72,8 @@ function normalizeConfig(input: Record<string, unknown>): OuroborosConfig {
         }
       : undefined,
     modelDefaults,
+    agentDefaults,
+    agentBackends,
   };
 }
 
@@ -108,6 +126,54 @@ function modelPreferenceValue(value: unknown): ModelPreferenceConfig | undefined
     ...optionalStringField(record, "base_url"),
     ...optionalStringField(record, "env_key"),
   };
+}
+
+function agentDefaultsValue(value: unknown): AgentDefaultsConfig | undefined {
+  const defaults = objectValue(value);
+  const roles = stringRecordValue(defaults?.roles);
+  return roles ? { roles } : undefined;
+}
+
+function agentBackendsValue(value: unknown): Record<string, AgentBackendConfig> | undefined {
+  const backends = objectValue(value);
+  if (!backends) {
+    return undefined;
+  }
+  const entries = Object.entries(backends).flatMap(([id, backend]) => {
+    const normalized = agentBackendValue(backend);
+    return normalized ? [[id, normalized] as const] : [];
+  });
+  return entries.length ? Object.fromEntries(entries) : undefined;
+}
+
+function agentBackendValue(value: unknown): AgentBackendConfig | undefined {
+  const record = objectValue(value);
+  if (!record) {
+    return undefined;
+  }
+  const kind = stringValue(record.kind);
+  if (!kind) {
+    return undefined;
+  }
+  return {
+    kind,
+    ...optionalStringField(record, "agent"),
+    ...optionalStringField(record, "agentCommand"),
+    ...optionalStringField(record, "approval"),
+    ...optionalStringField(record, "format"),
+  };
+}
+
+function stringRecordValue(value: unknown) {
+  const record = objectValue(value);
+  if (!record) {
+    return undefined;
+  }
+  const entries = Object.entries(record).flatMap(([key, raw]) => {
+    const value = stringValue(raw);
+    return value ? [[key, value] as const] : [];
+  });
+  return entries.length ? Object.fromEntries(entries) : undefined;
 }
 
 function objectValue(value: unknown) {

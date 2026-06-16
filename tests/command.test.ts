@@ -1,4 +1,7 @@
 import { describe, expect, test } from "bun:test";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { childToolchainEnvEvidence, proxyEnvForChildProcess, proxyEnvFromScutilOutput, runLocalCommand } from "../packages/runner/src";
 
 const testHome = "/tmp/ouroboros-test-home";
@@ -85,6 +88,28 @@ describe("command runner", () => {
       "/opt/homebrew/bin",
       "/usr/local/bin",
     ]);
+  });
+
+  test("adds local nvm node bins to child PATH with newest versions first", () => {
+    const home = mkdtempSync(join(tmpdir(), "orbs-nvm-home-"));
+    try {
+      mkdirSync(join(home, ".nvm/versions/node/v18.20.0/bin"), { recursive: true });
+      mkdirSync(join(home, ".nvm/versions/node/v22.13.0/bin"), { recursive: true });
+
+      const env = proxyEnvForChildProcess({
+        PATH: "/usr/bin:/bin",
+        HOME: home,
+      });
+
+      expect(env.PATH?.split(":").slice(0, 4)).toEqual([
+        join(home, ".bun/bin"),
+        join(home, ".nvm/versions/node/v22.13.0/bin"),
+        join(home, ".nvm/versions/node/v18.20.0/bin"),
+        "/opt/homebrew/bin",
+      ]);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
   });
 
   test("normalizes developer PATH from a clean low-PATH process environment", () => {

@@ -4,6 +4,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import { childEnvForProcess } from "../packages/runner/src/executors/proxy-env";
 import { parseAttemptOutput } from "../packages/runner/src/executors/output";
 
 type AgentId = "codex" | "claude-code" | "opencode" | "openclaw" | "hermes" | "reasonix";
@@ -34,12 +35,14 @@ export type SmokeResult = {
   status: "passed" | "failed" | "skipped";
   experimental: boolean;
   summary?: string;
+  artifacts: string[];
   diagnostics: string[];
 };
 
 export type RunSmokeMatrixOptions = {
   agents?: SmokeAgent[];
   commandExists?: (command: string) => Promise<boolean>;
+  adapterAvailable?: (agent: SmokeAgent) => Promise<string | null>;
   runCommand?: (input: RunCommandInput) => Promise<CommandResult>;
   makeTempCwd?: () => Promise<string>;
   cleanupTempCwd?: (cwd: string) => Promise<void>;
@@ -64,6 +67,7 @@ export function parseAgentOutput(raw: string) {
 export async function runSmokeMatrix(options: RunSmokeMatrixOptions = {}): Promise<SmokeResult[]> {
   const agents = options.agents ?? buildAgentMatrix();
   const commandExists = options.commandExists ?? defaultCommandExists;
+  const adapterAvailable = options.adapterAvailable ?? defaultAdapterAvailable;
   const runCommand = options.runCommand ?? defaultRunCommand;
   const makeTempCwd = options.makeTempCwd ?? defaultMakeTempCwd;
   const cleanupTempCwd = options.cleanupTempCwd ?? defaultCleanupTempCwd;
@@ -73,11 +77,25 @@ export async function runSmokeMatrix(options: RunSmokeMatrixOptions = {}): Promi
   for (const agent of agents) {
     const missing = await missingCommands(agent, commandExists);
     if (missing.length > 0) {
+      const env = childEnvForProcess();
       results.push({
         agent: agent.id,
         status: "skipped",
         experimental: agent.experimental,
-        diagnostics: missing.map((command) => `missing command: ${command}`),
+        artifacts: [],
+        diagnostics: [...missing.map((command) => `missing command: ${command}`), `child PATH: ${env.PATH ?? ""}`],
+      });
+      continue;
+    }
+
+    const adapterProblem = await adapterAvailable(agent);
+    if (adapterProblem) {
+      results.push({
+        agent: agent.id,
+        status: "skipped",
+        experimental: agent.experimental,
+        artifacts: [],
+        diagnostics: [adapterProblem],
       });
       continue;
     }
@@ -99,21 +117,10 @@ async function smokeAgent(input: {
   runCommand: (input: RunCommandInput) => Promise<CommandResult>;
   timeoutMs: number;
 }): Promise<SmokeResult> {
-  const sessionName = `orbs-smoke-${input.agent.id}`;
   const base = acpxBaseCommand(input.agent, input.cwd);
-  const ensure = await input.runCommand({
-    cmd: [...base, "sessions", "ensure", "--name", sessionName],
-    stdin: "",
-    cwd: input.cwd,
-    timeoutMs: input.timeoutMs,
-  });
-  if (ensure.exitCode !== 0) {
-    return failed(input.agent, ["sessions ensure failed", commandDiagnostic(ensure)]);
-  }
-
   const prompt = smokePrompt(input.cwd, input.agent);
   const response = await input.runCommand({
-    cmd: [...base, "-s", sessionName],
+    cmd: [...base, "exec"],
     stdin: prompt,
     cwd: input.cwd,
     timeoutMs: input.timeoutMs,
@@ -126,10 +133,11 @@ async function smokeAgent(input: {
     const parsed = parseAgentOutput(response.stdout);
     const checks = Array.isArray(parsed.checks) ? parsed.checks : [];
     const hasCwdCheck = checks.some((check) => hasPassedCheck(check, "cwd"));
-    const hasSessionCheck = checks.some((check) => hasPassedCheck(check, "session"));
-    if (parsed.status !== "done" || !hasCwdCheck || !hasSessionCheck) {
+    const hasReadOnlyCheck = checks.some((check) => hasPassedCheck(check, "read-only prompt"));
+    const hasJsonCheck = checks.some((check) => hasPassedCheck(check, "final Orbs JSON"));
+    if (parsed.status !== "done" || !hasCwdCheck || !hasReadOnlyCheck || !hasJsonCheck) {
       return failed(input.agent, [
-        "final Orbs JSON must be done and include passed cwd and session checks",
+        "final Orbs JSON must be done and include passed cwd, read-only prompt, and final Orbs JSON checks",
         `parsed summary: ${parsed.summary}`,
       ]);
     }
@@ -138,6 +146,11 @@ async function smokeAgent(input: {
       status: "passed",
       experimental: input.agent.experimental,
       summary: redact(parsed.summary),
+      artifacts: [
+        `cwd: ${input.cwd}`,
+        `command: ${redact([...base, "exec"].join(" "))}`,
+        "scope: one-shot acpx exec smoke; write workloads remain disabled",
+      ],
       diagnostics: [],
     };
   } catch (error) {
@@ -156,9 +169,9 @@ function acpxBaseCommand(agent: SmokeAgent, cwd: string) {
     cwd,
     "--auth-policy",
     "fail",
-    "--deny-all",
+    "--approve-reads",
     "--non-interactive-permissions",
-    "deny",
+    "fail",
     "--format",
     "text",
   ];
@@ -174,7 +187,7 @@ function smokePrompt(cwd: string, agent: SmokeAgent) {
 Smoke-test agent backend: ${agent.id}
 Expected cwd: ${cwd}
 
-Validate that this session was created and that the working directory provided to the ACP session is the expected cwd. If either cannot be validated, return status "blocked" with a short diagnostic.
+Validate that the working directory provided to the ACP session is the expected cwd. Do not write, edit, delete, move, or create files. If cwd cannot be validated without writes, return status "blocked" with a short diagnostic.
 
 Use exactly this JSON shape:
 {
@@ -183,7 +196,7 @@ Use exactly this JSON shape:
   "changedFiles": [],
   "checks": [
     { "name": "cwd", "status": "passed" },
-    { "name": "session", "status": "passed" },
+    { "name": "read-only prompt", "status": "passed" },
     { "name": "final Orbs JSON", "status": "passed" }
   ],
   "artifacts": [],
@@ -207,9 +220,29 @@ async function defaultCommandExists(command: string) {
   return result.exitCode === 0;
 }
 
+async function defaultAdapterAvailable(agent: SmokeAgent) {
+  if (agent.id !== "claude-code") {
+    return null;
+  }
+  const result = await defaultRunCommand({
+    cmd: ["npm", "exec", "--offline", "--package", "@agentclientprotocol/claude-agent-acp@^0.36.1", "--", "claude-agent-acp", "--help"],
+    stdin: "",
+    timeoutMs: 20_000,
+  });
+  if (result.exitCode === 0) {
+    return null;
+  }
+  return [
+    "missing local npm package: @agentclientprotocol/claude-agent-acp@^0.36.1",
+    "Claude Code smoke skipped before ACP initialization to avoid network-dependent npm fetch",
+    commandDiagnostic(result),
+  ].join("\n");
+}
+
 async function defaultRunCommand(input: RunCommandInput): Promise<CommandResult> {
   const proc = Bun.spawn(input.cmd, {
     cwd: input.cwd,
+    env: childEnvForProcess(),
     stdin: "pipe",
     stdout: "pipe",
     stderr: "pipe",
@@ -247,6 +280,7 @@ function failed(agent: SmokeAgent, diagnostics: string[]): SmokeResult {
     agent: agent.id,
     status: "failed",
     experimental: agent.experimental,
+    artifacts: [],
     diagnostics: diagnostics.map(redact),
   };
 }

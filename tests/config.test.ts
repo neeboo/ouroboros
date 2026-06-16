@@ -53,4 +53,67 @@ describe("config", () => {
       },
     });
   });
+
+  test("parses role-scoped agent backend defaults from TOML", async () => {
+    const configPath = join(dir, "config.toml");
+    await writeFile(
+      configPath,
+      [
+        "[agentDefaults.roles]",
+        'worker = "opencode"',
+        'verifier = "claude-code"',
+        "",
+        "[agentBackends.opencode]",
+        'kind = "acpx"',
+        'agent = "opencode"',
+        'approval = "approve-reads"',
+        "",
+        '["agentBackends"."claude-code"]',
+        'kind = "acpx"',
+        'agent = "claude"',
+      ].join("\n"),
+    );
+
+    await expect(loadOuroborosConfig(configPath)).resolves.toMatchObject({
+      agentDefaults: {
+        roles: {
+          worker: "opencode",
+          verifier: "claude-code",
+        },
+      },
+      agentBackends: {
+        opencode: {
+          kind: "acpx",
+          agent: "opencode",
+          approval: "approve-reads",
+        },
+        "claude-code": {
+          kind: "acpx",
+          agent: "claude",
+        },
+      },
+    });
+  });
+
+  test("ignores global agent defaults in TOML to keep backend config role-scoped", async () => {
+    const configPath = join(dir, "config.toml");
+    await writeFile(
+      configPath,
+      [
+        "[agentDefaults]",
+        'global = "opencode"',
+        "",
+        "[agentDefaults.roles]",
+        'verifier = "claude-code"',
+      ].join("\n"),
+    );
+
+    await expect(loadOuroborosConfig(configPath)).resolves.toMatchObject({
+      agentDefaults: {
+        roles: {
+          verifier: "claude-code",
+        },
+      },
+    });
+  });
 });

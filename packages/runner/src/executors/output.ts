@@ -309,11 +309,65 @@ function extractJsonObject(raw: string) {
     return fenced[1];
   }
 
-  const start = trimmed.indexOf("{");
-  const end = trimmed.lastIndexOf("}");
-  if (start >= 0 && end > start) {
-    return trimmed.slice(start, end + 1);
+  const candidates = jsonObjectCandidates(trimmed);
+  for (let index = candidates.length - 1; index >= 0; index -= 1) {
+    try {
+      JSON.parse(candidates[index]);
+      return candidates[index];
+    } catch {
+      continue;
+    }
   }
 
   throw new Error("agent output did not contain a JSON object");
+}
+
+function jsonObjectCandidates(raw: string) {
+  const candidates: string[] = [];
+  for (let index = 0; index < raw.length; index += 1) {
+    if (raw[index] !== "{") {
+      continue;
+    }
+    const candidate = balancedJsonObjectFrom(raw, index);
+    if (candidate) {
+      candidates.push(candidate);
+      index += candidate.length - 1;
+    }
+  }
+  return candidates;
+}
+
+function balancedJsonObjectFrom(raw: string, start: number) {
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let index = start; index < raw.length; index += 1) {
+    const char = raw[index];
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+      } else if (char === "\\") {
+        escaped = true;
+      } else if (char === "\"") {
+        inString = false;
+      }
+      continue;
+    }
+
+    if (char === "\"") {
+      inString = true;
+      continue;
+    }
+    if (char === "{") {
+      depth += 1;
+      continue;
+    }
+    if (char === "}") {
+      depth -= 1;
+      if (depth === 0) {
+        return raw.slice(start, index + 1);
+      }
+    }
+  }
+  return null;
 }
