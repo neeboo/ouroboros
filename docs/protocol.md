@@ -43,6 +43,25 @@ Required fields:
 }
 ```
 
+The CLI can seed the same `modelDefaults` object from TOML when creating runs. Missing config files are ignored. `--config <path>` is used when supplied; otherwise the CLI looks for `ouroboros.toml` and then `config.toml`.
+
+```toml
+[models]
+model = "gpt-5-codex"
+
+[models.roles.worker]
+model = "gpt-5.4-mini"
+provider = "openai"
+profile = "fast"
+base_url = "https://api.example.test/v1"
+env_key = "OPENAI_API_KEY"
+
+[models.roles.verifier]
+model = "gpt-5.5"
+```
+
+`provider`, `profile`, `base_url`, and `env_key` are stored on the resolved model preference for future adapter work only. Current executors do not select providers, route base URLs, load env key values, or execute profiles from these fields.
+
 ### Task
 
 A task is one schedulable node in a run.
@@ -210,7 +229,7 @@ then run.context.modelDefaults.global
 then CLI --model
 ```
 
-The resolved model object is recorded in `attempts.input_json.model`. `codex-cli` passes it to `codex exec -m <model>`. `codex-resumable` passes it on both `codex exec` start and `codex exec resume`, and resumed attempts reuse the model stored on the running attempt.
+Explicit `--context-json` values win over config-seeded defaults: if `context.modelDefaults` is present, the CLI leaves it unchanged. The resolved model object is recorded in `attempts.input_json.model`, including `model`, `source`, `role`, and any inert metadata fields supplied in config. Run overview sessions expose the same stored object for dashboard visibility. `codex-cli` passes only the resolved `model` to `codex exec -m <model>`. `codex-resumable` passes only the resolved `model` on both `codex exec` start and `codex exec resume`, and resumed attempts reuse the model stored on the running attempt.
 
 Agent backend resolution is also protocol-level state. A run can define named backends in `context_json.agentBackends`, choose defaults in `context_json.agentDefaults`, and a task can override with `config_json.agentBackend`:
 

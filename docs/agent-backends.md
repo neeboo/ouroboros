@@ -20,6 +20,34 @@ ACP/acpx events, tool calls, diffs, and stream chunks are supplemental observabi
 
 Backend selection lives in `run.context` and `task.config`.
 
+Run model defaults can be seeded from TOML at run creation time. `--config <path>` wins when supplied; otherwise the CLI checks `ouroboros.toml` and then `config.toml`. The TOML is converted into `run.context.modelDefaults` only when the caller did not already provide `modelDefaults` in `--context-json`.
+
+```toml
+[models]
+model = "gpt-5-codex"
+
+[models.roles.worker]
+model = "gpt-5.4-mini"
+provider = "openai"
+profile = "fast"
+base_url = "https://api.example.test/v1"
+env_key = "OPENAI_API_KEY"
+
+[models.roles.verifier]
+model = "gpt-5.5"
+```
+
+Model resolution order is unchanged:
+
+```text
+task.config.modelPreference
+then run.context.modelDefaults.roles[task.role]
+then run.context.modelDefaults.global
+then CLI --model
+```
+
+Resolved attempts record `attempt.input.model` with `model`, `source`, `role`, and any supplied `provider`, `profile`, `base_url`, or `env_key` strings. Those extra fields are inert metadata in this slice: Orbs does not use them to select a third-party provider, route base URLs, read env var values, or execute profiles. Current Codex executors pass only the resolved `model` string.
+
 ```json
 {
   "agentDefaults": {

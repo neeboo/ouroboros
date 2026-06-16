@@ -969,6 +969,7 @@ export class Harness {
             attemptId: attempt.id,
             status: attempt.status,
             output: attempt.output,
+            model: objectOrNull(attempt.input.model),
             sessionName: stringOrNull(attempt.input.sessionName),
             codexSessionId: stringOrNull(attempt.input.codexSessionId),
             worktreePath: task.worktreePath,
@@ -1184,6 +1185,10 @@ function resolveRunProjectId(
 
 function stringOrNull(value: unknown) {
   return typeof value === "string" && value.trim().length > 0 ? value : null;
+}
+
+function objectOrNull(value: unknown) {
+  return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
 }
 
 function createDependencyReadiness(tasks: Task[]) {

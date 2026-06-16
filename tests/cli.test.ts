@@ -87,8 +87,78 @@ describe("CLI", () => {
     });
   });
 
+  test("seeds create-run model defaults from config without explicit context defaults", async () => {
+    await runCli("init");
+    const configPath = join(dir, "config.toml");
+    await writeFile(
+      configPath,
+      [
+        "[models.roles.worker]",
+        'model = "gpt-5.4-mini"',
+        'provider = "openai"',
+        'profile = "fast"',
+        'base_url = "https://api.example.test/v1"',
+        'env_key = "OPENAI_API_KEY"',
+        "",
+        "[models.roles.verifier]",
+        'model = "gpt-5.5"',
+      ].join("\n"),
+    );
+
+    const run = await runCliJson("create-run", "--goal", "Config seeded run", "--config", configPath);
+    const overview = await runCliJson("run-overview", "--run-id", run.id);
+
+    expect(overview.run.context.modelDefaults).toEqual({
+      roles: {
+        worker: {
+          model: "gpt-5.4-mini",
+          provider: "openai",
+          profile: "fast",
+          base_url: "https://api.example.test/v1",
+          env_key: "OPENAI_API_KEY",
+        },
+        verifier: {
+          model: "gpt-5.5",
+        },
+      },
+    });
+  });
+
+  test("keeps explicit context model defaults ahead of config defaults", async () => {
+    await runCli("init");
+    const configPath = join(dir, "config.toml");
+    await writeFile(
+      configPath,
+      [
+        "[models.roles.worker]",
+        'model = "gpt-5.4-mini"',
+      ].join("\n"),
+    );
+
+    const run = await runCliJson(
+      "create-run",
+      "--goal",
+      "Explicit context run",
+      "--config",
+      configPath,
+      "--context-json",
+      '{"modelDefaults":{"roles":{"worker":{"model":"explicit-worker"}}}}',
+    );
+    const overview = await runCliJson("run-overview", "--run-id", run.id);
+
+    expect(overview.run.context.modelDefaults).toEqual({
+      roles: {
+        worker: {
+          model: "explicit-worker",
+        },
+      },
+    });
+  });
+
   test("bootstraps a self-iteration planning run", async () => {
-    const result = await runCliJson("self-iterate");
+    const configPath = join(dir, "self-iterate.toml");
+    await writeFile(configPath, "[models.roles.worker]\nmodel = \"gpt-5.4-mini\"\n");
+    const result = await runCliJson("self-iterate", "--config", configPath);
     const overview = await runCliJson("run-overview", "--run-id", result.runId);
 
     expect(result.runId).toBeString();
@@ -114,6 +184,13 @@ describe("CLI", () => {
       context: expect.objectContaining({
         source: "self-iterate",
         planDoc: "docs/self-iteration-plan.md",
+        modelDefaults: {
+          roles: {
+            worker: {
+              model: "gpt-5.4-mini",
+            },
+          },
+        },
       }),
     });
     expect(overview.tasks).toHaveLength(1);
@@ -226,6 +303,8 @@ describe("CLI", () => {
 
   test("intakes a requirement document into a planner run", async () => {
     await runCli("init");
+    const configPath = join(dir, "intake.toml");
+    await writeFile(configPath, "[models.roles.verifier]\nmodel = \"gpt-5.5\"\n");
 
     const result = await runCliJson(
       "intake",
@@ -233,6 +312,8 @@ describe("CLI", () => {
       "React dashboard migration",
       "--document",
       "Migrate the dashboard to React and add a Vercel AI Elements style composer.",
+      "--config",
+      configPath,
     );
     const runId = result.runId;
     const overview = await runCliJson("run-overview", "--run-id", runId);
@@ -247,6 +328,13 @@ describe("CLI", () => {
     expect(result.supervisorCommand).toContain("create-runs");
     expect(overview.run.goal).toBe("Intake: React dashboard migration");
     expect(overview.run.context.document).toContain("Vercel AI Elements style composer");
+    expect(overview.run.context.modelDefaults).toEqual({
+      roles: {
+        verifier: {
+          model: "gpt-5.5",
+        },
+      },
+    });
     expect(overview.tasks[0]).toMatchObject({
       id: result.taskId,
       role: "planner",
@@ -1528,6 +1616,106 @@ describe("CLI", () => {
       },
     });
     expect(attempt.output.summary).toBe("resumed planner");
+  });
+
+  test("codex resumable attempts store and reuse config-seeded role model metadata", async () => {
+    await runCli("init");
+    const configPath = join(dir, "role-models.toml");
+    await writeFile(
+      configPath,
+      [
+        "[models.roles.worker]",
+        'model = "gpt-5.4-mini"',
+        'provider = "openai"',
+        'profile = "fast"',
+        'base_url = "https://api.example.test/v1"',
+        'env_key = "OPENAI_API_KEY"',
+      ].join("\n"),
+    );
+    const run = await runCliJson("create-run", "--goal", "Config model run", "--config", configPath);
+    const task = await runCliJson(
+      "create-task",
+      "--run-id",
+      run.id,
+      "--role",
+      "worker",
+      "--goal",
+      "Async worker",
+      "--prompt",
+      "Work asynchronously.",
+    );
+    const argsPath = join(dir, "codex-args.jsonl");
+    const codexBin = join(dir, "fake-codex-config-model");
+    await writeFile(
+      codexBin,
+      [
+        "#!/usr/bin/env bun",
+        "import { appendFileSync } from 'node:fs';",
+        "const args = Bun.argv.slice(2);",
+        `appendFileSync(${JSON.stringify(argsPath)}, JSON.stringify(args) + "\\n");`,
+        "const modelIndex = args.indexOf('-m');",
+        "if (modelIndex === -1 || args[modelIndex + 1] !== 'gpt-5.4-mini') process.exit(9);",
+        "if (args.includes('resume')) {",
+        "  console.log(JSON.stringify({ type: 'session.started', session_id: 'session_config_model' }));",
+        "  console.log(JSON.stringify({ type: 'agent.message', message: '{\"status\":\"done\",\"summary\":\"resumed config model\",\"changedFiles\":[],\"checks\":[],\"artifacts\":[],\"problems\":[]}' }));",
+        "  process.exit(0);",
+        "}",
+        "console.log(JSON.stringify({ type: 'session.started', session_id: 'session_config_model' }));",
+        "console.log(JSON.stringify({ type: 'agent.message.delta', delta: 'working' }));",
+        "console.error('command idle timed out after 300000ms');",
+        "process.exit(124);",
+      ].join("\n"),
+    );
+    await chmod(codexBin, 0o755);
+
+    const started = await runCliJson(
+      "codex-start-attempt",
+      "--task-id",
+      task.id,
+      "--codex-bin",
+      codexBin,
+      "--timeout-ms",
+      "900000",
+      "--idle-timeout-ms",
+      "300000",
+      "--model",
+      "gpt-5-codex",
+    );
+    const resumed = await runCliJson(
+      "codex-resume-attempt",
+      "--attempt-id",
+      started.attemptId,
+      "--codex-bin",
+      codexBin,
+      "--timeout-ms",
+      "900000",
+      "--idle-timeout-ms",
+      "300000",
+      "--model",
+      "wrong-resume-model",
+    );
+    const attempt = new Harness(dbPath).getAttempt(started.attemptId)!;
+    const overview = await runCliJson("run-overview", "--run-id", run.id);
+    const recordedArgs = (await Bun.file(argsPath).text()).trim().split("\n").map((line) => JSON.parse(line));
+
+    expect(resumed).toMatchObject({
+      attemptId: started.attemptId,
+      status: "done",
+    });
+    expect(recordedArgs).toHaveLength(2);
+    expect(recordedArgs.every((args: string[]) => args.includes("gpt-5.4-mini"))).toBe(true);
+    expect(recordedArgs.some((args: string[]) => args.includes("wrong-resume-model"))).toBe(false);
+    expect(attempt.input.model).toEqual({
+      model: "gpt-5.4-mini",
+      provider: "openai",
+      profile: "fast",
+      base_url: "https://api.example.test/v1",
+      env_key: "OPENAI_API_KEY",
+      source: "role-default",
+      role: "worker",
+    });
+    expect(overview.sessions[0].model).toEqual(attempt.input.model);
+    expect(attempt.output.summary).toBe("resumed config model");
   });
 
   test("uses task model preference before role defaults and cli model", async () => {

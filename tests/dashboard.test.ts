@@ -505,6 +505,29 @@ describe("dashboard", () => {
     expect(graph.edges).toContainEqual(expect.objectContaining({ source: fixture.tasks[0].id, target: fixture.tasks[1].id }));
   });
 
+  test("surfaces resolved model metadata in dashboard flow and canvas data", () => {
+    const fixture = longTextDashboardFixture();
+    (fixture.sessions[0] as Record<string, unknown>).model = {
+      model: "gpt-5.4-mini",
+      source: "role-default",
+      role: "worker",
+      provider: "openai",
+      profile: "fast",
+      base_url: "https://api.example.test/v1",
+      env_key: "OPENAI_API_KEY",
+    };
+    const graph = buildDashboardTaskGraph(fixture as never, "cycle_long_text");
+    const html = dashboardHtml({ runId: "run_123" });
+
+    const sessionModel = (fixture.sessions[0] as unknown as { model: Record<string, unknown> }).model;
+    expect(graph.nodes[0].data.latestSession?.model).toEqual(sessionModel);
+    expect(html).toContain("modelMetaForSession");
+    expect(html).toContain("session.model");
+    expect(html).toContain("Model ");
+    expect(html).toContain("latestSession.model");
+    expect(html).toContain("model.source");
+  });
+
   test("defines reusable static overflow contracts for dashboard long text surfaces", () => {
     const html = dashboardHtml({ runId: "run_123" });
 

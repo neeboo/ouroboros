@@ -55,7 +55,7 @@ switch (parsed.command) {
     break;
   }
   case "self-iterate": {
-    const { runId, taskId } = createSelfIterationBootstrap();
+    const { runId, taskId } = await createSelfIterationBootstrap();
     printJson({
       runId,
       taskId,
@@ -96,7 +96,7 @@ switch (parsed.command) {
     break;
   }
   case "self-iterate-launch": {
-    const { runId, taskId } = createSelfIterationBootstrap();
+    const { runId, taskId } = await createSelfIterationBootstrap();
     const port = parsePositiveInteger(flag(parsed, "port") ?? "7331", "--port");
     const selfIterationWorktreeArgs = defaultSelfIterationWorktreeArgs();
     const dashboard = createDashboardRuntime({
@@ -148,9 +148,10 @@ switch (parsed.command) {
   case "create-run": {
     const goal = required(parsed, "goal");
     const context = parseObject(flag(parsed, "context-json") ?? "{}");
+    const config = await loadCliConfig();
     const id = harness.createRun({
       goal,
-      context,
+      context: withConfigModelDefaults(context, config),
       projectId: flag(parsed, "project-id") ?? null,
       projectRoot: flag(parsed, "project-root") ?? null,
     });
@@ -172,7 +173,7 @@ switch (parsed.command) {
   case "intake": {
     const document = required(parsed, "document");
     const title = flag(parsed, "title") ?? compactForTitle(document, 80);
-    const result = createIntakeRun({ title, document });
+    const result = await createIntakeRun({ title, document });
     printJson({
       ...result,
       supervisorCommand: cliCommand(
@@ -291,7 +292,7 @@ switch (parsed.command) {
   }
   case "linear-check": {
     harness.init();
-    const config = await loadOuroborosConfig(flag(parsed, "config") ?? "ouroboros.toml");
+    const config = await loadCliConfig();
     const linear = config.linear ?? {};
     const result = await checkLinearAccess({
       harness,
@@ -774,6 +775,31 @@ function cliCommand(command: string, ...args: string[]) {
   return ["bun", "run", "orbs", "--", "--db", parsed.db, command, ...args].map(shellQuote).join(" ");
 }
 
+async function loadCliConfig() {
+  if (flag(parsed, "config")) {
+    return loadOuroborosConfig(flag(parsed, "config")!);
+  }
+  const primary = await loadOuroborosConfig("ouroboros.toml");
+  if (hasConfigContent(primary)) {
+    return primary;
+  }
+  return loadOuroborosConfig("config.toml");
+}
+
+function withConfigModelDefaults(context: Record<string, unknown>, config: Awaited<ReturnType<typeof loadOuroborosConfig>>) {
+  if (!config.modelDefaults || context.modelDefaults !== undefined) {
+    return context;
+  }
+  return {
+    ...context,
+    modelDefaults: config.modelDefaults,
+  };
+}
+
+function hasConfigContent(config: Awaited<ReturnType<typeof loadOuroborosConfig>>) {
+  return Boolean(config.linear || config.modelDefaults);
+}
+
 function compactForTitle(value: string, max: number) {
   const text = value.replace(/\s+/g, " ").trim();
   if (text.length <= max) {
@@ -1074,14 +1100,15 @@ function createPlannerFromUserGoal(input: { runId: string; goal: string; interru
   });
 }
 
-function createSelfIterationBootstrap() {
+async function createSelfIterationBootstrap() {
   harness.init();
+  const config = await loadCliConfig();
   const runId = harness.createRun({
     goal: SELF_ITERATION_GOAL,
-    context: {
+    context: withConfigModelDefaults({
       source: "self-iterate",
       planDoc: SELF_ITERATION_PLAN_DOC,
-    },
+    }, config),
   });
   const taskId = harness.createTask({
     runId,
@@ -1093,15 +1120,16 @@ function createSelfIterationBootstrap() {
   return { runId, taskId };
 }
 
-function createIntakeRun(input: { title: string; document: string }) {
+async function createIntakeRun(input: { title: string; document: string }) {
   harness.init();
+  const config = await loadCliConfig();
   const runId = harness.createRun({
     goal: `Intake: ${input.title}`,
-    context: {
+    context: withConfigModelDefaults({
       source: "intake",
       title: input.title,
       document: input.document,
-    },
+    }, config),
   });
   const taskId = harness.createTask({
     runId,
@@ -1496,8 +1524,8 @@ function createDashboardRuntime(input: {
       stopRunner,
       startSupervisor,
       stopSupervisor,
-      createIntake: (document, title) => {
-        const result = createIntakeRun({ title: title || compactForTitle(document, 80), document });
+      createIntake: async (document, title) => {
+        const result = await createIntakeRun({ title: title || compactForTitle(document, 80), document });
         startSupervisor();
         return { ...result, status: "todo" };
       },

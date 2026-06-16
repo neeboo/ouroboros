@@ -12,6 +12,10 @@ export interface Run {
 export interface ModelPreference {
   model: string;
   reason?: string;
+  provider?: string;
+  profile?: string;
+  base_url?: string;
+  env_key?: string;
 }
 
 export interface TaskConfig {
@@ -244,6 +248,7 @@ export interface ObservableSession {
   attemptId: string;
   status: Exclude<Status, "todo">;
   output: Partial<AttemptOutput>;
+  model: Record<string, unknown> | null;
   sessionName: string | null;
   codexSessionId: string | null;
   worktreePath: string | null;

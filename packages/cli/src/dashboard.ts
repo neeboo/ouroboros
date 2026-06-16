@@ -30,7 +30,7 @@ interface DashboardActions {
   stopRunner?: () => DashboardActionResult;
   startSupervisor?: () => DashboardActionResult;
   stopSupervisor?: () => DashboardActionResult;
-  createIntake?: (document: string, title?: string) => DashboardActionResult;
+  createIntake?: (document: string, title?: string) => DashboardActionResult | Promise<DashboardActionResult>;
 }
 
 type DashboardAutoStartRunner = (overview: RunOverview, runner: DashboardRunnerStatus | null) => boolean;
@@ -60,6 +60,7 @@ interface DashboardTaskGraphNode {
       sessionName: string | null;
       codexSessionId: string | null;
       latestText: string;
+      model: Record<string, unknown> | null;
     } | null;
   };
 }
@@ -94,6 +95,7 @@ export function buildDashboardTaskGraph(overview: RunOverview, groupId?: string 
           sessionName: session.sessionName,
           codexSessionId: session.codexSessionId,
           latestText: session.latestText,
+          model: session.model,
         },
       ]),
   );
@@ -1862,6 +1864,19 @@ export function dashboardHtml(input: { runId: string }) {
     const relationText = (ids) => ids.length ? ids.map((id) => '<span class="code-meta">' + escapeHtml(id) + '</span>').join(", ") : '<span class="meta">none</span>';
     const roleSummary = (tasks) => [...new Set(tasks.map((task) => task.role))].join(" / ");
     const roleMark = (role) => escapeHtml(String(role || "?").slice(0, 2));
+    const modelMetaForSession = (session) => {
+      const model = session && session.model && typeof session.model === "object" ? session.model : null;
+      if (!model || !model.model) return "";
+      const details = [
+        model.source ? "source " + model.source : "",
+        model.role ? "role " + model.role : "",
+        model.provider ? "provider " + model.provider : "",
+        model.profile ? "profile " + model.profile : "",
+        model.base_url ? "base_url " + model.base_url : "",
+        model.env_key ? "env_key " + model.env_key : "",
+      ].filter(Boolean).join(" · ");
+      return "Model " + model.model + (details ? " · " + details : "");
+    };
     const goalRow = (group) =>
       '<button class="task-row ' + (group.id === selectedGoalId ? 'selected' : '') + '" data-goal-id="' + escapeHtml(group.id) + '">' +
       '<span class="status-dot ' + escapeHtml(group.status) + '"></span>' +
@@ -1877,12 +1892,13 @@ export function dashboardHtml(input: { runId: string }) {
         key: session.attemptId,
         mark: roleMark(session.role),
         author: escapeHtml(session.role),
-        summary: escapeHtml(session.taskGoal) + ' · ' + escapeHtml(session.status),
+        summary: escapeHtml(session.taskGoal) + ' · ' + escapeHtml(session.status) + (modelMetaForSession(session) ? ' · ' + escapeHtml(modelMetaForSession(session)) : ''),
         action: '<span class="status-text ' + escapeHtml(session.status) + '">' + escapeHtml(session.status) + '</span>',
         body:
           '<div class="tool-line code-meta">task ' + escapeHtml(session.taskId) + ' · attempt ' + escapeHtml(session.attemptId) +
           (session.sessionName ? '<br>session ' + escapeHtml(session.sessionName) : '') +
-          (session.codexSessionId ? '<br>codex ' + escapeHtml(session.codexSessionId) : '') + '</div>' +
+          (session.codexSessionId ? '<br>codex ' + escapeHtml(session.codexSessionId) : '') +
+          (modelMetaForSession(session) ? '<br>' + escapeHtml(modelMetaForSession(session)) : '') + '</div>' +
           '<div class="turn-text">' + escapeHtml(readableSummary(session)) + '</div>' +
           conversationEvidence(session) +
           rawStreamDetails(session),
@@ -1936,6 +1952,7 @@ export function dashboardHtml(input: { runId: string }) {
         sessionName: session.sessionName,
         codexSessionId: session.codexSessionId,
         latestText: latestText(session),
+        model: session.model || null,
       }]));
       const columns = new Map();
       const nodes = tasks.map((task, index) => {
@@ -1974,7 +1991,9 @@ export function dashboardHtml(input: { runId: string }) {
         '<div id="dashboard-canvas-root" data-canvas-graph="' + escapeHtml(JSON.stringify(graph)) + '"></div>' +
         '<div hidden>' + graph.nodes.map((node) => {
           const task = node.data;
-          return '<span data-canvas-task-id="' + escapeHtml(task.taskId) + '">' + escapeHtml(task.role) + ' ' + escapeHtml(task.status) + '</span>';
+          const model = task.latestSession && task.latestSession.model ? task.latestSession.model : null;
+          return '<span data-canvas-task-id="' + escapeHtml(task.taskId) + '">' + escapeHtml(task.role) + ' ' + escapeHtml(task.status) +
+            (model ? ' model ' + escapeHtml(model.model || "") + ' source ' + escapeHtml(model.source || "") : '') + '</span>';
         }).join("") + graph.edges.map((edge) =>
           '<span data-canvas-edge="' + escapeHtml(edge.id) + '">' + escapeHtml(edge.label) + '</span>'
         ).join("") + '</div>' +

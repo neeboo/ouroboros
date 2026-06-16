@@ -56,8 +56,14 @@ function normalizeModelPreference(value: unknown): ModelPreference | null {
   if (!model) {
     return null;
   }
-  const reason = stringOrNull(record.reason);
-  return reason ? { model, reason } : { model };
+  return {
+    model,
+    ...optionalStringField(record, "reason"),
+    ...optionalStringField(record, "provider"),
+    ...optionalStringField(record, "profile"),
+    ...optionalStringField(record, "base_url"),
+    ...optionalStringField(record, "env_key"),
+  };
 }
 
 function objectOrNull(value: unknown): Record<string, unknown> | null {
@@ -66,4 +72,9 @@ function objectOrNull(value: unknown): Record<string, unknown> | null {
 
 function stringOrNull(value: unknown) {
   return typeof value === "string" && value.trim().length > 0 ? value : null;
+}
+
+function optionalStringField(record: Record<string, unknown>, key: string) {
+  const value = stringOrNull(record[key]);
+  return value ? { [key]: value } : {};
 }
