@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Harness } from "../packages/harness/src";
+import { applyHarnessAction, Harness } from "../packages/harness/src";
 import { buildTaskPrompt } from "../packages/runner/src";
 import {
   buildDashboardTaskGraph,
@@ -108,6 +108,11 @@ function dashboardResolvedBlockedTaskIdsForTest(tasks: Array<Record<string, unkn
   const match = html.match(/const resolvedBlockedTaskIdsFor = \(tasks\) => \{([\s\S]*?)\n    \};/);
   if (!match) throw new Error("resolvedBlockedTaskIdsFor script not found");
   return new Function("tasks", `${match[1]}; return resolvedBlockedTaskIdsFor(tasks);`)(tasks) as Set<string>;
+}
+
+function createdTaskIdFromActionResult(result: { artifacts: Array<Record<string, unknown>> }): string | undefined {
+  const created = result.artifacts.find((artifact) => artifact.kind === "task" && typeof artifact.taskId === "string");
+  return typeof created?.taskId === "string" ? created.taskId : undefined;
 }
 
 function styleBlock(html: string) {
@@ -1326,6 +1331,19 @@ describe("dashboard", () => {
       taskId: runningTaskId,
       input: { sessionName: "task-long-running", codexSessionId: "codex_123" },
     });
+    const runningThreadId = harness.upsertExecutionThread({
+      runId,
+      taskId: runningTaskId,
+      attemptId: runningAttemptId,
+      ownerType: "runner",
+      ownerId: "dashboard",
+      role: "worker",
+      status: "running",
+      pid: 1234,
+      sessionName: "task-long-running",
+      agentSessionId: "codex_123",
+      worktreePath: "/tmp/dashboard-task",
+    });
     const dashboardInput = {
       runId,
       overview: () => harness.getRunOverview({ runId }),
@@ -1346,27 +1364,34 @@ describe("dashboard", () => {
         }),
         interruptAndCreateGoal: (goal: string) => {
           const running = harness.listRunningAttempts({ runId });
-          for (const attempt of running) {
-            harness.finishAttempt({
-              attemptId: attempt.id,
-              output: {
-                status: "blocked",
-                summary: "Interrupted by dashboard",
-                changedFiles: [],
-                checks: [{ name: "dashboard interrupt", status: "failed" }],
-                artifacts: [],
-                problems: [goal],
-              },
-            });
+          if (running.length === 0) {
+            return {
+              taskId: harness.createTask({
+                runId,
+                role: "planner",
+                goal: `Replan after user interruption: ${goal}`,
+                prompt: goal,
+                doneWhen: ["replanned"],
+              }),
+              status: "todo",
+              interrupted: 0,
+            };
           }
-          return {
-            taskId: harness.createTask({
-              runId,
+          const [primaryAttempt] = running;
+          const actionResult = applyHarnessAction(harness, {
+            type: "interruptAttemptAndCreateTask",
+            attemptId: primaryAttempt.id,
+            reason: goal,
+            followUpTask: {
               role: "planner",
               goal: `Replan after user interruption: ${goal}`,
               prompt: goal,
               doneWhen: ["replanned"],
-            }),
+            },
+          });
+          const followUpTaskId = createdTaskIdFromActionResult(actionResult);
+          return {
+            taskId: followUpTaskId,
             status: "todo",
             interrupted: running.length,
           };
@@ -1382,18 +1407,21 @@ describe("dashboard", () => {
         stopAttempt: (attemptId: string) => {
           const attempt = harness.getAttempt(attemptId);
           if (!attempt) throw new Error(`attempt not found: ${attemptId}`);
-          harness.finishAttempt({
+          const task = harness.getTask(attempt.taskId);
+          if (!task) throw new Error(`task not found: ${attempt.taskId}`);
+          const actionResult = applyHarnessAction(harness, {
+            type: "interruptAttemptAndCreateTask",
             attemptId,
-            output: {
-              status: "blocked",
-              summary: "Stopped by dashboard",
-              changedFiles: [],
-              checks: [{ name: "dashboard stop", status: "failed" }],
-              artifacts: [],
-              problems: ["user stopped the task"],
+            reason: "user stopped the current task from the dashboard",
+            followUpTask: {
+              role: "worker",
+              goal: `Repair interrupted work: ${task.goal}`,
+              prompt: "Inspect the interrupted task and repair it.",
+              doneWhen: ["repair emitted"],
             },
           });
-          return { attemptId, taskId: attempt.taskId, status: "blocked" };
+          const followUpTaskId = createdTaskIdFromActionResult(actionResult);
+          return { attemptId, taskId: attempt.taskId, followUpTaskId, status: "blocked" };
         },
       },
     };
@@ -1440,6 +1468,14 @@ describe("dashboard", () => {
       expect(stopBody.status).toBe("blocked");
       expect(harness.getAttempt(runningAttemptId)?.status).toBe("blocked");
       expect(harness.getTask(runningTaskId)?.status).toBe("blocked");
+      expect(harness.listExecutionThreads({ runId })[0]).toMatchObject({
+        id: runningThreadId,
+        status: "interrupted",
+        interruptReason: "user stopped the current task from the dashboard",
+      });
+      expect(harness.getRunOverview({ runId }).tasks).toContainEqual(
+        expect.objectContaining({ role: "worker", status: "todo", parentId: runningTaskId }),
+      );
 
       const rerunResponse = await handleDashboardRequest(
         new Request(`http://localhost/api/tasks/${runningTaskId}/rerun`, {
@@ -1453,9 +1489,22 @@ describe("dashboard", () => {
       expect(rerunBody.status).toBe("todo");
       expect(harness.getTask(runningTaskId)?.status).toBe("todo");
 
-      harness.startAttempt({
+      const rerunAttemptId = harness.startAttempt({
         taskId: runningTaskId,
         input: { sessionName: "task-long-running-again", codexSessionId: "codex_456" },
+      });
+      const rerunThreadId = harness.upsertExecutionThread({
+        runId,
+        taskId: runningTaskId,
+        attemptId: rerunAttemptId,
+        ownerType: "runner",
+        ownerId: "dashboard",
+        role: "worker",
+        status: "running",
+        pid: 1235,
+        sessionName: "task-long-running-again",
+        agentSessionId: "codex_456",
+        worktreePath: "/tmp/dashboard-task",
       });
 
       const addResponse = await handleDashboardRequest(
@@ -1480,6 +1529,15 @@ describe("dashboard", () => {
       expect(interruptResponse.status).toBe(200);
       expect(interruptBody.interrupted).toBe(1);
       expect(harness.getTask(runningTaskId)?.status).toBe("blocked");
+      expect(rerunThreadId).toBeTruthy();
+      expect(harness.listExecutionThreads({ runId }).find((thread) => thread.id === rerunThreadId)).toMatchObject({
+        id: rerunThreadId,
+        status: "interrupted",
+        interruptReason: "Change direction now",
+      });
+      expect(harness.getRunOverview({ runId }).tasks).toContainEqual(
+        expect.objectContaining({ role: "planner", status: "todo", parentId: runningTaskId }),
+      );
 
       const resumeResponse = await handleDashboardRequest(
         new Request(`http://localhost/api/tasks/${runningTaskId}/resume`, {

@@ -7,8 +7,10 @@ export {
 export { initDatabase, withDatabase } from "./database";
 export { makeId } from "./ids";
 export { applyHarnessAction, parseHarnessAction } from "./actions";
+export { diagnoseRunOverview } from "./overseer";
 export { readableList, readableValue } from "./readable";
 export type { HarnessAction, HarnessActionResult } from "./actions";
+export type { OverseerDiagnosis, RunSupervisorState } from "./overseer";
 export type {
   Attempt,
   AttemptEvent,

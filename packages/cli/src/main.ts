@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-import { applyHarnessAction, Harness, readableList, readableValue } from "@ouroboros/harness";
+import { applyHarnessAction, diagnoseRunOverview, Harness, readableList, readableValue } from "@ouroboros/harness";
 import type { AttemptOutput } from "@ouroboros/harness";
 import {
   buildTaskPrompt,
@@ -287,6 +287,18 @@ switch (parsed.command) {
       url: required(parsed, "url"),
       action,
       token: flag(parsed, "token") ?? process.env.ORBS_ACTION_TOKEN ?? null,
+    });
+    printJson(result);
+    break;
+  }
+  case "overseer-tick": {
+    harness.init();
+    const result = await runOverseerTick({
+      runId: required(parsed, "run-id"),
+      eventLimit: parsePositiveInteger(flag(parsed, "event-limit") ?? "25", "--event-limit"),
+      interruptAttemptId: flag(parsed, "interrupt-attempt") ?? null,
+      reason: flag(parsed, "reason") ?? null,
+      followUpJson: flag(parsed, "follow-up-json") ?? null,
     });
     printJson(result);
     break;
@@ -1101,6 +1113,58 @@ function createPlannerFromUserGoal(input: { runId: string; goal: string; interru
   });
 }
 
+function createPlannerFollowUpTask(goal: string) {
+  return {
+    role: "planner",
+    goal: `Replan after user interruption: ${goal}`,
+    prompt: [
+      "The user interrupted the current run and gave a new requirement.",
+      "",
+      "User request:",
+      goal,
+      "",
+      "Inspect the current run state, recent attempts, lessons, and repository state before planning.",
+      "Return structured JSON with one to five nextTasks items for the next useful increment.",
+      "Prefer a worker task when the next step is implementation, or a verifier task when the next step is validation.",
+      "Keep the task small enough for the existing run-loop to execute and verify.",
+    ].join("\n"),
+    doneWhen: [
+      "current run state has been inspected",
+      "one to five nextTasks items are returned",
+      "next task is small enough for the run-loop",
+    ],
+  };
+}
+
+function createRepairFollowUpTask(task: NonNullable<ReturnType<Harness["getTask"]>>, reason: string) {
+  return {
+    role: "worker",
+    goal: `Repair interrupted work: ${task.goal}`,
+    prompt: [
+      "The user stopped the current task from the dashboard.",
+      "",
+      "Stopped task:",
+      task.goal,
+      "",
+      "Stop reason:",
+      reason,
+      "",
+      "Inspect the current run state, recent attempts, lessons, and repository state before repairing.",
+      "Return structured JSON with the smallest repair increment that can be run safely after the interruption.",
+    ].join("\n"),
+    doneWhen: [
+      "the stopped attempt has been reviewed",
+      "the repair task is runnable after the interruption",
+      "the next repair step is small enough for the run-loop",
+    ],
+  };
+}
+
+function createdTaskIdFromActionResult(result: { artifacts: Array<Record<string, unknown>> }): string | undefined {
+  const created = result.artifacts.find((artifact) => artifact.kind === "task" && typeof artifact.taskId === "string");
+  return typeof created?.taskId === "string" ? created.taskId : undefined;
+}
+
 async function createSelfIterationBootstrap() {
   harness.init();
   const config = await loadCliConfig();
@@ -1288,8 +1352,118 @@ async function superviseDaemon(input: {
   };
 }
 
+async function runOverseerTick(input: {
+  runId: string;
+  eventLimit: number;
+  interruptAttemptId: string | null;
+  reason: string | null;
+  followUpJson: string | null;
+}) {
+  try {
+    const overview = harness.getRunOverview({ runId: input.runId, eventLimit: input.eventLimit });
+    if (!overview.run) {
+      return blockedOverseerTick({
+        runId: input.runId,
+        summary: `Run not found: ${input.runId}`,
+        problems: [`run not found: ${input.runId}`],
+      });
+    }
+
+    const diagnosis = diagnoseRunOverview(overview);
+    if (!input.interruptAttemptId) {
+      return doneOverseerTick({
+        runId: input.runId,
+        summary: `Diagnosed run ${input.runId}.`,
+        diagnosis,
+      });
+    }
+
+    if (!input.reason || !input.followUpJson) {
+      return blockedOverseerTick({
+        runId: input.runId,
+        summary: "Missing overseer intervention arguments.",
+        problems: [
+          !input.reason ? "--reason is required when --interrupt-attempt is set" : null,
+          !input.followUpJson ? "--follow-up-json is required when --interrupt-attempt is set" : null,
+        ].filter((problem): problem is string => problem !== null),
+      });
+    }
+
+    let followUpTask: Record<string, unknown>;
+    try {
+      followUpTask = parseJsonObject(input.followUpJson);
+    } catch (error) {
+      return blockedOverseerTick({
+        runId: input.runId,
+        summary: "Invalid overseer follow-up JSON.",
+        problems: [cliErrorMessage(error)],
+      });
+    }
+
+    const intervention = applyHarnessAction(harness, {
+      type: "interruptAttemptAndCreateTask",
+      attemptId: input.interruptAttemptId,
+      reason: input.reason,
+      followUpTask,
+    });
+    const refreshedOverview = harness.getRunOverview({ runId: input.runId, eventLimit: input.eventLimit });
+    const refreshedDiagnosis = diagnoseRunOverview(refreshedOverview);
+
+    return {
+      ...intervention,
+      runId: input.runId,
+      diagnosis: refreshedDiagnosis,
+      intervention,
+    };
+  } catch (error) {
+    return blockedOverseerTick({
+      runId: input.runId,
+      summary: "Overseer tick failed.",
+      problems: [cliErrorMessage(error)],
+    });
+  }
+}
+
+function doneOverseerTick(input: {
+  runId: string;
+  summary: string;
+  diagnosis: ReturnType<typeof diagnoseRunOverview>;
+}) {
+  return {
+    status: "done" as const,
+    summary: input.summary,
+    checks: [],
+    artifacts: [],
+    problems: [],
+    runId: input.runId,
+    diagnosis: input.diagnosis,
+    intervention: null,
+  };
+}
+
+function blockedOverseerTick(input: { runId: string; summary: string; problems: string[] }) {
+  return {
+    status: "blocked" as const,
+    summary: input.summary,
+    checks: [{ name: "overseer tick", status: "failed" as const, evidence: input.problems[0] ?? input.summary }],
+    artifacts: [],
+    problems: input.problems,
+    runId: input.runId,
+    diagnosis: null,
+    intervention: null,
+  };
+}
+
 function cliErrorMessage(error: unknown) {
   return error instanceof Error ? error.message : String(error);
+}
+
+function parseJsonObject(raw: string) {
+  const value = JSON.parse(raw);
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("expected a JSON object");
+  }
+  return value as Record<string, unknown>;
 }
 
 function runStatusCounts() {
@@ -1538,21 +1712,20 @@ function createDashboardRuntime(input: {
       },
       interruptAndCreateGoal: (goal) => {
         resumeAutomaticRunner();
-        harness.updateRunStatus({ runId: input.runId, status: "todo" });
         const running = harness.listRunningAttempts({ runId: input.runId });
-        for (const attempt of running) {
-          const output: AttemptOutput = {
-            status: "blocked",
-            summary: "Interrupted by the dashboard user",
-            changedFiles: [],
-            checks: [{ name: "dashboard interrupt", status: "failed" }],
-            artifacts: [],
-            problems: [goal],
-          };
-          harness.finishAttempt({ attemptId: attempt.id, output });
-          markAttemptThreadInterrupted(attempt.id, goal);
+        if (running.length === 0) {
+          harness.updateRunStatus({ runId: input.runId, status: "todo" });
+          const taskId = createPlannerFromUserGoal({ runId: input.runId, goal, interrupted: true });
+          return { taskId, status: "todo", interrupted: 0 };
         }
-        const taskId = createPlannerFromUserGoal({ runId: input.runId, goal, interrupted: true });
+        const actionResult = applyHarnessAction(harness, {
+          type: "interruptRunningAttemptsAndCreateTask",
+          attemptIds: running.map((attempt) => attempt.id),
+          reason: goal,
+          followUpTask: createPlannerFollowUpTask(goal),
+        });
+        harness.updateRunStatus({ runId: input.runId, status: "todo" });
+        const taskId = createdTaskIdFromActionResult(actionResult);
         return { taskId, status: "todo", interrupted: running.length };
       },
       resumeTask: (taskId) => {
@@ -1584,20 +1757,19 @@ function createDashboardRuntime(input: {
         if (!task || task.runId !== input.runId) {
           fail(`attempt does not belong to run: ${input.runId}`);
         }
-        harness.finishAttempt({
+        const actionResult = applyHarnessAction(harness, {
+          type: "interruptAttemptAndCreateTask",
           attemptId,
-          output: {
-            status: "blocked",
-            summary: "Stopped by the dashboard user",
-            changedFiles: [],
-            checks: [{ name: "dashboard stop", status: "failed" }],
-            artifacts: [],
-            problems: ["user stopped the current task from the dashboard"],
-          },
+          reason: "user stopped the current task from the dashboard",
+          followUpTask: createRepairFollowUpTask(task, "user stopped the current task from the dashboard"),
         });
-        markAttemptThreadInterrupted(attemptId, "user stopped the current task from the dashboard");
         harness.updateRunStatus({ runId: input.runId, status: "todo" });
-        return { attemptId, taskId: task.id, status: "blocked" };
+        return {
+          attemptId,
+          taskId: task.id,
+          followUpTaskId: createdTaskIdFromActionResult(actionResult),
+          status: "blocked",
+        };
       },
     },
   });

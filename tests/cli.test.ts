@@ -720,6 +720,78 @@ describe("CLI", () => {
     expect(prompt).toContain("experience");
   });
 
+  test("shows candidate guardrails for repeated blocked attempts while keeping run lessons JSON", async () => {
+    await runCli("init");
+    const run = await runCliJson(
+      "create-run",
+      "--goal",
+      "Bootstrap ouroboros",
+      "--context-json",
+      '{"repo":"ouroboros"}',
+    );
+    const firstTask = await runCliJson(
+      "create-task",
+      "--run-id",
+      run.id,
+      "--role",
+      "worker",
+      "--goal",
+      "First blocked attempt",
+      "--prompt",
+      "Record the first failure.",
+    );
+    const secondTask = await runCliJson(
+      "create-task",
+      "--run-id",
+      run.id,
+      "--role",
+      "worker",
+      "--goal",
+      "Second blocked attempt",
+      "--prompt",
+      "Record the second failure.",
+    );
+
+    await runCliJson(
+      "record-attempt",
+      "--task-id",
+      firstTask.id,
+      "--input-json",
+      "{}",
+      "--output-json",
+      '{"status":"blocked","summary":"First blocked attempt","problems":["missing workspace link."]}',
+    );
+    await runCliJson(
+      "record-attempt",
+      "--task-id",
+      secondTask.id,
+      "--input-json",
+      "{}",
+      "--output-json",
+      '{"status":"blocked","summary":"Second blocked attempt","problems":["Missing workspace link"]}',
+    );
+
+    const thirdTask = await runCliJson(
+      "create-task",
+      "--run-id",
+      run.id,
+      "--role",
+      "worker",
+      "--goal",
+      "Render prompt after repeated lessons",
+      "--prompt",
+      "Show the prompt.",
+    );
+
+    const prompt = await runCli("show-task-prompt", "--task-id", thirdTask.id);
+
+    expect(prompt).toContain("## Candidate Guardrails");
+    expect(prompt).toContain("Seen 2 times");
+    expect(prompt).toContain("missing workspace link");
+    expect(prompt).toContain("## Run Lessons");
+    expect(prompt).toContain("\"kind\": \"lesson\"");
+  });
+
   test("runs the next task with the noop executor", async () => {
     await runCli("init");
     const run = await runCliJson("create-run", "--goal", "Bootstrap ouroboros");
@@ -2919,6 +2991,152 @@ describe("CLI", () => {
     expect(events[0]).toMatchObject({
       actionType: "reclaimRunningTasks",
       status: "done",
+    });
+  });
+
+  test("overseer-tick prints diagnosis JSON with empty-run and queue starvation signals", async () => {
+    await runCli("init");
+    const emptyRun = await runCliJson("create-run", "--goal", "Empty overseer run");
+    const queuedRun = await runCliJson("create-run", "--goal", "Queued overseer run");
+    const queuedTask = await runCliJson(
+      "create-task",
+      "--run-id",
+      queuedRun.id,
+      "--role",
+      "worker",
+      "--goal",
+      "Queued work",
+      "--prompt",
+      "Wait for a runner.",
+    );
+
+    const emptyTick = await runCliJson("overseer-tick", "--run-id", emptyRun.id);
+    const queuedTick = await runCliJson("overseer-tick", "--run-id", queuedRun.id);
+
+    expect(emptyTick).toMatchObject({
+      status: "done",
+      runId: emptyRun.id,
+      summary: `Diagnosed run ${emptyRun.id}.`,
+      diagnosis: expect.objectContaining({
+        state: "waiting",
+        emptyRunGoalReviewRaceRisk: true,
+        queueStarvation: false,
+      }),
+      intervention: null,
+    });
+    expect(queuedTick).toMatchObject({
+      status: "done",
+      runId: queuedRun.id,
+      diagnosis: expect.objectContaining({
+        emptyRunGoalReviewRaceRisk: false,
+        queueStarvation: true,
+        activeWork: expect.objectContaining({
+          readyTaskIds: [queuedTask.id],
+        }),
+      }),
+      intervention: null,
+    });
+  });
+
+  test("overseer-tick interrupts a running attempt through the harness action layer", async () => {
+    await runCli("init");
+    const run = await runCliJson("create-run", "--goal", "Interrupt overseer run");
+    const task = await runCliJson(
+      "create-task",
+      "--run-id",
+      run.id,
+      "--role",
+      "worker",
+      "--goal",
+      "Interrupted work",
+      "--prompt",
+      "Keep going.",
+    );
+    const attemptId = await runCliJson("start-attempt", "--task-id", task.id, "--input-json", "{}");
+    new Harness(dbPath).upsertExecutionThread({
+      runId: run.id,
+      taskId: task.id,
+      attemptId: attemptId.attemptId,
+      ownerType: "runner",
+      role: "worker",
+      status: "running",
+      sessionName: "task-interrupt",
+      agentSessionId: "codex_interrupt",
+    });
+
+    const result = await runCliJson(
+      "overseer-tick",
+      "--run-id",
+      run.id,
+      "--interrupt-attempt",
+      attemptId.attemptId,
+      "--reason",
+      "overseer observed stale work",
+      "--follow-up-json",
+      '{"role":"planner","goal":"Replan after interruption","prompt":"Inspect the interrupted run and produce the next plan.","doneWhen":["next plan emitted"]}',
+    );
+    const events = await runCliJson("action-events", "--limit", "1");
+    const overview = await runCliJson("run-overview", "--run-id", run.id);
+
+    expect(result).toMatchObject({
+      status: "done",
+      runId: run.id,
+      intervention: expect.objectContaining({
+        status: "done",
+        actionType: "interruptAttemptAndCreateTask",
+        eventId: expect.any(String),
+      }),
+    });
+    expect(events[0]).toMatchObject({
+      id: result.eventId,
+      actionType: "interruptAttemptAndCreateTask",
+      status: "done",
+    });
+    expect(overview.tasks).toHaveLength(2);
+    expect(overview.tasks).toContainEqual(
+      expect.objectContaining({
+        role: "planner",
+        status: "todo",
+        parentId: task.id,
+      }),
+    );
+    expect(new Harness(dbPath).getAttempt(attemptId.attemptId)?.status).toBe("blocked");
+  });
+
+  test("overseer-tick reports blocked JSON when the intervention cannot be applied", async () => {
+    await runCli("init");
+    const run = await runCliJson("create-run", "--goal", "Blocked overseer tick");
+
+    const result = await runCliJson(
+      "overseer-tick",
+      "--run-id",
+      run.id,
+      "--interrupt-attempt",
+      "attempt_missing",
+      "--reason",
+      "overseer observed stale work",
+      "--follow-up-json",
+      '{"role":"planner","goal":"Replan after interruption","prompt":"Inspect the interrupted run and produce the next plan.","doneWhen":["next plan emitted"]}',
+    );
+    const events = await runCliJson("action-events", "--limit", "1");
+
+    expect(result).toMatchObject({
+      status: "blocked",
+      runId: run.id,
+      diagnosis: expect.objectContaining({
+        state: "waiting",
+      }),
+      intervention: expect.objectContaining({
+        status: "blocked",
+        actionType: "interruptAttemptAndCreateTask",
+        eventId: expect.any(String),
+      }),
+      problems: [expect.stringContaining("attempt not found")],
+    });
+    expect(events[0]).toMatchObject({
+      id: result.eventId,
+      actionType: "interruptAttemptAndCreateTask",
+      status: "blocked",
     });
   });
 

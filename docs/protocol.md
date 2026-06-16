@@ -288,6 +288,8 @@ Every generated prompt should contain:
 - run goal
 - run context
 - run lessons
+- candidate guardrails when repeated lessons exist
+- reusable experience evidence for successful attempts
 - task goal
 - task role
 - dependencies and their latest results
@@ -406,6 +408,8 @@ Every recorded attempt creates one run-level lesson:
 The next prompt for the same run includes recent lessons in `## Run Lessons`. Successful lessons should preserve useful execution patterns. Failure lessons should preserve avoidable problems and their evidence.
 
 Templates can decide how strongly lessons influence the next graph design. The default task template exposes lessons as JSON so planners can turn them into constraints, avoid repeated failure modes, and reuse successful patterns.
+
+Repeated blocked lessons may also be rendered as prompt-only candidate guardrails in the task prompt, while successful experiences may be rendered as reusable experience evidence. That rendering is guidance only unless a later planner or amendment slice turns the pattern into a durable active guardrail, preflight check, or schema-backed rule.
 
 ## Verification
 

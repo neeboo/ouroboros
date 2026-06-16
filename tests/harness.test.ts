@@ -2,7 +2,13 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { DEFAULT_TASK_PROMPT_TEMPLATE, Harness, initDatabase, withDatabase } from "../packages/harness/src";
+import {
+  DEFAULT_TASK_PROMPT_TEMPLATE,
+  Harness,
+  diagnoseRunOverview,
+  initDatabase,
+  withDatabase,
+} from "../packages/harness/src";
 
 describe("Harness", () => {
   let dir: string;
@@ -903,6 +909,186 @@ describe("Harness", () => {
     });
     expect(thread?.interruptedAt).toBeString();
     expect(overview.threads).toContainEqual(expect.objectContaining({ id: threadId, status: "interrupted" }));
+  });
+
+  test("diagnoses a healthy draining run", () => {
+    const runId = harness.createRun({ goal: "Drain active work" });
+    const taskId = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Implement active work",
+      prompt: "Work.",
+    });
+    const attemptId = harness.startAttempt({
+      taskId,
+      input: {
+        sessionName: "worker-session",
+        codexSessionId: "codex-worker",
+      },
+    });
+    harness.upsertExecutionThread({
+      runId,
+      taskId,
+      attemptId,
+      ownerType: "runner",
+      role: "worker",
+      status: "running",
+      sessionName: "worker-session",
+      agentSessionId: "codex-worker",
+    });
+    harness.recordAttemptEvent({
+      attemptId,
+      stream: "stdout",
+      sequence: 1,
+      text: "working\n",
+    });
+
+    const diagnosis = diagnoseRunOverview(harness.getRunOverview({ runId, eventLimit: 5 }));
+
+    expect(diagnosis.state).toBe("draining");
+    expect(diagnosis.activeWork.readyTaskIds).toEqual([]);
+    expect(diagnosis.activeWork.runningTaskIds).toEqual([taskId]);
+    expect(diagnosis.runningAttempts).toHaveLength(1);
+    expect(diagnosis.executionThreads).toHaveLength(1);
+    expect(diagnosis.recentAttemptEvents).toEqual([
+      expect.objectContaining({
+        attemptId,
+        taskId,
+        stream: "stdout",
+      }),
+    ]);
+    expect(diagnosis.duplicateTaskGoals).toEqual([]);
+    expect(diagnosis.emptyRunGoalReviewRaceRisk).toBe(false);
+    expect(diagnosis.repeatedBlockedFailures).toEqual([]);
+    expect(diagnosis.orphanedLeases).toEqual([]);
+    expect(diagnosis.queueStarvation).toBe(false);
+  });
+
+  test("diagnoses overseer failure signals from run overview data", () => {
+    const runId = harness.createRun({ goal: "Diagnose failures" });
+    const readyOne = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Duplicate goal",
+      prompt: "Work.",
+    });
+    const readyTwo = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Duplicate goal",
+      prompt: "Work again.",
+    });
+    const blocked = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Repeated failure",
+      prompt: "Recover.",
+    });
+    const orphaned = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Orphaned lease",
+      prompt: "Lease.",
+    });
+    const failedAttemptOne = harness.recordAttempt({
+      taskId: blocked,
+      input: {},
+      output: {
+        status: "blocked",
+        summary: "Database locked",
+        problems: ["database locked"],
+      },
+    });
+    const failedAttemptTwo = harness.recordAttempt({
+      taskId: blocked,
+      input: {},
+      output: {
+        status: "blocked",
+        summary: "Database locked",
+        problems: ["database locked"],
+      },
+    });
+    withDatabase(harness.dbPath, (db) => {
+      db.query("update tasks set status = 'running', updated_at = current_timestamp where id = $taskId").run({
+        $taskId: orphaned,
+      });
+    });
+    harness.upsertExecutionThread({
+      runId,
+      taskId: orphaned,
+      ownerType: "runner",
+      role: "worker",
+      status: "orphaned",
+      interruptReason: "runner exited before attempt",
+    });
+
+    const diagnosis = diagnoseRunOverview(harness.getRunOverview({ runId, eventLimit: 5 }));
+
+    expect(diagnosis.state).toBe("orphaned");
+    expect(diagnosis.activeWork.readyTaskIds).toEqual(expect.arrayContaining([readyOne, readyTwo]));
+    expect(diagnosis.duplicateTaskGoals).toEqual([
+      expect.objectContaining({
+        goal: "Duplicate goal",
+        taskIds: expect.arrayContaining([readyOne, readyTwo]),
+      }),
+    ]);
+    expect(diagnosis.repeatedBlockedFailures).toEqual([
+      expect.objectContaining({
+        taskId: blocked,
+        attemptIds: expect.arrayContaining([failedAttemptOne, failedAttemptTwo]),
+      }),
+    ]);
+    expect(diagnosis.orphanedLeases).toEqual([
+      expect.objectContaining({
+        taskId: orphaned,
+      }),
+    ]);
+    expect(diagnosis.queueStarvation).toBe(true);
+    expect(diagnosis.emptyRunGoalReviewRaceRisk).toBe(false);
+  });
+
+  test("diagnoses the empty-run goal-review race risk", () => {
+    const runId = harness.createRun({ goal: "Wait for goal review" });
+
+    const diagnosis = diagnoseRunOverview(harness.getRunOverview({ runId }));
+
+    expect(diagnosis.state).toBe("waiting");
+    expect(diagnosis.activeWork.readyTaskIds).toEqual([]);
+    expect(diagnosis.activeWork.runningTaskIds).toEqual([]);
+    expect(diagnosis.runningAttempts).toEqual([]);
+    expect(diagnosis.emptyRunGoalReviewRaceRisk).toBe(true);
+    expect(diagnosis.queueStarvation).toBe(false);
+    expect(diagnosis.duplicateTaskGoals).toEqual([]);
+    expect(diagnosis.repeatedBlockedFailures).toEqual([]);
+    expect(diagnosis.orphanedLeases).toEqual([]);
+  });
+
+  test("diagnoses a blocked-only run", () => {
+    const runId = harness.createRun({ goal: "Blocked run" });
+    const taskId = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Blocked work",
+      prompt: "Recover.",
+    });
+    harness.recordAttempt({
+      taskId,
+      input: {},
+      output: {
+        status: "blocked",
+        summary: "Dependency missing",
+        problems: ["dependency missing"],
+      },
+    });
+
+    const diagnosis = diagnoseRunOverview(harness.getRunOverview({ runId }));
+
+    expect(diagnosis.state).toBe("blocked");
+    expect(diagnosis.emptyRunGoalReviewRaceRisk).toBe(false);
+    expect(diagnosis.duplicateTaskGoals).toEqual([]);
+    expect(diagnosis.repeatedBlockedFailures).toEqual([]);
+    expect(diagnosis.orphanedLeases).toEqual([]);
+    expect(diagnosis.queueStarvation).toBe(false);
   });
 
   test("records experiences and lessons from attempts", () => {

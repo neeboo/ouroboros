@@ -222,6 +222,38 @@ while (!budgetExceeded(run)) {
 }
 ```
 
+## Runtime Overseer
+
+The runtime overseer is the read-only diagnosis layer above the harness. It consumes the run overview and emits observable signals for the control surface and CLI, including:
+
+- active work;
+- running attempts;
+- execution threads;
+- recent attempt events;
+- duplicate todo or running task goals;
+- empty-run goal-review race risk;
+- repeated blocked failures;
+- orphaned leases;
+- queue starvation.
+
+Its job is to explain the current run state and surface risk, not to execute repairs.
+
+Allowed authority:
+
+- classify run supervision state from existing overview data;
+- report evidence for scheduler and dashboard decisions;
+- surface blocked, orphaned, waiting, draining, and complete signals;
+- help callers decide whether they need a lease, goal review, retry, or human review.
+
+Forbidden authority:
+
+- create, retry, or finish tasks;
+- mark runs complete;
+- change a verifier contract or goal contract;
+- ignore database lock evidence by silently retrying;
+- invent new state that is not supported by the overview data;
+- bypass the runner, action server, or lock discipline to force a repair.
+
 ## Goal Review Loop
 
 Goal review runs only when there is no active work left or when the scheduler needs a run-level decision.

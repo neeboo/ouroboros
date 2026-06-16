@@ -7,7 +7,29 @@ export type HarnessAction =
   | { type: "markRunTodo"; runId: string; reason?: string }
   | { type: "retireRun"; runId: string; reason: string }
   | { type: "prepareRunDrain"; runId: string; maxTries?: number; reason?: string }
-  | { type: "completeSystemTask"; taskId: string; actionEventId: string; reason?: string };
+  | { type: "completeSystemTask"; taskId: string; actionEventId: string; reason?: string }
+  | {
+      type: "interruptAttemptAndCreateTask";
+      attemptId: string;
+      reason: string;
+      followUpTask: {
+        role: string;
+        goal: string;
+        prompt: string;
+        doneWhen?: string[];
+      };
+    }
+  | {
+      type: "interruptRunningAttemptsAndCreateTask";
+      attemptIds: string[];
+      reason: string;
+      followUpTask: {
+        role: string;
+        goal: string;
+        prompt: string;
+        doneWhen?: string[];
+      };
+    };
 
 export interface HarnessActionResult {
   status: "done" | "blocked";
@@ -49,7 +71,25 @@ export function parseHarnessAction(value: unknown): HarnessAction {
       reason: optionalStringField(record, "reason"),
     };
   }
-  throw new Error("harness action type must be reclaimRunningTasks, retryTask, markRunTodo, retireRun, prepareRunDrain, or completeSystemTask");
+  if (type === "interruptAttemptAndCreateTask") {
+    return {
+      type,
+      attemptId: stringField(record, "attemptId"),
+      reason: stringField(record, "reason"),
+      followUpTask: followUpTaskField(record, "followUpTask"),
+    };
+  }
+  if (type === "interruptRunningAttemptsAndCreateTask") {
+    return {
+      type,
+      attemptIds: stringArrayField(record, "attemptIds"),
+      reason: stringField(record, "reason"),
+      followUpTask: followUpTaskField(record, "followUpTask"),
+    };
+  }
+  throw new Error(
+    "harness action type must be reclaimRunningTasks, retryTask, markRunTodo, retireRun, prepareRunDrain, completeSystemTask, interruptAttemptAndCreateTask, or interruptRunningAttemptsAndCreateTask",
+  );
 }
 
 export function applyHarnessAction(harness: Harness, rawAction: unknown): HarnessActionResult & { eventId: string } {
@@ -149,6 +189,14 @@ function applyParsedHarnessAction(harness: Harness, action: HarnessAction): Harn
     return completeSystemTask(harness, action);
   }
 
+  if (action.type === "interruptAttemptAndCreateTask") {
+    return interruptAttemptAndCreateTask(harness, action);
+  }
+
+  if (action.type === "interruptRunningAttemptsAndCreateTask") {
+    return interruptRunningAttemptsAndCreateTask(harness, action);
+  }
+
   return prepareRunDrain(harness, action);
 }
 
@@ -205,6 +253,249 @@ function completeSystemTask(
     { kind: "attempt", attemptId, taskId: action.taskId, status: event.status },
     { kind: "harness_action_event", actionEventId: event.id, actionType: event.actionType },
   ]);
+}
+
+function interruptAttemptAndCreateTask(
+  harness: Harness,
+  action: Extract<HarnessAction, { type: "interruptAttemptAndCreateTask" }>,
+): HarnessActionResult {
+  const prepared = prepareInterruptAttempt(harness, action.attemptId, action.type);
+  if (!prepared.ok) {
+    return prepared.result;
+  }
+  const followUpTaskId = applyInterruptAttempt(harness, prepared, action.reason, action.followUpTask);
+  harness.updateRunStatus({ runId: prepared.run.id, status: "todo" });
+
+  return doneResult(
+    action.type,
+    `Interrupted attempt ${prepared.attempt.id} and created follow-up task ${followUpTaskId}.`,
+    [
+      { name: "attempt exists", status: "passed", evidence: prepared.attempt.id },
+      { name: "attempt status", status: "passed", evidence: "blocked" },
+      { name: "task exists", status: "passed", evidence: prepared.task.id },
+      { name: "run exists", status: "passed", evidence: prepared.run.id },
+      {
+        name: "execution thread coverage",
+        status: "passed",
+        evidence: prepared.matchingThreadIds.length > 0
+          ? prepared.matchingThreadIds.join(",")
+          : "no matching execution thread",
+      },
+      { name: "follow-up task created", status: "passed", evidence: followUpTaskId },
+    ],
+    [
+      { kind: "attempt", attemptId: prepared.attempt.id, taskId: prepared.task.id, runId: prepared.run.id, status: "blocked", reason: action.reason },
+      ...prepared.matchingThreadIds.map((threadId) => ({
+        kind: "execution_thread",
+        threadId,
+        attemptId: prepared.attempt.id,
+        taskId: prepared.task.id,
+        runId: prepared.run.id,
+        status: "interrupted",
+        interruptReason: action.reason,
+      })),
+      {
+        kind: "task",
+        taskId: followUpTaskId,
+        runId: prepared.run.id,
+        parentTaskId: prepared.task.id,
+        role: action.followUpTask.role,
+        status: "todo",
+        reason: action.reason,
+      },
+    ],
+  );
+}
+
+function interruptRunningAttemptsAndCreateTask(
+  harness: Harness,
+  action: Extract<HarnessAction, { type: "interruptRunningAttemptsAndCreateTask" }>,
+): HarnessActionResult {
+  const uniqueAttemptIds = [...new Set(action.attemptIds)];
+  if (uniqueAttemptIds.length === 0) {
+    return blockedResult(action.type, "No attempts were provided.", ["attempt ids must not be empty"]);
+  }
+
+  const preparedAttempts: PreparedInterruptAttempt[] = [];
+  for (const attemptId of uniqueAttemptIds) {
+    const prepared = prepareInterruptAttempt(harness, attemptId, action.type);
+    if (!prepared.ok) {
+      return prepared.result;
+    }
+    if (preparedAttempts.length > 0 && prepared.run.id !== preparedAttempts[0]!.run.id) {
+      return blockedResult(action.type, `Attempt ${attemptId} does not belong to run ${preparedAttempts[0]!.run.id}.`, [
+        `attempt ${attemptId} does not belong to run ${preparedAttempts[0]!.run.id}`,
+      ]);
+    }
+    preparedAttempts.push(prepared);
+  }
+
+  const primaryAttempt = preparedAttempts[0]!;
+  const artifacts: Array<Record<string, unknown>> = [];
+  const checks: HarnessActionResult["checks"] = [];
+  const interruptedAttemptIds: string[] = [];
+  let followUpTaskId: string | undefined;
+
+  for (const [index, prepared] of preparedAttempts.entries()) {
+    const createdFollowUpTask = index === 0;
+    const taskFollowUpTaskId = applyInterruptAttempt(harness, prepared, action.reason, createdFollowUpTask ? action.followUpTask : undefined);
+    interruptedAttemptIds.push(prepared.attempt.id);
+    if (createdFollowUpTask) {
+      followUpTaskId = taskFollowUpTaskId;
+    }
+    artifacts.push(
+      { kind: "attempt", attemptId: prepared.attempt.id, taskId: prepared.task.id, runId: prepared.run.id, status: "blocked", reason: action.reason },
+      ...prepared.matchingThreadIds.map((threadId) => ({
+        kind: "execution_thread",
+        threadId,
+        attemptId: prepared.attempt.id,
+        taskId: prepared.task.id,
+        runId: prepared.run.id,
+        status: "interrupted",
+        interruptReason: action.reason,
+      })),
+    );
+    checks.push(
+      { name: "attempt exists", status: "passed", evidence: prepared.attempt.id },
+      { name: "attempt status", status: "passed", evidence: "blocked" },
+      { name: "task exists", status: "passed", evidence: prepared.task.id },
+      { name: "run exists", status: "passed", evidence: prepared.run.id },
+      {
+        name: "execution thread coverage",
+        status: "passed",
+        evidence: prepared.matchingThreadIds.length > 0
+          ? prepared.matchingThreadIds.join(",")
+          : "no matching execution thread",
+      },
+    );
+  }
+
+  harness.updateRunStatus({ runId: primaryAttempt.run.id, status: "todo" });
+  if (followUpTaskId !== undefined) {
+    checks.push({ name: "follow-up task created", status: "passed", evidence: followUpTaskId });
+    artifacts.push({
+      kind: "task",
+      taskId: followUpTaskId,
+      runId: primaryAttempt.run.id,
+      parentTaskId: primaryAttempt.task.id,
+      role: action.followUpTask.role,
+      status: "todo",
+      reason: action.reason,
+    });
+  }
+
+  return doneResult(
+    action.type,
+    `Interrupted ${interruptedAttemptIds.length} running attempt${interruptedAttemptIds.length === 1 ? "" : "s"} and created follow-up task ${followUpTaskId ?? "unknown"}.`,
+    checks,
+    artifacts,
+  );
+}
+
+function prepareInterruptAttempt(
+  harness: Harness,
+  attemptId: string,
+  actionType: HarnessAction["type"],
+):
+  | { ok: true; attempt: NonNullable<ReturnType<Harness["getAttempt"]>>; task: NonNullable<ReturnType<Harness["getTask"]>>; run: NonNullable<ReturnType<Harness["getRun"]>>; matchingThreadIds: string[] }
+  | { ok: false; result: HarnessActionResult } {
+  const attempt = harness.getAttempt(attemptId);
+  if (!attempt) {
+    return { ok: false, result: blockedResult(actionType, `Attempt not found: ${attemptId}`, [`attempt not found: ${attemptId}`]) };
+  }
+  if (attempt.status !== "running") {
+    return {
+      ok: false,
+      result: blockedResult(actionType, `Attempt ${attemptId} is not running.`, [`attempt ${attemptId} is not running`]),
+    };
+  }
+  const task = harness.getTask(attempt.taskId);
+  if (!task) {
+    return {
+      ok: false,
+      result: blockedResult(actionType, `Task not found for attempt: ${attemptId}`, [`task not found for attempt: ${attemptId}`]),
+    };
+  }
+  const run = harness.getRun(task.runId);
+  if (!run) {
+    return { ok: false, result: blockedResult(actionType, `Run not found for task: ${task.id}`, [`run not found for task: ${task.id}`]) };
+  }
+
+  const matchingThreadIds = harness
+    .listExecutionThreads({ runId: run.id })
+    .filter((thread) => thread.status === "running" && (thread.attemptId === attempt.id || thread.taskId === task.id))
+    .map((thread) => thread.id);
+
+  return { ok: true, attempt, task, run, matchingThreadIds };
+}
+
+type PreparedInterruptAttempt = {
+  attempt: NonNullable<ReturnType<Harness["getAttempt"]>>;
+  task: NonNullable<ReturnType<Harness["getTask"]>>;
+  run: NonNullable<ReturnType<Harness["getRun"]>>;
+  matchingThreadIds: string[];
+};
+
+function applyInterruptAttempt(
+  harness: Harness,
+  prepared: PreparedInterruptAttempt,
+  reason: string,
+  followUpTask?: {
+    role: string;
+    goal: string;
+    prompt: string;
+    doneWhen?: string[];
+  },
+) {
+  harness.finishAttempt({
+    attemptId: prepared.attempt.id,
+    output: {
+      status: "blocked",
+      summary: `Interrupted by overseer: ${reason}`,
+      changedFiles: [],
+      checks: [
+        { name: "overseer interruption", status: "failed", evidence: reason },
+        {
+          name: "execution thread coverage",
+          status: "passed",
+          evidence: prepared.matchingThreadIds.length > 0 ? prepared.matchingThreadIds.join(",") : "no matching execution thread",
+        },
+      ],
+      artifacts: [
+        {
+          kind: "overseer_interruption",
+          attemptId: prepared.attempt.id,
+          taskId: prepared.task.id,
+          runId: prepared.run.id,
+          reason,
+          interruptedThreadIds: prepared.matchingThreadIds,
+        },
+      ],
+      problems: [reason],
+    },
+  });
+
+  for (const threadId of prepared.matchingThreadIds) {
+    harness.updateExecutionThread({
+      id: threadId,
+      status: "interrupted",
+      interruptReason: reason,
+      heartbeat: true,
+    });
+  }
+
+  if (!followUpTask) {
+    return undefined;
+  }
+
+  return harness.createTask({
+    runId: prepared.run.id,
+    parentId: prepared.task.id,
+    role: followUpTask.role,
+    goal: followUpTask.goal,
+    prompt: followUpTask.prompt,
+    doneWhen: followUpTask.doneWhen ?? [],
+  });
 }
 
 function prepareRunDrain(harness: Harness, action: Extract<HarnessAction, { type: "prepareRunDrain" }>): HarnessActionResult {
@@ -364,6 +655,40 @@ function optionalStringField(record: Record<string, unknown>, key: string) {
     throw new Error(`${key} must be a string`);
   }
   return value.trim();
+}
+
+function followUpTaskField(record: Record<string, unknown>, key: string) {
+  const value = objectRecord(record[key], key);
+  return {
+    role: stringField(value, "role"),
+    goal: stringField(value, "goal"),
+    prompt: stringField(value, "prompt"),
+    doneWhen: optionalStringArrayField(value, "doneWhen"),
+  };
+}
+
+function optionalStringArrayField(record: Record<string, unknown>, key: string) {
+  const value = record[key];
+  if (value === undefined) {
+    return undefined;
+  }
+  if (!Array.isArray(value)) {
+    throw new Error(`${key} must be an array of strings`);
+  }
+  return value.map((item, index) => {
+    if (typeof item !== "string" || item.trim().length === 0) {
+      throw new Error(`${key}[${index}] must be a non-empty string`);
+    }
+    return item.trim();
+  });
+}
+
+function stringArrayField(record: Record<string, unknown>, key: string) {
+  const value = optionalStringArrayField(record, key);
+  if (value === undefined) {
+    throw new Error(`${key} must be an array of strings`);
+  }
+  return value;
 }
 
 function optionalPositiveInteger(record: Record<string, unknown>, key: string) {

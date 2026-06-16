@@ -16,14 +16,17 @@ Ouroboros already has the minimum working loop:
 - Bounded goal-review retries and proxy-aware child process execution.
 - A first-class self-iteration bootstrap command that creates a self-iteration run, seeds the planner task, and can launch the dashboard and runner together.
 - Frozen verifier-contract plumbing for planner-created worker tasks: optional `verifierContract` planner output stays backward-compatible when omitted, is persisted in task config when supplied, is injected into verifier prompts, and is cited on `created_verifier_task` artifacts.
+- Prompt rendering already turns repeated lessons into prompt-only candidate guardrails and successful experiences into reusable evidence.
 
 ## Next Iteration Goal
 
 Make Ouroboros able to plan and drain its own next improvement cycle before it asks for human intervention.
 
-The current self-iteration state is past bootstrap and past the first frozen verifier-contract slice. The self-iteration command exists, and planner-created worker tasks can now carry a frozen verifier contract through task config into verifier creation.
+The current self-iteration state is past bootstrap, past the first frozen verifier-contract slice, and past the candidate-guardrail prompt work. The self-iteration command exists, planner-created worker tasks can carry a frozen verifier contract through task config into verifier creation, repeated lessons are already rendered as prompt-only candidate guardrails, and successful experiences are already rendered as reusable evidence.
 
-The next planning candidate is lesson-to-guardrail promotion: repeated lessons should become candidate guardrails and, after acceptance, active role-scoped rules or preflight checks. Keep this as a planning problem first. Do not change database schema, prompt contracts, or dependency sets until a planner has proposed the smallest verifiable slice and an amendment path.
+This slice follows commits `592d380` for role model defaults and `18265b4` for explicit goal-review decision recovery. Those behaviors are already accounted for and stay out of scope here.
+
+The next planning candidate after this slice is durable lesson-to-guardrail promotion: active role-scoped guardrails, preflight checks, or schema-backed persistence will require a later planner or amendment slice with an explicit boundary. Keep that future path separate. Do not change database schema, prompt contracts, or dependency sets until a planner has proposed the smallest verifiable slice and an amendment path.
 
 ## Split-Enough Rule
 
@@ -71,7 +74,7 @@ The planner should choose as many areas as can be split into independent, verifi
 - add a Linear bridge skeleton that maps local runs and tasks to external issues;
 - improve run completion review so it can cite evidence from docs, tests, dashboard state, and lessons.
 - extend the planning loop beyond the verified task-level verifier-contract baseline toward run-level contract amendment and audit paths.
-- promote repeated lessons into guardrails and keep repeated experiences as reusable evidence patterns; this is the next planning candidate.
+- promote repeated lessons into durable active guardrails, preflight checks, or schema-backed guardrail storage in a later slice while keeping repeated experiences as reusable evidence patterns; this future path remains separate from the current prompt-only baseline.
 
 ## Human Checkpoints
 
