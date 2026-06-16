@@ -7,6 +7,14 @@ export {
   setRunDecisionAction,
 } from "./agent-actions";
 export { applyStartHooks, runNextReadyTask, runReadyTasks, runUntilIdle } from "./runner";
+export {
+  resumeCodexResumableAttempt,
+  runCodexAutopilot,
+  runCodexResumableLoop,
+  startCodexResumableAttempt,
+  superviseCodexDaemon,
+  superviseCodexRuns,
+} from "./codex-resumable-runner";
 export { createAcpxAgentExecutor, createAcpxCodexExecutor } from "./executors/acpx";
 export { createCodexCliExecutor } from "./executors/codex-cli";
 export { createCodexResumableClient } from "./executors/codex-resumable";
@@ -79,6 +87,14 @@ export type {
   CodexResumableResult,
   CodexResumableStartInput,
 } from "./executors/codex-resumable";
+export type {
+  CodexResumableClientFactory,
+  CodexResumableOrchestrationInput,
+  RunCodexAutopilotInput,
+  RunCodexResumableLoopInput,
+  SuperviseCodexDaemonInput,
+  SuperviseCodexRunsInput,
+} from "./codex-resumable-runner";
 export type {
   ContextSubagent,
   ContextSubagentEntry,

@@ -3,24 +3,26 @@ import { applyHarnessAction, diagnoseRunOverview, Harness, readableList, readabl
 import type { AttemptOutput } from "@ouroboros/harness";
 import {
   buildTaskPrompt,
-  applyStartHooks,
-  createCodexResumableClient,
   createContextSummaryHook,
   createGitWorktreeHook,
   createGoalReviewDecisionHook,
-  inferExplicitRunDecision,
   createRepairTaskHook,
   createRunsFromOutputHook,
   createTasksFromOutputHook,
   createVerifierTaskHook,
   childEnvForProcess,
-  childToolchainEnvEvidence,
   createRouteExecutor,
   resolveExecutionRoute,
+  resumeCodexResumableAttempt,
+  runCodexAutopilot,
+  runCodexResumableLoop,
   runReadyTasks,
   runUntilIdle,
+  startCodexResumableAttempt,
+  superviseCodexDaemon,
+  superviseCodexRuns,
 } from "@ouroboros/runner";
-import type { ResolvedExecutionRoute, StopHook } from "@ouroboros/runner";
+import type { CodexSandbox, ResolvedExecutionRoute, StopHook } from "@ouroboros/runner";
 import { fail, flag, parseArgs, required } from "./args";
 import { loadOuroborosConfig } from "./config";
 import { parseArray, parseObject, printJson } from "./json";
@@ -29,14 +31,13 @@ import { serveDashboard } from "./dashboard";
 import { requestHarnessAction, serveHarnessActions } from "./action-server";
 import { buildAgentMatrix, doctorAgent } from "../../../scripts/acpx-agent-smoke";
 import { join } from "node:path";
-import type { ExecutionThreadStatus, Task } from "@ouroboros/harness";
+import type { Task } from "@ouroboros/harness";
 
 const parsed = parseArgs(Bun.argv.slice(2));
 const harness = new Harness(parsed.db);
 const DEFAULT_MAX_TRIES = 3;
 const DEFAULT_SELF_ITERATION_CONCURRENCY = 3;
 const DEFAULT_SELF_ITERATION_WORKTREE_ROOT = ".ouroboros/worktrees";
-const RUNNING_ATTEMPT_STALE_MS = 5 * 60 * 1000;
 const SELF_ITERATION_GOAL = "Use Ouroboros to plan its own next self-iteration cycle";
 const SELF_ITERATION_PLAN_DOC = "docs/self-iteration-plan.md";
 const DEFAULT_STOP_HOOKS = "create-runs,create-tasks,create-verifier,create-repair,context-summary";
@@ -370,7 +371,7 @@ switch (parsed.command) {
     const limit = parseConcurrency();
     if (usesCodexResumablePath(executorName)) {
       const maxTries = parsePositiveInteger(flag(parsed, "max-tries") ?? String(DEFAULT_MAX_TRIES), "--max-tries");
-      const result = await runCodexResumableLoop({ runId, maxRounds: 1, limit, maxTries });
+      const result = await runCodexResumableLoop({ ...codexRunnerInput(), runId, maxRounds: 1, limit, maxTries });
       printJson({ tasks: result.rounds.flatMap((round) => round.tasks) });
       break;
     }
@@ -399,7 +400,7 @@ switch (parsed.command) {
     const maxRounds = parsePositiveInteger(flag(parsed, "max-rounds") ?? "10", "--max-rounds");
     const maxTries = parsePositiveInteger(flag(parsed, "max-tries") ?? String(DEFAULT_MAX_TRIES), "--max-tries");
     if (usesCodexResumablePath(executorName)) {
-      printJson(await runCodexResumableLoop({ runId, maxRounds, limit, maxTries }));
+      printJson(await runCodexResumableLoop({ ...codexRunnerInput(), runId, maxRounds, limit, maxTries }));
       break;
     }
     const result = await runUntilIdle({
@@ -427,7 +428,8 @@ switch (parsed.command) {
       fail("autopilot currently supports codex-resumable");
     }
     printJson(
-      await runAutopilot({
+      await runCodexAutopilot({
+        ...codexRunnerInput(),
         runId: required(parsed, "run-id"),
         limit: parseConcurrency(),
         maxRounds: parsePositiveInteger(flag(parsed, "max-rounds") ?? "1", "--max-rounds"),
@@ -444,7 +446,8 @@ switch (parsed.command) {
       fail("supervise-runs currently supports codex-resumable");
     }
     printJson(
-      await superviseRuns({
+      await superviseCodexRuns({
+        ...codexRunnerInput(),
         rootRunId: flag(parsed, "root-run-id") ?? null,
         runConcurrency: parsePositiveInteger(flag(parsed, "run-concurrency") ?? "2", "--run-concurrency"),
         taskConcurrency: parseConcurrency(),
@@ -461,7 +464,9 @@ switch (parsed.command) {
     if (executorName !== "codex-resumable") {
       fail("supervise-daemon currently supports codex-resumable");
     }
-    const result = await superviseDaemon({
+    const maxTicks = parseNonNegativeInteger(flag(parsed, "max-ticks") ?? "0", "--max-ticks");
+    const result = await superviseCodexDaemon({
+      ...codexRunnerInput(),
       rootRunId: flag(parsed, "root-run-id") ?? null,
       runConcurrency: parsePositiveInteger(flag(parsed, "run-concurrency") ?? "2", "--run-concurrency"),
       taskConcurrency: parseConcurrency(),
@@ -470,7 +475,8 @@ switch (parsed.command) {
       maxTries: parsePositiveInteger(flag(parsed, "max-tries") ?? String(DEFAULT_MAX_TRIES), "--max-tries"),
       intervalMs: parseNonNegativeInteger(flag(parsed, "interval-ms") ?? "1500", "--interval-ms"),
       idleMs: parseNonNegativeInteger(flag(parsed, "idle-ms") ?? flag(parsed, "interval-ms") ?? "1500", "--idle-ms"),
-      maxTicks: parseNonNegativeInteger(flag(parsed, "max-ticks") ?? "0", "--max-ticks"),
+      maxTicks,
+      onTick: maxTicks === 0 ? (tick) => console.log(JSON.stringify(tick)) : undefined,
     });
     printJson(result);
     break;
@@ -568,149 +574,12 @@ switch (parsed.command) {
   }
   case "codex-start-attempt": {
     const taskId = required(parsed, "task-id");
-    const task = harness.getTask(taskId);
-    if (!task) {
-      fail(`task not found: ${taskId}`);
-    }
-    const run = harness.getRun(task.runId);
-    if (!run) {
-      fail(`run not found: ${task.runId}`);
-    }
-    const sessionName = task.sessionRef ?? `task-${task.id}`;
-    const prompt = buildTaskPrompt({
-      run,
-      task,
-      dependencyAttempts: task.dependsOn.length > 0 ? harness.listLatestAttemptsForTasks(task.dependsOn) : [],
-      lessons: harness.listLessons({ runId: run.id }),
-      template: harness.getPromptTemplate("task")?.contentMd,
-    });
-    const route = resolveCliExecutionRoute({ run, task, cliExecutor: "codex-resumable" });
-    const input = {
-      prompt,
-      sessionName,
-      executor: "codex-resumable",
-      model: route.model,
-    };
-    const cwd = task.worktreePath ?? worktreeForTask()?.(task) ?? runnerCwd();
-    const startResult = await applyStartHooks({
-      hooks: startHooks(),
-      run,
-      task,
-      sessionName,
-      cwd,
-    });
-    if ((startResult.problems ?? []).length > 0) {
-      const attemptId = harness.recordAttempt({
-        taskId,
-        input: { ...input, cwd, startHooks: true },
-        output: {
-          status: "blocked",
-          summary: "start hooks blocked task execution",
-          changedFiles: [],
-          checks: startResult.checks ?? [],
-          artifacts: startResult.artifacts ?? [],
-          problems: startResult.problems ?? [],
-        },
-      });
-      printJson({
-        attemptId,
-        taskId,
-        status: "blocked",
-        codexSessionId: null,
-      });
-      break;
-    }
-    const attemptId = harness.startAttempt({ taskId, input: { ...input, cwd } });
-    const recorder = createAttemptEventRecorder(attemptId);
-    const result = await codexResumableClient(route.model?.model, cwd).start({
-      prompt,
-      sessionName,
-      onStdout: recorder.stdout,
-      onStderr: recorder.stderr,
-      onEvent: recorder.event,
-    });
-    harness.updateAttemptInput({
-      attemptId,
-      input: codexAttemptInput({ prompt, sessionName, result, model: route.model, cwd }),
-    });
-    if (result.status === "running") {
-      printJson({
-        attemptId,
-        taskId,
-        status: "running",
-        codexSessionId: result.sessionId,
-      });
-      break;
-    }
-    const outputWithArtifacts = withCodexArtifacts(result.output, result.sessionId);
-    harness.finishAttempt({
-      attemptId,
-      output: {
-        ...outputWithArtifacts,
-        checks: [...(startResult.checks ?? []), ...(result.output.checks ?? [])],
-        artifacts: [...(startResult.artifacts ?? []), ...(outputWithArtifacts.artifacts ?? [])],
-      },
-    });
-    printJson({
-      attemptId,
-      taskId,
-      status: result.status,
-      codexSessionId: result.sessionId,
-    });
+    printJson(await startCodexResumableAttempt({ ...codexRunnerInput(), taskId }));
     break;
   }
   case "codex-resume-attempt": {
     const attemptId = required(parsed, "attempt-id");
-    const attempt = harness.getAttempt(attemptId);
-    if (!attempt) {
-      fail(`attempt not found: ${attemptId}`);
-    }
-    const sessionId = typeof attempt.input.codexSessionId === "string" ? attempt.input.codexSessionId : "";
-    if (!sessionId) {
-      fail(`attempt has no codexSessionId: ${attemptId}`);
-    }
-    const sessionName = typeof attempt.input.sessionName === "string" ? attempt.input.sessionName : `attempt-${attemptId}`;
-    const recorder = createAttemptEventRecorder(attemptId);
-    const resolvedModel = attemptModelPreference(attempt.input);
-    const cwd = typeof attempt.input.cwd === "string" ? attempt.input.cwd : runnerCwd();
-    const result = await codexResumableClient(resolvedModel?.model, cwd).resume({
-      sessionId,
-      sessionName,
-      prompt: flag(parsed, "prompt") ?? "Continue until you can return the required structured JSON.",
-      onStdout: recorder.stdout,
-      onStderr: recorder.stderr,
-      onEvent: recorder.event,
-    });
-    harness.updateAttemptInput({
-      attemptId,
-      input: {
-        ...attempt.input,
-          ...codexAttemptInput({
-            prompt: flag(parsed, "prompt") ?? "Continue until you can return the required structured JSON.",
-            sessionName,
-            result,
-            model: resolvedModel,
-            cwd,
-          }),
-      },
-    });
-    if (result.status === "running") {
-      printJson({
-        attemptId,
-        status: "running",
-        codexSessionId: result.sessionId,
-      });
-      break;
-    }
-    harness.finishAttempt({
-      attemptId,
-      output: withCodexArtifacts(result.output, result.sessionId),
-    });
-    printJson({
-      attemptId,
-      status: result.status,
-      codexSessionId: result.sessionId,
-    });
+    printJson(await resumeCodexResumableAttempt({ ...codexRunnerInput(), attemptId, prompt: flag(parsed, "prompt") }));
     break;
   }
   case "retry-task": {
@@ -730,7 +599,7 @@ function parseApproval(raw: string) {
   return raw;
 }
 
-function parseSandbox(raw: string) {
+function parseSandbox(raw: string): CodexSandbox {
   if (raw !== "read-only" && raw !== "workspace-write" && raw !== "danger-full-access") {
     fail("--sandbox must be read-only, workspace-write, or danger-full-access");
   }
@@ -927,153 +796,24 @@ function attemptInputForRoute(route: ResolvedExecutionRoute, cwd: string) {
   };
 }
 
-async function runCodexResumableLoop(input: { runId: string; maxRounds: number; limit: number; maxTries: number }) {
-  const rounds = [];
-  for (let index = 0; index < input.maxRounds; index += 1) {
-    const reclaimed = harness.reclaimRunningTasksWithoutAttempts({ runId: input.runId });
-    const resumed = await resumeRunningCodexAttempts({ runId: input.runId, limit: input.limit });
-    if (resumed.length > 0) {
-      rounds.push({ index, tasks: resumed, reclaimed });
-      if (resumed.some((task) => task.status === "running")) {
-        break;
-      }
-      continue;
-    }
-
-    const started = await startReadyCodexAttempts({ runId: input.runId, limit: input.limit });
-    if (started.length === 0) {
-      const review = ensureGoalReviewTask(input.runId, input.maxTries);
-      if (review.created) {
-        const reviewed = await startReadyCodexAttempts({ runId: input.runId, limit: input.limit });
-        if (reviewed.length > 0) {
-          rounds.push({ index, tasks: reviewed, goalReview: review, reclaimed });
-          if (reviewed.some((task) => task.status === "running")) {
-            break;
-          }
-          continue;
-        }
-      }
-      break;
-    }
-    rounds.push({ index, tasks: started, reclaimed });
-    if (started.some((task) => task.status === "running")) {
-      break;
-    }
-  }
-  return { rounds };
-}
-
-async function runAutopilot(input: {
-  runId: string;
-  maxCycles: number;
-  maxRounds: number;
-  limit: number;
-  maxTries: number;
-  intervalMs: number;
-}) {
-  const cycles = [];
-  for (let index = 0; index < input.maxCycles; index += 1) {
-    const result = await runCodexResumableLoop({
-      runId: input.runId,
-      maxRounds: input.maxRounds,
-      limit: input.limit,
-      maxTries: input.maxTries,
-    });
-    const overview = harness.getRunOverview({ runId: input.runId, eventLimit: 0 });
-    cycles.push({
-      index,
-      rounds: result.rounds,
-      activeTasks: overview.tasks.filter((task) => task.status === "todo" || task.status === "running").length,
-      runStatus: overview.run?.status ?? null,
-    });
-
-    if (overview.run?.status === "done") {
-      return { status: "done" as const, cycles };
-    }
-    if (index < input.maxCycles - 1) {
-      await sleep(input.intervalMs);
-    }
-  }
-  const overview = harness.getRunOverview({ runId: input.runId, eventLimit: 0 });
+function codexRunnerInput() {
   return {
-    status: overview.run?.status ?? "unknown",
-    cycles,
+    harness,
+    cwd: runnerCwd(),
+    worktreeForTask: worktreeForTask(),
+    startHooks: startHooks(),
+    stopHooksByRole: stopHooksByRole(),
+    cliAgentBackend: flag(parsed, "agent-backend"),
+    cliExecutor: "codex-resumable" as const,
+    model: flag(parsed, "model"),
+    genericExecutorFactory: executorFactory("codex-resumable"),
+    codexOptions: {
+      sandbox: parseCodexResumableSandbox(),
+      codexBin: flag(parsed, "codex-bin"),
+      timeoutMs: parseTimeoutMs(flag(parsed, "timeout-ms")),
+      idleTimeoutMs: parseTimeoutMs(flag(parsed, "idle-timeout-ms"), "--idle-timeout-ms"),
+    },
   };
-}
-
-function ensureGoalReviewTask(runId: string, maxTries: number) {
-  const run = harness.getRun(runId);
-  if (!run) {
-    fail(`run not found: ${runId}`);
-  }
-  if (run.status === "done") {
-    return { created: false as const, reason: "run_done" };
-  }
-  if (run.status === "blocked") {
-    return { created: false as const, reason: "run_blocked" };
-  }
-  const overview = harness.getRunOverview({ runId, eventLimit: 0 });
-  if (overview.tasks.some((task) => task.status === "todo" || task.status === "running")) {
-    return { created: false as const, reason: "active_tasks" };
-  }
-  const completedReview = [...overview.sessions].reverse().find(
-    (session) =>
-      session.role === "goal-review" &&
-      (session.output.runDecision === "complete" || inferExplicitRunDecision(session.output) === "complete") &&
-      (session.output.nextTasks ?? []).length === 0,
-  );
-  if (completedReview) {
-    harness.updateRunStatus({ runId, status: "done" });
-    return {
-      created: false as const,
-      reason: "completed_by_existing_goal_review",
-      taskId: completedReview.taskId,
-    };
-  }
-  const blockedReview = [...overview.tasks].reverse().find(
-    (task) => task.role === "goal-review" && task.status === "blocked",
-  );
-  if (blockedReview) {
-    const lastTask = overview.tasks[overview.tasks.length - 1];
-    if (lastTask && lastTask.id !== blockedReview.id) {
-      return createGoalReviewTask(runId);
-    }
-    const tries = overview.sessions.filter((session) => session.taskId === blockedReview.id).length;
-    if (tries >= maxTries) {
-      return { created: false as const, reason: "max_tries", taskId: blockedReview.id, tries, maxTries };
-    }
-    harness.retryTask({ taskId: blockedReview.id });
-    return { created: true as const, taskId: blockedReview.id, retried: true as const, tries: tries + 1, maxTries };
-  }
-  return createGoalReviewTask(runId);
-}
-
-function createGoalReviewTask(runId: string) {
-  const taskId = harness.createTask({
-    runId,
-    role: "goal-review",
-    goal: "Review whether the run goal is complete",
-    prompt: [
-      "Answer this before creating more work: are we sure the original run goal has been reached?",
-      "",
-      "Inspect the repository, README, tests, dashboard state, recent attempts, and run lessons.",
-      "Before choosing a runDecision, cite concrete evidence from repository files or docs, tests or commands, dashboard or run overview state, and recent lessons.",
-      "Do not declare runDecision complete unless the summary, checks, artifacts, or problems cite that evidence before declaring complete.",
-      "Return structured JSON with one of these decisions:",
-      "- runDecision complete: the run goal is satisfied; do not include nextTasks.",
-      "- runDecision continue: the run goal is not satisfied; include one to five nextTasks items, usually planners or workers with verifiers.",
-      "- runDecision verify: completion is uncertain; include one to five verifier nextTasks items.",
-      "- runDecision defer: the run goal is not satisfied, but progress is blocked by an external dependency or missing user/system action; do not include nextTasks.",
-    ].join("\n"),
-    doneWhen: [
-      "runDecision is complete, continue, verify, or defer",
-      "completion decision cites concrete evidence from repository files or docs, tests or commands, dashboard or run overview state, and recent lessons",
-      "complete does not create nextTasks",
-      "defer does not create nextTasks and cites the external dependency or missing action",
-      "continue or verify includes one to five nextTasks items",
-    ],
-  });
-  return { created: true as const, taskId };
 }
 
 function createPlannerFromUserGoal(input: { runId: string; goal: string; interrupted: boolean }) {
@@ -1228,120 +968,6 @@ function intakePlannerPrompt(document: string) {
   ].join("\n");
 }
 
-async function superviseRuns(input: {
-  rootRunId?: string | null;
-  runConcurrency: number;
-  taskConcurrency: number;
-  maxCycles: number;
-  maxRounds: number;
-  maxTries: number;
-  intervalMs: number;
-}) {
-  const cycles = [];
-  for (let index = 0; index < input.maxCycles; index += 1) {
-    const candidates = runnableRuns({ limit: input.runConcurrency, rootRunId: input.rootRunId ?? null });
-    if (candidates.length === 0) {
-      return { status: "idle" as const, cycles };
-    }
-    const results = await Promise.all(candidates.map(async (run) => {
-      const result = await runCodexResumableLoop({
-        runId: run.id,
-        maxRounds: input.maxRounds,
-        limit: input.taskConcurrency,
-        maxTries: input.maxTries,
-      });
-      const overview = harness.getRunOverview({ runId: run.id, eventLimit: 0 });
-      return {
-        runId: run.id,
-        goal: run.goal,
-        status: overview.run?.status ?? run.status,
-        rounds: result.rounds,
-        activeTasks: overview.tasks.filter((task) => task.status === "todo" || task.status === "running").length,
-      };
-    }));
-    cycles.push({ index, runs: results });
-    if (results.some((run) => run.status !== "done" && run.activeTasks > 0) && index < input.maxCycles - 1) {
-      await sleep(input.intervalMs);
-      continue;
-    }
-    if (index < input.maxCycles - 1) {
-      await sleep(input.intervalMs);
-    }
-  }
-  return { status: "cycle_limit" as const, cycles };
-}
-
-async function superviseDaemon(input: {
-  rootRunId?: string | null;
-  runConcurrency: number;
-  taskConcurrency: number;
-  tickCycles: number;
-  maxRounds: number;
-  maxTries: number;
-  intervalMs: number;
-  idleMs: number;
-  maxTicks: number;
-}) {
-  let stopping = false;
-  const stop = () => {
-    stopping = true;
-  };
-  process.once("SIGINT", stop);
-  process.once("SIGTERM", stop);
-
-  const ticks = [];
-  let index = 0;
-  while (!stopping && (input.maxTicks === 0 || index < input.maxTicks)) {
-    let waitMs = input.intervalMs;
-    let tick;
-    try {
-      const result = await superviseRuns({
-        rootRunId: input.rootRunId ?? null,
-        runConcurrency: input.runConcurrency,
-        taskConcurrency: input.taskConcurrency,
-        maxCycles: input.tickCycles,
-        maxRounds: input.maxRounds,
-        maxTries: input.maxTries,
-        intervalMs: input.intervalMs,
-      });
-      waitMs = result.status === "idle" ? input.idleMs : input.intervalMs;
-      tick = {
-        type: "daemon.tick",
-        index,
-        status: "ok" as const,
-        result,
-        runCounts: runStatusCounts(),
-        createdAt: new Date().toISOString(),
-      };
-    } catch (error) {
-      tick = {
-        type: "daemon.tick",
-        index,
-        status: "error" as const,
-        error: cliErrorMessage(error),
-        runCounts: runStatusCounts(),
-        createdAt: new Date().toISOString(),
-      };
-    }
-    ticks.push(tick);
-    if (input.maxTicks === 0) {
-      console.log(JSON.stringify(tick));
-    }
-    index += 1;
-    if (!stopping && (input.maxTicks === 0 || index < input.maxTicks)) {
-      await sleep(waitMs);
-    }
-  }
-
-  process.off("SIGINT", stop);
-  process.off("SIGTERM", stop);
-  return {
-    status: stopping ? "stopped" as const : input.maxTicks > 0 ? "tick_limit" as const : "stopped" as const,
-    ticks,
-    runCounts: runStatusCounts(),
-  };
-}
-
 async function runOverseerTick(input: {
   runId: string;
   eventLimit: number;
@@ -1454,36 +1080,6 @@ function parseJsonObject(raw: string) {
     throw new Error("expected a JSON object");
   }
   return value as Record<string, unknown>;
-}
-
-function runStatusCounts() {
-  const counts = { todo: 0, running: 0, done: 0, blocked: 0 };
-  for (const run of harness.listRuns({ limit: 1000 })) {
-    counts[run.status] += 1;
-  }
-  return counts;
-}
-
-function runnableRuns(input: { limit: number; rootRunId?: string | null }) {
-  const runs = harness.listRuns({ statuses: ["todo", "running"], limit: 500 });
-  const scoped = input.rootRunId ? runsInScope(runs, input.rootRunId) : runs;
-  return scoped.filter((run) => run.status !== "done").slice(0, input.limit);
-}
-
-function runsInScope(runs: ReturnType<Harness["listRuns"]>, rootRunId: string) {
-  const included = new Set([rootRunId]);
-  let changed = true;
-  while (changed) {
-    changed = false;
-    for (const run of runs) {
-      const parentRunId = typeof run.context.parentRunId === "string" ? run.context.parentRunId : null;
-      if (parentRunId && included.has(parentRunId) && !included.has(run.id)) {
-        included.add(run.id);
-        changed = true;
-      }
-    }
-  }
-  return runs.filter((run) => included.has(run.id));
 }
 
 function createDashboardRuntime(input: {
@@ -1780,431 +1376,8 @@ function createDashboardRuntime(input: {
   };
 }
 
-async function resumeRunningCodexAttempts(input: { runId: string; limit: number }) {
-  const attempts = harness.listRunningAttempts({ runId: input.runId }).slice(0, input.limit);
-  const sessionsByAttemptId = new Map(
-    harness.getRunOverview({ runId: input.runId, eventLimit: 1 }).sessions.map((session) => [session.attemptId, session]),
-  );
-  const tasks = await Promise.all(attempts.map(async (attempt) => {
-    const task = harness.getTask(attempt.taskId);
-    if (!task) {
-      return null;
-    }
-    const run = harness.getRun(task.runId);
-    if (!run) {
-      return null;
-    }
-    const sessionId = typeof attempt.input.codexSessionId === "string" ? attempt.input.codexSessionId : "";
-    if (!sessionId) {
-      const sessionName = typeof attempt.input.sessionName === "string" ? attempt.input.sessionName : `attempt-${attempt.id}`;
-      const cwd = typeof attempt.input.cwd === "string" ? attempt.input.cwd : task.worktreePath ?? runnerCwd();
-      if (runningAttemptIsFresh(sessionsByAttemptId.get(attempt.id))) {
-        upsertAttemptThread({
-          runId: run.id,
-          task,
-          attemptId: attempt.id,
-          sessionName,
-          cwd,
-          status: "running",
-        });
-        return {
-          taskId: task.id,
-          attemptId: attempt.id,
-          sessionName,
-          status: "running",
-          codexSessionId: null,
-        };
-      }
-      upsertAttemptThread({
-        runId: run.id,
-        task,
-        attemptId: attempt.id,
-        sessionName,
-        cwd,
-        status: "orphaned",
-      });
-      const output: AttemptOutput = {
-        status: "blocked",
-        summary: "Running attempt cannot be resumed because it has no Codex session id",
-        changedFiles: [],
-        checks: [{ name: "codex-resumable session id", status: "failed" }],
-        artifacts: [],
-        problems: ["running attempt is missing codexSessionId; task was returned to todo for a fresh attempt"],
-      };
-      harness.finishAttempt({ attemptId: attempt.id, output });
-      harness.retryTask({ taskId: task.id });
-      return {
-        taskId: task.id,
-        attemptId: attempt.id,
-        sessionName,
-        status: "blocked",
-        codexSessionId: null,
-      };
-    }
-    const sessionName = typeof attempt.input.sessionName === "string" ? attempt.input.sessionName : `attempt-${attempt.id}`;
-    const prompt =
-      typeof attempt.input.prompt === "string"
-        ? attempt.input.prompt
-        : "Continue until you can return the required structured JSON.";
-    const recorder = createAttemptEventRecorder(attempt.id);
-    const resolvedModel = attemptModelPreference(attempt.input);
-    const cwd = typeof attempt.input.cwd === "string" ? attempt.input.cwd : task.worktreePath ?? runnerCwd();
-    upsertAttemptThread({
-      runId: run.id,
-      task,
-      attemptId: attempt.id,
-      sessionName,
-      cwd,
-      agentSessionId: sessionId,
-      status: "running",
-    });
-    const result = await codexResumableClient(resolvedModel?.model, cwd).resume({
-      sessionId,
-      sessionName,
-      prompt,
-      onStdout: recorder.stdout,
-      onStderr: recorder.stderr,
-      onEvent: recorder.event,
-    });
-    harness.updateAttemptInput({
-      attemptId: attempt.id,
-      input: {
-        ...attempt.input,
-        ...codexAttemptInput({ prompt, sessionName, result, model: resolvedModel, cwd }),
-        threadId: threadIdForAttempt(attempt.id),
-      },
-    });
-    updateAttemptThread({
-      attemptId: attempt.id,
-      status: result.status === "running" ? "running" : undefined,
-      agentSessionId: result.sessionId,
-      heartbeat: true,
-    });
-    if (result.status === "running") {
-      return {
-        taskId: task.id,
-        attemptId: attempt.id,
-        sessionName,
-        status: "running",
-        codexSessionId: result.sessionId,
-      };
-    }
-    const { output, decision } = await applyCliStopHooks({
-      run,
-      task,
-      sessionName,
-      prompt,
-      output: withCodexArtifacts(result.output, result.sessionId),
-    });
-    harness.finishAttempt({ attemptId: attempt.id, output });
-    applyCliPostAttemptRunEffects(run.id, task, output);
-    updateAttemptThread({
-      attemptId: attempt.id,
-      status: output.status,
-      agentSessionId: result.sessionId,
-      heartbeat: true,
-    });
-    if (decision === "retry") {
-      harness.retryTask({ taskId: task.id });
-    }
-    return {
-      taskId: task.id,
-      attemptId: attempt.id,
-      sessionName,
-      status: output.status,
-      codexSessionId: result.sessionId,
-    };
-  }));
-  return tasks.filter((task) => task !== null);
-}
-
-function runningAttemptIsFresh(session: { startedAt: string | null; events: Array<{ createdAt: string }> } | undefined) {
-  const lastEventAt = session?.events.at(-1)?.createdAt;
-  const heartbeatAt = parseTimestampMs(lastEventAt) ?? parseTimestampMs(session?.startedAt);
-  return heartbeatAt !== null && Date.now() - heartbeatAt < RUNNING_ATTEMPT_STALE_MS;
-}
-
-function parseTimestampMs(value: string | null | undefined) {
-  if (!value) {
-    return null;
-  }
-  const normalized = value.includes("T") ? value : `${value.replace(" ", "T")}Z`;
-  const ms = Date.parse(normalized);
-  return Number.isFinite(ms) ? ms : null;
-}
-
-async function startReadyCodexAttempts(input: { runId: string; limit: number }) {
-  const run = harness.getRun(input.runId);
-  if (!run) {
-    fail(`run not found: ${input.runId}`);
-  }
-  const leased = harness.leaseReadyTasks({
-    runId: input.runId,
-    limit: input.limit,
-    sessionForTask: (task) => task.sessionRef ?? `task-${task.id}`,
-    worktreeForTask: worktreeForTask(),
-  });
-  const tasks = await Promise.all(leased.map(async (task) => {
-    const sessionName = task.sessionRef ?? `task-${task.id}`;
-    const prompt = buildTaskPrompt({
-      run,
-      task,
-      dependencyAttempts: task.dependsOn.length > 0 ? harness.listLatestAttemptsForTasks(task.dependsOn) : [],
-      lessons: harness.listLessons({ runId: run.id }),
-      template: harness.getPromptTemplate("task")?.contentMd,
-    });
-    const route = resolveCliExecutionRoute({ run, task, cliExecutor: "codex-resumable" });
-    const resolvedModel = route.model;
-    const cwd = task.worktreePath ?? runnerCwd();
-    const baseInput = {
-      prompt,
-      sessionName,
-      executor: route.backend.kind,
-      ...attemptInputForRoute(route, cwd),
-    };
-    const startResult = await applyStartHooks({
-      hooks: startHooks(),
-      run,
-      task,
-      sessionName,
-      cwd,
-    });
-    if ((startResult.problems ?? []).length > 0) {
-      const attemptId = harness.recordAttempt({
-        taskId: task.id,
-        input: { ...baseInput, startHooks: true },
-        output: {
-          status: "blocked",
-          summary: "start hooks blocked task execution",
-          changedFiles: [],
-          checks: startResult.checks ?? [],
-          artifacts: startResult.artifacts ?? [],
-          problems: startResult.problems ?? [],
-        },
-      });
-      upsertAttemptThread({
-        runId: run.id,
-        task,
-        attemptId,
-        sessionName,
-        cwd,
-        status: "blocked",
-      });
-      return {
-        taskId: task.id,
-        attemptId,
-        sessionName,
-        status: "blocked",
-        codexSessionId: null,
-      };
-    }
-    if (route.executionMode !== "codex-resumable") {
-      return runLeasedGenericAttempt({
-        run,
-        task,
-        sessionName,
-        prompt,
-        cwd,
-        route,
-        startResult,
-      });
-    }
-    const attemptId = harness.startAttempt({ taskId: task.id, input: baseInput });
-    upsertAttemptThread({
-      runId: run.id,
-      task,
-      attemptId,
-      sessionName,
-      cwd,
-      status: "running",
-    });
-    const recorder = createAttemptEventRecorder(attemptId);
-    const result = await codexResumableClient(resolvedModel?.model, cwd).start({
-      prompt,
-      sessionName,
-      onStdout: recorder.stdout,
-      onStderr: recorder.stderr,
-      onEvent: recorder.event,
-    });
-    const attemptInput = {
-      ...codexAttemptInput({ prompt, sessionName, result, model: route.model, cwd }),
-      threadId: threadIdForAttempt(attemptId),
-    };
-    harness.updateAttemptInput({ attemptId, input: attemptInput });
-    updateAttemptThread({
-      attemptId,
-      status: result.status === "running" ? "running" : undefined,
-      agentSessionId: result.sessionId,
-      heartbeat: true,
-    });
-    if (result.status === "running") {
-      return {
-        taskId: task.id,
-        attemptId,
-        sessionName,
-        status: "running",
-        codexSessionId: result.sessionId,
-      };
-    }
-    const { output, decision } = await applyCliStopHooks({
-      run,
-      task,
-      sessionName,
-      prompt,
-      output: withCodexArtifacts(result.output, result.sessionId),
-    });
-    harness.finishAttempt({
-      attemptId,
-      output: {
-        ...output,
-        checks: [...(startResult.checks ?? []), ...(output.checks ?? [])],
-        artifacts: [...(startResult.artifacts ?? []), ...(output.artifacts ?? [])],
-      },
-    });
-    const finishedAttempt = harness.getAttempt(attemptId);
-    applyCliPostAttemptRunEffects(run.id, task, finishedAttempt?.output ?? output);
-    updateAttemptThread({
-      attemptId,
-      status: output.status,
-      agentSessionId: result.sessionId,
-      heartbeat: true,
-    });
-    if (decision === "retry") {
-      harness.retryTask({ taskId: task.id });
-    }
-    return {
-      taskId: task.id,
-      attemptId,
-      sessionName,
-      status: output.status,
-      codexSessionId: result.sessionId,
-    };
-  }));
-  return tasks;
-}
-
-async function runLeasedGenericAttempt(input: {
-  run: NonNullable<ReturnType<Harness["getRun"]>>;
-  task: Task;
-  sessionName: string;
-  prompt: string;
-  cwd: string;
-  route: ResolvedExecutionRoute;
-  startResult: Awaited<ReturnType<typeof applyStartHooks>>;
-}) {
-  const factoryInput = {
-    run: input.run,
-    task: input.task,
-    sessionName: input.sessionName,
-    cwd: input.cwd,
-    route: input.route,
-  };
-  const attemptId = harness.startAttempt({
-    taskId: input.task.id,
-    input: {
-      prompt: input.prompt,
-      sessionName: input.sessionName,
-      executor: input.route.backend.kind,
-      ...attemptInputForRoute(input.route, input.cwd),
-    },
-  });
-  upsertAttemptThread({
-    runId: input.run.id,
-    task: input.task,
-    attemptId,
-    sessionName: input.sessionName,
-    cwd: input.cwd,
-    status: "running",
-  });
-  const executor = executorFactory("codex-resumable")(factoryInput);
-  const rawOutput = await executor({
-    prompt: input.prompt,
-    run: input.run,
-    task: input.task,
-    sessionName: input.sessionName,
-    route: input.route,
-  });
-  const { output, decision } = await applyCliStopHooks({
-    run: input.run,
-    task: input.task,
-    sessionName: input.sessionName,
-    prompt: input.prompt,
-    output: rawOutput,
-  });
-  output.checks = [...(input.startResult.checks ?? []), ...(output.checks ?? [])];
-  output.artifacts = [...(input.startResult.artifacts ?? []), ...(output.artifacts ?? [])];
-  harness.finishAttempt({ attemptId, output });
-  const finishedAttempt = harness.getAttempt(attemptId);
-  applyCliPostAttemptRunEffects(input.run.id, input.task, finishedAttempt?.output ?? output);
-  updateAttemptThread({
-    attemptId,
-    status: output.status,
-    heartbeat: true,
-  });
-  if (decision === "retry") {
-    harness.retryTask({ taskId: input.task.id });
-  }
-  return {
-    taskId: input.task.id,
-    attemptId,
-    sessionName: input.sessionName,
-    status: output.status,
-    codexSessionId: null,
-  };
-}
-
 function threadIdForAttempt(attemptId: string) {
   return `thread_${attemptId}`;
-}
-
-function applyCliPostAttemptRunEffects(runId: string, task: Pick<Task, "role">, output: AttemptOutput) {
-  if (task.role === "goal-review" && output.status === "done" && output.runDecision === "complete") {
-    harness.updateRunStatus({ runId, status: "done" });
-  }
-  if (task.role === "goal-review" && output.status === "done" && output.runDecision === "defer") {
-    harness.updateRunStatus({ runId, status: "blocked" });
-  }
-}
-
-function upsertAttemptThread(input: {
-  runId: string;
-  task: Task;
-  attemptId: string;
-  sessionName: string;
-  cwd: string;
-  status?: ExecutionThreadStatus;
-  agentSessionId?: string | null;
-}) {
-  return harness.upsertExecutionThread({
-    id: threadIdForAttempt(input.attemptId),
-    runId: input.runId,
-    taskId: input.task.id,
-    attemptId: input.attemptId,
-    ownerType: "runner",
-    ownerId: String(process.pid),
-    role: input.task.role,
-    status: input.status ?? "running",
-    pid: process.pid,
-    sessionName: input.sessionName,
-    agentSessionId: input.agentSessionId ?? null,
-    worktreePath: input.cwd,
-  });
-}
-
-function updateAttemptThread(input: {
-  attemptId: string;
-  status?: ExecutionThreadStatus;
-  agentSessionId?: string | null;
-  heartbeat?: boolean;
-}) {
-  harness.updateExecutionThread({
-    id: threadIdForAttempt(input.attemptId),
-    status: input.status,
-    ownerId: String(process.pid),
-    pid: process.pid,
-    agentSessionId: input.agentSessionId ?? null,
-    heartbeat: input.heartbeat,
-  });
 }
 
 function markAttemptThreadInterrupted(attemptId: string, reason: string) {
@@ -2216,129 +1389,17 @@ function markAttemptThreadInterrupted(attemptId: string, reason: string) {
   });
 }
 
-async function applyCliStopHooks(input: {
-  run: NonNullable<ReturnType<Harness["getRun"]>>;
-  task: NonNullable<ReturnType<Harness["getTask"]>>;
-  sessionName: string;
-  prompt: string;
-  output: AttemptOutput;
-}) {
-  let output = {
-    ...input.output,
-    checks: [...(input.output.checks ?? [])],
-    artifacts: [...(input.output.artifacts ?? [])],
-    problems: [...(input.output.problems ?? [])],
-  };
-  let decision: "continue" | "retry" | "exit" = "exit";
-  const hooksByRole: Record<string, StopHook[]> = stopHooksByRole();
-  const hooks = [...(hooksByRole[input.task.role] ?? [])];
-  for (const hook of hooks) {
-    const result = await hook({ ...input, output });
-    output.checks = [...(output.checks ?? []), ...(result.checks ?? [])];
-    output.artifacts = [...(output.artifacts ?? []), ...(result.artifacts ?? [])];
-    if (result.outputPatch) {
-      output = { ...output, ...result.outputPatch };
-    }
-    if (result.problems && result.problems.length > 0) {
-      output.problems = [...(output.problems ?? []), ...result.problems];
-      output.status = "blocked";
-    }
-    if (result.decision === "retry") {
-      decision = "retry";
-      output.status = "blocked";
-    } else if (result.decision === "continue" && decision !== "retry") {
-      decision = "continue";
-    } else if (result.decision === "exit" && decision !== "retry") {
-      decision = "exit";
-    }
-  }
-  return { output, decision };
-}
-
-function codexResumableClient(model?: string | null, cwd = runnerCwd()) {
-  return createCodexResumableClient({
-    cwd,
-    sandbox: parseCodexResumableSandbox(),
-    codexBin: flag(parsed, "codex-bin"),
-    model: model ?? undefined,
-    timeoutMs: parseTimeoutMs(flag(parsed, "timeout-ms")),
-    idleTimeoutMs: parseTimeoutMs(flag(parsed, "idle-timeout-ms"), "--idle-timeout-ms"),
-  });
-}
-
 function parseCodexResumableSandbox() {
   return parseSandbox(flag(parsed, "sandbox") ?? "workspace-write");
 }
 
-function codexAttemptInput(input: {
-  prompt: string;
-  sessionName: string;
-  result: {
-    sessionId: string | null;
-    outputPath: string;
-    stdout: string;
-    stderr: string;
-    events: Array<Record<string, unknown>>;
-  };
-  model: unknown;
-  cwd?: string;
-}) {
-  return {
-    prompt: input.prompt,
-    sessionName: input.sessionName,
-    cwd: input.cwd,
-    executor: "codex-resumable",
-    model: input.model,
-    codexSessionId: input.result.sessionId,
-    outputPath: input.result.outputPath,
-    stdout: input.result.stdout,
-    stderr: input.result.stderr,
-    events: input.result.events,
-    childEnv: childToolchainEnvEvidence(),
-  };
-}
-
-function attemptModelPreference(input: Record<string, unknown>): { model: string } | null {
-  const model = input.model;
-  if (!model || typeof model !== "object" || Array.isArray(model)) {
-    return null;
+function applyCliPostAttemptRunEffects(runId: string, task: Pick<Task, "role">, output: AttemptOutput) {
+  if (task.role === "goal-review" && output.status === "done" && output.runDecision === "complete") {
+    harness.updateRunStatus({ runId, status: "done" });
   }
-  const record = model as Record<string, unknown>;
-  return typeof record.model === "string" && record.model.trim().length > 0 ? (record as { model: string }) : null;
-}
-
-function createAttemptEventRecorder(attemptId: string) {
-  let sequence = Date.now() * 1000;
-  const nextSequence = () => {
-    sequence += 1;
-    return sequence;
-  };
-  return {
-    stdout: (chunk: string) => {
-      harness.recordAttemptEvent({
-        attemptId,
-        stream: "stdout",
-        sequence: nextSequence(),
-        text: chunk,
-      });
-    },
-    stderr: (chunk: string) => {
-      harness.recordAttemptEvent({
-        attemptId,
-        stream: "stderr",
-        sequence: nextSequence(),
-        text: chunk,
-      });
-    },
-    event: (event: Record<string, unknown>) => {
-      harness.recordAttemptEvent({
-        attemptId,
-        stream: "codex-json",
-        sequence: nextSequence(),
-        payload: event,
-      });
-    },
-  };
+  if (task.role === "goal-review" && output.status === "done" && output.runDecision === "defer") {
+    harness.updateRunStatus({ runId, status: "blocked" });
+  }
 }
 
 function dashboardRunnerCommand(
@@ -2474,16 +1535,6 @@ function drainDashboardRunnerStream(stream: ReadableStream<Uint8Array>, onChunk:
   })();
 }
 
-function withCodexArtifacts(output: AttemptOutput, sessionId: string | null): AttemptOutput {
-  if (!sessionId) {
-    return output;
-  }
-  return {
-    ...output,
-    artifacts: [...(output.artifacts ?? []), { kind: "codex_session", sessionId }],
-  };
-}
-
 function parsePositiveInteger(raw: string, name: string) {
   const value = Number(raw);
   if (!Number.isInteger(value) || value < 1) {
@@ -2502,10 +1553,6 @@ function parseNonNegativeInteger(raw: string, name: string) {
     fail(`${name} must be a non-negative integer`);
   }
   return value;
-}
-
-function sleep(ms: number) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function runnerCwd() {
