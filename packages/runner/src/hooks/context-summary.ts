@@ -1,3 +1,4 @@
+import { readableValue } from "@ouroboros/harness";
 import type { AttemptOutput } from "@ouroboros/harness";
 import type { ContextSubagent, ContextSubagentOutput, StopHook, StopHookInput } from "../types";
 
@@ -85,7 +86,7 @@ function deterministicContextSummary(input: StopHookInput): ContextSubagentOutpu
     };
   }
 
-  const firstProblem = input.output.problems?.find((problem) => problem.trim().length > 0);
+  const firstProblem = input.output.problems?.map((problem) => readableValue(problem)).find((problem) => problem.length > 0);
   return {
     experience: {
       summary: "No reusable success pattern recorded for this blocked attempt.",
@@ -111,8 +112,8 @@ function normalizeArchive(archive: ContextSubagentOutput, input: StopHookInput):
   };
 }
 
-function compact(value: string) {
-  const normalized = value.replace(/\s+/g, " ").trim();
+function compact(value: unknown) {
+  const normalized = readableValue(value);
   if (normalized.length <= 240) {
     return normalized;
   }

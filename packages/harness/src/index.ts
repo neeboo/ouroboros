@@ -7,6 +7,7 @@ export {
 export { initDatabase, withDatabase } from "./database";
 export { makeId } from "./ids";
 export { applyHarnessAction, parseHarnessAction } from "./actions";
+export { readableList, readableValue } from "./readable";
 export type { HarnessAction, HarnessActionResult } from "./actions";
 export type {
   Attempt,

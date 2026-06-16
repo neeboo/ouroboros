@@ -1,4 +1,4 @@
-import { DEFAULT_REPAIR_TASK_PROMPT_TEMPLATE, type AttemptOutput, type Harness } from "@ouroboros/harness";
+import { DEFAULT_REPAIR_TASK_PROMPT_TEMPLATE, readableValue, type AttemptOutput, type Harness } from "@ouroboros/harness";
 import { prettyJson, renderPromptTemplate } from "../template";
 import type { StopHook } from "../types";
 
@@ -35,16 +35,17 @@ export function createRepairTaskHook(options: { harness: Harness }): StopHook {
 }
 
 function buildRepairPrompt(template: string | undefined, verifierTaskId: string, output: AttemptOutput) {
+  const verifierSummary = readableValue(output.summary);
   const verifierOutput = {
-      summary: output.summary,
-      changedFiles: output.changedFiles ?? [],
-      checks: output.checks ?? [],
-      artifacts: output.artifacts ?? [],
-      problems: output.problems ?? [],
-    };
+    summary: verifierSummary,
+    changedFiles: output.changedFiles ?? [],
+    checks: output.checks ?? [],
+    artifacts: output.artifacts ?? [],
+    problems: output.problems ?? [],
+  };
   return renderPromptTemplate(template ?? DEFAULT_REPAIR_TASK_PROMPT_TEMPLATE, {
     verifierTaskId,
-    verifierSummary: output.summary,
+    verifierSummary,
     verifierOutputJson: prettyJson(verifierOutput),
     verifierProblemsJson: prettyJson(output.problems ?? []),
   });

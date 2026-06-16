@@ -1,3 +1,4 @@
+import { readableValue } from "@ouroboros/harness";
 import type { RunOverview, RunStatusCounts } from "@ouroboros/harness";
 import { isAbsolute, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -234,6 +235,27 @@ function columnX(column: string) {
 function compactText(value: string, max: number) {
   const text = String(value ?? "").replace(/\s+/g, " ").trim();
   return text.length > max ? `${text.slice(0, max - 1)}…` : text;
+}
+
+export function dashboardEvidenceItemTextForTest(item: unknown) {
+  return dashboardEvidenceItemText(item);
+}
+
+function dashboardEvidenceItemText(item: unknown) {
+  if (typeof item === "string") {
+    return item;
+  }
+  if (!item || typeof item !== "object") {
+    return readableValue(item);
+  }
+  const record = item as Record<string, unknown>;
+  if ("summary" in record) {
+    const summary = readableValue(record.summary);
+    if (summary) {
+      return summary;
+    }
+  }
+  return readableValue(item);
 }
 
 export function dashboardHtml(input: { runId: string }) {
@@ -1443,6 +1465,47 @@ export function dashboardHtml(input: { runId: string }) {
       '"': "&quot;",
       "'": "&#39;"
     }[char]));
+    const compactJson = (value) => {
+      try {
+        const seen = new WeakSet();
+        const json = JSON.stringify(value, (_key, nested) => {
+          if (typeof nested === "bigint") return String(nested);
+          if (!nested || typeof nested !== "object") return nested;
+          if (seen.has(nested)) return "[Circular]";
+          seen.add(nested);
+          return nested;
+        });
+        return json || "";
+      } catch {
+        return typeof value === "object" ? "[Unserializable object]" : String(value);
+      }
+    };
+    const readableValue = (value, seen) => {
+      if (typeof value === "string") return value.replace(/\\s+/g, " ").trim();
+      if (value === null || value === undefined) return "";
+      if (typeof value !== "object") return String(value);
+      const seenObjects = seen || new WeakSet();
+      if (seenObjects.has(value)) return "[Circular]";
+      seenObjects.add(value);
+      if (Array.isArray(value)) {
+        return value.map((item) => readableValue(item, seenObjects)).filter(Boolean).join("; ");
+      }
+      const preferred = ["summary", "message", "error", "details", "name", "status", "severity", "path", "command"];
+      const used = new Set();
+      const parts = [];
+      for (const key of preferred) {
+        if (!(key in value) || value[key] === null || value[key] === undefined) continue;
+        used.add(key);
+        const formatted = readableValue(value[key], seenObjects);
+        if (formatted) parts.push(key + ": " + formatted);
+      }
+      const remaining = {};
+      for (const [key, nested] of Object.entries(value)) {
+        if (!used.has(key)) remaining[key] = nested;
+      }
+      if (Object.keys(remaining).length > 0) parts.push("extra: " + compactJson(remaining));
+      return (parts.length ? parts.join("; ") : compactJson(value)).replace(/\\s+/g, " ").trim();
+    };
     const eventText = (event) => {
       if (event.text && String(event.text).trim()) return String(event.text).trim();
       const payload = event.payload || {};
@@ -1460,8 +1523,12 @@ export function dashboardHtml(input: { runId: string }) {
     };
     const evidenceItemText = (item) => {
       if (typeof item === "string") return item;
-      if (!item || typeof item !== "object") return String(item ?? "");
-      return item.summary || item.evidence || item.name || item.path || item.kind || JSON.stringify(item);
+      if (!item || typeof item !== "object") return readableValue(item);
+      if ("summary" in item) {
+        const summary = readableValue(item.summary);
+        if (summary) return summary;
+      }
+      return readableValue(item);
     };
     const evidenceItemMeta = (item) => {
       if (!item || typeof item !== "object") return "";

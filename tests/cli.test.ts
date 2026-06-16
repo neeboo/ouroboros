@@ -699,6 +699,84 @@ describe("CLI", () => {
     );
   });
 
+  test("records and finishes attempts with readable structured summaries and problems", async () => {
+    await runCli("init");
+    const run = await runCliJson("create-run", "--goal", "Serialize verifier failure");
+    const recordTask = await runCliJson(
+      "create-task",
+      "--run-id",
+      run.id,
+      "--role",
+      "verifier",
+      "--goal",
+      "Record structured failure",
+      "--prompt",
+      "Record it.",
+    );
+
+    const recorded = await runCliJson(
+      "record-attempt",
+      "--task-id",
+      recordTask.id,
+      "--input-json",
+      "{}",
+      "--output-json",
+      JSON.stringify({
+        status: "blocked",
+        summary: { summary: "Record verifier blocked", status: "blocked" },
+        problems: [
+          {
+            severity: "high",
+            path: "packages/cli/src/main.ts",
+            message: "record-attempt coerced object problem",
+          },
+        ],
+      }),
+    );
+
+    const finishTask = await runCliJson(
+      "create-task",
+      "--run-id",
+      run.id,
+      "--role",
+      "verifier",
+      "--goal",
+      "Finish structured failure",
+      "--prompt",
+      "Finish it.",
+    );
+    const started = await runCliJson("start-attempt", "--task-id", finishTask.id, "--input-json", "{}");
+    await runCliJson(
+      "finish-attempt",
+      "--attempt-id",
+      started.attemptId,
+      "--output-json",
+      JSON.stringify({
+        status: "blocked",
+        summary: { message: "Finish verifier blocked", status: "blocked" },
+        problems: [
+          {
+            severity: "medium",
+            command: "bun test tests/cli.test.ts",
+            error: "finish-attempt coerced object problem",
+          },
+        ],
+      }),
+    );
+
+    const harness = new Harness(dbPath);
+    const recordAttempt = harness.getAttempt(recorded.attemptId)!;
+    const finishAttempt = harness.getAttempt(started.attemptId)!;
+
+    expect(recordAttempt.output.summary).toContain("Record verifier blocked");
+    expect(recordAttempt.output.problems?.[0]).toContain("record-attempt coerced object problem");
+    expect(recordAttempt.error).not.toContain("[object Object]");
+    expect(finishAttempt.output.summary).toContain("Finish verifier blocked");
+    expect(finishAttempt.output.problems?.[0]).toContain("finish-attempt coerced object problem");
+    expect(finishAttempt.output.problems?.[0]).toContain("bun test tests/cli.test.ts");
+    expect(finishAttempt.error).not.toContain("[object Object]");
+  });
+
   test("runs multiple ready tasks with separate sessions", async () => {
     await runCli("init");
     const run = await runCliJson("create-run", "--goal", "Bootstrap ouroboros");

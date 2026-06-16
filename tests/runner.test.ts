@@ -787,7 +787,7 @@ describe("runner", () => {
     expect(attempt.output.summary).toBe("Bound acpx planner turns with a shorter timeout or a smaller prompt.");
     expect(attempt.output.problems).toEqual([
       "Bound acpx planner turns with a shorter timeout or a smaller prompt.",
-      rawProblem,
+      "exit code: 124 stderr: command timed out after 600000ms",
     ]);
     expect(attempt.output.artifacts).toContainEqual({
       kind: "context_lesson_archive",
@@ -801,6 +801,43 @@ describe("runner", () => {
         summary: "Bound acpx planner turns with a shorter timeout or a smaller prompt.",
       }),
     );
+  });
+
+  test("context summary derives readable lessons from structured problem objects", async () => {
+    const runId = harness.createRun({ goal: "Build loop" });
+    const taskId = harness.createTask({
+      runId,
+      role: "verifier",
+      goal: "Verify readable lessons",
+      prompt: "Verify the lesson summary.",
+    });
+
+    const result = await runNextReadyTask({
+      harness,
+      runId,
+      executor: async () => ({
+        status: "blocked",
+        summary: "structured verifier failure",
+        artifacts: [],
+        checks: [{ name: "structured verifier", status: "failed" }],
+        problems: [
+          {
+            severity: "high",
+            message: "Structured verifier problem needs repair",
+            details: { command: "bun test tests/runner.test.ts" },
+          } as unknown as string,
+        ],
+      }),
+      stopHooks: [createContextSummaryHook()],
+    });
+
+    const attempt = harness.getAttempt(result!.attemptId)!;
+
+    expect(attempt.taskId).toBe(taskId);
+    expect(attempt.output.summary).toContain("Structured verifier problem needs repair");
+    expect(attempt.output.summary).toContain("bun test tests/runner.test.ts");
+    expect(attempt.output.summary).not.toContain("[object Object]");
+    expect(attempt.output.problems?.[0]).not.toContain("[object Object]");
   });
 
   test("planner stop hook creates next tasks from structured output", async () => {
@@ -1661,6 +1698,48 @@ describe("runner", () => {
     expect(harness.nextReadyTask(runId)?.prompt).toContain("missing regression test");
   });
 
+  test("repair task hook renders structured verifier summaries as readable text", async () => {
+    const runId = harness.createRun({ goal: "Build loop" });
+    harness.setPromptTemplate({
+      key: "repair-task",
+      contentMd: "Custom repair for {{verifierTaskId}}: {{verifierSummary}}\n{{verifierProblemsJson}}",
+    });
+    harness.createTask({
+      runId,
+      role: "verifier",
+      goal: "Verify runner",
+      prompt: "Verify the runner.",
+    });
+
+    await runNextReadyTask({
+      harness,
+      runId,
+      executor: async () => ({
+        status: "blocked",
+        summary: {
+          summary: "Verification could not prove completion",
+          details: { command: "bun test tests/runner.test.ts" },
+        } as unknown as string,
+        artifacts: [],
+        checks: [],
+        problems: [
+          {
+            message: "missing regression test",
+            details: { path: "tests/runner.test.ts" },
+          } as unknown as string,
+        ],
+      }),
+      stopHooks: [createRepairTaskHook({ harness })],
+    });
+
+    const prompt = harness.nextReadyTask(runId)?.prompt ?? "";
+    expect(prompt).toContain("Verification could not prove completion");
+    expect(prompt).toContain("bun test tests/runner.test.ts");
+    expect(prompt).toContain("missing regression test");
+    expect(prompt).toContain("tests/runner.test.ts");
+    expect(prompt).not.toContain("[object Object]");
+  });
+
   test("parses valid planner next tasks", () => {
     const output = parseAttemptOutput(
       JSON.stringify({
@@ -1687,6 +1766,35 @@ describe("runner", () => {
         doneWhen: ["tests pass"],
       },
     ]);
+  });
+
+  test("parses object summaries and problem entries into readable text", () => {
+    const output = parseAttemptOutput(
+      JSON.stringify({
+        status: "blocked",
+        summary: {
+          summary: "Verifier could not prove completion",
+          status: "blocked",
+          details: { command: "bun test tests/runner.test.ts" },
+        },
+        problems: [
+          {
+            severity: "high",
+            path: "packages/runner/src/executors/output.ts",
+            message: "Problem entries were rendered as objects",
+            details: { command: "bun test tests/runner.test.ts", status: "failed" },
+          },
+        ],
+      }),
+    );
+
+    expect(output.summary).toContain("Verifier could not prove completion");
+    expect(output.summary).toContain("bun test tests/runner.test.ts");
+    expect(output.summary).not.toContain("[object Object]");
+    expect(output.problems?.[0]).toContain("Problem entries were rendered as objects");
+    expect(output.problems?.[0]).toContain("packages/runner/src/executors/output.ts");
+    expect(output.problems?.[0]).toContain("high");
+    expect(output.problems?.[0]).not.toContain("[object Object]");
   });
 
   test("parses optional planner next task verifier contracts", () => {

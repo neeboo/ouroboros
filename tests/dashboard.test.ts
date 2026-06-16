@@ -4,7 +4,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Harness } from "../packages/harness/src";
 import { buildTaskPrompt } from "../packages/runner/src";
-import { buildDashboardTaskGraph, dashboardHtml, handleDashboardRequest } from "../packages/cli/src/dashboard";
+import {
+  buildDashboardTaskGraph,
+  dashboardEvidenceItemTextForTest,
+  dashboardHtml,
+  handleDashboardRequest,
+} from "../packages/cli/src/dashboard";
 import { DASHBOARD_REACT_MODULES } from "../packages/cli/src/dashboard-app";
 
 const pathologicalText = {
@@ -262,6 +267,30 @@ describe("dashboard", () => {
     expect(html).toContain("captureFlowScrollState");
     expect(html).toContain("restoreFlowScrollState");
     expect(html).toContain("node.scrollTop = scrollState.shouldFollowBottom ? node.scrollHeight : scrollState.scrollTop");
+  });
+
+  test("renders structured dashboard evidence as readable text", () => {
+    const problem = dashboardEvidenceItemTextForTest({
+      severity: "high",
+      path: "packages/cli/src/dashboard.ts",
+      message: "Dashboard rendered structured problem as an object",
+      details: { command: "bun test tests/dashboard.test.ts", status: "failed" },
+    });
+    const artifact = dashboardEvidenceItemTextForTest({
+      kind: "context_lesson_archive",
+      summary: {
+        message: "Artifact summary was structured",
+        evidence: { status: "blocked" },
+      },
+    });
+
+    expect(problem).toContain("Dashboard rendered structured problem as an object");
+    expect(problem).toContain("packages/cli/src/dashboard.ts");
+    expect(problem).toContain("bun test tests/dashboard.test.ts");
+    expect(problem).not.toContain("[object Object]");
+    expect(artifact).toContain("Artifact summary was structured");
+    expect(artifact).toContain("blocked");
+    expect(artifact).not.toContain("[object Object]");
   });
 
   test("treats repaired blocked verifier tasks as historical evidence", () => {

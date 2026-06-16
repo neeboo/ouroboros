@@ -1,3 +1,4 @@
+import { readableList, readableValue } from "@ouroboros/harness";
 import type { AttemptOutput, PlannedRun, PlannedTask } from "@ouroboros/harness";
 
 export function parseAttemptOutputOrBlocked(input: {
@@ -28,11 +29,11 @@ export function parseAttemptOutput(raw: string): AttemptOutput {
   return {
     status: parsed.status,
     runDecision: mergeRunDecision(validateRunDecision(parsed.runDecision), actionOutput.runDecision),
-    summary: String(parsed.summary ?? ""),
+    summary: readableValue(parsed.summary),
     changedFiles: Array.isArray(parsed.changedFiles) ? parsed.changedFiles.map(String) : [],
     checks: Array.isArray(parsed.checks) ? parsed.checks : [],
     artifacts: Array.isArray(parsed.artifacts) ? parsed.artifacts : [],
-    problems: Array.isArray(parsed.problems) ? parsed.problems.map(String) : [],
+    problems: readableList(parsed.problems),
     nextTasks: [...validatePlannedTasks(parsed.nextTasks), ...actionOutput.nextTasks],
     nextRuns: [...validatePlannedRuns(parsed.nextRuns), ...actionOutput.nextRuns],
   };

@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-import { applyHarnessAction, Harness } from "@ouroboros/harness";
+import { applyHarnessAction, Harness, readableList, readableValue } from "@ouroboros/harness";
 import type { AttemptOutput } from "@ouroboros/harness";
 import {
   buildTaskPrompt,
@@ -463,11 +463,11 @@ switch (parsed.command) {
       output: {
         status: output.status as "done" | "blocked",
         runDecision: parseOptionalRunDecision(output.runDecision),
-        summary: String(output.summary ?? ""),
+        summary: readableValue(output.summary),
         changedFiles: Array.isArray(output.changedFiles) ? output.changedFiles : [],
         checks: Array.isArray(output.checks) ? output.checks : [],
         artifacts: Array.isArray(output.artifacts) ? output.artifacts : [],
-        problems: Array.isArray(output.problems) ? output.problems.map(String) : [],
+        problems: readableList(output.problems),
       },
     });
     const attempt = harness.getAttempt(attemptId);
@@ -503,11 +503,11 @@ switch (parsed.command) {
       attemptId,
       output: {
         status: output.status as "done" | "blocked",
-        summary: String(output.summary ?? ""),
+        summary: readableValue(output.summary),
         changedFiles: Array.isArray(output.changedFiles) ? output.changedFiles : [],
         checks: Array.isArray(output.checks) ? output.checks : [],
         artifacts: Array.isArray(output.artifacts) ? output.artifacts : [],
-        problems: Array.isArray(output.problems) ? output.problems.map(String) : [],
+        problems: readableList(output.problems),
       },
     });
     const attempt = harness.getAttempt(attemptId);

@@ -66,6 +66,7 @@ import type {
   UpsertExecutionThreadInput,
 } from "./types";
 import { basename, resolve } from "node:path";
+import { readableList, readableValue } from "./readable";
 
 export class Harness {
   readonly dbPath: string;
@@ -468,12 +469,13 @@ export class Harness {
   }
 
   recordAttempt(input: RecordAttemptInput) {
-    if (input.output.status !== "done" && input.output.status !== "blocked") {
+    const output = normalizeAttemptOutput(input.output);
+    if (output.status !== "done" && output.status !== "blocked") {
       throw new Error("attempt output status must be 'done' or 'blocked'");
     }
 
     const id = input.id ?? makeId("attempt");
-    const problems = input.output.problems ?? [];
+    const problems = output.problems ?? [];
     return withDatabase(this.dbPath, (db) => {
       db.transaction(() => {
         db.query(
@@ -490,11 +492,11 @@ export class Harness {
         ).run({
           $id: id,
           $taskId: input.taskId,
-          $status: input.output.status,
+          $status: output.status,
           $inputJson: toJson(input.input),
-          $outputJson: toJson(input.output),
-          $checksJson: toJson(input.output.checks ?? []),
-          $artifactsJson: toJson(input.output.artifacts ?? []),
+          $outputJson: toJson(output),
+          $checksJson: toJson(output.checks ?? []),
+          $artifactsJson: toJson(output.artifacts ?? []),
           $error: problems.length > 0 ? problems.join("\n") : null,
         });
         db.query(
@@ -504,14 +506,14 @@ export class Harness {
           where id = $taskId
           `,
         ).run({
-          $status: input.output.status,
+          $status: output.status,
           $taskId: input.taskId,
         });
         const taskRow = db.query("select * from tasks where id = $taskId").get({ $taskId: input.taskId }) as
           | TaskRow
           | null;
         if (taskRow) {
-          const lesson = lessonForAttempt(input.output);
+          const lesson = lessonForAttempt(output);
           db.query(
             `
             insert into lessons (
@@ -569,11 +571,12 @@ export class Harness {
   }
 
   finishAttempt(input: FinishAttemptInput) {
-    if (input.output.status !== "done" && input.output.status !== "blocked") {
+    const output = normalizeAttemptOutput(input.output);
+    if (output.status !== "done" && output.status !== "blocked") {
       throw new Error("attempt output status must be 'done' or 'blocked'");
     }
 
-    const problems = input.output.problems ?? [];
+    const problems = output.problems ?? [];
     return withDatabase(this.dbPath, (db) => {
       db.transaction(() => {
         db.query(
@@ -588,10 +591,10 @@ export class Harness {
           where id = $attemptId and status = 'running'
           `,
         ).run({
-          $status: input.output.status,
-          $outputJson: toJson(input.output),
-          $checksJson: toJson(input.output.checks ?? []),
-          $artifactsJson: toJson(input.output.artifacts ?? []),
+          $status: output.status,
+          $outputJson: toJson(output),
+          $checksJson: toJson(output.checks ?? []),
+          $artifactsJson: toJson(output.artifacts ?? []),
           $error: problems.length > 0 ? problems.join("\n") : null,
           $attemptId: input.attemptId,
         });
@@ -608,14 +611,14 @@ export class Harness {
           where id = $taskId
           `,
         ).run({
-          $status: input.output.status,
+          $status: output.status,
           $taskId: attemptRow.task_id,
         });
         const taskRow = db.query("select * from tasks where id = $taskId").get({ $taskId: attemptRow.task_id }) as
           | TaskRow
           | null;
         if (taskRow) {
-          const lesson = lessonForAttempt(input.output);
+          const lesson = lessonForAttempt(output);
           db.query(
             `
             insert into lessons (
@@ -1304,11 +1307,19 @@ function latestEventText(events: Array<{ text: string | null; payload: Record<st
   return "";
 }
 
+function normalizeAttemptOutput(output: RecordAttemptInput["output"]) {
+  return {
+    ...output,
+    summary: readableValue(output.summary),
+    problems: readableList(output.problems),
+  };
+}
+
 function lessonForAttempt(output: RecordAttemptInput["output"]) {
   if (output.status === "done") {
     return {
       kind: "experience" as const,
-      summary: output.summary || "Task completed successfully",
+      summary: readableValue(output.summary) || "Task completed successfully",
       evidence: {
         changedFiles: output.changedFiles ?? [],
         checks: output.checks ?? [],
@@ -1319,7 +1330,7 @@ function lessonForAttempt(output: RecordAttemptInput["output"]) {
 
   return {
     kind: "lesson" as const,
-    summary: output.problems?.[0] ?? output.summary ?? "Task was blocked",
+    summary: readableList(output.problems)[0] || readableValue(output.summary) || "Task was blocked",
     evidence: {
       summary: output.summary,
       checks: output.checks ?? [],

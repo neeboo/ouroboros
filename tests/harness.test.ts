@@ -94,6 +94,44 @@ describe("Harness", () => {
     });
   });
 
+  test("stores readable blocked attempt errors and lessons from structured problem entries", () => {
+    const runId = harness.createRun({ goal: "Build verifier serialization" });
+    const taskId = harness.createTask({
+      runId,
+      role: "verifier",
+      goal: "Verify structured failures",
+      prompt: "Verify readable failures.",
+    });
+
+    const attemptId = harness.recordAttempt({
+      taskId,
+      input: {},
+      output: {
+        status: "blocked",
+        summary: { summary: "Verifier blocked", status: "blocked" } as unknown as string,
+        problems: [
+          {
+            severity: "high",
+            path: "packages/harness/src/harness.ts",
+            message: "Structured failure was not readable",
+            details: { command: "bun test tests/harness.test.ts" },
+          } as unknown as string,
+        ],
+      },
+    });
+
+    const attempt = harness.getAttempt(attemptId)!;
+    const lesson = harness.listLessons({ runId }).find((candidate) => candidate.attemptId === attemptId)!;
+
+    expect(attempt.error).toContain("Structured failure was not readable");
+    expect(attempt.error).toContain("packages/harness/src/harness.ts");
+    expect(attempt.error).not.toContain("[object Object]");
+    expect(attempt.output.summary).toContain("Verifier blocked");
+    expect(attempt.output.problems?.[0]).toContain("bun test tests/harness.test.ts");
+    expect(lesson.summary).toContain("Structured failure was not readable");
+    expect(lesson.summary).not.toContain("[object Object]");
+  });
+
   test("stores task model preference in task config", () => {
     const runId = harness.createRun({ goal: "Build loop" });
     const taskId = harness.createTask({
