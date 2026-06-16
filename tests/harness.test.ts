@@ -384,7 +384,13 @@ describe("Harness", () => {
   test("configures sqlite connections to wait briefly on busy databases", () => {
     const value = withDatabase(harness.dbPath, (db) => db.query("pragma busy_timeout").get() as { timeout: number });
 
-    expect(value.timeout).toBeGreaterThanOrEqual(5000);
+    expect(value.timeout).toBeGreaterThanOrEqual(30000);
+  });
+
+  test("configures sqlite connections for concurrent read and streamed write workloads", () => {
+    const value = withDatabase(harness.dbPath, (db) => db.query("pragma journal_mode").get() as { journal_mode: string });
+
+    expect(value.journal_mode.toLowerCase()).toBe("wal");
   });
 
   test("seeds and updates prompt templates", () => {

@@ -69,6 +69,8 @@ import type {
 import { basename, resolve } from "node:path";
 import { readableList, readableValue } from "./readable";
 
+const ATTEMPT_EVENT_BUSY_RETRIES = 5;
+
 export class Harness {
   readonly dbPath: string;
 
@@ -687,30 +689,40 @@ export class Harness {
 
   recordAttemptEvent(input: RecordAttemptEventInput) {
     const id = input.id ?? makeId("event");
-    return withDatabase(this.dbPath, (db) => {
-      db.query(
-        `
-        insert into attempt_events (
-          id, attempt_id, sequence, stream, text, payload_json
-        )
-        values (
-          $id, $attemptId, $sequence, $stream, $text, $payloadJson
-        )
-        on conflict(attempt_id, sequence) do update set
-          stream = excluded.stream,
-          text = excluded.text,
-          payload_json = excluded.payload_json
-        `,
-      ).run({
-        $id: id,
-        $attemptId: input.attemptId,
-        $sequence: input.sequence,
-        $stream: input.stream,
-        $text: input.text ?? null,
-        $payloadJson: toJson(input.payload ?? {}),
-      });
-      return id;
-    });
+    for (let retry = 0; retry <= ATTEMPT_EVENT_BUSY_RETRIES; retry += 1) {
+      try {
+        return withDatabase(this.dbPath, (db) => {
+          db.query(
+            `
+            insert into attempt_events (
+              id, attempt_id, sequence, stream, text, payload_json
+            )
+            values (
+              $id, $attemptId, $sequence, $stream, $text, $payloadJson
+            )
+            on conflict(attempt_id, sequence) do update set
+              stream = excluded.stream,
+              text = excluded.text,
+              payload_json = excluded.payload_json
+            `,
+          ).run({
+            $id: id,
+            $attemptId: input.attemptId,
+            $sequence: input.sequence,
+            $stream: input.stream,
+            $text: input.text ?? null,
+            $payloadJson: toJson(input.payload ?? {}),
+          });
+          return id;
+        });
+      } catch (error) {
+        if (!isSqliteBusyError(error) || retry === ATTEMPT_EVENT_BUSY_RETRIES) {
+          throw error;
+        }
+        sleepSync(25 * (retry + 1));
+      }
+    }
+    return id;
   }
 
   listRuns(input: ListRunsInput = {}) {
@@ -1371,4 +1383,12 @@ function lessonForAttempt(output: RecordAttemptInput["output"]) {
       problems: output.problems ?? [],
     },
   };
+}
+
+function isSqliteBusyError(error: unknown) {
+  return error instanceof Error && "code" in error && (error as { code?: unknown }).code === "SQLITE_BUSY";
+}
+
+function sleepSync(ms: number) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }

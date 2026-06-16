@@ -17,7 +17,9 @@ export function initDatabase(dbPath: string) {
 export function withDatabase<T>(dbPath: string, callback: (db: Database) => T) {
   const db = new Database(dbPath);
   db.exec("pragma foreign_keys = on");
-  db.exec("pragma busy_timeout = 5000");
+  db.exec("pragma busy_timeout = 30000");
+  db.exec("pragma journal_mode = wal");
+  db.exec("pragma synchronous = normal");
   try {
     return callback(db);
   } finally {
