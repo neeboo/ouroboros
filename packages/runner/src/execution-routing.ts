@@ -24,14 +24,25 @@ export function resolveExecutionRoute(input: {
     cliAgentBackend: input.cliAgentBackend,
     cliExecutor: input.cliExecutor,
   });
+  const model = resolveModelPreference({
+    run: input.run,
+    task: input.task,
+    globalModel: input.globalModel,
+  });
   return {
     role: input.task.role,
     backend,
-    model: resolveModelPreference({
-      run: input.run,
-      task: input.task,
-      globalModel: input.globalModel,
-    }),
+    model: modelForBackend(backend, model),
     executionMode: backend.kind === "codex-resumable" ? "codex-resumable" : "generic",
   };
+}
+
+function modelForBackend(backend: ResolvedAgentBackend, model: ResolvedModelPreference | null) {
+  if (!model) {
+    return null;
+  }
+  if (backend.kind === "acpx" && backend.agent === "claude" && model.source !== "task") {
+    return null;
+  }
+  return model;
 }

@@ -199,7 +199,7 @@ Agent backend selection can also live on the run or on a single task:
 ```bash
 orbs create-run \
   --goal "Use Ouroboros to iterate on Ouroboros" \
-  --context-json '{"agentDefaults":{"roles":{"worker":"opencode","verifier":"claude-code"}},"agentBackends":{"opencode":{"kind":"acpx","agent":"opencode"},"claude-code":{"kind":"acpx","agent":"claude"}}}'
+  --context-json '{"agentDefaults":{"global":"claude-code","roles":{"verifier":"codex-resumable"}},"agentBackends":{"claude-code":{"kind":"acpx","agent":"claude","approval":"approve-all"},"codex-resumable":{"kind":"codex-resumable"}}}'
 ```
 
 ```bash
@@ -212,6 +212,8 @@ orbs create-task \
 ```
 
 See `docs/agent-backends.md` for capability boundaries, smoke testing, and custom `agentCommand` examples for ACP servers such as Hermes or Reasonix.
+
+Claude Code uses its local Claude configuration by default. When a route resolves to `claude-code`, Orbs drops inherited `modelDefaults` and CLI `--model` values, including inert metadata such as `base_url` and `env_key`. A task can still set an explicit `config.modelPreference` when the Claude adapter should receive a specific `--model`.
 
 ## Common Commands
 

@@ -1615,7 +1615,7 @@ describe("CLI", () => {
       "--goal",
       "Bootstrap ouroboros",
       "--context-json",
-      '{"agentDefaults":{"roles":{"worker":"claude-code"}},"agentBackends":{"claude-code":{"kind":"acpx","agent":"claude","approval":"approve-all"}}}',
+      '{"modelDefaults":{"roles":{"worker":{"model":"gpt-5.4-mini","base_url":"https://api.example.test/v1","env_key":"OPENAI_API_KEY"}}},"agentDefaults":{"global":"claude-code"},"agentBackends":{"claude-code":{"kind":"acpx","agent":"claude","approval":"approve-all"}}}',
     );
     const task = await runCliJson(
       "create-task",
@@ -1666,13 +1666,15 @@ describe("CLI", () => {
     expect(promptCall).toContain("--approve-all");
     expect(promptCall).toContain("claude");
     expect(promptCall).not.toContain("--model");
+    expect(promptCall).not.toContain("gpt-5.4-mini");
     expect(attempt.input.backend).toMatchObject({
       id: "claude-code",
       kind: "acpx",
       agent: "claude",
       approval: "approve-all",
-      source: "role-default",
+      source: "run-default",
     });
+    expect(attempt.input.model).toBeNull();
     expect(attempt.input.executor).toBe("acpx");
     expect(attempt.output.summary).toBe("claude selected");
   });

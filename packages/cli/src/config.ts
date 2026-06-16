@@ -31,6 +31,7 @@ export interface ModelPreferenceConfig {
 }
 
 export interface AgentDefaultsConfig {
+  global?: string;
   roles?: Record<string, string>;
 }
 
@@ -131,8 +132,15 @@ function modelPreferenceValue(value: unknown): ModelPreferenceConfig | undefined
 
 function agentDefaultsValue(value: unknown): AgentDefaultsConfig | undefined {
   const defaults = objectValue(value);
+  const global = stringValue(defaults?.global) ?? stringValue(defaults?.default);
   const roles = stringRecordValue(defaults?.roles);
-  return roles ? { roles } : undefined;
+  if (!global && !roles) {
+    return undefined;
+  }
+  return {
+    ...(global ? { global } : {}),
+    ...(roles ? { roles } : {}),
+  };
 }
 
 function agentBackendsValue(value: unknown): Record<string, AgentBackendConfig> | undefined {

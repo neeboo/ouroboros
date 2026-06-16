@@ -10,15 +10,21 @@ project_url = "https://linear.app/<workspace>/project/<project-slug>/overview"
 project_id = "<project-slug-or-id>"
 team_key = "<team-key>"
 
-# Optional: keep verifier model defaults separate from agent backend selection.
+# Optional: keep Codex verifier model defaults separate from agent backend selection.
 [models.roles.verifier]
 model = "gpt-5.5"
 reason = "keep verifier on a stronger verifier model"
 
+[agentDefaults]
+global = "claude-code"
+
 [agentDefaults.roles]
-worker = "claude-code"
+verifier = "codex-resumable"
 
 ["agentBackends"."claude-code"]
 kind = "acpx"
 agent = "claude"
 approval = "approve-all"
+
+["agentBackends"."codex-resumable"]
+kind = "codex-resumable"

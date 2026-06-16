@@ -48,6 +48,8 @@ then CLI --model
 
 Resolved attempts record `attempt.input.model` with `model`, `source`, `role`, and any supplied `provider`, `profile`, `base_url`, or `env_key` strings. Those extra fields are inert metadata in this slice: Orbs does not use them to select a third-party provider, route base URLs, read env var values, or execute profiles. Current Codex executors pass only the resolved `model` string.
 
+Claude Code is intentionally isolated from inherited Codex model defaults. When a route resolves to the built-in `claude-code` backend, Orbs drops model preferences from role defaults, run defaults, and CLI `--model`, so `model`, `base_url`, `env_key`, and related metadata are not recorded on the attempt or sent to acpx. Only a task-level `config.modelPreference` is treated as an explicit Claude model override.
+
 ```json
 {
   "agentDefaults": {
@@ -136,22 +138,18 @@ Copy-pasteable `run.context`:
 ```json
 {
   "modelDefaults": {
-    "global": { "model": "gpt-5-codex" },
     "roles": {
-      "worker": { "model": "gpt-5-mini" },
-      "verifier": { "model": "gpt-5-mini" }
+      "verifier": { "model": "gpt-5.5" }
     }
   },
   "agentDefaults": {
-    "global": "codex",
+    "global": "claude-code",
     "roles": {
-      "planner": "codex",
-      "worker": "opencode",
-      "verifier": "claude-code"
+      "verifier": "codex-resumable"
     }
   },
   "agentBackends": {
-    "codex": { "kind": "acpx", "agent": "codex" },
+    "codex-resumable": { "kind": "codex-resumable" },
     "opencode": { "kind": "acpx", "agent": "opencode" },
     "claude-code": { "kind": "acpx", "agent": "claude" },
     "reasonix": { "kind": "acpx", "agentCommand": "reasonix acp" },
@@ -299,7 +297,7 @@ The acpx adapter should:
 
 - create or reuse one named acpx session per Orbs task session;
 - pass the assigned task cwd, including worktree cwd, through `--cwd`;
-- pass the resolved Orbs model as acpx `--model` when the target supports it;
+- pass the resolved Orbs model as acpx `--model` when the target supports it and the backend permits inherited model routing;
 - pass the selected approval mode as an acpx permission flag;
 - submit the generated Orbs task prompt on stdin;
 - parse only the agent's final text output as Orbs structured JSON;
@@ -317,7 +315,7 @@ Remote or Gateway-backed agents require cwd and worktree verification before nor
 | Agent | Session Support | Streaming | Cwd / Worktree | Auth | Model Selection | Permissions | JSON Output | Resume | Stop / Interrupt | Artifacts / Checks |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | `codex` | Supported through acpx named sessions; native `codex-resumable` also records Codex session ids. | acpx exposes structured ACP messages; Orbs currently parses final text only. | acpx receives `--cwd`; `codex-cli` and `codex-resumable` run in the assigned cwd. Verify worktree writes in smoke tests. | Uses local Codex CLI auth. | Orbs can pass resolved model through acpx `--model` or Codex CLI `-m`. | acpx approval flag or Codex sandbox flag, depending on executor. | Must return final Orbs JSON; ACP events are supplemental. | acpx named sessions or native Codex session id path. | acpx cancel exists, native dashboard stop marks blocked; durable cleanup should be verified. | From final Orbs JSON plus Orbs stop hooks; Codex session id may be recorded as an artifact. |
-| `claude-code` | Feasible through acpx `claude`; OpenClaw docs describe ACP Claude as session-backed with resume controls. | ACP/acpx can surface structured messages, tool activity, and diffs; Orbs final parser remains text JSON. | acpx receives `--cwd`; smoke-test Claude Code against task worktrees before write tasks. | Requires local Claude Code auth. | Orbs may pass `--model`; confirm target adapter accepts the requested value. | acpx approval flag. Claude's own runtime permissions may also apply. | Must be prompted to return Orbs JSON. | acpx session resume only; no Orbs-native Claude resume id yet. | Treat stop as best-effort until cancellation has been tested for the adapter. | From final Orbs JSON and stop hooks only. |
+| `claude-code` | Feasible through acpx `claude`; OpenClaw docs describe ACP Claude as session-backed with resume controls. | ACP/acpx can surface structured messages, tool activity, and diffs; Orbs final parser remains text JSON. | acpx receives `--cwd`; smoke-test Claude Code against task worktrees before write tasks. | Requires local Claude Code auth. | Uses Claude Code's local configuration by default. Orbs drops inherited `modelDefaults` and CLI `--model`; only task-level `modelPreference` is passed as acpx `--model`. | acpx approval flag. Claude's own runtime permissions may also apply. | Must be prompted to return Orbs JSON. | acpx session resume only; no Orbs-native Claude resume id yet. | Treat stop as best-effort until cancellation has been tested for the adapter. | From final Orbs JSON and stop hooks only. |
 | `opencode` | Feasible through acpx `opencode`; OpenCode documents an ACP subprocess command. | ACP streaming is available at protocol level; Orbs does not yet promote stream chunks to evidence. | acpx receives `--cwd`; verify OpenCode's file and terminal tools operate in the Orbs worktree. | Uses OpenCode local provider/auth config. | Orbs may pass `--model`; support depends on OpenCode/acpx adapter behavior. | acpx approval flag plus OpenCode's own permission flow, if any. | Must return final Orbs JSON. | acpx named sessions. | Best-effort local process stop/cancel until tested. | From final Orbs JSON and stop hooks only. |
 | `openclaw` | Feasible through acpx `openclaw` when OpenClaw exposes an ACP bridge or Gateway session. | ACP streams tool activity and chat through the bridge; Orbs treats it as observability. | High risk for remote/Gateway sessions. Verify the Gateway session's actual filesystem matches the Orbs cwd before writes. | Requires OpenClaw Gateway or local OpenClaw auth/config. | Usually routed by OpenClaw agent/session config; Orbs `--model` may not select the downstream model. | OpenClaw/Gateway permissions are separate from Orbs. acpx approval only covers the client boundary. | Must return final Orbs JSON through the bridge. | Depends on OpenClaw session key/binding and acpx named session behavior. | Gateway stop semantics must be tested; Orbs can mark the attempt blocked locally. | From final Orbs JSON and stop hooks only. Gateway artifacts are supplemental unless copied into final JSON. |
 | `hermes` | Feasible through custom `agentCommand`: `hermes acp` or `hermes-acp`; Hermes docs say ACP sessions are in-memory while the ACP server runs. | Hermes ACP exposes chat, tool activity, diffs, terminal commands, approvals, and streamed chunks. | Hermes says ACP sessions bind the editor cwd to the task, but remote installs still need Orbs worktree verification. | Uses Hermes config, provider credentials, and `hermes model` setup. | Hermes ACP stores a selected model in session state; Orbs `--model` passthrough needs adapter smoke testing. | Hermes ACP approval options map to allow once, allow always, deny, and session-scoped approval. | Must return final Orbs JSON. | Scoped to the running Hermes ACP server process; not yet Orbs-native durable resume. | Hermes stores a cancel event per ACP session; Orbs should still treat cancellation as unverified until tested. | From final Orbs JSON and stop hooks only. Hermes internal logs/tools are supplemental. |

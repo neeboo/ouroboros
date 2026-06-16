@@ -1701,13 +1701,20 @@ describe("runner", () => {
       status: "todo" as const,
       context: {
         modelDefaults: {
+          global: { model: "gpt-5", reason: "global codex default" },
           roles: {
-            worker: { model: "gpt-5.4-mini", reason: "cheap worker" },
+            worker: {
+              model: "gpt-5.4-mini",
+              reason: "cheap worker",
+              base_url: "https://api.example.test/v1",
+              env_key: "OPENAI_API_KEY",
+            },
+            verifier: { model: "gpt-5.5", reason: "strong verifier" },
           },
         },
         agentDefaults: {
+          global: "claude-code",
           roles: {
-            worker: "claude-code",
             verifier: "codex-resumable",
           },
         },
@@ -1737,14 +1744,9 @@ describe("runner", () => {
         id: "claude-code",
         kind: "acpx",
         agent: "claude",
-        source: "role-default",
+        source: "run-default",
       },
-      model: {
-        model: "gpt-5.4-mini",
-        reason: "cheap worker",
-        source: "role-default",
-        role: "worker",
-      },
+      model: null,
     });
     expect(resolveExecutionRoute({ run, task: { ...task, role: "verifier" }, cliExecutor: "codex-cli" })).toMatchObject({
       role: "verifier",
@@ -1753,6 +1755,63 @@ describe("runner", () => {
         id: "codex-resumable",
         kind: "codex-resumable",
         source: "role-default",
+      },
+      model: {
+        model: "gpt-5.5",
+        reason: "strong verifier",
+        source: "role-default",
+        role: "verifier",
+      },
+    });
+  });
+
+  test("allows explicit task model preference for Claude Code routes", () => {
+    const run = {
+      id: "run_1",
+      projectId: null,
+      projectRoot: null,
+      goal: "Build loop",
+      status: "todo" as const,
+      context: {
+        agentDefaults: {
+          global: "claude-code",
+        },
+      },
+    };
+    const task = {
+      id: "task_1",
+      runId: "run_1",
+      parentId: null,
+      cycleId: "task_1",
+      status: "todo" as const,
+      role: "worker",
+      goal: "Work",
+      prompt: "Work.",
+      dependsOn: [],
+      doneWhen: [],
+      config: {
+        modelPreference: {
+          model: "sonnet",
+          reason: "explicit claude override",
+        },
+      },
+      worktreePath: null,
+      sessionRef: null,
+      contextVersion: 1,
+    };
+
+    expect(resolveExecutionRoute({ run, task, globalModel: "gpt-5.4-mini" })).toMatchObject({
+      backend: {
+        id: "claude-code",
+        kind: "acpx",
+        agent: "claude",
+        source: "run-default",
+      },
+      model: {
+        model: "sonnet",
+        reason: "explicit claude override",
+        source: "task",
+        role: "worker",
       },
     });
   });

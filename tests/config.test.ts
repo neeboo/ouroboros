@@ -101,7 +101,7 @@ describe("config", () => {
     });
   });
 
-  test("ignores global agent defaults in TOML to keep backend config role-scoped", async () => {
+  test("parses global and role-scoped agent backend defaults from TOML", async () => {
     const configPath = join(dir, "config.toml");
     await writeFile(
       configPath,
@@ -116,6 +116,7 @@ describe("config", () => {
 
     await expect(loadOuroborosConfig(configPath)).resolves.toMatchObject({
       agentDefaults: {
+        global: "opencode",
         roles: {
           verifier: "claude-code",
         },

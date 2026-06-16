@@ -231,15 +231,16 @@ then CLI --model
 
 Explicit `--context-json` values win over config-seeded defaults: if `context.modelDefaults` is present, the CLI leaves it unchanged. The resolved model object is recorded in `attempts.input_json.model`, including `model`, `source`, `role`, and any inert metadata fields supplied in config. Run overview sessions expose the same stored object for dashboard visibility. `codex-cli` passes only the resolved `model` to `codex exec -m <model>`. `codex-resumable` passes only the resolved `model` on both `codex exec` start and `codex exec resume`, and resumed attempts reuse the model stored on the running attempt.
 
+Backend routing may further constrain model inheritance. The built-in `claude-code` backend does not inherit role defaults, run defaults, or CLI `--model`; in that case `attempts.input_json.model` is `null`, and `base_url`, `env_key`, and other model metadata are not passed to acpx. A task-level `config.modelPreference` remains an explicit model override for that single Claude Code task.
+
 Agent backend resolution is also protocol-level state. A run can define named backends in `context_json.agentBackends`, choose defaults in `context_json.agentDefaults`, and a task can override with `config_json.agentBackend`:
 
 ```json
 {
   "agentDefaults": {
-    "global": "codex",
+    "global": "claude-code",
     "roles": {
-      "worker": "opencode",
-      "verifier": "claude-code"
+      "verifier": "codex-resumable"
     }
   },
   "agentBackends": {
