@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { applyHarnessAction, Harness } from "../packages/harness/src";
@@ -109,6 +109,155 @@ describe("Harness actions", () => {
     expect(attempts[0].checks).toContainEqual(
       expect.objectContaining({ name: "harness action event", evidence: drainResult.eventId }),
     );
+  });
+
+  test("integrates a verified worker worktree through an audited overseer action", async () => {
+    const repoPath = join(dir, "repo");
+    const worktreePath = join(dir, "worker-tree");
+    await mkdir(repoPath, { recursive: true });
+    await writeFile(join(repoPath, "README.md"), "initial\n");
+    git(repoPath, ["init", "-b", "main"]);
+    git(repoPath, ["add", "README.md"]);
+    git(repoPath, ["-c", "user.name=Ouroboros Test", "-c", "user.email=test@example.com", "commit", "-m", "Initial commit"]);
+    git(repoPath, ["worktree", "add", "-b", "task-worker", worktreePath, "main"]);
+    await mkdir(join(worktreePath, "src"), { recursive: true });
+    await writeFile(join(worktreePath, "src", "app.ts"), "export const value = 1;\n");
+
+    const runId = harness.createRun({ goal: "Integrate verified work", projectRoot: repoPath });
+    const workerTaskId = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Implement app file",
+      prompt: "Create src/app.ts.",
+      worktreePath,
+    });
+    harness.recordAttempt({
+      taskId: workerTaskId,
+      input: { executor: "test" },
+      output: {
+        status: "done",
+        summary: "Created app file",
+        changedFiles: ["src/app.ts"],
+        checks: [{ name: "worker check", status: "passed" }],
+        artifacts: [],
+        problems: [],
+      },
+    });
+    const verifierTaskId = harness.createTask({
+      runId,
+      role: "verifier",
+      goal: "Verify worker",
+      prompt: "Verify worker changes.",
+      dependsOn: [workerTaskId],
+    });
+    harness.recordAttempt({
+      taskId: verifierTaskId,
+      input: { executor: "test" },
+      output: {
+        status: "done",
+        summary: "Verified app file",
+        changedFiles: [],
+        checks: [{ name: "verify", status: "passed" }],
+        artifacts: [],
+        problems: [],
+      },
+    });
+    const goalReviewTaskId = harness.createTask({
+      runId,
+      role: "goal-review",
+      goal: "Review completion",
+      prompt: "Review run completion.",
+    });
+    harness.recordAttempt({
+      taskId: goalReviewTaskId,
+      input: { executor: "test" },
+      output: {
+        status: "done",
+        runDecision: "complete",
+        summary: "Goal reached",
+        changedFiles: [],
+        checks: [{ name: "goal", status: "passed" }],
+        artifacts: [],
+        problems: [],
+      },
+    });
+    harness.updateRunStatus({ runId, status: "done" });
+
+    const result = applyHarnessAction(harness, {
+      type: "integrateVerifiedRun",
+      runId,
+      workerTaskId,
+      commitMessage: "Integrate verified worker",
+      reason: "overseer merge after verification",
+    });
+    const mergedFile = await readFile(join(repoPath, "src", "app.ts"), "utf8");
+    const log = git(repoPath, ["log", "--oneline", "-1"]).stdout;
+    const event = harness.listHarnessActionEvents({ limit: 1 })[0];
+
+    expect(result).toMatchObject({
+      status: "done",
+      actionType: "integrateVerifiedRun",
+      eventId: expect.any(String),
+    });
+    expect(result.artifacts).toContainEqual(
+      expect.objectContaining({
+        kind: "integration",
+        workerTaskId,
+        verifierTaskId,
+        goalReviewTaskId,
+        targetBranch: "main",
+        sourceBranch: "task-worker",
+        pushed: false,
+      }),
+    );
+    expect(mergedFile.trim()).toBe("export const value = 1;");
+    expect(log).toContain("Integrate verified worker");
+    expect(event).toMatchObject({
+      actionType: "integrateVerifiedRun",
+      status: "done",
+      request: expect.objectContaining({ runId, workerTaskId }),
+    });
+  });
+
+  test("blocks integration when verifier evidence is missing", () => {
+    const runId = harness.createRun({ goal: "Reject unverified integration" });
+    const workerTaskId = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Unverified worker",
+      prompt: "Do work.",
+      worktreePath: "/tmp/unverified-worker",
+    });
+    harness.recordAttempt({
+      taskId: workerTaskId,
+      input: { executor: "test" },
+      output: {
+        status: "done",
+        summary: "Changed files",
+        changedFiles: ["src/app.ts"],
+        checks: [],
+        artifacts: [],
+        problems: [],
+      },
+    });
+    harness.updateRunStatus({ runId, status: "done" });
+
+    const result = applyHarnessAction(harness, {
+      type: "integrateVerifiedRun",
+      runId,
+      workerTaskId,
+    });
+    const event = harness.listHarnessActionEvents({ limit: 1 })[0];
+
+    expect(result).toMatchObject({
+      status: "blocked",
+      actionType: "integrateVerifiedRun",
+      problems: [expect.stringContaining("no completed verifier evidence")],
+    });
+    expect(event).toMatchObject({
+      actionType: "integrateVerifiedRun",
+      status: "blocked",
+    });
   });
 
   test("retires a stale run from the active queue without deleting task evidence", () => {
@@ -446,3 +595,16 @@ describe("Harness actions", () => {
     expect(harness.listHarnessActionEvents({ limit: 1 })[0]).toMatchObject({ actionType: "prepareRunDrain" });
   });
 });
+
+function git(cwd: string, args: string[]) {
+  const result = Bun.spawnSync({
+    cmd: ["git", ...args],
+    cwd,
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const stdout = new TextDecoder().decode(result.stdout);
+  const stderr = new TextDecoder().decode(result.stderr);
+  expect(result.exitCode, `git ${args.join(" ")}\n${stderr || stdout}`).toBe(0);
+  return { stdout, stderr };
+}

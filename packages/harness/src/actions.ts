@@ -1,5 +1,7 @@
+import { existsSync } from "node:fs";
+import { isAbsolute, join } from "node:path";
 import { Harness } from "./harness";
-import type { ReclaimedRunningTask } from "./types";
+import type { ReclaimedRunningTask, RunOverview, Task } from "./types";
 
 export type HarnessAction =
   | { type: "reclaimRunningTasks"; runId: string; reason?: string }
@@ -16,6 +18,16 @@ export type HarnessAction =
   | { type: "retireRun"; runId: string; reason: string }
   | { type: "prepareRunDrain"; runId: string; maxTries?: number; reason?: string }
   | { type: "completeSystemTask"; taskId: string; actionEventId: string; reason?: string }
+  | {
+      type: "integrateVerifiedRun";
+      runId: string;
+      workerTaskId?: string;
+      repoPath?: string;
+      targetBranch?: string;
+      commitMessage?: string;
+      push?: boolean;
+      reason?: string;
+    }
   | {
       type: "interruptAttemptAndCreateTask";
       attemptId: string;
@@ -47,6 +59,23 @@ export interface HarnessActionResult {
   artifacts: Array<Record<string, unknown>>;
   problems: string[];
 }
+
+export interface HarnessActionOptions {
+  runGit?: GitRunner;
+}
+
+interface GitCommandInput {
+  cwd: string;
+  args: string[];
+}
+
+interface GitCommandResult {
+  exitCode: number;
+  stdout: string;
+  stderr: string;
+}
+
+type GitRunner = (input: GitCommandInput) => GitCommandResult;
 
 export function parseHarnessAction(value: unknown): HarnessAction {
   const record = objectRecord(value, "harness action");
@@ -89,6 +118,18 @@ export function parseHarnessAction(value: unknown): HarnessAction {
       reason: optionalStringField(record, "reason"),
     };
   }
+  if (type === "integrateVerifiedRun") {
+    return {
+      type,
+      runId: stringField(record, "runId"),
+      workerTaskId: optionalStringField(record, "workerTaskId"),
+      repoPath: optionalStringField(record, "repoPath"),
+      targetBranch: optionalStringField(record, "targetBranch"),
+      commitMessage: optionalStringField(record, "commitMessage"),
+      push: optionalBooleanField(record, "push"),
+      reason: optionalStringField(record, "reason"),
+    };
+  }
   if (type === "interruptAttemptAndCreateTask") {
     return {
       type,
@@ -106,11 +147,15 @@ export function parseHarnessAction(value: unknown): HarnessAction {
     };
   }
   throw new Error(
-    "harness action type must be reclaimRunningTasks, retryTask, markRunTodo, updateRunContext, retireRun, prepareRunDrain, completeSystemTask, interruptAttemptAndCreateTask, or interruptRunningAttemptsAndCreateTask",
+    "harness action type must be reclaimRunningTasks, retryTask, markRunTodo, updateRunContext, retireRun, prepareRunDrain, completeSystemTask, integrateVerifiedRun, interruptAttemptAndCreateTask, or interruptRunningAttemptsAndCreateTask",
   );
 }
 
-export function applyHarnessAction(harness: Harness, rawAction: unknown): HarnessActionResult & { eventId: string } {
+export function applyHarnessAction(
+  harness: Harness,
+  rawAction: unknown,
+  options: HarnessActionOptions = {},
+): HarnessActionResult & { eventId: string } {
   let action: HarnessAction;
   try {
     action = parseHarnessAction(rawAction);
@@ -125,7 +170,7 @@ export function applyHarnessAction(harness: Harness, rawAction: unknown): Harnes
     return { ...result, eventId };
   }
 
-  const result = applyParsedHarnessAction(harness, action);
+  const result = applyParsedHarnessAction(harness, action, options);
   const eventId = harness.recordHarnessActionEvent({
     actionType: action.type,
     status: result.status,
@@ -135,7 +180,7 @@ export function applyHarnessAction(harness: Harness, rawAction: unknown): Harnes
   return { ...result, eventId };
 }
 
-function applyParsedHarnessAction(harness: Harness, action: HarnessAction): HarnessActionResult {
+function applyParsedHarnessAction(harness: Harness, action: HarnessAction, options: HarnessActionOptions): HarnessActionResult {
   if (action.type === "reclaimRunningTasks") {
     const run = harness.getRun(action.runId);
     if (!run) {
@@ -240,6 +285,10 @@ function applyParsedHarnessAction(harness: Harness, action: HarnessAction): Harn
     return completeSystemTask(harness, action);
   }
 
+  if (action.type === "integrateVerifiedRun") {
+    return integrateVerifiedRun(harness, action, options);
+  }
+
   if (action.type === "interruptAttemptAndCreateTask") {
     return interruptAttemptAndCreateTask(harness, action);
   }
@@ -303,6 +352,185 @@ function completeSystemTask(
   ], [
     { kind: "attempt", attemptId, taskId: action.taskId, status: event.status },
     { kind: "harness_action_event", actionEventId: event.id, actionType: event.actionType },
+  ]);
+}
+
+function integrateVerifiedRun(
+  harness: Harness,
+  action: Extract<HarnessAction, { type: "integrateVerifiedRun" }>,
+  options: HarnessActionOptions,
+): HarnessActionResult {
+  const overview = harness.getRunOverview({ runId: action.runId, eventLimit: 0 });
+  const run = overview.run;
+  if (!run) {
+    return blockedResult(action.type, `Run not found: ${action.runId}`, [`run not found: ${action.runId}`]);
+  }
+
+  const checks: HarnessActionResult["checks"] = [
+    { name: "run exists", status: "passed", evidence: action.runId },
+  ];
+  if (run.status !== "done") {
+    return blockedIntegration(action.type, "Run is not complete.", checks, [`run status is ${run.status}`]);
+  }
+  checks.push({ name: "run status", status: "passed", evidence: "done" });
+
+  const worker = selectIntegrationWorker(overview, action.workerTaskId);
+  if (!worker) {
+    return blockedIntegration(action.type, "No completed execution task with a worktree was found.", checks, [
+      action.workerTaskId ? `worker task not integration-ready: ${action.workerTaskId}` : "no integration-ready worker task",
+    ]);
+  }
+  checks.push({ name: "execution task", status: "passed", evidence: worker.id });
+
+  const workerSession = latestSessionForTask(overview, worker.id);
+  const changedFiles = Array.isArray(workerSession?.output.changedFiles) ? workerSession.output.changedFiles : [];
+  if (changedFiles.length === 0) {
+    return blockedIntegration(action.type, `Worker task ${worker.id} has no changedFiles evidence.`, checks, [
+      `worker ${worker.id} has no changedFiles evidence`,
+    ]);
+  }
+  checks.push({ name: "worker changed files", status: "passed", evidence: changedFiles.join(",") });
+
+  const verifier = selectVerifierForWorker(overview, worker.id);
+  if (!verifier) {
+    return blockedIntegration(action.type, `Worker task ${worker.id} has no completed verifier evidence.`, checks, [
+      `worker ${worker.id} has no completed verifier evidence`,
+    ]);
+  }
+  checks.push({ name: "verifier evidence", status: "passed", evidence: verifier.id });
+
+  const goalReview = selectCompletedGoalReview(overview);
+  if (!goalReview) {
+    return blockedIntegration(action.type, "Run has no completed goal-review decision.", checks, [
+      "missing goal-review runDecision complete",
+    ]);
+  }
+  checks.push({ name: "goal review", status: "passed", evidence: goalReview.id });
+
+  const repoPath = action.repoPath ?? run.projectRoot ?? overview.project?.rootPath;
+  if (!repoPath) {
+    return blockedIntegration(action.type, "No repository path was provided for integration.", checks, [
+      "repoPath or run projectRoot is required",
+    ]);
+  }
+  if (!existsSync(repoPath)) {
+    return blockedIntegration(action.type, `Repository path does not exist: ${repoPath}`, checks, [
+      `repo path does not exist: ${repoPath}`,
+    ]);
+  }
+  const worktreePath = resolveWorktreePath(repoPath, worker.worktreePath);
+  if (!worktreePath || !existsSync(worktreePath)) {
+    return blockedIntegration(action.type, `Worker worktree does not exist: ${worker.worktreePath ?? "missing"}`, checks, [
+      `worker worktree does not exist: ${worker.worktreePath ?? "missing"}`,
+    ]);
+  }
+  checks.push({ name: "repository path", status: "passed", evidence: repoPath });
+  checks.push({ name: "worktree path", status: "passed", evidence: worktreePath });
+
+  const git = options.runGit ?? defaultGitRunner;
+  const targetBranch = action.targetBranch ?? "main";
+  const commitMessage = action.commitMessage ?? `Integrate verified task ${worker.id}`;
+  const targetBranchResult = runGitStep(git, repoPath, ["branch", "--show-current"]);
+  if (!targetBranchResult.ok) {
+    return blockedCommand(action.type, "Could not read target repository branch.", checks, targetBranchResult);
+  }
+  const currentBranch = targetBranchResult.stdout.trim();
+  if (currentBranch !== targetBranch) {
+    return blockedIntegration(action.type, `Target repository is on ${currentBranch || "detached HEAD"}, not ${targetBranch}.`, checks, [
+      `target repository branch is ${currentBranch || "detached HEAD"}`,
+    ]);
+  }
+  checks.push({ name: "target branch", status: "passed", evidence: targetBranch });
+
+  const targetStatus = runGitStep(git, repoPath, ["status", "--short"]);
+  if (!targetStatus.ok) {
+    return blockedCommand(action.type, "Could not inspect target repository status.", checks, targetStatus);
+  }
+  if (targetStatus.stdout.trim().length > 0) {
+    return blockedIntegration(action.type, "Target repository has uncommitted changes.", checks, [
+      "target repository must be clean before integration",
+    ]);
+  }
+  checks.push({ name: "target repository clean", status: "passed", evidence: "clean" });
+
+  const sourceBranchResult = runGitStep(git, worktreePath, ["branch", "--show-current"]);
+  if (!sourceBranchResult.ok) {
+    return blockedCommand(action.type, "Could not read worker worktree branch.", checks, sourceBranchResult);
+  }
+  const sourceBranch = sourceBranchResult.stdout.trim();
+  if (!sourceBranch || sourceBranch === targetBranch) {
+    return blockedIntegration(action.type, "Worker worktree is not on an integration branch.", checks, [
+      `source branch is ${sourceBranch || "detached HEAD"}`,
+    ]);
+  }
+  checks.push({ name: "source branch", status: "passed", evidence: sourceBranch });
+
+  const workerStatus = runGitStep(git, worktreePath, ["status", "--short"]);
+  if (!workerStatus.ok) {
+    return blockedCommand(action.type, "Could not inspect worker worktree status.", checks, workerStatus);
+  }
+  let workerCommit: string | null = null;
+  if (workerStatus.stdout.trim().length > 0) {
+    const add = runGitStep(git, worktreePath, ["add", "-A"]);
+    if (!add.ok) {
+      return blockedCommand(action.type, "Could not stage worker changes.", checks, add);
+    }
+    const commit = runGitStep(git, worktreePath, ["commit", "-m", commitMessage]);
+    if (!commit.ok) {
+      return blockedCommand(action.type, "Could not commit worker changes.", checks, commit);
+    }
+    workerCommit = readGitStdout(git, worktreePath, ["rev-parse", "--short", "HEAD"]);
+    checks.push({ name: "worker commit", status: "passed", evidence: workerCommit ?? "created" });
+  } else {
+    checks.push({ name: "worker worktree clean", status: "passed", evidence: "no uncommitted changes" });
+  }
+
+  const aheadResult = runGitStep(git, repoPath, ["rev-list", "--count", `${targetBranch}..${sourceBranch}`]);
+  if (!aheadResult.ok) {
+    return blockedCommand(action.type, "Could not compare source and target branches.", checks, aheadResult);
+  }
+  const ahead = Number.parseInt(aheadResult.stdout.trim(), 10);
+  if (!Number.isFinite(ahead) || ahead < 1) {
+    return blockedIntegration(action.type, `Source branch ${sourceBranch} has no commits to merge into ${targetBranch}.`, checks, [
+      `source branch ${sourceBranch} has no commits ahead of ${targetBranch}`,
+    ]);
+  }
+  checks.push({ name: "source commits ahead", status: "passed", evidence: String(ahead) });
+
+  const merge = runGitStep(git, repoPath, ["merge", "--no-ff", sourceBranch, "-m", commitMessage]);
+  if (!merge.ok) {
+    return blockedCommand(action.type, "Could not merge verified worker branch.", checks, merge);
+  }
+  const mergeCommit = readGitStdout(git, repoPath, ["rev-parse", "--short", "HEAD"]);
+  checks.push({ name: "merge", status: "passed", evidence: mergeCommit ?? sourceBranch });
+
+  let pushed = false;
+  if (action.push === true) {
+    const push = runGitStep(git, repoPath, ["push", "origin", targetBranch]);
+    if (!push.ok) {
+      return blockedCommand(action.type, "Could not push target branch.", checks, push);
+    }
+    pushed = true;
+    checks.push({ name: "push", status: "passed", evidence: `origin ${targetBranch}` });
+  }
+
+  return doneResult(action.type, `Integrated verified task ${worker.id} into ${targetBranch}.`, checks, [
+    {
+      kind: "integration",
+      runId: action.runId,
+      workerTaskId: worker.id,
+      verifierTaskId: verifier.id,
+      goalReviewTaskId: goalReview.id,
+      repoPath,
+      worktreePath,
+      targetBranch,
+      sourceBranch,
+      workerCommit,
+      mergeCommit,
+      pushed,
+      changedFiles,
+      reason: action.reason ?? null,
+    },
   ]);
 }
 
@@ -683,6 +911,145 @@ function reclaimedArtifacts(reclaimed: ReclaimedRunningTask[]) {
   }));
 }
 
+function selectIntegrationWorker(overview: RunOverview, workerTaskId: string | undefined): Task | null {
+  const isExecutionTask = (task: Task) =>
+    task.status === "done" &&
+    task.worktreePath !== null &&
+    !["planner", "verifier", "goal-review"].includes(task.role);
+  if (workerTaskId) {
+    const task = overview.tasks.find((candidate) => candidate.id === workerTaskId);
+    return task && isExecutionTask(task) ? task : null;
+  }
+  return [...overview.tasks].reverse().find(isExecutionTask) ?? null;
+}
+
+function latestSessionForTask(overview: RunOverview, taskId: string) {
+  return [...overview.sessions].reverse().find((session) => session.taskId === taskId && session.status === "done") ?? null;
+}
+
+function selectVerifierForWorker(overview: RunOverview, workerTaskId: string): Task | null {
+  return [...overview.tasks].reverse().find((task) => {
+    if (task.role !== "verifier" || task.status !== "done" || !task.dependsOn.includes(workerTaskId)) {
+      return false;
+    }
+    const session = latestSessionForTask(overview, task.id);
+    if (!session || session.output.status !== "done") {
+      return false;
+    }
+    const checks = Array.isArray(session.output.checks) ? session.output.checks : [];
+    return !checks.some(isFailedCheck);
+  }) ?? null;
+}
+
+function selectCompletedGoalReview(overview: RunOverview): Task | null {
+  return [...overview.tasks].reverse().find((task) => {
+    if (task.role !== "goal-review" || task.status !== "done") {
+      return false;
+    }
+    const session = latestSessionForTask(overview, task.id);
+    return session?.output.status === "done" && session.output.runDecision === "complete";
+  }) ?? null;
+}
+
+function isFailedCheck(check: unknown) {
+  return Boolean(
+    check &&
+      typeof check === "object" &&
+      "status" in check &&
+      (check as { status?: unknown }).status === "failed",
+  );
+}
+
+function resolveWorktreePath(repoPath: string, worktreePath: string | null) {
+  if (!worktreePath) {
+    return null;
+  }
+  return isAbsolute(worktreePath) ? worktreePath : join(repoPath, worktreePath);
+}
+
+function defaultGitRunner(input: GitCommandInput): GitCommandResult {
+  const result = Bun.spawnSync({
+    cmd: ["git", ...input.args],
+    cwd: input.cwd,
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  return {
+    exitCode: result.exitCode,
+    stdout: decodeCommandOutput(result.stdout),
+    stderr: decodeCommandOutput(result.stderr),
+  };
+}
+
+function runGitStep(git: GitRunner, cwd: string, args: string[]) {
+  const result = git({ cwd, args });
+  return {
+    ...result,
+    ok: result.exitCode === 0,
+    command: `git ${args.join(" ")}`,
+    cwd,
+  };
+}
+
+function readGitStdout(git: GitRunner, cwd: string, args: string[]) {
+  const result = runGitStep(git, cwd, args);
+  return result.ok ? result.stdout.trim() : null;
+}
+
+function blockedCommand(
+  actionType: Extract<HarnessAction, { type: "integrateVerifiedRun" }>["type"],
+  summary: string,
+  checks: HarnessActionResult["checks"],
+  result: ReturnType<typeof runGitStep>,
+): HarnessActionResult {
+  return {
+    status: "blocked",
+    actionType,
+    summary,
+    checks: [
+      ...checks,
+      { name: "git command", status: "failed", evidence: `${result.command} in ${result.cwd}` },
+    ],
+    artifacts: [
+      {
+        kind: "git_command",
+        command: result.command,
+        cwd: result.cwd,
+        exitCode: result.exitCode,
+        stdout: result.stdout,
+        stderr: result.stderr,
+      },
+    ],
+    problems: [result.stderr.trim() || result.stdout.trim() || summary],
+  };
+}
+
+function blockedIntegration(
+  actionType: Extract<HarnessAction, { type: "integrateVerifiedRun" }>["type"],
+  summary: string,
+  checks: HarnessActionResult["checks"],
+  problems: string[],
+): HarnessActionResult {
+  return {
+    status: "blocked",
+    actionType,
+    summary,
+    checks: [...checks, { name: "integration preflight", status: "failed", evidence: problems.join("; ") }],
+    artifacts: [],
+    problems,
+  };
+}
+
+function decodeCommandOutput(value: Uint8Array | ArrayBuffer | string | null | undefined) {
+  if (!value) {
+    return "";
+  }
+  if (typeof value === "string") {
+    return value;
+  }
+  return new TextDecoder().decode(value);
+}
+
 function objectRecord(value: unknown, label: string) {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new Error(`${label} must be an object`);
@@ -716,6 +1083,17 @@ function optionalStatusField(record: Record<string, unknown>, key: string) {
   }
   if (value !== "todo" && value !== "running" && value !== "done" && value !== "blocked") {
     throw new Error(`${key} must be todo, running, done, or blocked`);
+  }
+  return value;
+}
+
+function optionalBooleanField(record: Record<string, unknown>, key: string) {
+  const value = record[key];
+  if (value === undefined) {
+    return undefined;
+  }
+  if (typeof value !== "boolean") {
+    throw new Error(`${key} must be a boolean`);
   }
   return value;
 }

@@ -481,11 +481,14 @@ Supported actions:
 { "type": "markRunTodo", "runId": "run_...", "reason": "optional" }
 { "type": "prepareRunDrain", "runId": "run_...", "maxTries": 3, "reason": "optional" }
 { "type": "completeSystemTask", "taskId": "task_...", "actionEventId": "action_...", "reason": "optional" }
+{ "type": "integrateVerifiedRun", "runId": "run_...", "workerTaskId": "optional", "targetBranch": "main", "push": false, "reason": "optional" }
 ```
 
 `prepareRunDrain` reclaims orphaned task leases, marks the run `todo`, and creates or retries a bounded `goal-review` task when the queue is otherwise empty. It does not mark a run complete and does not weaken the verifier contract.
 
 `completeSystemTask` records a task attempt from an existing `harness_action_events` row. It derives the attempt status, summary, checks, artifacts, and problems from the audited action result, so a system task can be closed without giving a worktree broad database write access or arbitrary attempt-writing power.
+
+`integrateVerifiedRun` is the overseer-owned integration path. It only runs after the run is `done`, an execution task has changed-file evidence and a worktree, a verifier depending on that task has completed without failed checks, and a `goal-review` task has returned `runDecision: "complete"`. The action may commit dirty worker worktree changes, merge the worker branch into the target branch, and optionally push. If any preflight or git command fails, it records a blocked action event and leaves integration for repair or human review.
 
 Every action writes a `harness_action_events` audit row with the validated request, result, checks, artifacts, and problems. Verifiers should cite these rows when checking whether a system-level repair actually happened.
 
