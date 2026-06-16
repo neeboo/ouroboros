@@ -272,10 +272,48 @@ describe("acpx agent smoke script", () => {
     );
     expect(result.diagnostics).toEqual(
       expect.arrayContaining([
-        "missing command: hermes-acp",
         "setup blocker: acpx auth missing for Hermes; add auth.custom or auth.hermes-setup, or export ACPX_AUTH_CUSTOM / ACPX_AUTH_HERMES_SETUP",
       ]),
     );
+    expect(result.status).toBe("skipped");
+    expect(result.diagnostics).not.toContain("missing command: hermes-acp");
+  });
+
+  test("passes Hermes doctor when selected command, ACP check, and acpx auth are ready", async () => {
+    const result = await doctorHermes({
+      commandPath: async (command) => {
+        if (command === "acpx") {
+          return "/opt/homebrew/bin/acpx";
+        }
+        if (command === "hermes") {
+          return "/Users/ghostcorn/.local/bin/hermes";
+        }
+        return null;
+      },
+      runCommand: async ({ cmd }) => {
+        if (cmd.join(" ") === "hermes acp --check") {
+          return { exitCode: 0, stdout: "Hermes ACP check OK\n", stderr: "" };
+        }
+        if (cmd.join(" ") === "acpx config show --format json") {
+          return { exitCode: 0, stdout: '{"authMethods":["hermes-setup"]}', stderr: "" };
+        }
+        throw new Error(`unexpected command: ${cmd.join(" ")}`);
+      },
+    });
+
+    expect(result).toMatchObject({
+      agent: "hermes",
+      status: "passed",
+      experimental: true,
+      artifacts: expect.arrayContaining([
+        "hermes: /Users/ghostcorn/.local/bin/hermes",
+        "hermes-acp: missing",
+        "selected raw agentCommand: hermes acp",
+        "Hermes ACP check: passed",
+        "acpx authMethods: hermes-setup",
+      ]),
+      diagnostics: [expect.stringMatching(/^child PATH: /)],
+    });
   });
 
   test("reports command and JSON failures without credentials", async () => {

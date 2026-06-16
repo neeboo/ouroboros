@@ -135,36 +135,40 @@ export async function doctorHermes(options: HermesDoctorOptions = {}): Promise<S
   if (!acpx) {
     diagnostics.push("missing command: acpx");
   }
-  if (!hermes) {
+  if (!hermes && !hermesAcp) {
     diagnostics.push("missing command: hermes");
-  }
-  if (!hermesAcp) {
     diagnostics.push("missing command: hermes-acp");
   }
+  let hermesCheckStatus: "passed" | "failed" | "skipped" = "skipped";
+  let hasCompatibleAuth = false;
   if (!hermes && !hermesAcp) {
     diagnostics.push("setup blocker: install Hermes CLI or expose hermes/hermes-acp on the normalized child PATH");
   } else {
     const hermesCheck = await checkHermesAcp({ hermes, hermesAcp, runCommand });
+    hermesCheckStatus = hermesCheck.status;
     artifacts.push(`Hermes ACP check: ${hermesCheck.status}`);
     if (hermesCheck.diagnostic) {
       diagnostics.push(hermesCheck.diagnostic);
     }
 
     const auth = acpx ? await readAcpxAuthMethods(runCommand) : { methods: [], diagnostic: "acpx authMethods: skipped because acpx is missing" };
+    hasCompatibleAuth = hasHermesAcpxAuth(auth.methods, env);
     artifacts.push(`acpx authMethods: ${auth.methods.length > 0 ? auth.methods.join(", ") : "none"}`);
     if (auth.diagnostic) {
       diagnostics.push(auth.diagnostic);
     }
-    if (hermesCheck.status === "passed" && !hasHermesAcpxAuth(auth.methods, env)) {
+    if (hermesCheck.status === "passed" && !hasCompatibleAuth) {
       diagnostics.push(
         "setup blocker: acpx auth missing for Hermes; add auth.custom or auth.hermes-setup, or export ACPX_AUTH_CUSTOM / ACPX_AUTH_HERMES_SETUP",
       );
     }
   }
 
+  const status = acpx && hermesCheckStatus === "passed" && hasCompatibleAuth ? "passed" : "skipped";
+
   return {
     agent: "hermes",
-    status: "skipped",
+    status,
     experimental: true,
     artifacts: artifacts.map(redact),
     diagnostics: diagnostics.map(redact),
