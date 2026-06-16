@@ -115,7 +115,9 @@ export type StopHook = (input: StopHookInput) => Promise<StopHookResult> | StopH
 
 export type StopHooksByRole = Record<string, StopHook[]>;
 
-export type StopHookOutputPatch = Partial<Pick<AttemptOutput, "summary" | "changedFiles" | "problems" | "nextTasks">>;
+export type StopHookOutputPatch = Partial<
+  Pick<AttemptOutput, "summary" | "changedFiles" | "problems" | "nextTasks" | "runDecision">
+>;
 
 export interface ContextSubagentEntry {
   summary: string;

@@ -2004,6 +2004,91 @@ describe("CLI", () => {
     expect(await runCliJson("next-task", "--run-id", run.id)).toBeNull();
   });
 
+  test("run-loop recovers explicit textual goal-review runDecision", async () => {
+    await runCli("init");
+    const run = await runCliJson("create-run", "--goal", "Bootstrap role model defaults");
+    const codexBin = join(dir, "fake-codex-goal-text-decision");
+    await writeFile(
+      codexBin,
+      [
+        "#!/usr/bin/env bun",
+        "const prompt = await new Response(Bun.stdin.stream()).text();",
+        "if (!prompt.includes('Role: goal-review')) process.exit(2);",
+        "console.log(JSON.stringify({ status: 'done', summary: 'Tests passed and the runDecision complete is clear.', changedFiles: [], checks: [], artifacts: [], problems: [] }));",
+      ].join("\n"),
+    );
+    await chmod(codexBin, 0o755);
+
+    await runCliJson(
+      "run-loop",
+      "--run-id",
+      run.id,
+      "--executor",
+      "codex-resumable",
+      "--codex-bin",
+      codexBin,
+      "--cwd",
+      "/repo",
+      "--max-rounds",
+      "1",
+    );
+    const overview = await runCliJson("run-overview", "--run-id", run.id);
+
+    expect(overview.run.status).toBe("done");
+    expect(overview.sessions[0].output).toMatchObject({
+      status: "done",
+      runDecision: "complete",
+    });
+  });
+
+  test("run-loop restores a maxed blocked goal review with explicit textual completion", async () => {
+    await runCli("init");
+    const run = await runCliJson("create-run", "--goal", "Bootstrap role model defaults");
+    const review = await runCliJson(
+      "create-task",
+      "--run-id",
+      run.id,
+      "--role",
+      "goal-review",
+      "--goal",
+      "Review whether the run goal is complete",
+      "--prompt",
+      "Review the completed run.",
+    );
+    await runCliJson(
+      "record-attempt",
+      "--task-id",
+      review.id,
+      "--input-json",
+      "{}",
+      "--output-json",
+      JSON.stringify({
+        status: "blocked",
+        summary: "Repository checks passed; runDecision complete.",
+        problems: ["goal-review output must include runDecision"],
+      }),
+    );
+
+    await runCliJson(
+      "run-loop",
+      "--run-id",
+      run.id,
+      "--executor",
+      "codex-resumable",
+      "--codex-bin",
+      "/should/not/run",
+      "--cwd",
+      "/repo",
+      "--max-rounds",
+      "1",
+      "--max-tries",
+      "1",
+    );
+    const overview = await runCliJson("run-overview", "--run-id", run.id);
+
+    expect(overview.run.status).toBe("done");
+  });
+
   test("run-loop restores a run completed by an existing goal review", async () => {
     await runCli("init");
     const run = await runCliJson("create-run", "--goal", "Bootstrap ouroboros");

@@ -9,15 +9,17 @@ export function createGoalReviewDecisionHook(_options: { harness: Harness }): St
       return { decision: "exit" };
     }
 
+    const inferredRunDecision = output.runDecision ?? inferExplicitRunDecision(output);
+    const outputPatch = inferredRunDecision && !output.runDecision ? { runDecision: inferredRunDecision } : undefined;
     const artifacts = [
       {
         kind: "goal_review",
-        runDecision: output.runDecision ?? null,
+        runDecision: inferredRunDecision ?? null,
         taskId: task.id,
       },
     ];
 
-    if (!output.runDecision) {
+    if (!inferredRunDecision) {
       return {
         decision: "exit",
         artifacts,
@@ -25,15 +27,16 @@ export function createGoalReviewDecisionHook(_options: { harness: Harness }): St
       };
     }
 
-    if (output.runDecision === "complete") {
+    if (inferredRunDecision === "complete") {
       if ((output.nextTasks ?? []).length > 0) {
         return {
           decision: "exit",
           artifacts,
+          outputPatch,
           problems: ["complete goal-review must not include nextTasks"],
         };
       }
-      return { decision: "exit", artifacts };
+      return { decision: "exit", artifacts, outputPatch };
     }
 
     const nextTasks = output.nextTasks ?? [];
@@ -41,20 +44,38 @@ export function createGoalReviewDecisionHook(_options: { harness: Harness }): St
       return {
         decision: "exit",
         artifacts,
+        outputPatch,
         problems: [
-          `${output.runDecision} goal-review must include one to ${MAX_GOAL_REVIEW_NEXT_TASKS} nextTasks items`,
+          `${inferredRunDecision} goal-review must include one to ${MAX_GOAL_REVIEW_NEXT_TASKS} nextTasks items`,
         ],
       };
     }
 
-    if (output.runDecision === "verify" && nextTasks.some((plannedTask) => plannedTask.role !== "verifier")) {
+    if (inferredRunDecision === "verify" && nextTasks.some((plannedTask) => plannedTask.role !== "verifier")) {
       return {
         decision: "exit",
         artifacts,
+        outputPatch,
         problems: ["verify goal-review nextTasks must all use role verifier"],
       };
     }
 
-    return { decision: "continue", artifacts };
+    return { decision: "continue", artifacts, outputPatch };
   };
+}
+
+export function inferExplicitRunDecision(output: {
+  summary?: unknown;
+  checks?: unknown[];
+  artifacts?: unknown[];
+  problems?: unknown[];
+}) {
+  const haystack = [output.summary, ...(output.checks ?? []), ...(output.artifacts ?? []), ...(output.problems ?? [])]
+    .map((value) => (typeof value === "string" ? value : JSON.stringify(value)))
+    .join("\n");
+  const match = haystack.match(/\brunDecision\s*[:=]?\s*(complete|continue|verify)\b/i);
+  if (!match) {
+    return undefined;
+  }
+  return match[1].toLowerCase() as "complete" | "continue" | "verify";
 }

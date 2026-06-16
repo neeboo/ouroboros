@@ -8,6 +8,7 @@ import {
   createRunsAction,
   createContextSummaryHook,
   createGitWorktreeHook,
+  createGoalReviewDecisionHook,
   createRepairTaskHook,
   createRunsFromOutputHook,
   createTasksAction,
@@ -1665,6 +1666,40 @@ describe("runner", () => {
       kind: "created_repair_task",
       taskId: repair.id,
       verifierTaskId: verifierTask,
+    });
+  });
+
+  test("goal-review hook patches an explicitly written runDecision from readable text", async () => {
+    const runId = harness.createRun({ goal: "Configure worker model defaults" });
+    const taskId = harness.createTask({
+      runId,
+      role: "goal-review",
+      goal: "Review whether the run goal is complete",
+      prompt: "Review the goal.",
+    });
+
+    const result = await runNextReadyTask({
+      harness,
+      runId,
+      stopHooksByRole: {
+        "goal-review": [createGoalReviewDecisionHook({ harness })],
+      },
+      executor: async () => ({
+        status: "done",
+        summary: "Implementation and tests passed; runDecision complete.",
+        changedFiles: [],
+        checks: [{ name: "tests", status: "passed" }],
+        artifacts: [],
+        problems: [],
+      }),
+    });
+    const attempt = harness.getAttempt(result!.attemptId)!;
+
+    expect(result?.taskId).toBe(taskId);
+    expect(harness.getRun(runId)?.status).toBe("done");
+    expect(attempt.output).toMatchObject({
+      status: "done",
+      runDecision: "complete",
     });
   });
 

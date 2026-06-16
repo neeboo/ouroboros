@@ -10,6 +10,7 @@ import {
   createContextSummaryHook,
   createGitWorktreeHook,
   createGoalReviewDecisionHook,
+  inferExplicitRunDecision,
   createRepairTaskHook,
   createRunsFromOutputHook,
   createTasksFromOutputHook,
@@ -1018,8 +1019,8 @@ function ensureGoalReviewTask(runId: string, maxTries: number) {
   const completedReview = [...overview.sessions].reverse().find(
     (session) =>
       session.role === "goal-review" &&
-      session.status === "done" &&
-      session.output.runDecision === "complete",
+      (session.output.runDecision === "complete" || inferExplicitRunDecision(session.output) === "complete") &&
+      (session.output.nextTasks ?? []).length === 0,
   );
   if (completedReview) {
     harness.updateRunStatus({ runId, status: "done" });
