@@ -2689,6 +2689,23 @@ describe("runner", () => {
     ).toThrow("payload.tasks must be an array");
   });
 
+  test("normalizes done run decisions from fixed actions to complete", () => {
+    const output = parseAttemptOutput(
+      JSON.stringify({
+        status: "done",
+        summary: "verified complete",
+        actions: [
+          {
+            type: "setRunDecision",
+            payload: { decision: "done" },
+          },
+        ],
+      }),
+    );
+
+    expect(output.runDecision).toBe("complete");
+  });
+
   test("fixed action builders reject invalid control values", () => {
     expect(() => setRunDecisionAction("pause" as never)).toThrow("decision must be complete, continue, verify, or defer");
     expect(() => doneOutput({ summary: "" })).toThrow("summary must be a non-empty string");

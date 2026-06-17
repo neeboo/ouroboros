@@ -1031,6 +1031,44 @@ describe("CLI", () => {
     expect(finishAttempt.error).not.toContain("[object Object]");
   });
 
+  test("record-attempt normalizes done run decisions to complete", async () => {
+    await runCli("init");
+    const run = await runCliJson("create-run", "--goal", "Normalize manual run decision");
+    const task = await runCliJson(
+      "create-task",
+      "--run-id",
+      run.id,
+      "--role",
+      "goal-review",
+      "--goal",
+      "Review completion",
+      "--prompt",
+      "Review the run.",
+    );
+
+    const recorded = await runCliJson(
+      "record-attempt",
+      "--task-id",
+      task.id,
+      "--input-json",
+      "{}",
+      "--output-json",
+      JSON.stringify({
+        status: "done",
+        runDecision: "done",
+        summary: "Goal is done.",
+        changedFiles: [],
+        checks: [],
+        artifacts: [],
+        problems: [],
+      }),
+    );
+
+    const attempt = new Harness(dbPath).getAttempt(recorded.attemptId)!;
+
+    expect(attempt.output.runDecision).toBe("complete");
+  });
+
   test("runs multiple ready tasks with separate sessions", async () => {
     await runCli("init");
     const run = await runCliJson("create-run", "--goal", "Bootstrap ouroboros");

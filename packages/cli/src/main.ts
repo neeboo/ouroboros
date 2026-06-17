@@ -623,6 +623,9 @@ function parseOptionalRunDecision(raw: unknown): AttemptOutput["runDecision"] | 
   if (raw === undefined || raw === null) {
     return undefined;
   }
+  if (raw === "done") {
+    return "complete";
+  }
   if (raw !== "complete" && raw !== "continue" && raw !== "verify" && raw !== "defer") {
     fail("attempt output runDecision must be complete, continue, verify, or defer");
   }
