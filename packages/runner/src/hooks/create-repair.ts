@@ -87,6 +87,12 @@ function externalSetupBlockerReason(output: AttemptOutput) {
   ) {
     return "provider connectivity requires external environment change";
   }
+  if (
+    (haystack.includes("sigkill") || haystack.includes("exit code 137") || haystack.includes("exit 137")) &&
+    (haystack.includes("typecheck") || haystack.includes("tsc") || haystack.includes("verification"))
+  ) {
+    return "local verification resource limit requires external environment change";
+  }
   return null;
 }
 

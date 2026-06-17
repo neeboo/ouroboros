@@ -2341,6 +2341,43 @@ describe("runner", () => {
     });
   });
 
+  test("blocked verifier stop hook skips repair for local resource exhaustion blockers", async () => {
+    const runId = harness.createRun({ goal: "Verify supervisor hardening" });
+    const verifierTask = harness.createTask({
+      runId,
+      role: "verifier",
+      goal: "Verify typecheck",
+      prompt: "Verify typecheck.",
+    });
+
+    const result = await runNextReadyTask({
+      harness,
+      runId,
+      executor: async () => ({
+        status: "blocked",
+        summary: "Required typecheck could not be verified because tsc was killed by SIGKILL.",
+        checks: [
+          {
+            name: "typecheck",
+            status: "failed",
+            evidence: "bun run typecheck and tsc --noEmit were killed with exit code 137/SIGKILL.",
+          },
+        ],
+        problems: ["typecheck was killed with exit code 137"],
+      }),
+      stopHooks: [createRepairTaskHook({ harness })],
+    });
+
+    const attempt = harness.getAttempt(result!.attemptId)!;
+    expect(result?.stopDecision).toBe("exit");
+    expect(harness.nextReadyTask(runId)).toBeNull();
+    expect(attempt.output.artifacts).toContainEqual({
+      kind: "repair_skipped_external_setup_blocker",
+      verifierTaskId: verifierTask,
+      reason: "local verification resource limit requires external environment change",
+    });
+  });
+
   test("goal-review hook patches an explicitly written runDecision from readable text", async () => {
     const runId = harness.createRun({ goal: "Configure worker model defaults" });
     const taskId = harness.createTask({
