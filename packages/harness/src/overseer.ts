@@ -74,6 +74,7 @@ export function diagnoseRunOverview(overview: RunOverview): OverseerDiagnosis {
   );
   const duplicateTaskGoals = collectDuplicateTaskGoals(tasks);
   const repeatedBlockedFailures = collectRepeatedBlockedFailures(overview.sessions, tasks);
+  const paused = runIsPaused(overview);
   const orphanedLeases = runningTasks
     .filter((task) => !runningAttemptTaskIds.has(task.id))
     .map((task) => ({
@@ -90,7 +91,7 @@ export function diagnoseRunOverview(overview: RunOverview): OverseerDiagnosis {
     runningAttempts.length === 0 &&
     overview.threads.every((thread) => thread.status !== "running") &&
     !tasks.some((task) => task.status === "blocked");
-  const queueStarvation = readyTaskIds.length > 0 && !liveRunnerPresent;
+  const queueStarvation = !paused && readyTaskIds.length > 0 && !liveRunnerPresent;
   const blockedOnlyRemaining =
     tasks.some((task) => task.status === "blocked") &&
     tasks.every((task) => task.status === "blocked" || task.status === "done");
@@ -104,6 +105,7 @@ export function diagnoseRunOverview(overview: RunOverview): OverseerDiagnosis {
       threads: overview.threads,
       orphanedLeases,
       blockedOnlyRemaining,
+      paused,
     }),
     activeWork: {
       readyTaskIds,
@@ -128,9 +130,13 @@ function deriveState(input: {
   threads: ExecutionThread[];
   orphanedLeases: OverseerOrphanedLease[];
   blockedOnlyRemaining: boolean;
+  paused: boolean;
 }): RunSupervisorState {
   if (input.runStatus === "done") {
     return "complete";
+  }
+  if (input.paused) {
+    return "paused";
   }
   if (input.blockedOnlyRemaining) {
     return "blocked";
@@ -148,6 +154,42 @@ function deriveState(input: {
     return "waiting";
   }
   return "waiting";
+}
+
+function runIsPaused(overview: RunOverview) {
+  const context = overview.run?.context ?? {};
+  if (isActiveRunPause(context.runPause)) {
+    return true;
+  }
+  const pauseClearedAt = parseTimestampMs(context.runPauseClearedAt);
+  return overview.threads.some((thread) => {
+    if (thread.status !== "interrupted" || !isHumanStopReason(thread.interruptReason)) {
+      return false;
+    }
+    const interruptedAt = parseTimestampMs(thread.interruptedAt) ?? parseTimestampMs(thread.updatedAt);
+    return pauseClearedAt === null || interruptedAt === null || interruptedAt > pauseClearedAt;
+  });
+}
+
+function isActiveRunPause(value: unknown) {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function isHumanStopReason(reason: string | null) {
+  if (!reason) {
+    return false;
+  }
+  const normalized = reason.toLowerCase();
+  return normalized.includes("human") || normalized.includes("user") || normalized.includes("dashboard") || normalized.includes("manual");
+}
+
+function parseTimestampMs(value: unknown) {
+  if (typeof value !== "string" || value.trim().length === 0) {
+    return null;
+  }
+  const normalized = value.includes("T") ? value : `${value.replace(" ", "T")}Z`;
+  const ms = Date.parse(normalized);
+  return Number.isFinite(ms) ? ms : null;
 }
 
 function collectDuplicateTaskGoals(tasks: Task[]): OverseerDuplicateTaskGoal[] {

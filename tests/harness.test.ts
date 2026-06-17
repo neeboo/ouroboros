@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import {
   DEFAULT_TASK_PROMPT_TEMPLATE,
   Harness,
+  applyHarnessAction,
   diagnoseRunOverview,
   initDatabase,
   withDatabase,
@@ -1071,6 +1072,132 @@ describe("Harness", () => {
     ]);
     expect(diagnosis.queueStarvation).toBe(true);
     expect(diagnosis.emptyRunGoalReviewRaceRisk).toBe(false);
+  });
+
+  test("diagnoses an active run pause from overview context", () => {
+    const runId = harness.createRun({
+      goal: "Respect human pause",
+      context: {
+        runPause: {
+          reason: "human requested pause",
+          pausedAt: "2026-06-17T00:00:00.000Z",
+        },
+      },
+    });
+    const taskId = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Paused work",
+      prompt: "Wait.",
+    });
+
+    const diagnosis = diagnoseRunOverview(harness.getRunOverview({ runId }));
+
+    expect(diagnosis.state).toBe("paused");
+    expect(diagnosis.activeWork.readyTaskIds).toEqual([taskId]);
+    expect(diagnosis.queueStarvation).toBe(false);
+  });
+
+  test("diagnoses uncleared human-stopped interrupted threads as paused", () => {
+    const runId = harness.createRun({ goal: "Pause after human stop" });
+    const taskId = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Interrupted work",
+      prompt: "Work.",
+    });
+    const attemptId = harness.startAttempt({ taskId, input: {} });
+    harness.updateExecutionThread({
+      id: harness.upsertExecutionThread({
+        runId,
+        taskId,
+        attemptId,
+        ownerType: "runner",
+        role: "worker",
+        status: "running",
+      }),
+      status: "interrupted",
+      interruptReason: "human requested stop from dashboard",
+    });
+
+    const diagnosis = diagnoseRunOverview(harness.getRunOverview({ runId }));
+
+    expect(diagnosis.state).toBe("paused");
+    expect(diagnosis.executionThreads).toEqual([
+      expect.objectContaining({
+        status: "interrupted",
+        interruptReason: "human requested stop from dashboard",
+      }),
+    ]);
+  });
+
+  test("retrying a task clears durable run pause and supersedes human-stopped threads", () => {
+    const runId = harness.createRun({
+      goal: "Resume paused run",
+      context: {
+        runPause: {
+          reason: "human requested pause",
+          pausedAt: "2026-06-17T00:00:00.000Z",
+        },
+      },
+    });
+    const taskId = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Blocked paused work",
+      prompt: "Work.",
+    });
+    const attemptId = harness.startAttempt({ taskId, input: {} });
+    harness.updateExecutionThread({
+      id: harness.upsertExecutionThread({
+        runId,
+        taskId,
+        attemptId,
+        ownerType: "runner",
+        role: "worker",
+        status: "running",
+      }),
+      status: "interrupted",
+      interruptReason: "human requested stop from dashboard",
+    });
+    harness.finishAttempt({
+      attemptId,
+      output: {
+        status: "blocked",
+        summary: "Stopped by human",
+        problems: ["stopped by human"],
+      },
+    });
+
+    harness.retryTask({ taskId });
+
+    const run = harness.getRun(runId)!;
+    const diagnosis = diagnoseRunOverview(harness.getRunOverview({ runId }));
+    expect(run.context.runPause).toBeNull();
+    expect(typeof run.context.runPauseClearedAt).toBe("string");
+    expect(diagnosis.state).toBe("orphaned");
+    expect(diagnosis.activeWork.readyTaskIds).toEqual([taskId]);
+  });
+
+  test("explicit run actions clear durable run pause", () => {
+    const markRunId = harness.createRun({
+      goal: "Mark paused run todo",
+      context: { runPause: { reason: "human requested pause" } },
+    });
+    const drainRunId = harness.createRun({
+      goal: "Drain paused run",
+      context: { runPause: { reason: "human requested pause" } },
+    });
+
+    applyHarnessAction(harness, { type: "markRunTodo", runId: markRunId });
+    applyHarnessAction(harness, { type: "prepareRunDrain", runId: drainRunId });
+
+    expect(harness.getRun(markRunId)?.context.runPause).toBeNull();
+    expect(typeof harness.getRun(markRunId)?.context.runPauseClearedAt).toBe("string");
+    expect(harness.getRun(drainRunId)?.context.runPause).toBeNull();
+    expect(typeof harness.getRun(drainRunId)?.context.runPauseClearedAt).toBe("string");
+    expect(diagnoseRunOverview(harness.getRunOverview({ runId: markRunId })).state).not.toBe("paused");
+    expect(diagnoseRunOverview(harness.getRunOverview({ runId: drainRunId })).state).not.toBe("paused");
   });
 
   test("diagnoses the empty-run goal-review race risk", () => {

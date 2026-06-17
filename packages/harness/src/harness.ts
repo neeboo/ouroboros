@@ -183,6 +183,16 @@ export class Harness {
     });
   }
 
+  clearRunPause(runId: string) {
+    return this.updateRun({
+      runId,
+      contextPatch: {
+        runPause: null,
+        runPauseClearedAt: new Date().toISOString(),
+      },
+    });
+  }
+
   createTask(input: CreateTaskInput) {
     const id = input.id ?? makeId("task");
     return withDatabase(this.dbPath, (db) => {
@@ -1053,6 +1063,7 @@ export class Harness {
 
   retryTask(input: RetryTaskInput) {
     return withDatabase(this.dbPath, (db) => {
+      const task = db.query("select * from tasks where id = $taskId").get({ $taskId: input.taskId }) as TaskRow | null;
       db.query(
         `
         update tasks
@@ -1060,6 +1071,27 @@ export class Harness {
         where id = $taskId
         `,
       ).run({ $taskId: input.taskId });
+      if (task) {
+        const runRow = db.query("select * from runs where id = $runId").get({ $runId: task.run_id }) as RunRow | null;
+        if (runRow) {
+          const run = runFromRow(runRow);
+          db.query(
+            `
+            update runs
+            set context_json = $contextJson,
+                updated_at = current_timestamp
+            where id = $runId
+            `,
+          ).run({
+            $runId: task.run_id,
+            $contextJson: toJson({
+              ...run.context,
+              runPause: null,
+              runPauseClearedAt: new Date().toISOString(),
+            }),
+          });
+        }
+      }
     });
   }
 

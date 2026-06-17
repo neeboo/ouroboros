@@ -1,4 +1,4 @@
-import { applyHarnessAction, type AttemptOutput, type Harness, type HarnessActionResult, type RunOverview, type Task } from "@ouroboros/harness";
+import { applyHarnessAction, diagnoseRunOverview, type AttemptOutput, type Harness, type HarnessActionResult, type RunOverview, type Task } from "@ouroboros/harness";
 import { buildTaskPrompt } from "./prompt";
 import { applyStartHooks } from "./runner";
 import { createCodexResumableClient } from "./executors/codex-resumable";
@@ -254,6 +254,7 @@ class CodexResumableOrchestrator {
   async startAttempt(taskId: string) {
     const task = this.taskOrThrow(taskId);
     const run = this.runOrThrow(task.runId);
+    this.harness.clearRunPause(run.id);
     const sessionName = task.sessionRef ?? `task-${task.id}`;
     const prompt = this.promptForTask(run, task);
     const route = this.resolveRoute(run, task);
@@ -290,6 +291,7 @@ class CodexResumableOrchestrator {
     }
     const task = this.taskOrThrow(attempt.taskId);
     const run = this.runOrThrow(task.runId);
+    this.harness.clearRunPause(run.id);
     const sessionId = typeof attempt.input.codexSessionId === "string" ? attempt.input.codexSessionId : "";
     if (!sessionId) {
       throw new Error(`attempt has no codexSessionId: ${attemptId}`);
@@ -980,7 +982,18 @@ function threadIdForAttempt(attemptId: string) {
 function runnableRuns(harness: Harness, input: { limit: number; rootRunId?: string | null }) {
   const runs = harness.listRuns({ statuses: ["todo", "running"], limit: 500 });
   const scoped = input.rootRunId ? runsInScope(runs, input.rootRunId) : runs;
-  return scoped.filter((run) => run.status !== "done").slice(0, input.limit);
+  const runnable = [];
+  for (const run of scoped) {
+    const diagnosis = diagnoseRunOverview(harness.getRunOverview({ runId: run.id, eventLimit: 0 }));
+    if (diagnosis.state === "paused" || diagnosis.state === "blocked" || diagnosis.state === "complete") {
+      continue;
+    }
+    runnable.push(run);
+    if (runnable.length >= input.limit) {
+      break;
+    }
+  }
+  return runnable;
 }
 
 function maybeIntegrateCompletedRun(
