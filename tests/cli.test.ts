@@ -2881,6 +2881,98 @@ describe("CLI", () => {
     expect(overview.run.status).toBe("done");
   });
 
+  test("run-loop creates a fresh goal review after newer work supersedes maxed non-terminal reviews", async () => {
+    await runCli("init");
+    const run = await runCliJson("create-run", "--goal", "Harden supervisor pause handling");
+    const staleReviewIds: string[] = [];
+    for (const summary of ["continue after first review", "verify remaining repair", "continue after verifier"]) {
+      const review = await runCliJson(
+        "create-task",
+        "--run-id",
+        run.id,
+        "--role",
+        "goal-review",
+        "--goal",
+        "Review whether the run goal is complete",
+        "--prompt",
+        "Review the goal.",
+      );
+      staleReviewIds.push(review.id);
+      await runCliJson(
+        "record-attempt",
+        "--task-id",
+        review.id,
+        "--input-json",
+        "{}",
+        "--output-json",
+        JSON.stringify({
+          status: "done",
+          runDecision: summary.startsWith("verify") ? "verify" : "continue",
+          summary,
+          nextTasks: [{ role: "worker", goal: "Historical task", prompt: "Already handled." }],
+        }),
+      );
+    }
+    const newerVerifier = await runCliJson(
+      "create-task",
+      "--run-id",
+      run.id,
+      "--role",
+      "verifier",
+      "--goal",
+      "Verify repaired supervisor pause handling",
+      "--prompt",
+      "Verify.",
+    );
+    await runCliJson(
+      "record-attempt",
+      "--task-id",
+      newerVerifier.id,
+      "--input-json",
+      "{}",
+      "--output-json",
+      '{"status":"done","summary":"newer verifier passed","changedFiles":[],"checks":[],"artifacts":[],"problems":[]}',
+    );
+    const codexBin = join(dir, "fake-codex-fresh-review-after-non-terminal");
+    await writeFile(
+      codexBin,
+      [
+        "#!/usr/bin/env bun",
+        "const prompt = await new Response(Bun.stdin.stream()).text();",
+        "if (!prompt.includes('Role: goal-review')) process.exit(2);",
+        "console.log(JSON.stringify({ type: 'agent.message', message: '{\"status\":\"done\",\"runDecision\":\"complete\",\"summary\":\"fresh review completed\",\"changedFiles\":[],\"checks\":[],\"artifacts\":[],\"problems\":[]}' }));",
+      ].join("\n"),
+    );
+    await chmod(codexBin, 0o755);
+
+    const result = await runCliJson(
+      "run-loop",
+      "--run-id",
+      run.id,
+      "--executor",
+      "codex-resumable",
+      "--codex-bin",
+      codexBin,
+      "--cwd",
+      "/repo",
+      "--max-rounds",
+      "1",
+      "--max-tries",
+      "3",
+    );
+    const overview = await runCliJson("run-overview", "--run-id", run.id);
+    const freshReview = overview.tasks.find(
+      (task: { role: string; id: string }) => task.role === "goal-review" && !staleReviewIds.includes(task.id),
+    );
+
+    expect(result.rounds[0].tasks[0].taskId).toBe(freshReview!.id);
+    expect(freshReview).toMatchObject({
+      role: "goal-review",
+      status: "done",
+    });
+    expect(overview.run.status).toBe("done");
+  });
+
   test("autopilot drains active queue and then completes goal review", async () => {
     await runCli("init");
     const run = await runCliJson("create-run", "--goal", "Bootstrap ouroboros");

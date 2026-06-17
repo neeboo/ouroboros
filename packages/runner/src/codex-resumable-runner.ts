@@ -480,7 +480,11 @@ class CodexResumableOrchestrator {
     if (overview.tasks.some((task) => task.status === "todo" || task.status === "running")) {
       return { created: false as const, reason: "active_tasks" };
     }
-    const completedReview = [...overview.sessions].reverse().find(
+    const latestProgressIndex = overview.sessions.reduce((latest, session, index) => {
+      return session.role !== "goal-review" && session.status === "done" ? index : latest;
+    }, -1);
+    const currentReviewSessions = overview.sessions.filter((session, index) => index > latestProgressIndex);
+    const completedReview = [...currentReviewSessions].reverse().find(
       (session) =>
         session.role === "goal-review" &&
         (session.output.runDecision === "complete" || inferExplicitRunDecision(session.output) === "complete") &&
@@ -493,7 +497,7 @@ class CodexResumableOrchestrator {
     if (run.status === "blocked") {
       return { created: false as const, reason: "run_blocked" };
     }
-    const nonTerminalReviews = overview.sessions.filter((session) => {
+    const nonTerminalReviews = currentReviewSessions.filter((session) => {
       if (session.role !== "goal-review" || session.status !== "done") {
         return false;
       }
