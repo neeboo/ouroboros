@@ -210,6 +210,7 @@ function applyParsedHarnessAction(harness: Harness, action: HarnessAction, optio
     if (!run) {
       return blockedResult(action.type, `Run not found: ${action.runId}`, [`run not found: ${action.runId}`]);
     }
+    harness.clearRunPause(action.runId);
     harness.updateRunStatus({ runId: action.runId, status: "todo" });
     return doneResult(action.type, `Run ${action.runId} marked todo.`, [
       { name: "run exists", status: "passed", evidence: action.runId },
@@ -790,6 +791,7 @@ function prepareRunDrain(harness: Harness, action: Extract<HarnessAction, { type
   }
 
   const reclaimed = harness.reclaimRunningTasksWithoutAttempts({ runId: action.runId });
+  harness.clearRunPause(action.runId);
   harness.updateRunStatus({ runId: action.runId, status: "todo" });
   const overview = harness.getRunOverview({ runId: action.runId, eventLimit: 0 });
   const active = overview.tasks.filter((task) => task.status === "todo" || task.status === "running");

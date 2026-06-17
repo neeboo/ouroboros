@@ -725,14 +725,102 @@ describe("runner", () => {
     expect(thread.status).toBe("running");
   });
 
+  test("supervisor skips paused blocked and complete diagnoses while draining runnable orphaned work", async () => {
+    const pausedRunId = harness.createRun({
+      goal: "Paused run",
+      context: {
+        runPause: {
+          reason: "human requested pause",
+          pausedAt: "2026-06-17T00:00:00.000Z",
+        },
+      },
+    });
+    const pausedTaskId = harness.createTask({
+      runId: pausedRunId,
+      role: "worker",
+      goal: "Paused task",
+      prompt: "Do not run.",
+    });
+
+    const blockedRunId = harness.createRun({ goal: "Blocked run" });
+    const blockedTaskId = harness.createTask({
+      runId: blockedRunId,
+      role: "worker",
+      goal: "Blocked task",
+      prompt: "Blocked.",
+    });
+    harness.recordAttempt({
+      taskId: blockedTaskId,
+      input: {},
+      output: {
+        status: "blocked",
+        summary: "Cannot continue",
+        problems: ["cannot continue"],
+      },
+    });
+
+    const completeRunId = harness.createRun({ goal: "Complete run" });
+    harness.updateRunStatus({ runId: completeRunId, status: "done" });
+
+    const runnableRunId = harness.createRun({ goal: "Runnable orphaned run" });
+    const runnableTaskId = harness.createTask({
+      runId: runnableRunId,
+      role: "worker",
+      goal: "Runnable task",
+      prompt: "Run.",
+    });
+
+    const result = await superviseCodexRuns({
+      harness,
+      cwd: dir,
+      runConcurrency: 4,
+      taskConcurrency: 1,
+      maxCycles: 1,
+      maxRounds: 1,
+      maxTries: 3,
+      intervalMs: 1,
+      clientFactory: () => ({
+        start: async () => ({
+          status: "done" as const,
+          sessionId: "session_runnable",
+          outputPath: join(dir, "runnable-output.json"),
+          stdout: "",
+          stderr: "",
+          events: [],
+          output: {
+            status: "done" as const,
+            summary: "Ran runnable work",
+            changedFiles: [],
+            checks: [],
+            artifacts: [],
+            problems: [],
+          },
+        }),
+        resume: async () => {
+          throw new Error("resume should not be called");
+        },
+      }),
+    });
+
+    expect(result.cycles[0].runs.map((run) => run.runId)).toEqual([runnableRunId]);
+    expect(harness.getTask(runnableTaskId)?.status).toBe("done");
+    expect(harness.getTask(pausedTaskId)?.status).toBe("todo");
+    expect(harness.getRun(pausedRunId)?.context.runPause).toEqual(
+      expect.objectContaining({ reason: "human requested pause" }),
+    );
+  });
+
   test("supervisor integrates a completed verified run when enabled", async () => {
     const repoPath = join(dir, "repo");
     const worktreePath = join(dir, "verified-worker");
     await mkdir(repoPath, { recursive: true });
     await writeFile(join(repoPath, "README.md"), "initial\n");
     git(repoPath, ["init", "-b", "main"]);
+    git(repoPath, ["config", "user.name", "Ouroboros Test"]);
+    git(repoPath, ["config", "user.email", "test@example.com"]);
+    git(repoPath, ["config", "commit.gpgSign", "false"]);
     git(repoPath, ["add", "README.md"]);
-    git(repoPath, ["-c", "user.name=Ouroboros Test", "-c", "user.email=test@example.com", "commit", "-m", "Initial commit"]);
+    git(repoPath, ["commit", "-m", "Initial commit"]);
     git(repoPath, ["worktree", "add", "-b", "task-verified-worker", worktreePath, "main"]);
     await mkdir(join(worktreePath, "src"), { recursive: true });
     await writeFile(join(worktreePath, "src", "supervised.ts"), "export const supervised = true;\n");
