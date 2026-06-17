@@ -537,8 +537,8 @@ describe("dashboard", () => {
     const html = dashboardHtml({ runId: "run_123" });
 
     expectCssRule(html, "body", ["overflow: hidden;"]);
-    expectCssRule(html, ".app-shell", ["display: grid;", "grid-template-columns: 300px minmax(0, 1fr) clamp(380px, 30vw, 520px);", "overflow-x: hidden;"]);
-    expectCssRule(html, ".task-sidebar", ["min-width: 0;", "overflow: hidden;"]);
+    expectCssRule(html, ".app-shell", ["height: 100dvh;", "display: grid;", "grid-template-columns: 300px minmax(0, 1fr) clamp(380px, 30vw, 520px);", "overflow-x: hidden;"]);
+    expectCssRule(html, ".task-sidebar", ["height: 100dvh;", "min-width: 0;", "min-height: 0;", "overflow: hidden;"]);
     expectCssRule(html, ".project-header", ["min-width: 0;", "overflow: hidden;"]);
     expectCssRule(html, ".project-name", ["overflow: hidden;", "text-overflow: ellipsis;", "white-space: nowrap;"]);
     expectCssRule(html, ".project-root", ["overflow: hidden;", "text-overflow: ellipsis;", "white-space: nowrap;"]);

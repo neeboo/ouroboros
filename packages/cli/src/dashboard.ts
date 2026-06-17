@@ -426,6 +426,7 @@ export function dashboardHtml(input: { runId: string }) {
       background: var(--app);
     }
     .app-shell {
+      height: 100dvh;
       min-height: 100dvh;
       display: grid;
       grid-template-columns: 300px minmax(0, 1fr) clamp(380px, 30vw, 520px);
@@ -433,9 +434,11 @@ export function dashboardHtml(input: { runId: string }) {
       background: var(--app);
     }
     .task-sidebar {
+      height: 100dvh;
       display: grid;
       grid-template-rows: auto auto 1fr;
       min-width: 0;
+      min-height: 0;
       padding: 14px 10px;
       background: linear-gradient(180deg, #313130, #565652);
       border-right: 1px solid rgba(255, 255, 255, 0.12);
@@ -1467,6 +1470,7 @@ export function dashboardHtml(input: { runId: string }) {
     @media (max-width: 900px) {
       body { overflow: auto; }
       .app-shell {
+        height: auto;
         min-height: 100dvh;
         grid-template-columns: minmax(0, 1fr);
       }
