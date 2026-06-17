@@ -647,6 +647,26 @@ describe("Harness", () => {
     expect(harness.nextReadyTask(runId)?.id).toBe(downstream);
   });
 
+  test("repair worker can start when it depends on the blocked verifier it repairs", () => {
+    const runId = harness.createRun({ goal: "Repair blocked verifier" });
+    const verifier = harness.createTask({
+      runId,
+      role: "verifier",
+      goal: "Verify dashboard UX",
+      prompt: "Verify.",
+    });
+    recordTaskStatus(verifier, "blocked", "Browser smoke failed");
+    const repair = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Repair dashboard UX verifier failures without expanding scope",
+      prompt: "Repair.",
+      dependsOn: [verifier],
+    });
+
+    expect(harness.nextReadyTask(runId)?.id).toBe(repair);
+  });
+
   test("done repair worker without done repair verifier does not unlock dependent work", () => {
     const { runId, verifier, downstream, repair } = createBlockedVerifierRepairGraph();
 

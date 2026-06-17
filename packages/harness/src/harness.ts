@@ -370,7 +370,7 @@ export class Harness {
 
       for (const row of taskRows) {
         const task = taskFromRow(row);
-        if (task.dependsOn.every(dependencyIsSatisfied)) {
+        if (task.dependsOn.every((dependencyId) => dependencyIsSatisfied(dependencyId, task))) {
           return task;
         }
       }
@@ -468,7 +468,7 @@ export class Harness {
       const dependencyIsSatisfied = createDependencyReadiness(allTaskRows.map(taskFromRow));
       const ready = taskRows
         .map(taskFromRow)
-        .filter((task) => task.dependsOn.every(dependencyIsSatisfied))
+        .filter((task) => task.dependsOn.every((dependencyId) => dependencyIsSatisfied(dependencyId, task)))
         .slice(0, input.limit);
 
       return db.transaction(() => {
@@ -1233,6 +1233,7 @@ function objectOrNull(value: unknown) {
 
 function createDependencyReadiness(tasks: Task[]) {
   const statuses = new Map(tasks.map((task) => [task.id, task.status]));
+  const tasksById = new Map(tasks.map((task) => [task.id, task]));
   const repairTasksByParent = new Map<string, Task[]>();
   const verifiedRepairIds = new Set<string>();
 
@@ -1250,13 +1251,22 @@ function createDependencyReadiness(tasks: Task[]) {
     }
   }
 
-  return (taskId: string) => {
+  return (taskId: string, dependentTask?: Task) => {
     const status = statuses.get(taskId);
     if (status === "done") {
       return true;
     }
     if (status !== "blocked") {
       return false;
+    }
+
+    const dependency = tasksById.get(taskId);
+    if (
+      dependentTask?.role === "worker" &&
+      dependency?.role === "verifier" &&
+      dependentTask.goal.toLowerCase().startsWith("repair")
+    ) {
+      return true;
     }
 
     return (repairTasksByParent.get(taskId) ?? []).some((repairTask) => verifiedRepairIds.has(repairTask.id));
