@@ -493,6 +493,23 @@ class CodexResumableOrchestrator {
       this.harness.updateRunStatus({ runId, status: "done" });
       return { created: false as const, reason: "completed_by_existing_goal_review", taskId: completedReview.taskId };
     }
+    const nonTerminalReviews = overview.sessions.filter((session) => {
+      if (session.role !== "goal-review" || session.status !== "done") {
+        return false;
+      }
+      const decision = session.output.runDecision ?? inferExplicitRunDecision(session.output);
+      return decision === "continue" || decision === "verify";
+    });
+    if (nonTerminalReviews.length >= maxTries) {
+      this.harness.updateRunStatus({ runId, status: "blocked" });
+      return {
+        created: false as const,
+        reason: "goal_review_max_tries",
+        taskId: nonTerminalReviews[nonTerminalReviews.length - 1]?.taskId,
+        tries: nonTerminalReviews.length,
+        maxTries,
+      };
+    }
     const blockedReview = [...overview.tasks].reverse().find(
       (task) => task.role === "goal-review" && task.status === "blocked",
     );

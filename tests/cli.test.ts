@@ -2608,6 +2608,54 @@ describe("CLI", () => {
     expect(overview.sessions.filter((session: { taskId: string }) => session.taskId === review.id)).toHaveLength(3);
   });
 
+  test("run-loop blocks a run after too many non-terminal goal reviews", async () => {
+    await runCli("init");
+    const run = await runCliJson("create-run", "--goal", "Bootstrap ouroboros");
+    for (const summary of ["more work remains", "still incomplete", "needs another repair"]) {
+      const review = await runCliJson(
+        "create-task",
+        "--run-id",
+        run.id,
+        "--role",
+        "goal-review",
+        "--goal",
+        "Review whether the run goal is complete",
+        "--prompt",
+        "Review the goal.",
+      );
+      await runCliJson(
+        "record-attempt",
+        "--task-id",
+        review.id,
+        "--input-json",
+        "{}",
+        "--output-json",
+        JSON.stringify({ status: "done", runDecision: "continue", summary, nextTasks: [] }),
+      );
+    }
+
+    const result = await runCliJson(
+      "run-loop",
+      "--run-id",
+      run.id,
+      "--executor",
+      "codex-resumable",
+      "--codex-bin",
+      "/should/not/run",
+      "--cwd",
+      "/repo",
+      "--max-rounds",
+      "1",
+      "--max-tries",
+      "3",
+    );
+    const overview = await runCliJson("run-overview", "--run-id", run.id);
+
+    expect(result.rounds).toEqual([]);
+    expect(overview.run.status).toBe("blocked");
+    expect(overview.tasks.filter((task: { role: string }) => task.role === "goal-review")).toHaveLength(3);
+  });
+
   test("run-loop creates a fresh goal review after newer work supersedes a maxed blocked review", async () => {
     await runCli("init");
     const run = await runCliJson("create-run", "--goal", "Bootstrap ouroboros");

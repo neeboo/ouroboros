@@ -829,6 +829,23 @@ function ensureGoalReviewTask(
   maxTries: number,
   overview: ReturnType<Harness["getRunOverview"]>,
 ) {
+  const nonTerminalReviews = overview.sessions.filter(
+    (session) =>
+      session.role === "goal-review" &&
+      session.status === "done" &&
+      (session.output.runDecision === "continue" || session.output.runDecision === "verify"),
+  );
+  if (nonTerminalReviews.length >= maxTries) {
+    harness.updateRunStatus({ runId, status: "blocked" });
+    return {
+      status: "blocked" as const,
+      summary: `Run ${runId} reached ${nonTerminalReviews.length}/${maxTries} non-terminal goal-review decisions.`,
+      checks: [{ name: "goal review continue limit", status: "failed" as const, evidence: `${nonTerminalReviews.length}/${maxTries}` }],
+      artifacts: [{ kind: "goal_review", tries: nonTerminalReviews.length, maxTries, status: "blocked" }],
+      problems: [`goal-review continue/verify limit reached for ${runId}`],
+    };
+  }
+
   const blockedReview = [...overview.tasks].reverse().find(
     (task) => task.role === "goal-review" && task.status === "blocked",
   );
