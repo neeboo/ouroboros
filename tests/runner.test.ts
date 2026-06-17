@@ -810,6 +810,121 @@ describe("runner", () => {
     );
   });
 
+  test("resumable loop start clears durable human pause", async () => {
+    const runId = harness.createRun({
+      goal: "Start paused run explicitly",
+      context: {
+        runPause: {
+          reason: "human requested pause",
+          pausedAt: "2026-06-17T00:00:00.000Z",
+        },
+      },
+    });
+    const taskId = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Started work",
+      prompt: "Run.",
+    });
+
+    await runCodexResumableLoop({
+      harness,
+      cwd: dir,
+      runId,
+      maxRounds: 1,
+      limit: 1,
+      maxTries: 3,
+      clientFactory: () => ({
+        start: async () => ({
+          status: "done" as const,
+          sessionId: "session_start",
+          outputPath: join(dir, "start-output.json"),
+          stdout: "",
+          stderr: "",
+          events: [],
+          output: {
+            status: "done" as const,
+            summary: "Started work",
+            changedFiles: [],
+            checks: [],
+            artifacts: [],
+            problems: [],
+          },
+        }),
+        resume: async () => {
+          throw new Error("resume should not be called");
+        },
+      }),
+    });
+
+    const run = harness.getRun(runId)!;
+    expect(harness.getTask(taskId)?.status).toBe("done");
+    expect(run.context.runPause).toBeNull();
+    expect(typeof run.context.runPauseClearedAt).toBe("string");
+  });
+
+  test("resumable loop resume clears durable human pause", async () => {
+    const runId = harness.createRun({
+      goal: "Resume paused run explicitly",
+      context: {
+        runPause: {
+          reason: "human requested pause",
+          pausedAt: "2026-06-17T00:00:00.000Z",
+        },
+      },
+    });
+    const taskId = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Resumed work",
+      prompt: "Continue.",
+    });
+    const attemptId = harness.startAttempt({
+      taskId,
+      input: {
+        codexSessionId: "session_existing",
+        sessionName: "task-existing",
+        cwd: dir,
+        prompt: "Continue.",
+      },
+    });
+
+    await runCodexResumableLoop({
+      harness,
+      cwd: dir,
+      runId,
+      maxRounds: 1,
+      limit: 1,
+      maxTries: 3,
+      clientFactory: () => ({
+        start: async () => {
+          throw new Error("start should not be called");
+        },
+        resume: async () => ({
+          status: "done" as const,
+          sessionId: "session_existing",
+          outputPath: join(dir, "resume-output.json"),
+          stdout: "",
+          stderr: "",
+          events: [],
+          output: {
+            status: "done" as const,
+            summary: "Resumed work",
+            changedFiles: [],
+            checks: [],
+            artifacts: [],
+            problems: [],
+          },
+        }),
+      }),
+    });
+
+    const run = harness.getRun(runId)!;
+    expect(harness.getAttempt(attemptId)?.status).toBe("done");
+    expect(run.context.runPause).toBeNull();
+    expect(typeof run.context.runPauseClearedAt).toBe("string");
+  });
+
   test("supervisor integrates a completed verified run when enabled", async () => {
     const repoPath = join(dir, "repo");
     const worktreePath = join(dir, "verified-worker");

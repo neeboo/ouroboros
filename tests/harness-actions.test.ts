@@ -228,8 +228,11 @@ describe("Harness actions", () => {
     await mkdir(repoPath, { recursive: true });
     await writeFile(join(repoPath, "README.md"), "initial\n");
     git(repoPath, ["init", "-b", "main"]);
+    git(repoPath, ["config", "user.name", "Ouroboros Test"]);
+    git(repoPath, ["config", "user.email", "test@example.com"]);
+    git(repoPath, ["config", "commit.gpgSign", "false"]);
     git(repoPath, ["add", "README.md"]);
-    git(repoPath, ["-c", "user.name=Ouroboros Test", "-c", "user.email=test@example.com", "-c", "commit.gpgSign=false", "commit", "-m", "Initial commit"]);
+    git(repoPath, ["commit", "-m", "Initial commit"]);
     git(repoPath, ["worktree", "add", "-b", "task-worker-precomplete", worktreePath, "main"]);
     await mkdir(join(worktreePath, "src"), { recursive: true });
     await writeFile(join(worktreePath, "src", "pause.ts"), "export const paused = true;\n");
