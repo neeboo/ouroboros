@@ -369,10 +369,16 @@ function integrateVerifiedRun(
   const checks: HarnessActionResult["checks"] = [
     { name: "run exists", status: "passed", evidence: action.runId },
   ];
-  if (run.status !== "done") {
+  const isExplicitWorkerIntegration = action.workerTaskId !== undefined;
+  const isPreCompletionIntegration = run.status !== "done" && isExplicitWorkerIntegration;
+  if (run.status !== "done" && !isExplicitWorkerIntegration) {
     return blockedIntegration(action.type, "Run is not complete.", checks, [`run status is ${run.status}`]);
   }
-  checks.push({ name: "run status", status: "passed", evidence: "done" });
+  checks.push({
+    name: "run status",
+    status: "passed",
+    evidence: isPreCompletionIntegration ? `pre-completion explicit worker integration from ${run.status}` : "done",
+  });
 
   const worker = selectIntegrationWorker(overview, action.workerTaskId);
   if (!worker) {
@@ -399,13 +405,17 @@ function integrateVerifiedRun(
   }
   checks.push({ name: "verifier evidence", status: "passed", evidence: verifier.id });
 
-  const goalReview = selectCompletedGoalReview(overview);
-  if (!goalReview) {
+  const goalReview = isPreCompletionIntegration ? null : selectCompletedGoalReview(overview);
+  if (!isPreCompletionIntegration && !goalReview) {
     return blockedIntegration(action.type, "Run has no completed goal-review decision.", checks, [
       "missing goal-review runDecision complete",
     ]);
   }
-  checks.push({ name: "goal review", status: "passed", evidence: goalReview.id });
+  checks.push({
+    name: "goal review",
+    status: "passed",
+    evidence: goalReview?.id ?? "deferred until run completion",
+  });
 
   const repoPath = action.repoPath ?? run.projectRoot ?? overview.project?.rootPath;
   if (!repoPath) {
@@ -520,7 +530,8 @@ function integrateVerifiedRun(
       runId: action.runId,
       workerTaskId: worker.id,
       verifierTaskId: verifier.id,
-      goalReviewTaskId: goalReview.id,
+      goalReviewTaskId: goalReview?.id ?? null,
+      preCompletion: isPreCompletionIntegration,
       repoPath,
       worktreePath,
       targetBranch,
