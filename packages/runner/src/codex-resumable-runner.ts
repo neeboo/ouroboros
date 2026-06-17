@@ -336,6 +336,9 @@ class CodexResumableOrchestrator {
 
   async resumeRunningAttempts(input: { runId: string; limit: number }) {
     const attempts = this.harness.listRunningAttempts({ runId: input.runId }).slice(0, input.limit);
+    if (attempts.length > 0) {
+      this.harness.clearRunPause(input.runId);
+    }
     const overview = this.harness.getRunOverview({ runId: input.runId, eventLimit: 1 });
     const sessionsByAttemptId = new Map(overview.sessions.map((session) => [session.attemptId, session]));
     const threadsByAttemptId = new Map(overview.threads.map((thread) => [thread.attemptId, thread]));
@@ -436,6 +439,7 @@ class CodexResumableOrchestrator {
 
   async startReadyAttempts(input: { runId: string; limit: number }) {
     const run = this.runOrThrow(input.runId);
+    this.harness.clearRunPause(run.id);
     const leased = this.harness.leaseReadyTasks({
       runId: input.runId,
       limit: input.limit,
