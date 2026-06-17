@@ -85,7 +85,7 @@ export function inferExplicitRunDecision(output: {
   const haystack = [output.summary, ...(output.checks ?? []), ...(output.artifacts ?? []), ...(output.problems ?? [])]
     .map((value) => (typeof value === "string" ? value : JSON.stringify(value)))
     .join("\n");
-  const match = haystack.match(/\brunDecision\s*[:=]?\s*(complete|continue|verify|defer)\b/i);
+  const match = haystack.match(/\b(?:runDecision\s*[:=]?|decision\s*[:=])\s*(complete|continue|verify|defer)\b/i);
   if (!match) {
     return undefined;
   }

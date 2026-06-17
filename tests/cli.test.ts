@@ -2416,6 +2416,107 @@ describe("CLI", () => {
     expect(overview.run.status).toBe("done");
   });
 
+  test("run-loop restores a maxed blocked goal review with labeled textual completion", async () => {
+    await runCli("init");
+    const run = await runCliJson("create-run", "--goal", "Finish intake workflow");
+    const review = await runCliJson(
+      "create-task",
+      "--run-id",
+      run.id,
+      "--role",
+      "goal-review",
+      "--goal",
+      "Review whether the run goal is complete",
+      "--prompt",
+      "Review the completed run.",
+    );
+    await runCliJson(
+      "record-attempt",
+      "--task-id",
+      review.id,
+      "--input-json",
+      "{}",
+      "--output-json",
+      JSON.stringify({
+        status: "blocked",
+        summary: "Latest verification passed. Decision: complete.",
+        problems: ["goal-review output must include runDecision"],
+      }),
+    );
+
+    await runCliJson(
+      "run-loop",
+      "--run-id",
+      run.id,
+      "--executor",
+      "codex-resumable",
+      "--codex-bin",
+      "/should/not/run",
+      "--cwd",
+      "/repo",
+      "--max-rounds",
+      "1",
+      "--max-tries",
+      "1",
+    );
+    const overview = await runCliJson("run-overview", "--run-id", run.id);
+
+    expect(overview.run.status).toBe("done");
+  });
+
+  test("run-loop restores a blocked run when a goal review has labeled textual completion", async () => {
+    await runCli("init");
+    const run = await runCliJson("create-run", "--goal", "Finish blocked intake workflow");
+    const review = await runCliJson(
+      "create-task",
+      "--run-id",
+      run.id,
+      "--role",
+      "goal-review",
+      "--goal",
+      "Review whether the run goal is complete",
+      "--prompt",
+      "Review the completed run.",
+    );
+    await runCliJson(
+      "record-attempt",
+      "--task-id",
+      review.id,
+      "--input-json",
+      "{}",
+      "--output-json",
+      JSON.stringify({
+        status: "blocked",
+        summary: "Latest verification passed. Decision: complete.",
+        problems: ["goal-review output must include runDecision"],
+      }),
+    );
+    await runCliJson(
+      "action",
+      "--action-json",
+      JSON.stringify({ type: "retireRun", runId: run.id, reason: "simulate maxed blocked review" }),
+    );
+
+    await runCliJson(
+      "run-loop",
+      "--run-id",
+      run.id,
+      "--executor",
+      "codex-resumable",
+      "--codex-bin",
+      "/should/not/run",
+      "--cwd",
+      "/repo",
+      "--max-rounds",
+      "1",
+      "--max-tries",
+      "1",
+    );
+    const overview = await runCliJson("run-overview", "--run-id", run.id);
+
+    expect(overview.run.status).toBe("done");
+  });
+
   test("run-loop restores a run completed by an existing goal review", async () => {
     await runCli("init");
     const run = await runCliJson("create-run", "--goal", "Bootstrap ouroboros");

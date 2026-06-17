@@ -476,9 +476,6 @@ class CodexResumableOrchestrator {
     if (run.status === "done") {
       return { created: false as const, reason: "run_done" };
     }
-    if (run.status === "blocked") {
-      return { created: false as const, reason: "run_blocked" };
-    }
     const overview = this.harness.getRunOverview({ runId, eventLimit: 0 });
     if (overview.tasks.some((task) => task.status === "todo" || task.status === "running")) {
       return { created: false as const, reason: "active_tasks" };
@@ -492,6 +489,9 @@ class CodexResumableOrchestrator {
     if (completedReview) {
       this.harness.updateRunStatus({ runId, status: "done" });
       return { created: false as const, reason: "completed_by_existing_goal_review", taskId: completedReview.taskId };
+    }
+    if (run.status === "blocked") {
+      return { created: false as const, reason: "run_blocked" };
     }
     const nonTerminalReviews = overview.sessions.filter((session) => {
       if (session.role !== "goal-review" || session.status !== "done") {
