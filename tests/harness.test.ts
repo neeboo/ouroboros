@@ -101,6 +101,30 @@ describe("Harness", () => {
     });
   });
 
+  test("global run counts exclude retired blocked runs", () => {
+    const activeTodoRunId = harness.createRun({ goal: "Active todo" });
+    const activeBlockedRunId = harness.createRun({ goal: "Active blocked" });
+    const retiredRunId = harness.createRun({
+      goal: "Retired duplicate",
+      context: {
+        retired: true,
+        retiredAt: "2026-06-18T00:00:00.000Z",
+        retiredReason: "duplicate historical run",
+      },
+    });
+
+    harness.updateRunStatus({ runId: activeBlockedRunId, status: "blocked" });
+    harness.updateRunStatus({ runId: retiredRunId, status: "blocked" });
+
+    expect(harness.countRunsByStatus()).toEqual({
+      todo: 1,
+      running: 0,
+      done: 0,
+      blocked: 1,
+    });
+    expect(harness.getRun(activeTodoRunId)?.status).toBe("todo");
+  });
+
   test("stores readable blocked attempt errors and lessons from structured problem entries", () => {
     const runId = harness.createRun({ goal: "Build verifier serialization" });
     const taskId = harness.createTask({

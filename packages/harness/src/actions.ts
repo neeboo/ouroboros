@@ -257,11 +257,20 @@ function applyParsedHarnessAction(harness: Harness, action: HarnessAction, optio
       return blockedResult(action.type, `Run not found: ${action.runId}`, [`run not found: ${action.runId}`]);
     }
     const blockedTasks = harness.blockUnfinishedTasksForRun({ runId: action.runId, reason: action.reason });
-    harness.updateRunStatus({ runId: action.runId, status: "blocked" });
+    harness.updateRun({
+      runId: action.runId,
+      status: "blocked",
+      contextPatch: {
+        retired: true,
+        retiredAt: new Date().toISOString(),
+        retiredReason: action.reason,
+      },
+    });
     return doneResult(action.type, `Run ${action.runId} retired from the active queue.`, [
       { name: "run exists", status: "passed", evidence: action.runId },
       { name: "previous run status", status: "passed", evidence: run.status },
       { name: "retired run status", status: "passed", evidence: "blocked" },
+      { name: "retired context", status: "passed", evidence: "retired=true" },
       { name: "unfinished tasks blocked", status: "passed", evidence: String(blockedTasks.length) },
     ], [
       {
@@ -269,6 +278,7 @@ function applyParsedHarnessAction(harness: Harness, action: HarnessAction, optio
         runId: action.runId,
         previousStatus: run.status,
         status: "blocked",
+        retired: true,
         reason: action.reason,
         unfinishedTasksBlocked: blockedTasks.length,
       },

@@ -1077,6 +1077,65 @@ describe("dashboard", () => {
     }
   });
 
+  test("ignores retired child runs when aggregating the root dashboard overview", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "ouroboros-dashboard-retired-child-"));
+    const harness = new Harness(join(dir, "ouroboros.db"));
+    harness.init();
+    const rootRunId = harness.createRun({ goal: "Root intake" });
+    harness.updateRunStatus({ runId: rootRunId, status: "done" });
+    const retiredRunId = harness.createRun({
+      goal: "Retired child goal",
+      context: {
+        parentRunId: rootRunId,
+        retired: true,
+        retiredAt: "2026-06-18T00:00:00.000Z",
+        retiredReason: "superseded by integrated run",
+      },
+    });
+    const retiredTaskId = harness.createTask({
+      runId: retiredRunId,
+      role: "worker",
+      goal: "Old blocked worker",
+      prompt: "Old work.",
+    });
+    harness.recordAttempt({
+      taskId: retiredTaskId,
+      input: { executor: "test" },
+      output: {
+        status: "blocked",
+        summary: "Superseded old work",
+        changedFiles: [],
+        checks: [{ name: "retired", status: "failed" }],
+        artifacts: [],
+        problems: ["superseded"],
+      },
+    });
+    harness.updateRunStatus({ runId: retiredRunId, status: "blocked" });
+
+    try {
+      const response = await handleDashboardRequest(
+        new Request(`http://localhost/api/runs/${rootRunId}/overview`),
+        {
+          runId: rootRunId,
+          overview: () => harness.getRunOverview({ runId: rootRunId }),
+          childOverviews: () => [harness.getRunOverview({ runId: retiredRunId })],
+          globalRunCounts: () => harness.countRunsByStatus(),
+          runnerStatus: () => ({ status: "idle", pid: null }),
+          supervisorStatus: () => ({ status: "idle", pid: null, lastOutput: "" }),
+          renderTaskPrompt: () => "",
+        },
+      );
+      const body = await response.json();
+
+      expect(response.status).toBe(200);
+      expect(body.run.status).toBe("done");
+      expect(body.tasks.some((task: { id: string }) => task.id === retiredTaskId)).toBe(false);
+      expect(body.globalRuns).toEqual({ todo: 0, running: 0, done: 1, blocked: 0 });
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   test("serves global supervisor overview state and intake actions", async () => {
     const dir = await mkdtemp(join(tmpdir(), "ouroboros-dashboard-supervisor-"));
     const harness = new Harness(join(dir, "ouroboros.db"));

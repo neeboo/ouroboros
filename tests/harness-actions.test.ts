@@ -364,8 +364,16 @@ describe("Harness actions", () => {
       actionType: "retireRun",
       eventId: expect.any(String),
     });
-    expect(harness.getRun(runId)?.status).toBe("blocked");
+    expect(harness.getRun(runId)).toMatchObject({
+      status: "blocked",
+      context: expect.objectContaining({
+        retired: true,
+        retiredReason: "duplicate historical self-iteration run",
+        retiredAt: expect.any(String),
+      }),
+    });
     expect(harness.getTask(taskId)?.status).toBe("blocked");
+    expect(result.artifacts).toContainEqual(expect.objectContaining({ kind: "run", retired: true }));
     expect(result.artifacts).toContainEqual(expect.objectContaining({ kind: "blocked_task", taskId }));
     expect(event).toMatchObject({
       actionType: "retireRun",

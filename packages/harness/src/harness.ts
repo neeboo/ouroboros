@@ -780,6 +780,7 @@ export class Harness {
           `
           select status, count(*) as count
           from runs
+          where json_extract(context_json, '$.retired') is not 1
           group by status
           `,
         )

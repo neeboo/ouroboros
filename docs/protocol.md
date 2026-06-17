@@ -481,15 +481,18 @@ Supported actions:
 { "type": "retryTask", "taskId": "task_...", "reason": "optional" }
 { "type": "markRunTodo", "runId": "run_...", "reason": "optional" }
 { "type": "prepareRunDrain", "runId": "run_...", "maxTries": 3, "reason": "optional" }
+{ "type": "retireRun", "runId": "run_...", "reason": "optional" }
 { "type": "completeSystemTask", "taskId": "task_...", "actionEventId": "action_...", "reason": "optional" }
 { "type": "integrateVerifiedRun", "runId": "run_...", "workerTaskId": "optional", "targetBranch": "main", "push": false, "reason": "optional" }
 ```
 
 `prepareRunDrain` reclaims orphaned task leases, marks the run `todo`, and creates or retries a bounded `goal-review` task when the queue is otherwise empty. It does not mark a run complete and does not weaken the verifier contract.
 
+`retireRun` moves a stale or superseded run out of the active control surface without deleting evidence. It keeps the run status `blocked`, blocks unfinished tasks in that run, and patches run context with `retired: true`, `retiredAt`, and `retiredReason`. Retired runs stay queryable as history, but dashboard aggregate views and global active run counts exclude them.
+
 `completeSystemTask` records a task attempt from an existing `harness_action_events` row. It derives the attempt status, summary, checks, artifacts, and problems from the audited action result, so a system task can be closed without giving a worktree broad database write access or arbitrary attempt-writing power.
 
-`integrateVerifiedRun` is the overseer-owned integration path. It only runs after the run is `done`, an execution task has changed-file evidence and a worktree, a verifier depending on that task has completed without failed checks, and a `goal-review` task has returned `runDecision: "complete"`. The action may commit dirty worker worktree changes, merge the worker branch into the target branch, and optionally push. If any preflight or git command fails, it records a blocked action event and leaves integration for repair or human review.
+`integrateVerifiedRun` is the overseer-owned integration path. It can integrate a specific verified worker before the entire run is done when `workerTaskId` is provided, or integrate a complete run after `goal-review` has returned `runDecision: "complete"`. In both modes the execution task must have changed-file evidence and a worktree, and the verifier depending on that task must have completed without failed checks. The action may commit dirty worker worktree changes, merge the worker branch into the target branch, and optionally push. If any preflight or git command fails, it records a blocked action event and leaves integration for repair or human review.
 
 `supervise-runs` and `supervise-daemon` can call this action automatically with `--integrate-complete-runs`. The default remains off so planning-only runs and read-only experiments do not unexpectedly touch git. `--integration-target-branch <branch>` defaults to `main`; `--integration-push` opts into pushing after a successful local merge.
 

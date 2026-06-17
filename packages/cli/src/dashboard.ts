@@ -133,10 +133,11 @@ export function buildDashboardTaskGraph(overview: RunOverview, groupId?: string 
 }
 
 export function aggregateDashboardOverview(rootOverview: RunOverview, childOverviews: RunOverview[] = []): RunOverview {
-  if (childOverviews.length === 0) {
+  const activeChildOverviews = childOverviews.filter((overview) => !isRetiredRun(overview.run));
+  if (activeChildOverviews.length === 0) {
     return rootOverview;
   }
-  const overviews = [rootOverview, ...childOverviews];
+  const overviews = [rootOverview, ...activeChildOverviews];
   const tasks = uniqueDashboardItems(overviews.flatMap((overview) => overview.tasks));
   const sessions = uniqueDashboardItems(overviews.flatMap((overview) => overview.sessions), (session) => session.attemptId);
   const threads = uniqueDashboardItems(overviews.flatMap((overview) => overview.threads));
@@ -155,6 +156,10 @@ export function aggregateDashboardOverview(rootOverview: RunOverview, childOverv
     threads,
     lessons,
   };
+}
+
+function isRetiredRun(run: RunOverview["run"]) {
+  return run?.context?.retired === true;
 }
 
 function uniqueDashboardItems<T>(
