@@ -310,6 +310,19 @@ export interface BlockUnfinishedTasksForRunInput {
   reason: string;
 }
 
+export interface BlockedDependencyTask {
+  taskId: string;
+  role: string;
+  previousStatus: Extract<Status, "todo">;
+  dependencyIds: string[];
+  reason: string;
+}
+
+export interface BlockTasksWithBlockedDependenciesInput {
+  runId: string;
+  reason: string;
+}
+
 export interface LeaseReadyTasksInput {
   runId: string;
   limit: number;

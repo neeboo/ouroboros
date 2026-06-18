@@ -178,6 +178,66 @@ describe("Harness actions", () => {
     expect(overview.run?.status).toBe("done");
   });
 
+  test("prepares a drained run by blocking todo tasks whose dependencies are blocked", () => {
+    const runId = harness.createRun({ goal: "Drain impossible dependency chain" });
+    const workerTaskId = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Blocked worker",
+      prompt: "This worker cannot finish.",
+    });
+    harness.recordAttempt({
+      taskId: workerTaskId,
+      input: { executor: "test" },
+      output: {
+        status: "blocked",
+        summary: "Worker blocked permanently",
+        changedFiles: [],
+        checks: [{ name: "worker", status: "failed", evidence: "blocked" }],
+        artifacts: [],
+        problems: ["worker blocked permanently"],
+      },
+    });
+    const verifierTaskId = harness.createTask({
+      runId,
+      role: "verifier",
+      goal: "Verify blocked worker",
+      prompt: "This should not stay todo forever.",
+      dependsOn: [workerTaskId],
+    });
+
+    const result = applyHarnessAction(harness, {
+      type: "prepareRunDrain",
+      runId,
+      maxTries: 2,
+    });
+    const overview = harness.getRunOverview({ runId });
+    const verifier = harness.getTask(verifierTaskId);
+    const verifierAttempt = harness.listLatestAttemptsForTasks([verifierTaskId])[0];
+
+    expect(result).toMatchObject({
+      status: "done",
+      actionType: "prepareRunDrain",
+    });
+    expect(result.checks).toContainEqual(
+      expect.objectContaining({ name: "blocked dependency tasks", status: "passed", evidence: "1" }),
+    );
+    expect(result.artifacts).toContainEqual(
+      expect.objectContaining({
+        kind: "blocked_dependency_task",
+        taskId: verifierTaskId,
+        dependencyIds: [workerTaskId],
+      }),
+    );
+    expect(verifier?.status).toBe("blocked");
+    expect(verifierAttempt).toMatchObject({
+      taskId: verifierTaskId,
+      status: "blocked",
+      summary: expect.stringContaining("dependencies are blocked"),
+    });
+    expect(overview.tasks.find((task) => task.role === "goal-review")?.status).toBe("todo");
+  });
+
   test("completes a system task from a recorded harness action event", () => {
     const runId = harness.createRun({ goal: "Repair run state" });
     const taskId = harness.createTask({

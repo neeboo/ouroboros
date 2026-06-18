@@ -952,6 +952,10 @@ function prepareRunDrain(harness: Harness, action: Extract<HarnessAction, { type
   const reclaimed = harness.reclaimRunningTasksWithoutAttempts({ runId: action.runId });
   harness.clearRunPause(action.runId);
   harness.updateRunStatus({ runId: action.runId, status: "todo" });
+  const blockedDependencies = harness.blockTasksWithBlockedDependencies({
+    runId: action.runId,
+    reason: "task dependencies are blocked",
+  });
   const overview = harness.getRunOverview({ runId: action.runId, eventLimit: 0 });
   const active = overview.tasks.filter((task) => task.status === "todo" || task.status === "running");
   const checks: HarnessActionResult["checks"] = [
@@ -960,6 +964,16 @@ function prepareRunDrain(harness: Harness, action: Extract<HarnessAction, { type
     { name: "run marked todo", status: "passed", evidence: "todo" },
   ];
   const artifacts: HarnessActionResult["artifacts"] = reclaimedArtifacts(reclaimed);
+  if (blockedDependencies.length > 0) {
+    checks.push({ name: "blocked dependency tasks", status: "passed", evidence: String(blockedDependencies.length) });
+    artifacts.push(...blockedDependencies.map((task) => ({
+      kind: "blocked_dependency_task",
+      taskId: task.taskId,
+      role: task.role,
+      dependencyIds: task.dependencyIds,
+      reason: task.reason,
+    })));
+  }
   artifacts.push({ kind: "run", runId: action.runId, previousStatus: run.status, status: "todo", reason: action.reason ?? null });
 
   if (active.length > 0) {

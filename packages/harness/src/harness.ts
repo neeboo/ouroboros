@@ -50,6 +50,8 @@ import type {
   ListExternalRefsInput,
   ListLessonsInput,
   ListRunsInput,
+  BlockedDependencyTask,
+  BlockTasksWithBlockedDependenciesInput,
   RecordAttemptEventInput,
   RecordAttemptInput,
   RecordHarnessActionEventInput,
@@ -455,6 +457,116 @@ export class Harness {
             where task_id = $taskId and status = 'running'
             `,
           ).run({ $taskId: task.taskId, $reason: input.reason });
+        }
+        return blocked;
+      })();
+    });
+  }
+
+  blockTasksWithBlockedDependencies(input: BlockTasksWithBlockedDependenciesInput): BlockedDependencyTask[] {
+    return withDatabase(this.dbPath, (db) => {
+      const rows = db
+        .query(
+          `
+          select *
+          from tasks
+          where run_id = $runId
+          order by created_at, id
+          `,
+        )
+        .all({ $runId: input.runId }) as TaskRow[];
+      const tasks = rows.map(taskFromRow);
+      const tasksById = new Map(tasks.map((task) => [task.id, task]));
+      const dependencyIsSatisfied = createDependencyReadiness(tasks);
+      const blocked = tasks
+        .filter((task) => task.status === "todo")
+        .flatMap((task) => {
+          const dependencyIds = task.dependsOn.filter((dependencyId) => {
+            const dependency = tasksById.get(dependencyId);
+            return dependency?.status === "blocked" && !dependencyIsSatisfied(dependencyId, task);
+          });
+          if (dependencyIds.length === 0) {
+            return [];
+          }
+          return [{
+            taskId: task.id,
+            role: task.role,
+            previousStatus: task.status as Extract<Status, "todo">,
+            dependencyIds,
+            reason: input.reason,
+          }];
+        });
+
+      if (blocked.length === 0) {
+        return blocked;
+      }
+
+      return db.transaction(() => {
+        for (const task of blocked) {
+          const output = {
+            status: "blocked" as const,
+            summary: `Task blocked because dependencies are blocked: ${task.dependencyIds.join(", ")}`,
+            changedFiles: [],
+            checks: [
+              { name: "blocked dependencies", status: "failed", evidence: task.dependencyIds.join(",") },
+            ],
+            artifacts: [
+              {
+                kind: "blocked_dependency_task",
+                taskId: task.taskId,
+                dependencyIds: task.dependencyIds,
+                reason: task.reason,
+              },
+            ],
+            problems: [task.reason],
+          };
+          const attemptId = makeId("attempt");
+          db.query(
+            `
+            insert into attempts (
+              id, task_id, status, input_json, output_json,
+              checks_json, artifacts_json, error, finished_at
+            )
+            values (
+              $id, $taskId, 'blocked', $inputJson, $outputJson,
+              $checksJson, $artifactsJson, $error, current_timestamp
+            )
+            `,
+          ).run({
+            $id: attemptId,
+            $taskId: task.taskId,
+            $inputJson: toJson({ executor: "harness", reason: task.reason }),
+            $outputJson: toJson(output),
+            $checksJson: toJson(output.checks),
+            $artifactsJson: toJson(output.artifacts),
+            $error: task.reason,
+          });
+          db.query(
+            `
+            update tasks
+            set status = 'blocked', updated_at = current_timestamp
+            where id = $taskId and status = 'todo'
+            `,
+          ).run({ $taskId: task.taskId });
+          const lesson = lessonForAttempt(output);
+          db.query(
+            `
+            insert into lessons (
+              id, run_id, task_id, attempt_id, kind, summary, evidence_json
+            )
+            values (
+              $id, $runId, $taskId, $attemptId, $kind, $summary, $evidenceJson
+            )
+            `,
+          ).run({
+            $id: makeId("lesson"),
+            $runId: input.runId,
+            $taskId: task.taskId,
+            $attemptId: attemptId,
+            $kind: lesson.kind,
+            $summary: lesson.summary,
+            $evidenceJson: toJson(lesson.evidence),
+          });
         }
         return blocked;
       })();
