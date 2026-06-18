@@ -1242,15 +1242,21 @@ describe("runner", () => {
     });
     const mergedFile = await readFile(join(repoPath, "src", "supervised.ts"), "utf8");
     const actionEvent = harness.listHarnessActionEvents({ limit: 1 })[0];
+    const integrationResults = result.cycles[0].runs[0].integration!;
 
     expect(result.cycles[0].runs[0]).toMatchObject({
       runId,
       status: "done",
-      integration: expect.objectContaining({
-        status: "done",
-        actionType: "integrateVerifiedRun",
-      }),
     });
+    expect(integrationResults).toHaveLength(1);
+    expect(integrationResults).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          status: "done",
+          actionType: "integrateVerifiedRun",
+        }),
+      ]),
+    );
     expect(mergedFile.trim()).toBe("export const supervised = true;");
     expect(actionEvent).toMatchObject({
       actionType: "integrateVerifiedRun",
@@ -1336,23 +1342,195 @@ describe("runner", () => {
     });
     const mergedFile = await readFile(join(repoPath, "src", "pre-review.ts"), "utf8");
     const actionEvent = harness.listHarnessActionEvents({ limit: 1 })[0];
+    const integrationResults = result.cycles[0].runs[0].integration!;
 
     expect(harness.getRun(runId)?.status).toBe("todo");
     expect(harness.getTask(verifierTaskId)?.status).toBe("done");
     expect(result.cycles[0].runs[0]).toMatchObject({
       runId,
       status: "todo",
-      integration: expect.objectContaining({
-        status: "done",
-        actionType: "integrateVerifiedRun",
-      }),
     });
+    expect(integrationResults).toHaveLength(1);
+    expect(integrationResults).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          status: "done",
+          actionType: "integrateVerifiedRun",
+        }),
+      ]),
+    );
     expect(mergedFile.trim()).toBe("export const preReview = true;");
     expect(actionEvent).toMatchObject({
       actionType: "integrateVerifiedRun",
       status: "done",
       request: expect.objectContaining({ workerTaskId }),
     });
+  });
+
+  test("supervisor integrates every eligible verified worker in a single pre-review tick", async () => {
+    const repoPath = join(dir, "repo-pre-review-multi");
+    const workerAWorktree = join(dir, "verified-worker-a");
+    const workerBWorktree = join(dir, "verified-worker-b");
+    await mkdir(repoPath, { recursive: true });
+    await writeFile(join(repoPath, "README.md"), "initial\n");
+    git(repoPath, ["init", "-b", "main"]);
+    git(repoPath, ["config", "user.name", "Ouroboros Test"]);
+    git(repoPath, ["config", "user.email", "test@example.com"]);
+    git(repoPath, ["config", "commit.gpgSign", "false"]);
+    git(repoPath, ["add", "README.md"]);
+    git(repoPath, ["commit", "-m", "Initial commit"]);
+    git(repoPath, ["worktree", "add", "-b", "task-worker-a", workerAWorktree, "main"]);
+    await mkdir(join(workerAWorktree, "src"), { recursive: true });
+    await writeFile(join(workerAWorktree, "src", "worker_a.ts"), "export const workerA = true;\n");
+    git(repoPath, ["worktree", "add", "-b", "task-worker-b", workerBWorktree, "main"]);
+    await mkdir(join(workerBWorktree, "src"), { recursive: true });
+    await writeFile(join(workerBWorktree, "src", "worker_b.ts"), "export const workerB = true;\n");
+
+    const runId = harness.createRun({ goal: "Integrate two verified workers", projectRoot: repoPath });
+    const workerATaskId = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Implement worker A file",
+      prompt: "Create src/worker_a.ts.",
+      worktreePath: workerAWorktree,
+    });
+    harness.recordAttempt({
+      taskId: workerATaskId,
+      input: { executor: "test" },
+      output: {
+        status: "done",
+        summary: "Created worker A file",
+        changedFiles: ["src/worker_a.ts"],
+        checks: [{ name: "worker A check", status: "passed" }],
+        artifacts: [],
+        problems: [],
+      },
+    });
+    const verifierATaskId = harness.createTask({
+      runId,
+      role: "verifier",
+      goal: "Verify worker A",
+      prompt: "Verify worker A output.",
+      dependsOn: [workerATaskId],
+    });
+    harness.recordAttempt({
+      taskId: verifierATaskId,
+      input: { executor: "test" },
+      output: {
+        status: "done",
+        summary: "Verified worker A",
+        changedFiles: [],
+        checks: [{ name: "verify A", status: "passed" }],
+        artifacts: [],
+        problems: [],
+      },
+    });
+    const workerBTaskId = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Implement worker B file",
+      prompt: "Create src/worker_b.ts.",
+      worktreePath: workerBWorktree,
+      dependsOn: [workerATaskId],
+    });
+    harness.recordAttempt({
+      taskId: workerBTaskId,
+      input: { executor: "test" },
+      output: {
+        status: "done",
+        summary: "Created worker B file",
+        changedFiles: ["src/worker_b.ts"],
+        checks: [{ name: "worker B check", status: "passed" }],
+        artifacts: [],
+        problems: [],
+      },
+    });
+    const verifierBTaskId = harness.createTask({
+      runId,
+      role: "verifier",
+      goal: "Verify worker B",
+      prompt: "Verify worker B output.",
+      dependsOn: [workerBTaskId],
+    });
+    harness.recordAttempt({
+      taskId: verifierBTaskId,
+      input: { executor: "test" },
+      output: {
+        status: "done",
+        summary: "Verified worker B",
+        changedFiles: [],
+        checks: [{ name: "verify B", status: "passed" }],
+        artifacts: [],
+        problems: [],
+      },
+    });
+
+    const result = await superviseCodexRuns({
+      harness,
+      cwd: repoPath,
+      rootRunId: runId,
+      runConcurrency: 1,
+      taskConcurrency: 1,
+      maxCycles: 1,
+      maxRounds: 1,
+      maxTries: 3,
+      intervalMs: 1,
+      integrateCompletedRuns: true,
+      clientFactory: () => ({
+        start: async () => ({
+          status: "done" as const,
+          sessionId: "session_idle",
+          outputPath: join(dir, "idle-output.json"),
+          stdout: "",
+          stderr: "",
+          events: [],
+          output: {
+            status: "done" as const,
+            summary: "Nothing to start",
+            changedFiles: [],
+            checks: [],
+            artifacts: [],
+            problems: [],
+          },
+        }),
+        resume: async () => {
+          throw new Error("resume should not be called");
+        },
+      }),
+    });
+
+    const actionEvents = harness
+      .listHarnessActionEvents({ limit: 50 })
+      .filter((event) => event.actionType === "integrateVerifiedRun" && event.status === "done");
+    const integratedWorkerIds = actionEvents.map((event) => event.request.workerTaskId);
+    const integrationResults = result.cycles[0].runs[0].integration!;
+    const integrationOrderWorkerIds = integrationResults.map((result) => {
+      const artifact = result.artifacts.find((entry) => typeof (entry as { workerTaskId?: unknown }).workerTaskId === "string") as
+        | { workerTaskId: string }
+        | undefined;
+      return artifact?.workerTaskId;
+    });
+
+    expect(harness.getRun(runId)?.status).toBe("todo");
+    expect(integrationResults).toHaveLength(2);
+    expect(integrationResults).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          status: "done",
+          actionType: "integrateVerifiedRun",
+          artifacts: [expect.objectContaining({ workerTaskId: workerATaskId })],
+        }),
+        expect.objectContaining({
+          status: "done",
+          actionType: "integrateVerifiedRun",
+          artifacts: [expect.objectContaining({ workerTaskId: workerBTaskId })],
+        }),
+      ]),
+    );
+    expect(integratedWorkerIds.sort()).toEqual([workerATaskId, workerBTaskId].sort());
+    expect(integrationOrderWorkerIds).toEqual([workerBTaskId, workerATaskId]);
+    expect(await readFile(join(repoPath, "src", "worker_a.ts"), "utf8")).toContain("workerA = true");
+    expect(await readFile(join(repoPath, "src", "worker_b.ts"), "utf8")).toContain("workerB = true");
   });
 
   test("supervisor skips a verified worker superseded by a verified repair", async () => {
@@ -1495,11 +1673,13 @@ describe("runner", () => {
       }),
     });
 
-    expect(result.cycles[0].runs[0].integration).toMatchObject({
-      status: "done",
-      actionType: "integrateVerifiedRun",
-      artifacts: [expect.objectContaining({ workerTaskId: repairTaskId })],
-    });
+    expect(result.cycles[0].runs[0].integration).toEqual([
+      expect.objectContaining({
+        status: "done",
+        actionType: "integrateVerifiedRun",
+        artifacts: [expect.objectContaining({ workerTaskId: repairTaskId })],
+      }),
+    ]);
     expect(await readFile(join(repoPath, "src", "repair.ts"), "utf8")).toContain("repair");
     expect(Bun.file(join(repoPath, "src", "original.ts")).exists()).resolves.toBe(false);
   });
