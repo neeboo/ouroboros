@@ -269,6 +269,54 @@ describe("CLI", () => {
     ]);
   });
 
+  test("keeps self-iteration planner/verifier/goal-review on codex-resumable when config recovers the backend policy", async () => {
+    const configPath = join(dir, "self-iterate-recovered.toml");
+    await writeFile(
+      configPath,
+      [
+        "[agentDefaults]",
+        'global = "claude-code"',
+        "",
+        "[agentDefaults.roles]",
+        'planner = "codex-resumable"',
+        'verifier = "codex-resumable"',
+        'goal-review = "codex-resumable"',
+        "",
+        '["agentBackends"."claude-code"]',
+        'kind = "acpx"',
+        'agent = "claude"',
+        'approval = "approve-all"',
+        "",
+        '["agentBackends"."codex-resumable"]',
+        'kind = "codex-resumable"',
+      ].join("\n"),
+    );
+
+    const result = await runCliJson("self-iterate", "--config", configPath);
+    const overview = await runCliJson("run-overview", "--run-id", result.runId);
+
+    expect(overview.run.context.agentDefaults).toEqual({
+      global: "claude-code",
+      roles: {
+        planner: "codex-resumable",
+        verifier: "codex-resumable",
+        "goal-review": "codex-resumable",
+      },
+    });
+    expect(overview.run.context.agentBackends).toMatchObject({
+      "claude-code": { kind: "acpx", agent: "claude", approval: "approve-all" },
+      "codex-resumable": { kind: "codex-resumable" },
+    });
+
+    expect(result.runnerCommand).toContain("--executor codex-resumable");
+    expect(result.runnerCommand).toContain(`run-loop --run-id ${result.runId}`);
+    expect(result.runnerCommand).toContain("--stop-hook create-runs,create-tasks,create-verifier,create-repair,context-summary");
+    expect(result.launchCommand).toContain("self-iterate-launch");
+
+    const lessons = await runCliJson("list-lessons", "--run-id", result.runId);
+    expect(Array.isArray(lessons)).toBe(true);
+  });
+
   test("launches the self-iteration dashboard and runner together", async () => {
     await runCli("init");
     const dashboardPort = nextTestPort();

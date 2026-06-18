@@ -215,6 +215,35 @@ See `docs/agent-backends.md` for capability boundaries, smoke testing, and custo
 
 Claude Code uses its local Claude configuration by default. When a route resolves to `claude-code`, Orbs drops inherited `modelDefaults` and CLI `--model` values, including inert metadata such as `base_url` and `env_key`. A task can still set an explicit `config.modelPreference` when the Claude adapter should receive a specific `--model`.
 
+### Self-Iteration Backend Default
+
+Self-iteration runs keep `planner`, `verifier`, and `goal-review` on `codex-resumable` by default, with `claude-code`/acpx still available for `worker` and as `agentDefaults.global`. This recovered policy was added after a real self-iteration run observed a `claude-code`/acpx planner attempt stay running for more than 13 minutes with zero attempt events, zero output, and no worktree changes (see `docs/self-iteration-plan.md` for the full reason and inspection commands). Configure it through `ouroboros.toml`:
+
+```toml
+[agentDefaults]
+global = "claude-code"
+
+[agentDefaults.roles]
+planner = "codex-resumable"
+verifier = "codex-resumable"
+goal-review = "codex-resumable"
+
+["agentBackends"."claude-code"]
+kind = "acpx"
+agent = "claude"
+approval = "approve-all"
+
+["agentBackends"."codex-resumable"]
+kind = "codex-resumable"
+```
+
+Inspect future self-iteration run evidence with:
+
+```bash
+orbs run-overview --run-id <run_id>   # confirms agentDefaults.roles and latest attempts
+orbs list-lessons --run-id <run_id>   # confirms no new silent-start lesson was recorded
+```
+
 ## Common Commands
 
 ```bash
