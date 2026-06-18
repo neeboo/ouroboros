@@ -414,6 +414,23 @@ Templates can decide how strongly lessons influence the next graph design. The d
 
 Repeated blocked lessons may also be rendered as prompt-only candidate guardrails in the task prompt, while successful experiences may be rendered as reusable experience evidence. That rendering is guidance only unless a later planner or amendment slice turns the pattern into a durable active guardrail, preflight check, or schema-backed rule.
 
+Accepted active guardrails can be carried in `run.context.guardrails` without adding a new table:
+
+```json
+{
+  "guardrails": [
+    {
+      "id": "guardrail_db_actions",
+      "role": "worker",
+      "summary": "Workers must request fixed HarnessAction payloads instead of writing the root database.",
+      "source": "lesson"
+    }
+  ]
+}
+```
+
+Each guardrail may use `role`, `roles`, or no role for a global rule. `active: false` excludes a guardrail from prompts. The default task prompt renders matching items as `## Active Guardrails` before prompt-only candidate guardrails. Automatic promotion from repeated lessons to active guardrails remains a separate planner/amendment step.
+
 ## Verification
 
 A verifier is just another task with role `verifier`.

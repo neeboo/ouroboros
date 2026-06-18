@@ -488,6 +488,7 @@ describe("Harness", () => {
     harness.init();
 
     expect(harness.getPromptTemplate("task")?.contentMd).toBe(DEFAULT_TASK_PROMPT_TEMPLATE);
+    expect(harness.getPromptTemplate("task")?.contentMd).toContain("{{activeGuardrailsMarkdown}}");
   });
 
   test("upgrades promoted guardrail default task prompt templates", () => {
@@ -543,6 +544,7 @@ describe("Harness", () => {
     harness.init();
 
     expect(harness.getPromptTemplate("task")?.contentMd).toBe(DEFAULT_TASK_PROMPT_TEMPLATE);
+    expect(harness.getPromptTemplate("task")?.contentMd).toContain("{{activeGuardrailsMarkdown}}");
   });
 
   test("preserves custom task prompt templates during prompt seeding", () => {

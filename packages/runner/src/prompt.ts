@@ -5,6 +5,7 @@ import { prettyJson, renderPromptTemplate } from "./template";
 
 const MAX_PROMPT_LESSONS = 12;
 const MAX_LESSON_SUMMARY_CHARS = 320;
+const MAX_ACTIVE_GUARDRAILS = 8;
 
 export function buildTaskPrompt(input: PromptInput) {
   const compactRecentLessons = compactLessons(input.lessons ?? []);
@@ -17,6 +18,7 @@ export function buildTaskPrompt(input: PromptInput) {
     taskPrompt: input.task.prompt,
     doneWhenMarkdown: input.task.doneWhen.map((item) => `- ${item}`).join("\n"),
     dependencyAttemptsJson: prettyJson(input.dependencyAttempts),
+    activeGuardrailsMarkdown: renderActiveGuardrails(input.run.context, input.task.role),
     candidateGuardrailsMarkdown: renderCandidateGuardrails(compactRecentLessons),
     reusableExperienceEvidenceMarkdown: renderReusableExperienceEvidence(compactRecentLessons),
     runLessonsJson: prettyJson(compactRecentLessons),
@@ -49,6 +51,12 @@ export function buildTaskPrompt(input: PromptInput) {
 
 type CompactLesson = ReturnType<typeof compactLessons>[number];
 
+interface ActiveGuardrail {
+  id: string;
+  summary: string;
+  source?: string;
+}
+
 function compactLessons(lessons: Lesson[]) {
   return lessons.slice(-MAX_PROMPT_LESSONS).map((lesson) => ({
     kind: lesson.kind,
@@ -74,6 +82,64 @@ function renderCandidateGuardrails(lessons: CompactLesson[]) {
     ),
     "",
   ].join("\n");
+}
+
+function renderActiveGuardrails(context: Record<string, unknown>, role: string) {
+  const guardrails = activeGuardrailsForRole(context.guardrails, role);
+  if (guardrails.length === 0) {
+    return "";
+  }
+
+  return [
+    "## Active Guardrails",
+    "These guardrails are accepted for this run and role. Apply them before candidate lessons.",
+    "",
+    ...guardrails.map((guardrail) => {
+      const source = guardrail.source ? ` (source: ${guardrail.source})` : "";
+      return `- ${guardrail.id}: ${guardrail.summary}${source}`;
+    }),
+    "",
+  ].join("\n");
+}
+
+function activeGuardrailsForRole(value: unknown, role: string): ActiveGuardrail[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value
+    .map((item) => activeGuardrailFromValue(item, role))
+    .filter((item): item is ActiveGuardrail => item !== null)
+    .slice(-MAX_ACTIVE_GUARDRAILS);
+}
+
+function activeGuardrailFromValue(value: unknown, role: string): ActiveGuardrail | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  const record = value as Record<string, unknown>;
+  if (record.active === false) {
+    return null;
+  }
+  if (!guardrailAppliesToRole(record, role)) {
+    return null;
+  }
+  const summary = typeof record.summary === "string" ? compactText(record.summary, MAX_LESSON_SUMMARY_CHARS) : "";
+  if (!summary) {
+    return null;
+  }
+  const id = typeof record.id === "string" && record.id.trim() ? record.id.trim() : "guardrail";
+  const source = typeof record.source === "string" && record.source.trim() ? record.source.trim() : undefined;
+  return { id, summary, source };
+}
+
+function guardrailAppliesToRole(record: Record<string, unknown>, role: string) {
+  const roles = Array.isArray(record.roles)
+    ? record.roles.filter((item): item is string => typeof item === "string")
+    : typeof record.role === "string"
+      ? [record.role]
+      : [];
+  return roles.length === 0 || roles.includes(role) || roles.includes("*");
 }
 
 function renderReusableExperienceEvidence(lessons: CompactLesson[]) {

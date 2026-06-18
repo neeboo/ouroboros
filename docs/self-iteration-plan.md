@@ -17,6 +17,7 @@ Ouroboros already has the minimum working loop:
 - A first-class self-iteration bootstrap command that creates a self-iteration run, seeds the planner task, and can launch the dashboard and runner together.
 - Frozen verifier-contract plumbing for planner-created worker tasks: optional `verifierContract` planner output stays backward-compatible when omitted, is persisted in task config when supplied, is injected into verifier prompts, and is cited on `created_verifier_task` artifacts.
 - Prompt rendering already turns repeated lessons into prompt-only candidate guardrails and successful experiences into reusable evidence.
+- Accepted active guardrails can now be carried in `run.context.guardrails` and rendered into matching role prompts before prompt-only candidate guardrails.
 
 ## Next Iteration Goal
 
@@ -26,7 +27,7 @@ The current self-iteration state is past bootstrap, past the first frozen verifi
 
 This slice follows commits `592d380` for role model defaults and `18265b4` for explicit goal-review decision recovery. Those behaviors are already accounted for and stay out of scope here.
 
-The next planning candidate after this slice is durable lesson-to-guardrail promotion: active role-scoped guardrails, preflight checks, or schema-backed persistence will require a later planner or amendment slice with an explicit boundary. Keep that future path separate. Do not change database schema, prompt contracts, or dependency sets until a planner has proposed the smallest verifiable slice and an amendment path.
+The next planning candidate after this slice is automatic lesson-to-guardrail promotion: repeated lessons can be proposed as active role-scoped guardrails, preflight checks, or schema-backed persistence through a later planner or amendment slice with an explicit boundary. Keep that future path separate. Do not change database schema or dependency sets until a planner has proposed the smallest verifiable slice and an amendment path.
 
 ## Split-Enough Rule
 

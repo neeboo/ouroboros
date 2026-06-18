@@ -115,6 +115,57 @@ describe("runner", () => {
     expect(prompt).toContain("isolated worktree");
   });
 
+  test("builds prompts with active role-scoped guardrails from run context", () => {
+    const runId = harness.createRun({
+      goal: "Use durable guardrails",
+      context: {
+        guardrails: [
+          {
+            id: "guardrail_worker_db_actions",
+            role: "worker",
+            summary: "Workers must request fixed HarnessAction payloads instead of writing the root database.",
+            source: "lesson",
+          },
+          {
+            id: "guardrail_verifier_evidence",
+            roles: ["verifier", "goal-review"],
+            summary: "Verifier decisions must cite repository, command, and harness evidence.",
+            source: "lesson",
+          },
+          {
+            id: "guardrail_disabled",
+            role: "worker",
+            summary: "Disabled guardrails stay out of prompts.",
+            active: false,
+          },
+        ],
+      },
+    });
+    const taskId = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Apply active guardrails",
+      prompt: "Use active guardrails before editing.",
+    });
+
+    const prompt = buildTaskPrompt({
+      run: harness.getRun(runId)!,
+      task: harness.getTask(taskId)!,
+      dependencyAttempts: [],
+    });
+
+    const activeGuardrailsSection = prompt.split("## Active Guardrails")[1]!
+      .split("## Candidate Guardrails")[0]!
+      .split("## Reusable Experience Evidence")[0]!
+      .split("## Required Output")[0]!;
+
+    expect(prompt).toContain("## Active Guardrails");
+    expect(activeGuardrailsSection).toContain("guardrail_worker_db_actions");
+    expect(activeGuardrailsSection).toContain("Workers must request fixed HarnessAction payloads");
+    expect(activeGuardrailsSection).not.toContain("guardrail_verifier_evidence");
+    expect(activeGuardrailsSection).not.toContain("Disabled guardrails");
+  });
+
   test("builds prompts with compact recent lessons", () => {
     const runId = harness.createRun({ goal: "Use Ouroboros to iterate on Ouroboros" });
     const taskId = harness.createTask({
