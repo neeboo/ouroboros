@@ -39,6 +39,7 @@ import { checkLinearAccess, linkLinearIssue } from "./linear";
 import { serveDashboard } from "./dashboard";
 import { requestHarnessAction, serveHarnessActions } from "./action-server";
 import { formatRunEvidence } from "./run-evidence";
+import { formatAttemptExplanation } from "./explain-attempt";
 import { buildAgentMatrix, doctorAgent } from "../../../scripts/acpx-agent-smoke";
 import { join } from "node:path";
 import type { Task } from "@ouroboros/harness";
@@ -605,6 +606,25 @@ switch (parsed.command) {
     console.log(
       formatRunEvidence(overview, {
         lessonLimit: parsePositiveInteger(flag(parsed, "limit") ?? "10", "--limit"),
+      }),
+    );
+    break;
+  }
+  case "explain-attempt": {
+    const attemptId = required(parsed, "attempt-id");
+    const attempt = harness.getAttempt(attemptId);
+    if (!attempt) {
+      fail(`attempt not found: ${attemptId}`);
+    }
+    const task = harness.getTask(attempt.taskId);
+    const explicitStdout = flag(parsed, "stdout");
+    const events = explicitStdout === undefined ? harness.listAttemptEvents(attemptId) : [];
+    console.log(
+      formatAttemptExplanation(attempt, {
+        stdout: explicitStdout ?? null,
+        events,
+        role: task?.role ?? null,
+        eventLimit: parsePositiveInteger(flag(parsed, "event-limit") ?? "25", "--event-limit"),
       }),
     );
     break;

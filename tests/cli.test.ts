@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { homedir, tmpdir } from "node:os";
 import { Harness } from "../packages/harness/src";
 import { formatRunEvidence } from "../packages/cli/src/run-evidence";
+import { formatAttemptExplanation } from "../packages/cli/src/explain-attempt";
 import { Database } from "bun:sqlite";
 
 describe("CLI", () => {
@@ -3673,6 +3674,355 @@ describe("CLI", () => {
 
     expect(result.exitCode).toBe(1);
     expect(result.stderr).toContain("run not found: run_missing");
+  });
+
+  test("formatAttemptExplanation prints a categorized attempt summary", async () => {
+    await runCli("init");
+    const run = await runCliJson("create-run", "--goal", "Validate explain-attempt formatter");
+    const task = await runCliJson(
+      "create-task",
+      "--run-id",
+      run.id,
+      "--role",
+      "worker",
+      "--goal",
+      "Implement increment",
+      "--prompt",
+      "Make a small change.",
+    );
+    const result = await runCliJson(
+      "record-attempt",
+      "--task-id",
+      task.id,
+      "--input-json",
+      JSON.stringify({
+        route: { executionMode: "codex-resumable", backend: { kind: "codex-resumable" } },
+        model: { model: "gpt-5.5" },
+        codexSessionId: "session_explain_1",
+      }),
+      "--output-json",
+      JSON.stringify({
+        status: "done",
+        summary: "Increment shipped",
+        changedFiles: ["packages/cli/src/explain-attempt.ts"],
+        checks: [{ name: "typecheck", status: "passed" }],
+        artifacts: [],
+        problems: ["API rate limit hit"],
+      }),
+    );
+
+    const harness = new Harness(dbPath);
+    const attempt = harness.getAttempt(result.attemptId);
+    const summary = formatAttemptExplanation(attempt, {
+      role: "worker",
+      stdout: [
+        "[client] initialize (running)",
+        "[client] session/new (running)",
+        "[thinking] Considering the next step",
+        "[tool] edited packages/cli/src/explain-attempt.ts",
+        "[error] RUNTIME: Internal error: API Error: 529 Overloaded",
+        "unstructured stdout line",
+      ].join("\n"),
+    });
+
+    expect(summary).toContain(`Attempt ${result.attemptId}`);
+    expect(summary).toContain(`Task: ${task.id}`);
+    expect(summary).toContain("Role: worker");
+    expect(summary).toContain("Status: done");
+    expect(summary).toContain("Model: gpt-5.5");
+    expect(summary).toContain("Route: codex-resumable");
+    expect(summary).toContain("Codex session: session_explain_1");
+    expect(summary).toContain("Events (6)");
+    expect(summary).toContain("client:");
+    expect(summary).toContain("[client] initialize (running)");
+    expect(summary).toContain("[client] session/new (running)");
+    expect(summary).toContain("thinking:");
+    expect(summary).toContain("[thinking] Considering the next step");
+    expect(summary).toContain("tool:");
+    expect(summary).toContain("[tool] edited packages/cli/src/explain-attempt.ts");
+    expect(summary).toContain("other:");
+    expect(summary).toContain("unstructured stdout line");
+    expect(summary).toContain("Errors and warnings (2)");
+    expect(summary).toContain("[error] RUNTIME: Internal error: API Error: 529 Overloaded");
+    expect(summary).toContain("API rate limit hit");
+    expect(summary).toContain("Summary");
+    expect(summary).toContain("Increment shipped");
+  });
+
+  test("formatAttemptExplanation categorizes recorded attempt events into the events section", () => {
+    const summary = formatAttemptExplanation(
+      {
+        id: "attempt_synthetic_events",
+        taskId: "task_synthetic_events",
+        status: "done",
+        input: { route: { executionMode: "codex-resumable" }, model: { model: "gpt-5.5" } },
+        output: { status: "done", summary: "Synthetic done" },
+        checks: [],
+        artifacts: [],
+        error: null,
+      },
+      {
+        role: "worker",
+        events: [
+          {
+            id: "event_1",
+            attemptId: "attempt_synthetic_events",
+            sequence: 1,
+            stream: "stdout",
+            text: "[client] initialize (running)",
+            payload: {},
+            createdAt: "2026-06-19T00:00:00.000Z",
+          },
+          {
+            id: "event_2",
+            attemptId: "attempt_synthetic_events",
+            sequence: 2,
+            stream: "stdout",
+            text: "[error] RUNTIME: Internal error: API Error: 529 Overloaded",
+            payload: {},
+            createdAt: "2026-06-19T00:00:01.000Z",
+          },
+          {
+            id: "event_3",
+            attemptId: "attempt_synthetic_events",
+            sequence: 3,
+            stream: "stderr",
+            text: "child process failed",
+            payload: {},
+            createdAt: "2026-06-19T00:00:02.000Z",
+          },
+          {
+            id: "event_4",
+            attemptId: "attempt_synthetic_events",
+            sequence: 4,
+            stream: "codex-json",
+            text: "{\"type\":\"message\"}",
+            payload: {},
+            createdAt: "2026-06-19T00:00:03.000Z",
+          },
+        ],
+      },
+    );
+
+    expect(summary).toContain("Events (3)");
+    expect(summary).toContain("[client] initialize (running)");
+    expect(summary).toContain("[error] RUNTIME: Internal error: API Error: 529 Overloaded");
+    expect(summary).toContain("Errors and warnings (2)");
+    expect(summary).toContain("[error] child process failed");
+    expect(summary).not.toContain("message");
+  });
+
+  test("formatAttemptExplanation treats missing stdout as an empty events section", () => {
+    const summary = formatAttemptExplanation(
+      {
+        id: "attempt_synthetic_1",
+        taskId: "task_synthetic_1",
+        status: "done",
+        input: {},
+        output: { status: "done", summary: "Synthetic done" },
+        checks: [],
+        artifacts: [],
+        error: null,
+      },
+      { role: "verifier" },
+    );
+
+    expect(summary).toContain("Attempt attempt_synthetic_1");
+    expect(summary).toContain("Task: task_synthetic_1");
+    expect(summary).toContain("Role: verifier");
+    expect(summary).toContain("Status: done");
+    expect(summary).toContain("Events: (none captured)");
+    expect(summary).toContain("Errors and warnings: (none)");
+    expect(summary).toContain("Summary");
+    expect(summary).toContain("Synthetic done");
+  });
+
+  test("formatAttemptExplanation throws when the attempt is missing", () => {
+    expect(() => formatAttemptExplanation(null)).toThrow("attempt not found");
+  });
+
+  test("explain-attempt CLI prints the categorized summary for a real attempt using --stdout", async () => {
+    await runCli("init");
+    const run = await runCliJson("create-run", "--goal", "Validate explain-attempt CLI");
+    const task = await runCliJson(
+      "create-task",
+      "--run-id",
+      run.id,
+      "--role",
+      "worker",
+      "--goal",
+      "Implement increment",
+      "--prompt",
+      "Make a small change.",
+    );
+    const result = await runCliJson(
+      "record-attempt",
+      "--task-id",
+      task.id,
+      "--input-json",
+      JSON.stringify({
+        route: { executionMode: "codex-resumable" },
+        model: { model: "gpt-5.5" },
+      }),
+      "--output-json",
+      JSON.stringify({
+        status: "done",
+        summary: "Increment shipped",
+        checks: [],
+        artifacts: [],
+        problems: [],
+      }),
+    );
+
+    const stdout = await runCli(
+      "explain-attempt",
+      "--attempt-id",
+      result.attemptId,
+      "--stdout",
+      "[client] initialize (running)\n[error] API Error: 529",
+    );
+
+    expect(stdout).toContain(`Attempt ${result.attemptId}`);
+    expect(stdout).toContain(`Task: ${task.id}`);
+    expect(stdout).toContain("Role: worker");
+    expect(stdout).toContain("Status: done");
+    expect(stdout).toContain("Model: gpt-5.5");
+    expect(stdout).toContain("Route: codex-resumable");
+    expect(stdout).toContain("Events (2)");
+    expect(stdout).toContain("[client] initialize (running)");
+    expect(stdout).toContain("Errors and warnings (1)");
+    expect(stdout).toContain("[error] API Error: 529");
+    expect(stdout).toContain("Increment shipped");
+  });
+
+  test("explain-attempt CLI replays recorded attempt_events when --stdout is omitted", async () => {
+    await runCli("init");
+    const run = await runCliJson("create-run", "--goal", "Validate explain-attempt replay");
+    const task = await runCliJson(
+      "create-task",
+      "--run-id",
+      run.id,
+      "--role",
+      "worker",
+      "--goal",
+      "Implement increment",
+      "--prompt",
+      "Make a small change.",
+    );
+    const result = await runCliJson(
+      "record-attempt",
+      "--task-id",
+      task.id,
+      "--input-json",
+      JSON.stringify({
+        route: { executionMode: "codex-resumable" },
+        model: { model: "gpt-5.5" },
+        codexSessionId: "session_replay_1",
+      }),
+      "--output-json",
+      JSON.stringify({
+        status: "done",
+        summary: "Increment shipped",
+        checks: [],
+        artifacts: [],
+        problems: [],
+      }),
+    );
+
+    const harness = new Harness(dbPath);
+    harness.recordAttemptEvent({
+      attemptId: result.attemptId,
+      sequence: 1,
+      stream: "stdout",
+      text: "[client] initialize (running)",
+    });
+    harness.recordAttemptEvent({
+      attemptId: result.attemptId,
+      sequence: 2,
+      stream: "stdout",
+      text: "[thinking] Considering the next step",
+    });
+    harness.recordAttemptEvent({
+      attemptId: result.attemptId,
+      sequence: 3,
+      stream: "stdout",
+      text: "[error] API Error: 529 Overloaded",
+    });
+    harness.recordAttemptEvent({
+      attemptId: result.attemptId,
+      sequence: 4,
+      stream: "stderr",
+      text: "child process exited",
+    });
+    harness.recordAttemptEvent({
+      attemptId: result.attemptId,
+      sequence: 5,
+      stream: "codex-json",
+      text: '{"type":"message","role":"assistant"}',
+    });
+
+    const stdout = await runCli("explain-attempt", "--attempt-id", result.attemptId);
+
+    expect(stdout).toContain(`Attempt ${result.attemptId}`);
+    expect(stdout).toContain(`Task: ${task.id}`);
+    expect(stdout).toContain("Role: worker");
+    expect(stdout).toContain("Status: done");
+    expect(stdout).toContain("Model: gpt-5.5");
+    expect(stdout).toContain("Route: codex-resumable");
+    expect(stdout).toContain("Codex session: session_replay_1");
+    expect(stdout).toContain("Events (4)");
+    expect(stdout).toContain("[client] initialize (running)");
+    expect(stdout).toContain("[thinking] Considering the next step");
+    expect(stdout).toContain("[error] API Error: 529 Overloaded");
+    expect(stdout).toContain("Errors and warnings (2)");
+    expect(stdout).toContain("[error] child process exited");
+    expect(stdout).not.toContain("assistant");
+    expect(stdout).toContain("Increment shipped");
+  });
+
+  test("explain-attempt CLI reports no captured events when the attempt has no recorded events", async () => {
+    await runCli("init");
+    const run = await runCliJson("create-run", "--goal", "Validate explain-attempt empty");
+    const task = await runCliJson(
+      "create-task",
+      "--run-id",
+      run.id,
+      "--role",
+      "worker",
+      "--goal",
+      "Implement increment",
+      "--prompt",
+      "Make a small change.",
+    );
+    const result = await runCliJson(
+      "record-attempt",
+      "--task-id",
+      task.id,
+      "--input-json",
+      JSON.stringify({}),
+      "--output-json",
+      JSON.stringify({
+        status: "done",
+        summary: "No output captured",
+        checks: [],
+        artifacts: [],
+        problems: [],
+      }),
+    );
+
+    const stdout = await runCli("explain-attempt", "--attempt-id", result.attemptId);
+
+    expect(stdout).toContain("Events: (none captured)");
+    expect(stdout).toContain("Errors and warnings: (none)");
+    expect(stdout).toContain("No output captured");
+  });
+
+  test("explain-attempt CLI fails with a helpful message when the attempt is missing", async () => {
+    await runCli("init");
+    const result = await runCliRaw("explain-attempt", "--attempt-id", "attempt_missing");
+
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain("attempt not found: attempt_missing");
   });
 
   test("retries a blocked task", async () => {
