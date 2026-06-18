@@ -189,6 +189,9 @@ function aggregateDashboardRunStatus(
   threads: RunOverview["threads"],
 ): NonNullable<RunOverview["run"]>["status"] {
   const runs = overviews.map((overview) => overview.run).filter((run): run is NonNullable<RunOverview["run"]> => run !== null);
+  if (runs.length > 0 && runs.every((run) => run.status === "done")) {
+    return "done";
+  }
   if (
     tasks.some((task) => task.status === "running") ||
     sessions.some((session) => session.status === "running") ||

@@ -830,6 +830,14 @@ function prepareRunDrain(harness: Harness, action: Extract<HarnessAction, { type
     return doneResult(action.type, `Run ${action.runId} has ${active.length} active task${active.length === 1 ? "" : "s"} ready for a runner.`, checks, artifacts);
   }
 
+  const completedReview = selectCompletedGoalReview(overview);
+  if (completedReview) {
+    harness.updateRunStatus({ runId: action.runId, status: "done" });
+    checks.push({ name: "completed goal review", status: "passed", evidence: completedReview.id });
+    artifacts.push({ kind: "run", runId: action.runId, previousStatus: run.status, status: "done", reviewTaskId: completedReview.id });
+    return doneResult(action.type, `Run ${action.runId} marked done from existing complete goal-review.`, checks, artifacts);
+  }
+
   const review = ensureGoalReviewTask(harness, action.runId, maxTries, overview);
   checks.push(...review.checks);
   artifacts.push(...review.artifacts);

@@ -486,7 +486,7 @@ Supported actions:
 { "type": "integrateVerifiedRun", "runId": "run_...", "workerTaskId": "optional", "targetBranch": "main", "push": false, "reason": "optional" }
 ```
 
-`prepareRunDrain` reclaims orphaned task leases, marks the run `todo`, and creates or retries a bounded `goal-review` task when the queue is otherwise empty. It does not mark a run complete and does not weaken the verifier contract.
+`prepareRunDrain` reclaims orphaned task leases, marks the run `todo`, and then drains the empty-queue case. If a completed `goal-review` already returned `runDecision: "complete"`, it marks the run `done`. Otherwise it creates or retries a bounded `goal-review` task when the queue is empty. It never weakens the verifier contract.
 
 `retireRun` moves a stale or superseded run out of the active control surface without deleting evidence. It keeps the run status `blocked`, blocks unfinished tasks in that run, and patches run context with `retired: true`, `retiredAt`, and `retiredReason`. Retired runs stay queryable as history, but dashboard aggregate views and global active run counts exclude them.
 

@@ -73,6 +73,48 @@ describe("Harness actions", () => {
     expect(overview.tasks).toContainEqual(expect.objectContaining({ role: "goal-review", status: "todo" }));
   });
 
+  test("prepares a drained run by accepting an existing complete goal-review", () => {
+    const runId = harness.createRun({ goal: "Already reviewed run" });
+    const reviewTaskId = harness.createTask({
+      runId,
+      role: "goal-review",
+      goal: "Review whether the run goal is complete",
+      prompt: "Review completion.",
+    });
+    harness.recordAttempt({
+      taskId: reviewTaskId,
+      input: { executor: "test" },
+      output: {
+        status: "done",
+        runDecision: "complete",
+        summary: "Goal reached with evidence.",
+        changedFiles: [],
+        checks: [{ name: "goal review", status: "passed", evidence: "complete" }],
+        artifacts: [],
+        problems: [],
+      },
+    });
+
+    const result = applyHarnessAction(harness, {
+      type: "prepareRunDrain",
+      runId,
+      maxTries: 2,
+    });
+    const overview = harness.getRunOverview({ runId });
+
+    expect(result).toMatchObject({
+      status: "done",
+      actionType: "prepareRunDrain",
+    });
+    expect(result.checks).toContainEqual(
+      expect.objectContaining({ name: "completed goal review", status: "passed", evidence: reviewTaskId }),
+    );
+    expect(result.artifacts).toContainEqual(
+      expect.objectContaining({ kind: "run", runId, previousStatus: "todo", status: "done" }),
+    );
+    expect(overview.run?.status).toBe("done");
+  });
+
   test("completes a system task from a recorded harness action event", () => {
     const runId = harness.createRun({ goal: "Repair run state" });
     const taskId = harness.createTask({

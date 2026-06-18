@@ -1077,6 +1077,74 @@ describe("dashboard", () => {
     }
   });
 
+  test("keeps a completed root dashboard overview done when only stale child threads remain", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "ouroboros-dashboard-stale-thread-"));
+    const harness = new Harness(join(dir, "ouroboros.db"));
+    harness.init();
+    const rootRunId = harness.createRun({ goal: "Root intake" });
+    harness.updateRunStatus({ runId: rootRunId, status: "done" });
+    const childRunId = harness.createRun({
+      goal: "Completed child goal",
+      context: { parentRunId: rootRunId },
+    });
+    const childTaskId = harness.createTask({
+      runId: childRunId,
+      role: "worker",
+      goal: "Implement child work",
+      prompt: "Do the child work.",
+    });
+    const childAttemptId = harness.recordAttempt({
+      taskId: childTaskId,
+      input: { executor: "test" },
+      output: {
+        status: "done",
+        summary: "Child work completed.",
+        changedFiles: [],
+        checks: [{ name: "child work", status: "passed" }],
+        artifacts: [],
+        problems: [],
+      },
+    });
+    harness.updateRunStatus({ runId: childRunId, status: "done" });
+    harness.upsertExecutionThread({
+      id: `thread_${childAttemptId}`,
+      runId: childRunId,
+      taskId: childTaskId,
+      attemptId: childAttemptId,
+      ownerType: "runner",
+      role: "worker",
+      status: "running",
+      pid: 12345,
+    });
+
+    try {
+      const response = await handleDashboardRequest(
+        new Request(`http://localhost/api/runs/${rootRunId}/overview`),
+        {
+          runId: rootRunId,
+          overview: () => harness.getRunOverview({ runId: rootRunId }),
+          childOverviews: () => [harness.getRunOverview({ runId: childRunId })],
+          globalRunCounts: () => harness.countRunsByStatus(),
+          runnerStatus: () => ({ status: "idle", pid: null }),
+          supervisorStatus: () => ({ status: "idle", pid: null, lastOutput: "" }),
+          renderTaskPrompt: () => "",
+        },
+      );
+      const body = await response.json();
+
+      expect(response.status).toBe(200);
+      expect(body.run.status).toBe("done");
+      expect(body.globalRuns).toEqual({ todo: 0, running: 0, done: 2, blocked: 0 });
+      expect(body.threads.map((thread: { id: string }) => thread.id)).toContain(`thread_${childAttemptId}`);
+      expect(body.supervisor).toMatchObject({
+        status: "running",
+        externallyManaged: true,
+      });
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   test("ignores retired child runs when aggregating the root dashboard overview", async () => {
     const dir = await mkdtemp(join(tmpdir(), "ouroboros-dashboard-retired-child-"));
     const harness = new Harness(join(dir, "ouroboros.db"));
