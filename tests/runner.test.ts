@@ -2024,6 +2024,48 @@ describe("runner", () => {
     expect(verifier.dependsOn).toEqual([worker.id]);
   });
 
+  test("planner stop hook resolves role-prefixed next task goal titles in dependsOn", async () => {
+    const runId = harness.createRun({ goal: "Build loop" });
+    harness.createTask({
+      runId,
+      role: "planner",
+      goal: "Plan next work",
+      prompt: "Plan dependent tasks.",
+    });
+
+    await runNextReadyTask({
+      harness,
+      runId,
+      executor: async () => ({
+        status: "done",
+        summary: "Planned role-prefixed dependencies",
+        artifacts: [],
+        checks: [],
+        problems: [],
+        nextTasks: [
+          {
+            role: "worker",
+            goal: "Plumb a run-level goal contract through run.context_json with no schema migration",
+            prompt: "Implement goal contract plumbing.",
+          },
+          {
+            role: "verifier",
+            goal: "Verify goal contract plumbing",
+            prompt: "Verify goal contract plumbing.",
+            dependsOn: ["worker:Plumb a run-level goal contract through run.context_json with no schema migration"],
+          },
+        ],
+      }),
+      stopHooks: [createTasksFromOutputHook({ harness })],
+    });
+
+    const overview = harness.getRunOverview({ runId, eventLimit: 1 });
+    const worker = overview.tasks.find((task) => task.goal === "Plumb a run-level goal contract through run.context_json with no schema migration")!;
+    const verifier = overview.tasks.find((task) => task.goal === "Verify goal contract plumbing")!;
+
+    expect(verifier.dependsOn).toEqual([worker.id]);
+  });
+
   test("planner stop hook makes same-batch verifiers wait for producer tasks by default", async () => {
     const runId = harness.createRun({ goal: "Build loop" });
     const plannerTask = harness.createTask({

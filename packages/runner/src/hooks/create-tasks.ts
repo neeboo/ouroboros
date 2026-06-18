@@ -82,9 +82,11 @@ function resolvePlannedDependencies(input: {
 
   addLabel(input.sourceTask.id, input.sourceTask.id);
   addLabel(input.sourceTask.goal, input.sourceTask.id);
+  addLabel(roleGoalLabel(input.sourceTask.role, input.sourceTask.goal), input.sourceTask.id);
   for (const entry of input.plannedEntries) {
     addLabel(entry.id, entry.id);
     addLabel(entry.plannedTask.goal, entry.id);
+    addLabel(roleGoalLabel(entry.plannedTask.role, entry.plannedTask.goal), entry.id);
   }
 
   const problems: string[] = [];
@@ -110,6 +112,12 @@ function resolvePlannedDependencies(input: {
   });
 
   return { dependsOnByIndex, problems };
+}
+
+function roleGoalLabel(role: string, goal: string) {
+  const normalizedRole = role.trim().toLowerCase();
+  const normalizedGoal = goal.trim();
+  return normalizedRole && normalizedGoal ? `${normalizedRole}:${normalizedGoal}` : "";
 }
 
 function explicitDependencyRefs(plannedTask: PlannedTask) {
