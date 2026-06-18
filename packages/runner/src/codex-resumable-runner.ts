@@ -1076,6 +1076,9 @@ function selectIntegrationCandidate(overview: RunOverview, integrated: Successfu
     if (integrated.workerIds.has(task.id)) {
       return false;
     }
+    if (isSupersededByVerifiedRepair(overview, task.id)) {
+      return false;
+    }
     const session = [...overview.sessions].reverse().find((candidate) => candidate.taskId === task.id && candidate.status === "done");
     if (!Array.isArray(session?.output.changedFiles) || session.output.changedFiles.length === 0) {
       return false;
@@ -1089,6 +1092,44 @@ function selectIntegrationCandidate(overview: RunOverview, integrated: Successfu
       candidate.dependsOn.includes(task.id)
     );
   }) ?? null;
+}
+
+function isSupersededByVerifiedRepair(overview: RunOverview, workerTaskId: string) {
+  const blockedVerifierIds = overview.tasks
+    .filter((task) => task.role === "verifier" && task.status === "blocked" && task.dependsOn.includes(workerTaskId))
+    .map((task) => task.id);
+  if (blockedVerifierIds.length === 0) {
+    return false;
+  }
+
+  const repairTaskIds = new Set<string>();
+  for (const session of overview.sessions) {
+    if (!blockedVerifierIds.includes(session.taskId) || session.status !== "blocked") {
+      continue;
+    }
+    const artifacts = Array.isArray(session.output.artifacts) ? session.output.artifacts : [];
+    for (const artifact of artifacts) {
+      if (isCreatedRepairTaskArtifact(artifact)) {
+        repairTaskIds.add(artifact.taskId);
+      }
+    }
+  }
+
+  for (const repairTaskId of repairTaskIds) {
+    const repairTask = overview.tasks.find((task) => task.id === repairTaskId);
+    if (repairTask?.status !== "done") {
+      continue;
+    }
+    const repairVerifier = overview.tasks.find((task) =>
+      task.role === "verifier" &&
+      task.status === "done" &&
+      task.dependsOn.includes(repairTaskId)
+    );
+    if (repairVerifier) {
+      return true;
+    }
+  }
+  return false;
 }
 
 function successfulIntegrationState(harness: Harness, runId: string): SuccessfulIntegrationState {
@@ -1127,6 +1168,13 @@ function isIntegrationArtifact(value: unknown): value is { kind: "integration"; 
     (value as { kind?: unknown }).kind === "integration" &&
     Array.isArray((value as { changedFiles?: unknown }).changedFiles) &&
     (value as { changedFiles: unknown[] }).changedFiles.every((file) => typeof file === "string");
+}
+
+function isCreatedRepairTaskArtifact(value: unknown): value is { kind: "created_repair_task"; taskId: string } {
+  return typeof value === "object" &&
+    value !== null &&
+    (value as { kind?: unknown }).kind === "created_repair_task" &&
+    typeof (value as { taskId?: unknown }).taskId === "string";
 }
 
 function runsInScope(runs: ReturnType<Harness["listRuns"]>, rootRunId: string) {

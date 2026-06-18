@@ -1355,6 +1355,155 @@ describe("runner", () => {
     });
   });
 
+  test("supervisor skips a verified worker superseded by a verified repair", async () => {
+    const repoPath = join(dir, "repo-superseded");
+    const originalWorktreePath = join(dir, "original-worker");
+    const repairWorktreePath = join(dir, "repair-worker");
+    await mkdir(repoPath, { recursive: true });
+    await writeFile(join(repoPath, "README.md"), "initial\n");
+    git(repoPath, ["init", "-b", "main"]);
+    git(repoPath, ["config", "user.name", "Ouroboros Test"]);
+    git(repoPath, ["config", "user.email", "test@example.com"]);
+    git(repoPath, ["config", "commit.gpgSign", "false"]);
+    git(repoPath, ["add", "README.md"]);
+    git(repoPath, ["commit", "-m", "Initial commit"]);
+    git(repoPath, ["worktree", "add", "-b", "task-original-worker", originalWorktreePath, "main"]);
+    await mkdir(join(originalWorktreePath, "src"), { recursive: true });
+    await mkdir(join(originalWorktreePath, "docs"), { recursive: true });
+    await writeFile(join(originalWorktreePath, "src", "original.ts"), "export const original = true;\n");
+    await writeFile(join(originalWorktreePath, "docs", "original.md"), "original docs\n");
+    git(repoPath, ["worktree", "add", "-b", "task-repair-worker", repairWorktreePath, "main"]);
+    await mkdir(join(repairWorktreePath, "src"), { recursive: true });
+    await writeFile(join(repairWorktreePath, "src", "repair.ts"), "export const repair = true;\n");
+
+    const runId = harness.createRun({ goal: "Integrate repaired work", projectRoot: repoPath });
+    const originalTaskId = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Implement original work",
+      prompt: "Create original files.",
+      worktreePath: originalWorktreePath,
+    });
+    harness.recordAttempt({
+      taskId: originalTaskId,
+      input: { executor: "test" },
+      output: {
+        status: "done",
+        summary: "Created original files",
+        changedFiles: ["src/original.ts", "docs/original.md"],
+        checks: [{ name: "worker check", status: "passed" }],
+        artifacts: [],
+        problems: [],
+      },
+    });
+    const blockedVerifierId = harness.createTask({
+      runId,
+      role: "verifier",
+      goal: "Verify original work",
+      prompt: "Verify original files.",
+      dependsOn: [originalTaskId],
+    });
+    const repairTaskId = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Repair original work",
+      prompt: "Repair original files.",
+      worktreePath: repairWorktreePath,
+    });
+    harness.recordAttempt({
+      taskId: blockedVerifierId,
+      input: { executor: "test" },
+      output: {
+        status: "blocked",
+        summary: "Original work needs repair",
+        changedFiles: [],
+        checks: [{ name: "verify", status: "failed" }],
+        artifacts: [{ kind: "created_repair_task", taskId: repairTaskId, verifierTaskId: blockedVerifierId }],
+        problems: ["original work needs repair"],
+      },
+    });
+    harness.recordAttempt({
+      taskId: repairTaskId,
+      input: { executor: "test" },
+      output: {
+        status: "done",
+        summary: "Repaired original files",
+        changedFiles: ["src/repair.ts"],
+        checks: [{ name: "repair check", status: "passed" }],
+        artifacts: [],
+        problems: [],
+      },
+    });
+    const repairVerifierId = harness.createTask({
+      runId,
+      role: "verifier",
+      goal: "Verify repair",
+      prompt: "Verify repair.",
+      dependsOn: [repairTaskId],
+    });
+    harness.recordAttempt({
+      taskId: repairVerifierId,
+      input: { executor: "test" },
+      output: {
+        status: "done",
+        summary: "Verified repair",
+        changedFiles: [],
+        checks: [{ name: "verify repair", status: "passed" }],
+        artifacts: [],
+        problems: [],
+      },
+    });
+    harness.createTask({
+      runId,
+      role: "goal-review",
+      goal: "Review completion",
+      prompt: "Return runDecision complete.",
+    });
+
+    const result = await superviseCodexRuns({
+      harness,
+      cwd: repoPath,
+      rootRunId: runId,
+      runConcurrency: 1,
+      taskConcurrency: 1,
+      maxCycles: 1,
+      maxRounds: 1,
+      maxTries: 3,
+      intervalMs: 1,
+      integrateCompletedRuns: true,
+      clientFactory: () => ({
+        start: async () => ({
+          status: "done" as const,
+          sessionId: "session_goal_review",
+          outputPath: join(dir, "goal-review-output.json"),
+          stdout: "",
+          stderr: "",
+          events: [],
+          output: {
+            status: "done" as const,
+            runDecision: "complete" as const,
+            summary: "Goal reached",
+            changedFiles: [],
+            checks: [{ name: "goal", status: "passed" }],
+            artifacts: [],
+            problems: [],
+          },
+        }),
+        resume: async () => {
+          throw new Error("resume should not be called");
+        },
+      }),
+    });
+
+    expect(result.cycles[0].runs[0].integration).toMatchObject({
+      status: "done",
+      actionType: "integrateVerifiedRun",
+      artifacts: [expect.objectContaining({ workerTaskId: repairTaskId })],
+    });
+    expect(await readFile(join(repoPath, "src", "repair.ts"), "utf8")).toContain("repair");
+    expect(Bun.file(join(repoPath, "src", "original.ts")).exists()).resolves.toBe(false);
+  });
+
   test("runner keeps dependency attempts empty for tasks without dependencies", async () => {
     const runId = harness.createRun({ goal: "Build loop" });
     harness.createTask({
