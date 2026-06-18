@@ -35,6 +35,7 @@ export function runFromRow(row: RunRow): Run {
     goal: row.goal,
     status: row.status,
     context,
+    createdAt: row.created_at ?? null,
   };
 }
 

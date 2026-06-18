@@ -1355,6 +1355,23 @@ function createDashboardRuntime(input: {
       .filter((run) => run.id !== input.runId)
       .filter((run) => run.context.parentRunId === input.runId || run.context.rootRunId === input.runId)
       .map((run) => harness.getRunOverview({ runId: run.id, eventLimit: dashboardEventLimit() }));
+  const recentRunsForDashboard = (limit: number) =>
+    harness
+      .listRuns({ limit: Math.max(1, Math.min(limit, 100)) })
+      .slice()
+      .sort((left, right) => {
+        const leftCreated = left.createdAt ?? "";
+        const rightCreated = right.createdAt ?? "";
+        if (leftCreated !== rightCreated) return rightCreated.localeCompare(leftCreated);
+        return right.id.localeCompare(left.id);
+      })
+      .map((run) => ({
+        id: run.id,
+        status: run.status,
+        goal: run.goal,
+        projectId: run.projectId ?? null,
+        createdAt: run.createdAt ?? null,
+      }));
   const server = serveDashboard({
     runId: input.runId,
     port: input.port,
@@ -1363,7 +1380,13 @@ function createDashboardRuntime(input: {
         runId: input.runId,
         eventLimit: dashboardEventLimit(),
       }),
+    runOverview: (runId: string) =>
+      harness.getRunOverview({
+        runId,
+        eventLimit: dashboardEventLimit(),
+      }),
     childOverviews: childRunOverviews,
+    recentRuns: recentRunsForDashboard,
     globalRunCounts: () => harness.countRunsByStatus(),
     runnerStatus,
     supervisorStatus,

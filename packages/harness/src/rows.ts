@@ -7,6 +7,7 @@ export interface RunRow {
   goal: string;
   status: Status;
   context_json: string;
+  created_at?: string;
 }
 
 export interface ProjectRow {
