@@ -1,6 +1,6 @@
 import { existsSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
-import { proposeGuardrailsFromLessons } from "./guardrails";
+import { acceptGuardrailProposal, proposeGuardrailsFromLessons } from "./guardrails";
 import { Harness } from "./harness";
 import type { ReclaimedRunningTask, RunOverview, Task } from "./types";
 
@@ -50,6 +50,13 @@ export type HarnessAction =
         prompt: string;
         doneWhen?: string[];
       };
+    }
+  | {
+      type: "acceptGuardrailProposal";
+      runId: string;
+      proposalId: string;
+      acceptedBy: string;
+      reason?: string;
     };
 
 export interface HarnessActionResult {
@@ -147,8 +154,17 @@ export function parseHarnessAction(value: unknown): HarnessAction {
       followUpTask: followUpTaskField(record, "followUpTask"),
     };
   }
+  if (type === "acceptGuardrailProposal") {
+    return {
+      type,
+      runId: stringField(record, "runId"),
+      proposalId: stringField(record, "proposalId"),
+      acceptedBy: stringField(record, "acceptedBy"),
+      reason: optionalStringField(record, "reason"),
+    };
+  }
   throw new Error(
-    "harness action type must be reclaimRunningTasks, retryTask, markRunTodo, updateRunContext, retireRun, prepareRunDrain, completeSystemTask, integrateVerifiedRun, interruptAttemptAndCreateTask, or interruptRunningAttemptsAndCreateTask",
+    "harness action type must be reclaimRunningTasks, retryTask, markRunTodo, updateRunContext, retireRun, prepareRunDrain, completeSystemTask, integrateVerifiedRun, interruptAttemptAndCreateTask, interruptRunningAttemptsAndCreateTask, or acceptGuardrailProposal",
   );
 }
 
@@ -307,6 +323,10 @@ function applyParsedHarnessAction(harness: Harness, action: HarnessAction, optio
 
   if (action.type === "interruptRunningAttemptsAndCreateTask") {
     return interruptRunningAttemptsAndCreateTask(harness, action);
+  }
+
+  if (action.type === "acceptGuardrailProposal") {
+    return acceptGuardrailProposalAction(harness, action);
   }
 
   return prepareRunDrain(harness, action);
@@ -692,6 +712,61 @@ function interruptRunningAttemptsAndCreateTask(
     checks,
     artifacts,
   );
+}
+
+function acceptGuardrailProposalAction(
+  harness: Harness,
+  action: Extract<HarnessAction, { type: "acceptGuardrailProposal" }>,
+): HarnessActionResult {
+  const run = harness.getRun(action.runId);
+  if (!run) {
+    return blockedResult(action.type, `Run not found: ${action.runId}`, [`run not found: ${action.runId}`]);
+  }
+  const accepted = acceptGuardrailProposal({
+    context: run.context,
+    proposalId: action.proposalId,
+    acceptedBy: action.acceptedBy,
+  });
+  if (!accepted) {
+    return blockedResult(action.type, `Guardrail proposal not found: ${action.proposalId}`, [
+      `guardrail proposal not found: ${action.proposalId} in run ${action.runId}`,
+    ]);
+  }
+
+  const previousProposals = Array.isArray(run.context.guardrailProposals) ? run.context.guardrailProposals : [];
+  const previousProposal = previousProposals.find((candidate) => {
+    if (!candidate || typeof candidate !== "object") return false;
+    const record = candidate as Record<string, unknown>;
+    return record.id === action.proposalId;
+  }) as Record<string, unknown> | undefined;
+  const previousAcceptedFlag = previousProposal?.accepted === true;
+
+  harness.updateRun({
+    runId: action.runId,
+    contextPatch: {
+      guardrailProposals: accepted.nextProposals,
+      guardrails: accepted.nextGuardrails,
+    },
+  });
+
+  return doneResult(action.type, `Accepted guardrail proposal ${action.proposalId} for run ${action.runId}.`, [
+    { name: "run exists", status: "passed", evidence: action.runId },
+    { name: "proposal exists", status: "passed", evidence: action.proposalId },
+    { name: "proposal previously accepted", status: "passed", evidence: String(previousAcceptedFlag) },
+    { name: "accepted by", status: "passed", evidence: action.acceptedBy },
+    { name: "guardrail active", status: "passed", evidence: "true" },
+  ], [
+    {
+      kind: "guardrail_acceptance",
+      runId: action.runId,
+      proposalId: action.proposalId,
+      guardrailId: accepted.guardrail.id,
+      acceptedBy: action.acceptedBy,
+      acceptedAt: accepted.guardrail.acceptedAt,
+      previouslyAccepted: previousAcceptedFlag,
+      reason: action.reason ?? null,
+    },
+  ]);
 }
 
 function prepareInterruptAttempt(

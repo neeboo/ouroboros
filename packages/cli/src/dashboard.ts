@@ -8,6 +8,7 @@ interface DashboardActionResult {
   attemptId?: string;
   runId?: string;
   taskId?: string;
+  proposalId?: string;
   status?: string;
   interrupted?: number;
   pid?: number;
@@ -31,6 +32,7 @@ interface DashboardActions {
   startSupervisor?: () => DashboardActionResult;
   stopSupervisor?: () => DashboardActionResult;
   createIntake?: (document: string, title?: string) => DashboardActionResult | Promise<DashboardActionResult>;
+  acceptGuardrailProposal?: (proposalId: string, acceptedBy?: string) => DashboardActionResult | Promise<DashboardActionResult>;
 }
 
 type DashboardAutoStartRunner = (overview: RunOverview, runner: DashboardRunnerStatus | null) => boolean;
@@ -1533,6 +1535,23 @@ export function dashboardHtml(input: { runId: string }) {
       line-height: 1.55;
       overflow-wrap: anywhere;
     }
+    .guardrail-actions {
+      margin-top: 7px;
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+    .guardrail-status {
+      min-width: 0;
+      color: var(--muted-2);
+      font-size: 11px;
+      line-height: 1.5;
+      overflow-wrap: anywhere;
+    }
+    .guardrail-status.error {
+      color: #ead2d0;
+    }
     .prompt-link {
       display: inline-flex;
       align-items: center;
@@ -2178,10 +2197,21 @@ export function dashboardHtml(input: { runId: string }) {
       const count = guardrailCount(record);
       const meta = ["source " + source, count === null ? "" : "count " + count, "roles " + roles].filter(Boolean).join(" · ");
       const stateAttribute = state === "active" ? 'data-guardrail-state="active"' : 'data-guardrail-state="proposed"';
-      return '<div class="guardrail-item" ' + stateAttribute + '>' +
+      const proposalId = typeof record.id === "string" ? record.id : "";
+      const accepted = record.accepted === true;
+      const acceptControl = state === "proposed" && !accepted && proposalId
+        ? '<div class="guardrail-actions" data-guardrail-actions="' + escapeHtml(proposalId) + '">' +
+          '<button type="button" class="plain-button" data-accept-guardrail="' + escapeHtml(proposalId) + '" data-accept-guardrail-run="' + escapeHtml(runId) + '" aria-label="Accept guardrail proposal ' + escapeHtml(proposalId) + '">Accept</button>' +
+          '<span class="guardrail-status" data-guardrail-status="' + escapeHtml(proposalId) + '" role="status" aria-live="polite"></span>' +
+          '</div>'
+        : (accepted
+            ? '<div class="guardrail-actions"><span class="guardrail-status">Accepted · use the CLI or harness to retire.</span></div>'
+            : '');
+      return '<div class="guardrail-item" ' + stateAttribute + ' data-guardrail-id="' + escapeHtml(proposalId) + '">' +
         '<div class="guardrail-id" title="' + escapeHtml(record.id || "guardrail") + '">' + escapeHtml(id) + '</div>' +
         '<div class="guardrail-summary">' + escapeHtml(compact(record.summary, 220) || "No summary recorded.") + '</div>' +
         '<div class="guardrail-meta">' + escapeHtml(meta) + '</div>' +
+        acceptControl +
         '</div>';
     };
     const guardrailGroup = (title, records, state) =>
@@ -2195,7 +2225,7 @@ export function dashboardHtml(input: { runId: string }) {
       return '<section class="inspector-card" data-inspector-section="guardrails"><h2>Guardrails</h2>' +
         guardrailGroup("Active Guardrails", activeGuardrails, "active") +
         guardrailGroup("Pending Guardrail Proposals", pendingProposals, "proposed") +
-        '<div class="meta">Read-only. Use CLI or harness actions to propose or accept guardrails.</div>' +
+        '<div class="meta">Accept control posts to /api/runs/' + escapeHtml(runId) + '/guardrails/&lt;proposalId&gt;/accept and delegates to the harness-owned acceptGuardrailProposal action. CLI commands propose-guardrails and accept-guardrail remain available.</div>' +
         '</section>';
     };
     const roleSummary = (tasks) => [...new Set(tasks.map((task) => task.role))].join(" / ");
@@ -2962,6 +2992,24 @@ export function dashboardHtml(input: { runId: string }) {
           .finally(() => { resumeButton.disabled = false; });
         return;
       }
+      const acceptGuardrailButton = event.target.closest("[data-accept-guardrail]");
+      if (acceptGuardrailButton) {
+        const proposalId = acceptGuardrailButton.getAttribute("data-accept-guardrail");
+        const proposalRunId = acceptGuardrailButton.getAttribute("data-accept-guardrail-run") || runId;
+        const status = document.querySelector('[data-guardrail-status="' + CSS.escape(proposalId) + '"]');
+        acceptGuardrailButton.disabled = true;
+        if (status) { status.textContent = "Accepting..."; status.classList.remove("error"); }
+        postJson("/api/runs/" + encodeURIComponent(proposalRunId) + "/guardrails/" + encodeURIComponent(proposalId) + "/accept", { acceptedBy: "dashboard" })
+          .then(() => {
+            if (status) { status.textContent = "Accepted. Refreshing..."; }
+            refreshOverview();
+          })
+          .catch((error) => {
+            if (status) { status.textContent = error.message; status.classList.add("error"); }
+          })
+          .finally(() => { acceptGuardrailButton.disabled = false; });
+        return;
+      }
       const historyRunRow = event.target.closest("[data-history-run-id]");
       if (historyRunRow) {
         const nextRunId = historyRunRow.getAttribute("data-history-run-id");
@@ -3149,6 +3197,25 @@ export async function handleDashboardRequest(
         { status: 404 },
       );
     }
+  }
+  const guardrailAcceptMatch = url.pathname.match(/^\/api\/runs\/([^/]+)\/guardrails\/([^/]+)\/accept$/);
+  if (request.method === "POST" && guardrailAcceptMatch) {
+    const routeRunId = decodeURIComponent(guardrailAcceptMatch[1]);
+    if (routeRunId !== input.runId) {
+      return Response.json(
+        { error: `dashboard actions are only available on the primary run ${input.runId}` },
+        { status: 404 },
+      );
+    }
+    const proposalId = decodeURIComponent(guardrailAcceptMatch[2]);
+    return withDashboardAction(async () => {
+      if (!input.actions?.acceptGuardrailProposal) {
+        throw new Error("dashboard guardrail acceptance is not configured");
+      }
+      const body = await readJsonBody(request).catch(() => ({} as Record<string, unknown>));
+      const acceptedBy = optionalBodyString(body, "acceptedBy") || "dashboard";
+      return input.actions.acceptGuardrailProposal(proposalId, acceptedBy);
+    });
   }
   if (request.method === "POST" && url.pathname === `/api/runs/${input.runId}/runner/start`) {
     return withDashboardAction(async () => {

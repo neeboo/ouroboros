@@ -1560,6 +1560,23 @@ function createDashboardRuntime(input: {
           status: "blocked",
         };
       },
+      acceptGuardrailProposal: (proposalId, acceptedBy) => {
+        const actionResult = applyHarnessAction(harness, {
+          type: "acceptGuardrailProposal",
+          runId: input.runId,
+          proposalId,
+          acceptedBy: acceptedBy || "dashboard",
+          reason: "dashboard guardrail proposal accept control",
+        });
+        if (actionResult.status === "blocked") {
+          fail(actionResult.problems.join("; ") || "guardrail proposal was not accepted");
+        }
+        return {
+          runId: input.runId,
+          status: actionResult.status,
+          proposalId,
+        };
+      },
     },
   });
   const shutdown = once(() => {
