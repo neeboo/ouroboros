@@ -56,6 +56,9 @@ export interface RunCodexResumableLoopInput extends CodexResumableOrchestrationI
   maxRounds: number;
   limit: number;
   maxTries: number;
+  integrateCompletedRuns?: boolean;
+  integrationTargetBranch?: string;
+  integrationPush?: boolean;
 }
 
 export async function runCodexResumableLoop(input: RunCodexResumableLoopInput) {
@@ -74,6 +77,12 @@ export async function runCodexResumableLoop(input: RunCodexResumableLoopInput) {
 
     const started = await orchestrator.startReadyAttempts({ runId: input.runId, limit: input.limit });
     if (started.length === 0) {
+      const overviewBeforeReview = input.harness.getRunOverview({ runId: input.runId, eventLimit: 0 });
+      const integration = maybeIntegrateCompletedRun(input, overviewBeforeReview);
+      if (integration?.some((result) => result.status === "done")) {
+        rounds.push({ index, tasks: started, integration, reclaimed });
+        continue;
+      }
       const review = orchestrator.ensureGoalReviewTask(input.runId, input.maxTries);
       if (review.created) {
         const reviewed = await orchestrator.startReadyAttempts({ runId: input.runId, limit: input.limit });
@@ -152,7 +161,14 @@ export async function superviseCodexRuns(input: SuperviseCodexRunsInput) {
         maxTries: input.maxTries,
       });
       const overview = input.harness.getRunOverview({ runId: run.id, eventLimit: 0 });
-      const integration = maybeIntegrateCompletedRun(input, overview);
+      const loopIntegration = result.rounds.flatMap((round) => {
+        const integration = (round as { integration?: Array<HarnessActionResult & { eventId: string }> }).integration;
+        return Array.isArray(integration) ? integration : [];
+      });
+      const postLoopIntegration = maybeIntegrateCompletedRun(input, overview);
+      const integration = input.integrateCompletedRuns
+        ? [...loopIntegration, ...(postLoopIntegration ?? [])]
+        : postLoopIntegration;
       const refreshedOverview = integration && integration.length > 0
         ? input.harness.getRunOverview({ runId: run.id, eventLimit: 0 })
         : overview;

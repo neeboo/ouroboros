@@ -1512,6 +1512,147 @@ describe("runner", () => {
     });
   });
 
+  test("supervisor integrates verified work before same-tick goal review when max rounds continue", async () => {
+    const repoPath = join(dir, "repo-pre-review-same-tick");
+    const worktreePath = join(dir, "verified-worker-same-tick");
+    await mkdir(repoPath, { recursive: true });
+    await writeFile(join(repoPath, "README.md"), "initial\n");
+    git(repoPath, ["init", "-b", "main"]);
+    git(repoPath, ["config", "user.name", "Ouroboros Test"]);
+    git(repoPath, ["config", "user.email", "test@example.com"]);
+    git(repoPath, ["config", "commit.gpgSign", "false"]);
+    git(repoPath, ["add", "README.md"]);
+    git(repoPath, ["commit", "-m", "Initial commit"]);
+    git(repoPath, ["worktree", "add", "-b", "task-verified-same-tick", worktreePath, "main"]);
+    await mkdir(join(worktreePath, "src"), { recursive: true });
+    await writeFile(join(worktreePath, "src", "same-tick.ts"), "export const sameTick = true;\n");
+
+    const runId = harness.createRun({ goal: "Review merged worker evidence", projectRoot: repoPath });
+    const workerTaskId = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Implement same tick file",
+      prompt: "Create src/same-tick.ts.",
+      worktreePath,
+    });
+    harness.recordAttempt({
+      taskId: workerTaskId,
+      input: { executor: "test" },
+      output: {
+        status: "done",
+        summary: "Created same tick file",
+        changedFiles: ["src/same-tick.ts"],
+        checks: [{ name: "worker check", status: "passed" }],
+        artifacts: [],
+        problems: [],
+      },
+    });
+    harness.createTask({
+      runId,
+      role: "verifier",
+      goal: "Verify same tick file",
+      prompt: "Verify worker output.",
+      dependsOn: [workerTaskId],
+    });
+
+    const result = await superviseCodexRuns({
+      harness,
+      cwd: repoPath,
+      rootRunId: runId,
+      runConcurrency: 1,
+      taskConcurrency: 1,
+      maxCycles: 1,
+      maxRounds: 4,
+      maxTries: 3,
+      intervalMs: 1,
+      integrateCompletedRuns: true,
+      clientFactory: (factoryInput) => ({
+        start: async (input) => {
+          if (factoryInput.task?.role === "goal-review") {
+            let mergedEvidence = "";
+            try {
+              mergedEvidence = await readFile(join(repoPath, "src", "same-tick.ts"), "utf8");
+            } catch {
+              // Missing evidence means goal-review ran before integration.
+            }
+            if (mergedEvidence.includes("sameTick = true")) {
+              return {
+                status: "done" as const,
+                sessionId: "session_goal_review_complete",
+                outputPath: join(dir, "goal-review-complete.json"),
+                stdout: "",
+                stderr: "",
+                events: [],
+                output: {
+                  status: "done" as const,
+                  runDecision: "complete" as const,
+                  summary: "Goal-review saw merged worker evidence.",
+                  changedFiles: [],
+                  checks: [{ name: "merged evidence", status: "passed" }],
+                  artifacts: [],
+                  problems: [],
+                },
+              };
+            }
+            return {
+              status: "done" as const,
+              sessionId: "session_goal_review_continue",
+              outputPath: join(dir, "goal-review-continue.json"),
+              stdout: "",
+              stderr: "",
+              events: [],
+              output: {
+                status: "done" as const,
+                runDecision: "continue" as const,
+                summary: "Merged worker evidence is missing.",
+                changedFiles: [],
+                checks: [{ name: "merged evidence", status: "failed" }],
+                artifacts: [],
+                problems: ["src/same-tick.ts was not visible on main"],
+                nextTasks: [{
+                  role: "worker" as const,
+                  goal: "Repair missing integration",
+                  prompt: "Repair missing integration.",
+                  doneWhen: ["merged evidence visible"],
+                }],
+              },
+            };
+          }
+          return {
+            status: "done" as const,
+            sessionId: "session_verifier",
+            outputPath: join(dir, "verifier-output.json"),
+            stdout: "",
+            stderr: "",
+            events: [],
+            output: {
+              status: "done" as const,
+              summary: "Verified same tick file",
+              changedFiles: [],
+              checks: [{ name: "verify", status: "passed" }],
+              artifacts: [],
+              problems: [],
+            },
+          };
+        },
+        resume: async () => {
+          throw new Error("resume should not be called");
+        },
+      }),
+    });
+
+    const integrationEvents = harness
+      .listHarnessActionEvents({ limit: 10 })
+      .filter((event) => event.actionType === "integrateVerifiedRun" && event.status === "done");
+    const goalReview = harness.getRunOverview({ runId }).tasks.find((task) => task.role === "goal-review");
+
+    expect(result.cycles[0].runs[0]).toMatchObject({ runId, status: "done", activeTasks: 0 });
+    expect(integrationEvents).toHaveLength(1);
+    expect(goalReview?.status).toBe("done");
+    expect(harness.getRun(runId)?.status).toBe("done");
+    expect(await readFile(join(repoPath, "src", "same-tick.ts"), "utf8")).toContain("sameTick = true");
+  });
+
   test("supervisor integrates every eligible verified worker in a single pre-review tick", async () => {
     const repoPath = join(dir, "repo-pre-review-multi");
     const workerAWorktree = join(dir, "verified-worker-a");
