@@ -14,6 +14,8 @@ export interface RunCommandInput {
   env?: Record<string, string | undefined>;
   timeoutMs?: number;
   idleTimeoutMs?: number;
+  cleanupOnFailure?: boolean;
+  cleanupProcessTree?: (pid: number) => void | Promise<void>;
   onStdout?: (chunk: string) => void;
   onStderr?: (chunk: string) => void;
 }

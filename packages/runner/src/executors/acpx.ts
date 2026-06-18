@@ -2,7 +2,7 @@ import { access, copyFile, mkdir, mkdtemp } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { parseAttemptOutputOrBlocked } from "./output";
+import { parseAttemptOutput, parseAttemptOutputOrBlocked } from "./output";
 import { commandProblem, runLocalCommand } from "./command";
 import type { AcpxAgentExecutorFactory, AcpxCodexExecutorFactory, ApprovalMode, RunCommand } from "./types";
 
@@ -14,6 +14,7 @@ export const createAcpxAgentExecutor: AcpxAgentExecutorFactory = (options) => {
   const approval = options.approval ?? "approve-reads";
   const runCommand = options.runCommand ?? runLocalCommand;
   const label = agentLabel(options);
+  const oneShotExec = options.agent === "claude";
 
   return async ({ prompt, sessionName }) => {
     const env = await acpxCommandEnv({
@@ -30,16 +31,18 @@ export const createAcpxAgentExecutor: AcpxAgentExecutorFactory = (options) => {
       agent: options.agent,
       agentCommand: options.agentCommand,
     });
-    const session = await ensureSession({
-      base,
-      runCommand,
-      env,
-      sessionName,
-      timeoutMs: options.timeoutMs,
-      idleTimeoutMs: options.idleTimeoutMs,
-    });
-    if (session) {
-      return session;
+    if (!oneShotExec) {
+      const session = await ensureSession({
+        base,
+        runCommand,
+        env,
+        sessionName,
+        timeoutMs: options.timeoutMs,
+        idleTimeoutMs: options.idleTimeoutMs,
+      });
+      if (session) {
+        return session;
+      }
     }
 
     let result = await runPrompt({
@@ -48,10 +51,11 @@ export const createAcpxAgentExecutor: AcpxAgentExecutorFactory = (options) => {
       env,
       sessionName,
       prompt,
+      oneShotExec,
       timeoutMs: options.timeoutMs,
       idleTimeoutMs: options.idleTimeoutMs,
     });
-    if (commandFailed(result) && needsReconnect(result)) {
+    if (!oneShotExec && commandFailed(result) && needsReconnect(result)) {
       await runCommand({
         cmd: [...base, "sessions", "close", sessionName],
         stdin: "",
@@ -77,9 +81,15 @@ export const createAcpxAgentExecutor: AcpxAgentExecutorFactory = (options) => {
         env,
         sessionName,
         prompt,
+        oneShotExec,
         timeoutMs: options.timeoutMs,
         idleTimeoutMs: options.idleTimeoutMs,
       });
+    }
+
+    const parsedOutput = parseSuccessfulPromptOutput(result);
+    if (parsedOutput) {
+      return parsedOutput;
     }
 
     if (commandFailed(result)) {
@@ -243,15 +253,17 @@ function runPrompt(input: {
   env: Record<string, string | undefined>;
   sessionName: string;
   prompt: string;
+  oneShotExec?: boolean;
   timeoutMs?: number;
   idleTimeoutMs?: number;
 }) {
   return input.runCommand({
-    cmd: [...input.base, "-s", input.sessionName],
+    cmd: input.oneShotExec ? [...input.base, "exec", "-f", "-"] : [...input.base, "-s", input.sessionName],
     stdin: input.prompt,
     env: input.env,
     timeoutMs: input.timeoutMs,
     idleTimeoutMs: input.idleTimeoutMs,
+    cleanupOnFailure: true,
   });
 }
 
@@ -261,6 +273,17 @@ function approvalFlag(approval: ApprovalMode) {
 
 function commandFailed(result: { exitCode: number; stdout: string; stderr: string }) {
   return result.exitCode !== 0 || result.stderr.includes("Error:") || result.stdout.includes("Error:");
+}
+
+function parseSuccessfulPromptOutput(result: { exitCode: number; stdout: string; stderr: string }) {
+  if (result.exitCode !== 0) {
+    return null;
+  }
+  try {
+    return parseAttemptOutput(result.stdout);
+  } catch {
+    return null;
+  }
 }
 
 function needsReconnect(result: { stdout: string; stderr: string }) {

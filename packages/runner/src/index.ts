@@ -23,7 +23,12 @@ export { parseAttemptOutput } from "./executors/output";
 export { resolveAgentBackend } from "./agent-backends";
 export { resolveExecutionRoute } from "./execution-routing";
 export { resolveModelPreference } from "./model-preferences";
-export { runLocalCommand } from "./executors/command";
+export {
+  descendantPidsFromPsOutputForTest,
+  runLocalCommand,
+  terminateProcessTree,
+  terminateProcessTreeSync,
+} from "./executors/command";
 export {
   childEnvForProcess,
   childToolchainEnvEvidence,

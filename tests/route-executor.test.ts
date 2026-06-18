@@ -49,14 +49,9 @@ describe("route executor", () => {
       approval: "approve-reads",
       runCommand: async ({ cmd, stdin }) => {
         calls.push({ cmd, stdin });
-        if (cmd.includes("show")) {
-          return { exitCode: calls.length === 1 ? 1 : 0, stdout: "", stderr: "" };
-        }
         return {
           exitCode: 0,
-          stdout: cmd.includes("-s")
-            ? '{"status":"done","summary":"claude route ok","changedFiles":[],"checks":[],"artifacts":[],"problems":[]}'
-            : "",
+          stdout: '{"status":"done","summary":"claude route ok","changedFiles":[],"checks":[],"artifacts":[],"problems":[]}',
           stderr: "",
         };
       },
@@ -72,10 +67,7 @@ describe("route executor", () => {
 
     expect(output.summary).toBe("claude route ok");
     expect(calls.map((call) => call.cmd)).toEqual([
-      ["acpx", "--cwd", "/repo", "--approve-all", "--format", "text", "--model", "sonnet", "claude", "sessions", "show", "task_1"],
-      ["acpx", "--cwd", "/repo", "--approve-all", "--format", "text", "--model", "sonnet", "claude", "sessions", "new", "--name", "task_1"],
-      ["acpx", "--cwd", "/repo", "--approve-all", "--format", "text", "--model", "sonnet", "claude", "sessions", "show", "task_1"],
-      ["acpx", "--cwd", "/repo", "--approve-all", "--format", "text", "--model", "sonnet", "claude", "-s", "task_1"],
+      ["acpx", "--cwd", "/repo", "--approve-all", "--format", "text", "--model", "sonnet", "claude", "exec", "-f", "-"],
     ]);
   });
 

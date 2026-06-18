@@ -2,7 +2,13 @@ import { describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { childToolchainEnvEvidence, proxyEnvForChildProcess, proxyEnvFromScutilOutput, runLocalCommand } from "../packages/runner/src";
+import {
+  childToolchainEnvEvidence,
+  descendantPidsFromPsOutputForTest,
+  proxyEnvForChildProcess,
+  proxyEnvFromScutilOutput,
+  runLocalCommand,
+} from "../packages/runner/src";
 
 const testHome = "/tmp/ouroboros-test-home";
 const testBunPath = `${testHome}/.bun/bin`;
@@ -155,6 +161,36 @@ describe("command runner", () => {
 
     expect(result.exitCode).toBe(124);
     expect(result.stderr).toContain("timed out");
+  });
+
+  test("cleans up the process tree when a command failure requests cleanup", async () => {
+    const cleanedPids: number[] = [];
+
+    const result = await runLocalCommand({
+      cmd: ["bun", "-e", "process.exit(7);"],
+      stdin: "",
+      cleanupOnFailure: true,
+      cleanupProcessTree: async (pid) => {
+        cleanedPids.push(pid);
+      },
+    });
+
+    expect(result.exitCode).toBe(7);
+    expect(cleanedPids).toHaveLength(1);
+    expect(cleanedPids[0]).toBeGreaterThan(0);
+  });
+
+  test("discovers nested child process trees from ps output", () => {
+    const output = [
+      " 100 1 10",
+      " 200 100 200",
+      " 300 200 200",
+      " 400 1 400",
+      " 500 200 500",
+      " 600 500 500",
+    ].join("\n");
+
+    expect(descendantPidsFromPsOutputForTest(output, 100)).toEqual([200, 300, 500, 600]);
   });
 
   test("keeps a command alive while it continues producing output", async () => {

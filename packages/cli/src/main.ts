@@ -21,6 +21,7 @@ import {
   startCodexResumableAttempt,
   superviseCodexDaemon,
   superviseCodexRuns,
+  terminateProcessTreeSync,
 } from "@ouroboros/runner";
 import type { CodexSandbox, ResolvedExecutionRoute, StopHook } from "@ouroboros/runner";
 import { fail, flag, parseArgs, required } from "./args";
@@ -1237,7 +1238,9 @@ function createDashboardRuntime(input: {
     runnerAutoPaused = true;
     const pid = runnerState.pid;
     if (runnerProcess && runnerState.status === "running") {
-      killDashboardRunnerChildren(pid);
+      if (pid) {
+        terminateProcessTreeSync(pid);
+      }
       runnerProcess.kill();
     }
     runnerProcess = null;
@@ -1253,7 +1256,9 @@ function createDashboardRuntime(input: {
   const stopSupervisor = () => {
     const pid = supervisorState.pid;
     if (supervisorProcess && supervisorState.status === "running") {
-      killDashboardRunnerChildren(pid);
+      if (pid) {
+        terminateProcessTreeSync(pid);
+      }
       supervisorProcess.kill();
     }
     supervisorProcess = null;
@@ -1517,17 +1522,6 @@ function supervisorCommand(
     cmd.push("--start-hook", options.defaultStartHook);
   }
   return cmd;
-}
-
-function killDashboardRunnerChildren(pid: number | null) {
-  if (!pid || process.platform === "win32") {
-    return;
-  }
-  Bun.spawnSync({
-    cmd: ["/bin/zsh", "-lc", `pkill -TERM -P ${pid} >/dev/null 2>&1 || true`],
-    stdout: "ignore",
-    stderr: "ignore",
-  });
 }
 
 function drainDashboardRunnerStream(stream: ReadableStream<Uint8Array>, onChunk: (chunk: string) => void) {

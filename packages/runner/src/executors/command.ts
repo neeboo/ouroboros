@@ -20,8 +20,17 @@ export const runLocalCommand: RunCommand = async (input) => {
 
   return await new Promise<CommandResult>((resolve) => {
     let settled = false;
+    let cleaned = false;
 
-    const finish = (result: CommandResult) => {
+    const cleanup = async () => {
+      if (cleaned) {
+        return;
+      }
+      cleaned = true;
+      await (input.cleanupProcessTree ?? terminateProcessTree)(proc.pid);
+    };
+
+    const finish = async (result: CommandResult, cleanupProcess = false) => {
       if (settled) {
         return;
       }
@@ -31,6 +40,9 @@ export const runLocalCommand: RunCommand = async (input) => {
       }
       if (idleTimeout) {
         clearTimeout(idleTimeout);
+      }
+      if (cleanupProcess) {
+        await cleanup();
       }
       resolve(result);
     };
@@ -44,22 +56,22 @@ export const runLocalCommand: RunCommand = async (input) => {
       }
       idleTimeout = setTimeout(() => {
         proc.kill();
-        finish({
+        void finish({
           exitCode: 124,
           stdout,
           stderr: appendProblem(stderr, `command idle timed out after ${input.idleTimeoutMs}ms`),
-        });
+        }, true);
       }, input.idleTimeoutMs);
     };
 
     if (input.timeoutMs !== undefined) {
       hardTimeout = setTimeout(() => {
         proc.kill();
-        finish({
+        void finish({
           exitCode: 124,
           stdout,
           stderr: appendProblem(stderr, `command timed out after ${input.timeoutMs}ms`),
-        });
+        }, true);
       }, input.timeoutMs);
     }
 
@@ -75,10 +87,103 @@ export const runLocalCommand: RunCommand = async (input) => {
       resetIdleTimeout();
     });
     proc.exited.then((exitCode) => {
-      finish({ exitCode, stdout, stderr });
+      void finish({ exitCode, stdout, stderr }, input.cleanupOnFailure === true && exitCode !== 0);
     });
   });
 };
+
+export async function terminateProcessTree(pid: number) {
+  if (!pid || process.platform === "win32") {
+    return;
+  }
+
+  terminateProcessTreeSync(pid, "SIGTERM");
+  await sleep(150);
+  terminateProcessTreeSync(pid, "SIGKILL");
+}
+
+export function terminateProcessTreeSync(pid: number, signal: NodeJS.Signals = "SIGTERM") {
+  if (!pid || process.platform === "win32") {
+    return;
+  }
+
+  const processFamily = [{ pid, pgid: null }, ...collectDescendantProcesses(pid)];
+  for (const processInfo of [...processFamily].reverse()) {
+    signalProcess(processInfo, signal);
+  }
+}
+
+function signalProcess(processInfo: { pid: number; pgid: number | null }, signal: NodeJS.Signals) {
+  if (processInfo.pgid === processInfo.pid) {
+    try {
+      process.kill(-processInfo.pgid, signal);
+      return;
+    } catch (error) {
+      if ((error as { code?: string }).code !== "ESRCH") {
+        return;
+      }
+    }
+  }
+
+  try {
+    process.kill(processInfo.pid, signal);
+  } catch {
+    // The command may have already exited; cleanup is best-effort.
+  }
+}
+
+function collectDescendantProcesses(pid: number) {
+  const result = Bun.spawnSync({
+    cmd: ["/bin/ps", "-axo", "pid=,ppid=,pgid="],
+    stdout: "pipe",
+    stderr: "ignore",
+  });
+  if (result.exitCode !== 0) {
+    return [];
+  }
+  return descendantProcessesFromPsOutput(new TextDecoder().decode(result.stdout), pid);
+}
+
+function descendantProcessesFromPsOutput(output: string, rootPid: number) {
+  const childrenByParent = new Map<number, Array<{ pid: number; pgid: number }>>();
+  for (const line of output.split(/\r?\n/)) {
+    const match = line.trim().match(/^(\d+)\s+(\d+)\s+(\d+)$/);
+    if (!match) {
+      continue;
+    }
+    const pid = Number(match[1]);
+    const parentPid = Number(match[2]);
+    const pgid = Number(match[3]);
+    if (
+      !Number.isSafeInteger(pid) ||
+      !Number.isSafeInteger(parentPid) ||
+      !Number.isSafeInteger(pgid) ||
+      pid === rootPid
+    ) {
+      continue;
+    }
+    const children = childrenByParent.get(parentPid) ?? [];
+    children.push({ pid, pgid });
+    childrenByParent.set(parentPid, children);
+  }
+
+  const descendants: Array<{ pid: number; pgid: number }> = [];
+  const queue = [...(childrenByParent.get(rootPid) ?? [])];
+  while (queue.length > 0) {
+    const child = queue.shift()!;
+    descendants.push(child);
+    queue.push(...(childrenByParent.get(child.pid) ?? []));
+  }
+  return descendants;
+}
+
+export function descendantPidsFromPsOutputForTest(output: string, rootPid: number) {
+  return descendantProcessesFromPsOutput(output, rootPid).map((processInfo) => processInfo.pid);
+}
+
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 function commandEnv(overrides: Record<string, string | undefined> | undefined) {
   if (!overrides) {

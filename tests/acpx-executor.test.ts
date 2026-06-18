@@ -166,22 +166,17 @@ describe("acpx executor", () => {
   });
 
   test("constructs acpx commands for the built-in claude agent", async () => {
-    const calls: Array<{ cmd: string[]; stdin: string }> = [];
+    const calls: Array<{ cmd: string[]; stdin: string; cleanupOnFailure?: boolean }> = [];
     const executor = createAcpxAgentExecutor({
       agent: "claude",
       cwd: "/repo",
       approval: "approve-all",
       model: "sonnet",
-      runCommand: async ({ cmd, stdin }) => {
-        calls.push({ cmd, stdin });
-        if (cmd.includes("show")) {
-          return { exitCode: calls.length === 1 ? 1 : 0, stdout: "", stderr: calls.length === 1 ? "missing session" : "" };
-        }
+      runCommand: async ({ cmd, stdin, cleanupOnFailure }) => {
+        calls.push({ cmd, stdin, cleanupOnFailure });
         return {
           exitCode: 0,
-          stdout: cmd.includes("-s")
-            ? '{"status":"done","summary":"claude ok","changedFiles":[],"checks":[],"artifacts":[],"problems":[]}'
-            : "",
+          stdout: '{"status":"done","summary":"claude ok","changedFiles":[],"checks":[],"artifacts":[],"problems":[]}',
           stderr: "",
         };
       },
@@ -209,13 +204,56 @@ describe("acpx executor", () => {
       },
     });
 
-    expect(calls.map((call) => call.cmd)).toEqual([
-      ["acpx", "--cwd", "/repo", "--approve-all", "--format", "text", "--model", "sonnet", "claude", "sessions", "show", "task_1"],
-      ["acpx", "--cwd", "/repo", "--approve-all", "--format", "text", "--model", "sonnet", "claude", "sessions", "new", "--name", "task_1"],
-      ["acpx", "--cwd", "/repo", "--approve-all", "--format", "text", "--model", "sonnet", "claude", "sessions", "show", "task_1"],
-      ["acpx", "--cwd", "/repo", "--approve-all", "--format", "text", "--model", "sonnet", "claude", "-s", "task_1"],
+    expect(calls).toEqual([
+      {
+        cmd: ["acpx", "--cwd", "/repo", "--approve-all", "--format", "text", "--model", "sonnet", "claude", "exec", "-f", "-"],
+        stdin: "Do the task",
+        cleanupOnFailure: true,
+      },
     ]);
     expect(output.summary).toBe("claude ok");
+  });
+
+  test("parses claude exec final JSON even when tool output contains Error text", async () => {
+    const executor = createAcpxAgentExecutor({
+      agent: "claude",
+      cwd: "/repo",
+      approval: "approve-all",
+      runCommand: async () => ({
+        exitCode: 0,
+        stdout: [
+          "[tool] Terminal output:",
+          "SQLiteError: unable to open database file",
+          '{"status":"done","summary":"claude planned despite tool error text","changedFiles":[],"checks":[],"artifacts":[],"problems":[]}',
+        ].join("\n"),
+        stderr: "",
+      }),
+    });
+
+    const output = await executor({
+      prompt: "Do the task",
+      sessionName: "task_1",
+      run: runFixture,
+      route: routeFixture,
+      task: {
+        id: "task_1",
+        runId: "run_1",
+        parentId: null,
+        cycleId: "task_1",
+        status: "todo",
+        role: "worker",
+        goal: "Task",
+        prompt: "Do it",
+        dependsOn: [],
+        doneWhen: [],
+        worktreePath: null,
+        sessionRef: null,
+        contextVersion: 1,
+      },
+    });
+
+    expect(output.status).toBe("done");
+    expect(output.summary).toBe("claude planned despite tool error text");
   });
 
   test("runs a raw acpx agent command through the generic executor", async () => {
@@ -400,13 +438,13 @@ describe("acpx executor", () => {
   });
 
   test("uses command hard and idle timeouts without passing an acpx wall timeout", async () => {
-    const calls: Array<{ cmd: string[]; timeoutMs?: number; idleTimeoutMs?: number }> = [];
+    const calls: Array<{ cmd: string[]; timeoutMs?: number; idleTimeoutMs?: number; cleanupOnFailure?: boolean }> = [];
     const executor = createAcpxCodexExecutor({
       cwd: "/repo",
       timeoutMs: 900000,
       idleTimeoutMs: 300000,
-      runCommand: async ({ cmd, timeoutMs, idleTimeoutMs }) => {
-        calls.push({ cmd, timeoutMs, idleTimeoutMs });
+      runCommand: async ({ cmd, timeoutMs, idleTimeoutMs, cleanupOnFailure }) => {
+        calls.push({ cmd, timeoutMs, idleTimeoutMs, cleanupOnFailure });
         return {
           exitCode: 0,
           stdout: cmd.includes("-s")
@@ -453,6 +491,10 @@ describe("acpx executor", () => {
     ]);
     expect(calls.every((call) => call.timeoutMs === 900000)).toBe(true);
     expect(calls.every((call) => call.idleTimeoutMs === 300000)).toBe(true);
+    expect(calls.find((call) => call.cmd.includes("-s"))?.cleanupOnFailure).toBe(true);
+    expect(calls.filter((call) => !call.cmd.includes("-s")).every((call) => call.cleanupOnFailure === undefined)).toBe(
+      true,
+    );
   });
 
   test("treats acpx stdout errors as command failures", async () => {

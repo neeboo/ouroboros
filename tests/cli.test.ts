@@ -1697,12 +1697,15 @@ describe("CLI", () => {
     const attemptId = result.rounds[0].tasks[0].attemptId;
     const attempt = new Harness(dbPath).getAttempt(attemptId)!;
     const loggedCalls = (await Bun.file(logPath).text()).trim().split("\n").map((line) => JSON.parse(line));
-    const promptCall = loggedCalls.find((args: string[]) => args.includes("claude") && args.includes("-s"));
+    const promptCall = loggedCalls.find(
+      (args: string[]) => args.includes("claude") && args.includes("exec") && args.includes("-f"),
+    );
 
     expect(result.rounds[0].tasks[0].taskId).toBe(task.id);
     expect(result.rounds[0].tasks[0].status).toBe("done");
     expect(promptCall).toContain("--approve-all");
     expect(promptCall).toContain("claude");
+    expect(promptCall).toContain("-");
     expect(promptCall).not.toContain("--model");
     expect(promptCall).not.toContain("gpt-5.4-mini");
     expect(attempt.input.backend).toMatchObject({
