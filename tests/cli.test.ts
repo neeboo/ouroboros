@@ -5,6 +5,7 @@ import { homedir, tmpdir } from "node:os";
 import { Harness } from "../packages/harness/src";
 import { formatRunEvidence } from "../packages/cli/src/run-evidence";
 import { formatAttemptExplanation } from "../packages/cli/src/explain-attempt";
+import { formatRunGraph } from "../packages/cli/src/run-graph";
 import { Database } from "bun:sqlite";
 
 describe("CLI", () => {
@@ -4025,6 +4026,119 @@ describe("CLI", () => {
     expect(result.stderr).toContain("attempt not found: attempt_missing");
   });
 
+  test("formatRunGraph prints a compact task graph seeded with planner, workers, verifier, and repair", async () => {
+    await runCli("init");
+    const run = await runCliJson("create-run", "--goal", "Validate run-graph formatter");
+    const planner = await runCliJson(
+      "create-task",
+      "--run-id",
+      run.id,
+      "--role",
+      "planner",
+      "--goal",
+      "Plan the increment",
+      "--prompt",
+      "Plan the next slice.",
+    );
+    const workerA = await runCliJson(
+      "create-task",
+      "--run-id",
+      run.id,
+      "--role",
+      "worker",
+      "--goal",
+      "Implement worker A",
+      "--prompt",
+      "Do work A.",
+    );
+    const workerB = await runCliJson(
+      "create-task",
+      "--run-id",
+      run.id,
+      "--role",
+      "worker",
+      "--goal",
+      "Implement worker B",
+      "--prompt",
+      "Do work B.",
+      "--depends-on-json",
+      JSON.stringify([planner.id]),
+    );
+    const verifier = await runCliJson(
+      "create-task",
+      "--run-id",
+      run.id,
+      "--role",
+      "verifier",
+      "--goal",
+      "Verify worker A output",
+      "--prompt",
+      "Validate worker A.",
+      "--depends-on-json",
+      JSON.stringify([workerA.id]),
+    );
+    const repair = await runCliJson(
+      "create-task",
+      "--run-id",
+      run.id,
+      "--role",
+      "worker",
+      "--goal",
+      "Repair verifier finding",
+      "--prompt",
+      "Fix the verifier finding.",
+      "--depends-on-json",
+      JSON.stringify([verifier.id]),
+    );
+
+    const harness = new Harness(dbPath);
+    const overview = harness.getRunOverview({ runId: run.id, eventLimit: 0 });
+    const summary = formatRunGraph(overview);
+
+    expect(summary).toContain(`Run ${run.id}`);
+    expect(summary).toContain(overview.run?.status ?? "");
+    expect(summary).toContain("Goal: Validate run-graph formatter");
+    expect(summary).toContain(shortTaskId(planner.id));
+    expect(summary).toContain(shortTaskId(workerA.id));
+    expect(summary).toContain(shortTaskId(workerB.id));
+    expect(summary).toContain(shortTaskId(verifier.id));
+    expect(summary).toContain(shortTaskId(repair.id));
+    expect(summary).toContain(`deps=${shortTaskId(workerA.id)}`);
+    expect(summary).toMatch(/Counts:.*todo:5/);
+  });
+
+  test("run-graph CLI prints a compact task graph for a seeded run", async () => {
+    await runCli("init");
+    const run = await runCliJson("create-run", "--goal", "Validate run-graph CLI output");
+    const worker = await runCliJson(
+      "create-task",
+      "--run-id",
+      run.id,
+      "--role",
+      "worker",
+      "--goal",
+      "Implement worker slice",
+      "--prompt",
+      "Do the work.",
+    );
+
+    const stdout = await runCli("run-graph", "--run-id", run.id);
+
+    expect(stdout).toContain(`Run ${run.id}`);
+    expect(stdout).toContain("Validate run-graph CLI output");
+    expect(stdout).toContain(shortTaskId(worker.id));
+    expect(stdout).toContain("worker");
+    expect(stdout).toMatch(/Counts:/);
+  });
+
+  test("run-graph CLI fails with a helpful message when the run is missing", async () => {
+    await runCli("init");
+    const result = await runCliRaw("run-graph", "--run-id", "run_missing");
+
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain("run not found: run_missing");
+  });
+
   test("retries a blocked task", async () => {
     await runCli("init");
     const run = await runCliJson("create-run", "--goal", "Bootstrap ouroboros");
@@ -4303,6 +4417,10 @@ describe("CLI", () => {
 
   async function runCliJson(...args: Array<string | Record<string, string>>) {
     return JSON.parse(await runCli(...args));
+  }
+
+  function shortTaskId(taskId: string) {
+    return taskId.length <= 12 ? taskId : taskId.slice(-12);
   }
 
   async function runRootOrbsJson(...args: string[]) {
