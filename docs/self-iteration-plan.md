@@ -19,6 +19,51 @@ Ouroboros already has the minimum working loop:
 - Prompt rendering already turns repeated lessons into prompt-only candidate guardrails and successful experiences into reusable evidence.
 - Accepted active guardrails can now be carried in `run.context.guardrails` and rendered into matching role prompts before prompt-only candidate guardrails.
 
+## Recovered Self-Iteration Backend Policy
+
+Self-iteration runs keep `planner`, `verifier`, and `goal-review` on `codex-resumable` by default. This is the recovered policy after a real run observed the silent-start failure mode below. The `claude-code`/acpx backend stays available for `worker` and as the `agentDefaults.global` default so worker routes can still use Claude Code when configured.
+
+Operational reason (concise): on `run_5a21fbd4ee724772bb543903b31dcf22`, attempt `attempt_49c1f7965ee74e5cbddb4eb9b79f89b7` on planner task `task_93d064b935f1484ba785a0f699bd4086` used route backend `claude-code`/acpx, stayed running from `2026-06-18 21:21:44` to `21:35:31`, produced zero attempt events, zero output, and no worktree changes, and was interrupted by the overseer after more than 13 minutes. The lesson is recorded in that run and rendered into future self-iteration planner prompts.
+
+The recovered policy lives in `run.context.agentDefaults`:
+
+```json
+{
+  "agentDefaults": {
+    "global": "claude-code",
+    "roles": {
+      "planner": "codex-resumable",
+      "verifier": "codex-resumable",
+      "goal-review": "codex-resumable"
+    }
+  },
+  "agentBackends": {
+    "claude-code": { "kind": "acpx", "agent": "claude", "approval": "approve-all" },
+    "codex-resumable": { "kind": "codex-resumable" }
+  }
+}
+```
+
+The bootstrap command does not force this context itself; it inherits `agentDefaults`/`agentBackends` from `ouroboros.toml` or `config.toml` via `withConfigDefaults`. Local configs that pin those roles to `codex-resumable` (as the committed `ouroboros.example.toml` recommends for `verifier`) carry the recovered policy forward into every self-iteration run.
+
+### Verifying Future Self-Iteration Evidence
+
+Use these commands to inspect a self-iteration run and confirm the recovered policy held:
+
+```bash
+# Run-level overview: agentDefaults.roles, agentBackends, task graph, and latest attempts.
+orbs run-overview --run-id <run_id>
+
+# Run-level lessons: failure summaries and successful experiences with evidence.
+orbs list-lessons --run-id <run_id>
+```
+
+When reviewing whether a future self-iteration run stayed on the recovered policy:
+
+1. `orbs run-overview --run-id <run_id>` — confirm `run.context.agentDefaults.roles.planner`, `roles.verifier`, and `roles.goal-review` are all `codex-resumable`, and that `run.context.agentBackends` defines both `claude-code` and `codex-resumable`.
+2. `orbs list-lessons --run-id <run_id>` — confirm no new silent-start lesson was recorded against `claude-code`/acpx planner attempts.
+3. If a planner attempt blocked with a silent-start reason again, treat it as a regression of this policy and re-pin the role defaults before the next run.
+
 ## Next Iteration Goal
 
 Make Ouroboros able to plan and drain its own next improvement cycle before it asks for human intervention.
