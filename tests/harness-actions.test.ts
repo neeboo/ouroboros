@@ -73,6 +73,69 @@ describe("Harness actions", () => {
     expect(overview.tasks).toContainEqual(expect.objectContaining({ role: "goal-review", status: "todo" }));
   });
 
+  test("prepareRunDrain proposes repeated lesson guardrails before goal review", () => {
+    const runId = harness.createRun({
+      goal: "Promote repeated lessons while draining",
+      context: {
+        guardrails: [{ id: "guardrail_existing", summary: "Preserve accepted guardrails.", active: true }],
+      },
+    });
+    const lessonSummary = "prepareRunDrain missed repeated lesson promotion";
+    const firstTaskId = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "First blocked task",
+      prompt: "Record a repeated lesson.",
+    });
+    const secondTaskId = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Second blocked task",
+      prompt: "Record the same repeated lesson.",
+    });
+    harness.recordAttempt({
+      taskId: firstTaskId,
+      input: { executor: "test" },
+      output: { status: "blocked", summary: "Blocked", problems: [lessonSummary] },
+    });
+    harness.recordAttempt({
+      taskId: secondTaskId,
+      input: { executor: "test" },
+      output: { status: "blocked", summary: "Blocked", problems: [`${lessonSummary}.`] },
+    });
+
+    const result = applyHarnessAction(harness, {
+      type: "prepareRunDrain",
+      runId,
+      maxTries: 2,
+    });
+    const overview = harness.getRunOverview({ runId });
+
+    expect(result).toMatchObject({
+      status: "done",
+      actionType: "prepareRunDrain",
+    });
+    expect(result.checks).toContainEqual(
+      expect.objectContaining({ name: "guardrail proposals refreshed", status: "passed", evidence: "1 proposal(s)" }),
+    );
+    expect(result.artifacts).toContainEqual(
+      expect.objectContaining({ kind: "guardrail_proposals", runId, proposed: 1 }),
+    );
+    expect(overview.run?.context.guardrails).toEqual([
+      expect.objectContaining({ id: "guardrail_existing", active: true }),
+    ]);
+    expect(overview.run?.context.guardrailProposals).toEqual([
+      expect.objectContaining({
+        summary: lessonSummary,
+        count: 2,
+        source: "lesson",
+        active: false,
+        accepted: false,
+      }),
+    ]);
+    expect(overview.tasks.find((task) => task.role === "goal-review")?.status).toBe("todo");
+  });
+
   test("prepares a drained run by accepting an existing complete goal-review", () => {
     const runId = harness.createRun({ goal: "Already reviewed run" });
     const reviewTaskId = harness.createTask({

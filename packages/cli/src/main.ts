@@ -1,5 +1,13 @@
 #!/usr/bin/env bun
-import { applyHarnessAction, diagnoseRunOverview, Harness, readableList, readableValue } from "@ouroboros/harness";
+import {
+  acceptGuardrailProposal as acceptGuardrailProposalInContext,
+  applyHarnessAction,
+  diagnoseRunOverview,
+  Harness,
+  proposeGuardrailsFromLessons as buildGuardrailProposalsFromLessons,
+  readableList,
+  readableValue,
+} from "@ouroboros/harness";
 import type { AttemptOutput } from "@ouroboros/harness";
 import {
   buildTaskPrompt,
@@ -22,7 +30,6 @@ import {
   superviseCodexDaemon,
   superviseCodexRuns,
   terminateProcessTreeSync,
-  normalizedLessonSummary,
 } from "@ouroboros/runner";
 import type { CodexSandbox, ResolvedExecutionRoute, StopHook } from "@ouroboros/runner";
 import { fail, flag, parseArgs, required } from "./args";
@@ -777,44 +784,24 @@ function proposeGuardrailsFromLessons(input: { runId: string; minCount: number }
   if (!run) {
     fail(`run not found: ${input.runId}`);
   }
-  const groups = repeatedLessonProposalGroups(harness.listLessons({ runId: input.runId }), input.minCount);
-  const existingProposals = guardrailProposalArray(run.context.guardrailProposals);
-  const existingById = new Map(existingProposals.map((proposal) => [proposal.id, proposal]));
-  const proposals = groups.map((group) => {
-    const existing = existingById.get(group.id);
-    return {
-      ...existing,
-      id: group.id,
-      summary: group.summary,
-      count: group.count,
-      sourceLessonIds: group.sourceLessonIds,
-      sourceAttemptIds: group.sourceAttemptIds,
-      roles: Array.isArray(existing?.roles) ? existing.roles : ["*"],
-      source: "lesson",
-      active: false,
-      accepted: existing?.accepted === true,
-      ...(typeof existing?.acceptedBy === "string" ? { acceptedBy: existing.acceptedBy } : {}),
-      ...(typeof existing?.acceptedAt === "string" ? { acceptedAt: existing.acceptedAt } : {}),
-    };
+  const proposalResult = buildGuardrailProposalsFromLessons({
+    lessons: harness.listLessons({ runId: input.runId }),
+    existingProposals: run.context.guardrailProposals,
+    minCount: input.minCount,
   });
-  const proposalIds = new Set(proposals.map((proposal) => proposal.id));
-  const nextProposals = [
-    ...existingProposals.filter((proposal) => !proposalIds.has(proposal.id)),
-    ...proposals,
-  ];
 
   harness.updateRun({
     runId: input.runId,
     contextPatch: {
-      guardrailProposals: nextProposals,
+      guardrailProposals: proposalResult.nextProposals,
     },
   });
 
   return {
     runId: input.runId,
     minCount: input.minCount,
-    proposed: proposals.length,
-    proposals,
+    proposed: proposalResult.proposed,
+    proposals: proposalResult.proposals,
   };
 }
 
@@ -823,115 +810,28 @@ function acceptGuardrailProposal(input: { runId: string; proposalId: string; acc
   if (!run) {
     fail(`run not found: ${input.runId}`);
   }
-  const proposals = guardrailProposalArray(run.context.guardrailProposals);
-  const proposal = proposals.find((candidate) => candidate.id === input.proposalId);
-  if (!proposal) {
+  const accepted = acceptGuardrailProposalInContext({
+    context: run.context,
+    proposalId: input.proposalId,
+    acceptedBy: input.acceptedBy,
+  });
+  if (!accepted) {
     fail(`guardrail proposal not found: ${input.proposalId}`);
   }
-  const acceptedAt = new Date().toISOString();
-  const guardrail = {
-    ...proposal,
-    active: true,
-    accepted: true,
-    acceptedBy: input.acceptedBy,
-    acceptedAt,
-  };
-  const existingGuardrails = guardrailArray(run.context.guardrails);
-  const nextGuardrails = existingGuardrails.some((candidate) => candidate.id === guardrail.id)
-    ? existingGuardrails.map((candidate) => (candidate.id === guardrail.id ? guardrail : candidate))
-    : [...existingGuardrails, guardrail];
-  const nextProposals = proposals.map((candidate) =>
-    candidate.id === proposal.id
-      ? {
-          ...candidate,
-          active: false,
-          accepted: true,
-          acceptedBy: input.acceptedBy,
-          acceptedAt,
-        }
-      : { ...candidate, active: candidate.active === true ? false : candidate.active },
-  );
 
   harness.updateRun({
     runId: input.runId,
     contextPatch: {
-      guardrailProposals: nextProposals,
-      guardrails: nextGuardrails,
+      guardrailProposals: accepted.nextProposals,
+      guardrails: accepted.nextGuardrails,
     },
   });
 
   return {
     runId: input.runId,
     proposalId: input.proposalId,
-    guardrail,
+    guardrail: accepted.guardrail,
   };
-}
-
-function repeatedLessonProposalGroups(
-  lessons: ReturnType<Harness["listLessons"]>,
-  minCount: number,
-) {
-  const groups = new Map<
-    string,
-    { id: string; count: number; summary: string; sourceLessonIds: string[]; sourceAttemptIds: string[] }
-  >();
-  for (const lesson of lessons) {
-    if (lesson.kind !== "lesson") {
-      continue;
-    }
-    const key = normalizedLessonSummary(lesson.summary);
-    if (!key) {
-      continue;
-    }
-    const group = groups.get(key);
-    if (group) {
-      group.count += 1;
-      group.sourceLessonIds.push(lesson.id);
-      group.sourceAttemptIds.push(lesson.attemptId);
-      continue;
-    }
-    groups.set(key, {
-      id: guardrailIdForLessonSummary(key),
-      count: 1,
-      summary: lesson.summary.replace(/\s+/g, " ").trim(),
-      sourceLessonIds: [lesson.id],
-      sourceAttemptIds: [lesson.attemptId],
-    });
-  }
-
-  return Array.from(groups.values())
-    .filter((group) => group.count >= minCount)
-    .sort((left, right) => right.count - left.count || left.summary.localeCompare(right.summary));
-}
-
-function guardrailIdForLessonSummary(normalizedSummary: string) {
-  const slug = normalizedSummary
-    .replace(/[^a-z0-9]+/g, "_")
-    .replace(/^_+|_+$/g, "")
-    .slice(0, 72)
-    .replace(/_+$/g, "");
-  return `guardrail_${slug || "lesson"}`;
-}
-
-function guardrailProposalArray(value: unknown): Array<Record<string, unknown> & { id: string }> {
-  return recordArrayWithIds(value);
-}
-
-function guardrailArray(value: unknown): Array<Record<string, unknown> & { id: string }> {
-  return recordArrayWithIds(value);
-}
-
-function recordArrayWithIds(value: unknown): Array<Record<string, unknown> & { id: string }> {
-  if (!Array.isArray(value)) {
-    return [];
-  }
-  return value.flatMap((item) => {
-    if (!item || typeof item !== "object" || Array.isArray(item)) {
-      return [];
-    }
-    const record = item as Record<string, unknown>;
-    return typeof record.id === "string" && record.id.trim() ? [{ ...record, id: record.id.trim() }] : [];
-  });
 }
 
 function executorFactory(_executorName: "noop" | "acpx-codex" | "codex-cli" | "codex-resumable") {

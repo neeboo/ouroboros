@@ -1,5 +1,6 @@
 import { existsSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
+import { proposeGuardrailsFromLessons } from "./guardrails";
 import { Harness } from "./harness";
 import type { ReclaimedRunningTask, RunOverview, Task } from "./types";
 
@@ -829,6 +830,26 @@ function prepareRunDrain(harness: Harness, action: Extract<HarnessAction, { type
     artifacts.push(...active.map((task) => ({ kind: "active_task", taskId: task.id, role: task.role, status: task.status })));
     return doneResult(action.type, `Run ${action.runId} has ${active.length} active task${active.length === 1 ? "" : "s"} ready for a runner.`, checks, artifacts);
   }
+
+  const proposals = proposeGuardrailsFromLessons({
+    lessons: harness.listLessons({ runId: action.runId }),
+    existingProposals: overview.run?.context.guardrailProposals,
+  });
+  harness.updateRun({
+    runId: action.runId,
+    contextPatch: { guardrailProposals: proposals.nextProposals },
+  });
+  checks.push({
+    name: "guardrail proposals refreshed",
+    status: "passed",
+    evidence: `${proposals.proposed} proposal(s)`,
+  });
+  artifacts.push({
+    kind: "guardrail_proposals",
+    runId: action.runId,
+    proposed: proposals.proposed,
+    proposalIds: proposals.proposals.map((proposal) => proposal.id),
+  });
 
   const completedReview = selectCompletedGoalReview(overview);
   if (completedReview) {
