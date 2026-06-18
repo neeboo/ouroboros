@@ -3424,6 +3424,124 @@ describe("CLI", () => {
     });
   });
 
+  test("proposes and accepts repeated lesson guardrails", async () => {
+    await runCli("init");
+    const run = await runCliJson(
+      "create-run",
+      "--goal",
+      "Promote repeated lessons",
+      "--context-json",
+      '{"guardrails":[{"id":"guardrail_existing","summary":"Preserve existing accepted guardrails.","source":"manual"}]}',
+    );
+    const lessonSummary =
+      "running attempt is missing codexSessionId; task was returned to todo for a fresh attempt";
+    const first = await runCliJson(
+      "create-task",
+      "--run-id",
+      run.id,
+      "--role",
+      "worker",
+      "--goal",
+      "First blocked attempt",
+      "--prompt",
+      "Block with repeated lesson.",
+    );
+    const second = await runCliJson(
+      "create-task",
+      "--run-id",
+      run.id,
+      "--role",
+      "worker",
+      "--goal",
+      "Second blocked attempt",
+      "--prompt",
+      "Block with repeated lesson again.",
+    );
+    await runCliJson(
+      "record-attempt",
+      "--task-id",
+      first.id,
+      "--input-json",
+      "{}",
+      "--output-json",
+      JSON.stringify({ status: "blocked", summary: "Blocked", problems: [lessonSummary] }),
+    );
+    await runCliJson(
+      "record-attempt",
+      "--task-id",
+      second.id,
+      "--input-json",
+      "{}",
+      "--output-json",
+      JSON.stringify({ status: "blocked", summary: "Blocked", problems: [`${lessonSummary}.`] }),
+    );
+
+    const proposalResult = await runCliJson("propose-guardrails", "--run-id", run.id);
+    const overviewAfterProposal = await runCliJson("run-overview", "--run-id", run.id);
+    const proposal = proposalResult.proposals[0];
+
+    expect(proposalResult).toMatchObject({ runId: run.id, proposed: 1 });
+    expect(proposal).toMatchObject({
+      summary: lessonSummary,
+      count: 2,
+      roles: ["*"],
+      source: "lesson",
+      active: false,
+      accepted: false,
+    });
+    expect(proposal.sourceLessonIds).toHaveLength(2);
+    expect(proposal.sourceAttemptIds).toHaveLength(2);
+    expect(overviewAfterProposal.run.context.guardrailProposals).toEqual([expect.objectContaining({
+      id: proposal.id,
+      accepted: false,
+      active: false,
+    })]);
+
+    const accepted = await runCliJson(
+      "accept-guardrail",
+      "--run-id",
+      run.id,
+      "--proposal-id",
+      proposal.id,
+      "--accepted-by",
+      "goal-review",
+    );
+    const promptTask = await runCliJson(
+      "create-task",
+      "--run-id",
+      run.id,
+      "--role",
+      "worker",
+      "--goal",
+      "Use accepted guardrail",
+      "--prompt",
+      "Render the prompt.",
+    );
+    const overviewAfterAccept = await runCliJson("run-overview", "--run-id", run.id);
+    const prompt = await runCli("show-task-prompt", "--task-id", promptTask.id);
+
+    expect(accepted.guardrail).toMatchObject({
+      id: proposal.id,
+      summary: lessonSummary,
+      source: "lesson",
+      active: true,
+      accepted: true,
+      acceptedBy: "goal-review",
+    });
+    expect(overviewAfterAccept.run.context.guardrails).toEqual([
+      expect.objectContaining({ id: "guardrail_existing" }),
+      expect.objectContaining({ id: proposal.id, active: true, accepted: true }),
+    ]);
+    expect(overviewAfterAccept.run.context.guardrailProposals[0]).toMatchObject({
+      id: proposal.id,
+      active: false,
+      accepted: true,
+    });
+    expect(prompt.indexOf("## Active Guardrails")).toBeGreaterThanOrEqual(0);
+    expect(prompt.indexOf("## Active Guardrails")).toBeLessThan(prompt.indexOf("## Candidate Guardrails"));
+    expect(prompt).toContain(`${proposal.id}: ${lessonSummary} (source: lesson)`);
+  });
+
   test("retries a blocked task", async () => {
     await runCli("init");
     const run = await runCliJson("create-run", "--goal", "Bootstrap ouroboros");

@@ -1,4 +1,15 @@
-import { applyHarnessAction, diagnoseRunOverview, type AttemptOutput, type Harness, type HarnessActionResult, type RunOverview, type Task } from "@ouroboros/harness";
+import {
+  applyHarnessAction,
+  diagnoseRunOverview,
+  type Attempt,
+  type AttemptOutput,
+  type ExecutionThread,
+  type ExecutionThreadStatus,
+  type Harness,
+  type HarnessActionResult,
+  type RunOverview,
+  type Task,
+} from "@ouroboros/harness";
 import { buildTaskPrompt } from "./prompt";
 import { applyStartHooks } from "./runner";
 import { createCodexResumableClient } from "./executors/codex-resumable";
@@ -8,7 +19,6 @@ import { createRouteExecutor } from "./route-executor";
 import { resolveExecutionRoute } from "./execution-routing";
 import type { ResolvedExecutionRoute } from "./execution-routing";
 import { inferExplicitRunDecision } from "./hooks/goal-review";
-import type { ExecutionThreadStatus } from "@ouroboros/harness";
 import type { StartHook, StartHookResult, StopHook, TaskExecutorFactory } from "./types";
 
 const DEFAULT_RUNNING_ATTEMPT_STALE_MS = 5 * 60 * 1000;
@@ -292,7 +302,10 @@ class CodexResumableOrchestrator {
     const task = this.taskOrThrow(attempt.taskId);
     const run = this.runOrThrow(task.runId);
     this.harness.clearRunPause(run.id);
-    const sessionId = typeof attempt.input.codexSessionId === "string" ? attempt.input.codexSessionId : "";
+    const sessionId = this.sessionIdForAttempt(
+      attempt,
+      this.harness.listExecutionThreads({ runId: run.id }).find((thread) => thread.attemptId === attemptId),
+    );
     if (!sessionId) {
       throw new Error(`attempt has no codexSessionId: ${attemptId}`);
     }
@@ -347,11 +360,11 @@ class CodexResumableOrchestrator {
       if (!task) return null;
       const run = this.harness.getRun(task.runId);
       if (!run) return null;
-      const sessionId = typeof attempt.input.codexSessionId === "string" ? attempt.input.codexSessionId : "";
+      const thread = threadsByAttemptId.get(attempt.id);
+      const sessionId = this.sessionIdForAttempt(attempt, thread);
       if (!sessionId) {
         const sessionName = typeof attempt.input.sessionName === "string" ? attempt.input.sessionName : `attempt-${attempt.id}`;
         const cwd = typeof attempt.input.cwd === "string" ? attempt.input.cwd : task.worktreePath ?? this.cwd;
-        const thread = threadsByAttemptId.get(attempt.id);
         if (this.runningAttemptIsFresh(sessionsByAttemptId.get(attempt.id), thread)) {
           this.upsertAttemptThread({ runId: run.id, task, attemptId: attempt.id, sessionName, cwd, status: "running" });
           return { taskId: task.id, attemptId: attempt.id, sessionName, status: "running" as const, codexSessionId: null };
@@ -869,6 +882,27 @@ class CodexResumableOrchestrator {
       agentSessionId: input.agentSessionId ?? null,
       heartbeat: input.heartbeat,
     });
+  }
+
+  private sessionIdForAttempt(attempt: Attempt, thread?: ExecutionThread) {
+    const sessionId = typeof attempt.input.codexSessionId === "string" ? attempt.input.codexSessionId : "";
+    if (sessionId) {
+      return sessionId;
+    }
+
+    const recoveredSessionId = thread?.agentSessionId ?? "";
+    if (!recoveredSessionId) {
+      return "";
+    }
+
+    this.harness.updateAttemptInput({
+      attemptId: attempt.id,
+      input: {
+        ...attempt.input,
+        codexSessionId: recoveredSessionId,
+      },
+    });
+    return recoveredSessionId;
   }
 
   private runningAttemptIsFresh(

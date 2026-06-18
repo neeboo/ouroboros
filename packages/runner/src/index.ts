@@ -1,4 +1,4 @@
-export { buildTaskPrompt } from "./prompt";
+export { buildTaskPrompt, normalizedLessonSummary } from "./prompt";
 export {
   blockedOutput,
   createRunsAction,

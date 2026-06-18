@@ -20,6 +20,7 @@ import {
   resolveAgentBackend,
   resolveExecutionRoute,
   runCodexResumableLoop,
+  resumeCodexResumableAttempt,
   runNextReadyTask,
   runReadyTasks,
   setRunDecisionAction,
@@ -681,6 +682,173 @@ describe("runner", () => {
     expect(attempt.status).toBe("blocked");
     expect(task.status).toBe("todo");
     expect(thread.status).toBe("orphaned");
+  });
+
+  test("runner-owned codex loop recovers missing codexSessionId from thread agent session id", async () => {
+    const runId = harness.createRun({ goal: "Recover runner session" });
+    const taskId = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Resume from thread",
+      prompt: "Continue.",
+    });
+    const recoveredAttemptId = harness.startAttempt({
+      taskId,
+      input: { sessionName: "recoverable", executor: "codex-resumable", cwd: dir },
+    });
+    harness.upsertExecutionThread({
+      id: `thread_${recoveredAttemptId}`,
+      runId,
+      taskId,
+      attemptId: recoveredAttemptId,
+      ownerType: "runner",
+      ownerId: "recoverable-owner",
+      role: "worker",
+      status: "running",
+      pid: 99999999,
+      sessionName: "recoverable",
+      agentSessionId: "session_from_thread",
+      worktreePath: dir,
+    });
+
+    const missingTaskId = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Missing session",
+      prompt: "Continue without a session.",
+    });
+    const missingAttemptId = harness.startAttempt({
+      taskId: missingTaskId,
+      input: { sessionName: "missing", executor: "codex-resumable", cwd: dir },
+    });
+    harness.upsertExecutionThread({
+      id: `thread_${missingAttemptId}`,
+      runId,
+      taskId: missingTaskId,
+      attemptId: missingAttemptId,
+      ownerType: "runner",
+      ownerId: "missing-owner",
+      role: "worker",
+      status: "running",
+      pid: 99999999,
+      sessionName: "missing",
+      worktreePath: dir,
+    });
+
+    const resumedSessions: string[] = [];
+    const result = await runCodexResumableLoop({
+      harness,
+      runId,
+      limit: 2,
+      maxRounds: 1,
+      maxTries: 3,
+      cwd: dir,
+      clientFactory: () => ({
+        start: async () => {
+          throw new Error("start should not be called");
+        },
+        resume: async ({ sessionId }) => {
+          resumedSessions.push(sessionId);
+          return {
+            status: "done" as const,
+            sessionId,
+            outputPath: join(dir, "output.json"),
+            stdout: "",
+            stderr: "",
+            events: [],
+            output: {
+              status: "done" as const,
+              summary: "Resumed",
+              changedFiles: [],
+              checks: [],
+              artifacts: [],
+              problems: [],
+            },
+          };
+        },
+      }),
+    });
+
+    const recoveredAttempt = harness.getAttempt(recoveredAttemptId)!;
+    const missingAttempt = harness.getAttempt(missingAttemptId)!;
+    const missingTask = harness.getTask(missingTaskId)!;
+
+    expect(resumedSessions).toEqual(["session_from_thread"]);
+    expect(result.rounds[0].tasks).toContainEqual(
+      expect.objectContaining({ attemptId: recoveredAttemptId, status: "done", codexSessionId: "session_from_thread" }),
+    );
+    expect(result.rounds[0].tasks).toContainEqual(
+      expect.objectContaining({ attemptId: missingAttemptId, status: "blocked", codexSessionId: null }),
+    );
+    expect(recoveredAttempt.input.codexSessionId).toBe("session_from_thread");
+    expect(missingAttempt.status).toBe("blocked");
+    expect(missingTask.status).toBe("todo");
+    expect(missingAttempt.output.problems).toContain("running attempt is missing codexSessionId; task was returned to todo for a fresh attempt");
+  });
+
+  test("direct codex resume recovers missing codexSessionId from thread agent session id", async () => {
+    const runId = harness.createRun({ goal: "Recover direct resume session" });
+    const taskId = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Resume direct",
+      prompt: "Continue.",
+    });
+    const attemptId = harness.startAttempt({
+      taskId,
+      input: { sessionName: "direct-recoverable", executor: "codex-resumable", cwd: dir },
+    });
+    harness.upsertExecutionThread({
+      id: `thread_${attemptId}`,
+      runId,
+      taskId,
+      attemptId,
+      ownerType: "runner",
+      ownerId: "direct-owner",
+      role: "worker",
+      status: "running",
+      pid: process.pid,
+      sessionName: "direct-recoverable",
+      agentSessionId: "direct_session_from_thread",
+      worktreePath: dir,
+    });
+
+    const resumedSessions: string[] = [];
+    const result = await resumeCodexResumableAttempt({
+      harness,
+      attemptId,
+      cwd: dir,
+      clientFactory: () => ({
+        start: async () => {
+          throw new Error("start should not be called");
+        },
+        resume: async ({ sessionId }) => {
+          resumedSessions.push(sessionId);
+          return {
+            status: "done" as const,
+            sessionId,
+            outputPath: join(dir, "output.json"),
+            stdout: "",
+            stderr: "",
+            events: [],
+            output: {
+              status: "done" as const,
+              summary: "Resumed direct",
+              changedFiles: [],
+              checks: [],
+              artifacts: [],
+              problems: [],
+            },
+          };
+        },
+      }),
+    });
+
+    const attempt = harness.getAttempt(attemptId)!;
+
+    expect(resumedSessions).toEqual(["direct_session_from_thread"]);
+    expect(result).toMatchObject({ attemptId, status: "done", codexSessionId: "direct_session_from_thread" });
+    expect(attempt.input.codexSessionId).toBe("direct_session_from_thread");
   });
 
   test("runner-owned loop preserves fresh generic running attempts without Codex session ids", async () => {

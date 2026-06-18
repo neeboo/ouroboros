@@ -180,7 +180,7 @@ function repeatedLessonGroups(lessons: CompactLesson[]) {
     .sort((left, right) => right.count - left.count || left.summary.localeCompare(right.summary));
 }
 
-function normalizedLessonSummary(value: string) {
+export function normalizedLessonSummary(value: string) {
   return value
     .normalize("NFKC")
     .toLowerCase()
