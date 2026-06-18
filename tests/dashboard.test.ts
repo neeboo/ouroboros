@@ -411,6 +411,30 @@ describe("dashboard", () => {
     expect(html).toContain("fetchDiffForChangedFile");
   });
 
+  test("renders active guardrails and pending guardrail proposals as read-only run context", () => {
+    const html = dashboardHtml({ runId: "run_123" });
+
+    expect(html).toContain("renderGuardrailsSection");
+    expect(html).toContain("guardrailRecords");
+    expect(html).toContain("overview.run?.context?.guardrails");
+    expect(html).toContain("overview.run?.context?.guardrailProposals");
+    expect(html).toContain("Active Guardrails");
+    expect(html).toContain("Pending Guardrail Proposals");
+    expect(html).toContain('data-inspector-section="guardrails"');
+    expect(html).toContain('data-guardrail-state="active"');
+    expect(html).toContain('data-guardrail-state="proposed"');
+    expect(html).toContain("guardrailSource");
+    expect(html).toContain("guardrailRoles");
+    expect(html).toContain("guardrailCount");
+    expect(html).toContain("compact(record.summary, 220)");
+    expect(html).toContain(".guardrail-summary");
+    expect(html).toContain(".guardrail-id");
+    expect(html).toContain(".guardrail-meta");
+    expect(html).not.toContain("data-accept-guardrail");
+    expect(html).not.toContain("accept-guardrail");
+    expect(html).not.toContain("propose-guardrails");
+  });
+
   test("renders Canvas and Flow workspace modes for the selected task graph", () => {
     const html = dashboardHtml({ runId: "run_123" });
 

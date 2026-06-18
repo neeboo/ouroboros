@@ -1406,6 +1406,53 @@ export function dashboardHtml(input: { runId: string }) {
       font-size: 14px;
       line-height: 1.55;
     }
+    .guardrail-list {
+      display: grid;
+      gap: 10px;
+    }
+    .guardrail-group + .guardrail-group {
+      margin-top: 18px;
+      padding-top: 16px;
+      border-top: 1px solid rgba(255, 255, 255, 0.08);
+    }
+    .guardrail-group-title {
+      margin-bottom: 9px;
+      color: #efeee9;
+      font-size: 12px;
+      font-weight: 720;
+      line-height: 1.4;
+    }
+    .guardrail-item {
+      min-width: 0;
+      padding: 10px 0 11px;
+      border-top: 1px solid rgba(255, 255, 255, 0.07);
+    }
+    .guardrail-id {
+      min-width: 0;
+      color: var(--muted-2);
+      font-family: var(--mono);
+      font-size: 10.5px;
+      line-height: 1.45;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .guardrail-summary {
+      min-width: 0;
+      margin-top: 4px;
+      color: #deddd7;
+      font-size: 13px;
+      line-height: 1.5;
+      overflow-wrap: anywhere;
+    }
+    .guardrail-meta {
+      min-width: 0;
+      margin-top: 5px;
+      color: var(--muted);
+      font-size: 11px;
+      line-height: 1.55;
+      overflow-wrap: anywhere;
+    }
     .prompt-link {
       display: inline-flex;
       align-items: center;
@@ -2003,6 +2050,41 @@ export function dashboardHtml(input: { runId: string }) {
     };
     const taskMeta = (task) => '<span class="code-meta">id ' + escapeHtml(task.id) + '</span>' + (task.dependsOn.length ? ' · depends on ' + task.dependsOn.map((id) => '<span class="code-meta">' + escapeHtml(id) + '</span>').join(", ") : '');
     const relationText = (ids) => ids.length ? ids.map((id) => '<span class="code-meta">' + escapeHtml(id) + '</span>').join(", ") : '<span class="meta">none</span>';
+    const guardrailRecords = (value) => Array.isArray(value) ? value.filter((record) => record && typeof record === "object" && !Array.isArray(record)) : [];
+    const guardrailSource = (record) => typeof record.source === "string" && record.source.trim() ? record.source.trim() : "unspecified source";
+    const guardrailRoles = (record) => {
+      const roles = Array.isArray(record.roles) ? record.roles : typeof record.role === "string" ? [record.role] : [];
+      const clean = roles.map((role) => String(role || "").trim()).filter(Boolean);
+      return clean.length ? compact(clean.join(", "), 160) : "global";
+    };
+    const guardrailCount = (record) => Number.isFinite(Number(record.count)) ? Number(record.count) : null;
+    const guardrailItem = (record, state) => {
+      const id = compact(record.id || "guardrail", 92);
+      const source = guardrailSource(record);
+      const roles = guardrailRoles(record);
+      const count = guardrailCount(record);
+      const meta = ["source " + source, count === null ? "" : "count " + count, "roles " + roles].filter(Boolean).join(" · ");
+      const stateAttribute = state === "active" ? 'data-guardrail-state="active"' : 'data-guardrail-state="proposed"';
+      return '<div class="guardrail-item" ' + stateAttribute + '>' +
+        '<div class="guardrail-id" title="' + escapeHtml(record.id || "guardrail") + '">' + escapeHtml(id) + '</div>' +
+        '<div class="guardrail-summary">' + escapeHtml(compact(record.summary, 220) || "No summary recorded.") + '</div>' +
+        '<div class="guardrail-meta">' + escapeHtml(meta) + '</div>' +
+        '</div>';
+    };
+    const guardrailGroup = (title, records, state) =>
+      '<div class="guardrail-group"><div class="guardrail-group-title">' + escapeHtml(title) + ' · ' + escapeHtml(records.length) + '</div>' +
+      (records.length ? '<div class="guardrail-list">' + records.map((record) => guardrailItem(record, state)).join("") + '</div>' : '<div class="empty">None recorded.</div>') +
+      '</div>';
+    const renderGuardrailsSection = (overview) => {
+      const activeGuardrails = guardrailRecords(overview.run?.context?.guardrails).filter((record) => record.active !== false);
+      const pendingProposals = guardrailRecords(overview.run?.context?.guardrailProposals).filter((record) => record.accepted !== true);
+      if (activeGuardrails.length === 0 && pendingProposals.length === 0) return "";
+      return '<section class="inspector-card" data-inspector-section="guardrails"><h2>Guardrails</h2>' +
+        guardrailGroup("Active Guardrails", activeGuardrails, "active") +
+        guardrailGroup("Pending Guardrail Proposals", pendingProposals, "proposed") +
+        '<div class="meta">Read-only. Use CLI or harness actions to propose or accept guardrails.</div>' +
+        '</section>';
+    };
     const roleSummary = (tasks) => [...new Set(tasks.map((task) => task.role))].join(" / ");
     const roleMark = (role) => escapeHtml(String(role || "?").slice(0, 2));
     const modelMetaForSession = (session) => {
@@ -2575,7 +2657,7 @@ export function dashboardHtml(input: { runId: string }) {
       setHtmlIfChanged("history-goal-list", [...goalGroups].reverse().filter((group) => group.activeTasks.length === 0).map(goalRow).join(""));
       patchWorkspace(renderWorkspace(selectedGroup));
       mountReactFlowCanvas();
-      patchInspectorPanel(renderInspector(overview, selectedGroup), renderSupervisor(overview) + renderRunner(overview));
+      patchInspectorPanel(renderInspector(overview, selectedGroup), renderGuardrailsSection(overview) + renderSupervisor(overview) + renderRunner(overview));
     }
     document.addEventListener("click", (event) => {
       if (!event.target || !event.target.closest) return;
