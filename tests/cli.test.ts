@@ -3617,6 +3617,143 @@ describe("CLI", () => {
     expect(prompt).toContain(`${proposal.id}: ${lessonSummary} (source: lesson)`);
   });
 
+  test("record-attempt refreshes guardrail proposals when goal-review completes", async () => {
+    await runCli("init");
+    const run = await runCliJson(
+      "create-run",
+      "--goal",
+      "Refresh proposals from CLI goal-review drain",
+      "--context-json",
+      JSON.stringify({
+        guardrails: [
+          {
+            id: "guardrail_manual",
+            summary: "Preserve manually accepted guardrails.",
+            source: "manual",
+            active: true,
+            accepted: true,
+            acceptedBy: "manual",
+            acceptedAt: "2026-01-01T00:00:00.000Z",
+          },
+        ],
+      }),
+    );
+    const lessonSummary = "record-attempt CLI must refresh repeated lesson proposals during goal-review drain";
+    const firstWorker = await runCliJson(
+      "create-task",
+      "--run-id",
+      run.id,
+      "--role",
+      "worker",
+      "--goal",
+      "First blocked worker",
+      "--prompt",
+      "Block with a repeated lesson.",
+    );
+    const secondWorker = await runCliJson(
+      "create-task",
+      "--run-id",
+      run.id,
+      "--role",
+      "worker",
+      "--goal",
+      "Second blocked worker",
+      "--prompt",
+      "Block with the same repeated lesson.",
+    );
+    const successWorker = await runCliJson(
+      "create-task",
+      "--run-id",
+      run.id,
+      "--role",
+      "worker",
+      "--goal",
+      "Successful worker",
+      "--prompt",
+      "Record a reusable experience.",
+    );
+    await runCliJson(
+      "record-attempt",
+      "--task-id",
+      firstWorker.id,
+      "--input-json",
+      "{}",
+      "--output-json",
+      JSON.stringify({ status: "blocked", summary: "Blocked", problems: [lessonSummary] }),
+    );
+    await runCliJson(
+      "record-attempt",
+      "--task-id",
+      secondWorker.id,
+      "--input-json",
+      "{}",
+      "--output-json",
+      JSON.stringify({ status: "blocked", summary: "Blocked", problems: [`${lessonSummary}.`] }),
+    );
+    await runCliJson(
+      "record-attempt",
+      "--task-id",
+      successWorker.id,
+      "--input-json",
+      "{}",
+      "--output-json",
+      JSON.stringify({
+        status: "done",
+        summary: "Reusable experience should not be promoted into a guardrail.",
+        changedFiles: [],
+        checks: [{ name: "experience", status: "passed" }],
+        artifacts: [],
+        problems: [],
+      }),
+    );
+    const review = await runCliJson(
+      "create-task",
+      "--run-id",
+      run.id,
+      "--role",
+      "goal-review",
+      "--goal",
+      "Review run completion",
+      "--prompt",
+      "Decide whether the goal is complete.",
+    );
+    await runCliJson(
+      "record-attempt",
+      "--task-id",
+      review.id,
+      "--input-json",
+      "{}",
+      "--output-json",
+      JSON.stringify({
+        status: "done",
+        runDecision: "continue",
+        summary: "Need another pass with a follow-up worker.",
+        changedFiles: [],
+        checks: [{ name: "goal review", status: "passed" }],
+        artifacts: [],
+        problems: [],
+      }),
+    );
+
+    const overview = await runCliJson("run-overview", "--run-id", run.id);
+    const proposals = (overview.run.context.guardrailProposals ?? []) as Array<Record<string, unknown>>;
+    const proposal = proposals[0];
+
+    expect(overview.run.status).toBe("todo");
+    expect(overview.run.context.guardrails).toEqual([
+      expect.objectContaining({ id: "guardrail_manual", active: true, accepted: true }),
+    ]);
+    expect(proposal).toMatchObject({
+      summary: lessonSummary,
+      count: 2,
+      source: "lesson",
+      active: false,
+      accepted: false,
+    });
+    const proposalSummaries = proposals.map((entry) => entry.summary);
+    expect(proposalSummaries).not.toContain("Reusable experience should not be promoted into a guardrail.");
+  });
+
   test("formatRunEvidence prints a terminal summary seeded with a goal-review attempt", async () => {
     await runCli("init");
     const run = await runCliJson("create-run", "--goal", "Validate run-evidence summary");

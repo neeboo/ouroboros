@@ -60,6 +60,61 @@ export function proposeGuardrailsFromLessons(input: {
   };
 }
 
+export interface RefreshGuardrailProposalsResult {
+  runId: string;
+  proposed: number;
+  proposals: GuardrailProposalRecord[];
+  nextProposals: GuardrailProposalRecord[];
+  updated: boolean;
+}
+
+export type GuardrailProposalRecord = Record<string, unknown> & {
+  id: string;
+  summary?: string;
+  count?: number;
+  source?: "lesson";
+  active?: boolean;
+  accepted?: boolean;
+  acceptedBy?: string;
+  acceptedAt?: string;
+};
+
+export interface RefreshGuardrailProposalsHarness {
+  listLessons(input: { runId: string; limit?: number }): Lesson[];
+  getRun(runId: string): { id: string; context: Record<string, unknown> } | null;
+  updateRun(input: { runId: string; contextPatch: Record<string, unknown> }): unknown;
+}
+
+export function refreshGuardrailProposalsForRun(input: {
+  harness: RefreshGuardrailProposalsHarness;
+  runId: string;
+  minCount?: number;
+}): RefreshGuardrailProposalsResult {
+  const run = input.harness.getRun(input.runId);
+  if (!run) {
+    return { runId: input.runId, proposed: 0, proposals: [], nextProposals: [], updated: false };
+  }
+  const proposalResult = proposeGuardrailsFromLessons({
+    lessons: input.harness.listLessons({ runId: input.runId }),
+    existingProposals: run.context.guardrailProposals,
+    minCount: input.minCount,
+  });
+  const updated = proposalResult.proposed > 0;
+  if (updated) {
+    input.harness.updateRun({
+      runId: input.runId,
+      contextPatch: { guardrailProposals: proposalResult.nextProposals },
+    });
+  }
+  return {
+    runId: input.runId,
+    proposed: proposalResult.proposed,
+    proposals: proposalResult.proposals as GuardrailProposalRecord[],
+    nextProposals: proposalResult.nextProposals as GuardrailProposalRecord[],
+    updated,
+  };
+}
+
 export function acceptGuardrailProposal(input: {
   context: Record<string, unknown>;
   proposalId: string;

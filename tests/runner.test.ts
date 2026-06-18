@@ -3,13 +3,14 @@ import { Database } from "bun:sqlite";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { Harness } from "../packages/harness/src";
+import { acceptGuardrailProposal, Harness } from "../packages/harness/src";
 import {
   buildTaskPrompt,
   createRunsAction,
   createContextSummaryHook,
   createGitWorktreeHook,
   createGoalReviewDecisionHook,
+  createRefreshGuardrailProposalsHook,
   createRepairTaskHook,
   createRunsFromOutputHook,
   createTasksAction,
@@ -3837,6 +3838,283 @@ describe("runner", () => {
       status: "done",
       runDecision: "defer",
     });
+  });
+
+  test("goal-review refresh hook surfaces repeated lesson guardrail proposals without auto-accepting", async () => {
+    const lessonSummary = "Refresh hook must promote repeated blocked lessons during goal-review drain";
+    const runId = harness.createRun({
+      goal: "Refresh proposals during goal-review drain",
+      context: {
+        guardrails: [
+          {
+            id: "guardrail_existing",
+            summary: "Preserve accepted guardrails.",
+            source: "manual",
+            active: true,
+            accepted: true,
+            acceptedBy: "manual",
+            acceptedAt: "2026-01-01T00:00:00.000Z",
+          },
+        ],
+      },
+    });
+    const firstBlocked = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "First blocked worker",
+      prompt: "Block with a repeated lesson.",
+    });
+    const secondBlocked = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Second blocked worker",
+      prompt: "Block with the same repeated lesson.",
+    });
+    harness.recordAttempt({
+      taskId: firstBlocked,
+      input: { executor: "test" },
+      output: { status: "blocked", summary: "Blocked", problems: [lessonSummary] },
+    });
+    harness.recordAttempt({
+      taskId: secondBlocked,
+      input: { executor: "test" },
+      output: { status: "blocked", summary: "Blocked", problems: [`${lessonSummary}.`] },
+    });
+    harness.createTask({
+      runId,
+      role: "goal-review",
+      goal: "Review whether the run goal is complete",
+      prompt: "Return runDecision continue with a follow-up worker task.",
+    });
+
+    const result = await runNextReadyTask({
+      harness,
+      runId,
+      stopHooksByRole: {
+        "goal-review": [
+          createGoalReviewDecisionHook({ harness }),
+          createTasksFromOutputHook({ harness }),
+          createRefreshGuardrailProposalsHook({ harness }),
+        ],
+      },
+      executor: async () => ({
+        status: "done",
+        runDecision: "continue",
+        summary: "Goal needs another worker pass.",
+        changedFiles: [],
+        checks: [{ name: "goal review", status: "passed" }],
+        artifacts: [],
+        problems: [],
+        nextTasks: [
+          {
+            role: "worker",
+            goal: "Follow-up worker",
+            prompt: "Apply the candidate guardrail once accepted.",
+          },
+        ],
+      }),
+    });
+    const attempt = harness.getAttempt(result!.attemptId)!;
+    const overview = harness.getRunOverview({ runId });
+    const proposals = (overview.run?.context.guardrailProposals ?? []) as Array<Record<string, unknown>>;
+    const proposal = proposals[0];
+
+    expect(result?.stopDecision).toBe("continue");
+    expect(attempt.output.runDecision).toBe("continue");
+    expect(overview.run?.context.guardrails).toEqual([
+      expect.objectContaining({ id: "guardrail_existing", active: true, accepted: true }),
+    ]);
+    expect(proposal).toMatchObject({
+      summary: lessonSummary,
+      count: 2,
+      source: "lesson",
+      active: false,
+      accepted: false,
+    });
+    expect(proposals).toHaveLength(1);
+    expect(attempt.output.artifacts).toContainEqual(
+      expect.objectContaining({
+        kind: "guardrail_proposals",
+        runId,
+        proposed: 1,
+      }),
+    );
+    expect(overview.tasks.some((task) => task.role === "worker" && task.status === "todo")).toBe(true);
+  });
+
+  test("goal-review refresh hook preserves accepted proposal metadata and skips experiences", async () => {
+    const acceptedLessonSummary = "Already accepted lesson proposal keeps its accepted metadata";
+    const experienceSummary = "Reusable experience should remain evidence, not a guardrail";
+    const runId = harness.createRun({
+      goal: "Keep accepted proposals intact during refresh",
+      context: {
+        guardrails: [
+          {
+            id: "guardrail_manual",
+            summary: "Preserve manually accepted guardrails.",
+            source: "manual",
+            active: true,
+            accepted: true,
+            acceptedBy: "manual",
+            acceptedAt: "2026-01-01T00:00:00.000Z",
+          },
+        ],
+      },
+    });
+    const firstBlocked = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "First blocked worker",
+      prompt: "Trigger the accepted lesson.",
+    });
+    const secondBlocked = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Second blocked worker",
+      prompt: "Trigger the accepted lesson again.",
+    });
+    harness.recordAttempt({
+      taskId: firstBlocked,
+      input: { executor: "test" },
+      output: { status: "blocked", summary: "Blocked", problems: [acceptedLessonSummary] },
+    });
+    harness.recordAttempt({
+      taskId: secondBlocked,
+      input: { executor: "test" },
+      output: { status: "blocked", summary: "Blocked", problems: [`${acceptedLessonSummary}.`] },
+    });
+    const successTask = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Succeed and record experience",
+      prompt: "Succeed while recording an experience lesson.",
+    });
+    harness.recordAttempt({
+      taskId: successTask,
+      input: { executor: "test" },
+      output: {
+        status: "done",
+        summary: experienceSummary,
+        changedFiles: [],
+        checks: [{ name: "experience", status: "passed" }],
+        artifacts: [],
+        problems: [],
+      },
+    });
+    harness.createTask({
+      runId,
+      role: "goal-review",
+      goal: "First review",
+      prompt: "Return runDecision continue with a follow-up worker task.",
+    });
+
+    const firstResult = await runNextReadyTask({
+      harness,
+      runId,
+      stopHooksByRole: {
+        "goal-review": [
+          createGoalReviewDecisionHook({ harness }),
+          createTasksFromOutputHook({ harness }),
+          createRefreshGuardrailProposalsHook({ harness }),
+        ],
+      },
+      executor: async () => ({
+        status: "done",
+        runDecision: "continue",
+        summary: "Need another pass.",
+        changedFiles: [],
+        checks: [{ name: "goal review", status: "passed" }],
+        artifacts: [],
+        problems: [],
+        nextTasks: [
+          {
+            role: "goal-review",
+            goal: "Second review",
+            prompt: "Return runDecision complete.",
+          },
+        ],
+      }),
+    });
+
+    const overviewAfterFirst = harness.getRunOverview({ runId });
+    const proposalsAfterFirst = (overviewAfterFirst.run?.context.guardrailProposals ?? []) as Array<Record<string, unknown>>;
+    const proposalId = proposalsAfterFirst[0]?.id as string;
+    expect(proposalId).toEqual(expect.any(String));
+    expect(proposalsAfterFirst[0]).toMatchObject({
+      summary: acceptedLessonSummary,
+      count: 2,
+      active: false,
+      accepted: false,
+    });
+    const proposalSummariesAfterFirst = proposalsAfterFirst.map((proposal) => proposal.summary);
+    expect(proposalSummariesAfterFirst).not.toContain(experienceSummary);
+
+    const accepted = acceptGuardrailProposal({
+      context: overviewAfterFirst.run!.context,
+      proposalId,
+      acceptedBy: "goal-review",
+      acceptedAt: "2026-02-01T00:00:00.000Z",
+    });
+    harness.updateRun({
+      runId,
+      contextPatch: {
+        guardrails: accepted!.nextGuardrails,
+        guardrailProposals: accepted!.nextProposals,
+      },
+    });
+
+    const thirdBlocked = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Third blocked worker",
+      prompt: "Trigger the accepted lesson a third time.",
+    });
+    harness.recordAttempt({
+      taskId: thirdBlocked,
+      input: { executor: "test" },
+      output: { status: "blocked", summary: "Blocked", problems: [`${acceptedLessonSummary}!`] },
+    });
+
+    await runNextReadyTask({
+      harness,
+      runId,
+      stopHooksByRole: {
+        "goal-review": [
+          createGoalReviewDecisionHook({ harness }),
+          createTasksFromOutputHook({ harness }),
+          createRefreshGuardrailProposalsHook({ harness }),
+        ],
+      },
+      executor: async () => ({
+        status: "done",
+        runDecision: "complete",
+        summary: "Goal complete.",
+        changedFiles: [],
+        checks: [{ name: "goal review", status: "passed" }],
+        artifacts: [],
+        problems: [],
+      }),
+    });
+
+    expect(firstResult?.stopDecision).toBe("continue");
+    const overview = harness.getRunOverview({ runId });
+    const proposals = (overview.run?.context.guardrailProposals ?? []) as Array<Record<string, unknown>>;
+    expect(overview.run?.status).toBe("done");
+    expect(overview.run?.context.guardrails).toEqual([
+      expect.objectContaining({ id: "guardrail_manual", active: true, accepted: true }),
+      expect.objectContaining({ id: proposalId, active: true, accepted: true }),
+    ]);
+    const refreshedProposal = proposals.find((proposal) => proposal.id === proposalId);
+    expect(refreshedProposal).toMatchObject({
+      id: proposalId,
+      count: 3,
+      active: false,
+      accepted: true,
+      acceptedBy: "goal-review",
+      acceptedAt: "2026-02-01T00:00:00.000Z",
+    });
+    const proposalSummaries = proposals.map((proposal) => proposal.summary);
+    expect(proposalSummaries).not.toContain(experienceSummary);
   });
 
   test("repair task hook uses the database template", async () => {

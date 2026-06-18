@@ -5,6 +5,7 @@ import {
   diagnoseRunOverview,
   Harness,
   proposeGuardrailsFromLessons as buildGuardrailProposalsFromLessons,
+  refreshGuardrailProposalsForRun,
   readableList,
   readableValue,
 } from "@ouroboros/harness";
@@ -14,6 +15,7 @@ import {
   createContextSummaryHook,
   createGitWorktreeHook,
   createGoalReviewDecisionHook,
+  createRefreshGuardrailProposalsHook,
   createRepairTaskHook,
   createRunsFromOutputHook,
   createTasksFromOutputHook,
@@ -1620,6 +1622,9 @@ function applyCliPostAttemptRunEffects(runId: string, task: Pick<Task, "role">, 
   if (task.role === "goal-review" && output.status === "done" && output.runDecision === "defer") {
     harness.updateRunStatus({ runId, status: "blocked" });
   }
+  if (task.role === "goal-review" && output.status === "done") {
+    refreshGuardrailProposalsForRun({ harness, runId });
+  }
 }
 
 function dashboardRunnerCommand(
@@ -1781,11 +1786,12 @@ function stopHooksByRole() {
   const taskCreationHook = createTasksFromOutputHook({ harness });
   const runCreationHook = createRunsFromOutputHook({ harness });
   const goalReviewDecisionHook = createGoalReviewDecisionHook({ harness });
+  const refreshGuardrailProposalsHook = createRefreshGuardrailProposalsHook({ harness });
   const hooks = {
     planner: [],
     worker: [],
     verifier: [],
-    "goal-review": [goalReviewDecisionHook, taskCreationHook],
+    "goal-review": [goalReviewDecisionHook, taskCreationHook, refreshGuardrailProposalsHook],
   } as Record<string, StopHook[]>;
   if (!raw) {
     return hooks;
