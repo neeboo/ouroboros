@@ -431,6 +431,15 @@ Accepted active guardrails can be carried in `run.context.guardrails` without ad
 
 Each guardrail may use `role`, `roles`, or no role for a global rule. `active: false` excludes a guardrail from prompts. The default task prompt renders matching items as `## Active Guardrails` before prompt-only candidate guardrails. Automatic promotion from repeated lessons to active guardrails remains a separate planner/amendment step.
 
+### Guardrail proposal acceptance
+
+The harness owns guardrail writes. Repeated lessons become pending proposals through `ouroboros propose-guardrails --run-id <runId>` and are stored on `run.context.guardrailProposals`. Promoting a pending proposal into `run.context.guardrails` is an audited write that flows through one of two scoped paths:
+
+- CLI: `ouroboros accept-guardrail --run-id <runId> --proposal-id <proposalId> --accepted-by <actor>`
+- Dashboard: a pending proposal renders an Accept control that POSTs to `/api/runs/<runId>/guardrails/<proposalId>/accept`
+
+Both paths delegate to the harness action `acceptGuardrailProposal`, which validates the run, the proposal id, and the monotonic promotion into `run.context.guardrails`, records a `guardrail_acceptance` artifact, and appends a row to `harness_action_events`. The dashboard does not write to the database directly; the route is scoped to the primary run and returns 404 for any other run id. Repeated lessons that have already been accepted are removed from the pending list until a new lesson refreshes their count.
+
 ## Verification
 
 A verifier is just another task with role `verifier`.

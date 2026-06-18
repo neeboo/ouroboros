@@ -790,6 +790,114 @@ describe("Harness actions", () => {
     expect(body).toMatchObject({ status: "done", actionType: "prepareRunDrain" });
     expect(harness.listHarnessActionEvents({ limit: 1 })[0]).toMatchObject({ actionType: "prepareRunDrain" });
   });
+
+  test("accepts a pending guardrail proposal and records an audited event", () => {
+    const runId = harness.createRun({
+      goal: "Promote a pending guardrail proposal",
+      context: {
+        guardrails: [{ id: "guardrail_existing", summary: "Preserve accepted guardrails.", active: true }],
+        guardrailProposals: [
+          {
+            id: "guardrail_pending",
+            summary: "Repeated lesson summary.",
+            count: 2,
+            source: "lesson",
+            active: false,
+            accepted: false,
+          },
+        ],
+      },
+    });
+
+    const result = applyHarnessAction(harness, {
+      type: "acceptGuardrailProposal",
+      runId,
+      proposalId: "guardrail_pending",
+      acceptedBy: "dashboard",
+      reason: "dashboard accept control",
+    });
+    const event = harness.listHarnessActionEvents({ limit: 1 })[0];
+    const overview = harness.getRunOverview({ runId });
+
+    expect(result).toMatchObject({
+      status: "done",
+      actionType: "acceptGuardrailProposal",
+      eventId: expect.any(String),
+    });
+    expect(result.artifacts).toContainEqual(
+      expect.objectContaining({
+        kind: "guardrail_acceptance",
+        runId,
+        proposalId: "guardrail_pending",
+        guardrailId: "guardrail_pending",
+        acceptedBy: "dashboard",
+        previouslyAccepted: false,
+      }),
+    );
+    expect(overview.run?.context.guardrails).toEqual([
+      expect.objectContaining({ id: "guardrail_existing" }),
+      expect.objectContaining({ id: "guardrail_pending", active: true, accepted: true, acceptedBy: "dashboard" }),
+    ]);
+    expect((overview.run?.context.guardrailProposals as Array<Record<string, unknown>> | undefined)?.[0]).toMatchObject({
+      id: "guardrail_pending",
+      accepted: true,
+      active: false,
+    });
+    expect(event).toMatchObject({
+      actionType: "acceptGuardrailProposal",
+      status: "done",
+      request: expect.objectContaining({ runId, proposalId: "guardrail_pending", acceptedBy: "dashboard" }),
+      result: expect.objectContaining({ status: "done" }),
+    });
+  });
+
+  test("blocks unknown guardrail proposal ids and missing runs without mutating context", () => {
+    const runId = harness.createRun({
+      goal: "Reject unknown guardrail proposal",
+      context: {
+        guardrailProposals: [
+          {
+            id: "guardrail_pending",
+            summary: "Repeated lesson summary.",
+            count: 2,
+            source: "lesson",
+            active: false,
+            accepted: false,
+          },
+        ],
+      },
+    });
+
+    const unknownProposal = applyHarnessAction(harness, {
+      type: "acceptGuardrailProposal",
+      runId,
+      proposalId: "guardrail_missing",
+      acceptedBy: "dashboard",
+    });
+    const missingRun = applyHarnessAction(harness, {
+      type: "acceptGuardrailProposal",
+      runId: "run_missing",
+      proposalId: "guardrail_pending",
+      acceptedBy: "dashboard",
+    });
+    const overview = harness.getRunOverview({ runId });
+
+    expect(unknownProposal).toMatchObject({
+      status: "blocked",
+      actionType: "acceptGuardrailProposal",
+    });
+    expect(unknownProposal.problems).toContainEqual(expect.stringContaining("guardrail proposal not found: guardrail_missing"));
+    expect(missingRun).toMatchObject({
+      status: "blocked",
+      actionType: "acceptGuardrailProposal",
+    });
+    expect((overview.run?.context.guardrailProposals as Array<Record<string, unknown>> | undefined)?.[0]).toMatchObject({
+      id: "guardrail_pending",
+      accepted: false,
+      active: false,
+    });
+    expect(overview.run?.context.guardrails ?? []).toEqual([]);
+  });
 });
 
 function git(cwd: string, args: string[]) {

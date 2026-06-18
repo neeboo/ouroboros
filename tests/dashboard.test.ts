@@ -411,7 +411,7 @@ describe("dashboard", () => {
     expect(html).toContain("fetchDiffForChangedFile");
   });
 
-  test("renders active guardrails and pending guardrail proposals as read-only run context", () => {
+  test("renders active guardrails and a harness-routed Accept control for pending guardrail proposals", () => {
     const html = dashboardHtml({ runId: "run_123" });
 
     expect(html).toContain("renderGuardrailsSection");
@@ -430,9 +430,13 @@ describe("dashboard", () => {
     expect(html).toContain(".guardrail-summary");
     expect(html).toContain(".guardrail-id");
     expect(html).toContain(".guardrail-meta");
-    expect(html).not.toContain("data-accept-guardrail");
-    expect(html).not.toContain("accept-guardrail");
-    expect(html).not.toContain("propose-guardrails");
+    expect(html).toContain('data-accept-guardrail="');
+    expect(html).toContain('data-accept-guardrail-run="');
+    expect(html).toContain("escapeHtml(proposalId)");
+    expect(html).toContain("escapeHtml(runId)");
+    expect(html).toContain('"/api/runs/" + encodeURIComponent(proposalRunId) + "/guardrails/" + encodeURIComponent(proposalId) + "/accept"');
+    expect(html).toContain("acceptGuardrailProposal");
+    expect(html).toContain("delegates to the harness-owned acceptGuardrailProposal action");
   });
 
   test("renders Canvas and Flow workspace modes for the selected task graph", () => {
@@ -2027,6 +2031,134 @@ describe("dashboard", () => {
       expect(response.status).toBe(404);
       const body = await response.json();
       expect(body.error).toMatch(/dashboard actions are only available on the primary run/);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("accepts pending guardrail proposals through the scoped dashboard route and blocks unknown ids", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "ouroboros-dashboard-guardrail-accept-"));
+    const harness = new Harness(join(dir, "ouroboros.db"));
+    harness.init();
+    const runId = harness.createRun({
+      goal: "Promote a pending guardrail proposal via the dashboard",
+      context: {
+        guardrails: [{ id: "guardrail_existing", summary: "Preserve accepted guardrails.", active: true }],
+        guardrailProposals: [
+          {
+            id: "guardrail_pending",
+            summary: "Repeated lesson summary.",
+            count: 2,
+            source: "lesson",
+            active: false,
+            accepted: false,
+          },
+        ],
+      },
+    });
+
+    const dashboardInput = {
+      runId,
+      overview: () => harness.getRunOverview({ runId }),
+      renderTaskPrompt: () => "",
+      actions: {
+        acceptGuardrailProposal: (proposalId: string, acceptedBy = "dashboard") => {
+          const actionResult = applyHarnessAction(harness, {
+            type: "acceptGuardrailProposal",
+            runId,
+            proposalId,
+            acceptedBy,
+            reason: "dashboard accept control",
+          });
+          if (actionResult.status === "blocked") {
+            throw new Error(actionResult.problems.join("; ") || "guardrail proposal was not accepted");
+          }
+          return { runId, proposalId, status: actionResult.status };
+        },
+      },
+    };
+
+    try {
+      const acceptResponse = await handleDashboardRequest(
+        new Request(`http://localhost/api/runs/${runId}/guardrails/guardrail_pending/accept`, {
+          method: "POST",
+          body: JSON.stringify({ acceptedBy: "dashboard" }),
+        }),
+        dashboardInput,
+      );
+      const acceptBody = await acceptResponse.json();
+      expect(acceptResponse.status).toBe(200);
+      expect(acceptBody).toMatchObject({
+        runId,
+        proposalId: "guardrail_pending",
+        status: "done",
+      });
+
+      const overview = harness.getRunOverview({ runId });
+      expect(overview.run?.context.guardrails).toEqual([
+        expect.objectContaining({ id: "guardrail_existing" }),
+        expect.objectContaining({ id: "guardrail_pending", active: true, accepted: true, acceptedBy: "dashboard" }),
+      ]);
+      expect((overview.run?.context.guardrailProposals as Array<Record<string, unknown>>)?.[0]).toMatchObject({
+        id: "guardrail_pending",
+        accepted: true,
+        active: false,
+      });
+
+      const unknownResponse = await handleDashboardRequest(
+        new Request(`http://localhost/api/runs/${runId}/guardrails/guardrail_missing/accept`, {
+          method: "POST",
+          body: JSON.stringify({}),
+        }),
+        dashboardInput,
+      );
+      expect(unknownResponse.status).toBe(400);
+      const unknownBody = await unknownResponse.json();
+      expect(unknownBody.error).toMatch(/guardrail proposal not found: guardrail_missing/);
+
+      const nonPrimaryResponse = await handleDashboardRequest(
+        new Request(`http://localhost/api/runs/run_other/guardrails/guardrail_pending/accept`, {
+          method: "POST",
+          body: JSON.stringify({}),
+        }),
+        dashboardInput,
+      );
+      expect(nonPrimaryResponse.status).toBe(404);
+      const nonPrimaryBody = await nonPrimaryResponse.json();
+      expect(nonPrimaryBody.error).toMatch(/dashboard actions are only available on the primary run/);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("rejects guardrail accept control when the action is not configured", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "ouroboros-dashboard-guardrail-accept-unconfigured-"));
+    const harness = new Harness(join(dir, "ouroboros.db"));
+    harness.init();
+    const runId = harness.createRun({
+      goal: "Reject dashboard accept without wiring",
+      context: {
+        guardrailProposals: [
+          { id: "guardrail_pending", summary: "x", count: 2, source: "lesson", active: false, accepted: false },
+        ],
+      },
+    });
+
+    try {
+      const response = await handleDashboardRequest(
+        new Request(`http://localhost/api/runs/${runId}/guardrails/guardrail_pending/accept`, {
+          method: "POST",
+          body: JSON.stringify({}),
+        }),
+        {
+          runId,
+          overview: () => harness.getRunOverview({ runId }),
+          renderTaskPrompt: () => "",
+        },
+      );
+      expect(response.status).toBe(400);
+      const body = await response.json();
+      expect(body.error).toMatch(/dashboard guardrail acceptance is not configured/);
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
