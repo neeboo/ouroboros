@@ -269,6 +269,74 @@ describe("CLI", () => {
     ]);
   });
 
+  test("self-iteration bootstrap routes planner, verifier, and goal-review through codex-resumable over a claude-code global default", async () => {
+    await runCli("init");
+    const configPath = join(dir, "self-iterate.toml");
+    await writeFile(
+      configPath,
+      [
+        "[agentDefaults]",
+        'global = "claude-code"',
+        "",
+        "[agentBackends.claude-code]",
+        'kind = "acpx"',
+        'agent = "claude"',
+        'approval = "approve-all"',
+      ].join("\n"),
+    );
+
+    const result = await runCliJson("self-iterate", "--config", configPath);
+    const overview = await runCliJson("run-overview", "--run-id", result.runId);
+
+    expect(overview.run.context.agentDefaults).toEqual({
+      global: "claude-code",
+      roles: {
+        planner: "codex-resumable",
+        verifier: "codex-resumable",
+        "goal-review": "codex-resumable",
+      },
+    });
+    expect(overview.run.context.agentBackends).toMatchObject({
+      "claude-code": {
+        kind: "acpx",
+        agent: "claude",
+        approval: "approve-all",
+      },
+    });
+  });
+
+  test("self-iteration bootstrap keeps explicit role agent backend overrides from config", async () => {
+    await runCli("init");
+    const configPath = join(dir, "self-iterate.toml");
+    await writeFile(
+      configPath,
+      [
+        "[agentDefaults]",
+        'global = "claude-code"',
+        "",
+        "[agentDefaults.roles]",
+        'planner = "claude-code"',
+        "",
+        "[agentBackends.claude-code]",
+        'kind = "acpx"',
+        'agent = "claude"',
+        'approval = "approve-all"',
+      ].join("\n"),
+    );
+
+    const result = await runCliJson("self-iterate", "--config", configPath);
+    const overview = await runCliJson("run-overview", "--run-id", result.runId);
+
+    expect(overview.run.context.agentDefaults).toEqual({
+      global: "claude-code",
+      roles: {
+        planner: "claude-code",
+        verifier: "codex-resumable",
+        "goal-review": "codex-resumable",
+      },
+    });
+  });
+
   test("launches the self-iteration dashboard and runner together", async () => {
     await runCli("init");
     const dashboardPort = nextTestPort();
