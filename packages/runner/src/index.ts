@@ -42,6 +42,7 @@ export { createTasksFromOutputHook } from "./hooks/create-tasks";
 export { createVerifierTaskHook } from "./hooks/create-verifier";
 export { createGitWorktreeHook } from "./hooks/git-worktree";
 export { createGoalReviewDecisionHook, inferExplicitRunDecision } from "./hooks/goal-review";
+export { createRefreshGuardrailProposalsHook } from "./hooks/refresh-guardrail-proposals";
 export type {
   AgentAction,
   AgentOutput,

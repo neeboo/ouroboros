@@ -7,10 +7,11 @@ export {
 export { initDatabase, withDatabase } from "./database";
 export { makeId } from "./ids";
 export { applyHarnessAction, parseHarnessAction } from "./actions";
-export { acceptGuardrailProposal, proposeGuardrailsFromLessons } from "./guardrails";
+export { acceptGuardrailProposal, proposeGuardrailsFromLessons, refreshGuardrailProposalsForRun } from "./guardrails";
 export { diagnoseRunOverview } from "./overseer";
 export { readableList, readableValue } from "./readable";
 export type { HarnessAction, HarnessActionOptions, HarnessActionResult } from "./actions";
+export type { GuardrailProposalRecord, RefreshGuardrailProposalsHarness, RefreshGuardrailProposalsResult } from "./guardrails";
 export type { OverseerDiagnosis, RunSupervisorState } from "./overseer";
 export type {
   Attempt,
