@@ -1273,7 +1273,7 @@ describe("runner", () => {
     await mkdir(join(worktreePath, "src"), { recursive: true });
     await writeFile(join(worktreePath, "src", "pre-review.ts"), "export const preReview = true;\n");
 
-    const runId = harness.createRun({ goal: "Integrate before review", projectRoot: repoPath });
+    const runId = harness.createRun({ goal: "Integrate before review" });
     const workerTaskId = harness.createTask({
       runId,
       role: "worker",

@@ -1035,7 +1035,7 @@ function runnableRuns(harness: Harness, input: { limit: number; rootRunId?: stri
 }
 
 function maybeIntegrateCompletedRun(
-  input: Pick<SuperviseCodexRunsInput, "harness" | "integrateCompletedRuns" | "integrationTargetBranch" | "integrationPush">,
+  input: Pick<SuperviseCodexRunsInput, "harness" | "cwd" | "integrateCompletedRuns" | "integrationTargetBranch" | "integrationPush">,
   overview: RunOverview,
 ): (HarnessActionResult & { eventId: string }) | null {
   if (!input.integrateCompletedRuns || !overview.run) {
@@ -1045,8 +1045,8 @@ function maybeIntegrateCompletedRun(
   if (preCompletion && overview.tasks.some((task) => task.status === "todo" || task.status === "running")) {
     return null;
   }
-  const integratedWorkerIds = successfulIntegratedWorkerIds(input.harness, overview.run.id);
-  const worker = selectIntegrationCandidate(overview, integratedWorkerIds);
+  const integrated = successfulIntegrationState(input.harness, overview.run.id);
+  const worker = selectIntegrationCandidate(overview, integrated);
   if (!worker) {
     return null;
   }
@@ -1054,6 +1054,7 @@ function maybeIntegrateCompletedRun(
     type: "integrateVerifiedRun",
     runId: overview.run.id,
     workerTaskId: worker.id,
+    repoPath: overview.run.projectRoot ?? overview.project?.rootPath ?? input.cwd,
     targetBranch: input.integrationTargetBranch ?? "main",
     push: input.integrationPush ?? false,
     reason: preCompletion
@@ -1062,16 +1063,24 @@ function maybeIntegrateCompletedRun(
   });
 }
 
-function selectIntegrationCandidate(overview: RunOverview, integratedWorkerIds: ReadonlySet<string> = new Set()): Task | null {
+interface SuccessfulIntegrationState {
+  workerIds: ReadonlySet<string>;
+  changedFiles: ReadonlySet<string>;
+}
+
+function selectIntegrationCandidate(overview: RunOverview, integrated: SuccessfulIntegrationState = emptyIntegrationState()): Task | null {
   return [...overview.tasks].reverse().find((task) => {
     if (["planner", "verifier", "goal-review"].includes(task.role) || task.status !== "done" || !task.worktreePath) {
       return false;
     }
-    if (integratedWorkerIds.has(task.id)) {
+    if (integrated.workerIds.has(task.id)) {
       return false;
     }
     const session = [...overview.sessions].reverse().find((candidate) => candidate.taskId === task.id && candidate.status === "done");
     if (!Array.isArray(session?.output.changedFiles) || session.output.changedFiles.length === 0) {
+      return false;
+    }
+    if (session.output.changedFiles.every((file) => integrated.changedFiles.has(file))) {
       return false;
     }
     return overview.tasks.some((candidate) =>
@@ -1082,8 +1091,9 @@ function selectIntegrationCandidate(overview: RunOverview, integratedWorkerIds: 
   }) ?? null;
 }
 
-function successfulIntegratedWorkerIds(harness: Harness, runId: string) {
+function successfulIntegrationState(harness: Harness, runId: string): SuccessfulIntegrationState {
   const workerIds = new Set<string>();
+  const changedFiles = new Set<string>();
   for (const event of harness.listHarnessActionEvents({ limit: 200 })) {
     if (event.actionType !== "integrateVerifiedRun" || event.status !== "done") {
       continue;
@@ -1093,8 +1103,30 @@ function successfulIntegratedWorkerIds(harness: Harness, runId: string) {
       continue;
     }
     workerIds.add(request.workerTaskId);
+    const result = event.result as Record<string, unknown>;
+    const artifacts = Array.isArray(result.artifacts) ? result.artifacts : [];
+    for (const artifact of artifacts) {
+      if (!isIntegrationArtifact(artifact)) {
+        continue;
+      }
+      for (const file of artifact.changedFiles) {
+        changedFiles.add(file);
+      }
+    }
   }
-  return workerIds;
+  return { workerIds, changedFiles };
+}
+
+function emptyIntegrationState(): SuccessfulIntegrationState {
+  return { workerIds: new Set(), changedFiles: new Set() };
+}
+
+function isIntegrationArtifact(value: unknown): value is { kind: "integration"; changedFiles: string[] } {
+  return typeof value === "object" &&
+    value !== null &&
+    (value as { kind?: unknown }).kind === "integration" &&
+    Array.isArray((value as { changedFiles?: unknown }).changedFiles) &&
+    (value as { changedFiles: unknown[] }).changedFiles.every((file) => typeof file === "string");
 }
 
 function runsInScope(runs: ReturnType<Harness["listRuns"]>, rootRunId: string) {
