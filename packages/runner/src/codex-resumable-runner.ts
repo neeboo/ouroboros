@@ -1037,30 +1037,36 @@ function runnableRuns(harness: Harness, input: { limit: number; rootRunId?: stri
 function maybeIntegrateCompletedRun(
   input: Pick<SuperviseCodexRunsInput, "harness" | "cwd" | "integrateCompletedRuns" | "integrationTargetBranch" | "integrationPush">,
   overview: RunOverview,
-): (HarnessActionResult & { eventId: string }) | null {
+): Array<HarnessActionResult & { eventId: string }> | null {
   if (!input.integrateCompletedRuns || !overview.run) {
     return null;
   }
   const preCompletion = overview.run.status !== "done";
   if (preCompletion && overview.tasks.some((task) => task.status === "todo" || task.status === "running")) {
-    return null;
+    return [];
   }
-  const integrated = successfulIntegrationState(input.harness, overview.run.id);
-  const worker = selectIntegrationCandidate(overview, integrated);
-  if (!worker) {
-    return null;
+  const results: Array<HarnessActionResult & { eventId: string }> = [];
+  let integrated = successfulIntegrationState(input.harness, overview.run.id);
+  while (true) {
+    const worker = selectIntegrationCandidate(overview, integrated);
+    if (!worker) {
+      break;
+    }
+    const result = applyHarnessAction(input.harness, {
+      type: "integrateVerifiedRun",
+      runId: overview.run.id,
+      workerTaskId: worker.id,
+      repoPath: overview.run.projectRoot ?? overview.project?.rootPath ?? input.cwd,
+      targetBranch: input.integrationTargetBranch ?? "main",
+      push: input.integrationPush ?? false,
+      reason: preCompletion
+        ? "supervisor integrated verified worker before goal review"
+        : "supervisor integrated a completed verified run",
+    });
+    results.push(result);
+    integrated = successfulIntegrationState(input.harness, overview.run.id);
   }
-  return applyHarnessAction(input.harness, {
-    type: "integrateVerifiedRun",
-    runId: overview.run.id,
-    workerTaskId: worker.id,
-    repoPath: overview.run.projectRoot ?? overview.project?.rootPath ?? input.cwd,
-    targetBranch: input.integrationTargetBranch ?? "main",
-    push: input.integrationPush ?? false,
-    reason: preCompletion
-      ? "supervisor integrated verified worker before goal review"
-      : "supervisor integrated a completed verified run",
-  });
+  return results;
 }
 
 interface SuccessfulIntegrationState {
