@@ -269,26 +269,19 @@ describe("CLI", () => {
     ]);
   });
 
-  test("keeps self-iteration planner/verifier/goal-review on codex-resumable when config recovers the backend policy", async () => {
-    const configPath = join(dir, "self-iterate-recovered.toml");
+  test("self-iteration bootstrap routes planner, verifier, and goal-review through codex-resumable over a claude-code global default", async () => {
+    await runCli("init");
+    const configPath = join(dir, "self-iterate.toml");
     await writeFile(
       configPath,
       [
         "[agentDefaults]",
         'global = "claude-code"',
         "",
-        "[agentDefaults.roles]",
-        'planner = "codex-resumable"',
-        'verifier = "codex-resumable"',
-        'goal-review = "codex-resumable"',
-        "",
-        '["agentBackends"."claude-code"]',
+        "[agentBackends.claude-code]",
         'kind = "acpx"',
         'agent = "claude"',
         'approval = "approve-all"',
-        "",
-        '["agentBackends"."codex-resumable"]',
-        'kind = "codex-resumable"',
       ].join("\n"),
     );
 
@@ -305,7 +298,6 @@ describe("CLI", () => {
     });
     expect(overview.run.context.agentBackends).toMatchObject({
       "claude-code": { kind: "acpx", agent: "claude", approval: "approve-all" },
-      "codex-resumable": { kind: "codex-resumable" },
     });
 
     expect(result.runnerCommand).toContain("--executor codex-resumable");
@@ -315,6 +307,38 @@ describe("CLI", () => {
 
     const lessons = await runCliJson("list-lessons", "--run-id", result.runId);
     expect(Array.isArray(lessons)).toBe(true);
+  });
+
+  test("self-iteration bootstrap keeps explicit role agent backend overrides from config", async () => {
+    await runCli("init");
+    const configPath = join(dir, "self-iterate.toml");
+    await writeFile(
+      configPath,
+      [
+        "[agentDefaults]",
+        'global = "claude-code"',
+        "",
+        "[agentDefaults.roles]",
+        'planner = "claude-code"',
+        "",
+        "[agentBackends.claude-code]",
+        'kind = "acpx"',
+        'agent = "claude"',
+        'approval = "approve-all"',
+      ].join("\n"),
+    );
+
+    const result = await runCliJson("self-iterate", "--config", configPath);
+    const overview = await runCliJson("run-overview", "--run-id", result.runId);
+
+    expect(overview.run.context.agentDefaults).toEqual({
+      global: "claude-code",
+      roles: {
+        planner: "claude-code",
+        verifier: "codex-resumable",
+        "goal-review": "codex-resumable",
+      },
+    });
   });
 
   test("launches the self-iteration dashboard and runner together", async () => {

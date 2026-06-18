@@ -60,6 +60,11 @@ const SELF_ITERATION_PLANNER_DONE_WHEN = [
   "Every planned task identifies a clear artifact, code change, test, or decision",
   "The graph includes natural failure paths through verifier, repair, or another planner and can be drained by run-loop",
 ];
+const SELF_ITERATION_ROLE_AGENT_DEFAULTS: Record<"planner" | "verifier" | "goal-review", string> = {
+  planner: "codex-resumable",
+  verifier: "codex-resumable",
+  "goal-review": "codex-resumable",
+};
 
 switch (parsed.command) {
   case "init": {
@@ -772,6 +777,34 @@ function withConfigDefaults(context: Record<string, unknown>, config: Awaited<Re
   };
 }
 
+function withSelfIterationConfigDefaults(
+  context: Record<string, unknown>,
+  config: Awaited<ReturnType<typeof loadOuroborosConfig>>,
+) {
+  const merged = withConfigDefaults(context, config);
+  const configAgentDefaults = recordValue(config.agentDefaults);
+  const configRoles = recordValue(configAgentDefaults.roles);
+  const mergedAgentDefaults = recordValue(merged.agentDefaults);
+  const mergedRoles = recordValue(mergedAgentDefaults.roles);
+  return {
+    ...merged,
+    agentDefaults: {
+      ...mergedAgentDefaults,
+      roles: {
+        ...SELF_ITERATION_ROLE_AGENT_DEFAULTS,
+        ...configRoles,
+        ...mergedRoles,
+      },
+    },
+  };
+}
+
+function recordValue(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : {};
+}
+
 function hasConfigContent(config: Awaited<ReturnType<typeof loadOuroborosConfig>>) {
   return Boolean(config.linear || config.modelDefaults || config.agentDefaults || config.agentBackends);
 }
@@ -1035,7 +1068,7 @@ async function createSelfIterationBootstrap() {
   const config = await loadCliConfig();
   const runId = harness.createRun({
     goal: SELF_ITERATION_GOAL,
-    context: withConfigDefaults({
+    context: withSelfIterationConfigDefaults({
       source: "self-iterate",
       planDoc: SELF_ITERATION_PLAN_DOC,
     }, config),
