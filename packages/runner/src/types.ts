@@ -9,12 +9,19 @@ export interface PromptInput {
   template?: string;
 }
 
+export interface ExecutorEventRecorder {
+  stdout: (chunk: string) => void;
+  stderr: (chunk: string) => void;
+  event: (event: Record<string, unknown>) => void;
+}
+
 export interface ExecutorInput {
   prompt: string;
   run: Run;
   task: Task;
   sessionName: string;
   route: ResolvedExecutionRoute;
+  recorder?: ExecutorEventRecorder;
 }
 
 export type TaskExecutor = (input: ExecutorInput) => Promise<AttemptOutput>;

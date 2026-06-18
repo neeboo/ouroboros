@@ -944,6 +944,136 @@ describe("runner", () => {
     expect(thread.status).toBe("running");
   });
 
+  test("generic acpx attempt records durable start evidence and streamed output via the executor recorder", async () => {
+    const runId = harness.createRun({
+      goal: "Observe generic acpx attempt",
+      context: {
+        agentDefaults: {
+          roles: {
+            planner: "claude-code",
+          },
+        },
+        agentBackends: {
+          "claude-code": {
+            kind: "acpx",
+            agent: "claude",
+          },
+        },
+      },
+    });
+    const taskId = harness.createTask({
+      runId,
+      role: "planner",
+      goal: "Plan with Claude Code",
+      prompt: "Plan.",
+    });
+
+    const recordedChunks: string[] = [];
+    const recordedEvents: Record<string, unknown>[] = [];
+    const result = await runCodexResumableLoop({
+      harness,
+      runId,
+      limit: 1,
+      maxRounds: 1,
+      maxTries: 3,
+      cwd: dir,
+      genericExecutorFactory: () => async ({ recorder }) => {
+        recorder?.event({ type: "test.executor.started" });
+        recorder?.stdout("[agent] planning\n");
+        recorder?.stderr("[agent] warning\n");
+        recordedChunks.push("streamed");
+        return {
+          status: "done",
+          summary: "planned via generic executor",
+          changedFiles: [],
+          checks: [],
+          artifacts: [],
+          problems: [],
+        };
+      },
+      clientFactory: () => ({
+        start: async () => {
+          throw new Error("start should not be called for generic route");
+        },
+        resume: async () => {
+          throw new Error("resume should not be called for generic route");
+        },
+      }),
+    });
+
+    const attemptId = result.rounds[0].tasks[0]!.attemptId;
+    const events = harness.listAttemptEvents(attemptId);
+    const systemEvents = events.filter((event) => event.stream === "system");
+    const stdoutEvents = events.filter((event) => event.stream === "stdout");
+    const stderrEvents = events.filter((event) => event.stream === "stderr");
+    for (const event of events) {
+      if (event.stream === "system" && event.payload && typeof event.payload === "object") {
+        recordedEvents.push(event.payload as Record<string, unknown>);
+      }
+    }
+
+    expect(systemEvents.length).toBeGreaterThan(0);
+    expect(systemEvents[0]!.payload).toMatchObject({ type: "generic.attempt.started", backend: "acpx" });
+    expect(recordedEvents.some((event) => event.type === "test.executor.started")).toBe(true);
+    expect(stdoutEvents.map((event) => event.text).join("")).toContain("[agent] planning");
+    expect(stderrEvents.map((event) => event.text).join("")).toContain("[agent] warning");
+    expect(recordedChunks).toEqual(["streamed"]);
+    expect(harness.getAttempt(attemptId)?.status).toBe("done");
+  });
+
+  test("generic acpx attempt records start evidence even when the executor throws", async () => {
+    const runId = harness.createRun({
+      goal: "Observe throwing generic acpx attempt",
+      context: {
+        agentDefaults: {
+          global: "claude-code",
+        },
+        agentBackends: {
+          "claude-code": {
+            kind: "acpx",
+            agent: "claude",
+          },
+        },
+      },
+    });
+    const taskId = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Throwing worker",
+      prompt: "Work.",
+    });
+
+    const result = await runCodexResumableLoop({
+      harness,
+      runId,
+      limit: 1,
+      maxRounds: 1,
+      maxTries: 3,
+      cwd: dir,
+      genericExecutorFactory: () => async () => {
+        throw new Error("silent executor crash");
+      },
+      clientFactory: () => ({
+        start: async () => {
+          throw new Error("start should not be called");
+        },
+        resume: async () => {
+          throw new Error("resume should not be called");
+        },
+      }),
+    });
+
+    const attemptId = result.rounds[0].tasks[0]!.attemptId;
+    const attempt = harness.getAttempt(attemptId)!;
+    const events = harness.listAttemptEvents(attemptId);
+    const systemEvents = events.filter((event) => event.stream === "system").map((event) => event.payload as Record<string, unknown>);
+
+    expect(attempt.status).toBe("blocked");
+    expect(attempt.output.problems).toContain("silent executor crash");
+    expect(systemEvents.some((event) => event.type === "generic.attempt.started")).toBe(true);
+    expect(systemEvents.some((event) => event.type === "generic.attempt.executor_threw")).toBe(true);
+  });
+
   test("supervisor skips paused blocked and complete diagnoses while draining runnable orphaned work", async () => {
     const pausedRunId = harness.createRun({
       goal: "Paused run",

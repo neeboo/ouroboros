@@ -52,6 +52,7 @@ export type {
 } from "./agent-actions";
 export type {
   AttemptInputFactory,
+  ExecutorEventRecorder,
   ExecutorInput,
   PromptInput,
   RunNextReadyTaskInput,

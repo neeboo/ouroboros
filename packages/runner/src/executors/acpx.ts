@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { parseAttemptOutput, parseAttemptOutputOrBlocked } from "./output";
 import { commandProblem, runLocalCommand } from "./command";
 import type { AcpxAgentExecutorFactory, AcpxCodexExecutorFactory, ApprovalMode, RunCommand } from "./types";
+import type { ExecutorEventRecorder } from "../types";
 
 export const createAcpxCodexExecutor: AcpxCodexExecutorFactory = (options) => {
   return createAcpxAgentExecutor({ ...options, agent: "codex" });
@@ -16,7 +17,7 @@ export const createAcpxAgentExecutor: AcpxAgentExecutorFactory = (options) => {
   const label = agentLabel(options);
   const oneShotExec = options.agent === "claude";
 
-  return async ({ prompt, sessionName }) => {
+  return async ({ prompt, sessionName, recorder }) => {
     const env = await acpxCommandEnv({
       cwd: options.cwd,
       sessionName,
@@ -31,6 +32,17 @@ export const createAcpxAgentExecutor: AcpxAgentExecutorFactory = (options) => {
       agent: options.agent,
       agentCommand: options.agentCommand,
     });
+    recorder?.event({
+      type: "acpx.attempt.started",
+      agent: label,
+      sessionName,
+      approval,
+      cwd: options.cwd,
+      model: options.model ?? null,
+      oneShot: oneShotExec,
+      timeoutMs: options.timeoutMs ?? null,
+      idleTimeoutMs: options.idleTimeoutMs ?? null,
+    });
     if (!oneShotExec) {
       const session = await ensureSession({
         base,
@@ -39,6 +51,7 @@ export const createAcpxAgentExecutor: AcpxAgentExecutorFactory = (options) => {
         sessionName,
         timeoutMs: options.timeoutMs,
         idleTimeoutMs: options.idleTimeoutMs,
+        recorder,
       });
       if (session) {
         return session;
@@ -54,8 +67,10 @@ export const createAcpxAgentExecutor: AcpxAgentExecutorFactory = (options) => {
       oneShotExec,
       timeoutMs: options.timeoutMs,
       idleTimeoutMs: options.idleTimeoutMs,
+      recorder,
     });
     if (!oneShotExec && commandFailed(result) && needsReconnect(result)) {
+      recorder?.event({ type: "acpx.attempt.reconnect", sessionName });
       await runCommand({
         cmd: [...base, "sessions", "close", sessionName],
         stdin: "",
@@ -71,6 +86,7 @@ export const createAcpxAgentExecutor: AcpxAgentExecutorFactory = (options) => {
         timeoutMs: options.timeoutMs,
         idleTimeoutMs: options.idleTimeoutMs,
         forceCreate: true,
+        recorder,
       });
       if (recreated) {
         return recreated;
@@ -83,6 +99,20 @@ export const createAcpxAgentExecutor: AcpxAgentExecutorFactory = (options) => {
         prompt,
         oneShotExec,
         timeoutMs: options.timeoutMs,
+        idleTimeoutMs: options.idleTimeoutMs,
+        recorder,
+      });
+    }
+
+    if (isIdleTimeout(result)) {
+      recorder?.event({
+        type: "acpx.attempt.idle_timeout",
+        sessionName,
+        idleTimeoutMs: options.idleTimeoutMs ?? null,
+      });
+      return blockedFromIdleTimeout({
+        label,
+        result,
         idleTimeoutMs: options.idleTimeoutMs,
       });
     }
@@ -183,6 +213,7 @@ async function ensureSession(input: {
   timeoutMs?: number;
   idleTimeoutMs?: number;
   forceCreate?: boolean;
+  recorder?: ExecutorEventRecorder;
 }) {
   const showSessionCommand = [...input.base, "sessions", "show", input.sessionName];
   if (!input.forceCreate) {
@@ -256,6 +287,7 @@ function runPrompt(input: {
   oneShotExec?: boolean;
   timeoutMs?: number;
   idleTimeoutMs?: number;
+  recorder?: ExecutorEventRecorder;
 }) {
   return input.runCommand({
     cmd: input.oneShotExec ? [...input.base, "exec", "-f", "-"] : [...input.base, "-s", input.sessionName],
@@ -264,6 +296,8 @@ function runPrompt(input: {
     timeoutMs: input.timeoutMs,
     idleTimeoutMs: input.idleTimeoutMs,
     cleanupOnFailure: true,
+    onStdout: input.recorder ? (chunk) => input.recorder!.stdout(chunk) : undefined,
+    onStderr: input.recorder ? (chunk) => input.recorder!.stderr(chunk) : undefined,
   });
 }
 
@@ -273,6 +307,47 @@ function approvalFlag(approval: ApprovalMode) {
 
 function commandFailed(result: { exitCode: number; stdout: string; stderr: string }) {
   return result.exitCode !== 0 || result.stderr.includes("Error:") || result.stdout.includes("Error:");
+}
+
+const IDLE_TIMEOUT_PATTERN = /command idle timed out after (\d+)ms/;
+
+function idleTimeoutMsFromResult(result: { exitCode: number; stdout: string; stderr: string }): number | null {
+  if (result.exitCode !== 124) {
+    return null;
+  }
+  const match = IDLE_TIMEOUT_PATTERN.exec(result.stderr);
+  return match ? Number(match[1]) : null;
+}
+
+function isIdleTimeout(result: { exitCode: number; stdout: string; stderr: string }) {
+  return idleTimeoutMsFromResult(result) !== null;
+}
+
+function blockedFromIdleTimeout(input: {
+  label: string;
+  result: { exitCode: number; stdout: string; stderr: string };
+  idleTimeoutMs?: number;
+}) {
+  const observedMs = idleTimeoutMsFromResult(input.result) ?? input.idleTimeoutMs;
+  const summary = observedMs
+    ? `acpx ${input.label} executor silent for ${observedMs}ms (idle timeout)`
+    : `acpx ${input.label} executor silent (idle timeout)`;
+  return {
+    status: "blocked" as const,
+    summary,
+    changedFiles: [],
+    checks: [{ name: `acpx ${input.label} idle`, status: "failed" as const }],
+    artifacts: [],
+    problems: [
+      [
+        `acpx ${input.label} executor produced no output for the idle timeout window (${observedMs ?? "?"}ms).`,
+        "The agent command stayed alive but emitted nothing on stdout or stderr.",
+        "exit code: 124",
+        ...(input.result.stdout.trim().length > 0 ? [`stdout:\n${input.result.stdout.trim()}`] : []),
+        ...(input.result.stderr.trim().length > 0 ? [`stderr:\n${input.result.stderr.trim()}`] : []),
+      ].join("\n\n"),
+    ],
+  };
 }
 
 function parseSuccessfulPromptOutput(result: { exitCode: number; stdout: string; stderr: string }) {
