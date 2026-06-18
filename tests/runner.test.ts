@@ -1206,35 +1206,39 @@ describe("runner", () => {
       dependsOn: [verifierTaskId],
     });
 
+    let startCount = 0;
     const result = await superviseCodexRuns({
       harness,
       cwd: repoPath,
       rootRunId: runId,
       runConcurrency: 1,
       taskConcurrency: 1,
-      maxCycles: 1,
+      maxCycles: 2,
       maxRounds: 1,
       maxTries: 3,
       intervalMs: 1,
       integrateCompletedRuns: true,
       clientFactory: () => ({
-        start: async () => ({
-          status: "done" as const,
-          sessionId: "session_goal_review",
-          outputPath: join(dir, "goal-review-output.json"),
-          stdout: "",
-          stderr: "",
-          events: [],
-          output: {
+        start: async () => {
+          startCount += 1;
+          return {
             status: "done" as const,
-            runDecision: "complete" as const,
-            summary: "Goal reached",
-            changedFiles: [],
-            checks: [{ name: "goal", status: "passed" }],
-            artifacts: [],
-            problems: [],
-          },
-        }),
+            sessionId: `session_goal_review_${startCount}`,
+            outputPath: join(dir, `goal-review-output-${startCount}.json`),
+            stdout: "",
+            stderr: "",
+            events: [],
+            output: {
+              status: "done" as const,
+              runDecision: "complete" as const,
+              summary: `Goal reached after review ${startCount}`,
+              changedFiles: [],
+              checks: [{ name: "goal", status: "passed" }],
+              artifacts: [],
+              problems: [],
+            },
+          };
+        },
         resume: async () => {
           throw new Error("resume should not be called");
         },
@@ -1243,8 +1247,14 @@ describe("runner", () => {
     const mergedFile = await readFile(join(repoPath, "src", "supervised.ts"), "utf8");
     const actionEvent = harness.listHarnessActionEvents({ limit: 1 })[0];
     const integrationResults = result.cycles[0].runs[0].integration!;
+    const goalReviews = harness.getRunOverview({ runId }).tasks.filter((task) => task.role === "goal-review");
+    const run = harness.getRun(runId)!;
 
     expect(result.cycles[0].runs[0]).toMatchObject({
+      runId,
+      status: "todo",
+    });
+    expect(result.cycles[1].runs[0]).toMatchObject({
       runId,
       status: "done",
     });
@@ -1258,6 +1268,11 @@ describe("runner", () => {
       ]),
     );
     expect(mergedFile.trim()).toBe("export const supervised = true;");
+    expect(startCount).toBe(2);
+    expect(goalReviews).toHaveLength(2);
+    expect(run.status).toBe("done");
+    expect(run.context.goalReviewInvalidatedByIntegration).toBe(false);
+    expect(typeof run.context.goalReviewRefreshedAt).toBe("string");
     expect(actionEvent).toMatchObject({
       actionType: "integrateVerifiedRun",
       status: "done",

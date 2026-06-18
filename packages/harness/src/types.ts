@@ -261,6 +261,7 @@ export interface ObservableSession {
   codexSessionId: string | null;
   worktreePath: string | null;
   startedAt: string | null;
+  finishedAt: string | null;
   latestText: string;
   events: AttemptEvent[];
 }

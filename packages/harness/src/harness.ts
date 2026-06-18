@@ -1002,14 +1002,14 @@ export class Harness {
       const attemptRows = db
         .query(
           `
-          select attempts.*, attempts.started_at as started_at
+          select attempts.*, attempts.started_at as started_at, attempts.finished_at as finished_at
           from attempts
           join tasks on tasks.id = attempts.task_id
           where tasks.run_id = $runId
           order by attempts.rowid
           `,
         )
-        .all({ $runId: input.runId }) as Array<AttemptRow & { started_at: string | null }>;
+        .all({ $runId: input.runId }) as Array<AttemptRow & { started_at: string | null; finished_at: string | null }>;
       const eventQuery = db.query(
         `
         select *
@@ -1042,6 +1042,7 @@ export class Harness {
             codexSessionId: stringOrNull(attempt.input.codexSessionId),
             worktreePath: task.worktreePath,
             startedAt: row.started_at,
+            finishedAt: row.finished_at,
             latestText: latestEventText(events),
             events,
           },

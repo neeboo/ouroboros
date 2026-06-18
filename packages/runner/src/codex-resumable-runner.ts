@@ -149,12 +149,15 @@ export async function superviseCodexRuns(input: SuperviseCodexRunsInput) {
       });
       const overview = input.harness.getRunOverview({ runId: run.id, eventLimit: 0 });
       const integration = maybeIntegrateCompletedRun(input, overview);
+      const refreshedOverview = integration && integration.length > 0
+        ? input.harness.getRunOverview({ runId: run.id, eventLimit: 0 })
+        : overview;
       return {
         runId: run.id,
         goal: run.goal,
-        status: overview.run?.status ?? run.status,
+        status: refreshedOverview.run?.status ?? run.status,
         rounds: result.rounds,
-        activeTasks: overview.tasks.filter((task) => task.status === "todo" || task.status === "running").length,
+        activeTasks: refreshedOverview.tasks.filter((task) => task.status === "todo" || task.status === "running").length,
         integration,
       };
     }));
@@ -499,13 +502,17 @@ class CodexResumableOrchestrator {
     if (overview.tasks.some((task) => task.status === "todo" || task.status === "running")) {
       return { created: false as const, reason: "active_tasks" };
     }
+    const goalReviewInvalidated = run.context.goalReviewInvalidatedByIntegration === true;
     const latestProgressIndex = overview.sessions.reduce((latest, session, index) => {
       return session.role !== "goal-review" && session.status === "done" ? index : latest;
     }, -1);
     const currentReviewSessions = overview.sessions.filter((session, index) => index > latestProgressIndex);
+    const latestIntegrationAt = latestSuccessfulIntegrationAt(this.harness, runId);
     const completedReview = [...currentReviewSessions].reverse().find(
       (session) =>
         session.role === "goal-review" &&
+        !goalReviewInvalidated &&
+        sessionCompletedAfter(session, latestIntegrationAt) &&
         (session.output.runDecision === "complete" || inferExplicitRunDecision(session.output) === "complete") &&
         (session.output.nextTasks ?? []).length === 0,
     );
@@ -1000,13 +1007,20 @@ function withCodexArtifacts(output: AttemptOutput, sessionId: string | null): At
 }
 
 function applyPostAttemptRunEffects(
-  harness: Pick<Harness, "updateRunStatus">,
+  harness: Pick<Harness, "updateRun" | "updateRunStatus">,
   runId: string,
   task: Pick<Task, "role">,
   output: AttemptOutput,
 ) {
   if (task.role === "goal-review" && output.status === "done" && output.runDecision === "complete") {
-    harness.updateRunStatus({ runId, status: "done" });
+    harness.updateRun({
+      runId,
+      status: "done",
+      contextPatch: {
+        goalReviewInvalidatedByIntegration: false,
+        goalReviewRefreshedAt: new Date().toISOString(),
+      },
+    });
   }
   if (task.role === "goal-review" && output.status === "done" && output.runDecision === "defer") {
     harness.updateRunStatus({ runId, status: "blocked" });
@@ -1065,6 +1079,16 @@ function maybeIntegrateCompletedRun(
     });
     results.push(result);
     integrated = successfulIntegrationState(input.harness, overview.run.id);
+  }
+  if (!preCompletion && results.some((result) => result.status === "done")) {
+    input.harness.updateRun({
+      runId: overview.run.id,
+      status: "todo",
+      contextPatch: {
+        goalReviewInvalidatedByIntegration: true,
+        goalReviewInvalidatedAt: new Date().toISOString(),
+      },
+    });
   }
   return results;
 }
@@ -1162,6 +1186,33 @@ function successfulIntegrationState(harness: Harness, runId: string): Successful
     }
   }
   return { workerIds, changedFiles };
+}
+
+function latestSuccessfulIntegrationAt(harness: Harness, runId: string) {
+  let latest: number | null = null;
+  for (const event of harness.listHarnessActionEvents({ limit: 200 })) {
+    if (event.actionType !== "integrateVerifiedRun" || event.status !== "done") {
+      continue;
+    }
+    const request = event.request as Record<string, unknown>;
+    if (request.runId !== runId) {
+      continue;
+    }
+    const createdAt = parseTimestampMs(event.createdAt);
+    if (createdAt === null) {
+      continue;
+    }
+    latest = latest === null ? createdAt : Math.max(latest, createdAt);
+  }
+  return latest;
+}
+
+function sessionCompletedAfter(session: { startedAt: string | null; finishedAt?: string | null }, timestamp: number | null) {
+  if (timestamp === null) {
+    return true;
+  }
+  const completedAt = parseTimestampMs(session.finishedAt ?? session.startedAt);
+  return completedAt !== null && completedAt > timestamp;
 }
 
 function emptyIntegrationState(): SuccessfulIntegrationState {
