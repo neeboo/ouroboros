@@ -3,6 +3,7 @@ import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { homedir, tmpdir } from "node:os";
 import { Harness } from "../packages/harness/src";
+import { formatRunEvidence } from "../packages/cli/src/run-evidence";
 import { Database } from "bun:sqlite";
 
 describe("CLI", () => {
@@ -3540,6 +3541,138 @@ describe("CLI", () => {
     expect(prompt.indexOf("## Active Guardrails")).toBeGreaterThanOrEqual(0);
     expect(prompt.indexOf("## Active Guardrails")).toBeLessThan(prompt.indexOf("## Candidate Guardrails"));
     expect(prompt).toContain(`${proposal.id}: ${lessonSummary} (source: lesson)`);
+  });
+
+  test("formatRunEvidence prints a terminal summary seeded with a goal-review attempt", async () => {
+    await runCli("init");
+    const run = await runCliJson("create-run", "--goal", "Validate run-evidence summary");
+    const worker = await runCliJson(
+      "create-task",
+      "--run-id",
+      run.id,
+      "--role",
+      "worker",
+      "--goal",
+      "Implement increment",
+      "--prompt",
+      "Make a small change.",
+    );
+    await runCliJson(
+      "record-attempt",
+      "--task-id",
+      worker.id,
+      "--input-json",
+      "{}",
+      "--output-json",
+      JSON.stringify({
+        status: "done",
+        summary: "Increment shipped",
+        changedFiles: ["packages/cli/src/run-evidence.ts"],
+        checks: [{ name: "typecheck", status: "passed" }],
+        artifacts: [],
+        problems: [],
+      }),
+    );
+    const review = await runCliJson(
+      "create-task",
+      "--run-id",
+      run.id,
+      "--role",
+      "goal-review",
+      "--goal",
+      "Review run completion",
+      "--prompt",
+      "Decide whether the goal is complete.",
+    );
+    await runCliJson(
+      "record-attempt",
+      "--task-id",
+      review.id,
+      "--input-json",
+      "{}",
+      "--output-json",
+      JSON.stringify({
+        status: "done",
+        runDecision: "complete",
+        summary: "Goal reached; checks and files cite the change.",
+        changedFiles: [],
+        checks: [
+          { name: "typecheck", status: "passed", evidence: "bun run typecheck" },
+        ],
+        artifacts: [
+          { kind: "goal_review", runDecision: "complete", taskId: review.id },
+          {
+            kind: "verifier_contract",
+            summary: "Worker output satisfies the task goal.",
+            path: "packages/cli/src/run-evidence.ts",
+          },
+        ],
+        problems: [],
+      }),
+    );
+
+    const harness = new Harness(dbPath);
+    const overview = harness.getRunOverview({ runId: run.id, eventLimit: 25 });
+    const summary = formatRunEvidence(overview);
+
+    expect(summary).toContain(`Run ${run.id}`);
+    expect(summary).toContain("Status: done");
+    expect(summary).toContain("Latest goal-review decision");
+    expect(summary).toContain("decision: complete");
+    expect(summary).toContain(`task: ${review.id}`);
+    expect(summary).toMatch(/cited evidence:/);
+    expect(summary).toContain("[check]");
+    expect(summary).toContain("typecheck");
+    expect(summary).toContain("[artifact:verifier_contract]");
+    expect(summary).toContain("packages/cli/src/run-evidence.ts");
+    expect(summary).toContain("Changed files");
+  });
+
+  test("run-evidence CLI prints the human-readable summary for a seeded run", async () => {
+    await runCli("init");
+    const run = await runCliJson("create-run", "--goal", "Validate run-evidence CLI output");
+    const review = await runCliJson(
+      "create-task",
+      "--run-id",
+      run.id,
+      "--role",
+      "goal-review",
+      "--goal",
+      "Review run completion",
+      "--prompt",
+      "Decide whether the goal is complete.",
+    );
+    await runCliJson(
+      "record-attempt",
+      "--task-id",
+      review.id,
+      "--input-json",
+      "{}",
+      "--output-json",
+      JSON.stringify({
+        status: "done",
+        runDecision: "complete",
+        summary: "Goal reached.",
+        checks: [{ name: "smoke", status: "passed" }],
+        artifacts: [],
+        problems: [],
+      }),
+    );
+
+    const stdout = await runCli("run-evidence", "--run-id", run.id);
+
+    expect(stdout).toContain(`Run ${run.id}`);
+    expect(stdout).toContain("Status: done");
+    expect(stdout).toContain("decision: complete");
+    expect(stdout).toContain("[check]");
+  });
+
+  test("run-evidence CLI fails with a helpful message when the run is missing", async () => {
+    await runCli("init");
+    const result = await runCliRaw("run-evidence", "--run-id", "run_missing");
+
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain("run not found: run_missing");
   });
 
   test("retries a blocked task", async () => {
