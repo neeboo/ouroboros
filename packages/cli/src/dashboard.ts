@@ -220,6 +220,9 @@ function inferDashboardSupervisorStatus(
   const activeThreads = overview.threads.filter((thread) => thread.status === "running");
   const activeTasks = overview.tasks.filter((task) => task.status === "running");
   const hasQueuedGlobalRuns = (globalRuns.todo || 0) > 0 || (globalRuns.running || 0) > 0;
+  if (overview.run?.status === "done" && !hasQueuedGlobalRuns && activeTasks.length === 0) {
+    return supervisor;
+  }
   if (activeThreads.length > 0 || activeTasks.length > 0) {
     return {
       ...(supervisor ?? {}),

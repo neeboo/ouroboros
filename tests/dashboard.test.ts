@@ -1136,10 +1136,7 @@ describe("dashboard", () => {
       expect(body.run.status).toBe("done");
       expect(body.globalRuns).toEqual({ todo: 0, running: 0, done: 2, blocked: 0 });
       expect(body.threads.map((thread: { id: string }) => thread.id)).toContain(`thread_${childAttemptId}`);
-      expect(body.supervisor).toMatchObject({
-        status: "running",
-        externallyManaged: true,
-      });
+      expect(body.supervisor).toEqual({ status: "idle", pid: null, lastOutput: "" });
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
