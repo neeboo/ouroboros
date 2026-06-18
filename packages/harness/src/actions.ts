@@ -1002,7 +1002,11 @@ function prepareRunDrain(harness: Harness, action: Extract<HarnessAction, { type
     proposalIds: proposals.proposals.map((proposal) => proposal.id),
   });
 
-  const completedReview = selectCompletedGoalReview(overview);
+  const goalReviewInvalidated = overview.run?.context.goalReviewInvalidatedByIntegration === true;
+  if (goalReviewInvalidated) {
+    checks.push({ name: "goal review invalidated", status: "passed", evidence: "integration" });
+  }
+  const completedReview = goalReviewInvalidated ? null : selectCompletedGoalReview(overview);
   if (completedReview) {
     harness.updateRunStatus({ runId: action.runId, status: "done" });
     checks.push({ name: "completed goal review", status: "passed", evidence: completedReview.id });

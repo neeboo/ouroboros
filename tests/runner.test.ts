@@ -1376,7 +1376,9 @@ describe("runner", () => {
       }),
     });
     const mergedFile = await readFile(join(repoPath, "src", "supervised.ts"), "utf8");
-    const actionEvent = harness.listHarnessActionEvents({ limit: 1 })[0];
+    const actionEvent = harness
+      .listHarnessActionEvents({ limit: 10 })
+      .find((event) => event.actionType === "integrateVerifiedRun");
     const integrationResults = result.cycles[0].runs[0].integration!;
     const goalReviews = harness.getRunOverview({ runId }).tasks.filter((task) => task.role === "goal-review");
     const run = harness.getRun(runId)!;
@@ -1913,7 +1915,23 @@ describe("runner", () => {
       integrateCompletedRuns: true,
       clientFactory: () => ({
         start: async () => {
-          throw new Error("no task should start");
+          return {
+            status: "done" as const,
+            sessionId: "session_goal_review_waiting",
+            outputPath: join(dir, "goal-review-waiting-output.json"),
+            stdout: "",
+            stderr: "",
+            events: [],
+            output: {
+              status: "done" as const,
+              runDecision: "complete" as const,
+              summary: "Integrated verified work and drained unrelated blocked dependency.",
+              changedFiles: [],
+              checks: [{ name: "goal review", status: "passed", evidence: "complete" }],
+              artifacts: [],
+              problems: [],
+            },
+          };
         },
         resume: async () => {
           throw new Error("resume should not be called");
@@ -1923,7 +1941,7 @@ describe("runner", () => {
 
     const integrationResults = result.cycles[0].runs[0].integration!;
 
-    expect(result.cycles[0].runs[0]).toMatchObject({ runId, activeTasks: 1 });
+    expect(result.cycles[0].runs[0]).toMatchObject({ runId, activeTasks: 0, status: "done" });
     expect(integrationResults).toHaveLength(1);
     expect(integrationResults[0]).toMatchObject({
       status: "done",
@@ -1931,6 +1949,75 @@ describe("runner", () => {
       artifacts: [expect.objectContaining({ workerTaskId })],
     });
     expect(await readFile(join(repoPath, "src", "unrelated-wait.ts"), "utf8")).toContain("unrelatedWait = true");
+  });
+
+  test("supervisor drains todo tasks blocked by dependencies when no task is ready", async () => {
+    const runId = harness.createRun({ goal: "Drain a stuck dependency graph" });
+    const blockedWorkerId = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Blocked worker",
+      prompt: "This worker is blocked.",
+    });
+    harness.recordAttempt({
+      taskId: blockedWorkerId,
+      input: { executor: "test" },
+      output: {
+        status: "blocked",
+        summary: "Worker blocked",
+        changedFiles: [],
+        checks: [{ name: "worker", status: "failed", evidence: "blocked" }],
+        artifacts: [],
+        problems: ["worker blocked"],
+      },
+    });
+    const verifierTaskId = harness.createTask({
+      runId,
+      role: "verifier",
+      goal: "Verify blocked worker",
+      prompt: "This should be drained.",
+      dependsOn: [blockedWorkerId],
+    });
+
+    const result = await superviseCodexRuns({
+      harness,
+      cwd: dir,
+      rootRunId: runId,
+      runConcurrency: 1,
+      taskConcurrency: 1,
+      maxCycles: 1,
+      maxRounds: 3,
+      maxTries: 3,
+      intervalMs: 1,
+      clientFactory: () => ({
+        start: async () => ({
+          status: "done" as const,
+          sessionId: "session_goal_review",
+          outputPath: join(dir, "goal-review-output.json"),
+          stdout: "",
+          stderr: "",
+          events: [],
+          output: {
+            status: "done" as const,
+            runDecision: "complete" as const,
+            summary: "No runnable work remains after blocked dependency drain.",
+            changedFiles: [],
+            checks: [{ name: "goal review", status: "passed", evidence: "drained" }],
+            artifacts: [],
+            problems: [],
+          },
+        }),
+        resume: async () => {
+          throw new Error("resume should not be called");
+        },
+      }),
+    });
+    const overview = harness.getRunOverview({ runId });
+
+    expect(result.cycles[0].runs[0]).toMatchObject({ runId, status: "done", activeTasks: 0 });
+    expect(harness.getTask(verifierTaskId)?.status).toBe("blocked");
+    expect(overview.tasks.find((task) => task.role === "goal-review")?.status).toBe("done");
+    expect(harness.getRun(runId)?.status).toBe("done");
   });
 
   test("supervisor skips a verified worker superseded by a verified repair", async () => {

@@ -178,6 +178,52 @@ describe("Harness actions", () => {
     expect(overview.run?.status).toBe("done");
   });
 
+  test("prepares a drained run by ignoring goal-review decisions invalidated by integration", () => {
+    const runId = harness.createRun({
+      goal: "Review after integration",
+      context: { goalReviewInvalidatedByIntegration: true },
+    });
+    const oldReviewTaskId = harness.createTask({
+      runId,
+      role: "goal-review",
+      goal: "Old review",
+      prompt: "This review predates integration.",
+    });
+    harness.recordAttempt({
+      taskId: oldReviewTaskId,
+      input: { executor: "test" },
+      output: {
+        status: "done",
+        runDecision: "complete",
+        summary: "Old complete decision",
+        changedFiles: [],
+        checks: [{ name: "goal review", status: "passed", evidence: "old" }],
+        artifacts: [],
+        problems: [],
+      },
+    });
+
+    const result = applyHarnessAction(harness, {
+      type: "prepareRunDrain",
+      runId,
+      maxTries: 2,
+    });
+    const overview = harness.getRunOverview({ runId });
+    const goalReviews = overview.tasks.filter((task) => task.role === "goal-review");
+
+    expect(result).toMatchObject({
+      status: "done",
+      actionType: "prepareRunDrain",
+      summary: expect.stringContaining("Created goal-review task"),
+    });
+    expect(result.checks).toContainEqual(
+      expect.objectContaining({ name: "goal review invalidated", status: "passed", evidence: "integration" }),
+    );
+    expect(overview.run?.status).toBe("todo");
+    expect(goalReviews).toHaveLength(2);
+    expect(goalReviews.find((task) => task.id !== oldReviewTaskId)?.status).toBe("todo");
+  });
+
   test("prepares a drained run by blocking todo tasks whose dependencies are blocked", () => {
     const runId = harness.createRun({ goal: "Drain impossible dependency chain" });
     const workerTaskId = harness.createTask({

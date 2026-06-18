@@ -83,17 +83,23 @@ export async function runCodexResumableLoop(input: RunCodexResumableLoopInput) {
         rounds.push({ index, tasks: started, integration, reclaimed });
         continue;
       }
-      const review = orchestrator.ensureGoalReviewTask(input.runId, input.maxTries);
-      if (review.created) {
+      const drain = applyHarnessAction(input.harness, {
+        type: "prepareRunDrain",
+        runId: input.runId,
+        maxTries: input.maxTries,
+        reason: "runner found no ready tasks",
+      });
+      if (drain.status === "done") {
         const reviewed = await orchestrator.startReadyAttempts({ runId: input.runId, limit: input.limit });
         if (reviewed.length > 0) {
-          rounds.push({ index, tasks: reviewed, goalReview: review, reclaimed });
+          rounds.push({ index, tasks: reviewed, goalReview: drain, reclaimed });
           if (reviewed.some((task) => task.status === "running")) {
             break;
           }
           continue;
         }
       }
+      rounds.push({ index, tasks: started, goalReview: drain, reclaimed });
       break;
     }
     rounds.push({ index, tasks: started, reclaimed });
