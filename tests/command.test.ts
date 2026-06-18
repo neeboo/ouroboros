@@ -8,6 +8,7 @@ import {
   proxyEnvForChildProcess,
   proxyEnvFromScutilOutput,
   runLocalCommand,
+  terminateProcessTreeSync,
 } from "../packages/runner/src";
 
 const testHome = "/tmp/ouroboros-test-home";
@@ -191,6 +192,10 @@ describe("command runner", () => {
     ].join("\n");
 
     expect(descendantPidsFromPsOutputForTest(output, 100)).toEqual([200, 300, 500, 600]);
+  });
+
+  test("treats unavailable process listing as no descendants during cleanup", () => {
+    expect(() => terminateProcessTreeSync(Number.MAX_SAFE_INTEGER)).not.toThrow();
   });
 
   test("keeps a command alive while it continues producing output", async () => {

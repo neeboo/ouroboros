@@ -1201,6 +1201,29 @@ export function dashboardHtml(input: { runId: string }) {
       padding-top: 18px;
       border-top: 1px solid rgba(255, 255, 255, 0.1);
     }
+    .action-group {
+      margin-top: 20px;
+      padding-top: 18px;
+      border-top: 1px solid rgba(255, 255, 255, 0.1);
+    }
+    .action-title {
+      color: #efeee9;
+      font-size: 12px;
+      font-weight: 720;
+      line-height: 1.4;
+    }
+    .action-help {
+      margin-top: 4px;
+      color: var(--muted);
+      font-size: 11px;
+      line-height: 1.45;
+    }
+    .action-buttons {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 12px;
+    }
     .changed-files-section {
       min-width: 0;
     }
@@ -2146,15 +2169,20 @@ export function dashboardHtml(input: { runId: string }) {
         unresolvedBlockedTasks[unresolvedBlockedTasks.length - 1] ||
         [...group.tasks].reverse().find((task) => task.status === "done") ||
         [...group.tasks].reverse().find((task) => task.status === "blocked");
+      const resumableTask = runningSessions.length ? null : unresolvedBlockedTasks[unresolvedBlockedTasks.length - 1] || null;
       const rerunnableTask = runningSessions.length ? null : [...unresolvedBlockedTasks, ...group.tasks.filter((task) => task.status === "done")].reverse()[0] || null;
+      const taskActions = [
+        runningSessions.length ? '<button class="plain-button danger" data-stop-attempt-id="' + escapeHtml(runningSessions[0].attemptId) + '">Stop current task</button>' : '',
+        resumableTask ? '<button class="plain-button" data-resume-task-id="' + escapeHtml(resumableTask.id) + '">Resume selected task</button>' : '',
+        rerunnableTask ? '<button class="plain-button" data-rerun-task-id="' + escapeHtml(rerunnableTask.id) + '">Rerun selected task</button>' : ''
+      ].filter(Boolean).join("");
       return '<section class="inspector-card" data-inspector-section="progress"><h2>Progress</h2>' +
         (currentTask ? '<div class="current-task"><div class="current-task-title">' + escapeHtml(currentTask.goal) + '</div><div class="current-task-meta">' + escapeHtml(currentTask.role) + ' · <span class="status-text ' + escapeHtml(currentTask.status) + '">' + escapeHtml(currentTask.status) + '</span><br><span class="code-meta">' + escapeHtml(currentTask.id) + '</span></div></div>' : '') +
         (doneWhen.length ? '<ul class="todo-list">' + doneWhen.map(({ task, item }) =>
           '<li class="todo-item ' + (effectiveTaskStatus(task, group.resolvedBlockedTaskIds) === "done" ? "done" : "") + '"><span class="checkbox ' + (effectiveTaskStatus(task, group.resolvedBlockedTaskIds) === "done" ? "done" : "") + '" aria-hidden="true"></span><span class="todo-text">' + escapeHtml(item) + '<span class="meta">' + escapeHtml(task.role) + '</span></span></li>'
         ).join("") + '</ul>' : '<div class="empty">No todos recorded</div>') +
         (group.resolvedBlockedCount ? '<div class="meta">' + escapeHtml(group.resolvedBlockedCount) + ' blocked verifier task was repaired and is now historical evidence.</div>' : '') +
-        (runningSessions.length ? '<div class="control-row"><button class="plain-button danger" data-stop-attempt-id="' + escapeHtml(runningSessions[0].attemptId) + '">Stop current task</button></div>' : '') +
-        (rerunnableTask ? '<div class="control-row"><button class="plain-button" data-rerun-task-id="' + escapeHtml(rerunnableTask.id) + '">Rerun selected task</button></div>' : '') +
+        (taskActions ? '<div class="action-group"><div class="action-title">Task actions</div><div class="action-help">These controls affect only the selected task.</div><div class="action-buttons">' + taskActions + '</div></div>' : '') +
         '</section>' + renderChangedFilesSection(group);
     };
     const latestRunnerSignal = (overview) => {
@@ -2197,10 +2225,10 @@ export function dashboardHtml(input: { runId: string }) {
         (supervisor?.exitCode !== undefined && supervisor?.exitCode !== null ? '<br><span class="code-meta">exit ' + escapeHtml(supervisor.exitCode) + '</span>' : '') +
         '</div></div>' +
         (output ? '<div class="stream-output">' + escapeHtml(compact(output, 900)) + '</div>' : '') +
-        (canStart || canStop ? '<div class="control-row">' +
+        (canStart || canStop ? '<div class="action-group"><div class="action-title">Runner actions</div><div class="action-help">These controls affect the run-level runner or supervisor process.</div><div class="action-buttons">' +
           (canStart ? '<button class="plain-button" data-start-supervisor>Start supervisor</button>' : '') +
           (canStop ? '<button class="plain-button danger" data-stop-supervisor>Stop supervisor</button>' : '') +
-        '</div>' : '') +
+        '</div></div>' : '') +
         '</section>';
     };
     const renderRunner = (overview) => {
@@ -2225,10 +2253,10 @@ export function dashboardHtml(input: { runId: string }) {
         '</div></div>' +
         (issue ? '<div class="current-task"><div class="current-task-title">' + escapeHtml(issue.timedOut ? "Connection timed out" : "Latest runner issue") + '</div><div class="current-task-meta">' + escapeHtml(issue.taskGoal) + '<br><span class="code-meta">' + escapeHtml(issue.attemptId) + '</span></div><div class="stream-output">' + escapeHtml(issue.text) + '</div></div>' : '') +
         (output ? '<div class="stream-output">' + escapeHtml(output) + '</div>' : '') +
-        (canStart || canStop ? '<div class="control-row">' +
+        (canStart || canStop ? '<div class="action-group"><div class="action-title">Runner actions</div><div class="action-help">These controls affect the run-level runner or supervisor process.</div><div class="action-buttons">' +
           (canStart ? '<button class="plain-button" data-start-runner>Start background runner</button>' : '') +
           (canStop ? '<button class="plain-button danger" data-stop-runner>Stop background runner</button>' : '') +
-        '</div>' : '') +
+        '</div></div>' : '') +
         '</section>';
     };
     const postJson = async (path, body) => {

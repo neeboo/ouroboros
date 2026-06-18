@@ -133,11 +133,16 @@ function signalProcess(processInfo: { pid: number; pgid: number | null }, signal
 }
 
 function collectDescendantProcesses(pid: number) {
-  const result = Bun.spawnSync({
-    cmd: ["/bin/ps", "-axo", "pid=,ppid=,pgid="],
-    stdout: "pipe",
-    stderr: "ignore",
-  });
+  let result: ReturnType<typeof Bun.spawnSync>;
+  try {
+    result = Bun.spawnSync({
+      cmd: ["/bin/ps", "-axo", "pid=,ppid=,pgid="],
+      stdout: "pipe",
+      stderr: "ignore",
+    });
+  } catch {
+    return [];
+  }
   if (result.exitCode !== 0) {
     return [];
   }

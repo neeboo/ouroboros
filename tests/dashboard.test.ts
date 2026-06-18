@@ -238,12 +238,18 @@ describe("dashboard", () => {
     expect(html).not.toContain('data-goal-action="add"');
     expect(html).toContain("data-stop-attempt-id");
     expect(html).toContain("Stop current task");
+    expect(html).toContain("data-resume-task-id");
+    expect(html).toContain("Resume selected task");
     expect(html).toContain("data-rerun-task-id");
     expect(html).toContain("Rerun selected task");
+    expect(html).toContain("Task actions");
+    expect(html).toContain("These controls affect only the selected task.");
     expect(html).toContain("data-start-runner");
     expect(html).toContain("data-stop-runner");
     expect(html).toContain("data-start-supervisor");
     expect(html).toContain("data-stop-supervisor");
+    expect(html).toContain("Runner actions");
+    expect(html).toContain("These controls affect the run-level runner or supervisor process.");
     expect(html).toContain("Start background runner");
     expect(html).toContain("Stop background runner");
     expect(html).toContain("Start supervisor");
