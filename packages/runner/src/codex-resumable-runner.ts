@@ -19,9 +19,11 @@ import { createRouteExecutor } from "./route-executor";
 import { resolveExecutionRoute } from "./execution-routing";
 import type { ResolvedExecutionRoute } from "./execution-routing";
 import { inferExplicitRunDecision } from "./hooks/goal-review";
-import type { StartHook, StartHookResult, StopHook, TaskExecutorFactory } from "./types";
+import type { ExecutorEventRecorder, StartHook, StartHookResult, StopHook, TaskExecutorFactory } from "./types";
 
 const DEFAULT_RUNNING_ATTEMPT_STALE_MS = 5 * 60 * 1000;
+const DEFAULT_GENERIC_ATTEMPT_IDLE_TIMEOUT_MS = 5 * 60 * 1000;
+const DEFAULT_GENERIC_ATTEMPT_HARD_TIMEOUT_MS = 30 * 60 * 1000;
 
 export type CodexResumableClientFactory = (input: {
   model?: string;
@@ -45,6 +47,8 @@ export interface CodexResumableOrchestrationInput {
   ownerId?: string;
   pid?: number;
   runningAttemptStaleMs?: number;
+  genericAttemptIdleTimeoutMs?: number;
+  genericAttemptHardTimeoutMs?: number;
 }
 
 export interface RunCodexResumableLoopInput extends CodexResumableOrchestrationInput {
@@ -255,6 +259,8 @@ class CodexResumableOrchestrator {
   private readonly ownerId: string;
   private readonly pid: number;
   private readonly staleMs: number;
+  private readonly genericIdleMs: number;
+  private readonly genericHardMs: number;
 
   constructor(private readonly input: CodexResumableOrchestrationInput) {
     this.harness = input.harness;
@@ -262,6 +268,8 @@ class CodexResumableOrchestrator {
     this.ownerId = input.ownerId ?? String(process.pid);
     this.pid = input.pid ?? process.pid;
     this.staleMs = input.runningAttemptStaleMs ?? DEFAULT_RUNNING_ATTEMPT_STALE_MS;
+    this.genericIdleMs = input.genericAttemptIdleTimeoutMs ?? DEFAULT_GENERIC_ATTEMPT_IDLE_TIMEOUT_MS;
+    this.genericHardMs = input.genericAttemptHardTimeoutMs ?? DEFAULT_GENERIC_ATTEMPT_HARD_TIMEOUT_MS;
   }
 
   async startAttempt(taskId: string) {
@@ -660,12 +668,27 @@ class CodexResumableOrchestrator {
       cwd: input.cwd,
       status: "running",
     });
+    const recorder = this.createAttemptEventRecorder(attemptId, "system");
+    recorder.event({
+      type: "generic.attempt.started",
+      role: input.task.role,
+      sessionName: input.sessionName,
+      backend: input.route.backend.kind,
+      agent: (input.route.backend as { agent?: string }).agent ?? null,
+      agentCommand: (input.route.backend as { agentCommand?: string }).agentCommand ?? null,
+      executionMode: input.route.executionMode,
+      cwd: input.cwd,
+      idleTimeoutMs: this.genericIdleMs,
+      hardTimeoutMs: this.genericHardMs,
+    });
     const executorFactory = this.input.genericExecutorFactory ?? ((factoryInput) =>
       createRouteExecutor({
         cwd: factoryInput.cwd,
         route: factoryInput.route,
         approval: "approve-reads",
         sandbox: "read-only",
+        timeoutMs: this.genericHardMs,
+        idleTimeoutMs: this.genericIdleMs,
       }));
     const executor = executorFactory({
       run: input.run,
@@ -674,13 +697,30 @@ class CodexResumableOrchestrator {
       cwd: input.cwd,
       route: input.route,
     });
-    const rawOutput = await executor({
-      prompt: input.prompt,
-      run: input.run,
-      task: input.task,
-      sessionName: input.sessionName,
-      route: input.route,
-    });
+    let rawOutput: AttemptOutput;
+    try {
+      rawOutput = await executor({
+        prompt: input.prompt,
+        run: input.run,
+        task: input.task,
+        sessionName: input.sessionName,
+        route: input.route,
+        recorder,
+      });
+    } catch (error) {
+      recorder.event({
+        type: "generic.attempt.executor_threw",
+        error: error instanceof Error ? error.message : String(error),
+      });
+      rawOutput = {
+        status: "blocked",
+        summary: "generic executor threw before producing output",
+        changedFiles: [],
+        checks: [{ name: "generic executor", status: "failed" }],
+        artifacts: [],
+        problems: [error instanceof Error ? error.message : String(error)],
+      };
+    }
     const { output, decision } = await this.applyStopHooks({
       run: input.run,
       task: input.task,
@@ -798,7 +838,7 @@ class CodexResumableOrchestrator {
     });
   }
 
-  private createAttemptEventRecorder(attemptId: string) {
+  private createAttemptEventRecorder(attemptId: string, eventStream: "codex-json" | "system" = "codex-json"): ExecutorEventRecorder {
     let sequence = Date.now() * 1000;
     const nextSequence = () => {
       sequence += 1;
@@ -812,7 +852,7 @@ class CodexResumableOrchestrator {
         this.harness.recordAttemptEvent({ attemptId, stream: "stderr", sequence: nextSequence(), text: chunk });
       },
       event: (event: Record<string, unknown>) => {
-        this.harness.recordAttemptEvent({ attemptId, stream: "codex-json", sequence: nextSequence(), payload: event });
+        this.harness.recordAttemptEvent({ attemptId, stream: eventStream, sequence: nextSequence(), payload: event });
       },
     };
   }

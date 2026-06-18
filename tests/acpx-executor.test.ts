@@ -882,4 +882,123 @@ describe("acpx executor", () => {
       "exit code: 1\n\nstdout:\nagent connected\n\nstderr:\nruntime internal error",
     ]);
   });
+
+  test("records start and idle timeout evidence via the executor recorder when the agent is silent", async () => {
+    const events: Array<{ stream: string; payload: Record<string, unknown>; text: string | null }> = [];
+    let sequence = Date.now() * 1000;
+    const recorder = {
+      stdout: (chunk: string) => {
+        sequence += 1;
+        events.push({ stream: "stdout", payload: {}, text: chunk });
+      },
+      stderr: (chunk: string) => {
+        sequence += 1;
+        events.push({ stream: "stderr", payload: {}, text: chunk });
+      },
+      event: (event: Record<string, unknown>) => {
+        sequence += 1;
+        events.push({ stream: "system", payload: event, text: null });
+      },
+    };
+
+    const executor = createAcpxCodexExecutor({
+      cwd: "/repo",
+      idleTimeoutMs: 30000,
+      runCommand: async ({ cmd }) => ({
+        exitCode: cmd.includes("-s") ? 124 : 0,
+        stdout: "",
+        stderr: cmd.includes("-s") ? "command idle timed out after 30000ms" : "",
+      }),
+    });
+
+    const output = await executor({
+      prompt: "Do the task",
+      sessionName: "task_1",
+      run: runFixture,
+      route: routeFixture,
+      recorder,
+      task: {
+        id: "task_1",
+        runId: "run_1",
+        parentId: null,
+        cycleId: "task_1",
+        status: "todo",
+        role: "worker",
+        goal: "Task",
+        prompt: "Do it",
+        dependsOn: [],
+        doneWhen: [],
+        worktreePath: null,
+        sessionRef: null,
+        contextVersion: 1,
+      },
+    });
+
+    const systemEvents = events.filter((event) => event.stream === "system").map((event) => event.payload);
+    expect(systemEvents.some((event) => event.type === "acpx.attempt.started")).toBe(true);
+    expect(systemEvents.some((event) => event.type === "acpx.attempt.idle_timeout")).toBe(true);
+    expect(output.status).toBe("blocked");
+    expect(output.summary).toContain("silent for 30000ms");
+    expect(output.problems?.[0]).toContain("produced no output for the idle timeout window");
+    expect(output.problems?.[0]).toContain("exit code: 124");
+    expect(output.problems?.[0]).toContain("command idle timed out after 30000ms");
+  });
+
+  test("does not emit idle timeout when the command exit is non-124", async () => {
+    const events: Array<{ stream: string; payload: Record<string, unknown>; text: string | null }> = [];
+    let sequence = Date.now() * 1000;
+    const recorder = {
+      stdout: (chunk: string) => {
+        sequence += 1;
+        events.push({ stream: "stdout", payload: {}, text: chunk });
+      },
+      stderr: (chunk: string) => {
+        sequence += 1;
+        events.push({ stream: "stderr", payload: {}, text: chunk });
+      },
+      event: (event: Record<string, unknown>) => {
+        sequence += 1;
+        events.push({ stream: "system", payload: event, text: null });
+      },
+    };
+
+    const executor = createAcpxCodexExecutor({
+      cwd: "/repo",
+      idleTimeoutMs: 30000,
+      runCommand: async ({ cmd }) => ({
+        exitCode: cmd.includes("-s") ? 1 : 0,
+        stdout: cmd.includes("-s") ? "Error: boom" : "",
+        stderr: "",
+      }),
+    });
+
+    const output = await executor({
+      prompt: "Do the task",
+      sessionName: "task_1",
+      run: runFixture,
+      route: routeFixture,
+      recorder,
+      task: {
+        id: "task_1",
+        runId: "run_1",
+        parentId: null,
+        cycleId: "task_1",
+        status: "todo",
+        role: "worker",
+        goal: "Task",
+        prompt: "Do it",
+        dependsOn: [],
+        doneWhen: [],
+        worktreePath: null,
+        sessionRef: null,
+        contextVersion: 1,
+      },
+    });
+
+    const systemEvents = events.filter((event) => event.stream === "system").map((event) => event.payload);
+    expect(systemEvents.some((event) => event.type === "acpx.attempt.started")).toBe(true);
+    expect(systemEvents.some((event) => event.type === "acpx.attempt.idle_timeout")).toBe(false);
+    expect(output.status).toBe("blocked");
+    expect(output.summary).toBe("acpx codex executor failed");
+  });
 });
