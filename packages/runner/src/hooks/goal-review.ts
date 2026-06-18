@@ -91,10 +91,13 @@ export function inferExplicitRunDecision(output: {
     .map((value) => (typeof value === "string" ? value : JSON.stringify(value)))
     .join("\n");
   const match = haystack.match(/\b(?:runDecision\s*[:=]?|decision\s*[:=])\s*(complete|continue|verify|defer)\b/i);
-  if (!match) {
-    return undefined;
+  if (match) {
+    return match[1].toLowerCase() as "complete" | "continue" | "verify" | "defer";
   }
-  return match[1].toLowerCase() as "complete" | "continue" | "verify" | "defer";
+  if (/\b(?:run\s+goal|goal)\s+(?:is\s+)?(?:met|complete|completed|satisfied)\b/i.test(haystack)) {
+    return "complete";
+  }
+  return undefined;
 }
 
 function runDecisionFromArtifact(value: unknown) {

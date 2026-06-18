@@ -3190,6 +3190,40 @@ describe("runner", () => {
     });
   });
 
+  test("goal-review hook patches an explicit run goal met summary", async () => {
+    const runId = harness.createRun({ goal: "Complete self iteration" });
+    const taskId = harness.createTask({
+      runId,
+      role: "goal-review",
+      goal: "Review whether the run goal is complete",
+      prompt: "Review the goal.",
+    });
+
+    const result = await runNextReadyTask({
+      harness,
+      runId,
+      stopHooksByRole: {
+        "goal-review": [createGoalReviewDecisionHook({ harness })],
+      },
+      executor: async () => ({
+        status: "done",
+        summary: "Run goal met. All required checks passed.",
+        changedFiles: [],
+        checks: [{ name: "tests", status: "passed" }],
+        artifacts: [],
+        problems: [],
+      }),
+    });
+    const attempt = harness.getAttempt(result!.attemptId)!;
+
+    expect(result?.taskId).toBe(taskId);
+    expect(harness.getRun(runId)?.status).toBe("done");
+    expect(attempt.output).toMatchObject({
+      status: "done",
+      runDecision: "complete",
+    });
+  });
+
   test("goal-review defer blocks the run without follow-up tasks", async () => {
     const runId = harness.createRun({ goal: "Prove external provider readiness" });
     const taskId = harness.createTask({
