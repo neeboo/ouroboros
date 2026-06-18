@@ -38,6 +38,7 @@ import { parseArray, parseObject, printJson } from "./json";
 import { checkLinearAccess, linkLinearIssue } from "./linear";
 import { serveDashboard } from "./dashboard";
 import { requestHarnessAction, serveHarnessActions } from "./action-server";
+import { formatRunEvidence } from "./run-evidence";
 import { buildAgentMatrix, doctorAgent } from "../../../scripts/acpx-agent-smoke";
 import { join } from "node:path";
 import type { Task } from "@ouroboros/harness";
@@ -588,6 +589,22 @@ switch (parsed.command) {
       harness.getRunOverview({
         runId: required(parsed, "run-id"),
         eventLimit: parsePositiveInteger(flag(parsed, "event-limit") ?? "25", "--event-limit"),
+      }),
+    );
+    break;
+  }
+  case "run-evidence": {
+    const runId = required(parsed, "run-id");
+    const overview = harness.getRunOverview({
+      runId,
+      eventLimit: parsePositiveInteger(flag(parsed, "event-limit") ?? "25", "--event-limit"),
+    });
+    if (!overview.run) {
+      fail(`run not found: ${runId}`);
+    }
+    console.log(
+      formatRunEvidence(overview, {
+        lessonLimit: parsePositiveInteger(flag(parsed, "limit") ?? "10", "--limit"),
       }),
     );
     break;
