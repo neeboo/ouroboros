@@ -461,7 +461,7 @@ describe("dashboard", () => {
   test("persists selected goal workspace mode and title expansion in run-scoped browser storage", () => {
     const html = dashboardHtml({ runId: "run_123" });
 
-    expect(html).toContain('const dashboardStorageKey = "ouroboros:dashboard:" + runId;');
+    expect(html).toContain('let dashboardStorageKey = "ouroboros:dashboard:" + runId;');
     expect(html).toContain("readDashboardState");
     expect(html).toContain("writeDashboardState");
     expect(html).toContain("const restoredDashboardState = readDashboardState();");
@@ -1763,6 +1763,270 @@ describe("dashboard", () => {
       expect(resumeResponse.status).toBe(200);
       expect(resumeBody.status).toBe("todo");
       expect(harness.getTask(runningTaskId)?.status).toBe("todo");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("renders a recent runs sidebar section that drives history navigation", () => {
+    const html = dashboardHtml({ runId: "run_123" });
+
+    expect(html).toContain("Recent runs");
+    expect(html).toContain('data-history-runs');
+    expect(html).toContain('data-history-runs-list');
+    expect(html).toContain('id="recent-runs-list"');
+    expect(html).toContain('data-history-run-id');
+    expect(html).toContain('ouroboros:dashboard:activeRun');
+    expect(html).toContain('/api/runs?limit=" + encodeURIComponent(RECENT_RUNS_LIMIT)');
+    expect(html).toContain('setSelectedRun');
+    expect(html).toContain('"#run=" + encodeURIComponent(runId)');
+    expect(html).toContain('parseRunIdFromHash');
+    expect(html).toContain('window.addEventListener("hashchange"');
+  });
+
+  test("GET /api/runs returns id status goal projectId and createdAt summaries", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "ouroboros-dashboard-recent-runs-"));
+    const harness = new Harness(join(dir, "ouroboros.db"));
+    harness.init();
+    const firstRunId = harness.createRun({ goal: "First run goal" });
+    harness.updateRunStatus({ runId: firstRunId, status: "done" });
+    await new Promise((resolve) => setTimeout(resolve, 1100));
+    const longGoal = "Second run goal that is longer than the dashboard summary truncation limit of one hundred forty characters so it should be truncated with an ellipsis at the end";
+    const secondRunId = harness.createRun({ goal: longGoal });
+
+    try {
+      const summaries = harness
+        .listRuns({ limit: 10 })
+        .slice()
+        .sort((left, right) => {
+          const leftCreated = left.createdAt ?? "";
+          const rightCreated = right.createdAt ?? "";
+          if (leftCreated !== rightCreated) return rightCreated.localeCompare(leftCreated);
+          return right.id.localeCompare(left.id);
+        })
+        .map((run) => ({
+          id: run.id,
+          status: run.status,
+          goal: run.goal,
+          projectId: run.projectId ?? null,
+          createdAt: run.createdAt ?? null,
+        }));
+
+      const recentRunsInput = {
+        runId: secondRunId,
+        overview: () => harness.getRunOverview({ runId: secondRunId }),
+        renderTaskPrompt: () => "",
+        recentRuns: (limit: number) => summaries.slice(0, limit),
+      };
+
+      const response = await handleDashboardRequest(
+        new Request("http://localhost/api/runs?limit=2"),
+        recentRunsInput,
+      );
+      expect(response.status).toBe(200);
+      const body = await response.json();
+      expect(Array.isArray(body.runs)).toBe(true);
+      expect(body.runs).toHaveLength(2);
+      for (const summary of body.runs) {
+        expect(typeof summary.id).toBe("string");
+        expect(typeof summary.status).toBe("string");
+        expect(typeof summary.goal).toBe("string");
+        expect(summary.projectId === null || typeof summary.projectId === "string").toBe(true);
+        expect(summary.createdAt === null || typeof summary.createdAt === "string").toBe(true);
+        expect(summary.id.startsWith("run_")).toBe(true);
+      }
+      expect(body.runs[0].id).toBe(secondRunId);
+      expect(body.runs[1].id).toBe(firstRunId);
+      expect(body.runs[0].status).toBe("todo");
+      expect(body.runs[1].status).toBe("done");
+      expect(body.runs[0].goal.endsWith("…")).toBe(true);
+      expect(body.runs[0].goal.length).toBeLessThanOrEqual(140);
+      expect(body.runs[1].goal).toBe("First run goal");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("GET /api/runs rejects unknown query params and defaults to ten rows", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "ouroboros-dashboard-recent-runs-params-"));
+    const harness = new Harness(join(dir, "ouroboros.db"));
+    harness.init();
+    const runId = harness.createRun({ goal: "Default limit run" });
+    let observedLimit = 0;
+
+    try {
+      const unknownResponse = await handleDashboardRequest(
+        new Request("http://localhost/api/runs?bogus=1"),
+        {
+          runId,
+          overview: () => harness.getRunOverview({ runId }),
+          renderTaskPrompt: () => "",
+          recentRuns: (limit: number) => {
+            observedLimit = limit;
+            return [];
+          },
+        },
+      );
+      expect(unknownResponse.status).toBe(400);
+      const unknownBody = await unknownResponse.json();
+      expect(unknownBody.error).toMatch(/unknown query parameter/);
+
+      const defaultResponse = await handleDashboardRequest(
+        new Request("http://localhost/api/runs"),
+        {
+          runId,
+          overview: () => harness.getRunOverview({ runId }),
+          renderTaskPrompt: () => "",
+          recentRuns: (limit: number) => {
+            observedLimit = limit;
+            return [
+              {
+                id: runId,
+                status: "todo",
+                goal: "Default limit run",
+                projectId: null,
+                createdAt: null,
+              },
+            ];
+          },
+        },
+      );
+      expect(defaultResponse.status).toBe(200);
+      expect(observedLimit).toBe(10);
+      const defaultBody = await defaultResponse.json();
+      expect(defaultBody.runs).toHaveLength(1);
+      expect(defaultBody.runs[0].id).toBe(runId);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("serves overview, changed-files, and diff for a non-primary run via runOverview", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "ouroboros-dashboard-multi-run-"));
+    const harness = new Harness(join(dir, "ouroboros.db"));
+    harness.init();
+    await mkdir(join(dir, "src"), { recursive: true });
+    await writeFile(join(dir, "src/app.ts"), "export const value = 1;\n");
+    Bun.spawnSync({ cmd: ["git", "init"], cwd: dir, stdout: "ignore", stderr: "ignore" });
+    Bun.spawnSync({ cmd: ["git", "add", "src/app.ts"], cwd: dir, stdout: "ignore", stderr: "ignore" });
+    Bun.spawnSync({
+      cmd: ["git", "-c", "user.email=test@example.com", "-c", "user.name=Test", "commit", "-m", "initial"],
+      cwd: dir,
+      stdout: "ignore",
+      stderr: "ignore",
+    });
+    await writeFile(join(dir, "src/app.ts"), "export const value = 2;\n");
+    const projectId = harness.createProject({ name: "Multi-run Project", rootPath: dir });
+    const primaryRunId = harness.createRun({ goal: "Primary dashboard run", projectId });
+    const otherRunId = harness.createRun({ goal: "Other historical run", projectId });
+    const otherTaskId = harness.createTask({
+      runId: otherRunId,
+      role: "worker",
+      goal: "Edit a file",
+      prompt: "Edit src/app.ts.",
+      worktreePath: dir,
+    });
+    harness.recordAttempt({
+      taskId: otherTaskId,
+      input: {},
+      output: {
+        status: "done",
+        summary: "Edited app.",
+        changedFiles: ["src/app.ts"],
+        checks: [],
+        artifacts: [],
+        problems: [],
+      },
+    });
+
+    try {
+      const input = {
+        runId: primaryRunId,
+        overview: () => harness.getRunOverview({ runId: primaryRunId }),
+        runOverview: (runId: string) => harness.getRunOverview({ runId }),
+        renderTaskPrompt: () => "",
+      };
+
+      const overviewResponse = await handleDashboardRequest(
+        new Request(`http://localhost/api/runs/${otherRunId}/overview`),
+        input,
+      );
+      expect(overviewResponse.status).toBe(200);
+      const overviewBody = await overviewResponse.json();
+      expect(overviewBody.run?.id).toBe(otherRunId);
+      expect(overviewBody.tasks.some((task: { id: string }) => task.id === otherTaskId)).toBe(true);
+
+      const changedResponse = await handleDashboardRequest(
+        new Request(`http://localhost/api/runs/${otherRunId}/changed-files`),
+        input,
+      );
+      expect(changedResponse.status).toBe(200);
+      const changedBody = await changedResponse.json();
+      expect(changedBody.files.map((file: { path: string }) => file.path)).toContain("src/app.ts");
+
+      const diffResponse = await handleDashboardRequest(
+        new Request(`http://localhost/api/runs/${otherRunId}/diff?path=src%2Fapp.ts`),
+        input,
+      );
+      expect(diffResponse.status).toBe(200);
+      const diffBody = await diffResponse.text();
+      expect(diffBody).toContain("-export const value = 1;");
+      expect(diffBody).toContain("+export const value = 2;");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("returns 404 for non-primary overview when runOverview is not configured", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "ouroboros-dashboard-no-run-overview-"));
+    const harness = new Harness(join(dir, "ouroboros.db"));
+    harness.init();
+    const primaryRunId = harness.createRun({ goal: "Primary dashboard run" });
+    const otherRunId = harness.createRun({ goal: "Other historical run" });
+
+    try {
+      const response = await handleDashboardRequest(
+        new Request(`http://localhost/api/runs/${otherRunId}/overview`),
+        {
+          runId: primaryRunId,
+          overview: () => harness.getRunOverview({ runId: primaryRunId }),
+          renderTaskPrompt: () => "",
+        },
+      );
+      expect(response.status).toBe(404);
+      const body = await response.json();
+      expect(body.error).toMatch(/run overview provider is not configured/);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("rejects POST actions targeted at a non-primary run", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "ouroboros-dashboard-action-non-primary-"));
+    const harness = new Harness(join(dir, "ouroboros.db"));
+    harness.init();
+    const primaryRunId = harness.createRun({ goal: "Primary dashboard run" });
+    const otherRunId = harness.createRun({ goal: "Other historical run" });
+
+    try {
+      const response = await handleDashboardRequest(
+        new Request(`http://localhost/api/runs/${otherRunId}/runner/start`, {
+          method: "POST",
+          body: "{}",
+        }),
+        {
+          runId: primaryRunId,
+          overview: () => harness.getRunOverview({ runId: primaryRunId }),
+          runOverview: (runId: string) => harness.getRunOverview({ runId }),
+          renderTaskPrompt: () => "",
+          actions: {
+            startRunner: () => ({ status: "running" }),
+          },
+        },
+      );
+      expect(response.status).toBe(404);
+      const body = await response.json();
+      expect(body.error).toMatch(/dashboard actions are only available on the primary run/);
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

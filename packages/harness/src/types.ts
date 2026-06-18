@@ -7,6 +7,7 @@ export interface Run {
   goal: string;
   status: Status;
   context: Record<string, unknown>;
+  createdAt?: string | null;
 }
 
 export interface ModelPreference {

@@ -45,6 +45,18 @@ interface DashboardRunnerStatus {
   externallyManaged?: boolean;
 }
 
+export interface DashboardRunSummary {
+  id: string;
+  status: string;
+  goal: string;
+  projectId: string | null;
+  createdAt: string | null;
+}
+
+const DASHBOARD_RUNS_HISTORY_LIMIT_MAX = 100;
+const DASHBOARD_RUNS_HISTORY_LIMIT_DEFAULT = 10;
+const DASHBOARD_RUN_SUMMARY_GOAL_MAX = 140;
+
 interface DashboardTaskGraphNode {
   id: string;
   type: "task";
@@ -758,6 +770,74 @@ export function dashboardHtml(input: { runId: string }) {
       color: #aaa9a2;
       font-size: 11px;
       line-height: 1.35;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .history-run-row {
+      width: 100%;
+      min-width: 0;
+      display: grid;
+      grid-template-columns: minmax(0, 64px) minmax(0, 1fr);
+      gap: 8px;
+      align-items: start;
+      padding: 8px 6px 9px;
+      border: 1px solid transparent;
+      border-bottom-color: rgba(255, 255, 255, 0.07);
+      border-radius: 0;
+      background: transparent;
+      color: #e4e3dd;
+      text-align: left;
+      font: inherit;
+      overflow: hidden;
+      cursor: pointer;
+      transition: transform 160ms cubic-bezier(0.16, 1, 0.3, 1), background 160ms, border-color 160ms;
+    }
+    .history-run-row:hover {
+      transform: translateX(2px);
+      background: rgba(255, 255, 255, 0.055);
+    }
+    .history-run-row.is-active {
+      background: rgba(255, 255, 255, 0.09);
+      border-bottom-color: rgba(255, 255, 255, 0.11);
+    }
+    .history-run-status {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      height: 20px;
+      padding: 0 6px;
+      border-radius: 999px;
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      background: rgba(255, 255, 255, 0.08);
+      color: #f2f1ec;
+      white-space: nowrap;
+    }
+    .history-run-status.status-done { background: rgba(184, 212, 194, 0.22); color: var(--ok); }
+    .history-run-status.status-running { background: rgba(212, 199, 168, 0.22); color: var(--warn); }
+    .history-run-status.status-blocked { background: rgba(210, 170, 168, 0.22); color: var(--danger); }
+    .history-run-status.status-todo { background: rgba(255, 255, 255, 0.08); color: var(--muted); }
+    .history-run-goal {
+      display: block;
+      min-width: 0;
+      color: #f2f1ec;
+      font-size: 13px;
+      font-weight: 600;
+      line-height: 1.3;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .history-run-id {
+      grid-column: 1 / -1;
+      display: block;
+      margin-top: 2px;
+      color: #787772;
+      font-size: 10px;
+      line-height: 1.3;
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
@@ -1620,6 +1700,10 @@ export function dashboardHtml(input: { runId: string }) {
           <h2 class="section-label">History</h2>
           <div class="task-list" id="history-goal-list"></div>
         </section>
+        <section class="nav-section" data-history-runs>
+          <h2 class="section-label">Recent runs</h2>
+          <div class="task-list" id="recent-runs-list" data-history-runs-list aria-live="polite">Loading recent runs…</div>
+        </section>
       </nav>
     </aside>
     <main class="workspace">
@@ -1643,7 +1727,37 @@ export function dashboardHtml(input: { runId: string }) {
     <aside class="inspector-panel" id="inspector-panel"></aside>
   </div>
   <script>
-    const runId = ${JSON.stringify(input.runId)};
+    const defaultRunId = ${JSON.stringify(input.runId)};
+    const activeRunStorageKey = "ouroboros:dashboard:activeRun";
+    const parseRunIdFromHash = (hash) => {
+      if (typeof hash !== "string" || !hash) return null;
+      const match = hash.match(/[#&]run=([^&]+)/);
+      if (!match) return null;
+      try {
+        const decoded = decodeURIComponent(match[1]);
+        return /^[A-Za-z0-9_-]+$/.test(decoded) ? decoded : null;
+      } catch {
+        return null;
+      }
+    };
+    const resolveInitialRunId = () => {
+      const fromHash = parseRunIdFromHash(window.location?.hash || "");
+      if (fromHash && fromHash !== defaultRunId) return fromHash;
+      try {
+        const stored = window.localStorage?.getItem(activeRunStorageKey);
+        if (typeof stored === "string" && /^[A-Za-z0-9_-]+$/.test(stored) && stored !== defaultRunId) {
+          return stored;
+        }
+      } catch {
+      }
+      return defaultRunId;
+    };
+    let runId = resolveInitialRunId();
+    if (runId !== defaultRunId) {
+      try { window.localStorage?.setItem(activeRunStorageKey, runId); } catch {}
+      try { window.history.replaceState(null, "", "#run=" + encodeURIComponent(runId)); } catch {}
+    }
+    let dashboardStorageKey = "ouroboros:dashboard:" + runId;
     const byStatus = (items) => items.reduce((acc, item) => {
       acc[item.status] = (acc[item.status] || 0) + 1;
       return acc;
@@ -1761,7 +1875,6 @@ export function dashboardHtml(input: { runId: string }) {
     const rawStreamDetails = (session) =>
       '<details class="raw-stream"><summary>Raw output</summary>' + streamOutput(session) + '</details>';
     const promptLink = (task) => '<a class="prompt-link" target="_blank" rel="noreferrer" href="/tasks/' + encodeURIComponent(task.id) + '/prompt">Prompt</a>';
-    const dashboardStorageKey = "ouroboros:dashboard:" + runId;
     const isWorkspaceMode = (value) => value === "canvas" || value === "flow";
     const readDashboardState = () => {
       try {
@@ -2659,6 +2772,70 @@ export function dashboardHtml(input: { runId: string }) {
       mountReactFlowCanvas();
       patchInspectorPanel(renderInspector(overview, selectedGroup), renderGuardrailsSection(overview) + renderSupervisor(overview) + renderRunner(overview));
     }
+    let recentRunsCache = [];
+    const RECENT_RUNS_LIMIT = 10;
+    const renderRecentRunsList = (runs) => {
+      const node = document.getElementById("recent-runs-list");
+      if (!node) return;
+      if (!Array.isArray(runs) || runs.length === 0) {
+        node.innerHTML = '<div class="empty">No recent runs available.</div>';
+        return;
+      }
+      node.innerHTML = runs.map((entry) => {
+        const id = typeof entry?.id === "string" ? entry.id : "";
+        if (!id) return "";
+        const status = typeof entry?.status === "string" ? entry.status : "unknown";
+        const goal = typeof entry?.goal === "string" && entry.goal.trim() ? entry.goal : "(no goal)";
+        const isActive = id === runId;
+        return '<button type="button" class="history-run-row' + (isActive ? " is-active" : "") + '" data-history-run-id="' + escapeHtml(id) + '" aria-current="' + (isActive ? "true" : "false") + '" title="' + escapeHtml(entry?.goal || id) + '">' +
+          '<span class="history-run-status status-' + escapeHtml(status) + '">' + escapeHtml(status) + '</span>' +
+          '<span class="history-run-goal">' + escapeHtml(goal) + '</span>' +
+          '<span class="history-run-id code-meta">' + escapeHtml(id) + '</span>' +
+        '</button>';
+      }).join("");
+    };
+    const refreshRecentRuns = () => {
+      fetch("/api/runs?limit=" + encodeURIComponent(RECENT_RUNS_LIMIT))
+        .then((response) => {
+          if (!response.ok) throw new Error("recent runs request failed: " + response.status);
+          return response.json();
+        })
+        .then((payload) => {
+          recentRunsCache = Array.isArray(payload?.runs) ? payload.runs : [];
+          renderRecentRunsList(recentRunsCache);
+        })
+        .catch((error) => {
+          const node = document.getElementById("recent-runs-list");
+          if (node) {
+            node.innerHTML = '<div class="empty">' + escapeHtml(error?.message ? error.message : "Failed to load recent runs.") + '</div>';
+          }
+        });
+    };
+    const setSelectedRun = (nextRunId) => {
+      if (typeof nextRunId !== "string" || !nextRunId || nextRunId === runId) {
+        renderRecentRunsList(recentRunsCache);
+        return;
+      }
+      runId = nextRunId;
+      dashboardStorageKey = "ouroboros:dashboard:" + runId;
+      try { window.localStorage?.setItem(activeRunStorageKey, runId); } catch {}
+      try { window.history.replaceState(null, "", "#run=" + encodeURIComponent(runId)); } catch {}
+      const restored = readDashboardState();
+      selectedGoalId = restored.selectedGoalId;
+      workspaceMode = restored.workspaceMode || "flow";
+      workspaceTitleExpanded = restored.workspaceTitleExpanded === true;
+      selectedChangedFilePath = null;
+      diffByPath.clear();
+      try { window.localStorage?.removeItem("ouroboros:dashboard:changedFile:" + runId); } catch {}
+      overviewWorker.postMessage({ type: "start", runId, apiBase: window.location.origin });
+      refreshRecentRuns();
+    };
+    window.addEventListener("hashchange", () => {
+      const fromHash = parseRunIdFromHash(window.location.hash || "");
+      if (fromHash && fromHash !== runId) {
+        setSelectedRun(fromHash);
+      }
+    });
     document.addEventListener("click", (event) => {
       if (!event.target || !event.target.closest) return;
       const titleToggle = event.target.closest("[data-workspace-title-toggle]");
@@ -2785,6 +2962,14 @@ export function dashboardHtml(input: { runId: string }) {
           .finally(() => { resumeButton.disabled = false; });
         return;
       }
+      const historyRunRow = event.target.closest("[data-history-run-id]");
+      if (historyRunRow) {
+        const nextRunId = historyRunRow.getAttribute("data-history-run-id");
+        if (nextRunId && nextRunId !== runId) {
+          setSelectedRun(nextRunId);
+        }
+        return;
+      }
       const row = event.target.closest("[data-goal-id]");
       if (!row) return;
       selectedGoalId = row.getAttribute("data-goal-id");
@@ -2843,6 +3028,7 @@ export function dashboardHtml(input: { runId: string }) {
         .finally(() => { if (submitter) submitter.disabled = false; });
     });
     overviewWorker.postMessage({ type: "start", runId, apiBase: window.location.origin });
+    refreshRecentRuns();
   </script>
 </body>
 </html>`;
@@ -2853,12 +3039,14 @@ export function serveDashboard(input: {
   port: number;
   overview: () => RunOverview;
   childOverviews?: () => RunOverview[];
+  runOverview?: (runId: string) => RunOverview;
   globalRunCounts?: () => RunStatusCounts;
   renderTaskPrompt: (taskId: string) => string;
   runnerStatus?: () => DashboardRunnerStatus | null;
   supervisorStatus?: () => DashboardRunnerStatus | null;
   autoStartRunner?: DashboardAutoStartRunner;
   actions?: DashboardActions;
+  recentRuns?: (limit: number) => DashboardRunSummary[];
 }) {
   return Bun.serve({
     port: input.port,
@@ -2874,12 +3062,14 @@ export async function handleDashboardRequest(
     runId: string;
     overview: () => RunOverview;
     childOverviews?: () => RunOverview[];
+    runOverview?: (runId: string) => RunOverview;
     globalRunCounts?: () => RunStatusCounts;
     renderTaskPrompt: (taskId: string) => string;
     runnerStatus?: () => DashboardRunnerStatus | null;
     supervisorStatus?: () => DashboardRunnerStatus | null;
     autoStartRunner?: DashboardAutoStartRunner;
     actions?: DashboardActions;
+    recentRuns?: (limit: number) => DashboardRunSummary[];
   },
 ) {
   const url = new URL(request.url);
@@ -2898,35 +3088,67 @@ export async function handleDashboardRequest(
       headers: { "content-type": "text/css; charset=utf-8" },
     });
   }
-  if (url.pathname === `/api/runs/${input.runId}/overview`) {
-    let overview = aggregateDashboardOverview(input.overview(), input.childOverviews?.() ?? []);
-    let runner = input.runnerStatus?.() ?? null;
-    let supervisor = input.supervisorStatus?.() ?? null;
-    if (input.actions?.startRunner && supervisor?.status !== "running" && input.autoStartRunner?.(overview, runner)) {
-      input.actions.startRunner();
-      overview = aggregateDashboardOverview(input.overview(), input.childOverviews?.() ?? []);
-      runner = input.runnerStatus?.() ?? runner;
-      supervisor = input.supervisorStatus?.() ?? supervisor;
-    }
-    const globalRuns = input.globalRunCounts?.() ?? { todo: 0, running: 0, done: 0, blocked: 0 };
-    supervisor = inferDashboardSupervisorStatus(supervisor, overview, globalRuns);
-    return Response.json({ ...overview, runner, supervisor, globalRuns });
+  if (url.pathname === "/api/runs") {
+    return handleRecentRunsRequest(url, input.recentRuns);
   }
-  if (url.pathname === `/api/runs/${input.runId}/changed-files`) {
-    return Response.json(changedFilesPayload(aggregateDashboardOverview(input.overview(), input.childOverviews?.() ?? [])));
-  }
-  if (url.pathname === `/api/runs/${input.runId}/diff`) {
-    const format = url.searchParams.get("format");
-    const asJson = format === "json";
-    const result = diffForChangedPath(aggregateDashboardOverview(input.overview(), input.childOverviews?.() ?? []), url.searchParams.get("path"));
-    if (!result.ok) {
-      return asJson
-        ? Response.json({ error: result.error }, { status: result.status })
-        : new Response(result.error, { status: result.status, headers: { "content-type": "text/plain; charset=utf-8" } });
+  const runGetMatch = url.pathname.match(/^\/api\/runs\/([^/]+)\/(overview|changed-files|diff)$/);
+  if (runGetMatch) {
+    const routeRunId = decodeURIComponent(runGetMatch[1]);
+    const suffix = runGetMatch[2];
+    if (routeRunId === input.runId) {
+      if (suffix === "overview") {
+        let overview = aggregateDashboardOverview(input.overview(), input.childOverviews?.() ?? []);
+        let runner = input.runnerStatus?.() ?? null;
+        let supervisor = input.supervisorStatus?.() ?? null;
+        if (input.actions?.startRunner && supervisor?.status !== "running" && input.autoStartRunner?.(overview, runner)) {
+          input.actions.startRunner();
+          overview = aggregateDashboardOverview(input.overview(), input.childOverviews?.() ?? []);
+          runner = input.runnerStatus?.() ?? runner;
+          supervisor = input.supervisorStatus?.() ?? supervisor;
+        }
+        const globalRuns = input.globalRunCounts?.() ?? { todo: 0, running: 0, done: 0, blocked: 0 };
+        supervisor = inferDashboardSupervisorStatus(supervisor, overview, globalRuns);
+        return Response.json({ ...overview, runner, supervisor, globalRuns });
+      }
+      const primaryOverview = aggregateDashboardOverview(input.overview(), input.childOverviews?.() ?? []);
+      if (suffix === "changed-files") {
+        return Response.json(changedFilesPayload(primaryOverview));
+      }
+      return dashboardDiffResponse(primaryOverview, url);
     }
-    return asJson
-      ? Response.json({ path: result.path, diff: result.diff })
-      : new Response(result.diff, { headers: { "content-type": "text/plain; charset=utf-8" } });
+    if (!input.runOverview) {
+      return Response.json(
+        { error: `run overview provider is not configured` },
+        { status: 404 },
+      );
+    }
+    let resolvedOverview: RunOverview;
+    try {
+      resolvedOverview = input.runOverview(routeRunId);
+    } catch (error) {
+      return Response.json(
+        { error: error instanceof Error ? error.message : String(error) },
+        { status: 404 },
+      );
+    }
+    const overview = aggregateDashboardOverview(resolvedOverview, []);
+    if (suffix === "overview") {
+      return Response.json(overview);
+    }
+    if (suffix === "changed-files") {
+      return Response.json(changedFilesPayload(overview));
+    }
+    return dashboardDiffResponse(overview, url);
+  }
+  const runPostMatch = url.pathname.match(/^\/api\/runs\/([^/]+)\/(runner\/start|runner\/stop|intake|goals|interrupt)$/);
+  if (request.method === "POST" && runPostMatch) {
+    const routeRunId = decodeURIComponent(runPostMatch[1]);
+    if (routeRunId !== input.runId) {
+      return Response.json(
+        { error: `dashboard actions are only available on the primary run ${input.runId}` },
+        { status: 404 },
+      );
+    }
   }
   if (request.method === "POST" && url.pathname === `/api/runs/${input.runId}/runner/start`) {
     return withDashboardAction(async () => {
@@ -3024,6 +3246,58 @@ export async function handleDashboardRequest(
     });
   }
   return new Response("not found", { status: 404 });
+}
+
+function handleRecentRunsRequest(url: URL, provider: ((limit: number) => DashboardRunSummary[]) | undefined) {
+  if (!provider) {
+    return Response.json({ error: "recent runs are not configured" }, { status: 404 });
+  }
+  for (const key of url.searchParams.keys()) {
+    if (key !== "limit") {
+      return Response.json({ error: `unknown query parameter: ${key}` }, { status: 400 });
+    }
+  }
+  const rawLimit = url.searchParams.get("limit");
+  let limit = DASHBOARD_RUNS_HISTORY_LIMIT_DEFAULT;
+  if (rawLimit !== null) {
+    const parsed = Number(rawLimit);
+    if (!Number.isInteger(parsed) || parsed <= 0) {
+      return Response.json({ error: "limit must be a positive integer" }, { status: 400 });
+    }
+    if (parsed > DASHBOARD_RUNS_HISTORY_LIMIT_MAX) {
+      return Response.json({ error: `limit must be at most ${DASHBOARD_RUNS_HISTORY_LIMIT_MAX}` }, { status: 400 });
+    }
+    limit = parsed;
+  }
+  let summaries: DashboardRunSummary[];
+  try {
+    summaries = provider(limit);
+  } catch (error) {
+    return Response.json({ error: error instanceof Error ? error.message : String(error) }, { status: 500 });
+  }
+  return Response.json({
+    runs: summaries.map((summary) => ({
+      id: summary.id,
+      status: summary.status,
+      goal: compactText(summary.goal ?? "", DASHBOARD_RUN_SUMMARY_GOAL_MAX),
+      projectId: summary.projectId ?? null,
+      createdAt: summary.createdAt ?? null,
+    })),
+  });
+}
+
+function dashboardDiffResponse(overview: RunOverview, url: URL) {
+  const format = url.searchParams.get("format");
+  const asJson = format === "json";
+  const result = diffForChangedPath(overview, url.searchParams.get("path"));
+  if (!result.ok) {
+    return asJson
+      ? Response.json({ error: result.error }, { status: result.status })
+      : new Response(result.error, { status: result.status, headers: { "content-type": "text/plain; charset=utf-8" } });
+  }
+  return asJson
+    ? Response.json({ path: result.path, diff: result.diff })
+    : new Response(result.diff, { headers: { "content-type": "text/plain; charset=utf-8" } });
 }
 
 function changedFilesPayload(overview: RunOverview) {
