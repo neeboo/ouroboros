@@ -39,6 +39,7 @@ import type {
   CreateRunInput,
   CreateTaskInput,
   DependencyAttempt,
+  AttemptEvent,
   FinishAttemptInput,
   GetHarnessActionEventInput,
   GetRunOverviewInput,
@@ -733,6 +734,22 @@ export class Harness {
       }
     }
     return id;
+  }
+
+  listAttemptEvents(attemptId: string): AttemptEvent[] {
+    return withDatabase(this.dbPath, (db) => {
+      const rows = db
+        .query(
+          `
+          select *
+          from attempt_events
+          where attempt_id = $attemptId
+          order by sequence asc
+          `,
+        )
+        .all({ $attemptId: attemptId }) as AttemptEventRow[];
+      return rows.map(attemptEventFromRow);
+    });
   }
 
   listRuns(input: ListRunsInput = {}) {
