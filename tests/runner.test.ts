@@ -1258,6 +1258,103 @@ describe("runner", () => {
     });
   });
 
+  test("supervisor integrates verified worker work before goal review when run is still todo", async () => {
+    const repoPath = join(dir, "repo-pre-review");
+    const worktreePath = join(dir, "verified-worker-pre-review");
+    await mkdir(repoPath, { recursive: true });
+    await writeFile(join(repoPath, "README.md"), "initial\n");
+    git(repoPath, ["init", "-b", "main"]);
+    git(repoPath, ["config", "user.name", "Ouroboros Test"]);
+    git(repoPath, ["config", "user.email", "test@example.com"]);
+    git(repoPath, ["config", "commit.gpgSign", "false"]);
+    git(repoPath, ["add", "README.md"]);
+    git(repoPath, ["commit", "-m", "Initial commit"]);
+    git(repoPath, ["worktree", "add", "-b", "task-verified-pre-review", worktreePath, "main"]);
+    await mkdir(join(worktreePath, "src"), { recursive: true });
+    await writeFile(join(worktreePath, "src", "pre-review.ts"), "export const preReview = true;\n");
+
+    const runId = harness.createRun({ goal: "Integrate before review", projectRoot: repoPath });
+    const workerTaskId = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Implement pre-review file",
+      prompt: "Create src/pre-review.ts.",
+      worktreePath,
+    });
+    harness.recordAttempt({
+      taskId: workerTaskId,
+      input: { executor: "test" },
+      output: {
+        status: "done",
+        summary: "Created pre-review file",
+        changedFiles: ["src/pre-review.ts"],
+        checks: [{ name: "worker check", status: "passed" }],
+        artifacts: [],
+        problems: [],
+      },
+    });
+    const verifierTaskId = harness.createTask({
+      runId,
+      role: "verifier",
+      goal: "Verify pre-review file",
+      prompt: "Verify worker output.",
+      dependsOn: [workerTaskId],
+    });
+
+    const result = await superviseCodexRuns({
+      harness,
+      cwd: repoPath,
+      rootRunId: runId,
+      runConcurrency: 1,
+      taskConcurrency: 1,
+      maxCycles: 1,
+      maxRounds: 1,
+      maxTries: 3,
+      intervalMs: 1,
+      integrateCompletedRuns: true,
+      clientFactory: () => ({
+        start: async () => ({
+          status: "done" as const,
+          sessionId: "session_verifier",
+          outputPath: join(dir, "verifier-output.json"),
+          stdout: "",
+          stderr: "",
+          events: [],
+          output: {
+            status: "done" as const,
+            summary: "Verified pre-review file",
+            changedFiles: [],
+            checks: [{ name: "verify", status: "passed" }],
+            artifacts: [],
+            problems: [],
+          },
+        }),
+        resume: async () => {
+          throw new Error("resume should not be called");
+        },
+      }),
+    });
+    const mergedFile = await readFile(join(repoPath, "src", "pre-review.ts"), "utf8");
+    const actionEvent = harness.listHarnessActionEvents({ limit: 1 })[0];
+
+    expect(harness.getRun(runId)?.status).toBe("todo");
+    expect(harness.getTask(verifierTaskId)?.status).toBe("done");
+    expect(result.cycles[0].runs[0]).toMatchObject({
+      runId,
+      status: "todo",
+      integration: expect.objectContaining({
+        status: "done",
+        actionType: "integrateVerifiedRun",
+      }),
+    });
+    expect(mergedFile.trim()).toBe("export const preReview = true;");
+    expect(actionEvent).toMatchObject({
+      actionType: "integrateVerifiedRun",
+      status: "done",
+      request: expect.objectContaining({ workerTaskId }),
+    });
+  });
+
   test("runner keeps dependency attempts empty for tasks without dependencies", async () => {
     const runId = harness.createRun({ goal: "Build loop" });
     harness.createTask({

@@ -1038,10 +1038,15 @@ function maybeIntegrateCompletedRun(
   input: Pick<SuperviseCodexRunsInput, "harness" | "integrateCompletedRuns" | "integrationTargetBranch" | "integrationPush">,
   overview: RunOverview,
 ): (HarnessActionResult & { eventId: string }) | null {
-  if (!input.integrateCompletedRuns || overview.run?.status !== "done") {
+  if (!input.integrateCompletedRuns || !overview.run) {
     return null;
   }
-  const worker = selectIntegrationCandidate(overview);
+  const preCompletion = overview.run.status !== "done";
+  if (preCompletion && overview.tasks.some((task) => task.status === "todo" || task.status === "running")) {
+    return null;
+  }
+  const integratedWorkerIds = successfulIntegratedWorkerIds(input.harness, overview.run.id);
+  const worker = selectIntegrationCandidate(overview, integratedWorkerIds);
   if (!worker) {
     return null;
   }
@@ -1051,18 +1056,45 @@ function maybeIntegrateCompletedRun(
     workerTaskId: worker.id,
     targetBranch: input.integrationTargetBranch ?? "main",
     push: input.integrationPush ?? false,
-    reason: "supervisor integrated a completed verified run",
+    reason: preCompletion
+      ? "supervisor integrated verified worker before goal review"
+      : "supervisor integrated a completed verified run",
   });
 }
 
-function selectIntegrationCandidate(overview: RunOverview): Task | null {
+function selectIntegrationCandidate(overview: RunOverview, integratedWorkerIds: ReadonlySet<string> = new Set()): Task | null {
   return [...overview.tasks].reverse().find((task) => {
     if (["planner", "verifier", "goal-review"].includes(task.role) || task.status !== "done" || !task.worktreePath) {
       return false;
     }
+    if (integratedWorkerIds.has(task.id)) {
+      return false;
+    }
     const session = [...overview.sessions].reverse().find((candidate) => candidate.taskId === task.id && candidate.status === "done");
-    return Array.isArray(session?.output.changedFiles) && session.output.changedFiles.length > 0;
+    if (!Array.isArray(session?.output.changedFiles) || session.output.changedFiles.length === 0) {
+      return false;
+    }
+    return overview.tasks.some((candidate) =>
+      candidate.role === "verifier" &&
+      candidate.status === "done" &&
+      candidate.dependsOn.includes(task.id)
+    );
   }) ?? null;
+}
+
+function successfulIntegratedWorkerIds(harness: Harness, runId: string) {
+  const workerIds = new Set<string>();
+  for (const event of harness.listHarnessActionEvents({ limit: 200 })) {
+    if (event.actionType !== "integrateVerifiedRun" || event.status !== "done") {
+      continue;
+    }
+    const request = event.request as Record<string, unknown>;
+    if (request.runId !== runId || typeof request.workerTaskId !== "string") {
+      continue;
+    }
+    workerIds.add(request.workerTaskId);
+  }
+  return workerIds;
 }
 
 function runsInScope(runs: ReturnType<Harness["listRuns"]>, rootRunId: string) {
