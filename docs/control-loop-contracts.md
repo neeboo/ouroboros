@@ -130,6 +130,8 @@ Forbidden amendments:
 
 Every accepted amendment should create a new verifier contract version and keep the old version auditable.
 
+The implementation provides an audited, run-scoped amendment path through the `amendRunContract` `HarnessAction`. It targets a single `contractKey` inside `run.context`, writes the new value, and appends a versioned entry to `run.context.contractAmendments`. Versions are monotonic per `contractKey`, and an optional `expectedVersion` staleness guard rejects amendments made against a superseded version without mutating the run. The action does not change the database schema and never weakens the frozen task-level verifier contract; it only records the amendment as auditable JSON alongside a `harness_action_events` row.
+
 ## Execution Loop
 
 After contracts are frozen, execution can run independently.
