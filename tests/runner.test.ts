@@ -1819,6 +1819,119 @@ describe("runner", () => {
     expect(await readFile(join(repoPath, "src", "worker_b.ts"), "utf8")).toContain("workerB = true");
   });
 
+  test("supervisor integrates verified work even when an unrelated branch is waiting", async () => {
+    const repoPath = join(dir, "repo-pre-review-unrelated-wait");
+    const worktreePath = join(dir, "verified-worker-unrelated-wait");
+    await mkdir(repoPath, { recursive: true });
+    await writeFile(join(repoPath, "README.md"), "initial\n");
+    git(repoPath, ["init", "-b", "main"]);
+    git(repoPath, ["config", "user.name", "Ouroboros Test"]);
+    git(repoPath, ["config", "user.email", "test@example.com"]);
+    git(repoPath, ["config", "commit.gpgSign", "false"]);
+    git(repoPath, ["add", "README.md"]);
+    git(repoPath, ["commit", "-m", "Initial commit"]);
+    git(repoPath, ["worktree", "add", "-b", "task-verified-unrelated-wait", worktreePath, "main"]);
+    await mkdir(join(worktreePath, "src"), { recursive: true });
+    await writeFile(join(worktreePath, "src", "unrelated-wait.ts"), "export const unrelatedWait = true;\n");
+
+    const runId = harness.createRun({ goal: "Integrate ready branch while another branch waits", projectRoot: repoPath });
+    const workerTaskId = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Implement unrelated wait file",
+      prompt: "Create src/unrelated-wait.ts.",
+      worktreePath,
+    });
+    harness.recordAttempt({
+      taskId: workerTaskId,
+      input: { executor: "test" },
+      output: {
+        status: "done",
+        summary: "Created unrelated wait file",
+        changedFiles: ["src/unrelated-wait.ts"],
+        checks: [{ name: "worker check", status: "passed" }],
+        artifacts: [],
+        problems: [],
+      },
+    });
+    const verifierTaskId = harness.createTask({
+      runId,
+      role: "verifier",
+      goal: "Verify unrelated wait file",
+      prompt: "Verify worker output.",
+      dependsOn: [workerTaskId],
+    });
+    harness.recordAttempt({
+      taskId: verifierTaskId,
+      input: { executor: "test" },
+      output: {
+        status: "done",
+        summary: "Verified unrelated wait file",
+        changedFiles: [],
+        checks: [{ name: "verify", status: "passed" }],
+        artifacts: [],
+        problems: [],
+      },
+    });
+    const blockedWorkerId = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Blocked unrelated work",
+      prompt: "This branch is blocked.",
+    });
+    harness.recordAttempt({
+      taskId: blockedWorkerId,
+      input: { executor: "test" },
+      output: {
+        status: "blocked",
+        summary: "External blocker",
+        changedFiles: [],
+        checks: [{ name: "external", status: "failed" }],
+        artifacts: [],
+        problems: ["external blocker"],
+      },
+    });
+    harness.createTask({
+      runId,
+      role: "verifier",
+      goal: "Verify blocked unrelated work",
+      prompt: "Wait for blocked worker.",
+      dependsOn: [blockedWorkerId],
+    });
+
+    const result = await superviseCodexRuns({
+      harness,
+      cwd: repoPath,
+      rootRunId: runId,
+      runConcurrency: 1,
+      taskConcurrency: 1,
+      maxCycles: 1,
+      maxRounds: 2,
+      maxTries: 3,
+      intervalMs: 1,
+      integrateCompletedRuns: true,
+      clientFactory: () => ({
+        start: async () => {
+          throw new Error("no task should start");
+        },
+        resume: async () => {
+          throw new Error("resume should not be called");
+        },
+      }),
+    });
+
+    const integrationResults = result.cycles[0].runs[0].integration!;
+
+    expect(result.cycles[0].runs[0]).toMatchObject({ runId, activeTasks: 1 });
+    expect(integrationResults).toHaveLength(1);
+    expect(integrationResults[0]).toMatchObject({
+      status: "done",
+      actionType: "integrateVerifiedRun",
+      artifacts: [expect.objectContaining({ workerTaskId })],
+    });
+    expect(await readFile(join(repoPath, "src", "unrelated-wait.ts"), "utf8")).toContain("unrelatedWait = true");
+  });
+
   test("supervisor skips a verified worker superseded by a verified repair", async () => {
     const repoPath = join(dir, "repo-superseded");
     const originalWorktreePath = join(dir, "original-worker");

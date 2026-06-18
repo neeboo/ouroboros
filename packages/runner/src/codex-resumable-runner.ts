@@ -1112,9 +1112,6 @@ function maybeIntegrateCompletedRun(
     return null;
   }
   const preCompletion = overview.run.status !== "done";
-  if (preCompletion && overview.tasks.some((task) => task.status === "todo" || task.status === "running")) {
-    return [];
-  }
   const results: Array<HarnessActionResult & { eventId: string }> = [];
   let integrated = successfulIntegrationState(input.harness, overview.run.id);
   while (true) {
