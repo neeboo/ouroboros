@@ -841,7 +841,7 @@ export class Harness {
           `
           select *
           from harness_action_events
-          order by created_at desc, id desc
+          order by rowid desc
           limit $limit
           `,
         )

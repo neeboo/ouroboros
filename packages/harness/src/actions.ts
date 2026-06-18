@@ -566,6 +566,35 @@ function integrateVerifiedRun(
   }
   const ahead = Number.parseInt(aheadResult.stdout.trim(), 10);
   if (!Number.isFinite(ahead) || ahead < 1) {
+    const ancestor = runGitStep(git, repoPath, ["merge-base", "--is-ancestor", sourceBranch, targetBranch]);
+    if (ancestor.ok) {
+      const mergeCommit = readGitStdout(git, repoPath, ["rev-parse", "--short", "HEAD"]);
+      checks.push({
+        name: "source already merged",
+        status: "passed",
+        evidence: `${sourceBranch} is ancestor of ${targetBranch}`,
+      });
+      return doneResult(action.type, `Verified task ${worker.id} is already integrated into ${targetBranch}.`, checks, [
+        {
+          kind: "integration",
+          runId: action.runId,
+          workerTaskId: worker.id,
+          verifierTaskId: verifier.id,
+          goalReviewTaskId: goalReview?.id ?? null,
+          preCompletion: isPreCompletionIntegration,
+          repoPath,
+          worktreePath,
+          targetBranch,
+          sourceBranch,
+          workerCommit,
+          mergeCommit,
+          pushed: false,
+          changedFiles,
+          reason: action.reason ?? null,
+          alreadyMerged: true,
+        },
+      ]);
+    }
     return blockedIntegration(action.type, `Source branch ${sourceBranch} has no commits to merge into ${targetBranch}.`, checks, [
       `source branch ${sourceBranch} has no commits ahead of ${targetBranch}`,
     ]);

@@ -327,6 +327,95 @@ describe("Harness actions", () => {
     });
   });
 
+  test("treats an already merged verified worker as an idempotent integration", async () => {
+    const repoPath = join(dir, "repo-already-merged");
+    const worktreePath = join(dir, "worker-tree-already-merged");
+    await mkdir(repoPath, { recursive: true });
+    await writeFile(join(repoPath, "README.md"), "initial\n");
+    git(repoPath, ["init", "-b", "main"]);
+    git(repoPath, ["config", "user.name", "Ouroboros Test"]);
+    git(repoPath, ["config", "user.email", "test@example.com"]);
+    git(repoPath, ["config", "commit.gpgSign", "false"]);
+    git(repoPath, ["add", "README.md"]);
+    git(repoPath, ["commit", "-m", "Initial commit"]);
+    git(repoPath, ["worktree", "add", "-b", "task-worker-already-merged", worktreePath, "main"]);
+    await mkdir(join(worktreePath, "src"), { recursive: true });
+    await writeFile(join(worktreePath, "src", "merged.ts"), "export const merged = true;\n");
+
+    const runId = harness.createRun({ goal: "Integrate verified work idempotently", projectRoot: repoPath });
+    const workerTaskId = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Implement merged file",
+      prompt: "Create src/merged.ts.",
+      worktreePath,
+    });
+    harness.recordAttempt({
+      taskId: workerTaskId,
+      input: { executor: "test" },
+      output: {
+        status: "done",
+        summary: "Created merged file",
+        changedFiles: ["src/merged.ts"],
+        checks: [{ name: "worker check", status: "passed" }],
+        artifacts: [],
+        problems: [],
+      },
+    });
+    const verifierTaskId = harness.createTask({
+      runId,
+      role: "verifier",
+      goal: "Verify merged file",
+      prompt: "Verify worker changes.",
+      dependsOn: [workerTaskId],
+    });
+    harness.recordAttempt({
+      taskId: verifierTaskId,
+      input: { executor: "test" },
+      output: {
+        status: "done",
+        summary: "Verified merged file",
+        changedFiles: [],
+        checks: [{ name: "verify", status: "passed" }],
+        artifacts: [],
+        problems: [],
+      },
+    });
+
+    const first = applyHarnessAction(harness, {
+      type: "integrateVerifiedRun",
+      runId,
+      workerTaskId,
+      commitMessage: "Integrate already merged worker",
+      reason: "first integration",
+    });
+    const headAfterFirst = git(repoPath, ["rev-parse", "HEAD"]).stdout.trim();
+    const second = applyHarnessAction(harness, {
+      type: "integrateVerifiedRun",
+      runId,
+      workerTaskId,
+      commitMessage: "Integrate already merged worker again",
+      reason: "retry after interrupted integration bookkeeping",
+    });
+    const headAfterSecond = git(repoPath, ["rev-parse", "HEAD"]).stdout.trim();
+
+    expect(first.status).toBe("done");
+    expect(second).toMatchObject({
+      status: "done",
+      actionType: "integrateVerifiedRun",
+      summary: expect.stringContaining("already integrated"),
+    });
+    expect(second.artifacts).toContainEqual(
+      expect.objectContaining({
+        kind: "integration",
+        workerTaskId,
+        verifierTaskId,
+        alreadyMerged: true,
+      }),
+    );
+    expect(headAfterSecond).toBe(headAfterFirst);
+  });
+
   test("integrates an explicitly verified worker before the whole run is complete", async () => {
     const repoPath = join(dir, "repo-precomplete");
     const worktreePath = join(dir, "worker-tree-precomplete");
