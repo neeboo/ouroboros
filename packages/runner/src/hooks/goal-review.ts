@@ -82,6 +82,11 @@ export function inferExplicitRunDecision(output: {
   artifacts?: unknown[];
   problems?: unknown[];
 }) {
+  const artifactDecision = (output.artifacts ?? []).map(runDecisionFromArtifact).find((decision) => decision !== undefined);
+  if (artifactDecision) {
+    return artifactDecision;
+  }
+
   const haystack = [output.summary, ...(output.checks ?? []), ...(output.artifacts ?? []), ...(output.problems ?? [])]
     .map((value) => (typeof value === "string" ? value : JSON.stringify(value)))
     .join("\n");
@@ -90,4 +95,27 @@ export function inferExplicitRunDecision(output: {
     return undefined;
   }
   return match[1].toLowerCase() as "complete" | "continue" | "verify" | "defer";
+}
+
+function runDecisionFromArtifact(value: unknown) {
+  if (typeof value !== "object" || value === null) {
+    return undefined;
+  }
+  const artifact = value as { kind?: unknown; type?: unknown; value?: unknown; runDecision?: unknown; decision?: unknown };
+  const kind = typeof artifact.kind === "string" ? artifact.kind : artifact.type;
+  if (kind !== "runDecision" && kind !== "run_decision" && kind !== "goal_review") {
+    return undefined;
+  }
+  return normalizeRunDecision(artifact.runDecision ?? artifact.decision ?? artifact.value);
+}
+
+function normalizeRunDecision(value: unknown) {
+  if (typeof value !== "string") {
+    return undefined;
+  }
+  const normalized = value.trim().toLowerCase();
+  if (normalized === "complete" || normalized === "continue" || normalized === "verify" || normalized === "defer") {
+    return normalized;
+  }
+  return undefined;
 }
