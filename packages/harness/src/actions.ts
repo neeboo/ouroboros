@@ -57,7 +57,25 @@ export type HarnessAction =
       proposalId: string;
       acceptedBy: string;
       reason?: string;
+    }
+  | {
+      type: "amendRunContract";
+      runId: string;
+      contractKey: string;
+      value: unknown;
+      version: number;
+      expectedVersion?: number;
+      reason?: string;
     };
+
+export interface ContractAmendmentEntry {
+  contractKey: string;
+  version: number;
+  previousValue: unknown;
+  value: unknown;
+  reason: string | null;
+  amendedAt: string;
+}
 
 export interface HarnessActionResult {
   status: "done" | "blocked";
@@ -163,8 +181,19 @@ export function parseHarnessAction(value: unknown): HarnessAction {
       reason: optionalStringField(record, "reason"),
     };
   }
+  if (type === "amendRunContract") {
+    return {
+      type,
+      runId: stringField(record, "runId"),
+      contractKey: stringField(record, "contractKey"),
+      value: requiredValueField(record, "value"),
+      version: positiveIntegerField(record, "version"),
+      expectedVersion: optionalNonNegativeIntegerField(record, "expectedVersion"),
+      reason: optionalStringField(record, "reason"),
+    };
+  }
   throw new Error(
-    "harness action type must be reclaimRunningTasks, retryTask, markRunTodo, updateRunContext, retireRun, prepareRunDrain, completeSystemTask, integrateVerifiedRun, interruptAttemptAndCreateTask, interruptRunningAttemptsAndCreateTask, or acceptGuardrailProposal",
+    "harness action type must be reclaimRunningTasks, retryTask, markRunTodo, updateRunContext, amendRunContract, retireRun, prepareRunDrain, completeSystemTask, integrateVerifiedRun, interruptAttemptAndCreateTask, interruptRunningAttemptsAndCreateTask, or acceptGuardrailProposal",
   );
 }
 
@@ -327,6 +356,10 @@ function applyParsedHarnessAction(harness: Harness, action: HarnessAction, optio
 
   if (action.type === "acceptGuardrailProposal") {
     return acceptGuardrailProposalAction(harness, action);
+  }
+
+  if (action.type === "amendRunContract") {
+    return amendRunContract(harness, action);
   }
 
   return prepareRunDrain(harness, action);
@@ -950,6 +983,112 @@ function prepareRunDrain(harness: Harness, action: Extract<HarnessAction, { type
   return doneResult(action.type, review.summary, checks, artifacts);
 }
 
+function amendRunContract(
+  harness: Harness,
+  action: Extract<HarnessAction, { type: "amendRunContract" }>,
+): HarnessActionResult {
+  const run = harness.getRun(action.runId);
+  if (!run) {
+    return blockedResult(action.type, `Run not found: ${action.runId}`, [`run not found: ${action.runId}`]);
+  }
+
+  const existingAmendments = readContractAmendments(run.context);
+  const currentVersion = existingAmendments
+    .filter((entry) => entry.contractKey === action.contractKey)
+    .reduce((max, entry) => (entry.version > max ? entry.version : max), 0);
+
+  if (action.expectedVersion !== undefined && action.expectedVersion !== currentVersion) {
+    return blockedResult(
+      action.type,
+      `Stale contract amendment for ${action.contractKey}: expected version ${action.expectedVersion}, current is ${currentVersion}.`,
+      [
+        `Stale contract amendment for contractKey ${action.contractKey}: expectedVersion=${action.expectedVersion}, current=${currentVersion}`,
+      ],
+    );
+  }
+
+  if (!Number.isInteger(action.version) || action.version <= currentVersion) {
+    return blockedResult(
+      action.type,
+      `Non-monotonic contract amendment for ${action.contractKey}: version ${action.version} must be greater than current ${currentVersion}.`,
+      [
+        `Non-monotonic contract amendment for contractKey ${action.contractKey}: version=${action.version}, current=${currentVersion}`,
+      ],
+    );
+  }
+
+  const previousValue = run.context[action.contractKey] ?? null;
+  const amendedAt = new Date().toISOString();
+  const amendment: ContractAmendmentEntry = {
+    contractKey: action.contractKey,
+    version: action.version,
+    previousValue,
+    value: action.value,
+    reason: action.reason ?? null,
+    amendedAt,
+  };
+  const updated = harness.updateRun({
+    runId: action.runId,
+    contextPatch: {
+      [action.contractKey]: action.value,
+      contractAmendments: [...existingAmendments, amendment],
+    },
+  });
+  if (!updated) {
+    return blockedResult(action.type, `Run not found: ${action.runId}`, [`run not found: ${action.runId}`]);
+  }
+
+  return doneResult(
+    action.type,
+    `Amended run ${action.runId} contract ${action.contractKey} to version ${action.version}.`,
+    [
+      { name: "run exists", status: "passed", evidence: action.runId },
+      { name: "contract key", status: "passed", evidence: action.contractKey },
+      { name: "previous version", status: "passed", evidence: String(currentVersion) },
+      { name: "next version", status: "passed", evidence: String(action.version) },
+      {
+        name: "expected version",
+        status: "passed",
+        evidence: action.expectedVersion === undefined ? "not provided" : String(action.expectedVersion),
+      },
+    ],
+    [
+      {
+        kind: "contract_amendment",
+        runId: action.runId,
+        contractKey: action.contractKey,
+        previousVersion: currentVersion,
+        version: action.version,
+        previousValue,
+        value: action.value,
+        reason: action.reason ?? null,
+        amendedAt,
+      },
+    ],
+  );
+}
+
+function readContractAmendments(context: Record<string, unknown>): ContractAmendmentEntry[] {
+  const raw = context.contractAmendments;
+  if (!Array.isArray(raw)) {
+    return [];
+  }
+  return raw.filter(isContractAmendmentEntry);
+}
+
+function isContractAmendmentEntry(value: unknown): value is ContractAmendmentEntry {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return false;
+  }
+  const entry = value as Record<string, unknown>;
+  return (
+    typeof entry.contractKey === "string" &&
+    typeof entry.version === "number" &&
+    Number.isInteger(entry.version) &&
+    typeof entry.amendedAt === "string"
+  );
+}
+
 function ensureGoalReviewTask(
   harness: Harness,
   runId: string,
@@ -1285,6 +1424,32 @@ function optionalPositiveInteger(record: Record<string, unknown>, key: string) {
     throw new Error(`${key} must be a positive integer`);
   }
   return value;
+}
+
+function positiveIntegerField(record: Record<string, unknown>, key: string) {
+  const value = record[key];
+  if (!Number.isInteger(value) || typeof value !== "number" || value < 1) {
+    throw new Error(`${key} must be a positive integer`);
+  }
+  return value;
+}
+
+function optionalNonNegativeIntegerField(record: Record<string, unknown>, key: string) {
+  const value = record[key];
+  if (value === undefined) {
+    return undefined;
+  }
+  if (!Number.isInteger(value) || typeof value !== "number" || value < 0) {
+    throw new Error(`${key} must be a non-negative integer`);
+  }
+  return value;
+}
+
+function requiredValueField(record: Record<string, unknown>, key: string) {
+  if (!(key in record)) {
+    throw new Error(`${key} must be provided`);
+  }
+  return record[key];
 }
 
 function safeRequest(value: unknown): Record<string, unknown> {

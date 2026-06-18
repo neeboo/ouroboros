@@ -510,6 +510,7 @@ Supported actions:
 { "type": "retireRun", "runId": "run_...", "reason": "optional" }
 { "type": "completeSystemTask", "taskId": "task_...", "actionEventId": "action_...", "reason": "optional" }
 { "type": "integrateVerifiedRun", "runId": "run_...", "workerTaskId": "optional", "targetBranch": "main", "push": false, "reason": "optional" }
+{ "type": "amendRunContract", "runId": "run_...", "contractKey": "goalContract", "value": { ... }, "version": 2, "expectedVersion": "optional non-negative integer", "reason": "optional" }
 ```
 
 `prepareRunDrain` reclaims orphaned task leases, marks the run `todo`, and then drains the empty-queue case. If a completed `goal-review` already returned `runDecision: "complete"`, it marks the run `done`. Otherwise it creates or retries a bounded `goal-review` task when the queue is empty. It never weakens the verifier contract.
@@ -519,6 +520,8 @@ Supported actions:
 `completeSystemTask` records a task attempt from an existing `harness_action_events` row. It derives the attempt status, summary, checks, artifacts, and problems from the audited action result, so a system task can be closed without giving a worktree broad database write access or arbitrary attempt-writing power.
 
 `integrateVerifiedRun` is the overseer-owned integration path. It can integrate a specific verified worker before the entire run is done when `workerTaskId` is provided, or integrate a complete run after `goal-review` has returned `runDecision: "complete"`. In both modes the execution task must have changed-file evidence and a worktree, and the verifier depending on that task must have completed without failed checks. The action may commit dirty worker worktree changes, merge the worker branch into the target branch, and optionally push. If any preflight or git command fails, it records a blocked action event and leaves integration for repair or human review.
+
+`amendRunContract` is the audited run-level contract amendment path. It writes `run.context[contractKey] = value` and appends a `contractAmendments` entry to `run.context` with the previous value, the new value, the integer `version`, an optional `reason`, and an ISO `amendedAt` timestamp. Versions are monotonic per `contractKey`: a new amendment must use a positive integer `version` strictly greater than the latest recorded version for that key (or greater than 0 when no prior amendment exists). An optional `expectedVersion` asserts the version the caller read before issuing the amendment; if it does not match the current latest version, the action is blocked as stale and the run context is left untouched. The action never mutates the task-level verifier-contract baseline; it only amends JSON in the run context, and every accepted or rejected attempt records a `harness_action_events` audit row.
 
 `supervise-runs` and `supervise-daemon` can call this action automatically with `--integrate-complete-runs`. The default remains off so planning-only runs and read-only experiments do not unexpectedly touch git. `--integration-target-branch <branch>` defaults to `main`; `--integration-push` opts into pushing after a successful local merge.
 

@@ -537,6 +537,190 @@ describe("Harness actions", () => {
     });
   });
 
+  test("amends a run contract through an audited, versioned action", () => {
+    const runId = harness.createRun({
+      goal: "Prove run contract amendment",
+      context: {
+        goalContract: { version: 1, successCriteria: ["initial"] },
+      },
+    });
+
+    const firstResult = applyHarnessAction(harness, {
+      type: "amendRunContract",
+      runId,
+      contractKey: "goalContract",
+      value: { version: 2, successCriteria: ["initial", "stronger"] },
+      version: 1,
+      expectedVersion: 0,
+      reason: "execution discovered a stronger check",
+    });
+    const firstRun = harness.getRun(runId)!;
+    const firstEvent = harness.listHarnessActionEvents({ limit: 1 })[0];
+
+    expect(firstResult).toMatchObject({
+      status: "done",
+      actionType: "amendRunContract",
+      eventId: expect.any(String),
+    });
+    expect(firstResult.artifacts).toContainEqual(
+      expect.objectContaining({
+        kind: "contract_amendment",
+        runId,
+        contractKey: "goalContract",
+        previousVersion: 0,
+        version: 1,
+        reason: "execution discovered a stronger check",
+      }),
+    );
+    expect(firstRun.context.goalContract).toEqual({
+      version: 2,
+      successCriteria: ["initial", "stronger"],
+    });
+    expect(firstRun.context.contractAmendments).toEqual([
+      expect.objectContaining({
+        contractKey: "goalContract",
+        version: 1,
+        reason: "execution discovered a stronger check",
+        amendedAt: expect.any(String),
+      }),
+    ]);
+    expect(firstEvent).toMatchObject({
+      actionType: "amendRunContract",
+      status: "done",
+      request: expect.objectContaining({ runId, contractKey: "goalContract", version: 1 }),
+    });
+
+    const secondResult = applyHarnessAction(harness, {
+      type: "amendRunContract",
+      runId,
+      contractKey: "goalContract",
+      value: { version: 3, successCriteria: ["initial", "stronger", "final"] },
+      version: 2,
+      expectedVersion: 1,
+      reason: "tighten stop policy after repair",
+    });
+    const secondRun = harness.getRun(runId)!;
+
+    expect(secondResult.status).toBe("done");
+    expect(secondRun.context.goalContract).toEqual({
+      version: 3,
+      successCriteria: ["initial", "stronger", "final"],
+    });
+    expect(secondRun.context.contractAmendments).toHaveLength(2);
+    expect(secondRun.context.contractAmendments).toContainEqual(
+      expect.objectContaining({ contractKey: "goalContract", version: 2 }),
+    );
+  });
+
+  test("rejects a stale contract amendment without mutating run context", () => {
+    const runId = harness.createRun({
+      goal: "Reject stale amendment",
+      context: {
+        goalContract: { version: 1, successCriteria: ["initial"] },
+      },
+    });
+    applyHarnessAction(harness, {
+      type: "amendRunContract",
+      runId,
+      contractKey: "goalContract",
+      value: { version: 2, successCriteria: ["initial", "stronger"] },
+      version: 1,
+      expectedVersion: 0,
+      reason: "first amendment",
+    });
+
+    const stale = applyHarnessAction(harness, {
+      type: "amendRunContract",
+      runId,
+      contractKey: "goalContract",
+      value: { version: 99, successCriteria: ["wrong"] },
+      version: 2,
+      expectedVersion: 0,
+      reason: "should not apply",
+    });
+    const run = harness.getRun(runId)!;
+    const event = harness.listHarnessActionEvents({ limit: 1 })[0];
+
+    expect(stale).toMatchObject({
+      status: "blocked",
+      actionType: "amendRunContract",
+      problems: [expect.stringContaining("Stale contract amendment")],
+    });
+    expect(run.context.goalContract).toEqual({ version: 2, successCriteria: ["initial", "stronger"] });
+    expect(run.context.contractAmendments).toHaveLength(1);
+    expect(event).toMatchObject({
+      actionType: "amendRunContract",
+      status: "blocked",
+      request: expect.objectContaining({ expectedVersion: 0 }),
+    });
+  });
+
+  test("rejects a non-monotonic contract amendment version", () => {
+    const runId = harness.createRun({
+      goal: "Reject non-monotonic amendment",
+      context: {
+        goalContract: { version: 5, successCriteria: ["fifth"] },
+      },
+    });
+    applyHarnessAction(harness, {
+      type: "amendRunContract",
+      runId,
+      contractKey: "goalContract",
+      value: { version: 6, successCriteria: ["fifth", "sixth"] },
+      version: 5,
+      expectedVersion: 0,
+      reason: "first amendment",
+    });
+
+    const regression = applyHarnessAction(harness, {
+      type: "amendRunContract",
+      runId,
+      contractKey: "goalContract",
+      value: { version: 4, successCriteria: ["regression"] },
+      version: 4,
+      reason: "should not apply",
+    });
+    const run = harness.getRun(runId)!;
+
+    expect(regression).toMatchObject({
+      status: "blocked",
+      actionType: "amendRunContract",
+      problems: [expect.stringContaining("Non-monotonic contract amendment")],
+    });
+    expect(run.context.goalContract).toEqual({ version: 6, successCriteria: ["fifth", "sixth"] });
+    expect(run.context.contractAmendments).toHaveLength(1);
+  });
+
+  test("blocks amendRunContract when the run or payload is invalid", () => {
+    const existingRunId = harness.createRun({ goal: "Existing run for amendment" });
+
+    const missingRun = applyHarnessAction(harness, {
+      type: "amendRunContract",
+      runId: "run_missing",
+      contractKey: "goalContract",
+      value: { version: 1 },
+      version: 1,
+    });
+    const invalidPayload = applyHarnessAction(harness, {
+      type: "amendRunContract",
+      runId: existingRunId,
+      contractKey: "goalContract",
+      version: 1,
+    } as never);
+
+    expect(missingRun).toMatchObject({
+      status: "blocked",
+      actionType: "amendRunContract",
+      problems: [expect.stringContaining("run not found")],
+    });
+    expect(invalidPayload).toMatchObject({
+      status: "blocked",
+      actionType: "invalid",
+      problems: [expect.stringContaining("value")],
+    });
+    expect(harness.getRun(existingRunId)?.context.contractAmendments).toBeUndefined();
+  });
+
   test("interrupts a running attempt, records overseer evidence, and creates a follow-up task", () => {
     const runId = harness.createRun({ goal: "Interrupt and replan" });
     const taskId = harness.createTask({
