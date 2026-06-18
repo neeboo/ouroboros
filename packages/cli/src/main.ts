@@ -40,6 +40,7 @@ import { serveDashboard } from "./dashboard";
 import { requestHarnessAction, serveHarnessActions } from "./action-server";
 import { formatRunEvidence } from "./run-evidence";
 import { formatAttemptExplanation } from "./explain-attempt";
+import { formatRunGraph } from "./run-graph";
 import { buildAgentMatrix, doctorAgent } from "../../../scripts/acpx-agent-smoke";
 import { join } from "node:path";
 import type { Task } from "@ouroboros/harness";
@@ -627,6 +628,15 @@ switch (parsed.command) {
         eventLimit: parsePositiveInteger(flag(parsed, "event-limit") ?? "25", "--event-limit"),
       }),
     );
+    break;
+  }
+  case "run-graph": {
+    const runId = required(parsed, "run-id");
+    const overview = harness.getRunOverview({ runId, eventLimit: 0 });
+    if (!overview.run) {
+      fail(`run not found: ${runId}`);
+    }
+    console.log(formatRunGraph(overview));
     break;
   }
   case "dashboard": {
