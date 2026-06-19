@@ -5101,14 +5101,14 @@ describe("CLI", () => {
       status: "blocked",
       actionType: "integrateVerifiedRun",
       eventId: expect.any(String),
-      summary: "Target repository has uncommitted changes.",
-      problems: expect.arrayContaining([expect.stringContaining("target repository must be clean before integration")]),
+      summary: "Target repository has uncommitted changes outside the verified worker output.",
+      problems: expect.arrayContaining([expect.stringContaining("unexpected target changes: uncommitted.txt")]),
     });
     expect(result.checks).toContainEqual(
       expect.objectContaining({
         name: "integration preflight",
         status: "failed",
-        evidence: expect.stringContaining("target repository must be clean before integration"),
+        evidence: expect.stringContaining("unexpected target changes: uncommitted.txt"),
       }),
     );
     expect(events[0]).toMatchObject({

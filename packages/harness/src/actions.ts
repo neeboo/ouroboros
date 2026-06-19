@@ -1,4 +1,4 @@
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import { acceptGuardrailProposal, proposeGuardrailsFromLessons } from "./guardrails";
 import {
@@ -559,13 +559,6 @@ function integrateVerifiedRun(
   if (!targetStatus.ok) {
     return blockedCommand(action.type, "Could not inspect target repository status.", checks, targetStatus);
   }
-  if (targetStatus.stdout.trim().length > 0) {
-    return blockedIntegration(action.type, "Target repository has uncommitted changes.", checks, [
-      "target repository must be clean before integration",
-    ]);
-  }
-  checks.push({ name: "target repository clean", status: "passed", evidence: "clean" });
-
   const mergeHeadCheck = runGitStep(git, repoPath, ["rev-parse", "--verify", "-q", "MERGE_HEAD"]);
   if (mergeHeadCheck.exitCode === 0) {
     return blockedIntegration(action.type, "Target repository has an unfinished merge (MERGE_HEAD).", checks, [
@@ -573,6 +566,24 @@ function integrateVerifiedRun(
     ]);
   }
   checks.push({ name: "no concurrent merge", status: "passed", evidence: "no MERGE_HEAD" });
+
+  if (targetStatus.stdout.trim().length > 0) {
+    return integrateMaterializedTargetChanges({
+      action,
+      checks,
+      changedFiles,
+      commitMessage,
+      git,
+      goalReview,
+      isPreCompletionIntegration,
+      repoPath,
+      targetBranch,
+      verifier,
+      worker,
+      worktreePath,
+    });
+  }
+  checks.push({ name: "target repository clean", status: "passed", evidence: "clean" });
 
   const sourceBranchResult = runGitStep(git, worktreePath, ["branch", "--show-current"]);
   if (!sourceBranchResult.ok) {
@@ -681,6 +692,99 @@ function integrateVerifiedRun(
       pushed,
       changedFiles,
       reason: action.reason ?? null,
+    },
+  ]);
+}
+
+function integrateMaterializedTargetChanges(input: {
+  action: Extract<HarnessAction, { type: "integrateVerifiedRun" }>;
+  checks: HarnessActionResult["checks"];
+  changedFiles: string[];
+  commitMessage: string;
+  git: GitRunner;
+  goalReview: Task | null;
+  isPreCompletionIntegration: boolean;
+  repoPath: string;
+  targetBranch: string;
+  verifier: Task;
+  worker: Task;
+  worktreePath: string;
+}): HarnessActionResult {
+  const dirtyFiles = readTargetDirtyFiles(input.git, input.repoPath);
+  if (!dirtyFiles.ok) {
+    return blockedCommand(input.action.type, "Could not inspect target repository dirty files.", input.checks, dirtyFiles.result);
+  }
+
+  const normalizedChangedFiles = normalizeRelativeFiles(input.changedFiles);
+  if (normalizedChangedFiles.length !== input.changedFiles.length) {
+    return blockedIntegration(input.action.type, "Worker changedFiles contain unsafe paths.", input.checks, [
+      "changedFiles must be relative paths inside the repository",
+    ]);
+  }
+  const changedFileSet = new Set(normalizedChangedFiles);
+  const unexpected = dirtyFiles.files.filter((file) => !changedFileSet.has(file));
+  if (unexpected.length > 0) {
+    return blockedIntegration(input.action.type, "Target repository has uncommitted changes outside the verified worker output.", input.checks, [
+      `unexpected target changes: ${unexpected.join(",")}`,
+    ]);
+  }
+
+  const mismatched = dirtyFiles.files.filter((file) =>
+    !sameMaterializedFile(input.repoPath, input.worktreePath, file)
+  );
+  if (mismatched.length > 0) {
+    return blockedIntegration(input.action.type, "Target repository dirty files do not match the verified worker worktree.", input.checks, [
+      `mismatched target files: ${mismatched.join(",")}`,
+    ]);
+  }
+
+  input.checks.push({
+    name: "target materialized worker changes",
+    status: "passed",
+    evidence: dirtyFiles.files.join(","),
+  });
+
+  const add = runGitStep(input.git, input.repoPath, ["add", "-A", "--", ...dirtyFiles.files]);
+  if (!add.ok) {
+    return blockedCommand(input.action.type, "Could not stage materialized target changes.", input.checks, add);
+  }
+  const commit = runGitStep(input.git, input.repoPath, ["commit", "-m", input.commitMessage]);
+  if (!commit.ok) {
+    return blockedCommand(input.action.type, "Could not commit materialized target changes.", input.checks, commit);
+  }
+  const mergeCommit = readGitStdout(input.git, input.repoPath, ["rev-parse", "--short", "HEAD"]);
+  input.checks.push({ name: "target commit", status: "passed", evidence: mergeCommit ?? "created" });
+
+  let pushed = false;
+  if (input.action.push === true) {
+    const push = runGitStep(input.git, input.repoPath, ["push", "origin", input.targetBranch]);
+    if (!push.ok) {
+      return blockedCommand(input.action.type, "Could not push target branch.", input.checks, push);
+    }
+    pushed = true;
+    input.checks.push({ name: "push", status: "passed", evidence: `origin ${input.targetBranch}` });
+  }
+
+  const sourceBranch = readGitStdout(input.git, input.worktreePath, ["branch", "--show-current"]);
+  return doneResult(input.action.type, `Committed materialized verified task ${input.worker.id} on ${input.targetBranch}.`, input.checks, [
+    {
+      kind: "integration",
+      mode: "materialized_target_commit",
+      runId: input.action.runId,
+      workerTaskId: input.worker.id,
+      verifierTaskId: input.verifier.id,
+      goalReviewTaskId: input.goalReview?.id ?? null,
+      preCompletion: input.isPreCompletionIntegration,
+      repoPath: input.repoPath,
+      worktreePath: input.worktreePath,
+      targetBranch: input.targetBranch,
+      sourceBranch,
+      workerCommit: null,
+      mergeCommit,
+      pushed,
+      changedFiles: input.changedFiles,
+      materializedFiles: dirtyFiles.files,
+      reason: input.action.reason ?? null,
     },
   ]);
 }
@@ -1571,6 +1675,47 @@ function runGitStep(git: GitRunner, cwd: string, args: string[]) {
     command: `git ${args.join(" ")}`,
     cwd,
   };
+}
+
+function readTargetDirtyFiles(git: GitRunner, cwd: string): { ok: true; files: string[] } | { ok: false; result: ReturnType<typeof runGitStep> } {
+  const commands = [
+    ["diff", "--name-only"],
+    ["diff", "--cached", "--name-only"],
+    ["ls-files", "--others", "--exclude-standard"],
+  ];
+  const files = new Set<string>();
+  for (const args of commands) {
+    const result = runGitStep(git, cwd, args);
+    if (!result.ok) {
+      return { ok: false, result };
+    }
+    for (const file of result.stdout.split(/\r?\n/).map((line) => line.trim()).filter(Boolean)) {
+      files.add(file);
+    }
+  }
+  return { ok: true, files: [...files].sort() };
+}
+
+function normalizeRelativeFiles(files: string[]) {
+  return files.filter((file) =>
+    file.length > 0 &&
+    !isAbsolute(file) &&
+    !file.split(/[\\/]+/).includes("..")
+  );
+}
+
+function sameMaterializedFile(repoPath: string, worktreePath: string, file: string) {
+  const repoFile = join(repoPath, file);
+  const worktreeFile = join(worktreePath, file);
+  const repoExists = existsSync(repoFile);
+  const worktreeExists = existsSync(worktreeFile);
+  if (repoExists !== worktreeExists) {
+    return false;
+  }
+  if (!repoExists) {
+    return true;
+  }
+  return readFileSync(repoFile).equals(readFileSync(worktreeFile));
 }
 
 function readGitStdout(git: GitRunner, cwd: string, args: string[]) {

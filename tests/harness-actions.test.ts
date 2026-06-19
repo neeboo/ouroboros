@@ -735,6 +735,174 @@ describe("Harness actions", () => {
     expect(mergedFile.trim()).toBe("export const paused = true;");
   });
 
+  test("commits verified worker files that were already materialized in the target repository", async () => {
+    const repoPath = join(dir, "repo-materialized");
+    const worktreePath = join(dir, "worker-tree-materialized");
+    await mkdir(repoPath, { recursive: true });
+    await writeFile(join(repoPath, "README.md"), "initial\n");
+    git(repoPath, ["init", "-b", "main"]);
+    git(repoPath, ["config", "user.name", "Ouroboros Test"]);
+    git(repoPath, ["config", "user.email", "test@example.com"]);
+    git(repoPath, ["config", "commit.gpgSign", "false"]);
+    git(repoPath, ["add", "README.md"]);
+    git(repoPath, ["commit", "-m", "Initial commit"]);
+    git(repoPath, ["worktree", "add", "-b", "task-worker-materialized", worktreePath, "main"]);
+    await mkdir(join(repoPath, "src"), { recursive: true });
+    await mkdir(join(worktreePath, "src"), { recursive: true });
+    await writeFile(join(repoPath, "src", "landing.ts"), "export const landing = true;\n");
+    await writeFile(join(worktreePath, "src", "landing.ts"), "export const landing = true;\n");
+
+    const runId = harness.createRun({ goal: "Integrate materialized worker output", projectRoot: repoPath });
+    const workerTaskId = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Build landing page",
+      prompt: "Create src/landing.ts.",
+      worktreePath,
+    });
+    harness.recordAttempt({
+      taskId: workerTaskId,
+      input: { executor: "test" },
+      output: {
+        status: "done",
+        summary: "Created landing page file",
+        changedFiles: ["src/landing.ts"],
+        checks: [{ name: "worker", status: "passed" }],
+        artifacts: [],
+        problems: [],
+      },
+    });
+    const verifierTaskId = harness.createTask({
+      runId,
+      role: "verifier",
+      goal: "Verify landing page",
+      prompt: "Verify worker changes.",
+      dependsOn: [workerTaskId],
+    });
+    harness.recordAttempt({
+      taskId: verifierTaskId,
+      input: { executor: "test" },
+      output: {
+        status: "done",
+        summary: "Verified landing page",
+        changedFiles: [],
+        checks: [{ name: "verify", status: "passed" }],
+        artifacts: [],
+        problems: [],
+      },
+    });
+
+    const result = applyHarnessAction(harness, {
+      type: "integrateVerifiedRun",
+      runId,
+      workerTaskId,
+      commitMessage: "Integrate materialized landing page",
+      reason: "worker files were copied to the target repository before integration",
+    });
+    const committedFile = await readFile(join(repoPath, "src", "landing.ts"), "utf8");
+    const log = git(repoPath, ["log", "--oneline", "-1"]).stdout;
+
+    expect(result).toMatchObject({
+      status: "done",
+      actionType: "integrateVerifiedRun",
+      summary: expect.stringContaining("Committed materialized verified task"),
+    });
+    expect(result.checks).toContainEqual(
+      expect.objectContaining({
+        name: "target materialized worker changes",
+        status: "passed",
+        evidence: "src/landing.ts",
+      }),
+    );
+    expect(result.artifacts).toContainEqual(
+      expect.objectContaining({
+        kind: "integration",
+        mode: "materialized_target_commit",
+        workerTaskId,
+        verifierTaskId,
+        targetBranch: "main",
+        materializedFiles: ["src/landing.ts"],
+      }),
+    );
+    expect(committedFile.trim()).toBe("export const landing = true;");
+    expect(log).toContain("Integrate materialized landing page");
+    expect(git(repoPath, ["status", "--short"]).stdout.trim()).toBe("");
+  });
+
+  test("blocks materialized target integration when dirty files are not verified worker output", async () => {
+    const repoPath = join(dir, "repo-materialized-unrelated");
+    const worktreePath = join(dir, "worker-tree-materialized-unrelated");
+    await mkdir(repoPath, { recursive: true });
+    await writeFile(join(repoPath, "README.md"), "initial\n");
+    git(repoPath, ["init", "-b", "main"]);
+    git(repoPath, ["config", "user.name", "Ouroboros Test"]);
+    git(repoPath, ["config", "user.email", "test@example.com"]);
+    git(repoPath, ["config", "commit.gpgSign", "false"]);
+    git(repoPath, ["add", "README.md"]);
+    git(repoPath, ["commit", "-m", "Initial commit"]);
+    git(repoPath, ["worktree", "add", "-b", "task-worker-materialized-unrelated", worktreePath, "main"]);
+    await mkdir(join(repoPath, "src"), { recursive: true });
+    await mkdir(join(worktreePath, "src"), { recursive: true });
+    await writeFile(join(repoPath, "src", "landing.ts"), "export const landing = true;\n");
+    await writeFile(join(worktreePath, "src", "landing.ts"), "export const landing = true;\n");
+    await writeFile(join(repoPath, "NOTES.md"), "human note\n");
+
+    const runId = harness.createRun({ goal: "Reject unrelated target changes", projectRoot: repoPath });
+    const workerTaskId = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Build landing page",
+      prompt: "Create src/landing.ts.",
+      worktreePath,
+    });
+    harness.recordAttempt({
+      taskId: workerTaskId,
+      input: { executor: "test" },
+      output: {
+        status: "done",
+        summary: "Created landing page file",
+        changedFiles: ["src/landing.ts"],
+        checks: [{ name: "worker", status: "passed" }],
+        artifacts: [],
+        problems: [],
+      },
+    });
+    const verifierTaskId = harness.createTask({
+      runId,
+      role: "verifier",
+      goal: "Verify landing page",
+      prompt: "Verify worker changes.",
+      dependsOn: [workerTaskId],
+    });
+    harness.recordAttempt({
+      taskId: verifierTaskId,
+      input: { executor: "test" },
+      output: {
+        status: "done",
+        summary: "Verified landing page",
+        changedFiles: [],
+        checks: [{ name: "verify", status: "passed" }],
+        artifacts: [],
+        problems: [],
+      },
+    });
+
+    const result = applyHarnessAction(harness, {
+      type: "integrateVerifiedRun",
+      runId,
+      workerTaskId,
+      commitMessage: "Should not integrate unrelated target changes",
+    });
+
+    expect(result).toMatchObject({
+      status: "blocked",
+      actionType: "integrateVerifiedRun",
+      summary: expect.stringContaining("outside the verified worker output"),
+      problems: [expect.stringContaining("NOTES.md")],
+    });
+    expect(git(repoPath, ["log", "--oneline", "-1"]).stdout).toContain("Initial commit");
+  });
+
   test("blocks integration when verifier evidence is missing", () => {
     const runId = harness.createRun({ goal: "Reject unverified integration" });
     const workerTaskId = harness.createTask({
