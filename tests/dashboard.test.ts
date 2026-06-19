@@ -2251,4 +2251,117 @@ describe("dashboard", () => {
       await rm(dir, { recursive: true, force: true });
     }
   });
+
+  test("overseer diagnosis endpoint returns draining state and evidence for a running attempt", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "ouroboros-dashboard-overseer-draining-"));
+    const harness = new Harness(join(dir, "ouroboros.db"));
+    harness.init();
+    const runId = harness.createRun({ goal: "Draining overseer dashboard run" });
+    const taskId = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Draining work",
+      prompt: "Keep running.",
+    });
+    const attemptId = harness.startAttempt({
+      taskId,
+      input: { codexSessionId: "codex_draining", sessionName: "task-draining" },
+    });
+    harness.upsertExecutionThread({
+      runId,
+      taskId,
+      attemptId,
+      ownerType: "runner",
+      role: "worker",
+      status: "running",
+      sessionName: "task-draining",
+      agentSessionId: "codex_draining",
+    });
+
+    try {
+      const response = await handleDashboardRequest(
+        new Request(`http://localhost/api/runs/${runId}/overview`),
+        {
+          runId,
+          overview: () => harness.getRunOverview({ runId }),
+          renderTaskPrompt: () => "",
+        },
+      );
+      const body = await response.json();
+      expect(body.diagnosis).toMatchObject({
+        state: "draining",
+        activeWork: expect.objectContaining({
+          readyTaskIds: [],
+          runningTaskIds: [taskId],
+        }),
+      });
+      expect(body.diagnosis.reason).toMatch(/1 running attempt/);
+      expect(body.diagnosis.runningAttempts).toEqual([
+        expect.objectContaining({ attemptId, taskId, role: "worker", codexSessionId: "codex_draining" }),
+      ]);
+      expect(body.diagnosis.orphanedLeases).toEqual([]);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("overseer diagnosis endpoint surfaces orphaned lease when a running task has no running attempt", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "ouroboros-dashboard-overseer-orphaned-"));
+    const harness = new Harness(join(dir, "ouroboros.db"));
+    harness.init();
+    const runId = harness.createRun({ goal: "Orphaned overseer dashboard run" });
+    const taskId = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Orphaned work",
+      prompt: "Stuck running.",
+      worktreePath: "/tmp/orphaned-worktree",
+    });
+    // The task is marked running without a corresponding running attempt, which the
+    // overseer classifies as an orphaned lease.
+    const Database = (await import("bun:sqlite")).default;
+    const connection = new Database(join(dir, "ouroboros.db"));
+    connection.query("update tasks set status = 'running' where id = ?").run(taskId);
+    connection.close();
+
+    try {
+      const response = await handleDashboardRequest(
+        new Request(`http://localhost/api/runs/${runId}/overview`),
+        {
+          runId,
+          overview: () => harness.getRunOverview({ runId }),
+          renderTaskPrompt: () => "",
+        },
+      );
+      const body = await response.json();
+      expect(body.diagnosis.state).toBe("orphaned");
+      expect(body.diagnosis.orphanedLeases).toEqual([
+        expect.objectContaining({
+          taskId,
+          worktreePath: "/tmp/orphaned-worktree",
+          reason: "running task has no running attempt",
+        }),
+      ]);
+      expect(body.diagnosis.reason).toMatch(/running task has no running attempt/);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("dashboard HTML renders the overseer diagnosis panel near runner and supervisor status", () => {
+    const html = dashboardHtml({ runId: "run_overseer_panel" });
+
+    expect(html).toContain('data-inspector-section="diagnosis"');
+    expect(html).toContain("Overseer diagnosis");
+    expect(html).toContain("Run supervisor state");
+    expect(html).toContain("renderDiagnosis(overview)");
+    expect(html).toContain("renderSupervisor(overview)");
+    expect(html).toContain("renderRunner(overview)");
+    // The inspector panel render call composes the diagnosis, supervisor, and runner
+    // sections in that order so the overseer state is visible alongside runner/supervisor
+    // status without hiding task, session, or evidence panels.
+    expect(html).toContain(
+      "renderGuardrailsSection(overview) + renderDiagnosis(overview) + renderSupervisor(overview) + renderRunner(overview)",
+    );
+  });
 });

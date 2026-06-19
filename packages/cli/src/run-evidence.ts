@@ -1,5 +1,11 @@
-import { readableValue } from "@ouroboros/harness";
-import type { LessonKind, ObservableSession, RunOverview, Status } from "@ouroboros/harness";
+import { diagnoseRunOverview, readableValue } from "@ouroboros/harness";
+import type {
+  LessonKind,
+  ObservableSession,
+  OverseerDiagnosis,
+  RunOverview,
+  Status,
+} from "@ouroboros/harness";
 
 type EvidenceEntry = { kind: string; text: string };
 type GoalReviewEvidence = EvidenceEntry[];
@@ -32,6 +38,8 @@ export function formatRunEvidence(overview: RunOverview, options: { lessonLimit?
 
   const counts = countTasksByStatus(overview.tasks);
   lines.push(`Tasks: ${formatStatusCounts(counts)}`);
+
+  appendOverseerDiagnosisLines(lines, diagnoseRunOverview(overview));
 
   const decision = latestGoalReviewDecision(overview);
   if (decision) {
@@ -232,4 +240,91 @@ function clamp(value: string, max: number): string {
     return text;
   }
   return `${text.slice(0, max - 1)}…`;
+}
+
+const DIAGNOSIS_REASON_LIMIT = 180;
+const DIAGNOSIS_SUMMARY_LIMIT = 120;
+const DIAGNOSIS_EVIDENCE_LIMIT = 4;
+
+export interface OverseerDiagnosisSummary {
+  state: OverseerDiagnosis["state"];
+  reason: string;
+}
+
+export function summarizeOverseerDiagnosis(diagnosis: OverseerDiagnosis): OverseerDiagnosisSummary {
+  return {
+    state: diagnosis.state,
+    reason: clamp(overseerDiagnosisReason(diagnosis), DIAGNOSIS_REASON_LIMIT),
+  };
+}
+
+function overseerDiagnosisReason(diagnosis: OverseerDiagnosis): string {
+  switch (diagnosis.state) {
+    case "complete":
+      return "run status is done";
+    case "paused":
+      return "manual pause is active";
+    case "blocked":
+      return "only blocked work remains";
+    case "orphaned": {
+      if (diagnosis.orphanedLeases.length > 0) {
+        const lease = diagnosis.orphanedLeases[0];
+        return `${lease.reason}: task ${lease.taskId}`;
+      }
+      return "ready work has no live runner";
+    }
+    case "draining":
+      return diagnosis.runningAttempts.length > 0
+        ? `${diagnosis.runningAttempts.length} running attempt${diagnosis.runningAttempts.length === 1 ? "" : "s"}`
+        : "live runner thread";
+    case "waiting":
+      return "todo work depends on incomplete tasks";
+    default:
+      return "no active work";
+  }
+}
+
+function appendOverseerDiagnosisLines(lines: string[], diagnosis: OverseerDiagnosis): void {
+  const summary = summarizeOverseerDiagnosis(diagnosis);
+  lines.push("");
+  lines.push("Overseer diagnosis");
+  lines.push(`  state: ${summary.state}`);
+  lines.push(`  reason: ${summary.reason}`);
+  lines.push(
+    `  active work: ready ${diagnosis.activeWork.readyTaskIds.length} · running ${diagnosis.activeWork.runningTaskIds.length}`,
+  );
+  if (diagnosis.queueStarvation) {
+    lines.push("  queue starvation: ready tasks exist without a live runner");
+  }
+  if (diagnosis.emptyRunGoalReviewRaceRisk) {
+    lines.push("  empty-run goal-review race risk: queue is idle without a goal-review task");
+  }
+
+  const runningEvidence: string[] = [];
+  for (const session of diagnosis.runningAttempts.slice(0, DIAGNOSIS_EVIDENCE_LIMIT)) {
+    const parts = [`attempt ${session.attemptId}`, `task ${session.taskId}`];
+    if (session.role) parts.push(session.role);
+    if (session.codexSessionId) parts.push(`codex ${session.codexSessionId}`);
+    runningEvidence.push(clamp(parts.join(" · "), DIAGNOSIS_SUMMARY_LIMIT));
+  }
+  if (runningEvidence.length > 0) {
+    lines.push("  running attempts:");
+    for (const entry of runningEvidence) {
+      lines.push(`    - ${entry}`);
+    }
+  }
+
+  const orphanedEvidence: string[] = [];
+  for (const lease of diagnosis.orphanedLeases.slice(0, DIAGNOSIS_EVIDENCE_LIMIT)) {
+    const parts = [`task ${lease.taskId}`, lease.reason];
+    if (lease.sessionRef) parts.push(`session ${lease.sessionRef}`);
+    if (lease.worktreePath) parts.push(`worktree ${lease.worktreePath}`);
+    orphanedEvidence.push(clamp(parts.join(" · "), DIAGNOSIS_SUMMARY_LIMIT));
+  }
+  if (orphanedEvidence.length > 0) {
+    lines.push("  orphaned leases:");
+    for (const entry of orphanedEvidence) {
+      lines.push(`    - ${entry}`);
+    }
+  }
 }

@@ -4126,6 +4126,140 @@ describe("CLI", () => {
     expect(() => formatRunEvidence(overview)).toThrow("run not found");
   });
 
+  test("overseer diagnosis surfaces draining state when a running attempt exists", async () => {
+    await runCli("init");
+    const run = await runCliJson("create-run", "--goal", "Draining overseer run");
+    const worker = await runCliJson(
+      "create-task",
+      "--run-id",
+      run.id,
+      "--role",
+      "worker",
+      "--goal",
+      "Run work",
+      "--prompt",
+      "Keep working.",
+    );
+    const attemptId = new Harness(dbPath).startAttempt({ taskId: worker.id, input: {} });
+    new Harness(dbPath).upsertExecutionThread({
+      runId: run.id,
+      taskId: worker.id,
+      attemptId,
+      ownerType: "runner",
+      role: "worker",
+      status: "running",
+      sessionName: "task-draining",
+      agentSessionId: "codex_draining",
+    });
+
+    const harness = new Harness(dbPath);
+    const overview = harness.getRunOverview({ runId: run.id, eventLimit: 25 });
+    const summary = formatRunEvidence(overview);
+
+    expect(summary).toContain("Overseer diagnosis");
+    expect(summary).toContain("state: draining");
+    expect(summary).toContain("running attempts:");
+    expect(summary).toContain(`attempt ${attemptId}`);
+    expect(summary).toContain(`task ${worker.id}`);
+  });
+
+  test("overseer diagnosis surfaces waiting and queue starvation signals for ready work", async () => {
+    await runCli("init");
+    const run = await runCliJson("create-run", "--goal", "Waiting overseer run");
+    await runCliJson(
+      "create-task",
+      "--run-id",
+      run.id,
+      "--role",
+      "worker",
+      "--goal",
+      "Queued work",
+      "--prompt",
+      "Wait for a runner.",
+    );
+
+    const harness = new Harness(dbPath);
+    const overview = harness.getRunOverview({ runId: run.id, eventLimit: 25 });
+    const summary = formatRunEvidence(overview);
+
+    expect(summary).toContain("state: orphaned");
+    expect(summary).toContain("reason: ready work has no live runner");
+    expect(summary).toContain("queue starvation: ready tasks exist without a live runner");
+    expect(summary).toContain(`active work: ready 1 · running 0`);
+  });
+
+  test("overseer diagnosis surfaces blocked state when only blocked work remains", async () => {
+    await runCli("init");
+    const run = await runCliJson("create-run", "--goal", "Blocked overseer run");
+    const task = await runCliJson(
+      "create-task",
+      "--run-id",
+      run.id,
+      "--role",
+      "worker",
+      "--goal",
+      "Blocked work",
+      "--prompt",
+      "Cannot proceed.",
+    );
+    await runCliJson(
+      "record-attempt",
+      "--task-id",
+      task.id,
+      "--input-json",
+      "{}",
+      "--output-json",
+      JSON.stringify({
+        status: "blocked",
+        summary: "Stuck on missing dependency.",
+        problems: ["missing dependency"],
+      }),
+    );
+
+    const harness = new Harness(dbPath);
+    const overview = harness.getRunOverview({ runId: run.id, eventLimit: 25 });
+    const summary = formatRunEvidence(overview);
+
+    expect(summary).toContain("state: blocked");
+    expect(summary).toContain("only blocked work remains");
+  });
+
+  test("overseer diagnosis surfaces complete state once the run is done", async () => {
+    await runCli("init");
+    const run = await runCliJson("create-run", "--goal", "Complete overseer run");
+    const review = await runCliJson(
+      "create-task",
+      "--run-id",
+      run.id,
+      "--role",
+      "goal-review",
+      "--goal",
+      "Review completion",
+      "--prompt",
+      "Decide completion.",
+    );
+    await runCliJson(
+      "record-attempt",
+      "--task-id",
+      review.id,
+      "--input-json",
+      "{}",
+      "--output-json",
+      JSON.stringify({
+        status: "done",
+        runDecision: "complete",
+        summary: "Goal reached.",
+      }),
+    );
+
+    const harness = new Harness(dbPath);
+    const overview = harness.getRunOverview({ runId: run.id, eventLimit: 25 });
+    const summary = formatRunEvidence(overview);
+
+    expect(summary).toContain("state: complete");
+    expect(summary).toContain("run status is done");
+  });
+
   test("formatAttemptExplanation prints a categorized attempt summary", async () => {
     await runCli("init");
     const run = await runCliJson("create-run", "--goal", "Validate explain-attempt formatter");
