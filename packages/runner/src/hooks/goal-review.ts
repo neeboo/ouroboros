@@ -1,4 +1,4 @@
-import type { Harness } from "@ouroboros/harness";
+import { inferExplicitRunDecision, type Harness } from "@ouroboros/harness";
 import type { StopHook } from "../types";
 
 const MAX_GOAL_REVIEW_NEXT_TASKS = 5;
@@ -76,49 +76,4 @@ export function createGoalReviewDecisionHook(_options: { harness: Harness }): St
   };
 }
 
-export function inferExplicitRunDecision(output: {
-  summary?: unknown;
-  checks?: unknown[];
-  artifacts?: unknown[];
-  problems?: unknown[];
-}) {
-  const artifactDecision = (output.artifacts ?? []).map(runDecisionFromArtifact).find((decision) => decision !== undefined);
-  if (artifactDecision) {
-    return artifactDecision;
-  }
-
-  const haystack = [output.summary, ...(output.checks ?? []), ...(output.artifacts ?? []), ...(output.problems ?? [])]
-    .map((value) => (typeof value === "string" ? value : JSON.stringify(value)))
-    .join("\n");
-  const match = haystack.match(/\b(?:runDecision\s*[:=]?|decision\s*[:=])\s*(complete|continue|verify|defer)\b/i);
-  if (match) {
-    return match[1].toLowerCase() as "complete" | "continue" | "verify" | "defer";
-  }
-  if (/\b(?:run\s+goal|goal)\s+(?:is\s+)?(?:met|complete|completed|satisfied)\b/i.test(haystack)) {
-    return "complete";
-  }
-  return undefined;
-}
-
-function runDecisionFromArtifact(value: unknown) {
-  if (typeof value !== "object" || value === null) {
-    return undefined;
-  }
-  const artifact = value as { kind?: unknown; type?: unknown; value?: unknown; runDecision?: unknown; decision?: unknown };
-  const kind = typeof artifact.kind === "string" ? artifact.kind : artifact.type;
-  if (kind !== "runDecision" && kind !== "run_decision" && kind !== "goal_review") {
-    return undefined;
-  }
-  return normalizeRunDecision(artifact.runDecision ?? artifact.decision ?? artifact.value);
-}
-
-function normalizeRunDecision(value: unknown) {
-  if (typeof value !== "string") {
-    return undefined;
-  }
-  const normalized = value.trim().toLowerCase();
-  if (normalized === "complete" || normalized === "continue" || normalized === "verify" || normalized === "defer") {
-    return normalized;
-  }
-  return undefined;
-}
+export { inferExplicitRunDecision };

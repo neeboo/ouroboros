@@ -18,7 +18,6 @@ import { childToolchainEnvEvidence } from "./executors/proxy-env";
 import { createRouteExecutor } from "./route-executor";
 import { resolveExecutionRoute } from "./execution-routing";
 import type { ResolvedExecutionRoute } from "./execution-routing";
-import { inferExplicitRunDecision } from "./hooks/goal-review";
 import type { ExecutorEventRecorder, StartHook, StartHookResult, StopHook, TaskExecutorFactory } from "./types";
 
 const DEFAULT_RUNNING_ATTEMPT_STALE_MS = 5 * 60 * 1000;
@@ -99,7 +98,6 @@ export async function runCodexResumableLoop(input: RunCodexResumableLoopInput) {
           continue;
         }
       }
-      rounds.push({ index, tasks: started, goalReview: drain, reclaimed });
       break;
     }
     rounds.push({ index, tasks: started, reclaimed });
@@ -521,71 +519,6 @@ class CodexResumableOrchestrator {
       }
       return this.runStartedAttempt({ run, task, sessionName, prompt, cwd, route, startResult, baseInput });
     }));
-  }
-
-  ensureGoalReviewTask(runId: string, maxTries: number) {
-    const run = this.runOrThrow(runId);
-    if (run.status === "done") {
-      return { created: false as const, reason: "run_done" };
-    }
-    const overview = this.harness.getRunOverview({ runId, eventLimit: 0 });
-    if (overview.tasks.some((task) => task.status === "todo" || task.status === "running")) {
-      return { created: false as const, reason: "active_tasks" };
-    }
-    const goalReviewInvalidated = run.context.goalReviewInvalidatedByIntegration === true;
-    const latestProgressIndex = overview.sessions.reduce((latest, session, index) => {
-      return session.role !== "goal-review" && session.status === "done" ? index : latest;
-    }, -1);
-    const currentReviewSessions = overview.sessions.filter((session, index) => index > latestProgressIndex);
-    const latestIntegrationAt = latestSuccessfulIntegrationAt(this.harness, runId);
-    const completedReview = [...currentReviewSessions].reverse().find(
-      (session) =>
-        session.role === "goal-review" &&
-        !goalReviewInvalidated &&
-        sessionCompletedAfter(session, latestIntegrationAt) &&
-        (session.output.runDecision === "complete" || inferExplicitRunDecision(session.output) === "complete") &&
-        (session.output.nextTasks ?? []).length === 0,
-    );
-    if (completedReview) {
-      this.harness.updateRunStatus({ runId, status: "done" });
-      return { created: false as const, reason: "completed_by_existing_goal_review", taskId: completedReview.taskId };
-    }
-    if (run.status === "blocked") {
-      return { created: false as const, reason: "run_blocked" };
-    }
-    const nonTerminalReviews = currentReviewSessions.filter((session) => {
-      if (session.role !== "goal-review" || session.status !== "done") {
-        return false;
-      }
-      const decision = session.output.runDecision ?? inferExplicitRunDecision(session.output);
-      return decision === "continue" || decision === "verify";
-    });
-    if (nonTerminalReviews.length >= maxTries) {
-      this.harness.updateRunStatus({ runId, status: "blocked" });
-      return {
-        created: false as const,
-        reason: "goal_review_max_tries",
-        taskId: nonTerminalReviews[nonTerminalReviews.length - 1]?.taskId,
-        tries: nonTerminalReviews.length,
-        maxTries,
-      };
-    }
-    const blockedReview = [...overview.tasks].reverse().find(
-      (task) => task.role === "goal-review" && task.status === "blocked",
-    );
-    if (blockedReview) {
-      const lastTask = overview.tasks[overview.tasks.length - 1];
-      if (lastTask && lastTask.id !== blockedReview.id) {
-        return this.createGoalReviewTask(runId);
-      }
-      const tries = overview.sessions.filter((session) => session.taskId === blockedReview.id).length;
-      if (tries >= maxTries) {
-        return { created: false as const, reason: "max_tries", taskId: blockedReview.id, tries, maxTries };
-      }
-      this.harness.retryTask({ taskId: blockedReview.id });
-      return { created: true as const, taskId: blockedReview.id, retried: true as const, tries: tries + 1, maxTries };
-    }
-    return this.createGoalReviewTask(runId);
   }
 
   private async runStartedAttempt(input: {
@@ -1245,33 +1178,6 @@ function successfulIntegrationState(harness: Harness, runId: string): Successful
     }
   }
   return { workerIds, changedFiles };
-}
-
-function latestSuccessfulIntegrationAt(harness: Harness, runId: string) {
-  let latest: number | null = null;
-  for (const event of harness.listHarnessActionEvents({ limit: 200 })) {
-    if (event.actionType !== "integrateVerifiedRun" || event.status !== "done") {
-      continue;
-    }
-    const request = event.request as Record<string, unknown>;
-    if (request.runId !== runId) {
-      continue;
-    }
-    const createdAt = parseTimestampMs(event.createdAt);
-    if (createdAt === null) {
-      continue;
-    }
-    latest = latest === null ? createdAt : Math.max(latest, createdAt);
-  }
-  return latest;
-}
-
-function sessionCompletedAfter(session: { startedAt: string | null; finishedAt?: string | null }, timestamp: number | null) {
-  if (timestamp === null) {
-    return true;
-  }
-  const completedAt = parseTimestampMs(session.finishedAt ?? session.startedAt);
-  return completedAt !== null && completedAt > timestamp;
 }
 
 function emptyIntegrationState(): SuccessfulIntegrationState {

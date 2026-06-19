@@ -6,6 +6,13 @@ export {
 } from "./default-prompts";
 export { initDatabase, withDatabase } from "./database";
 export { makeId } from "./ids";
+export {
+  GOAL_REVIEW_TASK_DONE_WHEN,
+  GOAL_REVIEW_TASK_GOAL,
+  GOAL_REVIEW_TASK_PROMPT,
+  inferExplicitRunDecision,
+  resolveRunDecision,
+} from "./goal-review";
 export { applyHarnessAction, parseHarnessAction } from "./actions";
 export { acceptGuardrailProposal, proposeGuardrailsFromLessons, refreshGuardrailProposalsForRun } from "./guardrails";
 export { diagnoseRunOverview } from "./overseer";
