@@ -11,6 +11,18 @@ import {
 import { Harness } from "./harness";
 import type { AttemptOutput, ReclaimedRunningTask, RunOverview, Task } from "./types";
 
+export interface UnintegratedVerifiedWorker {
+  taskId: string;
+  role: string;
+  verifierTaskId: string;
+  changedFiles: string[];
+}
+
+export interface IntegrationReadiness {
+  unintegrated: UnintegratedVerifiedWorker[];
+  integratedWorkerTaskIds: ReadonlySet<string>;
+}
+
 export type HarnessAction =
   | { type: "reclaimRunningTasks"; runId: string; reason?: string }
   | { type: "retryTask"; taskId: string; reason?: string }
@@ -452,12 +464,13 @@ function integrateVerifiedRun(
     evidence: isPreCompletionIntegration ? `pre-completion explicit worker integration from ${run.status}` : "done",
   });
 
-  const worker = selectIntegrationWorker(overview, action.workerTaskId);
-  if (!worker) {
+  const selectedWorker = selectIntegrationWorker(overview, action.workerTaskId);
+  if (!selectedWorker) {
     return blockedIntegration(action.type, "No completed execution task with a worktree was found.", checks, [
       action.workerTaskId ? `worker task not integration-ready: ${action.workerTaskId}` : "no integration-ready worker task",
     ]);
   }
+  let worker = selectedWorker;
   checks.push({ name: "execution task", status: "passed", evidence: worker.id });
 
   const workerSession = latestSessionForTask(overview, worker.id);
@@ -500,7 +513,7 @@ function integrateVerifiedRun(
       `repo path does not exist: ${repoPath}`,
     ]);
   }
-  const worktreePath = resolveWorktreePath(repoPath, worker.worktreePath);
+  let worktreePath = resolveWorktreePath(repoPath, worker.worktreePath);
   if (!worktreePath || !existsSync(worktreePath)) {
     return blockedIntegration(action.type, `Worker worktree does not exist: ${worker.worktreePath ?? "missing"}`, checks, [
       `worker worktree does not exist: ${worker.worktreePath ?? "missing"}`,
@@ -510,6 +523,24 @@ function integrateVerifiedRun(
   checks.push({ name: "worktree path", status: "passed", evidence: worktreePath });
 
   const git = options.runGit ?? defaultGitRunner;
+  const redirectedFromRepair = redirectRepairWorkerToSource({
+    overview,
+    worker,
+    worktreePath,
+    repoPath,
+    git,
+    changedFiles,
+  });
+  if (redirectedFromRepair) {
+    worktreePath = redirectedFromRepair.worktreePath;
+    checks.push({
+      name: "repair redirected to source worktree",
+      status: "passed",
+      evidence: `${worker.id} -> ${redirectedFromRepair.sourceWorkerId} (${worktreePath})`,
+    });
+    worker = { ...worker, id: redirectedFromRepair.sourceWorkerId, worktreePath };
+  }
+
   const targetBranch = action.targetBranch ?? "main";
   const commitMessage = action.commitMessage ?? `Integrate verified task ${worker.id}`;
   const targetBranchResult = runGitStep(git, repoPath, ["branch", "--show-current"]);
@@ -534,6 +565,14 @@ function integrateVerifiedRun(
     ]);
   }
   checks.push({ name: "target repository clean", status: "passed", evidence: "clean" });
+
+  const mergeHeadCheck = runGitStep(git, repoPath, ["rev-parse", "--verify", "-q", "MERGE_HEAD"]);
+  if (mergeHeadCheck.exitCode === 0) {
+    return blockedIntegration(action.type, "Target repository has an unfinished merge (MERGE_HEAD).", checks, [
+      `another integration is in progress on ${targetBranch}; MERGE_HEAD exists`,
+    ]);
+  }
+  checks.push({ name: "no concurrent merge", status: "passed", evidence: "no MERGE_HEAD" });
 
   const sourceBranchResult = runGitStep(git, worktreePath, ["branch", "--show-current"]);
   if (!sourceBranchResult.ok) {
@@ -1015,6 +1054,39 @@ function prepareRunDrain(harness: Harness, action: Extract<HarnessAction, { type
   }
   const completedReview = goalReviewInvalidated ? null : selectCompletedGoalReview(overview);
   if (completedReview) {
+    const readiness = describeIntegrationReadiness(harness, action.runId);
+    if (readiness.unintegrated.length > 0) {
+      harness.updateRun({
+        runId: action.runId,
+        status: "blocked",
+        contextPatch: {
+          pendingIntegrationWorkerTaskIds: readiness.unintegrated.map((worker) => worker.taskId),
+          pendingIntegrationReason: "verified worker changes are not integrated yet",
+        },
+      });
+      checks.push({
+        name: "pending integration",
+        status: "failed",
+        evidence: readiness.unintegrated.map((worker) => worker.taskId).join(","),
+      });
+      artifacts.push(...readiness.unintegrated.map((worker) => ({
+        kind: "pending_integration",
+        taskId: worker.taskId,
+        role: worker.role,
+        verifierTaskId: worker.verifierTaskId,
+        changedFiles: worker.changedFiles,
+      })));
+      return {
+        status: "blocked",
+        actionType: action.type,
+        summary: `Run ${action.runId} has unintegrated verified worker changes.`,
+        checks,
+        artifacts,
+        problems: readiness.unintegrated.map((worker) =>
+          `verified worker ${worker.taskId} has unintegrated changes verified by ${worker.verifierTaskId}`,
+        ),
+      };
+    }
     harness.updateRunStatus({ runId: action.runId, status: "done" });
     checks.push({ name: "completed goal review", status: "passed", evidence: completedReview.id });
     artifacts.push({ kind: "run", runId: action.runId, previousStatus: run.status, status: "done", reviewTaskId: completedReview.id });
@@ -1307,6 +1379,126 @@ function selectIntegrationWorker(overview: RunOverview, workerTaskId: string | u
     return task && isExecutionTask(task) ? task : null;
   }
   return [...overview.tasks].reverse().find(isExecutionTask) ?? null;
+}
+
+function redirectRepairWorkerToSource(input: {
+  overview: RunOverview;
+  worker: Task;
+  worktreePath: string;
+  repoPath: string;
+  git: GitRunner;
+  changedFiles: string[];
+}): { worktreePath: string; sourceWorkerId: string } | null {
+  const { overview, worker, worktreePath, repoPath, git, changedFiles } = input;
+  if (changedFiles.length === 0) {
+    return null;
+  }
+  const ownStatus = runGitStep(git, worktreePath, ["status", "--short"]);
+  if (!ownStatus.ok || ownStatus.stdout.trim().length > 0) {
+    return null;
+  }
+  const sourceWorker = findSourceWorkerForRepair(overview, worker.id);
+  if (!sourceWorker || sourceWorker.id === worker.id) {
+    return null;
+  }
+  const sourceWorktreePath = resolveWorktreePath(repoPath, sourceWorker.worktreePath);
+  if (!sourceWorktreePath || !existsSync(sourceWorktreePath)) {
+    return null;
+  }
+  const sourceStatus = runGitStep(git, sourceWorktreePath, ["status", "--short"]);
+  if (!sourceStatus.ok || sourceStatus.stdout.trim().length === 0) {
+    return null;
+  }
+  return { worktreePath: sourceWorktreePath, sourceWorkerId: sourceWorker.id };
+}
+
+function findSourceWorkerForRepair(overview: RunOverview, repairTaskId: string): Task | null {
+  const repair = overview.tasks.find((task) => task.id === repairTaskId);
+  if (!repair || !repair.parentId) {
+    return null;
+  }
+  const verifier = overview.tasks.find((task) => task.id === repair.parentId);
+  if (!verifier || verifier.role !== "verifier") {
+    return null;
+  }
+  for (const dependencyId of verifier.dependsOn) {
+    if (dependencyId === repairTaskId) {
+      continue;
+    }
+    const candidate = overview.tasks.find((task) => task.id === dependencyId);
+    if (candidate && candidate.role === "worker" && candidate.worktreePath) {
+      return candidate;
+    }
+  }
+  return null;
+}
+
+export function describeIntegrationReadiness(harness: Harness, runId: string): IntegrationReadiness {
+  const overview = harness.getRunOverview({ runId, eventLimit: 0 });
+  const integratedWorkerTaskIds = collectIntegratedWorkerTaskIds(harness, runId);
+  const unintegrated: UnintegratedVerifiedWorker[] = [];
+  for (const task of overview.tasks) {
+    if (["planner", "verifier", "goal-review"].includes(task.role)) {
+      continue;
+    }
+    if (task.status !== "done" || !task.worktreePath) {
+      continue;
+    }
+    if (integratedWorkerTaskIds.has(task.id)) {
+      continue;
+    }
+    const session = latestSessionForTask(overview, task.id);
+    const changedFiles = Array.isArray(session?.output.changedFiles) ? session.output.changedFiles : [];
+    if (changedFiles.length === 0) {
+      continue;
+    }
+    const verifier = selectVerifierForWorker(overview, task.id);
+    if (!verifier) {
+      continue;
+    }
+    unintegrated.push({
+      taskId: task.id,
+      role: task.role,
+      verifierTaskId: verifier.id,
+      changedFiles,
+    });
+  }
+  return { unintegrated, integratedWorkerTaskIds };
+}
+
+function collectIntegratedWorkerTaskIds(harness: Harness, runId: string): Set<string> {
+  const ids = new Set<string>();
+  for (const event of harness.listHarnessActionEvents({ limit: 500 })) {
+    if (event.actionType !== "integrateVerifiedRun" || event.status !== "done") {
+      continue;
+    }
+    const request = event.request as Record<string, unknown>;
+    if (request.runId !== runId || typeof request.workerTaskId !== "string") {
+      continue;
+    }
+    const result = event.result as Record<string, unknown>;
+    const artifacts = Array.isArray(result.artifacts) ? result.artifacts : [];
+    const integratedIds = artifacts.flatMap((artifact) => {
+      if (!artifact || typeof artifact !== "object") {
+        return [];
+      }
+      const record = artifact as Record<string, unknown>;
+      if (record.kind !== "integration" || typeof record.workerTaskId !== "string") {
+        return [];
+      }
+      return [record.workerTaskId];
+    });
+    if (integratedIds.length > 0) {
+      ids.add(request.workerTaskId);
+    }
+    for (const id of integratedIds) {
+      ids.add(id);
+    }
+    if (integratedIds.length === 0) {
+      ids.add(request.workerTaskId);
+    }
+  }
+  return ids;
 }
 
 function latestSessionForTask(overview: RunOverview, taskId: string) {

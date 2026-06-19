@@ -1,3 +1,4 @@
+import { describeIntegrationReadiness } from "@ouroboros/harness";
 import type { Harness, Task } from "@ouroboros/harness";
 import { buildTaskPrompt } from "./prompt";
 import { resolveExecutionRoute } from "./execution-routing";
@@ -178,13 +179,25 @@ function latestDependencyAttempts(harness: Pick<Harness, "listLatestAttemptsForT
 }
 
 function applyPostAttemptRunEffects(
-  harness: Pick<Harness, "updateRunStatus">,
+  harness: Harness,
   runId: string,
   task: Pick<Task, "role">,
   output: { status: string; runDecision?: string },
 ) {
   if (task.role === "goal-review" && output.status === "done" && output.runDecision === "complete") {
-    harness.updateRunStatus({ runId, status: "done" });
+    const readiness = describeIntegrationReadiness(harness, runId);
+    if (readiness.unintegrated.length > 0) {
+      harness.updateRun({
+        runId,
+        status: "blocked",
+        contextPatch: {
+          pendingIntegrationWorkerTaskIds: readiness.unintegrated.map((worker) => worker.taskId),
+          pendingIntegrationReason: "verified worker changes are not integrated yet",
+        },
+      });
+    } else {
+      harness.updateRunStatus({ runId, status: "done" });
+    }
   }
   if (task.role === "goal-review" && output.status === "done" && output.runDecision === "defer") {
     harness.updateRunStatus({ runId, status: "blocked" });
