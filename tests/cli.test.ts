@@ -355,6 +355,160 @@ describe("CLI", () => {
     });
   });
 
+  test("self-iteration run drains a concrete planner actions graph to a goal-review decision", async () => {
+    const bootstrap = await runCliJson("self-iterate");
+    const codexBin = join(dir, "fake-codex-self-iterate-drain");
+    const plannerOutput = {
+      status: "done",
+      summary: "Planned two concrete worker tasks through actions createTasks",
+      changedFiles: [],
+      checks: [],
+      artifacts: [],
+      problems: [],
+      actions: [
+        {
+          type: "createTasks",
+          payload: {
+            tasks: [
+              {
+                role: "worker",
+                goal: "Clarify dashboard task vs runner actions",
+                prompt:
+                  "Inspect packages/cli/src/dashboard.ts and packages/cli/src/main.ts first. Add a short label that distinguishes task-level actions from runner-level actions in the dashboard actions panel.",
+                dependsOn: [],
+                doneWhen: [
+                  "packages/cli/src/dashboard.ts has been inspected for the actions panel",
+                  "packages/cli/src/main.ts has been inspected for task and runner commands",
+                  "the new label appears in the rendered dashboard actions panel",
+                  "bun test tests/cli.test.ts still passes",
+                ],
+              },
+              {
+                role: "worker",
+                goal: "Expose a graph view helper for run-overview",
+                prompt:
+                  "Inspect packages/cli/src/run-graph.ts and packages/cli/src/main.ts first. Expose a small graph view helper that returns the task graph used by run-overview without changing the database schema.",
+                dependsOn: [],
+                doneWhen: [
+                  "packages/cli/src/run-graph.ts has been inspected",
+                  "the graph view helper is exported and unit-checked",
+                  "orbs run-overview --run-id <run_id> still returns the existing fields",
+                  "bun test tests/cli.test.ts still passes",
+                ],
+              },
+            ],
+          },
+        },
+      ],
+    };
+    const goalReviewOutput = {
+      status: "done",
+      runDecision: "complete",
+      summary:
+        "Planner graph drained through worker, verifier, and goal-review with concrete files and checks cited.",
+      changedFiles: [],
+      checks: [
+        { name: "graph drains without manual task insertion", status: "passed" },
+        { name: "orbs run-overview --run-id shows done run", status: "passed" },
+        { name: "orbs list-lessons --run-id returns lessons", status: "passed" },
+      ],
+      artifacts: [],
+      problems: [],
+    };
+    const verifierOutput = {
+      status: "done",
+      summary: "Verified worker output against the cited files and reran the named checks.",
+      changedFiles: [],
+      checks: [
+        { name: "bun test tests/cli.test.ts", status: "passed" },
+        { name: "verifier cites source files", status: "passed" },
+      ],
+      artifacts: [],
+      problems: [],
+    };
+    const workerOutput = {
+      status: "done",
+      summary: "Applied the planned dashboard and graph view changes and reran tests.",
+      changedFiles: ["packages/cli/src/dashboard.ts", "packages/cli/src/run-graph.ts"],
+      checks: [
+        { name: "bun test tests/cli.test.ts", status: "passed" },
+        { name: "worker cites inspected files", status: "passed" },
+      ],
+      artifacts: [],
+      problems: [],
+    };
+    await writeFile(
+      codexBin,
+      [
+        "#!/usr/bin/env bun",
+        "const prompt = await new Response(Bun.stdin.stream()).text();",
+        "const sessionId = prompt.includes('Role: goal-review') ? 'session_review' : prompt.includes('Role: planner') ? 'session_planner' : prompt.includes('Role: verifier') ? 'session_verifier' : 'session_worker';",
+        "console.log(JSON.stringify({ type: 'session.started', session_id: sessionId }));",
+        "if (prompt.includes('Role: planner')) {",
+        `  console.log(JSON.stringify({ type: 'agent.message', message: ${JSON.stringify(JSON.stringify(plannerOutput))} }));`,
+        "  process.exit(0);",
+        "}",
+        "if (prompt.includes('Role: goal-review')) {",
+        `  console.log(JSON.stringify({ type: 'agent.message', message: ${JSON.stringify(JSON.stringify(goalReviewOutput))} }));`,
+        "  process.exit(0);",
+        "}",
+        "if (prompt.includes('Role: verifier')) {",
+        `  console.log(JSON.stringify({ type: 'agent.message', message: ${JSON.stringify(JSON.stringify(verifierOutput))} }));`,
+        "  process.exit(0);",
+        "}",
+        `  console.log(JSON.stringify({ type: 'agent.message', message: ${JSON.stringify(JSON.stringify(workerOutput))} }));`,
+      ].join("\n"),
+    );
+    await chmod(codexBin, 0o755);
+
+    const result = await runCliJson(
+      "run-loop",
+      "--run-id",
+      bootstrap.runId,
+      "--executor",
+      "codex-resumable",
+      "--codex-bin",
+      codexBin,
+      "--cwd",
+      "/repo",
+      "--sandbox",
+      "read-only",
+      "--stop-hook",
+      "create-runs,create-tasks,create-verifier,create-repair,context-summary",
+      "--max-rounds",
+      "8",
+    );
+    const overview = await runCliJson("run-overview", "--run-id", bootstrap.runId);
+    const lessons = await runCliJson("list-lessons", "--run-id", bootstrap.runId);
+    const next = await runCliJson("next-task", "--run-id", bootstrap.runId);
+    const workers = overview.tasks.filter((task: { role: string }) => task.role === "worker");
+    const verifiers = overview.tasks.filter((task: { role: string }) => task.role === "verifier");
+    const review = overview.tasks.find((task: { role: string }) => task.role === "goal-review");
+
+    expect(overview.run.status).toBe("done");
+    expect(next).toBeNull();
+    expect(Array.isArray(lessons)).toBe(true);
+    expect(result.rounds.length).toBeGreaterThan(0);
+    expect(workers).toHaveLength(2);
+    for (const task of workers) {
+      expect(task.prompt).toMatch(/packages\/cli\/src\//);
+      expect(task.doneWhen.length).toBeGreaterThanOrEqual(3);
+      expect(task.doneWhen.length).toBeLessThanOrEqual(5);
+      expect(task.status).toBe("done");
+    }
+    expect(verifiers).toHaveLength(2);
+    for (const task of verifiers) {
+      expect(task.dependsOn).toHaveLength(1);
+      expect(workers.some((worker: { id: string }) => worker.id === task.dependsOn[0])).toBe(true);
+      expect(task.status).toBe("done");
+    }
+    expect(review).toMatchObject({ role: "goal-review", status: "done" });
+    const reviewSession = overview.sessions.find(
+      (session: { role: string }) => session.role === "goal-review",
+    );
+    expect(reviewSession?.output).toMatchObject({ status: "done", runDecision: "complete" });
+  });
+
   test("launches the self-iteration dashboard and runner together", async () => {
     await runCli("init");
     const dashboardPort = nextTestPort();
