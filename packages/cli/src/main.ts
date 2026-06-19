@@ -37,7 +37,7 @@ import type { CodexSandbox, ResolvedExecutionRoute, StopHook } from "@ouroboros/
 import { fail, flag, parseArgs, required } from "./args";
 import { loadOuroborosConfig } from "./config";
 import { parseArray, parseObject, printJson } from "./json";
-import { checkLinearAccess, linkLinearIssue } from "./linear";
+import { checkLinearAccess, ingestLinearEvent, linkLinearIssue } from "./linear";
 import { serveDashboard } from "./dashboard";
 import { requestHarnessAction, serveHarnessActions } from "./action-server";
 import { formatRunEvidence } from "./run-evidence";
@@ -355,6 +355,21 @@ switch (parsed.command) {
         issueUrl: flag(parsed, "issue-url") ?? null,
       });
       printJson(ref);
+    } catch (error) {
+      fail((error as Error).message);
+    }
+    break;
+  }
+  case "linear-ingest-event": {
+    harness.init();
+    try {
+      const stored = ingestLinearEvent({
+        harness,
+        eventType: required(parsed, "event-type"),
+        externalId: required(parsed, "external-id"),
+        payloadJson: required(parsed, "payload-json"),
+      });
+      printJson(stored);
     } catch (error) {
       fail((error as Error).message);
     }

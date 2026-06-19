@@ -14,6 +14,7 @@ import {
   executionThreadFromRow,
   externalRefFromRow,
   harnessActionEventFromRow,
+  inboxEventFromRow,
   lessonFromRow,
   projectFromRow,
   promptTemplateFromRow,
@@ -26,6 +27,7 @@ import type {
   ExecutionThreadRow,
   ExternalRefRow,
   HarnessActionEventRow,
+  InboxEventRow,
   LessonRow,
   ProjectRow,
   PromptTemplateRow,
@@ -35,6 +37,7 @@ import type {
 import type {
   CreateProjectInput,
   CreateExternalRefInput,
+  CreateInboxEventInput,
   SetPromptTemplateInput,
   CreateRunInput,
   CreateTaskInput,
@@ -42,10 +45,12 @@ import type {
   AttemptEvent,
   FinishAttemptInput,
   GetHarnessActionEventInput,
+  GetInboxEventInput,
   GetRunOverviewInput,
   LeaseReadyTasksInput,
   ListExecutionThreadsInput,
   ListHarnessActionEventsInput,
+  ListInboxEventsInput,
   ListRunningAttemptsInput,
   ListExternalRefsInput,
   ListLessonsInput,
@@ -1267,6 +1272,69 @@ export class Harness {
           $localId: input.localId,
         }) as ExternalRefRow[];
       return rows.map(externalRefFromRow);
+    });
+  }
+
+  createInboxEvent(input: CreateInboxEventInput) {
+    const id = input.id ?? makeId("inbox");
+    const status = input.status ?? "todo";
+    return withDatabase(this.dbPath, (db) => {
+      db.query(
+        `
+        insert into inbox_events (
+          id, provider, event_type, external_id, payload_json, status
+        )
+        values (
+          $id, $provider, $eventType, $externalId, $payloadJson, $status
+        )
+        `,
+      ).run({
+        $id: id,
+        $provider: input.provider,
+        $eventType: input.eventType,
+        $externalId: input.externalId,
+        $payloadJson: toJson(input.payload),
+        $status: status,
+      });
+      const row = db.query("select * from inbox_events where id = $id").get({ $id: id }) as InboxEventRow;
+      return inboxEventFromRow(row);
+    });
+  }
+
+  getInboxEvent(input: GetInboxEventInput) {
+    return withDatabase(this.dbPath, (db) => {
+      const row = db.query("select * from inbox_events where id = $id").get({ $id: input.id }) as
+        | InboxEventRow
+        | null;
+      return row ? inboxEventFromRow(row) : null;
+    });
+  }
+
+  listInboxEvents(input: ListInboxEventsInput = {}) {
+    return withDatabase(this.dbPath, (db) => {
+      const where: string[] = [];
+      const bindings: Record<string, string | number> = { $limit: input.limit ?? 100 };
+      if (input.provider) {
+        where.push("provider = $provider");
+        bindings.$provider = input.provider;
+      }
+      if (input.status) {
+        where.push("status = $status");
+        bindings.$status = input.status;
+      }
+      const whereClause = where.length ? `where ${where.join(" and ")}` : "";
+      const rows = db
+        .query(
+          `
+          select *
+          from inbox_events
+          ${whereClause}
+          order by created_at, id
+          limit $limit
+          `,
+        )
+        .all(bindings) as InboxEventRow[];
+      return rows.map(inboxEventFromRow);
     });
   }
 

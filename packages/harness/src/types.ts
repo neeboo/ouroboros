@@ -349,6 +349,36 @@ export interface ListExternalRefsInput {
   localId: string;
 }
 
+export interface InboxEvent {
+  id: string;
+  provider: string;
+  eventType: string;
+  externalId: string;
+  payload: Record<string, unknown>;
+  status: Status;
+  createdAt: string | null;
+  processedAt: string | null;
+}
+
+export interface CreateInboxEventInput {
+  provider: string;
+  eventType: string;
+  externalId: string;
+  payload: Record<string, unknown>;
+  status?: Status;
+  id?: string;
+}
+
+export interface GetInboxEventInput {
+  id: string;
+}
+
+export interface ListInboxEventsInput {
+  provider?: string;
+  status?: Status;
+  limit?: number;
+}
+
 export interface ListLessonsInput {
   runId: string;
   limit?: number;

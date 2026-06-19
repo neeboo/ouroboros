@@ -280,6 +280,7 @@ orbs set-prompt-template --key task --content "# Custom template..."
 # Linear bridge
 orbs linear-link-issue --local-type run --local-id <run_id> --issue-key LIN-123
 orbs linear-link-issue --local-type task --local-id <task_id> --issue-url https://linear.app/<workspace>/issue/LIN-123/title
+orbs linear-ingest-event --event-type issue.created --external-id LIN-123 --payload-json '{"action":"create"}'
 ```
 
 ## Roles
@@ -326,11 +327,14 @@ Current bridge scope:
 
 - `linear-check` validates Linear access and records the run-to-project reference.
 - `linear-link-issue` maps a local run or task to an external Linear issue.
+- `linear-ingest-event` records a Linear event payload into `inbox_events` with `provider linear` and `status todo`. This is intake only: it stores the raw event and does not interpret it, does not create or update runs or tasks, and does not write to `external_refs`.
+
+Inbox intake and external refs are separate paths. `external_refs` records stable local-to-external anchors. `inbox_events` records incoming raw events. Linear events recorded through `linear-ingest-event` do not mutate task state directly; the harness consumes them later through a separate decision step.
 
 Not implemented yet:
 
 - automatic issue creation
-- webhook/event listening
+- webhook/event listening (the listener that would feed `linear-ingest-event`)
 - comment sync
 - PR status sync
 

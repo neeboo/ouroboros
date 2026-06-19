@@ -180,6 +180,8 @@ orbs linear-link-issue --local-type task --local-id <task_id> --issue-url https:
 
 Only `run` and `task` are valid local types for this command. The command validates that the local entity exists, accepts one identifier from `--issue-id`, `--issue-key`, or `--issue-url`, and stores the mapping in `external_refs`. It does not fetch, create, or update the Linear issue.
 
+`external_refs` is distinct from `inbox_events`. Anchor mappings record stable local-to-external pointers. Incoming Linear events go through `inbox_events` via `linear-ingest-event` and never mutate `external_refs` directly. See the Linear Bridge Rule for the full intake contract.
+
 ## Status Values
 
 Keep statuses deliberately small:
@@ -563,22 +565,32 @@ If the start hook fails, the runner records a blocked attempt and skips the exec
 
 ## Linear Bridge Rule
 
-The current Linear bridge implementation is an anchor-mapping skeleton. It can record:
+The current Linear bridge implementation is split into two separate paths: anchor mapping and event intake.
 
-- run to Linear project refs from `linear-check`
-- run or task to Linear issue refs from `linear-link-issue`
+Anchor mappings live in `external_refs` and give future sync code stable local-to-external anchors. The implemented commands are:
 
-These mappings live in `external_refs` and give future sync code stable local-to-external anchors. They are not inbox events and they do not change task status, create issues, create comments, or post progress.
+- `linear-check` records a run-to-Linear-project ref.
+- `linear-link-issue` records a run or task to Linear issue ref.
 
-Webhook and event sync are still out of scope. When implemented, Linear events must never mutate task state directly.
+These mappings are not inbox events. They do not change task status, create issues, create comments, or post progress.
 
-They enter through `inbox_events`. The harness consumes them and decides whether to:
+Event intake lives in `inbox_events` and is implemented for explicit local intake only through `linear-ingest-event`:
+
+```bash
+orbs linear-ingest-event --event-type issue.created --external-id LIN-123 --payload-json '{"action":"create"}'
+```
+
+The command requires `--event-type`, `--external-id`, and `--payload-json`. It validates the payload as a JSON object, stores a row with `provider linear` and `status todo`, and returns the stored event including the parsed payload. Invalid JSON, non-object payloads, or missing required fields fail with a CLI error and do not create an `inbox_events` row. The command is intake only: it does not call the Linear API, does not verify webhook signatures, does not create or update runs, tasks, or `external_refs` rows, and does not interpret the event.
+
+Linear events recorded through `linear-ingest-event` never mutate task state directly. The harness consumes `inbox_events` through a separate decision step and decides whether to:
 
 - create a run
 - create a task
 - add context
 - create a repair task
 - ignore the event
+
+Webhook HTTP listener and signature verification are still out of scope. When implemented, the listener is expected to feed payloads through this same intake path so the rest of the control loop sees one consistent shape.
 
 Progress back to Linear is derived from accepted harness state.
 
