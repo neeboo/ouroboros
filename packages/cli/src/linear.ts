@@ -22,6 +22,13 @@ export interface LinearIssueLinkInput {
   issueUrl?: string | null;
 }
 
+export interface LinearIngestEventInput {
+  harness: Harness;
+  eventType: string;
+  externalId: string;
+  payloadJson: string;
+}
+
 interface LinearProject {
   id: string;
   name: string;
@@ -158,6 +165,48 @@ export function linkLinearIssue(input: LinearIssueLinkInput) {
     externalId: issueId,
     externalUrl: issueUrl,
     created: true,
+  };
+}
+
+export function ingestLinearEvent(input: LinearIngestEventInput) {
+  const eventType = input.eventType.trim();
+  if (!eventType) {
+    throw new Error("--event-type is required");
+  }
+  const externalId = input.externalId.trim();
+  if (!externalId) {
+    throw new Error("--external-id is required");
+  }
+  const trimmedPayload = input.payloadJson.trim();
+  if (!trimmedPayload) {
+    throw new Error("--payload-json is required");
+  }
+  let parsedPayload: unknown;
+  try {
+    parsedPayload = JSON.parse(trimmedPayload);
+  } catch {
+    throw new Error("--payload-json must be valid JSON");
+  }
+  if (!parsedPayload || typeof parsedPayload !== "object" || Array.isArray(parsedPayload)) {
+    throw new Error("--payload-json must be a JSON object");
+  }
+  const payload = parsedPayload as Record<string, unknown>;
+
+  const stored = input.harness.createInboxEvent({
+    provider: "linear",
+    eventType,
+    externalId,
+    payload,
+    status: "todo",
+  });
+  return {
+    id: stored.id,
+    provider: stored.provider,
+    eventType: stored.eventType,
+    externalId: stored.externalId,
+    status: stored.status,
+    payload: stored.payload,
+    createdAt: stored.createdAt,
   };
 }
 

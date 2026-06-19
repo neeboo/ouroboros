@@ -86,6 +86,17 @@ export interface ExternalRefRow {
   external_url: string | null;
 }
 
+export interface InboxEventRow {
+  id: string;
+  provider: string;
+  event_type: string;
+  external_id: string;
+  payload_json: string;
+  status: string;
+  created_at: string | null;
+  processed_at: string | null;
+}
+
 export interface LessonRow {
   id: string;
   run_id: string;

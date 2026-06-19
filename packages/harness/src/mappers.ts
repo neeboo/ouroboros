@@ -6,10 +6,12 @@ import type {
   ExecutionThread,
   ExternalRef,
   HarnessActionEvent,
+  InboxEvent,
   Lesson,
   Project,
   PromptTemplate,
   Run,
+  Status,
   Task,
   TaskConfig,
 } from "./types";
@@ -19,6 +21,7 @@ import type {
   ExecutionThreadRow,
   ExternalRefRow,
   HarnessActionEventRow,
+  InboxEventRow,
   LessonRow,
   ProjectRow,
   PromptTemplateRow,
@@ -124,6 +127,19 @@ export function externalRefFromRow(row: ExternalRefRow): ExternalRef {
     externalType: row.external_type,
     externalId: row.external_id,
     externalUrl: row.external_url,
+  };
+}
+
+export function inboxEventFromRow(row: InboxEventRow): InboxEvent {
+  return {
+    id: row.id,
+    provider: row.provider,
+    eventType: row.event_type,
+    externalId: row.external_id,
+    payload: parseJson<Record<string, unknown>>(row.payload_json),
+    status: row.status as Status,
+    createdAt: row.created_at ?? null,
+    processedAt: row.processed_at ?? null,
   };
 }
 

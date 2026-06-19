@@ -756,6 +756,116 @@ describe("CLI", () => {
     expect(missingIssue.stderr).toContain("Linear issue identifier is required");
   });
 
+  test("ingests a Linear event payload into inbox_events without mutating other state", async () => {
+    await runCli("init");
+    const run = await runCliJson("create-run", "--goal", "Bootstrap ouroboros");
+    const task = await runCliJson(
+      "create-task",
+      "--run-id",
+      run.id,
+      "--role",
+      "worker",
+      "--goal",
+      "Seed",
+      "--prompt",
+      "Seed.",
+    );
+
+    const stored = await runCliJson(
+      "linear-ingest-event",
+      "--event-type",
+      "issue.created",
+      "--external-id",
+      "LIN-123",
+      "--payload-json",
+      JSON.stringify({ action: "create", title: "Bootstrap ouroboros", url: "https://linear.app/pancat/issue/LIN-123/bootstrap" }),
+    );
+
+    expect(stored).toMatchObject({
+      provider: "linear",
+      eventType: "issue.created",
+      externalId: "LIN-123",
+      status: "todo",
+      payload: {
+        action: "create",
+        title: "Bootstrap ouroboros",
+        url: "https://linear.app/pancat/issue/LIN-123/bootstrap",
+      },
+    });
+    expect(stored.id).toMatch(/^inbox_/);
+
+    const harness = new Harness(dbPath);
+    const inbox = harness.listInboxEvents({ provider: "linear" });
+    expect(inbox).toHaveLength(1);
+    expect(inbox[0]).toMatchObject({
+      id: stored.id,
+      provider: "linear",
+      eventType: "issue.created",
+      externalId: "LIN-123",
+      status: "todo",
+      payload: { action: "create", title: "Bootstrap ouroboros" },
+    });
+    expect(harness.listExternalRefs({ localType: "run", localId: run.id })).toEqual([]);
+    expect(harness.getTask(task.id)?.status).toBe("todo");
+  });
+
+  test("rejects invalid Linear event intake without creating inbox rows", async () => {
+    await runCli("init");
+
+    const invalidJson = await runCliRaw(
+      "linear-ingest-event",
+      "--event-type",
+      "issue.created",
+      "--external-id",
+      "LIN-123",
+      "--payload-json",
+      "{not-json}",
+    );
+    const arrayPayload = await runCliRaw(
+      "linear-ingest-event",
+      "--event-type",
+      "issue.created",
+      "--external-id",
+      "LIN-123",
+      "--payload-json",
+      "[]",
+    );
+    const missingEventType = await runCliRaw(
+      "linear-ingest-event",
+      "--external-id",
+      "LIN-123",
+      "--payload-json",
+      "{}",
+    );
+    const missingExternalId = await runCliRaw(
+      "linear-ingest-event",
+      "--event-type",
+      "issue.created",
+      "--payload-json",
+      "{}",
+    );
+    const missingPayload = await runCliRaw(
+      "linear-ingest-event",
+      "--event-type",
+      "issue.created",
+      "--external-id",
+      "LIN-123",
+    );
+
+    expect(invalidJson.exitCode).toBe(1);
+    expect(invalidJson.stderr).toContain("--payload-json must be valid JSON");
+    expect(arrayPayload.exitCode).toBe(1);
+    expect(arrayPayload.stderr).toContain("--payload-json must be a JSON object");
+    expect(missingEventType.exitCode).toBe(1);
+    expect(missingEventType.stderr).toContain("--event-type is required");
+    expect(missingExternalId.exitCode).toBe(1);
+    expect(missingExternalId.stderr).toContain("--external-id is required");
+    expect(missingPayload.exitCode).toBe(1);
+    expect(missingPayload.stderr).toContain("--payload-json is required");
+
+    expect(new Harness(dbPath).listInboxEvents({ provider: "linear" })).toEqual([]);
+  });
+
   test("shows and updates prompt templates", async () => {
     await runCli("init");
 
