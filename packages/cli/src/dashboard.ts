@@ -1,8 +1,9 @@
-import { readableValue } from "@ouroboros/harness";
-import type { RunOverview, RunStatusCounts } from "@ouroboros/harness";
+import { diagnoseRunOverview, readableValue } from "@ouroboros/harness";
+import type { OverseerDiagnosis, RunOverview, RunStatusCounts } from "@ouroboros/harness";
 import { isAbsolute, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { DASHBOARD_REACT_MODULES } from "./dashboard-app";
+import { summarizeOverseerDiagnosis } from "./run-evidence";
 
 interface DashboardActionResult {
   attemptId?: string;
@@ -169,6 +170,50 @@ export function aggregateDashboardOverview(rootOverview: RunOverview, childOverv
     sessions,
     threads,
     lessons,
+  };
+}
+
+export interface DashboardOverseerDiagnosis {
+  state: OverseerDiagnosis["state"];
+  reason: string;
+  activeWork: {
+    readyTaskIds: string[];
+    runningTaskIds: string[];
+  };
+  runningAttempts: Array<{
+    attemptId: string;
+    taskId: string;
+    role: string;
+    codexSessionId: string | null;
+    sessionName: string | null;
+    worktreePath: string | null;
+  }>;
+  orphanedLeases: Array<{
+    taskId: string;
+    sessionRef: string | null;
+    worktreePath: string | null;
+    reason: string;
+  }>;
+  queueStarvation: boolean;
+  emptyRunGoalReviewRaceRisk: boolean;
+}
+
+export function overviewDiagnosisForResponse(overview: RunOverview): DashboardOverseerDiagnosis {
+  const diagnosis = diagnoseRunOverview(overview);
+  return {
+    ...summarizeOverseerDiagnosis(diagnosis),
+    activeWork: diagnosis.activeWork,
+    runningAttempts: diagnosis.runningAttempts.map((session) => ({
+      attemptId: session.attemptId,
+      taskId: session.taskId,
+      role: session.role,
+      codexSessionId: session.codexSessionId,
+      sessionName: session.sessionName,
+      worktreePath: session.worktreePath,
+    })),
+    orphanedLeases: diagnosis.orphanedLeases,
+    queueStarvation: diagnosis.queueStarvation,
+    emptyRunGoalReviewRaceRisk: diagnosis.emptyRunGoalReviewRaceRisk,
   };
 }
 
@@ -2793,6 +2838,49 @@ export function dashboardHtml(input: { runId: string }) {
         '</div></div>' : '') +
         '</section>';
     };
+    const renderDiagnosis = (overview) => {
+      const diagnosis = overview.diagnosis;
+      if (!diagnosis || typeof diagnosis !== "object") return "";
+      const state = typeof diagnosis.state === "string" ? diagnosis.state : "unknown";
+      const reason = compact(String(diagnosis.reason || ""), 220);
+      const activeWork = diagnosis.activeWork || {};
+      const readyCount = Array.isArray(activeWork.readyTaskIds) ? activeWork.readyTaskIds.length : 0;
+      const runningCount = Array.isArray(activeWork.runningTaskIds) ? activeWork.runningTaskIds.length : 0;
+      const runningAttempts = Array.isArray(diagnosis.runningAttempts) ? diagnosis.runningAttempts : [];
+      const orphanedLeases = Array.isArray(diagnosis.orphanedLeases) ? diagnosis.orphanedLeases : [];
+      const queueStarvation = Boolean(diagnosis.queueStarvation);
+      const raceRisk = Boolean(diagnosis.emptyRunGoalReviewRaceRisk);
+      const stateClass = state === "complete" ? "done" : state === "paused" || state === "blocked" ? "blocked" : state === "orphaned" ? "blocked" : state === "draining" ? "running" : "todo";
+      const parts = [];
+      parts.push('<section class="inspector-card" data-inspector-section="diagnosis"><h2>Overseer diagnosis</h2>');
+      parts.push('<div class="current-task"><div class="current-task-title">Run supervisor state</div><div class="current-task-meta">');
+      parts.push(escapeHtml(readyCount) + ' ready · ' + escapeHtml(runningCount) + ' running · <span class="status-text ' + escapeHtml(stateClass) + '">' + escapeHtml(state) + '</span>');
+      parts.push('<br><span class="code-meta">' + escapeHtml(reason) + '</span>');
+      if (queueStarvation) parts.push('<br><span class="code-meta">queue starvation: ready work without a live runner</span>');
+      if (raceRisk) parts.push('<br><span class="code-meta">empty-run goal-review race risk</span>');
+      parts.push('</div></div>');
+      if (runningAttempts.length > 0) {
+        parts.push('<div class="meta">Running attempts</div><ul class="task-list">');
+        for (const attempt of runningAttempts.slice(0, 4)) {
+          const meta = [escapeHtml(attempt.role || "session")].filter(Boolean);
+          if (attempt.codexSessionId) meta.push('<span class="code-meta">codex ' + escapeHtml(attempt.codexSessionId) + '</span>');
+          parts.push('<li class="task-row"><span class="task-role">' + escapeHtml(attempt.attemptId) + '</span> <span class="task-meta">' + escapeHtml(attempt.taskId) + (meta.length ? ' · ' + meta.join(" · ") : "") + '</span></li>');
+        }
+        parts.push('</ul>');
+      }
+      if (orphanedLeases.length > 0) {
+        parts.push('<div class="meta">Orphaned leases</div><ul class="task-list">');
+        for (const lease of orphanedLeases.slice(0, 4)) {
+          const meta = [escapeHtml(lease.reason || "running task has no running attempt")];
+          if (lease.sessionRef) meta.push('<span class="code-meta">session ' + escapeHtml(lease.sessionRef) + '</span>');
+          if (lease.worktreePath) meta.push('<span class="code-meta">worktree ' + escapeHtml(lease.worktreePath) + '</span>');
+          parts.push('<li class="task-row"><span class="task-role">' + escapeHtml(lease.taskId) + '</span> <span class="task-meta">' + meta.join(" · ") + '</span></li>');
+        }
+        parts.push('</ul>');
+      }
+      parts.push('</section>');
+      return parts.join("");
+    };
     const renderRunner = (overview) => {
       const runner = overview.runner;
       const issue = latestRunnerSignal(overview);
@@ -3137,7 +3225,7 @@ export function dashboardHtml(input: { runId: string }) {
       setHtmlIfChanged("history-goal-list", [...goalGroups].reverse().filter((group) => group.activeTasks.length === 0).map(goalRow).join(""));
       patchWorkspace(renderWorkspace(selectedGroup));
       mountReactFlowCanvas();
-      patchInspectorPanel(renderInspector(overview, selectedGroup), renderGuardrailsSection(overview) + renderSupervisor(overview) + renderRunner(overview));
+      patchInspectorPanel(renderInspector(overview, selectedGroup), renderGuardrailsSection(overview) + renderDiagnosis(overview) + renderSupervisor(overview) + renderRunner(overview));
     }
     let recentRunsCache = [];
     const RECENT_RUNS_LIMIT = 10;
@@ -3493,7 +3581,8 @@ export async function handleDashboardRequest(
         }
         const globalRuns = input.globalRunCounts?.() ?? { todo: 0, running: 0, done: 0, blocked: 0 };
         supervisor = inferDashboardSupervisorStatus(supervisor, overview, globalRuns);
-        return Response.json({ ...overview, runner, supervisor, globalRuns });
+        const diagnosis = overviewDiagnosisForResponse(overview);
+        return Response.json({ ...overview, runner, supervisor, globalRuns, diagnosis });
       }
       const primaryOverview = aggregateDashboardOverview(input.overview(), input.childOverviews?.() ?? []);
       if (suffix === "changed-files") {
@@ -3518,7 +3607,7 @@ export async function handleDashboardRequest(
     }
     const overview = aggregateDashboardOverview(resolvedOverview, []);
     if (suffix === "overview") {
-      return Response.json(overview);
+      return Response.json({ ...overview, diagnosis: overviewDiagnosisForResponse(overview) });
     }
     if (suffix === "changed-files") {
       return Response.json(changedFilesPayload(overview));
