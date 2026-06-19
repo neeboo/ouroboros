@@ -1903,6 +1903,16 @@ describe("CLI", () => {
     expect(attempt.input.model).toBeNull();
     expect(attempt.input.executor).toBe("acpx");
     expect(attempt.output.summary).toBe("claude selected");
+    expect(
+      new Harness(dbPath)
+        .listAttemptEvents(attemptId)
+        .some(
+          (event) =>
+            event.stream === "system" &&
+            event.payload.type === "acpx.attempt.started" &&
+            event.payload.idleTimeoutMs === 300000,
+        ),
+    ).toBe(true);
   });
 
   test("records a structured attempt from JSON", async () => {

@@ -52,6 +52,8 @@ const harness = new Harness(parsed.db);
 const DEFAULT_MAX_TRIES = 3;
 const DEFAULT_SELF_ITERATION_CONCURRENCY = 3;
 const DEFAULT_SELF_ITERATION_WORKTREE_ROOT = ".ouroboros/worktrees";
+const DEFAULT_GENERIC_ATTEMPT_IDLE_TIMEOUT_MS = 5 * 60 * 1000;
+const DEFAULT_GENERIC_ATTEMPT_HARD_TIMEOUT_MS = 30 * 60 * 1000;
 const SELF_ITERATION_GOAL = "Use Ouroboros to plan its own next self-iteration cycle";
 const SELF_ITERATION_PLAN_DOC = "docs/self-iteration-plan.md";
 const DEFAULT_STOP_HOOKS = "create-runs,create-tasks,create-verifier,create-repair,context-summary";
@@ -944,8 +946,8 @@ function executorFactory(_executorName: "noop" | "acpx-codex" | "codex-cli" | "c
       approval: parseApproval(flag(parsed, "approval") ?? "approve-reads"),
       sandbox: parseSandbox(flag(parsed, "sandbox") ?? "read-only"),
       codexBin: flag(parsed, "codex-bin"),
-      timeoutMs: parseTimeoutMs(flag(parsed, "timeout-ms")),
-      idleTimeoutMs: parseTimeoutMs(flag(parsed, "idle-timeout-ms"), "--idle-timeout-ms"),
+      timeoutMs: genericHardTimeoutMs(),
+      idleTimeoutMs: genericIdleTimeoutMs(),
     });
 }
 
@@ -1857,6 +1859,14 @@ function startHooks() {
       baseRef: flag(parsed, "git-base-ref") ?? "main",
     }),
   ];
+}
+
+function genericIdleTimeoutMs() {
+  return parseTimeoutMs(flag(parsed, "idle-timeout-ms"), "--idle-timeout-ms") ?? DEFAULT_GENERIC_ATTEMPT_IDLE_TIMEOUT_MS;
+}
+
+function genericHardTimeoutMs() {
+  return parseTimeoutMs(flag(parsed, "timeout-ms")) ?? DEFAULT_GENERIC_ATTEMPT_HARD_TIMEOUT_MS;
 }
 
 function parseTimeoutMs(raw: string | undefined, name = "--timeout-ms") {
