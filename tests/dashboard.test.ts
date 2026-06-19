@@ -6,6 +6,8 @@ import { applyHarnessAction, Harness } from "../packages/harness/src";
 import { buildTaskPrompt } from "../packages/runner/src";
 import {
   buildDashboardTaskGraph,
+  dashboardCodexEventPartsForTest,
+  dashboardEventLineForTest,
   dashboardEvidenceItemTextForTest,
   dashboardHtml,
   handleDashboardRequest,
@@ -697,6 +699,92 @@ describe("dashboard", () => {
     expect(html).toContain("<summary>Raw output</summary>");
     expect(html).toContain("currentStream.appendChild(nextLine.cloneNode(true));");
     expect(html).not.toContain("currentTurn.replaceWith(nextTurn.cloneNode(true));");
+  });
+
+  test("renders structured codex-json event payloads as readable session stream lines", () => {
+    const html = dashboardHtml({ runId: "run_123" });
+
+    expect(html).toContain("codexEventParts");
+    expect(html).toContain("summarizeToolArguments");
+    expect(html).toContain("rawEventDump");
+    expect(html).toContain("Raw JSON payloads");
+    expect(html).toContain(".stream-line.event-message .stream-line-label");
+    expect(html).toContain(".stream-line.event-tool .stream-line-label");
+    expect(html).toContain(".stream-line.event-session .stream-line-label");
+    expect(html).toContain('"stream-line event-\' + escapeHtml(line.category)');
+    expect(html).toContain('<span class="stream-line-label">');
+    expect(html).toContain('<span class="stream-line-text">');
+  });
+
+  test("formats structured codex-json payloads as categorized readable lines", () => {
+    const sessionCreated = dashboardCodexEventPartsForTest({ type: "session.created" });
+    expect(sessionCreated).toEqual({ category: "session", label: "session", text: "created" });
+
+    const assistantMessage = dashboardCodexEventPartsForTest({
+      type: "item.created",
+      item: {
+        type: "message",
+        role: "assistant",
+        content: [{ type: "output_text", text: "Adding the new dashboard test." }],
+      },
+    });
+    expect(assistantMessage).toEqual({
+      category: "message",
+      label: "assistant",
+      text: "Adding the new dashboard test.",
+    });
+
+    const toolCall = dashboardCodexEventPartsForTest({
+      type: "item.created",
+      item: {
+        type: "function_call",
+        name: "shell",
+        arguments: JSON.stringify({ command: ["bun", "test", "tests/dashboard.test.ts"] }),
+      },
+    });
+    expect(toolCall?.category).toBe("tool");
+    expect(toolCall?.label).toBe("shell");
+    expect(toolCall?.text).toContain("bun");
+    expect(toolCall?.text).toContain("tests/dashboard.test.ts");
+
+    const toolOutput = dashboardCodexEventPartsForTest({
+      type: "item.created",
+      item: { type: "function_call_output", output: "1 test passed." },
+    });
+    expect(toolOutput?.category).toBe("tool-output");
+    expect(toolOutput?.text).toBe("1 test passed.");
+
+    const reasoning = dashboardCodexEventPartsForTest({
+      type: "item.created",
+      item: { type: "reasoning", summary: [{ type: "summary_text", text: "Planning the next step." }] },
+    });
+    expect(reasoning?.category).toBe("thinking");
+    expect(reasoning?.text).toBe("Planning the next step.");
+
+    const error = dashboardCodexEventPartsForTest({ error: "API Error: 529 Overloaded" });
+    expect(error?.category).toBe("error");
+
+    const unknown = dashboardCodexEventPartsForTest({ unrelated: "field" });
+    expect(unknown).toBeNull();
+  });
+
+  test("falls back to plain text for non-codex stdout streams", () => {
+    const stdout = dashboardEventLineForTest({ stream: "stdout", text: "[client] initialize (running)" });
+    expect(stdout?.category).toBe("other");
+    expect(stdout?.label).toBe("log");
+    expect(stdout?.text).toBe("[client] initialize (running)");
+
+    const stderr = dashboardEventLineForTest({ stream: "stderr", text: "child process exited" });
+    expect(stderr?.category).toBe("error");
+    expect(stderr?.label).toBe("stderr");
+    expect(stderr?.text).toBe("child process exited");
+
+    const plainDelta = dashboardEventLineForTest({ stream: "codex-json", payload: { delta: "Composing response." } });
+    expect(plainDelta?.category).toBe("message");
+    expect(plainDelta?.text).toBe("Composing response.");
+
+    const empty = dashboardEventLineForTest({ stream: "codex-json", payload: { unrelated: "field" } });
+    expect(empty).toBeNull();
   });
 
   test("serves bundled React Flow canvas assets", async () => {
