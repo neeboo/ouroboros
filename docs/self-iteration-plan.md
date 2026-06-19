@@ -51,7 +51,7 @@ The bootstrap command does not force this context itself; it inherits `agentDefa
 Use these commands to inspect a self-iteration run and confirm the recovered policy held:
 
 ```bash
-# Run-level overview: agentDefaults.roles, agentBackends, task graph, and latest attempts.
+# Run-level overview: goalContract, agentDefaults.roles, agentBackends, task graph, and latest attempts.
 orbs run-overview --run-id <run_id>
 
 # Run-level lessons: failure summaries and successful experiences with evidence.
@@ -60,7 +60,7 @@ orbs list-lessons --run-id <run_id>
 
 When reviewing whether a future self-iteration run stayed on the recovered policy:
 
-1. `orbs run-overview --run-id <run_id>` — confirm `run.context.agentDefaults.roles.planner`, `roles.verifier`, and `roles.goal-review` are all `codex-resumable`, and that `run.context.agentBackends` defines both `claude-code` and `codex-resumable`.
+1. `orbs run-overview --run-id <run_id>` — confirm `run.context.goalContract` is present with desired state, success criteria, constraints, required evidence, budget, and stop policy; also confirm `run.context.agentDefaults.roles.planner`, `roles.verifier`, and `roles.goal-review` are all `codex-resumable`, and that `run.context.agentBackends` defines both `claude-code` and `codex-resumable`.
 2. `orbs list-lessons --run-id <run_id>` — confirm no new silent-start lesson was recorded against `claude-code`/acpx planner attempts.
 3. If a planner attempt blocked with a silent-start reason again, treat it as a regression of this policy and re-pin the role defaults before the next run.
 
