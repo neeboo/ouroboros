@@ -3886,6 +3886,136 @@ describe("CLI", () => {
     expect(result.stderr).toContain("run not found: run_missing");
   });
 
+  test("formatRunEvidence surfaces verifier and harness-action evidence in the Run evidence section", async () => {
+    await runCli("init");
+    const run = await runCliJson("create-run", "--goal", "Validate run-evidence evidence section");
+    const worker = await runCliJson(
+      "create-task",
+      "--run-id",
+      run.id,
+      "--role",
+      "worker",
+      "--goal",
+      "Implement increment",
+      "--prompt",
+      "Make a small change.",
+    );
+    await runCliJson(
+      "record-attempt",
+      "--task-id",
+      worker.id,
+      "--input-json",
+      "{}",
+      "--output-json",
+      JSON.stringify({
+        status: "done",
+        summary: "Increment shipped",
+        changedFiles: ["packages/cli/src/run-evidence.ts"],
+        checks: [],
+        artifacts: [],
+        problems: [],
+      }),
+    );
+    const verifier = await runCliJson(
+      "create-task",
+      "--run-id",
+      run.id,
+      "--role",
+      "verifier",
+      "--goal",
+      "Verify the increment",
+      "--prompt",
+      "Check the worker output.",
+      "--depends-on",
+      worker.id,
+    );
+    await runCliJson(
+      "record-attempt",
+      "--task-id",
+      verifier.id,
+      "--input-json",
+      "{}",
+      "--output-json",
+      JSON.stringify({
+        status: "done",
+        summary: "Worker output satisfies the task scope.",
+        changedFiles: [],
+        checks: [
+          { name: "typecheck", status: "passed", evidence: "bun run typecheck" },
+          { name: "unit tests", status: "passed" },
+        ],
+        artifacts: [
+          {
+            kind: "harness_action_event",
+            actionEventId: "action_seed",
+            actionType: "integrateVerifiedRun",
+          },
+        ],
+        problems: [],
+      }),
+    );
+
+    const harness = new Harness(dbPath);
+    const overview = harness.getRunOverview({ runId: run.id, eventLimit: 25 });
+    const summary = formatRunEvidence(overview);
+
+    expect(summary).toContain("Run evidence (");
+    expect(summary).toContain(`[verifier:done] task ${verifier.id} · verifier done · 2 checks · 2 passed`);
+    expect(summary).toContain("Worker output satisfies the task scope.");
+    expect(summary).toContain("[verifier:harness_action_event]");
+    expect(summary).toContain("integrateVerifiedRun");
+    expect(summary).toContain("Changed files");
+  });
+
+  test("formatRunEvidence reports Run evidence as none when run has no verifier or harness artifacts", async () => {
+    await runCli("init");
+    const run = await runCliJson("create-run", "--goal", "Validate empty evidence section");
+    const worker = await runCliJson(
+      "create-task",
+      "--run-id",
+      run.id,
+      "--role",
+      "worker",
+      "--goal",
+      "Implement increment",
+      "--prompt",
+      "Make a small change.",
+    );
+    await runCliJson(
+      "record-attempt",
+      "--task-id",
+      worker.id,
+      "--input-json",
+      "{}",
+      "--output-json",
+      JSON.stringify({
+        status: "done",
+        summary: "Increment shipped",
+        changedFiles: ["README.md"],
+        checks: [],
+        artifacts: [],
+        problems: [],
+      }),
+    );
+
+    const harness = new Harness(dbPath);
+    const overview = harness.getRunOverview({ runId: run.id, eventLimit: 25 });
+    const summary = formatRunEvidence(overview);
+
+    expect(summary).toContain("Run evidence: (none recorded)");
+    expect(summary).toContain("Latest goal-review decision: (none recorded)");
+    expect(summary).toContain("Changed files (1)");
+    expect(summary).toContain("README.md");
+  });
+
+  test("formatRunEvidence throws when the run is missing", async () => {
+    await runCli("init");
+    const harness = new Harness(dbPath);
+    const overview = harness.getRunOverview({ runId: "run_missing", eventLimit: 25 });
+
+    expect(() => formatRunEvidence(overview)).toThrow("run not found");
+  });
+
   test("formatAttemptExplanation prints a categorized attempt summary", async () => {
     await runCli("init");
     const run = await runCliJson("create-run", "--goal", "Validate explain-attempt formatter");

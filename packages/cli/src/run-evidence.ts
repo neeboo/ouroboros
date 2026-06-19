@@ -1,7 +1,8 @@
 import { readableValue } from "@ouroboros/harness";
-import type { LessonKind, RunOverview, Status } from "@ouroboros/harness";
+import type { LessonKind, ObservableSession, RunOverview, Status } from "@ouroboros/harness";
 
-type GoalReviewEvidence = Array<{ kind: string; text: string }>;
+type EvidenceEntry = { kind: string; text: string };
+type GoalReviewEvidence = EvidenceEntry[];
 
 interface GoalReviewDecision {
   taskId: string | null;
@@ -12,8 +13,10 @@ interface GoalReviewDecision {
 
 const DEFAULT_LESSON_LIMIT = 10;
 const EVIDENCE_LIMIT = 5;
+const RUN_EVIDENCE_LIMIT = 12;
 const MAX_SUMMARY_CHARS = 200;
 const STATUS_ORDER: Status[] = ["todo", "running", "done", "blocked"];
+const HARNESS_ARTIFACT_KINDS = new Set(["integration", "harness_action_event"]);
 
 export function formatRunEvidence(overview: RunOverview, options: { lessonLimit?: number } = {}): string {
   if (!overview.run) {
@@ -51,6 +54,18 @@ export function formatRunEvidence(overview: RunOverview, options: { lessonLimit?
   } else {
     lines.push("");
     lines.push("Latest goal-review decision: (none recorded)");
+  }
+
+  const runEvidence = collectRunEvidence(overview);
+  lines.push("");
+  if (runEvidence.length > 0) {
+    const shown = runEvidence.slice(0, RUN_EVIDENCE_LIMIT);
+    lines.push(`Run evidence (${shown.length}${runEvidence.length > shown.length ? ` of ${runEvidence.length}` : ""})`);
+    for (const item of shown) {
+      lines.push(`  - [${item.kind}] ${clamp(item.text, MAX_SUMMARY_CHARS)}`);
+    }
+  } else {
+    lines.push("Run evidence: (none recorded)");
   }
 
   const lessons = overview.lessons.slice().reverse().slice(0, lessonLimit);
@@ -150,6 +165,61 @@ function aggregateChangedFiles(overview: RunOverview): string[] {
     }
   }
   return ordered;
+}
+
+function collectRunEvidence(overview: RunOverview): EvidenceEntry[] {
+  const evidence: EvidenceEntry[] = [];
+  const sessionsByTask = new Map<string, ObservableSession[]>();
+  for (const session of overview.sessions) {
+    const list = sessionsByTask.get(session.taskId) ?? [];
+    list.push(session);
+    sessionsByTask.set(session.taskId, list);
+  }
+
+  for (const task of overview.tasks) {
+    if (task.role !== "verifier") continue;
+    const sessions = (sessionsByTask.get(task.id) ?? []).filter(
+      (session) => session.status === "done" || session.status === "blocked",
+    );
+    const latest = sessions[sessions.length - 1];
+    if (!latest) continue;
+    const parts = [`task ${task.id}`, `verifier ${latest.status}`];
+    const checks = summarizeChecks(latest.output?.checks);
+    if (checks) parts.push(checks);
+    const summary = (typeof latest.output?.summary === "string" ? latest.output.summary : "").trim();
+    if (summary) parts.push(clamp(summary, MAX_SUMMARY_CHARS));
+    evidence.push({ kind: `verifier:${latest.status}`, text: parts.join(" · ") });
+  }
+
+  for (const session of overview.sessions) {
+    const artifacts = Array.isArray(session.output?.artifacts) ? session.output!.artifacts : [];
+    for (const artifact of artifacts) {
+      const record = artifact as Record<string, unknown> | null;
+      if (!record || typeof record.kind !== "string") continue;
+      if (!HARNESS_ARTIFACT_KINDS.has(record.kind)) continue;
+      const text = readableValue(artifact);
+      if (!text) continue;
+      evidence.push({ kind: `${session.role || "session"}:${record.kind}`, text });
+    }
+  }
+
+  return evidence;
+}
+
+function summarizeChecks(checks: unknown): string {
+  if (!Array.isArray(checks) || checks.length === 0) return "";
+  let passed = 0;
+  let failed = 0;
+  for (const check of checks) {
+    const status = (check as { status?: unknown } | null)?.status;
+    if (status === "passed") passed += 1;
+    else if (status === "failed") failed += 1;
+  }
+  const total = checks.length;
+  const parts = [`${total} check${total === 1 ? "" : "s"}`];
+  if (passed > 0) parts.push(`${passed} passed`);
+  if (failed > 0) parts.push(`${failed} failed`);
+  return parts.join(" · ");
 }
 
 function labelLessonKind(kind: LessonKind): string {
