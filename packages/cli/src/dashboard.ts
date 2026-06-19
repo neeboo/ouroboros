@@ -388,6 +388,150 @@ function dashboardEvidenceItemText(item: unknown) {
   return readableValue(item);
 }
 
+export interface DashboardEventLine {
+  category: string;
+  label: string;
+  text: string;
+}
+
+export function dashboardCodexEventPartsForTest(payload: unknown): DashboardEventLine | null {
+  return dashboardCodexEventParts(payload);
+}
+
+function dashboardCodexEventParts(payload: unknown): DashboardEventLine | null {
+  if (!payload || typeof payload !== "object") return null;
+  const record = payload as Record<string, unknown>;
+  const type = typeof record.type === "string" ? record.type : "";
+  const item = record.item && typeof record.item === "object" ? (record.item as Record<string, unknown>) : null;
+  if (item) {
+    const itemType = typeof item.type === "string" ? item.type : "";
+    if (itemType === "message") {
+      const role = typeof item.role === "string" && item.role ? item.role : "message";
+      const content = Array.isArray(item.content) ? item.content : [];
+      const parts: string[] = [];
+      for (const part of content) {
+        if (!part || typeof part !== "object") continue;
+        const piece = part as Record<string, unknown>;
+        const text = typeof piece.text === "string" ? piece.text
+          : typeof piece.output === "string" ? piece.output
+          : "";
+        if (text.trim()) parts.push(text.trim());
+      }
+      if (parts.length === 0) return null;
+      return { category: "message", label: role, text: parts.join(" ").replace(/\s+/g, " ") };
+    }
+    if (itemType === "function_call" || itemType === "tool_call") {
+      const name = typeof item.name === "string" && item.name ? item.name : "tool";
+      const summary = dashboardSummarizeToolArguments(item.arguments);
+      return { category: "tool", label: name, text: summary || "(invoked)" };
+    }
+    if (itemType === "function_call_output" || itemType === "tool_call_output") {
+      const raw = typeof item.output === "string" ? item.output : "";
+      const text = raw.replace(/\s+/g, " ").trim();
+      if (!text) return null;
+      return { category: "tool-output", label: "tool output", text };
+    }
+    if (itemType === "reasoning") {
+      const summary = Array.isArray(item.summary) ? item.summary : [];
+      const parts: string[] = [];
+      for (const part of summary) {
+        if (!part || typeof part !== "object") continue;
+        const piece = part as Record<string, unknown>;
+        const text = typeof piece.text === "string" ? piece.text
+          : typeof piece.summary === "string" ? piece.summary
+          : "";
+        if (text.trim()) parts.push(text.trim());
+      }
+      if (parts.length === 0) return null;
+      return { category: "thinking", label: "thinking", text: parts.join(" ").replace(/\s+/g, " ") };
+    }
+  }
+  if (type === "session.created" || type === "session.updated" || type === "session.completed") {
+    const action = type.split(".")[1] || "started";
+    return { category: "session", label: "session", text: action };
+  }
+  if (type === "response.output_text.delta" || type === "response.output_text.done") {
+    const delta = typeof record.delta === "string" ? record.delta : "";
+    const text = delta.replace(/\s+/g, " ").trim();
+    if (!text) return null;
+    return { category: "message", label: "assistant", text };
+  }
+  if (type === "response.reasoning.delta" || type === "response.reasoning_text.delta") {
+    const delta = typeof record.delta === "string" ? record.delta : "";
+    const text = delta.replace(/\s+/g, " ").trim();
+    if (!text) return null;
+    return { category: "thinking", label: "thinking", text };
+  }
+  if (type === "response.function_call_arguments.delta" || type === "response.function_call.delta") {
+    const delta = typeof record.delta === "string" ? record.delta : "";
+    const text = delta.replace(/\s+/g, " ").trim();
+    if (!text) return null;
+    return { category: "tool", label: "tool", text };
+  }
+  if (typeof record.delta === "string" && record.delta.trim()) {
+    return { category: "message", label: "delta", text: record.delta.trim() };
+  }
+  if (typeof record.message === "string" && record.message.trim()) {
+    return { category: "message", label: "message", text: record.message.trim() };
+  }
+  if (typeof record.error === "string" && record.error.trim()) {
+    return { category: "error", label: "error", text: record.error.trim() };
+  }
+  return null;
+}
+
+function dashboardSummarizeToolArguments(raw: unknown): string {
+  if (typeof raw !== "string") return "";
+  const trimmed = raw.trim();
+  if (!trimmed) return "";
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(trimmed);
+  } catch {
+    return dashboardClampText(trimmed, 180);
+  }
+  if (!parsed || typeof parsed !== "object") return dashboardClampText(String(parsed), 180);
+  if (Array.isArray(parsed)) {
+    return dashboardClampText(parsed.map((value) => readableValue(value)).filter(Boolean).join(" "), 180);
+  }
+  const record = parsed as Record<string, unknown>;
+  const command = record.command ?? record.cmd ?? record.input;
+  if (Array.isArray(command)) {
+    return dashboardClampText(command.map((part) => readableValue(part)).filter(Boolean).join(" "), 180);
+  }
+  if (typeof command === "string") return dashboardClampText(command, 180);
+  const path = record.path ?? record.file;
+  if (typeof path === "string") return dashboardClampText(path, 180);
+  const pairs: string[] = [];
+  for (const [key, value] of Object.entries(record)) {
+    pairs.push(key + ": " + dashboardClampText(readableValue(value), 90));
+    if (pairs.length >= 3) break;
+  }
+  return dashboardClampText(pairs.join(" · "), 180);
+}
+
+function dashboardClampText(value: unknown, max: number): string {
+  const text = String(value ?? "").replace(/\s+/g, " ").trim();
+  if (text.length <= max) return text;
+  return text.slice(0, max - 1) + "…";
+}
+
+export function dashboardEventLineForTest(event: { text?: string | null; stream?: string; payload?: unknown }): DashboardEventLine | null {
+  if (event.text && String(event.text).trim()) {
+    const stream = typeof event.stream === "string" ? event.stream : "stdout";
+    return { category: stream === "stderr" ? "error" : "other", label: stream === "stderr" ? "stderr" : "log", text: String(event.text).trim() };
+  }
+  const parts = dashboardCodexEventParts(event.payload);
+  if (parts) return parts;
+  const record = (event.payload && typeof event.payload === "object" ? event.payload : {}) as Record<string, unknown>;
+  for (const key of ["delta", "message", "text", "content"]) {
+    if (typeof record[key] === "string" && (record[key] as string).trim()) {
+      return { category: "other", label: key, text: (record[key] as string).trim() };
+    }
+  }
+  return null;
+}
+
 export function dashboardHtml(input: { runId: string }) {
   return `<!doctype html>
 <html lang="en">
@@ -1185,6 +1329,46 @@ export function dashboardHtml(input: { runId: string }) {
     .stream-line + .stream-line {
       margin-top: 8px;
     }
+    .stream-line .stream-line-label {
+      display: inline-block;
+      min-width: 92px;
+      margin-right: 8px;
+      color: #8d8f99;
+      font-size: 10px;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+    .stream-line.event-tool .stream-line-label,
+    .stream-line.event-tool-output .stream-line-label,
+    .stream-line.event-session .stream-line-label,
+    .stream-line.event-thinking .stream-line-label,
+    .stream-line.event-message .stream-line-label,
+    .stream-line.event-error .stream-line-label,
+    .stream-line.event-other .stream-line-label {
+      color: #757884;
+    }
+    .stream-line.event-error {
+      color: #e6a3a3;
+    }
+    .raw-stream .raw-json details {
+      margin-top: 8px;
+    }
+    .raw-stream .raw-json summary {
+      color: #757884;
+      font-size: 10.5px;
+    }
+    .raw-stream .raw-json pre {
+      margin: 6px 0 0;
+      padding: 8px 10px;
+      background: rgba(255, 255, 255, 0.04);
+      border-radius: 6px;
+      color: #c9c9c4;
+      font-family: var(--mono);
+      font-size: 10.5px;
+      line-height: 1.5;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+    }
     .tool-line {
       margin-top: 14px;
       color: var(--muted-2);
@@ -1829,9 +2013,123 @@ export function dashboardHtml(input: { runId: string }) {
       if (Object.keys(remaining).length > 0) parts.push("extra: " + compactJson(remaining));
       return (parts.length ? parts.join("; ") : compactJson(value)).replace(/\\s+/g, " ").trim();
     };
+    const codexEventParts = (payload) => {
+      if (!payload || typeof payload !== "object") return null;
+      const type = typeof payload.type === "string" ? payload.type : "";
+      const item = payload.item && typeof payload.item === "object" ? payload.item : null;
+      if (item) {
+        const itemType = typeof item.type === "string" ? item.type : "";
+        if (itemType === "message") {
+          const role = typeof item.role === "string" && item.role ? item.role : "message";
+          const content = Array.isArray(item.content) ? item.content : [];
+          const parts = [];
+          for (const part of content) {
+            if (!part || typeof part !== "object") continue;
+            const text = typeof part.text === "string" ? part.text
+              : typeof part.output === "string" ? part.output
+              : "";
+            if (text.trim()) parts.push(text.trim());
+          }
+          if (parts.length === 0) return null;
+          return { category: "message", label: role, text: parts.join(" ").replace(/\\s+/g, " ") };
+        }
+        if (itemType === "function_call" || itemType === "tool_call") {
+          const name = typeof item.name === "string" && item.name ? item.name : "tool";
+          const summary = summarizeToolArguments(item.arguments);
+          return { category: "tool", label: name, text: summary || "(invoked)" };
+        }
+        if (itemType === "function_call_output" || itemType === "tool_call_output") {
+          const raw = typeof item.output === "string" ? item.output : "";
+          const text = raw.replace(/\\s+/g, " ").trim();
+          if (!text) return null;
+          return { category: "tool-output", label: "tool output", text };
+        }
+        if (itemType === "reasoning") {
+          const summary = Array.isArray(item.summary) ? item.summary : [];
+          const parts = [];
+          for (const part of summary) {
+            if (!part || typeof part !== "object") continue;
+            const text = typeof part.text === "string" ? part.text
+              : typeof part.summary === "string" ? part.summary
+              : "";
+            if (text.trim()) parts.push(text.trim());
+          }
+          if (parts.length === 0) return null;
+          return { category: "thinking", label: "thinking", text: parts.join(" ").replace(/\\s+/g, " ") };
+        }
+      }
+      if (type === "session.created" || type === "session.updated" || type === "session.completed") {
+        const action = type.split(".")[1] || "started";
+        return { category: "session", label: "session", text: action };
+      }
+      if (type === "response.output_text.delta" || type === "response.output_text.done") {
+        const delta = typeof payload.delta === "string" ? payload.delta : "";
+        const text = delta.replace(/\\s+/g, " ").trim();
+        if (!text) return null;
+        return { category: "message", label: "assistant", text };
+      }
+      if (type === "response.reasoning.delta" || type === "response.reasoning_text.delta") {
+        const delta = typeof payload.delta === "string" ? payload.delta : "";
+        const text = delta.replace(/\\s+/g, " ").trim();
+        if (!text) return null;
+        return { category: "thinking", label: "thinking", text };
+      }
+      if (type === "response.function_call_arguments.delta" || type === "response.function_call.delta") {
+        const delta = typeof payload.delta === "string" ? payload.delta : "";
+        const text = delta.replace(/\\s+/g, " ").trim();
+        if (!text) return null;
+        return { category: "tool", label: "tool", text };
+      }
+      if (typeof payload.delta === "string" && payload.delta.trim()) {
+        return { category: "message", label: "delta", text: payload.delta.trim() };
+      }
+      if (typeof payload.message === "string" && payload.message.trim()) {
+        return { category: "message", label: "message", text: payload.message.trim() };
+      }
+      if (typeof payload.error === "string" && payload.error.trim()) {
+        return { category: "error", label: "error", text: payload.error.trim() };
+      }
+      return null;
+    };
+    const summarizeToolArguments = (raw) => {
+      if (typeof raw !== "string") return "";
+      const trimmed = raw.trim();
+      if (!trimmed) return "";
+      let parsed;
+      try { parsed = JSON.parse(trimmed); } catch { return clampText(trimmed, 180); }
+      if (!parsed || typeof parsed !== "object") return clampText(String(parsed), 180);
+      if (Array.isArray(parsed)) return clampText(parsed.map((value) => readableValue(value)).filter(Boolean).join(" "), 180);
+      const command = parsed.command ?? parsed.cmd ?? parsed.input;
+      if (Array.isArray(command)) return clampText(command.map((part) => readableValue(part)).filter(Boolean).join(" "), 180);
+      if (typeof command === "string") return clampText(command, 180);
+      const path = parsed.path ?? parsed.file;
+      if (typeof path === "string") return clampText(path, 180);
+      const pairs = [];
+      for (const [key, value] of Object.entries(parsed)) {
+        pairs.push(key + ": " + clampText(readableValue(value), 90));
+        if (pairs.length >= 3) break;
+      }
+      return clampText(pairs.join(" · "), 180);
+    };
+    const clampText = (value, max) => {
+      const text = String(value ?? "").replace(/\\s+/g, " ").trim();
+      if (text.length <= max) return text;
+      return text.slice(0, max - 1) + "…";
+    };
+    const codexEventCategory = (event) => {
+      const payload = event.payload || {};
+      if (payload && typeof payload === "object" && typeof payload.error === "string") return "error";
+      const parts = codexEventParts(payload);
+      return parts ? parts.category : "other";
+    };
     const eventText = (event) => {
       if (event.text && String(event.text).trim()) return String(event.text).trim();
       const payload = event.payload || {};
+      const parts = codexEventParts(payload);
+      if (parts) {
+        const label = parts.label === parts.category ? parts.label : parts.label;
+        return "[" + label + "] " + parts.text;
+      }
       for (const key of ["delta", "message", "text", "content"]) {
         if (typeof payload[key] === "string" && payload[key].trim()) return payload[key].trim();
       }
@@ -1884,15 +2182,54 @@ export function dashboardHtml(input: { runId: string }) {
       return groups ? '<div class="conversation-evidence">' + groups + '</div>' : "";
     };
     const streamOutput = (session) => {
-      const lines = (session.events || []).map(eventText).filter(Boolean).slice(-20);
-      if (lines.length === 0 && latestText(session)) lines.push(latestText(session));
+      const events = (session.events || []).slice(-20);
+      const lines = events
+        .map((event) => {
+          if (event.text && String(event.text).trim()) {
+            return { category: event.stream === "stderr" ? "error" : "other", label: event.stream === "stderr" ? "stderr" : "log", text: String(event.text).trim() };
+          }
+          const parts = codexEventParts(event.payload || {});
+          if (parts) return parts;
+          const payload = event.payload || {};
+          for (const key of ["delta", "message", "text", "content"]) {
+            if (typeof payload[key] === "string" && payload[key].trim()) {
+              return { category: "other", label: key, text: payload[key].trim() };
+            }
+          }
+          return null;
+        })
+        .filter(Boolean);
+      if (lines.length === 0 && latestText(session)) {
+        lines.push({ category: "other", label: "latest", text: latestText(session) });
+      }
       if (lines.length === 0) return '<div class="turn-text">No stream output recorded.</div>';
       return '<div class="stream-output" data-attempt-stream="' + escapeHtml(session.attemptId) + '">' +
-        lines.map((line, index) => '<div class="stream-line" data-event-index="' + index + '">' + escapeHtml(line) + '</div>').join("") +
+        lines.map((line, index) => {
+          const label = line.label || line.category;
+          return '<div class="stream-line event-' + escapeHtml(line.category) + '" data-event-index="' + index + '">' +
+            '<span class="stream-line-label">' + escapeHtml(label) + '</span>' +
+            '<span class="stream-line-text">' + escapeHtml(line.text) + '</span>' +
+            '</div>';
+        }).join("") +
         '</div>';
     };
+    const rawEventDump = (session) => {
+      const events = (session.events || []).slice(-20);
+      if (events.length === 0) return "";
+      const items = events.map((event, index) => {
+        const payload = event.payload && typeof event.payload === "object" ? event.payload : null;
+        if (!payload) {
+          const text = typeof event.text === "string" ? event.text : "";
+          if (!text.trim()) return "";
+          return '<details><summary>event ' + (index + 1) + ' · ' + escapeHtml(event.stream || "text") + '</summary><pre>' + escapeHtml(text) + '</pre></details>';
+        }
+        return '<details><summary>event ' + (index + 1) + ' · ' + escapeHtml(event.stream || "codex-json") + '</summary><pre>' + escapeHtml(compactJson(payload)) + '</pre></details>';
+      }).filter(Boolean).join("");
+      if (!items) return "";
+      return '<details class="raw-json"><summary>Raw JSON payloads</summary>' + items + '</details>';
+    };
     const rawStreamDetails = (session) =>
-      '<details class="raw-stream"><summary>Raw output</summary>' + streamOutput(session) + '</details>';
+      '<details class="raw-stream"><summary>Raw output</summary>' + streamOutput(session) + rawEventDump(session) + '</details>';
     const promptLink = (task) => '<a class="prompt-link" target="_blank" rel="noreferrer" href="/tasks/' + encodeURIComponent(task.id) + '/prompt">Prompt</a>';
     const isWorkspaceMode = (value) => value === "canvas" || value === "flow";
     const readDashboardState = () => {
