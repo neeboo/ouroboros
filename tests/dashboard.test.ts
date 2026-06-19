@@ -2364,4 +2364,358 @@ describe("dashboard", () => {
       "renderGuardrailsSection(overview) + renderDiagnosis(overview) + renderSupervisor(overview) + renderRunner(overview)",
     );
   });
+
+  test("self-iteration run overview exposes active goal, task graph, ready work, runner, and supervisor/diagnosis evidence", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "ouroboros-dashboard-self-iteration-evidence-"));
+    const harness = new Harness(join(dir, "ouroboros.db"));
+    harness.init();
+    const goal = "Use Ouroboros to plan its own next self-iteration cycle";
+    const runId = harness.createRun({
+      goal,
+      context: {
+        source: "self-iterate",
+        planDoc: "docs/self-iteration-plan.md",
+        goalContract: {
+          desiredState: "Ouroboros can plan and drain its own next improvement cycle before it asks for human intervention.",
+          successCriteria: [
+            "a new Ouroboros run exists for self-iteration",
+            "its planner has produced a fine-grained task graph or a justified verifier task",
+            "the dashboard shows the active goal, task stream, todos, and runner state for that run",
+          ],
+          constraints: [
+            "Do not change database schema or dependency sets in this slice",
+            "Do not start implementation from a vague task",
+          ],
+          requiredEvidence: [
+            "orbs run-overview --run-id <run_id>",
+            "orbs list-lessons --run-id <run_id>",
+          ],
+          budget: { maxRounds: 8, maxAttemptsPerTask: 3 },
+        },
+        agentDefaults: {
+          global: "claude-code",
+          roles: {
+            planner: "codex-resumable",
+            verifier: "codex-resumable",
+            "goal-review": "codex-resumable",
+          },
+        },
+        agentBackends: {
+          "claude-code": { kind: "acpx", agent: "claude", approval: "approve-all" },
+          "codex-resumable": { kind: "codex-resumable" },
+        },
+      },
+    });
+    const plannerId = harness.createTask({
+      runId,
+      role: "planner",
+      goal: "Plan the next self-iteration slice",
+      prompt: "Inspect docs/self-iteration-plan.md and return a small nextTasks graph.",
+      doneWhen: [
+        "Planner output contains a small nextTasks graph",
+        "Every planned task has one role, one concrete goal, and one prompt with exact files or commands to inspect first",
+      ],
+    });
+    harness.recordAttempt({
+      taskId: plannerId,
+      input: { sessionName: "planner-session", codexSessionId: "codex_planner" },
+      output: {
+        status: "done",
+        summary: "Planner emitted worker + verifier",
+        changedFiles: [],
+        checks: [{ status: "passed", command: "bun test tests/dashboard.test.ts" }],
+        artifacts: [],
+        problems: [],
+      },
+    });
+    const workerId = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Tighten dashboard evidence for self-iteration supervision",
+      prompt:
+        "Inspect docs/self-iteration-plan.md, packages/cli/src/dashboard.ts, packages/cli/src/dashboard-canvas.tsx, packages/cli/src/main.ts, tests/dashboard.test.ts, and tests/cli.test.ts around self-iterate-launch.",
+      dependsOn: [plannerId],
+      doneWhen: [
+        "Dashboard HTML or /api/runs/<run_id>/overview tests cover active goal, task stream or task graph, todos or ready work, runner status, and supervisor or diagnosis state.",
+        "Any UI copy or API shape changed is backed by existing dashboard conventions and does not disrupt recent-runs or child-run aggregation behavior.",
+        "Long goals, task titles, and runner output remain bounded or covered by existing overflow/truncation tests.",
+        "The attempt output cites exactly how a verifier should inspect the dashboard evidence for a self-iteration run.",
+        "bun test tests/dashboard.test.ts passes.",
+      ],
+    });
+    const verifierId = harness.createTask({
+      runId,
+      role: "verifier",
+      goal: "Verify self-iteration dashboard evidence covers all five required signals",
+      prompt:
+        "Run orbs run-overview --run-id <run_id> and orbs list-lessons --run-id <run_id> and confirm the dashboard evidence covers active goal, task stream, todos, runner, and supervisor/diagnosis state.",
+      dependsOn: [workerId],
+      parentId: workerId,
+      doneWhen: ["All five dashboard evidence signals are present in the overview response."],
+    });
+    harness.updateRunStatus({ runId, status: "running" });
+
+    try {
+      const response = await handleDashboardRequest(
+        new Request(`http://localhost/api/runs/${runId}/overview`),
+        {
+          runId,
+          overview: () => harness.getRunOverview({ runId }),
+          globalRunCounts: () => harness.countRunsByStatus(),
+          runnerStatus: () => ({ status: "running", pid: 4321, lastOutput: "draining self-iteration tasks" }),
+          supervisorStatus: () => ({ status: "running", pid: 2468, lastOutput: "supervising self-iteration runs" }),
+          renderTaskPrompt: () => "",
+        },
+      );
+      expect(response.status).toBe(200);
+      const body = await response.json();
+
+      // Active goal evidence: the run goal is returned with the full self-iteration context
+      // (goalContract, agentDefaults, agentBackends) so a verifier can confirm the recovered
+      // backend policy and the iteration contract from a single overview fetch.
+      expect(body.run).toMatchObject({ id: runId, goal, status: "running" });
+      expect(body.run.context.source).toBe("self-iterate");
+      expect(body.run.context.planDoc).toBe("docs/self-iteration-plan.md");
+      expect(body.run.context.goalContract.desiredState).toContain("plan and drain its own next improvement cycle");
+      expect(body.run.context.goalContract.successCriteria).toContain(
+        "the dashboard shows the active goal, task stream, todos, and runner state for that run",
+      );
+      expect(body.run.context.goalContract.requiredEvidence).toContain("orbs run-overview --run-id <run_id>");
+      expect(body.run.context.agentDefaults.roles).toEqual({
+        planner: "codex-resumable",
+        verifier: "codex-resumable",
+        "goal-review": "codex-resumable",
+      });
+
+      // Task stream evidence: every planner worker verifier task is returned with role, goal,
+      // status, dependsOn, and doneWhen so the dashboard task stream reflects the generated graph.
+      expect(body.tasks).toHaveLength(3);
+      const taskById = new Map(body.tasks.map((task: { id: string; role: string; goal: string; status: string; dependsOn: string[]; doneWhen: string[] }) => [task.id, task]));
+      expect(taskById.get(plannerId)).toMatchObject({
+        id: plannerId,
+        role: "planner",
+        status: "done",
+        dependsOn: [],
+        doneWhen: expect.arrayContaining([expect.stringContaining("small nextTasks graph")]),
+      });
+      expect(taskById.get(workerId)).toMatchObject({
+        id: workerId,
+        role: "worker",
+        status: "todo",
+        dependsOn: [plannerId],
+        doneWhen: expect.arrayContaining([
+          expect.stringContaining("/api/runs/<run_id>/overview tests cover active goal"),
+          expect.stringContaining("runner status"),
+          expect.stringContaining("supervisor or diagnosis state"),
+        ]),
+      });
+      expect(taskById.get(verifierId)).toMatchObject({
+        id: verifierId,
+        role: "verifier",
+        status: "todo",
+        dependsOn: [workerId],
+        parentId: workerId,
+      });
+
+      // Task graph evidence: buildDashboardTaskGraph turns the overview into concrete nodes and
+      // edges that point at the planned worker and its verifier, so the UI can render the
+      // generated graph without re-deriving relationships.
+      const graph = buildDashboardTaskGraph(harness.getRunOverview({ runId }), plannerId);
+      expect(graph.nodes.map((node) => node.id)).toEqual([plannerId, workerId, verifierId]);
+      expect(graph.edges).toContainEqual(
+        expect.objectContaining({ source: plannerId, target: workerId, label: "dependsOn" }),
+      );
+      expect(graph.edges).toContainEqual(
+        expect.objectContaining({ source: workerId, target: verifierId, label: "dependsOn" }),
+      );
+      expect(graph.edges).toContainEqual(
+        expect.objectContaining({ source: workerId, target: verifierId, label: "parentId" }),
+      );
+
+      // Ready-work evidence: the overseer diagnosis lists ready and running task ids so a
+      // verifier can confirm what the runner is supposed to drain next. The diagnosis is
+      // derived from sessions/threads rather than the reported runner status, so when the
+      // worker task is ready but no attempt is live yet, the diagnosis correctly classifies
+      // the run as orphaned while the reported runner status shows the supervisor is active.
+      // Together, those two signals tell a verifier that the runner is up but has not yet
+      // picked up the queued self-iteration work.
+      expect(body.diagnosis.activeWork.readyTaskIds).toContain(workerId);
+      expect(body.diagnosis.activeWork.runningTaskIds).toEqual([]);
+      expect(body.diagnosis.state).toBe("orphaned");
+      expect(body.diagnosis.reason).toMatch(/ready work has no live runner/);
+      expect(body.diagnosis.queueStarvation).toBe(true);
+      expect(body.diagnosis.orphanedLeases).toEqual([]);
+
+      // Runner evidence: the runner status is returned alongside the diagnosis so a verifier
+      // can confirm the runner is active while the queue is non-empty.
+      expect(body.runner).toEqual({ status: "running", pid: 4321, lastOutput: "draining self-iteration tasks" });
+
+      // Supervisor evidence: the supervisor status is returned alongside the runner status so
+      // the dashboard can render both signals in the inspector panel.
+      expect(body.supervisor).toEqual({
+        status: "running",
+        pid: 2468,
+        lastOutput: "supervising self-iteration runs",
+      });
+      expect(body.globalRuns).toMatchObject({ running: 1 });
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("self-iteration run overview exposes draining diagnosis and runner evidence while a worker attempt is live", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "ouroboros-dashboard-self-iteration-draining-"));
+    const harness = new Harness(join(dir, "ouroboros.db"));
+    harness.init();
+    const goal = "Use Ouroboros to plan its own next self-iteration cycle";
+    const runId = harness.createRun({
+      goal,
+      context: {
+        source: "self-iterate",
+        planDoc: "docs/self-iteration-plan.md",
+        goalContract: {
+          desiredState: "Ouroboros can plan and drain its own next improvement cycle before it asks for human intervention.",
+          successCriteria: [
+            "a new Ouroboros run exists for self-iteration",
+            "the dashboard shows the active goal, task stream, todos, and runner state for that run",
+          ],
+          constraints: ["Do not change database schema or dependency sets in this slice"],
+          requiredEvidence: ["orbs run-overview --run-id <run_id>", "orbs list-lessons --run-id <run_id>"],
+          budget: { maxRounds: 8, maxAttemptsPerTask: 3 },
+        },
+        agentDefaults: {
+          global: "claude-code",
+          roles: {
+            planner: "codex-resumable",
+            verifier: "codex-resumable",
+            "goal-review": "codex-resumable",
+          },
+        },
+        agentBackends: {
+          "claude-code": { kind: "acpx", agent: "claude", approval: "approve-all" },
+          "codex-resumable": { kind: "codex-resumable" },
+        },
+      },
+    });
+    const plannerId = harness.createTask({
+      runId,
+      role: "planner",
+      goal: "Plan the next self-iteration slice",
+      prompt: "Inspect docs/self-iteration-plan.md and return a small nextTasks graph.",
+      doneWhen: ["Planner output contains a small nextTasks graph"],
+    });
+    harness.recordAttempt({
+      taskId: plannerId,
+      input: { sessionName: "planner-session", codexSessionId: "codex_planner" },
+      output: {
+        status: "done",
+        summary: "Planner emitted worker + verifier",
+        changedFiles: [],
+        checks: [],
+        artifacts: [],
+        problems: [],
+      },
+    });
+    const workerId = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Tighten dashboard evidence for self-iteration supervision",
+      prompt: "Inspect docs/self-iteration-plan.md and packages/cli/src/dashboard.ts.",
+      dependsOn: [plannerId],
+      doneWhen: ["Dashboard evidence is testable from /api/runs/<run_id>/overview."],
+    });
+    const attemptId = harness.startAttempt({
+      taskId: workerId,
+      input: { sessionName: "worker-session", codexSessionId: "codex_worker" },
+    });
+    harness.upsertExecutionThread({
+      runId,
+      taskId: workerId,
+      attemptId,
+      ownerType: "runner",
+      role: "worker",
+      status: "running",
+      sessionName: "worker-session",
+      agentSessionId: "codex_worker",
+    });
+    harness.updateRunStatus({ runId, status: "running" });
+
+    try {
+      const response = await handleDashboardRequest(
+        new Request(`http://localhost/api/runs/${runId}/overview`),
+        {
+          runId,
+          overview: () => harness.getRunOverview({ runId }),
+          globalRunCounts: () => harness.countRunsByStatus(),
+          runnerStatus: () => ({ status: "running", pid: 4321, lastOutput: "draining self-iteration worker" }),
+          supervisorStatus: () => ({ status: "running", pid: 2468, lastOutput: "supervising self-iteration run" }),
+          renderTaskPrompt: () => "",
+        },
+      );
+      expect(response.status).toBe(200);
+      const body = await response.json();
+
+      // Active goal and recovered backend policy are visible from the overview response.
+      expect(body.run).toMatchObject({ id: runId, goal, status: "running" });
+      expect(body.run.context.agentDefaults.roles.verifier).toBe("codex-resumable");
+      expect(body.run.context.goalContract.requiredEvidence).toContain("orbs run-overview --run-id <run_id>");
+
+      // Task stream evidence: planner is done, worker is running.
+      type DashboardTask = { id: string; role: string; status: string };
+      const taskById = new Map<string, DashboardTask>(
+        body.tasks.map((task: DashboardTask) => [task.id, task] as const),
+      );
+      expect(taskById.get(plannerId)?.status).toBe("done");
+      expect(taskById.get(workerId)).toMatchObject({ role: "worker", status: "running" });
+
+      // Diagnosis evidence: the overseer classifies the live worker attempt as draining and
+      // surfaces the running attempt so a verifier can confirm the runner is making progress.
+      expect(body.diagnosis.state).toBe("draining");
+      expect(body.diagnosis.reason).toMatch(/1 running attempt/);
+      expect(body.diagnosis.activeWork.runningTaskIds).toEqual([workerId]);
+      expect(body.diagnosis.activeWork.readyTaskIds).toEqual([]);
+      expect(body.diagnosis.runningAttempts).toEqual([
+        expect.objectContaining({ attemptId, taskId: workerId, role: "worker", codexSessionId: "codex_worker" }),
+      ]);
+      expect(body.diagnosis.orphanedLeases).toEqual([]);
+
+      // Runner and supervisor evidence: both are returned alongside the diagnosis so the
+      // inspector panel can render all three signals.
+      expect(body.runner).toEqual({ status: "running", pid: 4321, lastOutput: "draining self-iteration worker" });
+      expect(body.supervisor).toEqual({
+        status: "running",
+        pid: 2468,
+        lastOutput: "supervising self-iteration run",
+      });
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("dashboard HTML composes self-iteration evidence in the inspector panel for verifier review", () => {
+    const html = dashboardHtml({ runId: "run_self_iteration" });
+
+    // The inspector panel renders the active goal title, the workspace flow/task stream,
+    // the todo list of doneWhen items, the runner section, and the supervisor/diagnosis
+    // sections in a single compose call so a verifier can confirm every evidence signal
+    // from one dashboard fetch.
+    expect(html).toContain('data-inspector-section="progress"');
+    expect(html).toContain('data-inspector-section="runner"');
+    expect(html).toContain('data-inspector-section="supervisor"');
+    expect(html).toContain('data-inspector-section="diagnosis"');
+    expect(html).toContain('id="workspace-flow"');
+    expect(html).toContain("renderWorkspace(selectedGroup)");
+    expect(html).toContain("renderInspector = (overview, group) =>");
+    expect(html).toContain("patchInspectorPanel(renderInspector(overview, selectedGroup)");
+    expect(html).toContain("renderDiagnosis(overview) + renderSupervisor(overview) + renderRunner(overview)");
+    // The runner section explicitly flags queued work waiting for a runner so a verifier can
+    // tell self-iteration is paused on the runner rather than on missing work.
+    expect(html).toContain("Queue waiting for runner");
+    expect(html).toContain("Background runner");
+    // The diagnosis section explicitly surfaces ready + running counts and orphaned lease
+    // reasoning so a verifier can confirm supervisor state from the inspector panel.
+    expect(html).toContain("Run supervisor state");
+    expect(html).toContain("Running attempts");
+    expect(html).toContain("Orphaned leases");
+  });
 });
