@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { homedir, tmpdir } from "node:os";
 import { Harness } from "../packages/harness/src";
@@ -4658,6 +4658,155 @@ describe("CLI", () => {
     });
   });
 
+  test("CLI smoke: integrateVerifiedRun records a done action event on a clean temporary repository", async () => {
+    await runCli("init");
+    const { repoPath, worktreePath, run, workerTask } = await prepareVerifiedIntegrationRepo({
+      branch: "task-worker",
+      workerFile: "src/app.ts",
+      workerContent: "export const value = 1;\n",
+    });
+
+    const result = await runCliJson(
+      "action",
+      "--action-json",
+      JSON.stringify({
+        type: "integrateVerifiedRun",
+        runId: run.id,
+        workerTaskId: workerTask.id,
+        commitMessage: "Integrate verified worker",
+        reason: "CLI smoke for integrateVerifiedRun success",
+      }),
+    );
+    const events = await runCliJson("action-events", "--limit", "1");
+    const mergedFile = await readFile(join(repoPath, "src", "app.ts"), "utf8");
+    const log = gitCli(repoPath, ["log", "--oneline", "-1"]).stdout;
+
+    expect(result).toMatchObject({
+      status: "done",
+      actionType: "integrateVerifiedRun",
+      eventId: expect.any(String),
+    });
+    expect(result.artifacts).toContainEqual(
+      expect.objectContaining({
+        kind: "integration",
+        workerTaskId: workerTask.id,
+        targetBranch: "main",
+        sourceBranch: "task-worker",
+        pushed: false,
+      }),
+    );
+    expect(mergedFile.trim()).toBe("export const value = 1;");
+    expect(log).toContain("Integrate verified worker");
+    expect(events[0]).toMatchObject({
+      id: result.eventId,
+      actionType: "integrateVerifiedRun",
+      status: "done",
+      request: expect.objectContaining({ runId: run.id, workerTaskId: workerTask.id }),
+    });
+    expect(worktreePath).toBe(worktreePath);
+  });
+
+  test("CLI smoke: integrateVerifiedRun treats an already-merged worker as an idempotent integration via the CLI", async () => {
+    await runCli("init");
+    const { repoPath, run, workerTask } = await prepareVerifiedIntegrationRepo({
+      branch: "task-worker-idempotent",
+      workerFile: "src/idempotent.ts",
+      workerContent: "export const merged = true;\n",
+    });
+
+    const first = await runCliJson(
+      "action",
+      "--action-json",
+      JSON.stringify({
+        type: "integrateVerifiedRun",
+        runId: run.id,
+        workerTaskId: workerTask.id,
+        commitMessage: "Integrate verified idempotent worker",
+        reason: "first integration",
+      }),
+    );
+    const headAfterFirst = gitCli(repoPath, ["rev-parse", "HEAD"]).stdout.trim();
+
+    const second = await runCliJson(
+      "action",
+      "--action-json",
+      JSON.stringify({
+        type: "integrateVerifiedRun",
+        runId: run.id,
+        workerTaskId: workerTask.id,
+        commitMessage: "Integrate verified idempotent worker again",
+        reason: "retry after interrupted integration bookkeeping",
+      }),
+    );
+    const headAfterSecond = gitCli(repoPath, ["rev-parse", "HEAD"]).stdout.trim();
+    const events = await runCliJson("action-events", "--limit", "2");
+
+    expect(first.status).toBe("done");
+    expect(second).toMatchObject({
+      status: "done",
+      actionType: "integrateVerifiedRun",
+      summary: expect.stringContaining("already integrated"),
+    });
+    expect(second.artifacts).toContainEqual(
+      expect.objectContaining({
+        kind: "integration",
+        workerTaskId: workerTask.id,
+        alreadyMerged: true,
+      }),
+    );
+    expect(headAfterSecond).toBe(headAfterFirst);
+    expect(events[0]).toMatchObject({
+      id: second.eventId,
+      actionType: "integrateVerifiedRun",
+      status: "done",
+    });
+  });
+
+  test("CLI smoke: integrateVerifiedRun blocks via the CLI when the target repository has uncommitted changes", async () => {
+    await runCli("init");
+    const { repoPath, run, workerTask } = await prepareVerifiedIntegrationRepo({
+      branch: "task-worker-dirty",
+      workerFile: "src/dirty.ts",
+      workerContent: "export const dirty = true;\n",
+    });
+
+    await writeFile(join(repoPath, "uncommitted.txt"), "dirty target\n");
+
+    const result = await runCliJson(
+      "action",
+      "--action-json",
+      JSON.stringify({
+        type: "integrateVerifiedRun",
+        runId: run.id,
+        workerTaskId: workerTask.id,
+        commitMessage: "Should not merge into a dirty target",
+        reason: "CLI smoke for blocked git preflight",
+      }),
+    );
+    const events = await runCliJson("action-events", "--limit", "1");
+
+    expect(result).toMatchObject({
+      status: "blocked",
+      actionType: "integrateVerifiedRun",
+      eventId: expect.any(String),
+      summary: "Target repository has uncommitted changes.",
+      problems: expect.arrayContaining([expect.stringContaining("target repository must be clean before integration")]),
+    });
+    expect(result.checks).toContainEqual(
+      expect.objectContaining({
+        name: "integration preflight",
+        status: "failed",
+        evidence: expect.stringContaining("target repository must be clean before integration"),
+      }),
+    );
+    expect(events[0]).toMatchObject({
+      id: result.eventId,
+      actionType: "integrateVerifiedRun",
+      status: "blocked",
+      request: expect.objectContaining({ runId: run.id, workerTaskId: workerTask.id }),
+    });
+  });
+
   test("overseer-tick prints diagnosis JSON with empty-run and queue starvation signals", async () => {
     await runCli("init");
     const emptyRun = await runCliJson("create-run", "--goal", "Empty overseer run");
@@ -4866,6 +5015,139 @@ describe("CLI", () => {
 
   async function runCliJson(...args: Array<string | Record<string, string>>) {
     return JSON.parse(await runCli(...args));
+  }
+
+  function gitCli(cwd: string, args: string[]) {
+    const result = Bun.spawnSync({
+      cmd: ["git", ...args],
+      cwd,
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const stdout = new TextDecoder().decode(result.stdout);
+    const stderr = new TextDecoder().decode(result.stderr);
+    expect(result.exitCode, `git ${args.join(" ")}\n${stderr || stdout}`).toBe(0);
+    return { stdout, stderr };
+  }
+
+  async function prepareVerifiedIntegrationRepo(input: {
+    branch: string;
+    workerFile: string;
+    workerContent: string;
+  }) {
+    const repoPath = join(dir, `repo-${input.branch}`);
+    const worktreePath = join(dir, `worker-tree-${input.branch}`);
+    await mkdir(repoPath, { recursive: true });
+    await writeFile(join(repoPath, "README.md"), "initial\n");
+    gitCli(repoPath, ["init", "-b", "main"]);
+    gitCli(repoPath, ["config", "user.name", "Ouroboros Test"]);
+    gitCli(repoPath, ["config", "user.email", "test@example.com"]);
+    gitCli(repoPath, ["config", "commit.gpgSign", "false"]);
+    gitCli(repoPath, ["add", "README.md"]);
+    gitCli(repoPath, ["commit", "-m", "Initial commit"]);
+    gitCli(repoPath, ["worktree", "add", "-b", input.branch, worktreePath, "main"]);
+    const workerDir = join(worktreePath, input.workerFile.split("/").slice(0, -1).join("/"));
+    if (workerDir !== worktreePath) {
+      await mkdir(workerDir, { recursive: true });
+    }
+    await writeFile(join(worktreePath, input.workerFile), input.workerContent);
+
+    const run = await runCliJson(
+      "create-run",
+      "--goal",
+      "Integrate verified CLI smoke",
+      "--project-root",
+      repoPath,
+    );
+    const workerTaskId = new Harness(dbPath).createTask({
+      runId: run.id,
+      role: "worker",
+      goal: `Implement ${input.workerFile}`,
+      prompt: `Create ${input.workerFile}.`,
+      worktreePath,
+    });
+    await runCliJson(
+      "record-attempt",
+      "--task-id",
+      workerTaskId,
+      "--input-json",
+      "{}",
+      "--output-json",
+      JSON.stringify({
+        status: "done",
+        summary: `Created ${input.workerFile}`,
+        changedFiles: [input.workerFile],
+        checks: [{ name: "worker", status: "passed" }],
+        artifacts: [],
+        problems: [],
+      }),
+    );
+    const verifier = await runCliJson(
+      "create-task",
+      "--run-id",
+      run.id,
+      "--role",
+      "verifier",
+      "--goal",
+      "Verify worker",
+      "--prompt",
+      "Verify worker changes.",
+      "--depends-on-json",
+      JSON.stringify([workerTaskId]),
+    );
+    await runCliJson(
+      "record-attempt",
+      "--task-id",
+      verifier.id,
+      "--input-json",
+      "{}",
+      "--output-json",
+      JSON.stringify({
+        status: "done",
+        summary: "Verified worker changes.",
+        changedFiles: [],
+        checks: [{ name: "verify", status: "passed" }],
+        artifacts: [],
+        problems: [],
+      }),
+    );
+    const review = await runCliJson(
+      "create-task",
+      "--run-id",
+      run.id,
+      "--role",
+      "goal-review",
+      "--goal",
+      "Review completion",
+      "--prompt",
+      "Review run completion.",
+    );
+    await runCliJson(
+      "record-attempt",
+      "--task-id",
+      review.id,
+      "--input-json",
+      "{}",
+      "--output-json",
+      JSON.stringify({
+        status: "done",
+        runDecision: "complete",
+        summary: "Goal reached",
+        changedFiles: [],
+        checks: [{ name: "goal", status: "passed" }],
+        artifacts: [],
+        problems: [],
+      }),
+    );
+
+    return {
+      repoPath,
+      worktreePath,
+      run,
+      workerTask: { id: workerTaskId },
+      verifier,
+      review,
+    };
   }
 
   function shortTaskId(taskId: string) {
