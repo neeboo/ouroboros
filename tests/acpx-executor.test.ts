@@ -256,6 +256,34 @@ describe("acpx executor", () => {
     expect(output.summary).toBe("claude planned despite tool error text");
   });
 
+  test("parses final attempt output instead of earlier fenced evidence objects", () => {
+    const output = parseAttemptOutput([
+      "[thinking] recording evidence",
+      "```json",
+      '{"type":"preservePrepareRunDrainAuditTrail","status":"done","evidence":"applyHarnessAction records every prepareRunDrain event"}',
+      "```",
+      "```json",
+      [
+        "{",
+        '  "status": "done",',
+        '  "summary": "final attempt output",',
+        '  "changedFiles": [],',
+        '  "checks": [{"name":"parse","status":"passed"}],',
+        '  "artifacts": [],',
+        '  "problems": []',
+        "}",
+      ].join("\n"),
+      "```",
+      "[done] end_turn",
+    ].join("\n"));
+
+    expect(output).toMatchObject({
+      status: "done",
+      summary: "final attempt output",
+      checks: [{ name: "parse", status: "passed" }],
+    });
+  });
+
   test("runs a raw acpx agent command through the generic executor", async () => {
     const calls: string[][] = [];
     const executor = createAcpxAgentExecutor({

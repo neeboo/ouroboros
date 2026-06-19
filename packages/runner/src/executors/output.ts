@@ -21,22 +21,71 @@ export function parseAttemptOutputOrBlocked(input: {
 }
 
 export function parseAttemptOutput(raw: string): AttemptOutput {
-  const parsed = JSON.parse(extractJsonObject(raw));
-  if (parsed.status !== "done" && parsed.status !== "blocked") {
+  const candidates = extractJsonObjectCandidates(raw);
+  const errors: Error[] = [];
+  for (let index = candidates.length - 1; index >= 0; index -= 1) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(candidates[index]);
+    } catch {
+      continue;
+    }
+    if (!looksLikeAttemptOutput(parsed)) {
+      continue;
+    }
+    try {
+      return normalizeAttemptOutput(parsed);
+    } catch (error) {
+      errors.push(error instanceof Error ? error : new Error(String(error)));
+    }
+  }
+  if (errors.length > 0) {
+    throw errors[0];
+  }
+  throw new Error(candidates.length > 0 ? "agent output did not contain an attempt output JSON object" : "agent output did not contain a JSON object");
+}
+
+function normalizeAttemptOutput(parsed: unknown): AttemptOutput {
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error("agent output must be a JSON object");
+  }
+  const record = parsed as Record<string, unknown>;
+  if (record.status !== "done" && record.status !== "blocked") {
     throw new Error("agent output status must be 'done' or 'blocked'");
   }
-  const actionOutput = validateActions(parsed.actions);
+  const actionOutput = validateActions(record.actions);
   return {
-    status: parsed.status,
-    runDecision: mergeRunDecision(validateRunDecision(parsed.runDecision), actionOutput.runDecision),
-    summary: readableValue(parsed.summary),
-    changedFiles: Array.isArray(parsed.changedFiles) ? parsed.changedFiles.map(String) : [],
-    checks: Array.isArray(parsed.checks) ? parsed.checks : [],
-    artifacts: Array.isArray(parsed.artifacts) ? parsed.artifacts : [],
-    problems: readableList(parsed.problems),
-    nextTasks: [...validatePlannedTasks(parsed.nextTasks), ...actionOutput.nextTasks],
-    nextRuns: [...validatePlannedRuns(parsed.nextRuns), ...actionOutput.nextRuns],
+    status: record.status,
+    runDecision: mergeRunDecision(validateRunDecision(record.runDecision), actionOutput.runDecision),
+    summary: readableValue(record.summary),
+    changedFiles: Array.isArray(record.changedFiles) ? record.changedFiles.map(String) : [],
+    checks: Array.isArray(record.checks) ? record.checks : [],
+    artifacts: Array.isArray(record.artifacts) ? record.artifacts : [],
+    problems: readableList(record.problems),
+    nextTasks: [...validatePlannedTasks(record.nextTasks), ...actionOutput.nextTasks],
+    nextRuns: [...validatePlannedRuns(record.nextRuns), ...actionOutput.nextRuns],
   };
+}
+
+function looksLikeAttemptOutput(parsed: unknown) {
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return false;
+  }
+  const record = parsed as Record<string, unknown>;
+  if (record.status !== "done" && record.status !== "blocked") {
+    return false;
+  }
+  return (
+    "summary" in record ||
+    "changedFiles" in record ||
+    "checks" in record ||
+    "artifacts" in record ||
+    "problems" in record ||
+    "actions" in record ||
+    "nextTasks" in record ||
+    "nextRuns" in record ||
+    "runDecision" in record
+  );
 }
 
 function validateActions(actions: unknown): {
@@ -301,28 +350,19 @@ function looksLikeModelId(value: string) {
   return /^(gpt-|o\d|claude|gemini|deepseek|codex)/i.test(value);
 }
 
-function extractJsonObject(raw: string) {
+function extractJsonObjectCandidates(raw: string) {
   const trimmed = raw.trim();
+  const candidates: string[] = [];
   if (trimmed.startsWith("{") && trimmed.endsWith("}")) {
-    return trimmed;
+    candidates.push(trimmed);
   }
 
-  const fenced = trimmed.match(/```(?:json)?\s*(\{[\s\S]*?\})\s*```/);
-  if (fenced) {
-    return fenced[1];
+  for (const fenced of trimmed.matchAll(/```(?:json)?\s*(\{[\s\S]*?\})\s*```/g)) {
+    candidates.push(fenced[1]);
   }
 
-  const candidates = jsonObjectCandidates(trimmed);
-  for (let index = candidates.length - 1; index >= 0; index -= 1) {
-    try {
-      JSON.parse(candidates[index]);
-      return candidates[index];
-    } catch {
-      continue;
-    }
-  }
-
-  throw new Error("agent output did not contain a JSON object");
+  candidates.push(...jsonObjectCandidates(trimmed));
+  return [...new Set(candidates)];
 }
 
 function jsonObjectCandidates(raw: string) {
