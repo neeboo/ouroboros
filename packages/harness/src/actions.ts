@@ -1,8 +1,15 @@
 import { existsSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import { acceptGuardrailProposal, proposeGuardrailsFromLessons } from "./guardrails";
+import {
+  GOAL_REVIEW_TASK_DONE_WHEN,
+  GOAL_REVIEW_TASK_GOAL,
+  GOAL_REVIEW_TASK_PROMPT,
+  inferExplicitRunDecision,
+  resolveRunDecision,
+} from "./goal-review";
 import { Harness } from "./harness";
-import type { ReclaimedRunningTask, RunOverview, Task } from "./types";
+import type { AttemptOutput, ReclaimedRunningTask, RunOverview, Task } from "./types";
 
 export type HarnessAction =
   | { type: "reclaimRunningTasks"; runId: string; reason?: string }
@@ -1142,12 +1149,29 @@ function ensureGoalReviewTask(
   maxTries: number,
   overview: ReturnType<Harness["getRunOverview"]>,
 ) {
-  const nonTerminalReviews = overview.sessions.filter(
-    (session) =>
-      session.role === "goal-review" &&
-      session.status === "done" &&
-      (session.output.runDecision === "continue" || session.output.runDecision === "verify"),
+  const latestProgressIndex = overview.sessions.reduce((latest, session, index) => {
+    return session.role !== "goal-review" && session.status === "done" ? index : latest;
+  }, -1);
+  const currentReviewSessions = overview.sessions.filter(
+    (session, index) => index > latestProgressIndex && session.role === "goal-review" && session.status === "done",
   );
+
+  const latestReview = currentReviewSessions[currentReviewSessions.length - 1];
+  if (latestReview && resolveRunDecision(latestReview.output) === "defer") {
+    harness.updateRunStatus({ runId, status: "blocked" });
+    return {
+      status: "blocked" as const,
+      summary: `Run ${runId} blocked by deferred goal-review ${latestReview.taskId}.`,
+      checks: [{ name: "goal review defer", status: "passed" as const, evidence: latestReview.taskId }],
+      artifacts: [{ kind: "goal_review", taskId: latestReview.taskId, status: "defer" }],
+      problems: [],
+    };
+  }
+
+  const nonTerminalReviews = currentReviewSessions.filter((session) => {
+    const decision = resolveRunDecision(session.output);
+    return decision === "continue" || decision === "verify";
+  });
   if (nonTerminalReviews.length >= maxTries) {
     harness.updateRunStatus({ runId, status: "blocked" });
     return {
@@ -1163,13 +1187,44 @@ function ensureGoalReviewTask(
     (task) => task.role === "goal-review" && task.status === "blocked",
   );
   if (blockedReview) {
-    const tries = overview.sessions.filter((session) => session.taskId === blockedReview.id).length;
-    if (tries >= maxTries) {
+    const lastTask = overview.tasks[overview.tasks.length - 1];
+    const blockedTries = overview.sessions.filter((session) => session.taskId === blockedReview.id).length;
+    const lastBlockedSession = [...overview.sessions].reverse().find((session) => session.taskId === blockedReview.id);
+    const textualCompletion = lastBlockedSession
+      ? inferExplicitRunDecision(lastBlockedSession.output) === "complete"
+      : false;
+    if (textualCompletion) {
+      harness.updateRunStatus({ runId, status: "done" });
+      return {
+        status: "done" as const,
+        summary: `Goal-review task ${blockedReview.id} reported textual completion.`,
+        checks: [{ name: "goal review textual completion", status: "passed" as const, evidence: blockedReview.id }],
+        artifacts: [{ kind: "goal_review", taskId: blockedReview.id, status: "done", recovered: "textual" }],
+        problems: [],
+      };
+    }
+    if (lastTask && lastTask.id !== blockedReview.id) {
+      const taskId = createGoalReviewTask(harness, runId);
+      return {
+        status: "done" as const,
+        summary: `Created fresh goal-review task ${taskId} after newer work superseded ${blockedReview.id}.`,
+        checks: [
+          { name: "superseded goal review", status: "passed" as const, evidence: blockedReview.id },
+          { name: "goal review created", status: "passed" as const, evidence: taskId },
+        ],
+        artifacts: [
+          { kind: "goal_review", taskId: blockedReview.id, status: "blocked", superseded: true },
+          { kind: "goal_review", taskId, status: "todo", created: true },
+        ],
+        problems: [],
+      };
+    }
+    if (blockedTries >= maxTries) {
       return {
         status: "blocked" as const,
         summary: `Goal-review task ${blockedReview.id} already reached max tries.`,
-        checks: [{ name: "goal review max tries", status: "failed" as const, evidence: `${tries}/${maxTries}` }],
-        artifacts: [{ kind: "goal_review", taskId: blockedReview.id, tries, maxTries }],
+        checks: [{ name: "goal review max tries", status: "failed" as const, evidence: `${blockedTries}/${maxTries}` }],
+        artifacts: [{ kind: "goal_review", taskId: blockedReview.id, tries: blockedTries, maxTries }],
         problems: [`goal-review max tries reached for ${blockedReview.id}`],
       };
     }
@@ -1177,32 +1232,13 @@ function ensureGoalReviewTask(
     return {
       status: "done" as const,
       summary: `Goal-review task ${blockedReview.id} returned to todo.`,
-      checks: [{ name: "goal review retried", status: "passed" as const, evidence: `${tries + 1}/${maxTries}` }],
-      artifacts: [{ kind: "goal_review", taskId: blockedReview.id, status: "todo", retried: true, tries: tries + 1, maxTries }],
+      checks: [{ name: "goal review retried", status: "passed" as const, evidence: `${blockedTries + 1}/${maxTries}` }],
+      artifacts: [{ kind: "goal_review", taskId: blockedReview.id, status: "todo", retried: true, tries: blockedTries + 1, maxTries }],
       problems: [],
     };
   }
 
-  const taskId = harness.createTask({
-    runId,
-    role: "goal-review",
-    goal: "Review whether the run goal is complete",
-    prompt: [
-      "Answer this before creating more work: are we sure the original run goal has been reached?",
-      "",
-      "Inspect the repository, tests, dashboard state, recent attempts, run lessons, and harness action events.",
-      "Before choosing a runDecision, cite concrete evidence from repository files or docs, tests or commands, dashboard or run overview state, and recent lessons.",
-      "Return structured JSON with runDecision complete, continue, verify, or defer.",
-      "Do not declare complete unless the summary, checks, artifacts, or problems cite that evidence before declaring complete.",
-    ].join("\n"),
-    doneWhen: [
-      "runDecision is complete, continue, verify, or defer",
-      "decision cites repository, test, dashboard, and harness action evidence",
-      "complete creates no nextTasks",
-      "defer cites the external dependency or missing action and creates no nextTasks",
-      "continue or verify includes one to five follow-up tasks",
-    ],
-  });
+  const taskId = createGoalReviewTask(harness, runId);
   return {
     status: "done" as const,
     summary: `Created goal-review task ${taskId}.`,
@@ -1210,6 +1246,20 @@ function ensureGoalReviewTask(
     artifacts: [{ kind: "goal_review", taskId, status: "todo", created: true }],
     problems: [],
   };
+}
+
+function createGoalReviewTask(harness: Harness, runId: string) {
+  return harness.createTask({
+    runId,
+    role: "goal-review",
+    goal: GOAL_REVIEW_TASK_GOAL,
+    prompt: GOAL_REVIEW_TASK_PROMPT,
+    doneWhen: GOAL_REVIEW_TASK_DONE_WHEN,
+  });
+}
+
+export function goalReviewOutputHasCompletion(output: AttemptOutput) {
+  return resolveRunDecision(output) === "complete";
 }
 
 function doneResult(
@@ -1278,7 +1328,11 @@ function selectCompletedGoalReview(overview: RunOverview): Task | null {
       return false;
     }
     const session = latestSessionForTask(overview, task.id);
-    return session?.output.status === "done" && session.output.runDecision === "complete";
+    if (session?.output.status !== "done") {
+      return false;
+    }
+    const decision = resolveRunDecision(session.output);
+    return decision === "complete" && (session.output.nextTasks ?? []).length === 0;
   }) ?? null;
 }
 
