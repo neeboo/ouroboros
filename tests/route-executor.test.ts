@@ -111,6 +111,8 @@ describe("route executor", () => {
         "gpt-5-codex",
         "--skip-git-repo-check",
         "--ignore-user-config",
+        "-c",
+        'approval_policy="never"',
         "--output-last-message",
         expect.any(String),
         "-C",
