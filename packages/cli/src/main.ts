@@ -57,6 +57,50 @@ const DEFAULT_GENERIC_ATTEMPT_HARD_TIMEOUT_MS = 30 * 60 * 1000;
 const SELF_ITERATION_GOAL = "Use Ouroboros to plan its own next self-iteration cycle";
 const SELF_ITERATION_PLAN_DOC = "docs/self-iteration-plan.md";
 const DEFAULT_STOP_HOOKS = "create-runs,create-tasks,create-verifier,create-repair,context-summary";
+const SELF_ITERATION_GOAL_CONTRACT = {
+  desiredState: "Ouroboros can plan and drain its own next improvement cycle before it asks for human intervention.",
+  successCriteria: [
+    "a new Ouroboros run exists for self-iteration",
+    "its planner has produced a fine-grained task graph or a justified verifier task",
+    "the dashboard shows the active goal, task stream, todos, and runner state for that run",
+    "the generated graph points to concrete files and checks",
+    "no implementation task starts from an underspecified prompt",
+    "the run-loop can drain the generated graph to either done tasks, blocked tasks with repair paths, or a goal-review decision",
+  ],
+  constraints: [
+    "Do not change database schema or dependency sets in this slice",
+    "Do not start implementation from a vague task",
+    "Prefer small JSON contracts stored in run context or task config",
+    "Execution must not quietly weaken the contract",
+  ],
+  requiredEvidence: [
+    "orbs run-overview --run-id <run_id>",
+    "orbs list-lessons --run-id <run_id>",
+    "task graph with concrete files and checks",
+    "verifier decisions based on evidence",
+  ],
+  budget: {
+    maxRounds: 8,
+    maxAttemptsPerTask: DEFAULT_MAX_TRIES,
+  },
+  stopPolicy: {
+    completeWhen: [
+      "all generated work is drained and goal-review marks the run complete",
+      "completion criteria are satisfied with cited evidence",
+    ],
+    blockWhen: [
+      "verifier failures cannot be repaired inside the retry budget",
+      "the generated graph cannot be drained by run-loop",
+    ],
+    askHumanWhen: [
+      "a task wants to change repository structure",
+      "a task wants to introduce a new dependency",
+      "a task wants to alter the prompt contract or database schema",
+      "a verifier finds ambiguous product behavior",
+      "the run is done and the dashboard claims there is no queued work",
+    ],
+  },
+};
 const SELF_ITERATION_PLANNER_DONE_WHEN = [
   "Planner output contains a small nextTasks graph, usually two to five tasks across two to three independent areas when possible",
   "Every planned task has one role, one concrete goal, and one prompt with exact files or commands to inspect first",
@@ -1090,6 +1134,7 @@ async function createSelfIterationBootstrap() {
     context: withSelfIterationConfigDefaults({
       source: "self-iterate",
       planDoc: SELF_ITERATION_PLAN_DOC,
+      goalContract: SELF_ITERATION_GOAL_CONTRACT,
     }, config),
   });
   const taskId = harness.createTask({

@@ -233,21 +233,35 @@ describe("CLI", () => {
     expect(result.runnerCommand).toContain("--start-hook git-worktree");
     expect(result.runnerCommand).toContain("--stop-hook create-runs,create-tasks,create-verifier,create-repair,context-summary");
 
-    expect(overview.run).toMatchObject({
-      id: result.runId,
-      goal: "Use Ouroboros to plan its own next self-iteration cycle",
-      context: expect.objectContaining({
-        source: "self-iterate",
-        planDoc: "docs/self-iteration-plan.md",
-        modelDefaults: {
-          roles: {
-            worker: {
-              model: "gpt-5.4-mini",
-            },
-          },
-        },
-      }),
-    });
+    expect(overview.run.id).toBe(result.runId);
+    expect(overview.run.goal).toBe("Use Ouroboros to plan its own next self-iteration cycle");
+    expect(overview.run.context.source).toBe("self-iterate");
+    expect(overview.run.context.planDoc).toBe("docs/self-iteration-plan.md");
+    expect(overview.run.context.modelDefaults.roles.worker.model).toBe("gpt-5.4-mini");
+    const goalContract = overview.run.context.goalContract;
+    expect(goalContract).toBeDefined();
+    expect(typeof goalContract.desiredState).toBe("string");
+    expect(goalContract.desiredState).toContain("plan and drain its own next improvement cycle");
+    expect(Array.isArray(goalContract.successCriteria)).toBe(true);
+    expect(goalContract.successCriteria.length).toBeGreaterThan(0);
+    expect(goalContract.successCriteria).toContain("a new Ouroboros run exists for self-iteration");
+    expect(goalContract.successCriteria).toContain("the generated graph points to concrete files and checks");
+    expect(Array.isArray(goalContract.constraints)).toBe(true);
+    expect(goalContract.constraints.length).toBeGreaterThan(0);
+    expect(goalContract.constraints).toContain("Do not change database schema or dependency sets in this slice");
+    expect(goalContract.constraints).toContain("Do not start implementation from a vague task");
+    expect(Array.isArray(goalContract.requiredEvidence)).toBe(true);
+    expect(goalContract.requiredEvidence.length).toBeGreaterThan(0);
+    expect(goalContract.requiredEvidence).toContain("orbs run-overview --run-id <run_id>");
+    expect(goalContract.requiredEvidence).toContain("orbs list-lessons --run-id <run_id>");
+    expect(goalContract.budget.maxRounds).toBe(8);
+    expect(goalContract.budget.maxAttemptsPerTask).toBe(3);
+    expect(Array.isArray(goalContract.stopPolicy.completeWhen)).toBe(true);
+    expect(goalContract.stopPolicy.completeWhen.length).toBeGreaterThan(0);
+    expect(Array.isArray(goalContract.stopPolicy.blockWhen)).toBe(true);
+    expect(goalContract.stopPolicy.blockWhen.length).toBeGreaterThan(0);
+    expect(Array.isArray(goalContract.stopPolicy.askHumanWhen)).toBe(true);
+    expect(goalContract.stopPolicy.askHumanWhen.length).toBeGreaterThan(0);
     expect(overview.tasks).toHaveLength(1);
     expect(overview.tasks[0]).toMatchObject({
       id: result.taskId,
