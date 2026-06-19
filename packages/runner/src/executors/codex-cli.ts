@@ -22,6 +22,8 @@ export function createCodexCliExecutor(options: CodexCliExecutorOptions): TaskEx
         ...modelArgs,
         "--skip-git-repo-check",
         "--ignore-user-config",
+        "-c",
+        'approval_policy="never"',
         "--output-last-message",
         outputPath,
         "-C",

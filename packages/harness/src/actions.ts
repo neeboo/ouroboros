@@ -1191,8 +1191,9 @@ function ensureGoalReviewTask(
       "Answer this before creating more work: are we sure the original run goal has been reached?",
       "",
       "Inspect the repository, tests, dashboard state, recent attempts, run lessons, and harness action events.",
+      "Before choosing a runDecision, cite concrete evidence from repository files or docs, tests or commands, dashboard or run overview state, and recent lessons.",
       "Return structured JSON with runDecision complete, continue, verify, or defer.",
-      "Do not declare complete unless concrete evidence proves the original goal is satisfied.",
+      "Do not declare complete unless the summary, checks, artifacts, or problems cite that evidence before declaring complete.",
     ].join("\n"),
     doneWhen: [
       "runDecision is complete, continue, verify, or defer",
