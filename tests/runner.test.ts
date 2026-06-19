@@ -2171,6 +2171,89 @@ describe("runner", () => {
     expect(Bun.file(join(repoPath, "src", "original.ts")).exists()).resolves.toBe(false);
   });
 
+  test("supervisor refuses to mark a run done while verified worker changes remain unintegrated", async () => {
+    const repoPath = join(dir, "repo-unintegrated-supervisor");
+    const worktreePath = join(dir, "verified-worker-unintegrated");
+    await mkdir(repoPath, { recursive: true });
+    await writeFile(join(repoPath, "README.md"), "initial\n");
+    git(repoPath, ["init", "-b", "main"]);
+    git(repoPath, ["config", "user.name", "Ouroboros Test"]);
+    git(repoPath, ["config", "user.email", "test@example.com"]);
+    git(repoPath, ["config", "commit.gpgSign", "false"]);
+    git(repoPath, ["add", "README.md"]);
+    git(repoPath, ["commit", "-m", "Initial commit"]);
+    git(repoPath, ["worktree", "add", "-b", "task-unintegrated-worker", worktreePath, "main"]);
+    await mkdir(join(worktreePath, "src"), { recursive: true });
+    await writeFile(join(worktreePath, "src", "pending.ts"), "export const pending = true;\n");
+
+    const runId = harness.createRun({ goal: "Block completion until integration", projectRoot: repoPath });
+    const workerTaskId = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Implement pending work",
+      prompt: "Create src/pending.ts.",
+      worktreePath,
+    });
+    harness.recordAttempt({
+      taskId: workerTaskId,
+      input: { executor: "test" },
+      output: {
+        status: "done",
+        summary: "Created pending file",
+        changedFiles: ["src/pending.ts"],
+        checks: [{ name: "worker check", status: "passed" }],
+        artifacts: [],
+        problems: [],
+      },
+    });
+    const verifierTaskId = harness.createTask({
+      runId,
+      role: "verifier",
+      goal: "Verify pending work",
+      prompt: "Verify worker output.",
+      dependsOn: [workerTaskId],
+    });
+    harness.recordAttempt({
+      taskId: verifierTaskId,
+      input: { executor: "test" },
+      output: {
+        status: "done",
+        summary: "Verified",
+        changedFiles: [],
+        checks: [{ name: "verify", status: "passed" }],
+        artifacts: [],
+        problems: [],
+      },
+    });
+    harness.createTask({
+      runId,
+      role: "goal-review",
+      goal: "Mark complete",
+      prompt: "Return runDecision complete.",
+    });
+    harness.updateRunStatus({ runId, status: "running" });
+
+    await runReadyTasks({
+      harness,
+      runId,
+      limit: 1,
+      executorFactory: () => async () => ({
+        status: "done",
+        runDecision: "complete",
+        summary: "Goal reached",
+        changedFiles: [],
+        checks: [{ name: "goal", status: "passed" }],
+        artifacts: [],
+        problems: [],
+      }),
+    });
+
+    const run = harness.getRun(runId)!;
+    expect(run.status).toBe("blocked");
+    expect(run.context.pendingIntegrationWorkerTaskIds).toEqual([workerTaskId]);
+    expect(run.context.pendingIntegrationReason).toMatch(/not integrated/);
+  });
+
   test("runner keeps dependency attempts empty for tasks without dependencies", async () => {
     const runId = harness.createRun({ goal: "Build loop" });
     harness.createTask({

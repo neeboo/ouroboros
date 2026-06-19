@@ -1,5 +1,6 @@
 import {
   applyHarnessAction,
+  describeIntegrationReadiness,
   diagnoseRunOverview,
   type Attempt,
   type AttemptOutput,
@@ -1002,20 +1003,33 @@ function withCodexArtifacts(output: AttemptOutput, sessionId: string | null): At
 }
 
 function applyPostAttemptRunEffects(
-  harness: Pick<Harness, "updateRun" | "updateRunStatus">,
+  harness: Harness,
   runId: string,
   task: Pick<Task, "role">,
   output: AttemptOutput,
 ) {
   if (task.role === "goal-review" && output.status === "done" && output.runDecision === "complete") {
-    harness.updateRun({
-      runId,
-      status: "done",
-      contextPatch: {
-        goalReviewInvalidatedByIntegration: false,
-        goalReviewRefreshedAt: new Date().toISOString(),
-      },
-    });
+    const readiness = describeIntegrationReadiness(harness, runId);
+    if (readiness.unintegrated.length > 0) {
+      harness.updateRun({
+        runId,
+        status: "blocked",
+        contextPatch: {
+          pendingIntegrationWorkerTaskIds: readiness.unintegrated.map((worker) => worker.taskId),
+          pendingIntegrationReason: "verified worker changes are not integrated yet",
+          goalReviewRefreshedAt: new Date().toISOString(),
+        },
+      });
+    } else {
+      harness.updateRun({
+        runId,
+        status: "done",
+        contextPatch: {
+          goalReviewInvalidatedByIntegration: false,
+          goalReviewRefreshedAt: new Date().toISOString(),
+        },
+      });
+    }
   }
   if (task.role === "goal-review" && output.status === "done" && output.runDecision === "defer") {
     harness.updateRunStatus({ runId, status: "blocked" });

@@ -2,6 +2,7 @@
 import {
   acceptGuardrailProposal as acceptGuardrailProposalInContext,
   applyHarnessAction,
+  describeIntegrationReadiness,
   diagnoseRunOverview,
   Harness,
   proposeGuardrailsFromLessons as buildGuardrailProposalsFromLessons,
@@ -1679,7 +1680,19 @@ function parseCodexResumableSandbox() {
 
 function applyCliPostAttemptRunEffects(runId: string, task: Pick<Task, "role">, output: AttemptOutput) {
   if (task.role === "goal-review" && output.status === "done" && output.runDecision === "complete") {
-    harness.updateRunStatus({ runId, status: "done" });
+    const readiness = describeIntegrationReadiness(harness, runId);
+    if (readiness.unintegrated.length > 0) {
+      harness.updateRun({
+        runId,
+        status: "blocked",
+        contextPatch: {
+          pendingIntegrationWorkerTaskIds: readiness.unintegrated.map((worker) => worker.taskId),
+          pendingIntegrationReason: "verified worker changes are not integrated yet",
+        },
+      });
+    } else {
+      harness.updateRunStatus({ runId, status: "done" });
+    }
   }
   if (task.role === "goal-review" && output.status === "done" && output.runDecision === "defer") {
     harness.updateRunStatus({ runId, status: "blocked" });

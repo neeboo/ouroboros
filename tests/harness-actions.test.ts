@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { applyHarnessAction, Harness } from "../packages/harness/src";
+import { applyHarnessAction, describeIntegrationReadiness, Harness } from "../packages/harness/src";
 import { handleHarnessActionRequest } from "../packages/cli/src/action-server";
 
 describe("Harness actions", () => {
@@ -176,6 +176,86 @@ describe("Harness actions", () => {
       expect.objectContaining({ kind: "run", runId, previousStatus: "todo", status: "done" }),
     );
     expect(overview.run?.status).toBe("done");
+  });
+
+  test("prepareRunDrain blocks completion while verified worker changes remain unintegrated", () => {
+    const runId = harness.createRun({ goal: "Do not complete with pending worker integration" });
+    const workerTaskId = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Change code",
+      prompt: "Edit src/pending.ts.",
+      worktreePath: "/tmp/ouroboros-worker-pending",
+    });
+    harness.recordAttempt({
+      taskId: workerTaskId,
+      input: { executor: "test" },
+      output: {
+        status: "done",
+        summary: "Worker changed code",
+        changedFiles: ["src/pending.ts"],
+        checks: [{ name: "worker", status: "passed" }],
+        artifacts: [],
+        problems: [],
+      },
+    });
+    const verifierTaskId = harness.createTask({
+      runId,
+      role: "verifier",
+      goal: "Verify code",
+      prompt: "Verify worker.",
+      dependsOn: [workerTaskId],
+    });
+    harness.recordAttempt({
+      taskId: verifierTaskId,
+      input: { executor: "test" },
+      output: {
+        status: "done",
+        summary: "Verified",
+        changedFiles: [],
+        checks: [{ name: "verify", status: "passed" }],
+        artifacts: [],
+        problems: [],
+      },
+    });
+    const reviewTaskId = harness.createTask({
+      runId,
+      role: "goal-review",
+      goal: "Review whether the run goal is complete",
+      prompt: "Review completion.",
+    });
+    harness.recordAttempt({
+      taskId: reviewTaskId,
+      input: { executor: "test" },
+      output: {
+        status: "done",
+        runDecision: "complete",
+        summary: "Goal reached",
+        changedFiles: [],
+        checks: [{ name: "goal review", status: "passed", evidence: "complete" }],
+        artifacts: [],
+        problems: [],
+      },
+    });
+
+    const result = applyHarnessAction(harness, {
+      type: "prepareRunDrain",
+      runId,
+      maxTries: 2,
+    });
+    const overview = harness.getRunOverview({ runId });
+
+    expect(result).toMatchObject({
+      status: "blocked",
+      actionType: "prepareRunDrain",
+      summary: expect.stringContaining("unintegrated verified worker"),
+      problems: [expect.stringContaining(workerTaskId)],
+    });
+    expect(result.artifacts).toContainEqual(
+      expect.objectContaining({ kind: "pending_integration", taskId: workerTaskId, verifierTaskId, changedFiles: ["src/pending.ts"] }),
+    );
+    expect(overview.run?.status).toBe("blocked");
+    expect(overview.run?.context.pendingIntegrationWorkerTaskIds).toEqual([workerTaskId]);
   });
 
   test("prepares a drained run by ignoring goal-review decisions invalidated by integration", () => {
@@ -694,6 +774,366 @@ describe("Harness actions", () => {
       actionType: "integrateVerifiedRun",
       status: "blocked",
     });
+  });
+
+  test("redirects integration to the source worker worktree when a verified repair worker has no diff", async () => {
+    const repoPath = join(dir, "repo-repair-redirect");
+    const sourceWorktreePath = join(dir, "worker-tree-source");
+    const repairWorktreePath = join(dir, "worker-tree-repair");
+    await mkdir(repoPath, { recursive: true });
+    await writeFile(join(repoPath, "README.md"), "initial\n");
+    git(repoPath, ["init", "-b", "main"]);
+    git(repoPath, ["config", "user.name", "Ouroboros Test"]);
+    git(repoPath, ["config", "user.email", "test@example.com"]);
+    git(repoPath, ["config", "commit.gpgSign", "false"]);
+    git(repoPath, ["add", "README.md"]);
+    git(repoPath, ["commit", "-m", "Initial commit"]);
+    git(repoPath, ["worktree", "add", "-b", "task-source-worker", sourceWorktreePath, "main"]);
+    git(repoPath, ["worktree", "add", "-b", "task-repair-worker", repairWorktreePath, "main"]);
+    // The actual change lands in the source worker worktree (uncommitted).
+    await mkdir(join(sourceWorktreePath, "src"), { recursive: true });
+    await writeFile(join(sourceWorktreePath, "src", "fixed.ts"), "export const fixed = true;\n");
+    // The repair worker worktree is clean (the agent edited the source path, not its own).
+
+    const runId = harness.createRun({ goal: "Integrate repair that edited the source worker worktree", projectRoot: repoPath });
+    const sourceWorkerTaskId = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Original source worker",
+      prompt: "Edit src/fixed.ts.",
+      worktreePath: sourceWorktreePath,
+    });
+    harness.recordAttempt({
+      taskId: sourceWorkerTaskId,
+      input: { executor: "test" },
+      output: {
+        status: "done",
+        summary: "Edited source worker file",
+        changedFiles: ["src/fixed.ts"],
+        checks: [{ name: "source worker", status: "passed" }],
+        artifacts: [],
+        problems: [],
+      },
+    });
+    const blockingVerifierTaskId = harness.createTask({
+      runId,
+      role: "verifier",
+      goal: "Reject initial source worker output",
+      prompt: "Block the source worker.",
+      dependsOn: [sourceWorkerTaskId],
+    });
+    harness.recordAttempt({
+      taskId: blockingVerifierTaskId,
+      input: { executor: "test" },
+      output: {
+        status: "blocked",
+        summary: "Initial source worker output needed repair",
+        changedFiles: [],
+        checks: [{ name: "verifier", status: "failed" }],
+        artifacts: [
+          { kind: "created_repair_task", taskId: "placeholder", verifierTaskId: blockingVerifierTaskId },
+        ],
+        problems: ["source worker output needed repair"],
+      },
+    });
+    const repairWorkerTaskId = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Repair: address verifier feedback",
+      prompt: "Edit src/fixed.ts in the source worker worktree.",
+      worktreePath: repairWorktreePath,
+      parentId: blockingVerifierTaskId,
+    });
+    harness.recordAttempt({
+      taskId: repairWorkerTaskId,
+      input: { executor: "test" },
+      output: {
+        status: "done",
+        summary: "Repair applied to source worker worktree",
+        changedFiles: ["src/fixed.ts"],
+        checks: [{ name: "repair", status: "passed" }],
+        artifacts: [],
+        problems: [],
+      },
+    });
+    const repairVerifierTaskId = harness.createTask({
+      runId,
+      role: "verifier",
+      goal: "Verify repaired worker output",
+      prompt: "Verify repair.",
+      dependsOn: [repairWorkerTaskId],
+    });
+    harness.recordAttempt({
+      taskId: repairVerifierTaskId,
+      input: { executor: "test" },
+      output: {
+        status: "done",
+        summary: "Repair verified",
+        changedFiles: [],
+        checks: [{ name: "verify", status: "passed" }],
+        artifacts: [],
+        problems: [],
+      },
+    });
+    const goalReviewTaskId = harness.createTask({
+      runId,
+      role: "goal-review",
+      goal: "Mark repair run complete",
+      prompt: "Mark the run complete.",
+    });
+    harness.recordAttempt({
+      taskId: goalReviewTaskId,
+      input: { executor: "test" },
+      output: {
+        status: "done",
+        runDecision: "complete",
+        summary: "Repair complete",
+        changedFiles: [],
+        checks: [{ name: "goal", status: "passed" }],
+        artifacts: [],
+        problems: [],
+      },
+    });
+    harness.updateRunStatus({ runId, status: "done" });
+
+    const result = applyHarnessAction(harness, {
+      type: "integrateVerifiedRun",
+      runId,
+      workerTaskId: repairWorkerTaskId,
+      commitMessage: "Integrate redirected repair",
+      reason: "supervisor picks verified repair",
+    });
+    const readinessAfter = describeIntegrationReadiness(harness, runId);
+    const integratedFile = await readFile(join(repoPath, "src", "fixed.ts"), "utf8").catch(() => null);
+    const event = harness.listHarnessActionEvents({ limit: 1 })[0];
+
+    expect(result).toMatchObject({ status: "done", actionType: "integrateVerifiedRun" });
+    expect(result.checks).toContainEqual(
+      expect.objectContaining({
+        name: "repair redirected to source worktree",
+        status: "passed",
+        evidence: expect.stringContaining(sourceWorkerTaskId),
+      }),
+    );
+    expect(result.artifacts).toContainEqual(
+      expect.objectContaining({
+        kind: "integration",
+        workerTaskId: sourceWorkerTaskId,
+        verifierTaskId: repairVerifierTaskId,
+        worktreePath: sourceWorktreePath,
+        sourceBranch: "task-source-worker",
+        changedFiles: ["src/fixed.ts"],
+      }),
+    );
+    expect(integratedFile?.trim()).toBe("export const fixed = true;");
+    expect(readinessAfter.unintegrated).toHaveLength(0);
+    expect(readinessAfter.integratedWorkerTaskIds.has(sourceWorkerTaskId)).toBe(true);
+    expect(event).toMatchObject({
+      actionType: "integrateVerifiedRun",
+      status: "done",
+      request: expect.objectContaining({ workerTaskId: repairWorkerTaskId }),
+    });
+  });
+
+  test("blocks concurrent integrateVerifiedRun actions when MERGE_HEAD exists on the target repository", async () => {
+    const repoPath = join(dir, "repo-concurrent");
+    const worktreePath = join(dir, "worker-tree-concurrent");
+    await mkdir(repoPath, { recursive: true });
+    await writeFile(join(repoPath, "README.md"), "initial\n");
+    git(repoPath, ["init", "-b", "main"]);
+    git(repoPath, ["config", "user.name", "Ouroboros Test"]);
+    git(repoPath, ["config", "user.email", "test@example.com"]);
+    git(repoPath, ["config", "commit.gpgSign", "false"]);
+    git(repoPath, ["add", "README.md"]);
+    git(repoPath, ["commit", "-m", "Initial commit"]);
+    git(repoPath, ["worktree", "add", "-b", "task-worker-concurrent", worktreePath, "main"]);
+    await mkdir(join(worktreePath, "src"), { recursive: true });
+    await writeFile(join(worktreePath, "src", "merge.ts"), "export const merged = true;\n");
+
+    const runId = harness.createRun({ goal: "Serialize integration actions", projectRoot: repoPath });
+    const workerTaskId = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Worker for merge-head test",
+      prompt: "Edit src/merge.ts.",
+      worktreePath,
+    });
+    harness.recordAttempt({
+      taskId: workerTaskId,
+      input: { executor: "test" },
+      output: {
+        status: "done",
+        summary: "Worker for merge-head test",
+        changedFiles: ["src/merge.ts"],
+        checks: [{ name: "worker", status: "passed" }],
+        artifacts: [],
+        problems: [],
+      },
+    });
+    const verifierTaskId = harness.createTask({
+      runId,
+      role: "verifier",
+      goal: "Verify worker",
+      prompt: "Verify worker changes.",
+      dependsOn: [workerTaskId],
+    });
+    harness.recordAttempt({
+      taskId: verifierTaskId,
+      input: { executor: "test" },
+      output: {
+        status: "done",
+        summary: "Verified",
+        changedFiles: [],
+        checks: [{ name: "verify", status: "passed" }],
+        artifacts: [],
+        problems: [],
+      },
+    });
+    const goalReviewTaskId = harness.createTask({
+      runId,
+      role: "goal-review",
+      goal: "Mark complete",
+      prompt: "Mark run complete.",
+    });
+    harness.recordAttempt({
+      taskId: goalReviewTaskId,
+      input: { executor: "test" },
+      output: {
+        status: "done",
+        runDecision: "complete",
+        summary: "Goal reached",
+        changedFiles: [],
+        checks: [{ name: "goal", status: "passed" }],
+        artifacts: [],
+        problems: [],
+      },
+    });
+    harness.updateRunStatus({ runId, status: "done" });
+
+    // Simulate a concurrent in-progress merge on the target repository by writing MERGE_HEAD.
+    await writeFile(join(repoPath, ".git", "MERGE_HEAD"), "0123456789abcdef0123456789abcdef01234567\n");
+
+    const result = applyHarnessAction(harness, {
+      type: "integrateVerifiedRun",
+      runId,
+      workerTaskId,
+      commitMessage: "Should not run while MERGE_HEAD exists",
+      reason: "concurrent integration attempt",
+    });
+    const event = harness.listHarnessActionEvents({ limit: 1 })[0];
+
+    expect(result).toMatchObject({
+      status: "blocked",
+      actionType: "integrateVerifiedRun",
+      summary: expect.stringContaining("unfinished merge"),
+    });
+    expect(result.problems).toContainEqual(expect.stringContaining("MERGE_HEAD"));
+    expect(result.checks).toContainEqual(
+      expect.objectContaining({ name: "integration preflight", status: "failed", evidence: expect.stringContaining("MERGE_HEAD") }),
+    );
+    expect(event).toMatchObject({
+      actionType: "integrateVerifiedRun",
+      status: "blocked",
+    });
+  });
+
+  test("refuses to mark a run done while verified worker changes remain unintegrated", async () => {
+    const repoPath = join(dir, "repo-unintegrated");
+    const worktreePath = join(dir, "worker-tree-unintegrated");
+    await mkdir(repoPath, { recursive: true });
+    await writeFile(join(repoPath, "README.md"), "initial\n");
+    git(repoPath, ["init", "-b", "main"]);
+    git(repoPath, ["config", "user.name", "Ouroboros Test"]);
+    git(repoPath, ["config", "user.email", "test@example.com"]);
+    git(repoPath, ["config", "commit.gpgSign", "false"]);
+    git(repoPath, ["add", "README.md"]);
+    git(repoPath, ["commit", "-m", "Initial commit"]);
+    git(repoPath, ["worktree", "add", "-b", "task-worker-unintegrated", worktreePath, "main"]);
+    await mkdir(join(worktreePath, "src"), { recursive: true });
+    await writeFile(join(worktreePath, "src", "pending.ts"), "export const pending = true;\n");
+
+    const runId = harness.createRun({ goal: "Block run completion until integration", projectRoot: repoPath });
+    const workerTaskId = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Worker for unintegrated test",
+      prompt: "Edit src/pending.ts.",
+      worktreePath,
+    });
+    harness.recordAttempt({
+      taskId: workerTaskId,
+      input: { executor: "test" },
+      output: {
+        status: "done",
+        summary: "Pending integration",
+        changedFiles: ["src/pending.ts"],
+        checks: [{ name: "worker", status: "passed" }],
+        artifacts: [],
+        problems: [],
+      },
+    });
+    const verifierTaskId = harness.createTask({
+      runId,
+      role: "verifier",
+      goal: "Verify worker",
+      prompt: "Verify worker changes.",
+      dependsOn: [workerTaskId],
+    });
+    harness.recordAttempt({
+      taskId: verifierTaskId,
+      input: { executor: "test" },
+      output: {
+        status: "done",
+        summary: "Verified",
+        changedFiles: [],
+        checks: [{ name: "verify", status: "passed" }],
+        artifacts: [],
+        problems: [],
+      },
+    });
+    const goalReviewTaskId = harness.createTask({
+      runId,
+      role: "goal-review",
+      goal: "Mark complete",
+      prompt: "Mark run complete.",
+    });
+    harness.recordAttempt({
+      taskId: goalReviewTaskId,
+      input: { executor: "test" },
+      output: {
+        status: "done",
+        runDecision: "complete",
+        summary: "Goal reached but integration pending",
+        changedFiles: [],
+        checks: [{ name: "goal", status: "passed" }],
+        artifacts: [],
+        problems: [],
+      },
+    });
+
+    const readiness = describeIntegrationReadiness(harness, runId);
+    expect(readiness.unintegrated).toHaveLength(1);
+    expect(readiness.unintegrated[0]).toMatchObject({
+      taskId: workerTaskId,
+      verifierTaskId,
+      changedFiles: ["src/pending.ts"],
+    });
+
+    const run = harness.getRun(runId);
+    expect(run?.status).toBe("todo");
+
+    const integration = applyHarnessAction(harness, {
+      type: "integrateVerifiedRun",
+      runId,
+      workerTaskId,
+      commitMessage: "Integrate pending verified worker",
+      reason: "complete the run after integration",
+    });
+    expect(integration).toMatchObject({ status: "done" });
+
+    const readinessAfter = describeIntegrationReadiness(harness, runId);
+    expect(readinessAfter.unintegrated).toHaveLength(0);
+    expect(readinessAfter.integratedWorkerTaskIds.has(workerTaskId)).toBe(true);
   });
 
   test("retires a stale run from the active queue without deleting task evidence", () => {

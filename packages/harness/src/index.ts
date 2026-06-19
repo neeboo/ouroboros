@@ -13,11 +13,11 @@ export {
   inferExplicitRunDecision,
   resolveRunDecision,
 } from "./goal-review";
-export { applyHarnessAction, parseHarnessAction } from "./actions";
+export { applyHarnessAction, parseHarnessAction, describeIntegrationReadiness } from "./actions";
 export { acceptGuardrailProposal, proposeGuardrailsFromLessons, refreshGuardrailProposalsForRun } from "./guardrails";
 export { diagnoseRunOverview } from "./overseer";
 export { readableList, readableValue } from "./readable";
-export type { HarnessAction, HarnessActionOptions, HarnessActionResult } from "./actions";
+export type { HarnessAction, HarnessActionOptions, HarnessActionResult, IntegrationReadiness, UnintegratedVerifiedWorker } from "./actions";
 export type { GuardrailProposalRecord, RefreshGuardrailProposalsHarness, RefreshGuardrailProposalsResult } from "./guardrails";
 export type { OverseerDiagnosis, RunSupervisorState } from "./overseer";
 export type {
