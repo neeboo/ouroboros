@@ -1021,7 +1021,7 @@ function prepareRunDrain(harness: Harness, action: Extract<HarnessAction, { type
     return doneResult(action.type, `Run ${action.runId} marked done from existing complete goal-review.`, checks, artifacts);
   }
 
-  const review = ensureGoalReviewTask(harness, action.runId, maxTries, overview);
+  const review = ensureGoalReviewTask(harness, action.runId, maxTries, overview, goalReviewInvalidated);
   checks.push(...review.checks);
   artifacts.push(...review.artifacts);
   if (review.status === "blocked") {
@@ -1148,13 +1148,16 @@ function ensureGoalReviewTask(
   runId: string,
   maxTries: number,
   overview: ReturnType<Harness["getRunOverview"]>,
+  goalReviewInvalidated = false,
 ) {
   const latestProgressIndex = overview.sessions.reduce((latest, session, index) => {
     return session.role !== "goal-review" && session.status === "done" ? index : latest;
   }, -1);
-  const currentReviewSessions = overview.sessions.filter(
-    (session, index) => index > latestProgressIndex && session.role === "goal-review" && session.status === "done",
-  );
+  const currentReviewSessions = goalReviewInvalidated
+    ? []
+    : overview.sessions.filter(
+      (session, index) => index > latestProgressIndex && session.role === "goal-review" && session.status === "done",
+    );
 
   const latestReview = currentReviewSessions[currentReviewSessions.length - 1];
   if (latestReview && resolveRunDecision(latestReview.output) === "defer") {
@@ -1183,9 +1186,11 @@ function ensureGoalReviewTask(
     };
   }
 
-  const blockedReview = [...overview.tasks].reverse().find(
-    (task) => task.role === "goal-review" && task.status === "blocked",
-  );
+  const blockedReview = goalReviewInvalidated
+    ? undefined
+    : [...overview.tasks].reverse().find(
+      (task) => task.role === "goal-review" && task.status === "blocked",
+    );
   if (blockedReview) {
     const lastTask = overview.tasks[overview.tasks.length - 1];
     const blockedTries = overview.sessions.filter((session) => session.taskId === blockedReview.id).length;

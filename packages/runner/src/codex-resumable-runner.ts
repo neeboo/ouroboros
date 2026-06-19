@@ -1072,7 +1072,7 @@ function maybeIntegrateCompletedRun(
     results.push(result);
     integrated = successfulIntegrationState(input.harness, overview.run.id);
   }
-  if (!preCompletion && results.some((result) => result.status === "done")) {
+  if (results.some((result) => result.status === "done")) {
     input.harness.updateRun({
       runId: overview.run.id,
       status: "todo",

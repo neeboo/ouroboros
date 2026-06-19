@@ -224,6 +224,59 @@ describe("Harness actions", () => {
     expect(goalReviews.find((task) => task.id !== oldReviewTaskId)?.status).toBe("todo");
   });
 
+  test("prepares a drained run by ignoring invalidated non-terminal goal-review decisions", () => {
+    const runId = harness.createRun({
+      goal: "Review again after integration",
+      context: { goalReviewInvalidatedByIntegration: true },
+    });
+    const oldReviewTaskIds = Array.from({ length: 3 }, (_, index) =>
+      harness.createTask({
+        runId,
+        role: "goal-review",
+        goal: `Old review ${index + 1}`,
+        prompt: "This review predates integration.",
+      }),
+    );
+    for (const taskId of oldReviewTaskIds) {
+      harness.recordAttempt({
+        taskId,
+        input: { executor: "test" },
+        output: {
+          status: "done",
+          runDecision: "continue",
+          summary: "Old continue decision",
+          changedFiles: [],
+          checks: [{ name: "goal review", status: "failed", evidence: "old" }],
+          artifacts: [],
+          problems: ["old work remained"],
+        },
+      });
+    }
+
+    const result = applyHarnessAction(harness, {
+      type: "prepareRunDrain",
+      runId,
+      maxTries: 3,
+    });
+    const overview = harness.getRunOverview({ runId });
+    const goalReviews = overview.tasks.filter((task) => task.role === "goal-review");
+
+    expect(result).toMatchObject({
+      status: "done",
+      actionType: "prepareRunDrain",
+      summary: expect.stringContaining("Created goal-review task"),
+    });
+    expect(result.checks).toContainEqual(
+      expect.objectContaining({ name: "goal review invalidated", status: "passed", evidence: "integration" }),
+    );
+    expect(result.checks).not.toContainEqual(
+      expect.objectContaining({ name: "goal review continue limit", status: "failed" }),
+    );
+    expect(overview.run?.status).toBe("todo");
+    expect(goalReviews).toHaveLength(4);
+    expect(goalReviews.filter((task) => task.status === "todo")).toHaveLength(1);
+  });
+
   test("prepares a drained run by blocking todo tasks whose dependencies are blocked", () => {
     const runId = harness.createRun({ goal: "Drain impossible dependency chain" });
     const workerTaskId = harness.createTask({
