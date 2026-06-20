@@ -6,6 +6,7 @@ import { Harness } from "../packages/harness/src";
 import { formatRunEvidence } from "../packages/cli/src/run-evidence";
 import { formatAttemptExplanation } from "../packages/cli/src/explain-attempt";
 import { formatRunGraph } from "../packages/cli/src/run-graph";
+import { defaultDatabasePath, parseArgs } from "../packages/cli/src/args";
 import { Database } from "bun:sqlite";
 
 describe("CLI", () => {
@@ -53,6 +54,22 @@ describe("CLI", () => {
       db: dbPath,
       status: "initialized",
     });
+  });
+
+  test("default database path stays outside a git worktree", async () => {
+    const repoPath = join(dir, "target-repo");
+    await mkdir(repoPath, { recursive: true });
+    gitCli(repoPath, ["init", "-b", "main"]);
+
+    const originalCwd = process.cwd();
+    try {
+      process.chdir(repoPath);
+      const parsed = parseArgs(["run-overview", "--run-id", "run_missing"]);
+      expect(parsed.db).toBe(defaultDatabasePath(repoPath));
+      expect(parsed.db).toContain("/.git/orbs/ouroboros.db");
+    } finally {
+      process.chdir(originalCwd);
+    }
   });
 
   test("prints help without requiring a command or flag value", async () => {
@@ -4083,7 +4100,7 @@ describe("CLI", () => {
       JSON.stringify({
         status: "done",
         summary: "Increment shipped",
-        changedFiles: ["packages/cli/src/run-evidence.ts"],
+        changedFiles: ["packages/cli/src/run-evidence.ts", ".ouroboros/ouroboros.db"],
         checks: [{ name: "typecheck", status: "passed" }],
         artifacts: [],
         problems: [],
@@ -4142,6 +4159,7 @@ describe("CLI", () => {
     expect(summary).toContain("[artifact:verifier_contract]");
     expect(summary).toContain("packages/cli/src/run-evidence.ts");
     expect(summary).toContain("Changed files");
+    expect(summary).not.toContain(".ouroboros/ouroboros.db");
   });
 
   test("run-evidence CLI prints the human-readable summary for a seeded run", async () => {

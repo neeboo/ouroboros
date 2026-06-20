@@ -750,6 +750,7 @@ function printHelp() {
     "Usage:",
     "  orbs [--db <path>] <command> [options]",
     "  orbs --help",
+    "  Default DB: .git/orbs/ouroboros.db inside Git repositories, otherwise .ouroboros/ouroboros.db",
     "",
     "Core commands:",
     "  init                 Initialize the local SQLite database",

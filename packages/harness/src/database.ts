@@ -1,19 +1,25 @@
 import { Database } from "bun:sqlite";
-import { mkdirSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 
 export function initDatabase(dbPath: string) {
-  withDatabase(dbPath, (db) => {
+  const resolvedPath = normalizeDatabasePath(dbPath);
+  const allowMissingSchema = !databaseFileExists(resolvedPath);
+  withDatabase(resolvedPath, (db) => {
     db.exec(readFileSync(join(import.meta.dir, "..", "schema.sql"), "utf8"));
     ensureProjects(db);
     ensureTaskConfig(db);
     ensureTaskCycles(db);
     ensureHarnessActionEvents(db);
     ensureRunLifecycleGuards(db);
-  });
+  }, { allowMissingSchema });
 }
 
-export function withDatabase<T>(dbPath: string, callback: (db: Database) => T) {
+export function withDatabase<T>(
+  dbPath: string,
+  callback: (db: Database) => T,
+  options: { allowMissingSchema?: boolean } = {},
+) {
   const resolvedPath = normalizeDatabasePath(dbPath);
   ensureDatabaseDirectory(resolvedPath);
   const db = new Database(resolvedPath);
@@ -21,6 +27,9 @@ export function withDatabase<T>(dbPath: string, callback: (db: Database) => T) {
   db.exec("pragma busy_timeout = 30000");
   db.exec("pragma journal_mode = wal");
   db.exec("pragma synchronous = normal");
+  if (!options.allowMissingSchema) {
+    ensureOuroborosSchema(db, resolvedPath);
+  }
   try {
     return callback(db);
   } finally {
@@ -40,6 +49,24 @@ function ensureDatabaseDirectory(dbPath: string) {
     return;
   }
   mkdirSync(dirname(dbPath), { recursive: true });
+}
+
+function databaseFileExists(dbPath: string) {
+  return dbPath === ":memory:" || dbPath.startsWith("file:") || existsSync(dbPath);
+}
+
+function ensureOuroborosSchema(db: Database, dbPath: string) {
+  if (dbPath === ":memory:" || dbPath.startsWith("file:")) {
+    return;
+  }
+  const row = db
+    .query("select name from sqlite_master where type = 'table' and name = 'runs'")
+    .get() as { name: string } | null;
+  if (!row) {
+    throw new Error(
+      `Ouroboros database is missing schema: ${dbPath}. The run database may be corrupted or this command is pointing at the wrong DB. Run init only for a new database, or restore/recreate the run DB.`,
+    );
+  }
 }
 
 function ensureTaskCycles(db: Database) {

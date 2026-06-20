@@ -290,7 +290,7 @@ describe("Harness", () => {
         insert into runs (id, goal, status, context_json)
         values ('run_old', 'Legacy run', 'todo', '{"projectRoot":"/legacy/root"}');
       `);
-    });
+    }, { allowMissingSchema: true });
 
     initDatabase(oldDbPath);
     const reopened = new Harness(oldDbPath);
@@ -338,7 +338,7 @@ describe("Harness", () => {
         insert into tasks (id, run_id, status, role, goal, prompt)
         values ('task_old', 'run_old', 'todo', 'worker', 'Legacy task', 'Work.');
       `);
-    });
+    }, { allowMissingSchema: true });
 
     initDatabase(oldDbPath);
     const reopened = new Harness(oldDbPath);
@@ -425,12 +425,21 @@ describe("Harness", () => {
     withDatabase(nestedDbPath, (db) => {
       db.exec("create table if not exists smoke (id text primary key)");
       db.query("insert into smoke (id) values ($id)").run({ $id: "ok" });
-    });
+    }, { allowMissingSchema: true });
 
     expect(existsSync(nestedDbPath)).toBe(true);
-    expect(withDatabase(nestedDbPath, (db) => db.query("select id from smoke").get() as { id: string })).toEqual({
-      id: "ok",
-    });
+    expect(
+      withDatabase(nestedDbPath, (db) => db.query("select id from smoke").get() as { id: string }, {
+        allowMissingSchema: true,
+      }),
+    ).toEqual({ id: "ok" });
+  });
+
+  test("withDatabase diagnoses an existing empty Ouroboros database instead of treating it as a new run DB", async () => {
+    const emptyDbPath = join(dir, "empty", "ouroboros.db");
+    withDatabase(emptyDbPath, () => null, { allowMissingSchema: true });
+
+    expect(() => withDatabase(emptyDbPath, () => null)).toThrow("Ouroboros database is missing schema");
   });
 
   test("seeds and updates prompt templates", () => {

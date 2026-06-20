@@ -1,4 +1,5 @@
 import { resolve } from "node:path";
+import { spawnSync } from "node:child_process";
 
 export interface ParsedArgs {
   db: string;
@@ -7,7 +8,7 @@ export interface ParsedArgs {
 }
 
 export function parseArgs(args: string[]): ParsedArgs {
-  let db = ".ouroboros/ouroboros.db";
+  let db: string | null = null;
   const flags = new Map<string, string>();
   let command: string | null = null;
 
@@ -42,7 +43,7 @@ export function parseArgs(args: string[]): ParsedArgs {
     }
   }
 
-  return { db: normalizeCliDatabasePath(db), command, flags };
+  return { db: normalizeCliDatabasePath(db ?? defaultDatabasePath(process.cwd())), command, flags };
 }
 
 export function required(args: ParsedArgs, name: string) {
@@ -71,4 +72,17 @@ function normalizeCliDatabasePath(dbPath: string) {
     return dbPath;
   }
   return resolve(dbPath);
+}
+
+export function defaultDatabasePath(cwd: string) {
+  const result = spawnSync("git", ["-C", cwd, "rev-parse", "--path-format=absolute", "--git-path", "orbs/ouroboros.db"], {
+    encoding: "utf8",
+  });
+  if (result.status === 0) {
+    const gitPath = result.stdout.trim();
+    if (gitPath.length > 0) {
+      return gitPath;
+    }
+  }
+  return ".ouroboros/ouroboros.db";
 }

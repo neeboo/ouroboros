@@ -903,6 +903,80 @@ describe("Harness actions", () => {
     expect(git(repoPath, ["log", "--oneline", "-1"]).stdout).toContain("Initial commit");
   });
 
+  test("ignores Ouroboros runtime files when integrating materialized target changes", async () => {
+    const repoPath = join(dir, "repo-materialized-runtime-files");
+    const worktreePath = join(dir, "worker-tree-materialized-runtime-files");
+    await mkdir(repoPath, { recursive: true });
+    await writeFile(join(repoPath, "README.md"), "initial\n");
+    git(repoPath, ["init", "-b", "main"]);
+    git(repoPath, ["config", "user.name", "Ouroboros Test"]);
+    git(repoPath, ["config", "user.email", "test@example.com"]);
+    git(repoPath, ["config", "commit.gpgSign", "false"]);
+    git(repoPath, ["add", "README.md"]);
+    git(repoPath, ["commit", "-m", "Initial commit"]);
+    git(repoPath, ["worktree", "add", "-b", "task-worker-materialized-runtime-files", worktreePath, "main"]);
+    await mkdir(join(repoPath, "src"), { recursive: true });
+    await mkdir(join(worktreePath, "src"), { recursive: true });
+    await mkdir(join(repoPath, ".ouroboros"), { recursive: true });
+    await writeFile(join(repoPath, "src", "landing.ts"), "export const landing = true;\n");
+    await writeFile(join(worktreePath, "src", "landing.ts"), "export const landing = true;\n");
+    await writeFile(join(repoPath, ".ouroboros", "ouroboros.db"), "runtime state\n");
+
+    const runId = harness.createRun({ goal: "Ignore runtime files", projectRoot: repoPath });
+    const workerTaskId = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Build landing page",
+      prompt: "Create src/landing.ts.",
+      worktreePath,
+    });
+    harness.recordAttempt({
+      taskId: workerTaskId,
+      input: { executor: "test" },
+      output: {
+        status: "done",
+        summary: "Created landing page file",
+        changedFiles: ["src/landing.ts", ".ouroboros/ouroboros.db"],
+        checks: [{ name: "worker", status: "passed" }],
+        artifacts: [],
+        problems: [],
+      },
+    });
+    const verifierTaskId = harness.createTask({
+      runId,
+      role: "verifier",
+      goal: "Verify landing page",
+      prompt: "Verify worker changes.",
+      dependsOn: [workerTaskId],
+    });
+    harness.recordAttempt({
+      taskId: verifierTaskId,
+      input: { executor: "test" },
+      output: {
+        status: "done",
+        summary: "Verified landing page",
+        changedFiles: [],
+        checks: [{ name: "verify", status: "passed" }],
+        artifacts: [],
+        problems: [],
+      },
+    });
+
+    const result = applyHarnessAction(harness, {
+      type: "integrateVerifiedRun",
+      runId,
+      workerTaskId,
+      commitMessage: "Integrate materialized landing page",
+    });
+
+    expect(result).toMatchObject({
+      status: "done",
+      actionType: "integrateVerifiedRun",
+    });
+    expect(git(repoPath, ["log", "--oneline", "-1"]).stdout).toContain("Integrate materialized landing page");
+    expect(git(repoPath, ["status", "--short"]).stdout).toContain("?? .ouroboros/");
+  });
+
   test("blocks integration when verifier evidence is missing", () => {
     const runId = harness.createRun({ goal: "Reject unverified integration" });
     const workerTaskId = harness.createTask({

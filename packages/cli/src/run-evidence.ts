@@ -1,4 +1,4 @@
-import { diagnoseRunOverview, readableValue } from "@ouroboros/harness";
+import { diagnoseRunOverview, isOuroborosRuntimePath, readableValue } from "@ouroboros/harness";
 import type {
   LessonKind,
   ObservableSession,
@@ -154,7 +154,7 @@ function collectGoalReviewEvidence(output: RunOverview["sessions"][number]["outp
   }
   const changedFiles = Array.isArray(output.changedFiles) ? output.changedFiles : [];
   for (const file of changedFiles) {
-    if (typeof file === "string" && file.length > 0) {
+    if (typeof file === "string" && file.length > 0 && !isOuroborosRuntimePath(file)) {
       evidence.push({ kind: "file", text: file });
     }
   }
@@ -167,7 +167,7 @@ function aggregateChangedFiles(overview: RunOverview): string[] {
   for (const session of overview.sessions) {
     const files = Array.isArray(session.output?.changedFiles) ? session.output.changedFiles : [];
     for (const file of files) {
-      if (typeof file !== "string" || file.length === 0 || seen.has(file)) continue;
+      if (typeof file !== "string" || file.length === 0 || isOuroborosRuntimePath(file) || seen.has(file)) continue;
       seen.add(file);
       ordered.push(file);
     }

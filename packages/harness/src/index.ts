@@ -6,6 +6,7 @@ export {
 } from "./default-prompts";
 export { initDatabase, withDatabase } from "./database";
 export { makeId } from "./ids";
+export { filterOuroborosRuntimePaths, isOuroborosRuntimePath, OUROBOROS_RUNTIME_PATHS } from "./runtime-paths";
 export {
   GOAL_REVIEW_TASK_DONE_WHEN,
   GOAL_REVIEW_TASK_GOAL,

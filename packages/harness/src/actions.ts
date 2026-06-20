@@ -9,6 +9,7 @@ import {
   resolveRunDecision,
 } from "./goal-review";
 import { Harness } from "./harness";
+import { filterOuroborosRuntimePaths } from "./runtime-paths";
 import type { AttemptOutput, ReclaimedRunningTask, RunOverview, Task } from "./types";
 
 export interface UnintegratedVerifiedWorker {
@@ -474,7 +475,9 @@ function integrateVerifiedRun(
   checks.push({ name: "execution task", status: "passed", evidence: worker.id });
 
   const workerSession = latestSessionForTask(overview, worker.id);
-  const changedFiles = Array.isArray(workerSession?.output.changedFiles) ? workerSession.output.changedFiles : [];
+  const changedFiles = filterOuroborosRuntimePaths(
+    Array.isArray(workerSession?.output.changedFiles) ? workerSession.output.changedFiles : [],
+  );
   if (changedFiles.length === 0) {
     return blockedIntegration(action.type, `Worker task ${worker.id} has no changedFiles evidence.`, checks, [
       `worker ${worker.id} has no changedFiles evidence`,
@@ -1552,7 +1555,9 @@ export function describeIntegrationReadiness(harness: Harness, runId: string): I
       continue;
     }
     const session = latestSessionForTask(overview, task.id);
-    const changedFiles = Array.isArray(session?.output.changedFiles) ? session.output.changedFiles : [];
+    const changedFiles = filterOuroborosRuntimePaths(
+      Array.isArray(session?.output.changedFiles) ? session.output.changedFiles : [],
+    );
     if (changedFiles.length === 0) {
       continue;
     }
@@ -1693,11 +1698,11 @@ function readTargetDirtyFiles(git: GitRunner, cwd: string): { ok: true; files: s
       files.add(file);
     }
   }
-  return { ok: true, files: [...files].sort() };
+  return { ok: true, files: filterOuroborosRuntimePaths([...files]).sort() };
 }
 
 function normalizeRelativeFiles(files: string[]) {
-  return files.filter((file) =>
+  return filterOuroborosRuntimePaths(files).filter((file) =>
     file.length > 0 &&
     !isAbsolute(file) &&
     !file.split(/[\\/]+/).includes("..")

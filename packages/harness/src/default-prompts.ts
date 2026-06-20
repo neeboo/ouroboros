@@ -1,3 +1,13 @@
+import { OUROBOROS_RUNTIME_PATHS } from "./runtime-paths";
+
+const RUNTIME_PROTECTION_SECTION = [
+  "## Runtime File Guardrail",
+  `Treat ${OUROBOROS_RUNTIME_PATHS.map((path) => `\`${path}\``).join(", ")} as Ouroboros runtime/control paths.`,
+  "Do not modify, delete, recreate, clean, commit, or report these paths as task changedFiles.",
+  "When inspecting repository status or verifying frontend-only changes, ignore these paths unless the task explicitly asks you to change Ouroboros itself.",
+  "",
+].join("\n");
+
 export const DEFAULT_TASK_PROMPT_TEMPLATE = [
   "# Ouroboros Task",
   "",
@@ -16,6 +26,7 @@ export const DEFAULT_TASK_PROMPT_TEMPLATE = [
   "## Instructions",
   "{{taskPrompt}}",
   "",
+  RUNTIME_PROTECTION_SECTION,
   "## Done When",
   "{{doneWhenMarkdown}}",
   "",
@@ -173,6 +184,7 @@ export const DEFAULT_VERIFIER_TASK_PROMPT_TEMPLATE = [
   "Use the source worktree path above when it is recorded. Do not treat the verifier task's own fresh worktree as source evidence.",
   "When checking whether work remains, exclude the current verifier task and current running attempt from active-work counts.",
   "",
+  RUNTIME_PROTECTION_SECTION,
   "## Source Output",
   "```json",
   "{{sourceOutputJson}}",
@@ -188,6 +200,7 @@ export const DEFAULT_REPAIR_TASK_PROMPT_TEMPLATE = [
   "",
   "Verifier Task ID: {{verifierTaskId}}",
   "",
+  RUNTIME_PROTECTION_SECTION,
   "## Verifier Output",
   "```json",
   "{{verifierOutputJson}}",

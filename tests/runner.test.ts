@@ -71,6 +71,8 @@ describe("runner", () => {
     expect(prompt).toContain('"actions"');
     expect(prompt).toContain('"createTasks"');
     expect(prompt).toContain("a next task exists");
+    expect(prompt).toContain("## Runtime File Guardrail");
+    expect(prompt).toContain("Do not modify, delete, recreate, clean, commit, or report these paths as task changedFiles.");
   });
 
   test("builds prompts with run lessons", () => {
@@ -3691,6 +3693,8 @@ describe("runner", () => {
     const verifier = harness.nextReadyTask(runId)!;
     const attempt = harness.getAttempt(result!.attemptId)!;
     expect(verifier.prompt).toContain("## Frozen Verifier Contract");
+    expect(verifier.prompt).toContain("## Runtime File Guardrail");
+    expect(verifier.prompt).toContain(".ouroboros/");
     expect(verifier.prompt).toContain("created verifier prompt contains this exact criterion");
     expect(verifier.prompt).toContain("bun test tests/runner.test.ts");
     expect(attempt.output.artifacts).toContainEqual({
@@ -4453,6 +4457,33 @@ describe("runner", () => {
 
     expect(harness.nextReadyTask(runId)?.prompt).toContain(`Custom repair for ${verifierTask}`);
     expect(harness.nextReadyTask(runId)?.prompt).toContain("missing regression test");
+  });
+
+  test("repair task hook default prompt protects Ouroboros runtime files", async () => {
+    const runId = harness.createRun({ goal: "Build loop" });
+    harness.createTask({
+      runId,
+      role: "verifier",
+      goal: "Verify runner",
+      prompt: "Verify the runner.",
+    });
+
+    await runNextReadyTask({
+      harness,
+      runId,
+      executor: async () => ({
+        status: "blocked",
+        summary: "Verification failed",
+        artifacts: [],
+        checks: [],
+        problems: ["unexpected .ouroboros runtime file"],
+      }),
+      stopHooks: [createRepairTaskHook({ harness })],
+    });
+
+    const repair = harness.nextReadyTask(runId)!;
+    expect(repair.prompt).toContain("## Runtime File Guardrail");
+    expect(repair.prompt).toContain("Do not modify, delete, recreate, clean, commit, or report these paths as task changedFiles.");
   });
 
   test("repair task hook renders structured verifier summaries as readable text", async () => {

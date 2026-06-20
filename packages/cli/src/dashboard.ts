@@ -1,4 +1,4 @@
-import { diagnoseRunOverview, readableValue } from "@ouroboros/harness";
+import { diagnoseRunOverview, isOuroborosRuntimePath, readableValue } from "@ouroboros/harness";
 import type { OverseerDiagnosis, RunOverview, RunStatusCounts } from "@ouroboros/harness";
 import { isAbsolute, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -3524,9 +3524,27 @@ export function serveDashboard(input: {
   return Bun.serve({
     port: input.port,
     fetch(request) {
-      return handleDashboardRequest(request, input);
+      return withDashboardErrors(request, () => handleDashboardRequest(request, input));
     },
   });
+}
+
+async function withDashboardErrors(request: Request, handler: () => Response | Promise<Response>) {
+  try {
+    return await handler();
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (new URL(request.url).pathname.startsWith("/api/")) {
+      return Response.json(
+        {
+          error: message,
+          kind: message.includes("Ouroboros database is missing schema") ? "db_missing_schema" : "dashboard_error",
+        },
+        { status: 500 },
+      );
+    }
+    throw error;
+  }
 }
 
 export async function handleDashboardRequest(
@@ -3800,7 +3818,7 @@ function changedFilesPayload(overview: RunOverview) {
       const changedFiles = Array.isArray(session.output?.changedFiles) ? session.output.changedFiles : [];
       return changedFiles.flatMap((rawPath) => {
         const path = normalizeTrackedPath(rawPath);
-        if (!path || seen.has(path)) {
+        if (!path || isOuroborosRuntimePath(path) || seen.has(path)) {
           return [];
         }
         seen.add(path);

@@ -11,6 +11,7 @@ import {
   dashboardEvidenceItemTextForTest,
   dashboardHtml,
   handleDashboardRequest,
+  serveDashboard,
 } from "../packages/cli/src/dashboard";
 import { DASHBOARD_REACT_MODULES } from "../packages/cli/src/dashboard-app";
 
@@ -1990,6 +1991,30 @@ describe("dashboard", () => {
       expect(defaultBody.runs[0].id).toBe(runId);
     } finally {
       await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("serveDashboard returns JSON diagnostics for API database errors", async () => {
+    const server = serveDashboard({
+      runId: "run_broken",
+      port: 0,
+      overview: () => {
+        throw new Error("Ouroboros database is missing schema: /tmp/ouroboros.db");
+      },
+      renderTaskPrompt: () => "",
+    });
+
+    try {
+      const response = await fetch(`http://localhost:${server.port}/api/runs/run_broken/overview`);
+      const body = await response.json();
+
+      expect(response.status).toBe(500);
+      expect(body).toEqual({
+        error: "Ouroboros database is missing schema: /tmp/ouroboros.db",
+        kind: "db_missing_schema",
+      });
+    } finally {
+      server.stop(true);
     }
   });
 
