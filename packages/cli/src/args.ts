@@ -13,6 +13,10 @@ export function parseArgs(args: string[]): ParsedArgs {
 
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index];
+    if (arg === "--help" || arg === "-h") {
+      flags.set("help", "true");
+      continue;
+    }
     if (arg === "--db") {
       db = readValue(args, index, arg);
       index += 1;
@@ -31,7 +35,11 @@ export function parseArgs(args: string[]): ParsedArgs {
   }
 
   if (!command) {
-    fail("missing command");
+    if (flags.has("help")) {
+      command = "help";
+    } else {
+      fail("missing command");
+    }
   }
 
   return { db: normalizeCliDatabasePath(db), command, flags };

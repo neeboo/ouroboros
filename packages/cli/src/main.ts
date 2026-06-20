@@ -115,6 +115,11 @@ const SELF_ITERATION_ROLE_AGENT_DEFAULTS: Record<"planner" | "verifier" | "goal-
   "goal-review": "codex-resumable",
 };
 
+if (parsed.command === "help" || flag(parsed, "help") !== undefined) {
+  printHelp();
+  process.exit(0);
+}
+
 switch (parsed.command) {
   case "init": {
     harness.init();
@@ -736,6 +741,42 @@ switch (parsed.command) {
   }
   default:
     fail(`unknown command: ${parsed.command}`);
+}
+
+function printHelp() {
+  console.log([
+    "orbs - local control loop for long-running coding-agent work",
+    "",
+    "Usage:",
+    "  orbs [--db <path>] <command> [options]",
+    "  orbs --help",
+    "",
+    "Core commands:",
+    "  init                 Initialize the local SQLite database",
+    "  create-project       Register a project root",
+    "  create-run           Create a goal run",
+    "  create-task          Create a task in a run",
+    "  run-loop             Drain ready tasks for one run",
+    "  supervise-runs       Drain multiple runnable runs",
+    "  supervise-daemon     Keep supervising runs until stopped",
+    "  dashboard            Start the dashboard",
+    "  intake               Split a requirement document into child runs",
+    "  action               Apply a harness action such as integrateVerifiedRun",
+    "",
+    "Inspection:",
+    "  list-runs            List recent runs",
+    "  run-overview         Print run state as JSON",
+    "  run-evidence         Print readable run evidence",
+    "  run-graph            Print a compact task graph",
+    "  show-task-prompt     Render a task prompt",
+    "  explain-attempt      Explain an attempt from captured events",
+    "",
+    "Examples:",
+    "  orbs init",
+    "  orbs create-run --goal 'Refactor platform admin' --project-root $(pwd)",
+    "  orbs run-loop --run-id <run_id> --executor codex-resumable --cwd $(pwd)",
+    "  orbs dashboard --run-id <run_id> --port 7331",
+  ].join("\n"));
 }
 
 function parseApproval(raw: string) {

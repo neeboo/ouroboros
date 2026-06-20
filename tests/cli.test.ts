@@ -55,6 +55,20 @@ describe("CLI", () => {
     });
   });
 
+  test("prints help without requiring a command or flag value", async () => {
+    const help = await runCliRaw("--help");
+    const shortHelp = await runCliRaw("-h");
+    const commandHelp = await runCliRaw("init", "--help");
+
+    expect(help).toMatchObject({ exitCode: 0, stderr: "" });
+    expect(help.stdout).toContain("Usage:");
+    expect(help.stdout).toContain("orbs --help");
+    expect(shortHelp).toMatchObject({ exitCode: 0, stderr: "" });
+    expect(shortHelp.stdout).toContain("Core commands:");
+    expect(commandHelp).toMatchObject({ exitCode: 0, stderr: "" });
+    expect(commandHelp.stdout).toContain("init");
+  });
+
   test("creates projects and shows project metadata in run overview", async () => {
     await runCli("init");
     const project = await runCliJson(
