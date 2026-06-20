@@ -2713,6 +2713,43 @@ describe("CLI", () => {
     });
   });
 
+  test("run-loop recovers evidence-backed goal-review completion text", async () => {
+    await runCli("init");
+    const run = await runCliJson("create-run", "--goal", "Complete PAN-869 source-worktree verification");
+    const codexBin = join(dir, "fake-codex-goal-verification-complete");
+    await writeFile(
+      codexBin,
+      [
+        "#!/usr/bin/env bun",
+        "const prompt = await new Response(Bun.stdin.stream()).text();",
+        "if (!prompt.includes('Role: goal-review')) process.exit(2);",
+        "console.log(JSON.stringify({ status: 'done', summary: 'PAN-869 source-worktree verification is complete. typecheck, contracts, build, and gate-lite passed.', changedFiles: [], checks: [{ name: 'typecheck', status: 'passed' }, { name: 'contracts', status: 'passed' }, { name: 'build', status: 'passed' }, { name: 'gate-lite', status: 'passed' }], artifacts: [], problems: [] }));",
+      ].join("\n"),
+    );
+    await chmod(codexBin, 0o755);
+
+    await runCliJson(
+      "run-loop",
+      "--run-id",
+      run.id,
+      "--executor",
+      "codex-resumable",
+      "--codex-bin",
+      codexBin,
+      "--cwd",
+      "/repo",
+      "--max-rounds",
+      "1",
+    );
+    const overview = await runCliJson("run-overview", "--run-id", run.id);
+
+    expect(overview.run.status).toBe("done");
+    expect(overview.sessions[0].output).toMatchObject({
+      status: "done",
+      runDecision: "complete",
+    });
+  });
+
   test("run-loop defers a run when goal-review is waiting on external recovery", async () => {
     await runCli("init");
     const run = await runCliJson("create-run", "--goal", "Prove Hermes provider readiness");

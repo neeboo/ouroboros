@@ -44,6 +44,9 @@ export function inferExplicitRunDecision(output: {
   if (/\b(?:run\s+goal|goal)\s+(?:is\s+)?(?:met|complete|completed|satisfied)\b/i.test(haystack)) {
     return "complete";
   }
+  if (isEvidenceBackedCompletion(output, haystack)) {
+    return "complete";
+  }
   return undefined;
 }
 
@@ -73,4 +76,87 @@ function normalizeRunDecision(value: unknown) {
     return normalized;
   }
   return undefined;
+}
+
+function isEvidenceBackedCompletion(
+  output: {
+    summary?: unknown;
+    checks?: unknown[];
+    artifacts?: unknown[];
+    problems?: unknown[];
+  },
+  haystack: string,
+) {
+  if (!hasReviewCompletionLanguage(haystack)) {
+    return false;
+  }
+  if (!hasPassingEvidence(output, haystack)) {
+    return false;
+  }
+  if (hasBlockingFailures(output, haystack)) {
+    return false;
+  }
+  return true;
+}
+
+function hasReviewCompletionLanguage(haystack: string) {
+  return (
+    /\b(?:verification|review|复验|验证|检查|验收)\s+(?:is\s+)?(?:complete|completed|done|passed|通过|完成)\b/i.test(haystack) ||
+    /\b(?:source-worktree|worktree|workspace)\s+verification\s+(?:is\s+)?(?:complete|completed|done)\b/i.test(haystack) ||
+    /\b(?:all|required|final)\s+(?:checks|verification|evidence)\s+(?:passed|complete|completed|done)\b/i.test(haystack) ||
+    /(?:验证|复验|检查|验收)(?:已经|已)?(?:通过|完成)/.test(haystack)
+  );
+}
+
+function hasPassingEvidence(output: { checks?: unknown[]; artifacts?: unknown[] }, haystack: string) {
+  const hasPassedCheck = (output.checks ?? []).some((check) => objectFieldEquals(check, "status", "passed"));
+  if (hasPassedCheck) {
+    return true;
+  }
+  const hasPassingArtifact = (output.artifacts ?? []).some(
+    (artifact) =>
+      objectFieldEquals(artifact, "status", "passed") ||
+      objectFieldEquals(artifact, "result", "passed") ||
+      objectFieldEquals(artifact, "verdict", "passed"),
+  );
+  if (hasPassingArtifact) {
+    return true;
+  }
+  return /\b(?:passed|verified|typecheck|contracts?|build|gate-lite|tests?)\b/i.test(haystack);
+}
+
+function hasBlockingFailures(output: { checks?: unknown[]; problems?: unknown[] }, haystack: string) {
+  const hasFailedCheck = (output.checks ?? []).some(
+    (check) =>
+      objectFieldEquals(check, "status", "failed") ||
+      objectFieldEquals(check, "status", "blocked") ||
+      objectFieldEquals(check, "status", "error"),
+  );
+  if (hasFailedCheck && !hasNonBlockingFailureLanguage(haystack)) {
+    return true;
+  }
+  const problems = output.problems ?? [];
+  if (problems.length === 0) {
+    return false;
+  }
+  return !problems.every((problem) => hasNonBlockingFailureLanguage(toText(problem)));
+}
+
+function hasNonBlockingFailureLanguage(value: string) {
+  return /\b(?:non[-\s]?blocking|not\s+blocking|pre[-\s]?existing|existing|baseline|debt|unmodified|unchanged)\b/i.test(
+    value,
+  );
+}
+
+function objectFieldEquals(value: unknown, field: string, expected: string) {
+  if (typeof value !== "object" || value === null) {
+    return false;
+  }
+  const objectValue = value as Record<string, unknown>;
+  const fieldValue = objectValue[field];
+  return typeof fieldValue === "string" && fieldValue.toLowerCase() === expected;
+}
+
+function toText(value: unknown) {
+  return typeof value === "string" ? value : JSON.stringify(value);
 }
