@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { existsSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -416,6 +417,20 @@ describe("Harness", () => {
     const value = withDatabase(harness.dbPath, (db) => db.query("pragma journal_mode").get() as { journal_mode: string });
 
     expect(value.journal_mode.toLowerCase()).toBe("wal");
+  });
+
+  test("withDatabase creates missing parent directories before opening the database", () => {
+    const nestedDbPath = join(dir, "nested", ".ouroboros", "ouroboros.db");
+
+    withDatabase(nestedDbPath, (db) => {
+      db.exec("create table if not exists smoke (id text primary key)");
+      db.query("insert into smoke (id) values ($id)").run({ $id: "ok" });
+    });
+
+    expect(existsSync(nestedDbPath)).toBe(true);
+    expect(withDatabase(nestedDbPath, (db) => db.query("select id from smoke").get() as { id: string })).toEqual({
+      id: "ok",
+    });
   });
 
   test("seeds and updates prompt templates", () => {

@@ -1,9 +1,8 @@
 import { Database } from "bun:sqlite";
 import { mkdirSync, readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 
 export function initDatabase(dbPath: string) {
-  mkdirSync(dirname(dbPath), { recursive: true });
   withDatabase(dbPath, (db) => {
     db.exec(readFileSync(join(import.meta.dir, "..", "schema.sql"), "utf8"));
     ensureProjects(db);
@@ -15,7 +14,9 @@ export function initDatabase(dbPath: string) {
 }
 
 export function withDatabase<T>(dbPath: string, callback: (db: Database) => T) {
-  const db = new Database(dbPath);
+  const resolvedPath = normalizeDatabasePath(dbPath);
+  ensureDatabaseDirectory(resolvedPath);
+  const db = new Database(resolvedPath);
   db.exec("pragma foreign_keys = on");
   db.exec("pragma busy_timeout = 30000");
   db.exec("pragma journal_mode = wal");
@@ -25,6 +26,20 @@ export function withDatabase<T>(dbPath: string, callback: (db: Database) => T) {
   } finally {
     db.close();
   }
+}
+
+export function normalizeDatabasePath(dbPath: string) {
+  if (dbPath === ":memory:" || dbPath.startsWith("file:")) {
+    return dbPath;
+  }
+  return resolve(dbPath);
+}
+
+function ensureDatabaseDirectory(dbPath: string) {
+  if (dbPath === ":memory:" || dbPath.startsWith("file:")) {
+    return;
+  }
+  mkdirSync(dirname(dbPath), { recursive: true });
 }
 
 function ensureTaskCycles(db: Database) {

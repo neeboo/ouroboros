@@ -1,7 +1,8 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
+import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { acceptGuardrailProposal, Harness } from "../packages/harness/src";
 import {
@@ -1020,6 +1021,89 @@ describe("runner", () => {
     expect(stderrEvents.map((event) => event.text).join("")).toContain("[agent] warning");
     expect(recordedChunks).toEqual(["streamed"]);
     expect(harness.getAttempt(attemptId)?.status).toBe("done");
+  });
+
+  test("runner event writes keep using the original relative database after cwd changes to an external worktree", async () => {
+    const originalCwd = process.cwd();
+    const controlRoot = join(dir, "control-root");
+    const externalWorktree = join(dir, "external-worktree");
+    await mkdir(controlRoot, { recursive: true });
+    await mkdir(externalWorktree, { recursive: true });
+
+    try {
+      process.chdir(controlRoot);
+      const relativeHarness = new Harness(".ouroboros/ouroboros.db");
+      relativeHarness.init();
+      const expectedDbPath = resolve(".ouroboros", "ouroboros.db");
+      expect(relativeHarness.dbPath).toBe(expectedDbPath);
+
+      const runId = relativeHarness.createRun({
+        goal: "Write events from an external worktree",
+        context: {
+          agentDefaults: {
+            global: "claude-code",
+          },
+          agentBackends: {
+            "claude-code": {
+              kind: "acpx",
+              agent: "claude",
+            },
+          },
+        },
+      });
+      relativeHarness.createTask({
+        runId,
+        role: "worker",
+        goal: "Stream from external worktree",
+        prompt: "Stream output.",
+        worktreePath: externalWorktree,
+      });
+
+      process.chdir(externalWorktree);
+      const result = await runCodexResumableLoop({
+        harness: relativeHarness,
+        runId,
+        limit: 1,
+        maxRounds: 1,
+        maxTries: 3,
+        cwd: externalWorktree,
+        genericExecutorFactory: () => async ({ recorder }) => {
+          recorder?.stdout("external stream\n");
+          recorder?.event({ type: "test.external_worktree_event" });
+          return {
+            status: "done",
+            summary: "streamed from external worktree",
+            changedFiles: [],
+            checks: [],
+            artifacts: [],
+            problems: [],
+          };
+        },
+        clientFactory: () => ({
+          start: async () => {
+            throw new Error("start should not be called for generic route");
+          },
+          resume: async () => {
+            throw new Error("resume should not be called for generic route");
+          },
+        }),
+      });
+
+      const attemptId = result.rounds[0].tasks[0]!.attemptId;
+      const reopened = new Harness(expectedDbPath);
+      const events = reopened.listAttemptEvents(attemptId);
+
+      expect(events.some((event) => event.stream === "stdout" && event.text?.includes("external stream"))).toBe(true);
+      expect(events.some((event) =>
+        event.stream === "system" &&
+        event.payload &&
+        typeof event.payload === "object" &&
+        (event.payload as { type?: string }).type === "test.external_worktree_event"
+      )).toBe(true);
+      expect(existsSync(join(externalWorktree, ".ouroboros", "ouroboros.db"))).toBe(false);
+    } finally {
+      process.chdir(originalCwd);
+    }
   });
 
   test("generic acpx attempt records start evidence even when the executor throws", async () => {

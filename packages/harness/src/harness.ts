@@ -1,4 +1,4 @@
-import { initDatabase, withDatabase } from "./database";
+import { initDatabase, normalizeDatabasePath, withDatabase } from "./database";
 import {
   DEFAULT_CONTEXT_SUMMARY_PROMPT_TEMPLATE,
   DEFAULT_REPAIR_TASK_PROMPT_TEMPLATE,
@@ -83,7 +83,7 @@ export class Harness {
   readonly dbPath: string;
 
   constructor(dbPath: string) {
-    this.dbPath = dbPath;
+    this.dbPath = normalizeDatabasePath(dbPath);
   }
 
   init() {

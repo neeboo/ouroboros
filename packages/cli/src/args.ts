@@ -1,3 +1,5 @@
+import { resolve } from "node:path";
+
 export interface ParsedArgs {
   db: string;
   command: string;
@@ -32,7 +34,7 @@ export function parseArgs(args: string[]): ParsedArgs {
     fail("missing command");
   }
 
-  return { db, command, flags };
+  return { db: normalizeCliDatabasePath(db), command, flags };
 }
 
 export function required(args: ParsedArgs, name: string) {
@@ -54,4 +56,11 @@ function readValue(args: string[], index: number, flagName: string) {
 export function fail(message: string): never {
   console.error(message);
   process.exit(1);
+}
+
+function normalizeCliDatabasePath(dbPath: string) {
+  if (dbPath === ":memory:" || dbPath.startsWith("file:")) {
+    return dbPath;
+  }
+  return resolve(dbPath);
 }
