@@ -101,6 +101,7 @@ function isEvidenceBackedCompletion(
 
 function hasReviewCompletionLanguage(haystack: string) {
   return (
+    /\b[A-Z][A-Z0-9]+-\d+\s+(?:is\s+)?(?:complete|completed|done|satisfied)\b/i.test(haystack) ||
     /\b(?:verification|review|复验|验证|检查|验收)\s+(?:is\s+)?(?:complete|completed|done|passed|通过|完成)\b/i.test(haystack) ||
     /\b(?:source-worktree|worktree|workspace)\s+verification\s+(?:is\s+)?(?:complete|completed|done)\b/i.test(haystack) ||
     /\b(?:all|required|final)\s+(?:checks|verification|evidence)\s+(?:passed|complete|completed|done)\b/i.test(haystack) ||

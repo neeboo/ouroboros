@@ -4156,6 +4156,55 @@ describe("runner", () => {
     });
   });
 
+  test("goal-review hook patches evidence-backed ticket completion text", async () => {
+    const runId = harness.createRun({ goal: "Complete PAN-869 antd 6 warning cleanup" });
+    const taskId = harness.createTask({
+      runId,
+      role: "goal-review",
+      goal: "Review whether the run goal is complete",
+      prompt: "Review the goal.",
+    });
+
+    const result = await runNextReadyTask({
+      harness,
+      runId,
+      stopHooksByRole: {
+        "goal-review": [createGoalReviewDecisionHook({ harness })],
+      },
+      executor: async () => ({
+        status: "done",
+        summary:
+          "PAN-869 is complete: repository changes remove the remaining antd 6 deprecated first-screen APIs from platform_admin accounts/troubleshoot.",
+        changedFiles: [],
+        checks: [
+          { name: "typecheck", status: "passed", evidence: "npm --prefix apps/platform_admin run typecheck passed" },
+          {
+            name: "contracts",
+            status: "passed",
+            evidence: "npm --prefix apps/platform_admin run test:contracts passed, 15/15",
+          },
+          { name: "build", status: "passed", evidence: "npm --prefix apps/platform_admin run build passed" },
+          { name: "gate-lite", status: "passed", evidence: "bash scripts/gate-lite.sh auto passed" },
+          {
+            name: "antd deprecated API scan",
+            status: "passed",
+            evidence: "rg found no List width valueStyle Alert message direction or bordered usage in touched files",
+          },
+        ],
+        artifacts: [],
+        problems: [],
+      }),
+    });
+    const attempt = harness.getAttempt(result!.attemptId)!;
+
+    expect(result?.taskId).toBe(taskId);
+    expect(harness.getRun(runId)?.status).toBe("done");
+    expect(attempt.output).toMatchObject({
+      status: "done",
+      runDecision: "complete",
+    });
+  });
+
   test("goal-review hook does not infer complete from vague implementation completion", async () => {
     const runId = harness.createRun({ goal: "Complete PAN-869 source-worktree verification" });
     const taskId = harness.createTask({
