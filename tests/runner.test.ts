@@ -624,9 +624,58 @@ describe("runner", () => {
       codexSessionId: null,
     });
     expect(attempt.status).toBe("blocked");
-    expect(attempt.output.summary).toContain("without a resumable session id");
-    expect(task.status).toBe("todo");
+    expect(attempt.output.summary).toContain("without an agent session id");
+    expect(task.status).toBe("blocked");
     expect(thread.status).toBe("blocked");
+  });
+
+  test("runner-owned codex loop recovers a streamed session id before the start command returns", async () => {
+    const runId = harness.createRun({ goal: "Recover streamed session" });
+    const taskId = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Keep running after session event",
+      prompt: "Start and keep running.",
+    });
+
+    const result = await runCodexResumableLoop({
+      harness,
+      runId,
+      limit: 1,
+      maxRounds: 1,
+      maxTries: 3,
+      cwd: dir,
+      clientFactory: () => ({
+        start: async ({ onEvent, onStdout }) => {
+          onEvent?.({ type: "session.created", payload: { session: { session_id: "streamed_session" } } });
+          onStdout?.(`${JSON.stringify({ type: "session.created", payload: { session: { session_id: "streamed_session" } } })}\n`);
+          return {
+            status: "running" as const,
+            sessionId: null,
+            outputPath: join(dir, "output.json"),
+            stdout: "",
+            stderr: "",
+            events: [],
+          };
+        },
+        resume: async () => {
+          throw new Error("resume should not be called");
+        },
+      }),
+    });
+
+    const attemptId = result.rounds[0].tasks[0].attemptId;
+    const attempt = harness.getAttempt(attemptId)!;
+    const thread = harness.getRunOverview({ runId, eventLimit: 1 }).threads.find((candidate) => candidate.attemptId === attemptId)!;
+
+    expect(result.rounds[0].tasks[0]).toMatchObject({
+      taskId,
+      status: "running",
+      codexSessionId: "streamed_session",
+    });
+    expect(attempt.input.codexSessionId).toBe("streamed_session");
+    expect(thread.agentSessionId).toBe("streamed_session");
+    expect(harness.getTask(taskId)?.status).toBe("running");
   });
 
   test("runner-owned codex loop orphans running attempts when the owner pid is gone", async () => {
@@ -682,7 +731,10 @@ describe("runner", () => {
       codexSessionId: null,
     });
     expect(attempt.status).toBe("blocked");
-    expect(task.status).toBe("todo");
+    expect(task.status).toBe("blocked");
+    expect(attempt.output?.problems).toContain(
+      "running attempt is missing an agent session id; automatic retry is disabled because this attempt cannot be resumed safely",
+    );
     expect(thread.status).toBe("orphaned");
   });
 
@@ -784,8 +836,10 @@ describe("runner", () => {
     );
     expect(recoveredAttempt.input.codexSessionId).toBe("session_from_thread");
     expect(missingAttempt.status).toBe("blocked");
-    expect(missingTask.status).toBe("todo");
-    expect(missingAttempt.output.problems).toContain("running attempt is missing codexSessionId; task was returned to todo for a fresh attempt");
+    expect(missingTask.status).toBe("blocked");
+    expect(missingAttempt.output.problems).toContain(
+      "running attempt is missing an agent session id; automatic retry is disabled because this attempt cannot be resumed safely",
+    );
   });
 
   test("direct codex resume recovers missing codexSessionId from thread agent session id", async () => {

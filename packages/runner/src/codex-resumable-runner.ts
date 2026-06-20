@@ -13,7 +13,7 @@ import {
 } from "@ouroboros/harness";
 import { buildTaskPrompt } from "./prompt";
 import { applyStartHooks } from "./runner";
-import { createCodexResumableClient } from "./executors/codex-resumable";
+import { createCodexResumableClient, sessionIdFromEvents } from "./executors/codex-resumable";
 import type { CodexResumableClientOptions, CodexResumableResult } from "./executors/codex-resumable";
 import { childToolchainEnvEvidence } from "./executors/proxy-env";
 import { createRouteExecutor } from "./route-executor";
@@ -339,7 +339,10 @@ class CodexResumableOrchestrator {
       this.harness.listExecutionThreads({ runId: run.id }).find((thread) => thread.attemptId === attemptId),
     );
     if (!sessionId) {
-      throw new Error(`attempt has no codexSessionId: ${attemptId}`);
+      const output = missingResumableSessionOutput("direct resume");
+      this.harness.finishAttempt({ attemptId, output });
+      this.updateAttemptThread({ attemptId, status: "blocked", agentSessionId: null, heartbeat: true });
+      return { attemptId, status: "blocked" as const, codexSessionId: null };
     }
     const sessionName = typeof attempt.input.sessionName === "string" ? attempt.input.sessionName : `attempt-${attemptId}`;
     const prompt = promptOverride ?? "Continue until you can return the required structured JSON.";
@@ -362,7 +365,8 @@ class CodexResumableOrchestrator {
       },
     });
     if (result.status === "running") {
-      if (!result.sessionId) {
+      const resumedSessionId = result.sessionId ?? this.sessionIdForAttempt(this.harness.getAttempt(attemptId)!);
+      if (!resumedSessionId) {
         return this.blockAttemptWithoutResumableSession({
           attemptId,
           task,
@@ -370,7 +374,7 @@ class CodexResumableOrchestrator {
           result,
         });
       }
-      return { attemptId, status: "running" as const, codexSessionId: result.sessionId };
+      return { attemptId, status: "running" as const, codexSessionId: resumedSessionId };
     }
     this.harness.finishAttempt({
       attemptId,
@@ -403,15 +407,10 @@ class CodexResumableOrchestrator {
         }
         this.upsertAttemptThread({ runId: run.id, task, attemptId: attempt.id, sessionName, cwd, status: "orphaned" });
         const output: AttemptOutput = {
-          status: "blocked",
-          summary: "Running attempt cannot be resumed because it has no Codex session id",
-          changedFiles: [],
-          checks: [{ name: "codex-resumable session id", status: "failed" }],
-          artifacts: [],
-          problems: ["running attempt is missing codexSessionId; task was returned to todo for a fresh attempt"],
+          ...missingResumableSessionOutput("run-loop resume"),
+          artifacts: [{ kind: "execution_thread", status: "orphaned", attemptId: attempt.id }],
         };
         this.harness.finishAttempt({ attemptId: attempt.id, output });
-        this.harness.retryTask({ taskId: task.id });
         return { taskId: task.id, attemptId: attempt.id, sessionName, status: "blocked" as const, codexSessionId: null };
       }
       const sessionName = typeof attempt.input.sessionName === "string" ? attempt.input.sessionName : `attempt-${attempt.id}`;
@@ -450,11 +449,12 @@ class CodexResumableOrchestrator {
       this.updateAttemptThread({
         attemptId: attempt.id,
         status: result.status === "running" ? "running" : undefined,
-        agentSessionId: result.sessionId,
+        agentSessionId: result.sessionId ?? this.sessionIdFromAttemptEvents(attempt.id),
         heartbeat: true,
       });
       if (result.status === "running") {
-        if (!result.sessionId) {
+        const resumedSessionId = result.sessionId ?? this.sessionIdForAttempt(this.harness.getAttempt(attempt.id)!);
+        if (!resumedSessionId) {
           return this.blockAttemptWithoutResumableSession({
             attemptId: attempt.id,
             task,
@@ -462,7 +462,7 @@ class CodexResumableOrchestrator {
             result,
           });
         }
-        return { taskId: task.id, attemptId: attempt.id, sessionName, status: "running" as const, codexSessionId: result.sessionId };
+        return { taskId: task.id, attemptId: attempt.id, sessionName, status: "running" as const, codexSessionId: resumedSessionId };
       }
       const { output, decision } = await this.applyStopHooks({
         run,
@@ -567,11 +567,12 @@ class CodexResumableOrchestrator {
     this.updateAttemptThread({
       attemptId,
       status: result.status === "running" ? "running" : undefined,
-      agentSessionId: result.sessionId,
+      agentSessionId: result.sessionId ?? this.sessionIdFromAttemptEvents(attemptId),
       heartbeat: true,
     });
     if (result.status === "running") {
-      if (!result.sessionId) {
+      const sessionId = result.sessionId ?? this.sessionIdForAttempt(this.harness.getAttempt(attemptId)!);
+      if (!sessionId) {
         return this.blockAttemptWithoutResumableSession({
           attemptId,
           task: input.task,
@@ -579,7 +580,7 @@ class CodexResumableOrchestrator {
           result,
         });
       }
-      return { taskId: input.task.id, attemptId, sessionName: input.sessionName, status: "running" as const, codexSessionId: result.sessionId };
+      return { taskId: input.task.id, attemptId, sessionName: input.sessionName, status: "running" as const, codexSessionId: sessionId };
     }
     const { output, decision } = await this.applyStopHooks({
       run: input.run,
@@ -809,8 +810,26 @@ class CodexResumableOrchestrator {
       },
       event: (event: Record<string, unknown>) => {
         this.harness.recordAttemptEvent({ attemptId, stream: eventStream, sequence: nextSequence(), payload: event });
+        const sessionId = sessionIdFromEvents([event]);
+        if (sessionId) {
+          this.rememberAttemptSessionId(attemptId, sessionId);
+        }
       },
     };
+  }
+
+  private rememberAttemptSessionId(attemptId: string, sessionId: string) {
+    const attempt = this.harness.getAttempt(attemptId);
+    if (attempt && attempt.input.codexSessionId !== sessionId) {
+      this.harness.updateAttemptInput({
+        attemptId,
+        input: {
+          ...attempt.input,
+          codexSessionId: sessionId,
+        },
+      });
+    }
+    this.updateAttemptThread({ attemptId, agentSessionId: sessionId, heartbeat: true });
   }
 
   private blockAttemptWithoutResumableSession(input: {
@@ -821,16 +840,15 @@ class CodexResumableOrchestrator {
   }) {
     const output: AttemptOutput = {
       status: "blocked",
-      summary: "Codex resumable command returned running without a resumable session id",
+      summary: "Agent returned running without an agent session id",
       changedFiles: [],
-      checks: [{ name: "codex-resumable session id", status: "failed" }],
+      checks: [{ name: "agent session id", status: "failed" }],
       artifacts: input.result.outputPath ? [{ kind: "codex_output", path: input.result.outputPath }] : [],
       problems: [
-        "codex-resumable returned a running state without a session id; task was returned to todo for a fresh attempt",
+        "codex-resumable returned a running state without a session id; automatic retry is disabled because this attempt cannot be resumed",
       ],
     };
     this.harness.finishAttempt({ attemptId: input.attemptId, output });
-    this.harness.retryTask({ taskId: input.task.id });
     this.updateAttemptThread({
       attemptId: input.attemptId,
       status: "blocked",
@@ -894,7 +912,8 @@ class CodexResumableOrchestrator {
     }
 
     const recoveredSessionId = thread?.agentSessionId ?? "";
-    if (!recoveredSessionId) {
+    const eventSessionId = recoveredSessionId || this.sessionIdFromAttemptEvents(attempt.id);
+    if (!eventSessionId) {
       return "";
     }
 
@@ -902,10 +921,19 @@ class CodexResumableOrchestrator {
       attemptId: attempt.id,
       input: {
         ...attempt.input,
-        codexSessionId: recoveredSessionId,
+        codexSessionId: eventSessionId,
       },
     });
-    return recoveredSessionId;
+    this.updateAttemptThread({ attemptId: attempt.id, agentSessionId: eventSessionId, heartbeat: true });
+    return eventSessionId;
+  }
+
+  private sessionIdFromAttemptEvents(attemptId: string) {
+    const events = this.harness.listAttemptEvents(attemptId);
+    return sessionIdFromEvents(events.flatMap((event) => [
+      event.payload,
+      ...jsonObjectsFromText(event.text),
+    ]));
   }
 
   private runningAttemptIsFresh(
@@ -981,6 +1009,37 @@ function codexAttemptInput(input: {
     events: input.result.events,
     childEnv: childToolchainEnvEvidence(),
   };
+}
+
+function missingResumableSessionOutput(source: string): AttemptOutput {
+  return {
+    status: "blocked",
+    summary: "Running attempt cannot be resumed because it has no agent session id",
+    changedFiles: [],
+    checks: [{ name: "agent session id", status: "failed", evidence: source }],
+    artifacts: [],
+    problems: [
+      "running attempt is missing an agent session id; automatic retry is disabled because this attempt cannot be resumed safely",
+    ],
+  };
+}
+
+function jsonObjectsFromText(text: string | null) {
+  if (!text) {
+    return [];
+  }
+  return text
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0)
+    .flatMap((line) => {
+      try {
+        const parsed = JSON.parse(line);
+        return parsed && typeof parsed === "object" ? [parsed as Record<string, unknown>] : [];
+      } catch {
+        return [];
+      }
+    });
 }
 
 function attemptModelPreference(input: Record<string, unknown>): { model: string } | null {

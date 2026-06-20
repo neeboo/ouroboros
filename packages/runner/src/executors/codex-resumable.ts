@@ -208,13 +208,46 @@ function parseJsonLine(line: string) {
   }
 }
 
-function sessionIdFromEvents(events: Array<Record<string, unknown>>) {
+export function sessionIdFromEvents(events: Array<Record<string, unknown>>) {
   for (const event of events) {
-    for (const key of ["session_id", "sessionId", "conversation_id", "conversationId"]) {
-      const value = event[key];
-      if (typeof value === "string" && value.trim().length > 0) {
-        return value;
+    const value = sessionIdFromValue(event);
+    if (value) {
+      return value;
+    }
+  }
+  return null;
+}
+
+function sessionIdFromValue(value: unknown, depth = 0): string | null {
+  if (depth > 4 || value === null || value === undefined) {
+    return null;
+  }
+  if (typeof value === "string") {
+    return null;
+  }
+  if (Array.isArray(value)) {
+    for (const entry of value) {
+      const sessionId = sessionIdFromValue(entry, depth + 1);
+      if (sessionId) {
+        return sessionId;
       }
+    }
+    return null;
+  }
+  if (typeof value !== "object") {
+    return null;
+  }
+  const record = value as Record<string, unknown>;
+  for (const key of ["session_id", "sessionId", "conversation_id", "conversationId"]) {
+    const candidate = record[key];
+    if (typeof candidate === "string" && candidate.trim().length > 0) {
+      return candidate.trim();
+    }
+  }
+  for (const entry of Object.values(record)) {
+    const sessionId = sessionIdFromValue(entry, depth + 1);
+    if (sessionId) {
+      return sessionId;
     }
   }
   return null;

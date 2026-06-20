@@ -3646,7 +3646,7 @@ describe("CLI", () => {
     expect(args[sandboxIndex + 1]).toBe("workspace-write");
   });
 
-  test("autopilot retries stale running attempts without a codex session id", async () => {
+  test("autopilot blocks stale running attempts without an agent session id instead of retrying", async () => {
     await runCli("init");
     const run = await runCliJson("create-run", "--goal", "Bootstrap ouroboros");
     const task = await runCliJson(
@@ -3709,7 +3709,10 @@ describe("CLI", () => {
       }),
     );
     expect(harness.getAttempt(stale.attemptId)?.status).toBe("blocked");
-    expect(harness.getTask(task.id)?.status).toBe("done");
+    expect(harness.getTask(task.id)?.status).toBe("blocked");
+    expect(harness.getAttempt(stale.attemptId)?.output.problems).toContain(
+      "running attempt is missing an agent session id; automatic retry is disabled because this attempt cannot be resumed safely",
+    );
   });
 
   test("run-loop waits for fresh running attempts without a codex session id", async () => {

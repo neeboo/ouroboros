@@ -360,6 +360,31 @@ describe("codex cli executor", () => {
     });
   });
 
+  test("resumable client extracts nested session ids from codex json events", async () => {
+    const client = createCodexResumableClient({
+      cwd: "/repo",
+      codexBin: "/custom/codex",
+      runCommand: async () => ({
+        exitCode: 124,
+        stdout: [
+          JSON.stringify({ type: "session.created", payload: { session: { id: "ignored", sessionId: "nested_session" } } }),
+          JSON.stringify({ type: "agent.message.delta", delta: "thinking" }),
+        ].join("\n"),
+        stderr: "command idle timed out after 300000ms",
+      }),
+    });
+
+    const result = await client.start({
+      prompt: "Plan next task",
+      sessionName: "task_1",
+    });
+
+    expect(result).toMatchObject({
+      status: "running",
+      sessionId: "nested_session",
+    });
+  });
+
   test("resumable client streams stdout and parsed json events", async () => {
     const observedChunks: string[] = [];
     const observedEvents: Array<Record<string, unknown>> = [];
