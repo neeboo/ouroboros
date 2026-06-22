@@ -3799,6 +3799,68 @@ describe("runner", () => {
     });
   });
 
+  test("blocked verifier stop hook binds repair to the verified source worktree", async () => {
+    const runId = harness.createRun({ goal: "Build loop" });
+    const sourceWorktreePath = "/tmp/ouroboros-repair-source-worktree";
+    const workerTask = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Implement in source worktree",
+      prompt: "Change files in the task worktree.",
+      worktreePath: sourceWorktreePath,
+    });
+    harness.recordAttempt({
+      taskId: workerTask,
+      input: { executor: "test" },
+      output: {
+        status: "done",
+        summary: "Implemented in source worktree",
+        changedFiles: ["packages/cli/src/dashboard.ts"],
+        artifacts: [],
+        checks: [],
+        problems: [],
+      },
+    });
+    const verifierTask = harness.createTask({
+      runId,
+      role: "verifier",
+      goal: "Verify source worktree",
+      prompt: "Verify the runner.",
+      dependsOn: [workerTask],
+      worktreePath: sourceWorktreePath,
+    });
+
+    const result = await runNextReadyTask({
+      harness,
+      runId,
+      executor: async () => ({
+        status: "blocked",
+        summary: "Verification failed",
+        artifacts: [{ kind: "log", path: "verify.log" }],
+        checks: [{ name: "bun test", status: "failed" }],
+        problems: ["runner test failed"],
+      }),
+      stopHooks: [createRepairTaskHook({ harness })],
+    });
+
+    const attempt = harness.getAttempt(result!.attemptId)!;
+    const repair = harness.nextReadyTask(runId)!;
+    expect(result?.stopDecision).toBe("continue");
+    expect(repair.role).toBe("worker");
+    expect(repair.parentId).toBe(verifierTask);
+    expect(repair.dependsOn).toEqual([workerTask]);
+    expect(repair.worktreePath).toBe(sourceWorktreePath);
+    expect(repair.prompt).toContain(`Source Task ID: ${workerTask}`);
+    expect(repair.prompt).toContain(`Source Worktree Path: ${sourceWorktreePath}`);
+    expect(attempt.output.artifacts).toContainEqual({
+      kind: "created_repair_task",
+      taskId: repair.id,
+      verifierTaskId: verifierTask,
+      sourceTaskId: workerTask,
+      sourceWorktreePath,
+    });
+  });
+
   test("blocked verifier stop hook skips repair for external setup blockers", async () => {
     const runId = harness.createRun({ goal: "Prove Hermes support" });
     const verifierTask = harness.createTask({

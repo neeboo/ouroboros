@@ -1388,17 +1388,17 @@ function ensureGoalReviewTask(
       };
     }
     if (lastTask && lastTask.id !== blockedReview.id) {
-      const taskId = createGoalReviewTask(harness, runId);
+      const created = createGoalReviewTask(harness, runId, overview);
       return {
         status: "done" as const,
-        summary: `Created fresh goal-review task ${taskId} after newer work superseded ${blockedReview.id}.`,
+        summary: `Created fresh goal-review task ${created.taskId} after newer work superseded ${blockedReview.id}.`,
         checks: [
           { name: "superseded goal review", status: "passed" as const, evidence: blockedReview.id },
-          { name: "goal review created", status: "passed" as const, evidence: taskId },
+          { name: "goal review created", status: "passed" as const, evidence: created.taskId },
         ],
         artifacts: [
           { kind: "goal_review", taskId: blockedReview.id, status: "blocked", superseded: true },
-          { kind: "goal_review", taskId, status: "todo", created: true },
+          goalReviewCreatedArtifact(created),
         ],
         problems: [],
       };
@@ -1422,24 +1422,55 @@ function ensureGoalReviewTask(
     };
   }
 
-  const taskId = createGoalReviewTask(harness, runId);
+  const created = createGoalReviewTask(harness, runId, overview);
   return {
     status: "done" as const,
-    summary: `Created goal-review task ${taskId}.`,
-    checks: [{ name: "goal review created", status: "passed" as const, evidence: taskId }],
-    artifacts: [{ kind: "goal_review", taskId, status: "todo", created: true }],
+    summary: `Created goal-review task ${created.taskId}.`,
+    checks: [{ name: "goal review created", status: "passed" as const, evidence: created.taskId }],
+    artifacts: [goalReviewCreatedArtifact(created)],
     problems: [],
   };
 }
 
-function createGoalReviewTask(harness: Harness, runId: string) {
-  return harness.createTask({
+function createGoalReviewTask(
+  harness: Harness,
+  runId: string,
+  overview: ReturnType<Harness["getRunOverview"]>,
+) {
+  const sourceTask = selectGoalReviewSourceTask(overview);
+  const taskId = harness.createTask({
     runId,
     role: "goal-review",
     goal: GOAL_REVIEW_TASK_GOAL,
     prompt: GOAL_REVIEW_TASK_PROMPT,
+    dependsOn: sourceTask ? [sourceTask.id] : [],
+    worktreePath: sourceTask?.worktreePath ?? null,
     doneWhen: GOAL_REVIEW_TASK_DONE_WHEN,
   });
+  return { taskId, sourceTask };
+}
+
+function selectGoalReviewSourceTask(overview: ReturnType<Harness["getRunOverview"]>) {
+  return [...overview.tasks].reverse().find((task) =>
+    task.status === "done" &&
+    task.worktreePath !== null &&
+    !["planner", "verifier", "goal-review"].includes(task.role)
+  ) ?? null;
+}
+
+function goalReviewCreatedArtifact(created: ReturnType<typeof createGoalReviewTask>) {
+  return {
+    kind: "goal_review",
+    taskId: created.taskId,
+    status: "todo",
+    created: true,
+    ...(created.sourceTask
+      ? {
+          sourceTaskId: created.sourceTask.id,
+          sourceWorktreePath: created.sourceTask.worktreePath,
+        }
+      : {}),
+  };
 }
 
 export function goalReviewOutputHasCompletion(output: AttemptOutput) {

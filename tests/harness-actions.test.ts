@@ -73,6 +73,57 @@ describe("Harness actions", () => {
     expect(overview.tasks).toContainEqual(expect.objectContaining({ role: "goal-review", status: "todo" }));
   });
 
+  test("prepares a drained run by binding goal-review to the latest candidate worktree", () => {
+    const runId = harness.createRun({ goal: "Review candidate implementation" });
+    const worktreePath = "/tmp/ouroboros-candidate-worktree";
+    const workerTaskId = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Implement dashboard shell",
+      prompt: "Move the dashboard to React.",
+      worktreePath,
+    });
+    harness.recordAttempt({
+      taskId: workerTaskId,
+      input: { executor: "test" },
+      output: {
+        status: "done",
+        summary: "Implemented dashboard shell",
+        changedFiles: ["packages/cli/src/dashboard-shell.tsx"],
+        checks: [{ name: "bun test", status: "passed" }],
+        artifacts: [],
+        problems: [],
+      },
+    });
+
+    const result = applyHarnessAction(harness, {
+      type: "prepareRunDrain",
+      runId,
+      maxTries: 2,
+    });
+    const overview = harness.getRunOverview({ runId });
+    const review = overview.tasks.find((task) => task.role === "goal-review");
+
+    expect(result).toMatchObject({
+      status: "done",
+      actionType: "prepareRunDrain",
+    });
+    expect(review).toMatchObject({
+      role: "goal-review",
+      status: "todo",
+      dependsOn: [workerTaskId],
+      worktreePath,
+    });
+    expect(result.artifacts).toContainEqual(
+      expect.objectContaining({
+        kind: "goal_review",
+        taskId: review?.id,
+        sourceTaskId: workerTaskId,
+        sourceWorktreePath: worktreePath,
+      }),
+    );
+  });
+
   test("prepareRunDrain proposes repeated lesson guardrails before goal review", () => {
     const runId = harness.createRun({
       goal: "Promote repeated lessons while draining",

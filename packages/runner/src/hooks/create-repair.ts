@@ -21,12 +21,22 @@ export function createRepairTaskHook(options: { harness: Harness }): StopHook {
       };
     }
 
+    const sourceTask = selectRepairSourceTask(options.harness, task);
+    const sourceWorktreePath = sourceTask?.worktreePath ?? task.worktreePath ?? null;
     const taskId = options.harness.createTask({
       runId: run.id,
       parentId: task.id,
       role: "worker",
       goal: `Repair: ${task.goal}`,
-      prompt: buildRepairPrompt(options.harness.getPromptTemplate("repair-task")?.contentMd, task.id, output),
+      prompt: buildRepairPrompt(
+        options.harness.getPromptTemplate("repair-task")?.contentMd,
+        task.id,
+        sourceTask?.id ?? null,
+        sourceWorktreePath,
+        output,
+      ),
+      dependsOn: sourceTask ? [sourceTask.id] : [],
+      worktreePath: sourceWorktreePath,
       doneWhen: [
         "verifier problems are addressed",
         "relevant checks pass",
@@ -41,10 +51,24 @@ export function createRepairTaskHook(options: { harness: Harness }): StopHook {
           kind: "created_repair_task",
           taskId,
           verifierTaskId: task.id,
+          ...(sourceTask ? { sourceTaskId: sourceTask.id, sourceWorktreePath } : {}),
         },
       ],
     };
   };
+}
+
+function selectRepairSourceTask(
+  harness: Harness,
+  verifierTask: { dependsOn: string[]; worktreePath: string | null },
+) {
+  for (const dependencyId of verifierTask.dependsOn) {
+    const dependency = harness.getTask(dependencyId);
+    if (dependency && dependency.role === "worker" && dependency.worktreePath) {
+      return dependency;
+    }
+  }
+  return null;
 }
 
 function externalSetupBlockerReason(output: AttemptOutput) {
@@ -96,7 +120,13 @@ function externalSetupBlockerReason(output: AttemptOutput) {
   return null;
 }
 
-function buildRepairPrompt(template: string | undefined, verifierTaskId: string, output: AttemptOutput) {
+function buildRepairPrompt(
+  template: string | undefined,
+  verifierTaskId: string,
+  sourceTaskId: string | null,
+  sourceWorktreePath: string | null,
+  output: AttemptOutput,
+) {
   const verifierSummary = readableValue(output.summary);
   const verifierOutput = {
     summary: verifierSummary,
@@ -104,11 +134,25 @@ function buildRepairPrompt(template: string | undefined, verifierTaskId: string,
     checks: output.checks ?? [],
     artifacts: output.artifacts ?? [],
     problems: output.problems ?? [],
+    sourceTaskId,
+    sourceWorktreePath,
   };
-  return renderPromptTemplate(template ?? DEFAULT_REPAIR_TASK_PROMPT_TEMPLATE, {
+  const sourceSection = [
+    "## Source Worktree",
+    `Source Task ID: ${sourceTaskId ?? "not recorded"}`,
+    `Source Worktree Path: ${sourceWorktreePath ?? "not recorded"}`,
+  ].join("\n");
+  const rendered = renderPromptTemplate(template ?? DEFAULT_REPAIR_TASK_PROMPT_TEMPLATE, {
     verifierTaskId,
     verifierSummary,
     verifierOutputJson: prettyJson(verifierOutput),
     verifierProblemsJson: prettyJson(output.problems ?? []),
+    sourceTaskId: sourceTaskId ?? "not recorded",
+    sourceWorktreePath: sourceWorktreePath ?? "not recorded",
+    sourceWorktreeSection: sourceSection,
   });
+  if (rendered.includes(sourceSection)) {
+    return rendered;
+  }
+  return `${rendered}\n\n${sourceSection}`;
 }
