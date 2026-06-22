@@ -28,6 +28,8 @@ export function createTasksFromOutputHook(options: { harness: Harness }): StopHo
     }
 
     const created = plannedEntries.map(({ id, plannedTask }, index) => {
+      const dependsOn = resolved.dependsOnByIndex[index] ?? [task.id];
+      const worktreePath = inheritedWorktreePath(options.harness, task, dependsOn);
       const config = {
         ...(plannedTask.modelPreference ? { modelPreference: plannedTask.modelPreference } : {}),
         ...(plannedTask.verifierContract ? { verifierContract: plannedTask.verifierContract } : {}),
@@ -38,14 +40,16 @@ export function createTasksFromOutputHook(options: { harness: Harness }): StopHo
         role: plannedTask.role,
         goal: plannedTask.goal,
         prompt: plannedTask.prompt,
-        dependsOn: resolved.dependsOnByIndex[index] ?? [task.id],
+        dependsOn,
         doneWhen: plannedTask.doneWhen ?? [],
+        worktreePath,
         config,
       });
       return {
         kind: "created_task",
         taskId,
         sourceTaskId: task.id,
+        ...(worktreePath ? { sourceWorktreePath: worktreePath } : {}),
       };
     });
 
@@ -91,7 +95,11 @@ function resolvePlannedDependencies(input: {
 
   const problems: string[] = [];
   const dependsOnByIndex = input.plannedEntries.map((entry, index) => {
-    const refs = explicitDependencyRefs(entry.plannedTask) ?? defaultDependencyRefs(input, index);
+    const explicitRefs = explicitDependencyRefs(entry.plannedTask);
+    const refs =
+      explicitRefs && explicitRefs.length === 0 && input.sourceTask.role === "goal-review"
+        ? [input.sourceTask.id]
+        : explicitRefs ?? defaultDependencyRefs(input, index);
     return refs.flatMap((ref) => {
       const normalized = ref.trim();
       if (ambiguous.has(normalized)) {
@@ -144,4 +152,21 @@ function defaultDependencyRefs(
     .map((entry) => entry.id);
 
   return siblingProducerIds.length > 0 ? siblingProducerIds : [input.sourceTask.id];
+}
+
+function inheritedWorktreePath(harness: Harness, sourceTask: Task, dependsOn: string[]) {
+  if (dependsOn.length !== 1) {
+    return null;
+  }
+  if (dependsOn[0] === sourceTask.id && sourceTask.role === "goal-review") {
+    return sourceTask.worktreePath;
+  }
+  const dependency = harness.getTask(dependsOn[0]);
+  if (!dependency || !dependency.worktreePath) {
+    return null;
+  }
+  if (dependency.role === "worker" || sourceTask.role === "goal-review") {
+    return dependency.worktreePath;
+  }
+  return null;
 }

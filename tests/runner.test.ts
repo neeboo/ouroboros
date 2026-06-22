@@ -3198,6 +3198,63 @@ describe("runner", () => {
     expect(overview.tasks.find((task) => task.id === plannerTask)?.status).toBe("done");
   });
 
+  test("goal-review stop hook anchors follow-up tasks to the reviewed worktree", async () => {
+    const runId = harness.createRun({ goal: "Build loop" });
+    const sourceWorker = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Implement dashboard candidate",
+      prompt: "Implement in a candidate worktree.",
+      worktreePath: "/tmp/ouroboros-reviewed-candidate",
+    });
+    harness.recordAttempt({
+      taskId: sourceWorker,
+      input: { executor: "test" },
+      output: {
+        status: "done",
+        summary: "Candidate implemented",
+        changedFiles: ["packages/cli/src/dashboard.ts"],
+        checks: [{ name: "candidate", status: "passed" }],
+        artifacts: [],
+        problems: [],
+      },
+    });
+    const reviewTask = harness.createTask({
+      runId,
+      role: "goal-review",
+      goal: "Review candidate",
+      prompt: "Decide whether the candidate is complete.",
+      dependsOn: [sourceWorker],
+      worktreePath: "/tmp/ouroboros-reviewed-candidate",
+    });
+
+    await runNextReadyTask({
+      harness,
+      runId,
+      executor: async () => ({
+        status: "done",
+        runDecision: "continue",
+        summary: "Candidate needs one more repair",
+        artifacts: [],
+        checks: [],
+        problems: [],
+        nextTasks: [
+          {
+            role: "worker",
+            goal: "Repair dashboard shell",
+            prompt: "Continue from the reviewed candidate worktree.",
+            dependsOn: [],
+          },
+        ],
+      }),
+      stopHooks: [createTasksFromOutputHook({ harness })],
+    });
+
+    const repair = harness.getRunOverview({ runId, eventLimit: 1 }).tasks.find((task) => task.goal === "Repair dashboard shell")!;
+    expect(repair.dependsOn).toEqual([reviewTask]);
+    expect(repair.worktreePath).toBe("/tmp/ouroboros-reviewed-candidate");
+  });
+
   test("planner stop hook blocks unresolved dependsOn instead of creating stuck tasks", async () => {
     const runId = harness.createRun({ goal: "Build loop" });
     const plannerTask = harness.createTask({
