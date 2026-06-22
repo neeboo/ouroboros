@@ -12,6 +12,7 @@ import {
   dashboardHtml,
   handleDashboardRequest,
   serveDashboard,
+  shouldRetryDashboardBind,
 } from "../packages/cli/src/dashboard";
 import { DASHBOARD_REACT_MODULES } from "../packages/cli/src/dashboard-app";
 
@@ -2015,6 +2016,112 @@ describe("dashboard", () => {
       });
     } finally {
       server.stop(true);
+    }
+  });
+
+  test("shouldRetryDashboardBind only retries bounded ephemeral port conflicts", () => {
+    const busy = Object.assign(new Error("Address already in use"), { code: "EADDRINUSE" });
+
+    expect(shouldRetryDashboardBind({ port: 0, error: busy, attempt: 1 })).toBe(true);
+    expect(shouldRetryDashboardBind({ port: 7331, error: busy, attempt: 1 })).toBe(false);
+    expect(shouldRetryDashboardBind({ port: 0, error: new Error("Permission denied"), attempt: 1 })).toBe(false);
+    expect(shouldRetryDashboardBind({ port: 0, error: "not an error", attempt: 1 })).toBe(false);
+    expect(shouldRetryDashboardBind({ port: 0, error: busy, attempt: Number.POSITIVE_INFINITY })).toBe(false);
+    expect(shouldRetryDashboardBind({ port: 0, error: busy, attempt: 5 })).toBe(false);
+  });
+
+  test("serveDashboard retries ephemeral port allocation on transient EADDRINUSE", () => {
+    const observedPorts: number[] = [];
+    const originalServe = Bun.serve;
+    let callCount = 0;
+    const stubServer = {
+      stop: () => undefined,
+      port: 0,
+      hostname: "localhost",
+      ref: () => stubServer,
+      unref: () => stubServer,
+      reload: () => stubServer,
+      fetch: () => new Response("ok"),
+      pendingRequests: 0,
+      upgrade: () => false,
+      publish: () => false,
+      subscribe: () => undefined,
+      unsubscribe: () => undefined,
+    } as unknown as ReturnType<typeof Bun.serve>;
+    try {
+      (Bun as unknown as { serve: typeof Bun.serve }).serve = ((options: Parameters<typeof Bun.serve>[0]) => {
+        callCount += 1;
+        if (typeof options.port === "number") {
+          observedPorts.push(options.port);
+        }
+        if (callCount <= 2) {
+          throw Object.assign(new Error("listen EADDRINUSE: bind"), { code: "EADDRINUSE" });
+        }
+        return stubServer;
+      }) as typeof Bun.serve;
+
+      const server = serveDashboard({
+        runId: "run_retry",
+        port: 0,
+        overview: () => ({
+          run: {
+            id: "run_retry",
+            projectId: null,
+            projectRoot: null,
+            goal: "Retry goal",
+            status: "running" as const,
+            context: {},
+            createdAt: null,
+          },
+          project: null,
+          tasks: [],
+          sessions: [],
+          threads: [],
+          lessons: [],
+        }),
+        renderTaskPrompt: () => "",
+      });
+
+      try {
+        expect(server).toBe(stubServer);
+        expect(callCount).toBe(3);
+        expect(observedPorts).toEqual([0, 0, 0]);
+      } finally {
+        server.stop(true);
+      }
+    } finally {
+      (Bun as unknown as { serve: typeof Bun.serve }).serve = originalServe;
+    }
+  });
+
+  test("serveDashboard does not retry fixed port conflicts", () => {
+    const originalServe = Bun.serve;
+    let callCount = 0;
+    const busy = Object.assign(new Error("listen EADDRINUSE: bind"), { code: "EADDRINUSE" });
+    try {
+      (Bun as unknown as { serve: typeof Bun.serve }).serve = (() => {
+        callCount += 1;
+        throw busy;
+      }) as typeof Bun.serve;
+
+      expect(() =>
+        serveDashboard({
+          runId: "run_fixed",
+          port: 7331,
+          overview: () => ({
+            run: null,
+            project: null,
+            tasks: [],
+            sessions: [],
+            threads: [],
+            lessons: [],
+          }),
+          renderTaskPrompt: () => "",
+        }),
+      ).toThrow(busy);
+      expect(callCount).toBe(1);
+    } finally {
+      (Bun as unknown as { serve: typeof Bun.serve }).serve = originalServe;
     }
   });
 

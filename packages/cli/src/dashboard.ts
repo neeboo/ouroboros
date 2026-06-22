@@ -3511,6 +3511,23 @@ export function dashboardHtml(input: { runId: string }) {
 </html>`;
 }
 
+const DASHBOARD_BIND_RETRY_LIMIT = 5;
+
+export function shouldRetryDashboardBind(input: {
+  port: number;
+  error: unknown;
+  attempt: number;
+}) {
+  if (input.port !== 0 || !Number.isFinite(input.attempt) || input.attempt >= DASHBOARD_BIND_RETRY_LIMIT) {
+    return false;
+  }
+  if (!(input.error instanceof Error)) {
+    return false;
+  }
+  const text = `${input.error.message ?? ""} ${(input.error as { code?: unknown }).code ?? ""}`.toLowerCase();
+  return text.includes("eaddrinuse") || text.includes("address already in use");
+}
+
 export function serveDashboard(input: {
   runId: string;
   port: number;
@@ -3525,12 +3542,20 @@ export function serveDashboard(input: {
   actions?: DashboardActions;
   recentRuns?: (limit: number) => DashboardRunSummary[];
 }) {
-  return Bun.serve({
-    port: input.port,
-    fetch(request) {
-      return withDashboardErrors(request, () => handleDashboardRequest(request, input));
-    },
-  });
+  const fetchHandler = (request: Request) =>
+    withDashboardErrors(request, () => handleDashboardRequest(request, input));
+  let lastError: unknown = null;
+  for (let attempt = 1; attempt <= DASHBOARD_BIND_RETRY_LIMIT; attempt += 1) {
+    try {
+      return Bun.serve({ port: input.port, fetch: fetchHandler });
+    } catch (error) {
+      lastError = error;
+      if (!shouldRetryDashboardBind({ port: input.port, error, attempt })) {
+        throw error;
+      }
+    }
+  }
+  throw lastError ?? new Error("serveDashboard bind failed");
 }
 
 async function withDashboardErrors(request: Request, handler: () => Response | Promise<Response>) {
