@@ -257,8 +257,10 @@ export interface ObservableSession {
   status: Exclude<Status, "todo">;
   output: Partial<AttemptOutput>;
   model: Record<string, unknown> | null;
+  backend: Record<string, unknown> | null;
   sessionName: string | null;
   codexSessionId: string | null;
+  cwd: string | null;
   worktreePath: string | null;
   startedAt: string | null;
   finishedAt: string | null;

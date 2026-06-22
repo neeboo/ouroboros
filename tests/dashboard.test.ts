@@ -2290,7 +2290,12 @@ describe("dashboard", () => {
     });
     const attemptId = harness.startAttempt({
       taskId,
-      input: { codexSessionId: "codex_draining", sessionName: "task-draining" },
+      input: {
+        codexSessionId: "codex_draining",
+        sessionName: "task-draining",
+        cwd: "/tmp/draining-worktree",
+        backend: { id: "claude-code", kind: "acpx", agent: "claude" },
+      },
     });
     harness.upsertExecutionThread({
       runId,
@@ -2322,7 +2327,14 @@ describe("dashboard", () => {
       });
       expect(body.diagnosis.reason).toMatch(/1 running attempt/);
       expect(body.diagnosis.runningAttempts).toEqual([
-        expect.objectContaining({ attemptId, taskId, role: "worker", codexSessionId: "codex_draining" }),
+        expect.objectContaining({
+          attemptId,
+          taskId,
+          role: "worker",
+          codexSessionId: "codex_draining",
+          backend: expect.objectContaining({ kind: "acpx", agent: "claude" }),
+          cwd: "/tmp/draining-worktree",
+        }),
       ]);
       expect(body.diagnosis.orphanedLeases).toEqual([]);
     } finally {

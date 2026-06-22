@@ -186,6 +186,8 @@ export interface DashboardOverseerDiagnosis {
     role: string;
     codexSessionId: string | null;
     sessionName: string | null;
+    backend: Record<string, unknown> | null;
+    cwd: string | null;
     worktreePath: string | null;
   }>;
   orphanedLeases: Array<{
@@ -209,6 +211,8 @@ export function overviewDiagnosisForResponse(overview: RunOverview): DashboardOv
       role: session.role,
       codexSessionId: session.codexSessionId,
       sessionName: session.sessionName,
+      backend: session.backend,
+      cwd: session.cwd,
       worktreePath: session.worktreePath,
     })),
     orphanedLeases: diagnosis.orphanedLeases,

@@ -24,6 +24,7 @@ import type { ExecutorEventRecorder, StartHook, StartHookResult, StopHook, TaskE
 const DEFAULT_RUNNING_ATTEMPT_STALE_MS = 5 * 60 * 1000;
 const DEFAULT_GENERIC_ATTEMPT_IDLE_TIMEOUT_MS = 5 * 60 * 1000;
 const DEFAULT_GENERIC_ATTEMPT_HARD_TIMEOUT_MS = 30 * 60 * 1000;
+const DEFAULT_GENERIC_ATTEMPT_HEARTBEAT_MS = 30 * 1000;
 
 export type CodexResumableClientFactory = (input: {
   model?: string;
@@ -49,6 +50,7 @@ export interface CodexResumableOrchestrationInput {
   runningAttemptStaleMs?: number;
   genericAttemptIdleTimeoutMs?: number;
   genericAttemptHardTimeoutMs?: number;
+  genericAttemptHeartbeatMs?: number;
 }
 
 export interface RunCodexResumableLoopInput extends CodexResumableOrchestrationInput {
@@ -282,6 +284,7 @@ class CodexResumableOrchestrator {
   private readonly staleMs: number;
   private readonly genericIdleMs: number;
   private readonly genericHardMs: number;
+  private readonly genericHeartbeatMs: number;
 
   constructor(private readonly input: CodexResumableOrchestrationInput) {
     this.harness = input.harness;
@@ -291,6 +294,7 @@ class CodexResumableOrchestrator {
     this.staleMs = input.runningAttemptStaleMs ?? DEFAULT_RUNNING_ATTEMPT_STALE_MS;
     this.genericIdleMs = input.genericAttemptIdleTimeoutMs ?? DEFAULT_GENERIC_ATTEMPT_IDLE_TIMEOUT_MS;
     this.genericHardMs = input.genericAttemptHardTimeoutMs ?? DEFAULT_GENERIC_ATTEMPT_HARD_TIMEOUT_MS;
+    this.genericHeartbeatMs = input.genericAttemptHeartbeatMs ?? DEFAULT_GENERIC_ATTEMPT_HEARTBEAT_MS;
   }
 
   async startAttempt(taskId: string) {
@@ -626,6 +630,7 @@ class CodexResumableOrchestrator {
       status: "running",
     });
     const recorder = this.createAttemptEventRecorder(attemptId, "system");
+    const startedAt = Date.now();
     recorder.event({
       type: "generic.attempt.started",
       role: input.task.role,
@@ -637,7 +642,23 @@ class CodexResumableOrchestrator {
       cwd: input.cwd,
       idleTimeoutMs: this.genericIdleMs,
       hardTimeoutMs: this.genericHardMs,
+      heartbeatMs: this.genericHeartbeatMs,
     });
+    const heartbeat = setInterval(() => {
+      recorder.event({
+        type: "generic.attempt.heartbeat",
+        role: input.task.role,
+        sessionName: input.sessionName,
+        backend: input.route.backend.kind,
+        agent: (input.route.backend as { agent?: string }).agent ?? null,
+        agentCommand: (input.route.backend as { agentCommand?: string }).agentCommand ?? null,
+        executionMode: input.route.executionMode,
+        cwd: input.cwd,
+        elapsedMs: Date.now() - startedAt,
+      });
+      this.updateAttemptThread({ attemptId, heartbeat: true });
+    }, this.genericHeartbeatMs);
+    unrefTimer(heartbeat);
     const executorFactory = this.input.genericExecutorFactory ?? ((factoryInput) =>
       createRouteExecutor({
         cwd: factoryInput.cwd,
@@ -677,6 +698,8 @@ class CodexResumableOrchestrator {
         artifacts: [],
         problems: [error instanceof Error ? error.message : String(error)],
       };
+    } finally {
+      clearInterval(heartbeat);
     }
     const { output, decision } = await this.applyStopHooks({
       run: input.run,
@@ -1316,6 +1339,11 @@ function processIsAlive(pid: number) {
 
 function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function unrefTimer(timer: ReturnType<typeof setInterval>) {
+  const maybeTimer = timer as { unref?: () => void };
+  maybeTimer.unref?.();
 }
 
 function errorMessage(error: unknown) {

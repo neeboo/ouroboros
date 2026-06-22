@@ -1079,6 +1079,94 @@ describe("runner", () => {
     expect(harness.getAttempt(attemptId)?.status).toBe("done");
   });
 
+  test("generic acpx attempt records heartbeat events while a quiet executor is still running", async () => {
+    const runId = harness.createRun({
+      goal: "Observe quiet generic acpx attempt",
+      context: {
+        agentDefaults: {
+          global: "claude-code",
+        },
+        agentBackends: {
+          "claude-code": {
+            kind: "acpx",
+            agent: "claude",
+          },
+        },
+      },
+    });
+    harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Run quiet worker",
+      prompt: "Stay quiet for a bit.",
+    });
+
+    let releaseExecutor!: () => void;
+    const running = runCodexResumableLoop({
+      harness,
+      runId,
+      limit: 1,
+      maxRounds: 1,
+      maxTries: 3,
+      cwd: dir,
+      genericAttemptHeartbeatMs: 20,
+      genericExecutorFactory: () => async () => {
+        await new Promise<void>((resolve) => {
+          releaseExecutor = resolve;
+        });
+        return {
+          status: "done",
+          summary: "quiet worker completed",
+          changedFiles: [],
+          checks: [],
+          artifacts: [],
+          problems: [],
+        };
+      },
+      clientFactory: () => ({
+        start: async () => {
+          throw new Error("start should not be called for generic route");
+        },
+        resume: async () => {
+          throw new Error("resume should not be called for generic route");
+        },
+      }),
+    });
+
+    await waitFor(() => {
+      const [attempt] = harness.listRunningAttempts({ runId });
+      if (!attempt) {
+        return false;
+      }
+      const heartbeat = harness.listAttemptEvents(attempt.id).find((event) =>
+        event.stream === "system" &&
+        event.payload &&
+        typeof event.payload === "object" &&
+        (event.payload as { type?: string }).type === "generic.attempt.heartbeat"
+      );
+      return Boolean(heartbeat);
+    });
+
+    const [attempt] = harness.listRunningAttempts({ runId });
+    expect(attempt?.input).toMatchObject({
+      sessionName: expect.any(String),
+      cwd: dir,
+      backend: expect.objectContaining({ kind: "acpx", agent: "claude" }),
+    });
+    const eventsBeforeCompletion = harness.listAttemptEvents(attempt!.id);
+    expect(eventsBeforeCompletion.some((event) =>
+      event.stream === "system" &&
+      (event.payload as { type?: string }).type === "generic.attempt.heartbeat"
+    )).toBe(true);
+    expect(harness.getAttempt(attempt!.id)?.status).toBe("running");
+
+    releaseExecutor();
+    const result = await running;
+
+    expect(result.rounds[0].tasks[0]).toMatchObject({ status: "done", attemptId: attempt!.id });
+    expect(harness.getAttempt(attempt!.id)?.status).toBe("done");
+  });
+
   test("runner event writes keep using the original relative database after cwd changes to an external worktree", async () => {
     const originalCwd = process.cwd();
     const controlRoot = join(dir, "control-root");
@@ -5399,4 +5487,15 @@ function git(cwd: string, args: string[]) {
   const stderr = new TextDecoder().decode(result.stderr);
   expect(result.exitCode, `git ${args.join(" ")}\n${stderr || stdout}`).toBe(0);
   return { stdout, stderr };
+}
+
+async function waitFor(predicate: () => boolean, timeoutMs = 1000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (predicate()) {
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  expect(predicate()).toBe(true);
 }
