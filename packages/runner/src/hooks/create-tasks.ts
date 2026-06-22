@@ -29,10 +29,11 @@ export function createTasksFromOutputHook(options: { harness: Harness }): StopHo
 
     const created = plannedEntries.map(({ id, plannedTask }, index) => {
       const dependsOn = resolved.dependsOnByIndex[index] ?? [task.id];
-      const worktreePath = inheritedWorktreePath(options.harness, task, dependsOn);
+      const sourceWorktreePath = inheritedWorktreePath(options.harness, task, dependsOn);
       const config = {
         ...(plannedTask.modelPreference ? { modelPreference: plannedTask.modelPreference } : {}),
         ...(plannedTask.verifierContract ? { verifierContract: plannedTask.verifierContract } : {}),
+        ...(sourceWorktreePath ? { sourceWorktreePath } : {}),
       };
       const taskId = options.harness.createTask({
         id,
@@ -42,14 +43,14 @@ export function createTasksFromOutputHook(options: { harness: Harness }): StopHo
         prompt: plannedTask.prompt,
         dependsOn,
         doneWhen: plannedTask.doneWhen ?? [],
-        worktreePath,
+        worktreePath: null,
         config,
       });
       return {
         kind: "created_task",
         taskId,
         sourceTaskId: task.id,
-        ...(worktreePath ? { sourceWorktreePath: worktreePath } : {}),
+        ...(sourceWorktreePath ? { sourceWorktreePath } : {}),
       };
     });
 

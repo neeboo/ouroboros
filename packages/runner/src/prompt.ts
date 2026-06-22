@@ -15,6 +15,7 @@ export function buildTaskPrompt(input: PromptInput) {
     taskId: input.task.id,
     taskRole: input.task.role,
     taskGoal: input.task.goal,
+    taskConfigJson: prettyJson(input.task.config ?? {}),
     taskPrompt: input.task.prompt,
     doneWhenMarkdown: input.task.doneWhen.map((item) => `- ${item}`).join("\n"),
     dependencyAttemptsJson: prettyJson(input.dependencyAttempts),

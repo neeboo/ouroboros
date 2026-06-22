@@ -3198,7 +3198,7 @@ describe("runner", () => {
     expect(overview.tasks.find((task) => task.id === plannerTask)?.status).toBe("done");
   });
 
-  test("goal-review stop hook anchors follow-up tasks to the reviewed worktree", async () => {
+  test("goal-review stop hook records reviewed worktree without reusing it as child cwd", async () => {
     const runId = harness.createRun({ goal: "Build loop" });
     const sourceWorker = harness.createTask({
       runId,
@@ -3252,7 +3252,108 @@ describe("runner", () => {
 
     const repair = harness.getRunOverview({ runId, eventLimit: 1 }).tasks.find((task) => task.goal === "Repair dashboard shell")!;
     expect(repair.dependsOn).toEqual([reviewTask]);
-    expect(repair.worktreePath).toBe("/tmp/ouroboros-reviewed-candidate");
+    expect(repair.worktreePath).toBeNull();
+    expect(repair.config?.sourceWorktreePath).toBe("/tmp/ouroboros-reviewed-candidate");
+
+    const prompt = buildTaskPrompt({
+      run: harness.getRun(runId)!,
+      task: repair,
+      dependencyAttempts: [],
+    });
+    expect(prompt).toContain('"sourceWorktreePath": "/tmp/ouroboros-reviewed-candidate"');
+  });
+
+  test("sibling goal-review workers from one source worktree lease separate cwd values under concurrency", async () => {
+    const runId = harness.createRun({ goal: "Build loop" });
+    const sourceWorker = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Implement candidate",
+      prompt: "Implement in a source worktree.",
+      worktreePath: "/tmp/ouroboros-shared-source",
+    });
+    harness.recordAttempt({
+      taskId: sourceWorker,
+      input: { executor: "test" },
+      output: {
+        status: "done",
+        summary: "Candidate implemented",
+        artifacts: [],
+        checks: [],
+        problems: [],
+      },
+    });
+    const reviewTask = harness.createTask({
+      runId,
+      role: "goal-review",
+      goal: "Review candidate",
+      prompt: "Create sibling repairs.",
+      dependsOn: [sourceWorker],
+      worktreePath: "/tmp/ouroboros-shared-source",
+    });
+
+    await runNextReadyTask({
+      harness,
+      runId,
+      executor: async () => ({
+        status: "done",
+        runDecision: "continue",
+        summary: "Needs parallel follow-up work",
+        artifacts: [],
+        checks: [],
+        problems: [],
+        nextTasks: [
+          {
+            role: "worker",
+            goal: "Repair A",
+            prompt: "Use the reviewed source for context.",
+            dependsOn: [],
+          },
+          {
+            role: "worker",
+            goal: "Repair B",
+            prompt: "Use the reviewed source for context.",
+            dependsOn: [],
+          },
+        ],
+      }),
+      stopHooks: [createTasksFromOutputHook({ harness })],
+    });
+
+    const cwdByTask = new Map<string, string>();
+    const results = await runReadyTasks({
+      harness,
+      runId,
+      limit: 2,
+      worktreeForTask: (task) => join(dir, "worktrees", task.id),
+      executorFactory: ({ cwd }) => async ({ task }) => {
+        cwdByTask.set(task.id, cwd);
+        return {
+          status: "done",
+          summary: `Executed ${task.id} in ${cwd}`,
+          artifacts: [],
+          checks: [],
+          problems: [],
+        };
+      },
+    });
+
+    const repairTasks = harness
+      .getRunOverview({ runId, eventLimit: 1 })
+      .tasks.filter((task) => task.goal === "Repair A" || task.goal === "Repair B");
+    const cwdValues = repairTasks.map((task) => cwdByTask.get(task.id));
+
+    expect(results.map((result) => result.taskId).sort()).toEqual(repairTasks.map((task) => task.id).sort());
+    expect(new Set(cwdValues).size).toBe(2);
+    expect(cwdValues).not.toContain("/tmp/ouroboros-shared-source");
+    expect(repairTasks.map((task) => task.config?.sourceWorktreePath)).toEqual([
+      "/tmp/ouroboros-shared-source",
+      "/tmp/ouroboros-shared-source",
+    ]);
+    expect(repairTasks.map((task) => task.worktreePath).sort()).toEqual(
+      repairTasks.map((task) => join(dir, "worktrees", task.id)).sort(),
+    );
+    expect(harness.getTask(reviewTask)?.worktreePath).toBe("/tmp/ouroboros-shared-source");
   });
 
   test("planner stop hook blocks unresolved dependsOn instead of creating stuck tasks", async () => {
