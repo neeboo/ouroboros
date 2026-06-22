@@ -968,6 +968,9 @@ describe("acpx executor", () => {
     expect(output.status).toBe("blocked");
     expect(output.summary).toContain("silent for 30000ms");
     expect(output.problems?.[0]).toContain("produced no output for the idle timeout window");
+    expect(output.problems?.[0]).toContain("agent: codex");
+    expect(output.problems?.[0]).toContain("session: task_1");
+    expect(output.problems?.[0]).toContain("cwd: /repo");
     expect(output.problems?.[0]).toContain("exit code: 124");
     expect(output.problems?.[0]).toContain("command idle timed out after 30000ms");
   });

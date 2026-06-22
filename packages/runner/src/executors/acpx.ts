@@ -112,6 +112,8 @@ export const createAcpxAgentExecutor: AcpxAgentExecutorFactory = (options) => {
       });
       return blockedFromIdleTimeout({
         label,
+        sessionName,
+        cwd: options.cwd,
         result,
         idleTimeoutMs: options.idleTimeoutMs,
       });
@@ -325,6 +327,8 @@ function isIdleTimeout(result: { exitCode: number; stdout: string; stderr: strin
 
 function blockedFromIdleTimeout(input: {
   label: string;
+  sessionName: string;
+  cwd: string;
   result: { exitCode: number; stdout: string; stderr: string };
   idleTimeoutMs?: number;
 }) {
@@ -341,6 +345,9 @@ function blockedFromIdleTimeout(input: {
     problems: [
       [
         `acpx ${input.label} executor produced no output for the idle timeout window (${observedMs ?? "?"}ms).`,
+        `agent: ${input.label}`,
+        `session: ${input.sessionName}`,
+        `cwd: ${input.cwd}`,
         "The agent command stayed alive but emitted nothing on stdout or stderr.",
         "exit code: 124",
         ...(input.result.stdout.trim().length > 0 ? [`stdout:\n${input.result.stdout.trim()}`] : []),
