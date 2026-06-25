@@ -10,11 +10,13 @@ import {
   dashboardEventLineForTest,
   dashboardEvidenceItemTextForTest,
   dashboardHtml,
+  dashboardRunHistoryRowsHtmlForTest,
   handleDashboardRequest,
   serveDashboard,
   shouldRetryDashboardBind,
 } from "../packages/cli/src/dashboard";
 import { DASHBOARD_REACT_MODULES } from "../packages/cli/src/dashboard-app";
+import { buildDashboardWorkspaceModel } from "../packages/cli/src/dashboard-workspace-model";
 
 const pathologicalText = {
   token: "SupercalifragilisticDashboardOverflowRegressionToken".repeat(6),
@@ -289,8 +291,8 @@ describe("dashboard", () => {
     expect(html).toContain("rawStreamDetails");
     expect(html).toContain("eventText");
     expect(html).toContain("streamOutput");
-    expect(html).toContain("renderWorkspace");
-    expect(html).toContain("renderInspector");
+    expect(html).toContain("dashboardWorkspaceHtml");
+    expect(html).toContain("dashboardInspectorHtml");
     expect(html).toContain("orderedSessions");
     expect(html).toContain("captureFlowScrollState");
     expect(html).toContain("restoreFlowScrollState");
@@ -521,12 +523,57 @@ describe("dashboard", () => {
     expect(html).toContain("Run history");
     expect(html).toContain("renderRecentRunsList(recentRunsCache);");
     expect(html).toContain('data-history-source="GET /api/runs"');
-    expect(html).toContain('data-active-run-id="');
+    expect(html).toContain('data-active-run-id=\\"');
     expect(html).toContain('data-history-run-selected="true"');
     expect(html).toContain("const activeRun = runs.find((entry) => entry?.id === runId);");
     expect(html).toContain("const historyRuns = runs.filter((entry) => entry?.id !== runId);");
     expect(html).toContain("renderRunHistorySection(\"active-run-list\", activeRun ? [activeRun] : [], \"Active run\")");
     expect(html).toContain("renderRunHistorySection(\"recent-runs-list\", historyRuns, \"Run history\")");
+    expect(html).toContain("const runHistoryRowTemplate = document.createElement(\"template\")");
+    expect(html).toContain("runHistoryRowTemplate.content.cloneNode(true)");
+    expect(html).toContain("runs.map(renderReactRunHistoryRow).join(\"\")");
+    expect(html).not.toContain("reactRunHistoryRow");
+  });
+
+  test("renders run history rows through the React dashboard boundary", () => {
+    const rows = dashboardRunHistoryRowsHtmlForTest([
+      { id: "run_123", status: "running", goal: "Current run", projectId: null, createdAt: null },
+      { id: "run_done", status: "done", goal: "Earlier run", projectId: null, createdAt: null },
+    ], "run_123");
+
+    expect(rows).toContain('data-react-run-history="true"');
+    expect(rows).toContain('data-history-run-id="run_123"');
+    expect(rows).toContain('data-history-run-selected="true"');
+    expect(rows).toContain('class="history-run-row is-active"');
+    expect(rows).toContain('class="history-run-status status-running"');
+    expect(rows).toContain("Earlier run");
+  });
+
+  test("uses a restrained neutral dashboard palette without saturated status colors or gradients", () => {
+    const html = dashboardHtml({ runId: "run_123" });
+    const styles = styleBlock(html);
+
+    expect(styles).toContain("--app: #fafafa;");
+    expect(styles).toContain("--sidebar: #ffffff;");
+    expect(styles).toContain("--ink: #09090b;");
+    expect(styles).toContain("--muted: #71717a;");
+    expect(styles).toContain("--status-ink: #18181b;");
+    expect(styles).not.toContain("linear-gradient");
+    expect(styles).not.toContain("#b8d4c2");
+    expect(styles).not.toContain("#d4c7a8");
+    expect(styles).not.toContain("#d2aaa8");
+    expect(styles).not.toContain("rgba(111, 160, 122");
+    expect(styles).not.toContain("rgba(184, 113, 111");
+    expect(styles).not.toContain("#d8d7d0");
+    expect(styles).not.toContain("#b9b8b1");
+    expect(styles).not.toContain("#ecebe5");
+    expect(styles).not.toContain("#d3d2cc");
+    expect(styles).not.toContain("#efefea");
+    expect(styles).not.toContain("#c9c9c4");
+    expect(styles).not.toContain("#d9d8d1");
+    expect(styles).not.toContain("#deddd7");
+    expect(styles).not.toContain("#d6d5cf");
+    expect(styles).not.toContain("#d9d9d4");
   });
 
   test("keeps sidebar goal row titles shrink-safe and truncated", () => {
@@ -668,9 +715,9 @@ describe("dashboard", () => {
     expectCssRule(html, ".diff-output", ["overflow-x: auto;", "overflow-y: auto;", "white-space: pre;", "overflow-wrap: normal;"]);
     expectCssRule(html, ".diff-row", ["display: grid;", "grid-template-columns: 42px max-content;", "min-width: max-content;"]);
     expectCssRule(html, ".diff-line", ["white-space: pre;", "font-family: var(--mono);"]);
-    expectCssRule(html, ".diff-row.added", ["background: rgba(111, 160, 122, 0.12);"]);
-    expectCssRule(html, ".diff-row.removed", ["background: rgba(184, 113, 111, 0.12);"]);
-    expectCssRule(html, ".diff-row.hunk", ["background: rgba(255, 255, 255, 0.055);"]);
+    expectCssRule(html, ".diff-row.added", ["background: #f4f4f5;"]);
+    expectCssRule(html, ".diff-row.removed", ["background: #f4f4f5;"]);
+    expectCssRule(html, ".diff-row.hunk", ["background: #f4f4f5;"]);
     expectCssRule(html, ".diff-row.context", ["background: transparent;"]);
     expect(html).toContain("grid-template-columns: minmax(0, 1fr);");
     expect(html).toContain(".inspector-panel { width: auto; min-width: 0; max-width: none; }");
@@ -724,6 +771,8 @@ describe("dashboard", () => {
     expect(html).toContain('data-inspector-section="runner"');
     expect(html).toContain('patchKeyedChildren("inspector-panel"');
     expect(html).not.toContain('setHtmlIfChanged("inspector-panel", renderInspector(overview, selectedGroup) + renderRunner(overview));');
+    expect(html).not.toContain("const setHtmlIfChanged =");
+    expect(html).not.toContain("setHtmlIfChanged(");
   });
 
   test("renders harness-managed subsession threads inside the inspector panel", () => {
@@ -1013,6 +1062,119 @@ describe("dashboard", () => {
       );
       expect(graph.edges).toContainEqual(
         expect.objectContaining({ source: workerAId, target: verifierId, label: "dependsOn" }),
+      );
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("builds a chronological agent workspace timeline across sessions", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "ouroboros-dashboard-workspace-timeline-"));
+    const harness = new Harness(join(dir, "ouroboros.db"));
+    harness.init();
+    const runId = harness.createRun({ goal: "Review cross-session chronological turns" });
+    const olderTaskId = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Emit older event",
+      prompt: "Emit older session event.",
+    });
+    const newerTaskId = harness.createTask({
+      runId,
+      role: "verifier",
+      goal: "Emit newer event",
+      prompt: "Emit newer session event.",
+    });
+    const olderAttemptId = harness.startAttempt({ taskId: olderTaskId, input: { sessionName: "older-session" } });
+    const newerAttemptId = harness.startAttempt({ taskId: newerTaskId, input: { sessionName: "newer-session" } });
+    harness.recordAttemptEvent({ attemptId: newerAttemptId, stream: "stdout", sequence: 1, text: "newer message" });
+    harness.recordAttemptEvent({ attemptId: olderAttemptId, stream: "stdout", sequence: 2, text: "older message" });
+
+    try {
+      const overview = harness.getRunOverview({ runId });
+      const olderSession = overview.sessions.find((session) => session.taskId === olderTaskId);
+      const newerSession = overview.sessions.find((session) => session.taskId === newerTaskId);
+      if (!olderSession?.events[0] || !newerSession?.events[0]) {
+        throw new Error("expected both timeline fixture sessions to have one event");
+      }
+      olderSession.events[0].createdAt = "2026-01-01T00:00:01.000Z";
+      newerSession.events[0].createdAt = "2026-01-01T00:00:02.000Z";
+
+      const workspace = buildDashboardWorkspaceModel(overview, { selectedRunId: runId });
+
+      expect(workspace.timeline.newestAtBottom).toBe(true);
+      expect(workspace.timeline.turns.map((turn) => turn.text)).toEqual(["older message", "newer message"]);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("builds an agentic canvas workspace model with task session evidence todo and diff metadata", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "ouroboros-dashboard-workspace-canvas-"));
+    const harness = new Harness(join(dir, "ouroboros.db"));
+    harness.init();
+    const projectId = harness.createProject({ name: "Canvas Project", rootPath: dir });
+    const runId = harness.createRun({ goal: "Build agent canvas", projectId });
+    const workerId = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Implement canvas workspace model",
+      prompt: "Build the typed model.",
+      doneWhen: ["model covers task", "model covers todo"],
+    });
+    const verifierId = harness.createTask({
+      runId,
+      role: "verifier",
+      goal: "Verify canvas workspace model",
+      prompt: "Verify the typed model.",
+      dependsOn: [workerId],
+      parentId: workerId,
+    });
+    const workerAttemptId = harness.recordAttempt({
+      taskId: workerId,
+      input: { sessionName: "worker-session", codexSessionId: "codex_worker" },
+      output: {
+        status: "done",
+        summary: "Worker changed dashboard workspace model",
+        changedFiles: ["packages/cli/src/dashboard-workspace-model.ts"],
+        checks: [{ name: "workspace model test", status: "passed" }],
+        artifacts: [{ kind: "diff", path: "packages/cli/src/dashboard-workspace-model.ts", additions: 12 }],
+      },
+    });
+
+    try {
+      const overview = harness.getRunOverview({ runId });
+      overview.lessons.push({
+        id: "lesson_workspace_model",
+        runId,
+        taskId: workerId,
+        attemptId: workerAttemptId,
+        kind: "experience",
+        summary: "Workspace model evidence should stay attached to the node.",
+        evidence: {},
+      });
+      const workspace = buildDashboardWorkspaceModel(overview, { selectedGroupId: workerId, selectedRunId: runId });
+      const workerNode = workspace.canvas.nodes.find((node) => node.id === workerId);
+
+      expect(workspace.project).toMatchObject({ id: projectId, name: "Canvas Project", rootPath: dir });
+      expect(workspace.run).toMatchObject({ id: runId, goal: "Build agent canvas", selected: true });
+      expect(workspace.canvas.nodes.map((node) => node.id)).toEqual([workerId, verifierId]);
+      expect(workspace.canvas.edges).toContainEqual(
+        expect.objectContaining({ source: workerId, target: verifierId, label: "dependsOn" }),
+      );
+      expect(workerNode?.metadata.sessions).toContainEqual(expect.objectContaining({ name: "worker-session" }));
+      expect(workerNode?.metadata.todos).toEqual([
+        expect.objectContaining({ text: "model covers task" }),
+        expect.objectContaining({ text: "model covers todo" }),
+      ]);
+      expect(workerNode?.metadata.changedFiles).toEqual([
+        expect.objectContaining({ path: "packages/cli/src/dashboard-workspace-model.ts" }),
+      ]);
+      expect(workerNode?.metadata.diffs).toEqual([
+        expect.objectContaining({ path: "packages/cli/src/dashboard-workspace-model.ts" }),
+      ]);
+      expect(workerNode?.metadata.evidence.map((item) => item.label)).toEqual(
+        expect.arrayContaining(["summary", "check", "artifact", "lesson"]),
       );
     } finally {
       await rm(dir, { recursive: true, force: true });
@@ -2963,10 +3125,10 @@ describe("dashboard", () => {
     expect(html).toContain('data-inspector-section="supervisor"');
     expect(html).toContain('data-inspector-section="diagnosis"');
     expect(html).toContain('id="workspace-flow"');
-    expect(html).toContain("renderWorkspace(selectedGroup)");
-    expect(html).toContain("renderInspector = (overview, group) =>");
-    expect(html).toContain("patchInspectorPanel(renderInspector(overview, selectedGroup)");
-    expect(html).toContain("renderDiagnosis(overview) + renderSupervisor(overview) + renderRunner(overview)");
+    expect(html).toContain("dashboardWorkspaceHtml(selectedGroup)");
+    expect(html).toContain("dashboardInspectorHtml(overview, selectedGroup)");
+    expect(html).toContain("patchInspectorPanel(dashboardInspectorHtml(overview, selectedGroup)");
+    expect(html).toContain("dashboardRunStatusHtml(overview)");
     // The runner section explicitly flags queued work waiting for a runner so a verifier can
     // tell self-iteration is paused on the runner rather than on missing work.
     expect(html).toContain("Queue waiting for runner");

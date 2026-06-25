@@ -1,5 +1,6 @@
 import { IntakeComposerControls } from "./dashboard-controls";
-import type { DashboardComposerState, DashboardGoalSummary } from "./dashboard-types";
+import { renderStaticNode } from "./dashboard-static-render";
+import type { DashboardComposerState, DashboardGoalSummary, DashboardRunHistoryEntry } from "./dashboard-types";
 
 function GoalRow({ goal }: { goal: DashboardGoalSummary }) {
   return (
@@ -96,5 +97,47 @@ export function DashboardSidebar({
         </section>
       </nav>
     </aside>
+  );
+}
+
+export function DashboardRunHistoryRows({
+  runs,
+  activeRunId,
+}: {
+  runs: DashboardRunHistoryEntry[];
+  activeRunId: string;
+}) {
+  return (
+    <>
+      {runs.map((entry) => (
+        <DashboardRunHistoryRow entry={entry} activeRunId={activeRunId} key={entry.id} />
+      ))}
+    </>
+  );
+}
+
+export function renderDashboardRunHistoryRows(runs: DashboardRunHistoryEntry[], activeRunId: string) {
+  return renderStaticNode(<DashboardRunHistoryRows runs={runs} activeRunId={activeRunId} />);
+}
+
+function DashboardRunHistoryRow({ entry, activeRunId }: { entry: DashboardRunHistoryEntry; activeRunId: string }) {
+  const isActive = entry.id === activeRunId;
+  const goal = entry.goal && entry.goal.trim() ? entry.goal : "(no goal)";
+
+  return (
+    <button
+      type="button"
+      className={`history-run-row${isActive ? " is-active" : ""}`}
+      data-react-run-history="true"
+      data-history-run-id={entry.id}
+      data-active-run-id={activeRunId}
+      data-history-run-selected={isActive ? "true" : "false"}
+      aria-current={isActive ? "true" : "false"}
+      title={entry.goal || entry.id}
+    >
+      <span className={`history-run-status status-${entry.status}`}>{entry.status}</span>
+      <span className="history-run-goal">{goal}</span>
+      <span className="history-run-id code-meta">{entry.id}</span>
+    </button>
   );
 }

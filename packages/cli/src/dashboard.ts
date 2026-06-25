@@ -3,7 +3,9 @@ import type { OverseerDiagnosis, RunOverview, RunStatusCounts } from "@ouroboros
 import { isAbsolute, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { DASHBOARD_REACT_MODULES } from "./dashboard-app";
+import { renderDashboardRunHistoryRows as renderDashboardRunHistoryRowsReact } from "./dashboard-sidebar";
 import { renderDashboardShell } from "./dashboard-shell";
+import type { DashboardRunHistoryEntry } from "./dashboard-types";
 import { summarizeOverseerDiagnosis } from "./run-evidence";
 
 interface DashboardActionResult {
@@ -55,6 +57,14 @@ export interface DashboardRunSummary {
   goal: string;
   projectId: string | null;
   createdAt: string | null;
+}
+
+export function dashboardRunHistoryRowsHtmlForTest(runs: DashboardRunHistoryEntry[], activeRunId: string): string {
+  return renderDashboardRunHistoryRows(runs, activeRunId);
+}
+
+function renderDashboardRunHistoryRows(runs: DashboardRunHistoryEntry[], activeRunId: string): string {
+  return renderDashboardRunHistoryRowsReact(runs, activeRunId);
 }
 
 const DASHBOARD_RUNS_HISTORY_LIMIT_MAX = 100;
@@ -594,22 +604,21 @@ export function dashboardHtml(input: { runId: string }) {
   <style>
     :root {
       color-scheme: light;
-      font-family: "Aptos", "Segoe UI Variable", ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
-      --app: #121212;
-      --sidebar: #30302f;
-      --sidebar-soft: #3a3a38;
-      --panel: #252524;
-      --panel-soft: #2f2f2e;
-      --canvas: #151515;
-      --canvas-soft: #1d1d1c;
-      --line: rgba(255, 255, 255, 0.1);
-      --line-strong: rgba(255, 255, 255, 0.18);
-      --ink: #f0f0eb;
-      --muted: #aaa9a3;
-      --muted-2: #787772;
-      --ok: #b8d4c2;
-      --warn: #d4c7a8;
-      --danger: #d2aaa8;
+      font-family: "Geist", "Aptos", "Segoe UI Variable", ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+      --app: #fafafa;
+      --sidebar: #ffffff;
+      --sidebar-soft: #f4f4f5;
+      --panel: #ffffff;
+      --panel-soft: #f4f4f5;
+      --canvas: #fafafa;
+      --canvas-soft: #f4f4f5;
+      --line: #e4e4e7;
+      --line-strong: #d4d4d8;
+      --ink: #09090b;
+      --muted: #71717a;
+      --muted-2: #a1a1aa;
+      --status-ink: #18181b;
+      --status-muted: #52525b;
       --mono: "JetBrains Mono", "SFMono-Regular", Consolas, monospace;
       color: var(--ink);
       background: var(--app);
@@ -617,7 +626,7 @@ export function dashboardHtml(input: { runId: string }) {
     * { box-sizing: border-box; }
     * {
       scrollbar-width: thin;
-      scrollbar-color: rgba(255, 255, 255, 0.22) transparent;
+      scrollbar-color: #d4d4d8 transparent;
     }
     *::-webkit-scrollbar {
       width: 12px;
@@ -630,11 +639,11 @@ export function dashboardHtml(input: { runId: string }) {
       min-height: 44px;
       border: 4px solid transparent;
       border-radius: 999px;
-      background: rgba(255, 255, 255, 0.2);
+      background: #d4d4d8;
       background-clip: padding-box;
     }
     *::-webkit-scrollbar-thumb:hover {
-      background: rgba(255, 255, 255, 0.32);
+      background: #a1a1aa;
       background-clip: padding-box;
     }
     html, body { min-height: 100%; }
@@ -659,13 +668,13 @@ export function dashboardHtml(input: { runId: string }) {
       min-width: 0;
       min-height: 0;
       padding: 14px 10px;
-      background: linear-gradient(180deg, #313130, #565652);
-      border-right: 1px solid rgba(255, 255, 255, 0.12);
+      background: var(--sidebar);
+      border-right: 1px solid var(--line);
       overflow: hidden;
     }
     .sidebar-head {
       padding: 2px 6px 14px;
-      border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+      border-bottom: 1px solid var(--line);
     }
     .brand-row {
       display: flex;
@@ -684,7 +693,7 @@ export function dashboardHtml(input: { runId: string }) {
       max-width: 160px;
       padding: 0;
       border: 0;
-      color: var(--ok);
+      color: var(--status-ink);
       font-size: 11px;
       font-weight: 760;
       letter-spacing: 0.08em;
@@ -706,7 +715,7 @@ export function dashboardHtml(input: { runId: string }) {
     }
     #run-title {
       margin-top: 10px;
-      color: #d0d0c9;
+      color: var(--ink);
       font-size: 14px;
       line-height: 1.5;
       display: -webkit-box;
@@ -716,7 +725,7 @@ export function dashboardHtml(input: { runId: string }) {
     }
     .project-title {
       margin-top: 7px;
-      color: #aaa9a3;
+      color: var(--muted);
       font-family: var(--mono);
       font-size: 11px;
       line-height: 1.45;
@@ -744,7 +753,7 @@ export function dashboardHtml(input: { runId: string }) {
       margin-top: 16px;
     }
     .intake-label {
-      color: #bab9b2;
+      color: var(--muted);
       font-size: 11px;
       font-weight: 760;
       letter-spacing: 0.08em;
@@ -755,18 +764,18 @@ export function dashboardHtml(input: { runId: string }) {
       min-height: 72px;
       resize: vertical;
       padding: 10px 11px;
-      border: 1px solid rgba(255, 255, 255, 0.12);
+      border: 1px solid var(--line);
       border-radius: 12px;
       outline: 0;
-      background: rgba(18, 18, 18, 0.3);
-      color: #f0f0eb;
+      background: #ffffff;
+      color: var(--ink);
       font: inherit;
       font-size: 13px;
       line-height: 1.45;
     }
     .intake-input:focus {
-      border-color: rgba(255, 255, 255, 0.32);
-      background: rgba(18, 18, 18, 0.44);
+      border-color: #a1a1aa;
+      background: #ffffff;
     }
     .intake-actions {
       display: grid;
@@ -786,10 +795,10 @@ export function dashboardHtml(input: { runId: string }) {
       align-items: center;
       gap: 6px;
       padding: 4px 8px;
-      border: 1px solid rgba(255, 255, 255, 0.12);
+      border: 1px solid var(--line);
       border-radius: 999px;
-      color: #d7d6cf;
-      background: rgba(255, 255, 255, 0.06);
+      color: var(--status-muted);
+      background: #f4f4f5;
       font-size: 11px;
       line-height: 1.3;
     }
@@ -805,7 +814,7 @@ export function dashboardHtml(input: { runId: string }) {
       padding: 0;
       border: 0;
       border-radius: 999px;
-      background: rgba(255, 255, 255, 0.08);
+      background: var(--line);
       color: inherit;
       cursor: pointer;
     }
@@ -813,10 +822,10 @@ export function dashboardHtml(input: { runId: string }) {
       min-width: 0;
       min-height: 30px;
       padding: 0 10px;
-      border: 1px solid rgba(255, 255, 255, 0.14);
+      border: 1px solid var(--line-strong);
       border-radius: 999px;
-      background: rgba(255, 255, 255, 0.07);
-      color: #efeee9;
+      background: var(--line);
+      color: var(--ink);
       font: inherit;
       font-size: 12px;
       font-weight: 680;
@@ -827,24 +836,24 @@ export function dashboardHtml(input: { runId: string }) {
       transition: transform 160ms cubic-bezier(0.16, 1, 0.3, 1), background 160ms, border-color 160ms;
     }
     .plain-button:hover {
-      background: rgba(255, 255, 255, 0.11);
-      border-color: rgba(255, 255, 255, 0.24);
+      background: var(--line-strong);
+      border-color: #a1a1aa;
     }
     .plain-button:active {
       transform: scale(0.98);
     }
     .plain-button.secondary {
-      color: #d7d6cf;
+      color: var(--status-muted);
       background: transparent;
     }
     .plain-button.danger {
-      color: #ead2d0;
-      border-color: rgba(210, 170, 168, 0.32);
-      background: rgba(210, 170, 168, 0.08);
+      color: var(--ink);
+      border-color: var(--line-strong);
+      background: #f4f4f5;
     }
     .plain-button.danger:hover {
-      border-color: rgba(210, 170, 168, 0.48);
-      background: rgba(210, 170, 168, 0.14);
+      border-color: #a1a1aa;
+      background: #e4e4e7;
     }
     .plain-button:disabled {
       cursor: default;
@@ -862,23 +871,23 @@ export function dashboardHtml(input: { runId: string }) {
       grid-template-columns: repeat(2, minmax(0, 1fr));
       gap: 0;
       padding: 14px 6px;
-      border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+      border-bottom: 1px solid var(--line);
     }
     .stat {
       padding: 9px 10px 11px;
-      border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+      border-bottom: 1px solid var(--line);
     }
     .stat b {
       display: block;
       font-family: var(--mono);
       font-size: 24px;
       line-height: 1.1;
-      color: #f1f1ec;
+      color: var(--ink);
     }
     .stat span {
       display: block;
       margin-top: 5px;
-      color: #bbbab3;
+      color: var(--muted);
       font-size: 11px;
       font-weight: 720;
       letter-spacing: 0.08em;
@@ -904,7 +913,7 @@ export function dashboardHtml(input: { runId: string }) {
     .section-label {
       margin: 0 0 8px;
       padding: 0 4px;
-      color: #bab9b2;
+      color: var(--muted);
       font-size: 11px;
       font-weight: 760;
       letter-spacing: 0.08em;
@@ -927,10 +936,10 @@ export function dashboardHtml(input: { runId: string }) {
       align-items: start;
       padding: 10px 6px 11px;
       border: 1px solid transparent;
-      border-bottom-color: rgba(255, 255, 255, 0.07);
+      border-bottom-color: var(--line);
       border-radius: 0;
       background: transparent;
-      color: #e4e3dd;
+      color: var(--ink);
       text-align: left;
       font: inherit;
       overflow: hidden;
@@ -939,12 +948,12 @@ export function dashboardHtml(input: { runId: string }) {
     }
     .task-row:hover {
       transform: translateX(2px);
-      background: rgba(255, 255, 255, 0.055);
+      background: #f4f4f5;
     }
     .task-row:active { transform: translateY(0) scale(0.995); }
     .task-row.selected {
-      background: rgba(255, 255, 255, 0.09);
-      border-bottom-color: rgba(255, 255, 255, 0.11);
+      background: #f4f4f5;
+      border-bottom-color: var(--line-strong);
     }
     .task-row-text {
       min-width: 0;
@@ -953,7 +962,7 @@ export function dashboardHtml(input: { runId: string }) {
     .task-row strong {
       display: block;
       min-width: 0;
-      color: #f2f1ec;
+      color: var(--ink);
       font-size: 14px;
       font-weight: 680;
       line-height: 1.35;
@@ -963,7 +972,7 @@ export function dashboardHtml(input: { runId: string }) {
     }
     .task-row .row-meta {
       margin-top: 4px;
-      color: #aaa9a2;
+      color: var(--muted);
       font-size: 11px;
       line-height: 1.35;
       overflow: hidden;
@@ -979,10 +988,10 @@ export function dashboardHtml(input: { runId: string }) {
       align-items: start;
       padding: 8px 6px 9px;
       border: 1px solid transparent;
-      border-bottom-color: rgba(255, 255, 255, 0.07);
+      border-bottom-color: var(--line);
       border-radius: 0;
       background: transparent;
-      color: #e4e3dd;
+      color: var(--ink);
       text-align: left;
       font: inherit;
       overflow: hidden;
@@ -991,11 +1000,11 @@ export function dashboardHtml(input: { runId: string }) {
     }
     .history-run-row:hover {
       transform: translateX(2px);
-      background: rgba(255, 255, 255, 0.055);
+      background: #f4f4f5;
     }
     .history-run-row.is-active {
-      background: rgba(255, 255, 255, 0.09);
-      border-bottom-color: rgba(255, 255, 255, 0.11);
+      background: #f4f4f5;
+      border-bottom-color: var(--line-strong);
     }
     .history-run-status {
       display: inline-flex;
@@ -1008,18 +1017,18 @@ export function dashboardHtml(input: { runId: string }) {
       font-weight: 700;
       letter-spacing: 0.04em;
       text-transform: uppercase;
-      background: rgba(255, 255, 255, 0.08);
-      color: #f2f1ec;
+      background: var(--line);
+      color: var(--ink);
       white-space: nowrap;
     }
-    .history-run-status.status-done { background: rgba(184, 212, 194, 0.22); color: var(--ok); }
-    .history-run-status.status-running { background: rgba(212, 199, 168, 0.22); color: var(--warn); }
-    .history-run-status.status-blocked { background: rgba(210, 170, 168, 0.22); color: var(--danger); }
-    .history-run-status.status-todo { background: rgba(255, 255, 255, 0.08); color: var(--muted); }
+    .history-run-status.status-done { background: #f4f4f5; color: var(--status-ink); }
+    .history-run-status.status-running { background: #f4f4f5; color: var(--status-muted); }
+    .history-run-status.status-blocked { background: #f4f4f5; color: var(--status-ink); }
+    .history-run-status.status-todo { background: var(--line); color: var(--muted); }
     .history-run-goal {
       display: block;
       min-width: 0;
-      color: #f2f1ec;
+      color: var(--ink);
       font-size: 13px;
       font-weight: 600;
       line-height: 1.3;
@@ -1031,7 +1040,7 @@ export function dashboardHtml(input: { runId: string }) {
       grid-column: 1 / -1;
       display: block;
       margin-top: 2px;
-      color: #787772;
+      color: var(--muted-2);
       font-size: 10px;
       line-height: 1.3;
       overflow: hidden;
@@ -1048,8 +1057,8 @@ export function dashboardHtml(input: { runId: string }) {
     }
     .workspace-head {
       padding: 24px 44px 18px;
-      border-bottom: 1px solid rgba(255, 255, 255, 0.08);
-      background: rgba(18, 18, 18, 0.88);
+      border-bottom: 1px solid var(--line);
+      background: #ffffff;
       backdrop-filter: blur(12px);
     }
     .workspace-head-row {
@@ -1101,21 +1110,21 @@ export function dashboardHtml(input: { runId: string }) {
       min-height: 28px;
       margin-top: 11px;
       padding: 0 9px;
-      border: 1px solid rgba(255, 255, 255, 0.14);
+      border: 1px solid var(--line-strong);
       border-radius: 999px;
-      background: rgba(255, 255, 255, 0.065);
-      color: #d8d7d0;
+      background: #f4f4f5;
+      color: var(--ink);
       font: inherit;
       font-size: 11px;
       font-weight: 720;
       cursor: pointer;
     }
     .workspace-title-toggle:hover {
-      border-color: rgba(255, 255, 255, 0.26);
-      background: rgba(255, 255, 255, 0.11);
+      border-color: #a1a1aa;
+      background: var(--line-strong);
     }
     .workspace-title-toggle:focus-visible {
-      outline: 2px solid rgba(255, 255, 255, 0.55);
+      outline: 2px solid #71717a;
       outline-offset: 2px;
     }
     .workspace-toggle {
@@ -1124,9 +1133,9 @@ export function dashboardHtml(input: { runId: string }) {
       grid-template-columns: repeat(2, minmax(72px, 1fr));
       gap: 3px;
       padding: 3px;
-      border: 1px solid rgba(255, 255, 255, 0.12);
+      border: 1px solid var(--line);
       border-radius: 999px;
-      background: rgba(255, 255, 255, 0.055);
+      background: #f4f4f5;
     }
     .workspace-toggle button {
       min-width: 0;
@@ -1135,14 +1144,14 @@ export function dashboardHtml(input: { runId: string }) {
       border: 0;
       border-radius: 999px;
       background: transparent;
-      color: #b9b8b1;
+      color: var(--muted);
       font: inherit;
       font-size: 12px;
       font-weight: 720;
       cursor: pointer;
     }
     .workspace-toggle button.active {
-      background: #e3e2dc;
+      background: #ffffff;
       color: #171716;
       box-shadow: 0 1px 8px rgba(0, 0, 0, 0.24);
     }
@@ -1253,7 +1262,7 @@ export function dashboardHtml(input: { runId: string }) {
       grid-template-columns: 34px minmax(0, 1fr);
       gap: 18px;
       padding: 28px 0 36px;
-      border-top: 1px solid rgba(255, 255, 255, 0.065);
+      border-top: 1px solid #f4f4f5;
       background: transparent;
       animation: liftIn 260ms cubic-bezier(0.16, 1, 0.3, 1) both;
     }
@@ -1275,10 +1284,10 @@ export function dashboardHtml(input: { runId: string }) {
       height: 26px;
       display: inline-grid;
       place-items: center;
-      border: 1px solid rgba(255, 255, 255, 0.12);
+      border: 1px solid var(--line);
       border-radius: 999px;
-      background: rgba(255, 255, 255, 0.055);
-      color: #ecebe5;
+      background: #f4f4f5;
+      color: var(--ink);
       font-size: 11px;
       font-weight: 760;
       letter-spacing: 0.04em;
@@ -1288,7 +1297,7 @@ export function dashboardHtml(input: { runId: string }) {
       width: 1px;
       min-height: 24px;
       margin-top: 8px;
-      background: rgba(255, 255, 255, 0.08);
+      background: var(--line);
     }
     .turn-head, .inspector-row {
       display: flex;
@@ -1297,7 +1306,7 @@ export function dashboardHtml(input: { runId: string }) {
       gap: 12px;
     }
     .turn-author {
-      color: #f1f1ec;
+      color: var(--ink);
       font-size: 16px;
       font-weight: 720;
       line-height: 1.45;
@@ -1312,7 +1321,7 @@ export function dashboardHtml(input: { runId: string }) {
     }
     .turn-text {
       margin-top: 18px;
-      color: #d8d7d0;
+      color: var(--ink);
       font-size: 14px;
       line-height: 1.85;
       white-space: pre-wrap;
@@ -1326,10 +1335,10 @@ export function dashboardHtml(input: { runId: string }) {
     .evidence-group {
       min-width: 0;
       padding-top: 12px;
-      border-top: 1px solid rgba(255, 255, 255, 0.08);
+      border-top: 1px solid var(--line);
     }
     .evidence-title {
-      color: #aaa9a2;
+      color: var(--muted);
       font-size: 11px;
       font-weight: 700;
       line-height: 1.35;
@@ -1343,7 +1352,7 @@ export function dashboardHtml(input: { runId: string }) {
     }
     .evidence-item {
       min-width: 0;
-      color: #d3d2cc;
+      color: var(--ink);
       font-size: 12px;
       line-height: 1.55;
       overflow-wrap: anywhere;
@@ -1360,7 +1369,7 @@ export function dashboardHtml(input: { runId: string }) {
     }
     .raw-stream summary {
       cursor: pointer;
-      color: #aaa9a2;
+      color: var(--muted);
       font-weight: 650;
     }
     .stream-output {
@@ -1368,8 +1377,8 @@ export function dashboardHtml(input: { runId: string }) {
       max-height: 320px;
       overflow: auto;
       padding: 14px 0 0 16px;
-      border-left: 1px solid rgba(255, 255, 255, 0.12);
-      color: #efefea;
+      border-left: 1px solid var(--line);
+      color: var(--ink);
       font-family: var(--mono);
       font-size: 11px;
       line-height: 1.6;
@@ -1398,7 +1407,7 @@ export function dashboardHtml(input: { runId: string }) {
       color: #757884;
     }
     .stream-line.event-error {
-      color: #e6a3a3;
+      color: #52525b;
     }
     .raw-stream .raw-json details {
       margin-top: 8px;
@@ -1410,9 +1419,9 @@ export function dashboardHtml(input: { runId: string }) {
     .raw-stream .raw-json pre {
       margin: 6px 0 0;
       padding: 8px 10px;
-      background: rgba(255, 255, 255, 0.04);
+      background: #f4f4f5;
       border-radius: 6px;
-      color: #c9c9c4;
+      color: var(--ink);
       font-family: var(--mono);
       font-size: 10.5px;
       line-height: 1.5;
@@ -1434,7 +1443,7 @@ export function dashboardHtml(input: { runId: string }) {
       min-height: 0;
       padding: 46px 26px 28px;
       background: var(--app);
-      border-left: 1px solid rgba(255, 255, 255, 0.08);
+      border-left: 1px solid var(--line);
       overflow-x: hidden;
       overflow-y: auto;
       scrollbar-gutter: stable;
@@ -1451,7 +1460,7 @@ export function dashboardHtml(input: { runId: string }) {
     }
     .inspector-card + .inspector-card {
       margin-top: 0;
-      border-top: 1px solid rgba(255, 255, 255, 0.1);
+      border-top: 1px solid var(--line);
     }
     .inspector-card h2 {
       margin: 0 0 18px;
@@ -1471,10 +1480,10 @@ export function dashboardHtml(input: { runId: string }) {
     .current-task {
       margin: 0 0 20px;
       padding-bottom: 18px;
-      border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+      border-bottom: 1px solid var(--line);
     }
     .current-task-title {
-      color: #efeee9;
+      color: var(--ink);
       font-size: 13px;
       font-weight: 690;
       line-height: 1.5;
@@ -1492,7 +1501,7 @@ export function dashboardHtml(input: { runId: string }) {
       grid-template-columns: 18px minmax(0, 1fr);
       gap: 9px;
       align-items: start;
-      color: #d9d8d1;
+      color: var(--ink);
       font-size: 13px;
       line-height: 1.42;
     }
@@ -1505,7 +1514,7 @@ export function dashboardHtml(input: { runId: string }) {
     }
     .todo-item.done .todo-text {
       text-decoration: line-through;
-      text-decoration-color: rgba(255, 255, 255, 0.38);
+      text-decoration-color: #a1a1aa;
     }
     .todo-item .meta {
       display: block;
@@ -1515,15 +1524,15 @@ export function dashboardHtml(input: { runId: string }) {
     .control-row {
       margin-top: 20px;
       padding-top: 18px;
-      border-top: 1px solid rgba(255, 255, 255, 0.1);
+      border-top: 1px solid var(--line);
     }
     .action-group {
       margin-top: 20px;
       padding-top: 18px;
-      border-top: 1px solid rgba(255, 255, 255, 0.1);
+      border-top: 1px solid var(--line);
     }
     .action-title {
-      color: #efeee9;
+      color: var(--ink);
       font-size: 12px;
       font-weight: 720;
       line-height: 1.4;
@@ -1557,7 +1566,7 @@ export function dashboardHtml(input: { runId: string }) {
       gap: 2px;
       margin-left: 8px;
       padding-left: 12px;
-      border-left: 1px solid rgba(255, 255, 255, 0.08);
+      border-left: 1px solid var(--line);
     }
     .changed-file-node {
       width: 100%;
@@ -1570,7 +1579,7 @@ export function dashboardHtml(input: { runId: string }) {
       border: 0;
       border-radius: 5px;
       background: transparent;
-      color: #d8d7d0;
+      color: var(--ink);
       font: inherit;
       font-size: 12px;
       line-height: 1.35;
@@ -1580,15 +1589,15 @@ export function dashboardHtml(input: { runId: string }) {
       cursor: pointer;
     }
     button.changed-file-node:hover {
-      background: rgba(255, 255, 255, 0.045);
-      color: #f4f3ee;
+      background: #f4f4f5;
+      color: var(--ink);
     }
     button.changed-file-node.selected {
-      background: rgba(255, 255, 255, 0.075);
-      color: #ffffff;
+      background: #e4e4e7;
+      color: var(--ink);
     }
     button.changed-file-node.selected .changed-file-type {
-      color: #c8c7c1;
+      color: var(--muted);
     }
     .changed-file-type {
       color: var(--muted-2);
@@ -1618,7 +1627,7 @@ export function dashboardHtml(input: { runId: string }) {
       overflow: hidden;
       margin-top: 16px;
       padding-top: 16px;
-      border-top: 1px solid rgba(255, 255, 255, 0.1);
+      border-top: 1px solid var(--line);
     }
     .diff-header {
       position: sticky;
@@ -1630,7 +1639,7 @@ export function dashboardHtml(input: { runId: string }) {
     }
     .diff-path {
       min-width: 0;
-      color: #deddd7;
+      color: var(--ink);
       font-family: var(--mono);
       font-size: 11px;
       line-height: 1.55;
@@ -1642,10 +1651,10 @@ export function dashboardHtml(input: { runId: string }) {
       overflow-y: auto;
       margin: 0;
       padding: 8px 0;
-      border: 1px solid rgba(255, 255, 255, 0.1);
+      border: 1px solid var(--line);
       border-radius: 6px;
-      background: rgba(18, 18, 18, 0.22);
-      color: #f0f0eb;
+      background: #ffffff;
+      color: var(--ink);
       font-family: var(--mono);
       font-size: 11px;
       line-height: 1.62;
@@ -1670,20 +1679,20 @@ export function dashboardHtml(input: { runId: string }) {
       padding-right: 18px;
     }
     .diff-row.added {
-      background: rgba(111, 160, 122, 0.12);
+      background: #f4f4f5;
     }
     .diff-row.added .diff-gutter {
-      color: #a9c7b1;
+      color: var(--status-muted);
     }
     .diff-row.removed {
-      background: rgba(184, 113, 111, 0.12);
+      background: #f4f4f5;
     }
     .diff-row.removed .diff-gutter {
-      color: #d6aaa8;
+      color: var(--status-muted);
     }
     .diff-row.hunk {
-      background: rgba(255, 255, 255, 0.055);
-      color: #cfcec8;
+      background: #f4f4f5;
+      color: var(--muted);
     }
     .diff-row.context {
       background: transparent;
@@ -1703,10 +1712,10 @@ export function dashboardHtml(input: { runId: string }) {
       margin-top: 2px;
       display: inline-grid;
       place-items: center;
-      border: 2px solid rgba(255, 255, 255, 0.42);
+      border: 2px solid #a1a1aa;
       border-radius: 999px;
     }
-    .checkbox.done { background: #deded8; border-color: #deded8; }
+    .checkbox.done { background: #e4e4e7; border-color: #e4e4e7; }
     .checkbox.done::after {
       content: "";
       width: 5px;
@@ -1717,8 +1726,8 @@ export function dashboardHtml(input: { runId: string }) {
     }
     .lesson {
       padding: 9px 0 11px;
-      border-top: 1px solid rgba(255, 255, 255, 0.07);
-      color: #d6d5cf;
+      border-top: 1px solid var(--line);
+      color: var(--ink);
       font-size: 14px;
       line-height: 1.55;
     }
@@ -1729,11 +1738,11 @@ export function dashboardHtml(input: { runId: string }) {
     .guardrail-group + .guardrail-group {
       margin-top: 18px;
       padding-top: 16px;
-      border-top: 1px solid rgba(255, 255, 255, 0.08);
+      border-top: 1px solid var(--line);
     }
     .guardrail-group-title {
       margin-bottom: 9px;
-      color: #efeee9;
+      color: var(--ink);
       font-size: 12px;
       font-weight: 720;
       line-height: 1.4;
@@ -1741,7 +1750,7 @@ export function dashboardHtml(input: { runId: string }) {
     .guardrail-item {
       min-width: 0;
       padding: 10px 0 11px;
-      border-top: 1px solid rgba(255, 255, 255, 0.07);
+      border-top: 1px solid var(--line);
     }
     .guardrail-id {
       min-width: 0;
@@ -1756,7 +1765,7 @@ export function dashboardHtml(input: { runId: string }) {
     .guardrail-summary {
       min-width: 0;
       margin-top: 4px;
-      color: #deddd7;
+      color: var(--ink);
       font-size: 13px;
       line-height: 1.5;
       overflow-wrap: anywhere;
@@ -1784,7 +1793,7 @@ export function dashboardHtml(input: { runId: string }) {
       overflow-wrap: anywhere;
     }
     .guardrail-status.error {
-      color: #ead2d0;
+      color: var(--ink);
     }
     .prompt-link {
       display: inline-flex;
@@ -1794,18 +1803,18 @@ export function dashboardHtml(input: { runId: string }) {
       padding: 0;
       border: 0;
       border-radius: 0;
-      color: #d9d9d4;
+      color: var(--ink);
       background: transparent;
       font-size: 14px;
       font-weight: 720;
       text-decoration: underline;
-      text-decoration-color: rgba(255, 255, 255, 0.28);
+      text-decoration-color: #a1a1aa;
       text-underline-offset: 3px;
       transition: color 160ms, text-decoration-color 160ms;
     }
     .prompt-link:hover {
-      color: #ffffff;
-      text-decoration-color: rgba(255, 255, 255, 0.72);
+      color: var(--ink);
+      text-decoration-color: #52525b;
     }
     .prompt-link:active { color: #cfcfc9; }
     .status-dot {
@@ -1813,12 +1822,12 @@ export function dashboardHtml(input: { runId: string }) {
       height: 8px;
       margin-top: 6px;
       border-radius: 999px;
-      background: #8f8f88;
+      background: var(--muted-2);
     }
-    .status-dot.done { background: var(--ok); }
-    .status-dot.running { background: #d8d0a8; animation: breathe 1.8s ease-in-out infinite; }
-    .status-dot.blocked { background: var(--danger); }
-    .status-dot.todo { background: var(--warn); }
+    .status-dot.done { background: var(--status-ink); }
+    .status-dot.running { background: var(--status-ink); animation: breathe 1.8s ease-in-out infinite; }
+    .status-dot.blocked { background: var(--status-ink); }
+    .status-dot.todo { background: var(--status-muted); }
     .status-text {
       display: inline-flex;
       align-items: center;
@@ -1834,12 +1843,12 @@ export function dashboardHtml(input: { runId: string }) {
       text-overflow: ellipsis;
       white-space: nowrap;
     }
-    .status-text.done { color: var(--ok); }
-    .status-text.running { color: #d8d0a8; }
-    .status-text.blocked { color: var(--danger); }
-    .status-text.todo { color: var(--warn); }
-    .status-text.interrupted { color: var(--warn); }
-    .status-text.orphaned { color: var(--danger); }
+    .status-text.done { color: var(--status-ink); }
+    .status-text.running { color: var(--status-ink); }
+    .status-text.blocked { color: var(--status-ink); }
+    .status-text.todo { color: var(--status-muted); }
+    .status-text.interrupted { color: var(--status-muted); }
+    .status-text.orphaned { color: var(--status-ink); }
     .subsession-list {
       display: grid;
       gap: 10px;
@@ -1850,7 +1859,7 @@ export function dashboardHtml(input: { runId: string }) {
     .subsession-row {
       min-width: 0;
       padding: 9px 0 11px;
-      border-top: 1px solid rgba(255, 255, 255, 0.07);
+      border-top: 1px solid var(--line);
     }
     .subsession-row:first-child {
       border-top: 0;
@@ -1865,7 +1874,7 @@ export function dashboardHtml(input: { runId: string }) {
     .subsession-title {
       flex: 1 1 auto;
       min-width: 0;
-      color: #efeee9;
+      color: var(--ink);
       font-size: 13px;
       font-weight: 680;
       line-height: 1.35;
@@ -1882,7 +1891,7 @@ export function dashboardHtml(input: { runId: string }) {
     }
     .subsession-summary {
       margin-top: 6px;
-      color: #deddd7;
+      color: var(--ink);
       font-size: 12px;
       line-height: 1.5;
       overflow-wrap: anywhere;
@@ -1896,18 +1905,18 @@ export function dashboardHtml(input: { runId: string }) {
     }
     .empty {
       padding: 16px;
-      border-top: 1px dashed rgba(255, 255, 255, 0.14);
-      border-bottom: 1px dashed rgba(255, 255, 255, 0.14);
+      border-top: 1px dashed var(--line-strong);
+      border-bottom: 1px dashed var(--line-strong);
       border-radius: 0;
-      color: #aaa9a3;
+      color: var(--muted);
       font-size: 14px;
       line-height: 1.6;
-      background: rgba(255, 255, 255, 0.035);
+      background: #f4f4f5;
     }
     .empty strong {
       display: block;
       margin-bottom: 4px;
-      color: #d8d7d0;
+      color: var(--ink);
       font-size: 13px;
       font-weight: 680;
     }
@@ -1946,7 +1955,7 @@ export function dashboardHtml(input: { runId: string }) {
       .inspector-panel {
         padding: 24px 18px 30px;
         border-left: 0;
-        border-top: 1px solid rgba(255, 255, 255, 0.08);
+        border-top: 1px solid var(--line);
       }
       .task-sidebar { min-width: 0; overflow-x: hidden; overflow-y: visible; }
       .workspace-head-row {
@@ -2831,7 +2840,7 @@ export function dashboardHtml(input: { runId: string }) {
         ).join("") + '</div>' +
         '</div>';
     };
-    const renderWorkspace = (group) => workspaceMode === "canvas" ? renderCanvasWorkspace(group) : renderFlowWorkspace(group);
+    const dashboardWorkspaceHtml = (group) => workspaceMode === "canvas" ? renderCanvasWorkspace(group) : renderFlowWorkspace(group);
     const mountReactFlowCanvas = () => {
       if (workspaceMode !== "canvas") return;
       const mount = document.getElementById("dashboard-canvas-root");
@@ -2850,7 +2859,7 @@ export function dashboardHtml(input: { runId: string }) {
         window.addEventListener("ouroboros-canvas-ready", mountGraph, { once: true });
       }
     };
-    const renderInspector = (overview, group) => {
+    const dashboardInspectorHtml = (overview, group) => {
       if (!group) return '<section class="inspector-card" data-inspector-section="progress"><h2>Detail</h2><div class="empty">Select a goal</div></section>';
       const doneWhen = group.tasks.flatMap((task) => (Array.isArray(task.doneWhen) ? task.doneWhen : []).map((item) => ({ task, item })));
       const runningSessions = group.sessions.filter((session) => session.status === "running");
@@ -2993,6 +3002,7 @@ export function dashboardHtml(input: { runId: string }) {
         '</div></div>' : '') +
         '</section>';
     };
+    const dashboardRunStatusHtml = (overview) => renderGuardrailsSection(overview) + renderDiagnosis(overview) + renderSupervisor(overview) + renderRunner(overview);
     const postJson = async (path, body) => {
       const response = await fetch(path, {
         method: "POST",
@@ -3017,10 +3027,10 @@ export function dashboardHtml(input: { runId: string }) {
     const renderAttachmentChips = () => {
       const node = document.getElementById("attachment-chips");
       if (!node) return;
-      node.innerHTML = attachments.map((attachment, index) =>
+      patchStaticHtml("attachment-chips", attachments.map((attachment, index) =>
         '<div class="attachment-chip" data-attachment-index="' + index + '"><span title="' + escapeHtml(attachment.name) + '">' +
         escapeHtml(attachment.name || "attachment") + '</span><button type="button" aria-label="Remove attachment" data-remove-attachment="' + index + '">x</button></div>'
-      ).join("");
+      ).join(""));
     };
     const intakeDocument = (prompt, attachmentList) => {
       const sections = ["Prompt:\\n" + prompt.trim()];
@@ -3061,12 +3071,15 @@ export function dashboardHtml(input: { runId: string }) {
       const next = String(value ?? "");
       if (node && node.textContent !== next) node.textContent = next;
     };
-    const setHtmlIfChanged = (id, html) => {
+    const patchStaticHtml = (id, html) => {
       const current = renderedHtml.get(id);
       if (current === html) return;
-      renderedHtml.set(id, html);
       const node = document.getElementById(id);
-      if (node) node.innerHTML = html;
+      if (!node) return;
+      const template = document.createElement("template");
+      template.innerHTML = html;
+      node.replaceChildren(...Array.from(template.content.childNodes));
+      renderedHtml.set(id, html);
     };
     const patchKeyedChildren = (id, html, keyAttribute) => {
       if (renderedHtml.get(id) === html) return;
@@ -3077,8 +3090,7 @@ export function dashboardHtml(input: { runId: string }) {
       const nextChildren = Array.from(template.content.children);
       const keyedNextChildren = nextChildren.filter((child) => child.hasAttribute(keyAttribute));
       if (keyedNextChildren.length === 0) {
-        renderedHtml.set(id, html);
-        node.innerHTML = html;
+        patchStaticHtml(id, html);
         return;
       }
       const nextKeys = new Set(keyedNextChildren.map((child) => child.getAttribute(keyAttribute)));
@@ -3169,7 +3181,7 @@ export function dashboardHtml(input: { runId: string }) {
     const patchStreamOutput = (currentStream, nextStream) => {
       const nextLines = Array.from(nextStream.querySelectorAll("[data-event-index]"));
       if (nextLines.length === 0) {
-        if (currentStream.innerHTML !== nextStream.innerHTML) currentStream.innerHTML = nextStream.innerHTML;
+        if (currentStream.innerHTML !== nextStream.innerHTML) currentStream.replaceChildren(...Array.from(nextStream.cloneNode(true).childNodes));
         return;
       }
       const nextIndexes = new Set(nextLines.map((line) => line.getAttribute("data-event-index")));
@@ -3219,8 +3231,7 @@ export function dashboardHtml(input: { runId: string }) {
       const nextTranscript = template.content.querySelector(".transcript");
       const currentTranscript = node.querySelector(".transcript");
       if (!nextTranscript || !currentTranscript) {
-        renderedHtml.set("workspace-flow", html);
-        node.innerHTML = html;
+        patchStaticHtml("workspace-flow", html);
         restoreFlowScrollState(restoredFlowScrollState || scrollState);
         restoredFlowScrollState = null;
         return;
@@ -3307,7 +3318,7 @@ export function dashboardHtml(input: { runId: string }) {
       syncWorkspaceTitle(selectedGroup ? selectedGroup.titleTask.goal : "No goal selected");
       syncWorkspaceToggle();
       document.getElementById("workspace-flow")?.classList.toggle("canvas-workspace", workspaceMode === "canvas");
-      setHtmlIfChanged("sidebar-stats", [
+      patchStaticHtml("sidebar-stats", [
         ["Goals", goalGroups.length],
         ["Active goals", activeGroups.length],
         ["Global todo runs", globalRuns.todo || 0],
@@ -3315,34 +3326,55 @@ export function dashboardHtml(input: { runId: string }) {
         ["Queued tasks", (taskCounts.todo || 0) + (taskCounts.running || 0)],
         ["Running sessions", sessionCounts.running || 0]
       ].map(([label, value]) => '<div class="stat"><b>' + value + '</b><span>' + label + '</span></div>').join(""));
-      setHtmlIfChanged("active-goal-list", activeGroups.length ? activeGroups.map(goalRow).join("") : '<div class="empty"><strong>Idle</strong>No active tasks. Describe the next goal in the composer.</div>');
-      setHtmlIfChanged("history-goal-list", [...goalGroups].reverse().filter((group) => group.activeTasks.length === 0).map(goalRow).join(""));
-      patchWorkspace(renderWorkspace(selectedGroup));
+      patchStaticHtml("active-goal-list", activeGroups.length ? activeGroups.map(goalRow).join("") : '<div class="empty"><strong>Idle</strong>No active tasks. Describe the next goal in the composer.</div>');
+      patchStaticHtml("history-goal-list", [...goalGroups].reverse().filter((group) => group.activeTasks.length === 0).map(goalRow).join(""));
+      patchWorkspace(dashboardWorkspaceHtml(selectedGroup));
       mountReactFlowCanvas();
-      patchInspectorPanel(renderInspector(overview, selectedGroup), renderGuardrailsSection(overview) + renderDiagnosis(overview) + renderSupervisor(overview) + renderRunner(overview));
+      patchInspectorPanel(dashboardInspectorHtml(overview, selectedGroup), dashboardRunStatusHtml(overview));
     }
     let recentRunsCache = [];
     const RECENT_RUNS_LIMIT = 10;
-    const runHistoryRow = (entry) => {
+    const runHistoryRowTemplate = document.createElement("template");
+    runHistoryRowTemplate.innerHTML = ${JSON.stringify(renderDashboardRunHistoryRows([
+      { id: "__run_history_id__", status: "unknown", goal: "__run_history_goal__", projectId: null, createdAt: null },
+    ], "__active_run_id__"))};
+    const renderReactRunHistoryRow = (entry) => {
       const id = typeof entry?.id === "string" ? entry.id : "";
       if (!id) return "";
       const status = typeof entry?.status === "string" ? entry.status : "unknown";
-      const goal = typeof entry?.goal === "string" && entry.goal.trim() ? entry.goal : "(no goal)";
+      const rawGoal = typeof entry?.goal === "string" ? entry.goal : "";
+      const goal = rawGoal.trim() ? rawGoal : "(no goal)";
       const isActive = id === runId;
-      return '<button type="button" class="history-run-row' + (isActive ? " is-active" : "") + '" data-history-run-id="' + escapeHtml(id) + '" data-active-run-id="' + escapeHtml(runId) + '" data-history-run-selected="' + (isActive ? "true" : "false") + '" aria-current="' + (isActive ? "true" : "false") + '" title="' + escapeHtml(entry?.goal || id) + '">' +
-        '<span class="history-run-status status-' + escapeHtml(status) + '">' + escapeHtml(status) + '</span>' +
-        '<span class="history-run-goal">' + escapeHtml(goal) + '</span>' +
-        '<span class="history-run-id code-meta">' + escapeHtml(id) + '</span>' +
-      '</button>';
+      const fragment = runHistoryRowTemplate.content.cloneNode(true);
+      const row = fragment.querySelector("[data-react-run-history]");
+      if (!row) return "";
+      row.classList.toggle("is-active", isActive);
+      row.dataset.historyRunId = id;
+      row.dataset.activeRunId = runId;
+      row.dataset.historyRunSelected = isActive ? "true" : "false";
+      row.setAttribute("aria-current", isActive ? "true" : "false");
+      row.setAttribute("title", rawGoal || id);
+      const statusNode = row.querySelector(".history-run-status");
+      if (statusNode) {
+        statusNode.className = "history-run-status status-" + status;
+        statusNode.textContent = status;
+      }
+      const goalNode = row.querySelector(".history-run-goal");
+      if (goalNode) goalNode.textContent = goal;
+      const idNode = row.querySelector(".history-run-id");
+      if (idNode) idNode.textContent = id;
+      const host = document.createElement("div");
+      host.appendChild(fragment);
+      return host.innerHTML;
     };
     const renderRunHistorySection = (id, runs, label) => {
       const node = document.getElementById(id);
       if (!node) return;
       if (!Array.isArray(runs) || runs.length === 0) {
-        node.innerHTML = '<div class="empty">' + escapeHtml(label) + ' unavailable.</div>';
+        patchStaticHtml(id, '<div class="empty">' + escapeHtml(label) + ' unavailable.</div>');
         return;
       }
-      node.innerHTML = runs.map(runHistoryRow).join("");
+      patchStaticHtml(id, runs.map(renderReactRunHistoryRow).join(""));
     };
     const renderRecentRunsList = (runs) => {
       const activeRun = runs.find((entry) => entry?.id === runId);
@@ -3363,7 +3395,7 @@ export function dashboardHtml(input: { runId: string }) {
         .catch((error) => {
           const node = document.getElementById("recent-runs-list");
           if (node) {
-            node.innerHTML = '<div class="empty">' + escapeHtml(error?.message ? error.message : "Failed to load recent runs.") + '</div>';
+            patchStaticHtml("recent-runs-list", '<div class="empty">' + escapeHtml(error?.message ? error.message : "Failed to load recent runs.") + '</div>');
           }
         });
     };

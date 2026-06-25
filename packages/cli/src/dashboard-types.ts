@@ -44,6 +44,14 @@ export interface DashboardChangedFile {
   selected?: boolean;
 }
 
+export interface DashboardRunHistoryEntry {
+  id: string;
+  status: string;
+  goal: string;
+  projectId?: string | null;
+  createdAt?: string | null;
+}
+
 export interface DashboardAppState {
   runId: string;
   overview: RunOverview | null;
