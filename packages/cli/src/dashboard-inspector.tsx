@@ -1,4 +1,5 @@
 import { SupervisorControls } from "./dashboard-controls";
+import { Button, Panel, ScrollArea } from "./dashboard-ui/primitives";
 import type { DashboardChangedFile, DashboardSupervisorState } from "./dashboard-types";
 
 export function ChangedFilesInspector({
@@ -9,13 +10,14 @@ export function ChangedFilesInspector({
   selectedPath?: string | null;
 }) {
   return (
-    <section className="inspector-card changed-files-section" data-inspector-section="changed-files" data-changed-files-section>
+    <Panel className="inspector-card changed-files-section" data-inspector-section="changed-files" data-changed-files-section>
       <h2>Changed Files</h2>
-      <div className="changed-file-tree" data-changed-file-tree>
+      <ScrollArea className="changed-file-tree" data-changed-file-tree>
         {files.map((file) => (
-          <button
+          <Button
             type="button"
             className={`changed-file-node ${file.selected || file.path === selectedPath ? "selected" : ""}`}
+            variant="ghost"
             data-changed-file-node="file"
             data-changed-file-path={file.path}
             data-selected-changed-file={file.selected || file.path === selectedPath ? "true" : undefined}
@@ -27,17 +29,17 @@ export function ChangedFilesInspector({
               file
             </span>
             <span className="changed-file-name">{file.path}</span>
-          </button>
+          </Button>
         ))}
-      </div>
-      <div className="diff-panel" data-diff-panel data-diff-state={selectedPath ? "loading" : "empty-selection"}>
+      </ScrollArea>
+      <Panel as="div" className="diff-panel" data-diff-panel data-diff-state={selectedPath ? "loading" : "empty-selection"}>
         <div className="diff-header" data-diff-header>
           <span className="diff-path" data-diff-path>
             {selectedPath || "Select a changed file"}
           </span>
         </div>
-      </div>
-    </section>
+      </Panel>
+    </Panel>
   );
 }
 
@@ -53,10 +55,10 @@ export function DashboardInspector({
   children?: React.ReactNode;
 }) {
   return (
-    <aside className="inspector-panel" id="inspector-panel">
+    <ScrollArea as="aside" className="inspector-panel" id="inspector-panel">
       {children}
       <SupervisorControls supervisor={supervisor} />
       <ChangedFilesInspector files={changedFiles} selectedPath={selectedChangedFilePath} />
-    </aside>
+    </ScrollArea>
   );
 }

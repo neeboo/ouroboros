@@ -65,6 +65,21 @@ body {
 }
 
 @layer components {
+.ui-button {
+  min-width: 0;
+}
+.ui-tabs,
+.ui-panel,
+.ui-scroll-area {
+  min-width: 0;
+}
+.ui-scroll-area {
+  scrollbar-gutter: stable;
+}
+.ui-separator {
+  height: 1px;
+  background: var(--line, #e4e4e7);
+}
 .app-shell {
   height: 100dvh;
   min-height: 100dvh;

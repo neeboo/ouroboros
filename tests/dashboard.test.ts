@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { applyHarnessAction, Harness } from "../packages/harness/src";
@@ -192,6 +192,30 @@ verifyDashboardOverflow("desktop and mobile widths");
 `;
 
 describe("dashboard", () => {
+  test("defines a shadcn-compatible neutral dashboard component boundary", async () => {
+    const components = JSON.parse(await readFile(join(import.meta.dir, "../components.json"), "utf8"));
+    const primitives = await readFile(join(import.meta.dir, "../packages/cli/src/dashboard-ui/primitives.tsx"), "utf8");
+
+    expect(components).toMatchObject({
+      style: "new-york",
+      rsc: false,
+      tsx: true,
+      tailwind: {
+        baseColor: "neutral",
+        cssVariables: true,
+      },
+    });
+    expect(primitives).toContain("export function Button");
+    expect(primitives).toContain("export function Tabs");
+    expect(primitives).toContain("export function Panel");
+    expect(primitives).toContain("export function Separator");
+    expect(primitives).toContain("export function ScrollArea");
+    expect(primitives).not.toContain("useState");
+    expect(primitives).not.toContain("useEffect");
+    expect(primitives).not.toContain("window.");
+    await expect(stat(join(import.meta.dir, "../packages/cli/src/dashboard-ui"))).resolves.toMatchObject({ isDirectory: expect.any(Function) });
+  });
+
   test("exposes a React dashboard module boundary for the incremental migration", () => {
     expect(DASHBOARD_REACT_MODULES.map((module) => module.id)).toEqual([
       "shell",
@@ -223,6 +247,7 @@ describe("dashboard", () => {
     expect(dashboardSource).not.toContain('<div class="app-shell">');
     expect(html).toContain('data-react-dashboard-shell="true"');
     expect(html).toContain('class="app-shell"');
+    expect(html).toContain('/assets/dashboard.css');
     expect(html).toContain('id="active-run-list"');
     expect(html).toContain('data-history-source="GET /api/runs"');
   });
@@ -243,6 +268,11 @@ describe("dashboard", () => {
     expect(html).toContain('data-attach-files');
     expect(html).toContain('data-clear-attachments');
     expect(html).toContain('data-send-intake');
+    expect(html).toContain("ui-button");
+    expect(html).toContain("ui-panel");
+    expect(html).toContain("ui-scroll-area");
+    expect(html).toContain("ui-tabs");
+    expect(html).toContain("ui-separator");
     expect(html).toContain("attachmentMetaForFile");
     expect(html).toContain("readAttachment");
     expect(html).toContain("attachments.map");
@@ -945,6 +975,27 @@ describe("dashboard", () => {
     expect(cssResponse.status).toBe(200);
     expect(cssResponse.headers.get("content-type")).toContain("text/css");
     expect(cssBody).toContain("react-flow");
+  });
+
+  test("serves the Tailwind dashboard CSS boundary as a neutral asset", async () => {
+    const dashboardInput = {
+      runId: "run_123",
+      overview: () => ({ run: null, project: null, tasks: [], sessions: [], threads: [], lessons: [] }),
+      renderTaskPrompt: () => "",
+    };
+
+    const response = await handleDashboardRequest(
+      new Request("http://localhost/assets/dashboard.css"),
+      dashboardInput,
+    );
+    const css = await response.text();
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toContain("text/css");
+    expect(css).toContain('@import "tailwindcss"');
+    expect(css).toContain("--color-dashboard-ink: #09090b;");
+    expect(css).toContain(".ui-button");
+    expect(css).not.toContain("linear-gradient");
   });
 
   test("builds React Flow graph data for planner worker verifier relationships", async () => {

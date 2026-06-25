@@ -2430,6 +2430,11 @@ export async function handleDashboardRequest(
       headers: { "content-type": "text/css; charset=utf-8" },
     });
   }
+  if (url.pathname === "/assets/dashboard.css") {
+    return new Response(await bundledDashboardCss(), {
+      headers: { "content-type": "text/css; charset=utf-8" },
+    });
+  }
   if (url.pathname === "/api/runs") {
     return handleRecentRunsRequest(url, input.recentRuns);
   }

@@ -1,4 +1,5 @@
 import { IntakeComposerControls } from "./dashboard-controls";
+import { Panel, ScrollArea } from "./dashboard-ui/primitives";
 import { renderStaticNode } from "./dashboard-static-render";
 import type { DashboardComposerState, DashboardGoalSummary, DashboardRunHistoryEntry } from "./dashboard-types";
 
@@ -35,7 +36,7 @@ export function DashboardSidebar({
   historyGoals: DashboardGoalSummary[];
 }) {
   return (
-    <aside className="task-sidebar">
+    <Panel as="aside" className="task-sidebar">
       <div className="sidebar-head">
         <div className="brand-row">
           <h1>Ouroboros</h1>
@@ -55,7 +56,7 @@ export function DashboardSidebar({
         <IntakeComposerControls composer={composer} />
       </div>
       <section className="sidebar-stats" id="sidebar-stats" />
-      <nav className="task-nav" aria-label="Goals">
+      <ScrollArea as="nav" className="task-nav" aria-label="Goals">
         <section className="nav-section">
           <h2 className="section-label">Active Goals</h2>
           <div className="task-list" id="active-goal-list">
@@ -95,8 +96,8 @@ export function DashboardSidebar({
             Loading recent runs...
           </div>
         </section>
-      </nav>
-    </aside>
+      </ScrollArea>
+    </Panel>
   );
 }
 
