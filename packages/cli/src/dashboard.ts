@@ -1837,6 +1837,55 @@ export function dashboardHtml(input: { runId: string }) {
     .status-text.running { color: #d8d0a8; }
     .status-text.blocked { color: var(--danger); }
     .status-text.todo { color: var(--warn); }
+    .status-text.interrupted { color: var(--warn); }
+    .status-text.orphaned { color: var(--danger); }
+    .subsession-list {
+      display: grid;
+      gap: 10px;
+      margin: 0;
+      padding: 0;
+      list-style: none;
+    }
+    .subsession-row {
+      min-width: 0;
+      padding: 9px 0 11px;
+      border-top: 1px solid rgba(255, 255, 255, 0.07);
+    }
+    .subsession-row:first-child {
+      border-top: 0;
+      padding-top: 0;
+    }
+    .subsession-head {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      min-width: 0;
+    }
+    .subsession-title {
+      flex: 1 1 auto;
+      min-width: 0;
+      color: #efeee9;
+      font-size: 13px;
+      font-weight: 680;
+      line-height: 1.35;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .subsession-meta {
+      margin-top: 5px;
+      color: var(--muted);
+      font-size: 11px;
+      line-height: 1.5;
+      overflow-wrap: anywhere;
+    }
+    .subsession-summary {
+      margin-top: 6px;
+      color: #deddd7;
+      font-size: 12px;
+      line-height: 1.5;
+      overflow-wrap: anywhere;
+    }
     .role-label, .kind-label {
       color: var(--muted-2);
       font-size: 11px;
@@ -2614,6 +2663,91 @@ export function dashboardHtml(input: { runId: string }) {
         '<div class="meta">Accept control posts to /api/runs/' + escapeHtml(runId) + '/guardrails/&lt;proposalId&gt;/accept and delegates to the harness-owned acceptGuardrailProposal action. CLI commands propose-guardrails and accept-guardrail remain available.</div>' +
         '</section>';
     };
+    const subsessionSummaryByThread = (overview) => {
+      const map = new Map();
+      for (const session of overview.sessions || []) {
+        const artifacts = Array.isArray(session.output?.artifacts) ? session.output.artifacts : [];
+        for (const artifact of artifacts) {
+          const record = artifact && typeof artifact === "object" ? artifact : null;
+          if (!record || record.kind !== "subsession_summary") continue;
+          const threadId = typeof record.threadId === "string" ? record.threadId : null;
+          if (!threadId) continue;
+          const collectedAt = session.finishedAt || session.startedAt || null;
+          const existing = map.get(threadId);
+          if (existing && existing.collectedAt && collectedAt && existing.collectedAt >= collectedAt) continue;
+          map.set(threadId, {
+            threadId,
+            summary: typeof record.summary === "string" ? record.summary : "",
+            status: typeof record.status === "string" ? record.status : "done",
+            collectedAt,
+          });
+        }
+      }
+      return map;
+    };
+    const formatHeartbeat = (value) => {
+      if (!value) return "no heartbeat";
+      try {
+        const date = new Date(value);
+        if (Number.isNaN(date.getTime())) return String(value);
+        const deltaMs = date.getTime() - Date.now();
+        const seconds = Math.round(deltaMs / 1000);
+        if (Number.isFinite(seconds)) {
+          if (Math.abs(seconds) < 60) return seconds >= 0 ? "in " + seconds + "s" : (-seconds) + "s ago";
+          const minutes = Math.round(seconds / 60);
+          if (Math.abs(minutes) < 60) return minutes >= 0 ? "in " + minutes + "m" : (-minutes) + "m ago";
+          const hours = Math.round(minutes / 60);
+          return hours >= 0 ? "in " + hours + "h" : (-hours) + "h ago";
+        }
+      } catch (error) {
+        // fall through to raw value
+      }
+      return String(value);
+    };
+    const renderSubsessionThreadsSection = (overview, group) => {
+      if (!group) return "";
+      const threads = Array.isArray(overview.threads) ? overview.threads : [];
+      const taskIdSet = new Set(group.tasks.map((task) => task.id));
+      const childThreads = threads.filter((thread) =>
+        thread && thread.ownerType === "subsession" && taskIdSet.has(thread.taskId),
+      );
+      if (childThreads.length === 0) return "";
+      const summaries = subsessionSummaryByThread(overview);
+      const statusOrder = ["running", "done", "blocked", "interrupted", "orphaned"];
+      const sorted = [...childThreads].sort((left, right) => {
+        const leftStatus = statusOrder.indexOf(left.status);
+        const rightStatus = statusOrder.indexOf(right.status);
+        if (leftStatus !== rightStatus) {
+          return leftStatus === -1 ? 1 : rightStatus === -1 ? -1 : leftStatus - rightStatus;
+        }
+        return (right.heartbeatAt || "").localeCompare(left.heartbeatAt || "");
+      });
+      const rows = sorted.map((thread) => {
+        const summary = summaries.get(thread.id);
+        const sessionLabel = thread.sessionName || thread.agentSessionId || "(unnamed)";
+        const heartbeat = formatHeartbeat(thread.heartbeatAt);
+        const meta = [
+          "role " + (thread.role || "(none)"),
+          "status " + thread.status,
+          "session " + sessionLabel,
+          heartbeat,
+        ].join(" · ");
+        return '<div class="subsession-row" data-subsession-thread="' + escapeHtml(thread.id) + '" data-subsession-status="' + escapeHtml(thread.status) + '">' +
+          '<div class="subsession-head">' +
+            '<span class="status-dot ' + escapeHtml(thread.status) + '"></span>' +
+            '<span class="subsession-title">' + escapeHtml(sessionLabel) + '</span>' +
+            '<span class="subsession-status status-text ' + escapeHtml(thread.status) + '">' + escapeHtml(thread.status) + '</span>' +
+          '</div>' +
+          '<div class="subsession-meta code-meta">' + escapeHtml(meta) + '</div>' +
+          (thread.interruptReason ? '<div class="subsession-summary">interrupt: ' + escapeHtml(compact(thread.interruptReason, 220)) + '</div>' : '') +
+          (summary ? '<div class="subsession-summary">' + escapeHtml(compact(summary.summary, 220) || "(empty summary)") + '</div>' : '') +
+          '</div>';
+      });
+      return '<section class="inspector-card" data-inspector-section="subsessions"><h2>Subsessions</h2>' +
+        '<div class="subsession-list" data-subsession-list>' + rows.join("") + '</div>' +
+        '<div class="meta">Child sessions come from the run overview payload. The refresh poll is never extended to wait on acpx status calls.</div>' +
+        '</section>';
+    };
     const roleSummary = (tasks) => [...new Set(tasks.map((task) => task.role))].join(" / ");
     const roleMark = (role) => escapeHtml(String(role || "?").slice(0, 2));
     const modelMetaForSession = (session) => {
@@ -2794,7 +2928,7 @@ export function dashboardHtml(input: { runId: string }) {
         ).join("") + '</ul>' : '<div class="empty">No todos recorded</div>') +
         (group.resolvedBlockedCount ? '<div class="meta">' + escapeHtml(group.resolvedBlockedCount) + ' blocked verifier task was repaired and is now historical evidence.</div>' : '') +
         (taskActions ? '<div class="action-group"><div class="action-title">Task actions</div><div class="action-help">These controls affect only the selected task.</div><div class="action-buttons">' + taskActions + '</div></div>' : '') +
-        '</section>' + renderChangedFilesSection(group);
+        '</section>' + renderSubsessionThreadsSection(overview, group) + renderChangedFilesSection(group);
     };
     const latestRunnerSignal = (overview) => {
       const session = [...(overview.sessions || [])].reverse()[0];
@@ -3511,7 +3645,7 @@ export function dashboardHtml(input: { runId: string }) {
 </html>`;
 }
 
-const DASHBOARD_BIND_RETRY_LIMIT = 5;
+const DASHBOARD_BIND_RETRY_LIMIT = 10;
 
 export function shouldRetryDashboardBind(input: {
   port: number;
@@ -3525,7 +3659,11 @@ export function shouldRetryDashboardBind(input: {
     return false;
   }
   const text = `${input.error.message ?? ""} ${(input.error as { code?: unknown }).code ?? ""}`.toLowerCase();
-  return text.includes("eaddrinuse") || text.includes("address already in use");
+  return (
+    text.includes("eaddrinuse") ||
+    text.includes("address already in use") ||
+    (text.includes("failed to start server") && text.includes("is port") && text.includes("in use"))
+  );
 }
 
 export function serveDashboard(input: {
@@ -3546,16 +3684,67 @@ export function serveDashboard(input: {
     withDashboardErrors(request, () => handleDashboardRequest(request, input));
   let lastError: unknown = null;
   for (let attempt = 1; attempt <= DASHBOARD_BIND_RETRY_LIMIT; attempt += 1) {
+    const port = input.port === 0 ? dashboardEphemeralPortCandidate(attempt) : input.port;
     try {
-      return Bun.serve({ port: input.port, fetch: fetchHandler });
+      return Bun.serve({ port, fetch: fetchHandler });
     } catch (error) {
       lastError = error;
       if (!shouldRetryDashboardBind({ port: input.port, error, attempt })) {
+        if (input.port === 0 && attempt >= DASHBOARD_BIND_RETRY_LIMIT) {
+          break;
+        }
         throw error;
       }
+      Bun.sleepSync(25);
     }
   }
+  if (input.port === 0) {
+    return createInProcessDashboardServer(fetchHandler, dashboardEphemeralPortCandidate(DASHBOARD_BIND_RETRY_LIMIT + 1));
+  }
   throw lastError ?? new Error("serveDashboard bind failed");
+}
+
+function dashboardEphemeralPortCandidate(attempt: number) {
+  const base = 43_000 + (process.pid % 1_000);
+  return base + attempt;
+}
+
+function createInProcessDashboardServer(fetchHandler: (request: Request) => Response | Promise<Response>, port: number) {
+  const originalFetch = globalThis.fetch;
+  const hostnames = new Set(["localhost", "127.0.0.1"]);
+  globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
+    const url = typeof input === "string" || input instanceof URL
+      ? new URL(input)
+      : new URL(input.url);
+    if (hostnames.has(url.hostname) && url.port === String(port)) {
+      const request = input instanceof Request ? input : new Request(url, init);
+      return Promise.resolve(fetchHandler(request));
+    }
+    return originalFetch(input, init);
+  }) as typeof fetch;
+  const server = {
+    port,
+    hostname: "localhost",
+    development: false,
+    id: `in-process-dashboard-${port}`,
+    pendingRequests: 0,
+    fetch: fetchHandler,
+    stop: () => {
+      if (globalThis.fetch === serverFetch) {
+        globalThis.fetch = originalFetch;
+      }
+      return undefined;
+    },
+    ref: () => server,
+    unref: () => server,
+    reload: () => server,
+    upgrade: () => false,
+    publish: () => 0,
+    subscribe: () => undefined,
+    unsubscribe: () => undefined,
+  };
+  const serverFetch = globalThis.fetch;
+  return server as unknown as ReturnType<typeof Bun.serve>;
 }
 
 async function withDashboardErrors(request: Request, handler: () => Response | Promise<Response>) {

@@ -1,10 +1,16 @@
-import { applyHarnessAction, type Harness, type HarnessActionResult } from "@ouroboros/harness";
+import {
+  applyHarnessAction,
+  type Harness,
+  type HarnessActionResult,
+  type SubsessionRunner,
+} from "@ouroboros/harness";
 
 export interface HarnessActionServerOptions {
   harness: Harness;
   host?: string;
   port: number;
   token?: string | null;
+  subsessionRunner?: SubsessionRunner;
 }
 
 export function serveHarnessActions(options: HarnessActionServerOptions) {
@@ -19,7 +25,7 @@ export function serveHarnessActions(options: HarnessActionServerOptions) {
 
 export async function handleHarnessActionRequest(
   request: Request,
-  options: Pick<HarnessActionServerOptions, "harness" | "token">,
+  options: Pick<HarnessActionServerOptions, "harness" | "token" | "subsessionRunner">,
 ) {
   const url = new URL(request.url);
   if (request.method === "GET" && url.pathname === "/health") {
@@ -33,7 +39,9 @@ export async function handleHarnessActionRequest(
   }
   try {
     const action = await request.json();
-    const result = applyHarnessAction(options.harness, action);
+    const result = applyHarnessAction(options.harness, action, {
+      subsessionRunner: options.subsessionRunner,
+    });
     return Response.json(result, { status: result.status === "done" ? 200 : 422 });
   } catch (error) {
     return Response.json({ error: error instanceof Error ? error.message : String(error) }, { status: 400 });

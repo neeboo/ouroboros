@@ -22,6 +22,8 @@ import {
   createTasksFromOutputHook,
   createVerifierTaskHook,
   childEnvForProcess,
+  createAcpxSubsessionRunner,
+  createCollectSubsessionsHook,
   createRouteExecutor,
   resolveExecutionRoute,
   resumeCodexResumableAttempt,
@@ -44,6 +46,7 @@ import { requestHarnessAction, serveHarnessActions } from "./action-server";
 import { formatRunEvidence } from "./run-evidence";
 import { formatAttemptExplanation } from "./explain-attempt";
 import { formatRunGraph } from "./run-graph";
+import { buildRunThreadOverview, formatRunThreads } from "./run-threads";
 import { buildAgentMatrix, doctorAgent } from "../../../scripts/acpx-agent-smoke";
 import { join } from "node:path";
 import type { Task } from "@ouroboros/harness";
@@ -325,7 +328,13 @@ switch (parsed.command) {
   case "action": {
     harness.init();
     const action = parseObject(required(parsed, "action-json"));
-    printJson(applyHarnessAction(harness, action));
+    const subsessionRunner = flag(parsed, "subsession-runner");
+    const runner = subsessionRunner === "acpx"
+      ? createAcpxSubsessionRunner()
+      : subsessionRunner === "none"
+        ? undefined
+        : createAcpxSubsessionRunner();
+    printJson(applyHarnessAction(harness, action, { subsessionRunner: runner }));
     break;
   }
   case "action-events": {
@@ -340,7 +349,7 @@ switch (parsed.command) {
     const host = flag(parsed, "host") ?? "127.0.0.1";
     const port = parsePositiveInteger(flag(parsed, "port") ?? "7332", "--port");
     const token = flag(parsed, "token") ?? process.env.ORBS_ACTION_TOKEN ?? null;
-    const server = serveHarnessActions({ harness, host, port, token });
+    const server = serveHarnessActions({ harness, host, port, token, subsessionRunner: createAcpxSubsessionRunner() });
     printJson({
       status: "running",
       url: `http://${host}:${server.port}`,
@@ -713,6 +722,19 @@ switch (parsed.command) {
     console.log(formatRunGraph(overview));
     break;
   }
+  case "run-threads": {
+    const runId = required(parsed, "run-id");
+    const overview = harness.getRunOverview({ runId, eventLimit: 0 });
+    if (!overview.run) {
+      fail(`run not found: ${runId}`);
+    }
+    if (flag(parsed, "json") !== undefined) {
+      printJson(buildRunThreadOverview(overview));
+      break;
+    }
+    console.log(formatRunThreads(overview));
+    break;
+  }
   case "dashboard": {
     const runId = required(parsed, "run-id");
     const port = parsePositiveInteger(flag(parsed, "port") ?? "7331", "--port");
@@ -769,6 +791,7 @@ function printHelp() {
     "  run-overview         Print run state as JSON",
     "  run-evidence         Print readable run evidence",
     "  run-graph            Print a compact task graph",
+    "  run-threads          Print harness-managed subsession threads grouped by parent task",
     "  show-task-prompt     Render a task prompt",
     "  explain-attempt      Explain an attempt from captured events",
     "",
@@ -777,6 +800,10 @@ function printHelp() {
     "  orbs create-run --goal 'Refactor platform admin' --project-root $(pwd)",
     "  orbs run-loop --run-id <run_id> --executor codex-resumable --cwd $(pwd)",
     "  orbs dashboard --run-id <run_id> --port 7331",
+    "  orbs run-threads --run-id <run_id>",
+    "  orbs run-threads --run-id <run_id> --json true",
+    "  orbs action --action-json '{\"type\":\"collectSubsessions\",\"parentTaskId\":\"task_...\"}'",
+    "  orbs action --action-json '{\"type\":\"cancelSubsessions\",\"parentTaskId\":\"task_...\",\"reason\":\"manual stop\"}'",
   ].join("\n"));
 }
 
@@ -1904,34 +1931,35 @@ function stopHooksByRole() {
   const runCreationHook = createRunsFromOutputHook({ harness });
   const goalReviewDecisionHook = createGoalReviewDecisionHook({ harness });
   const refreshGuardrailProposalsHook = createRefreshGuardrailProposalsHook({ harness });
+  const collectSubsessionsHook = createCollectSubsessionsHook({ harness, subsessionRunner: createAcpxSubsessionRunner() });
   const hooks = {
-    planner: [],
-    worker: [],
-    verifier: [],
-    "goal-review": [goalReviewDecisionHook, taskCreationHook, refreshGuardrailProposalsHook],
+    planner: [collectSubsessionsHook],
+    worker: [collectSubsessionsHook],
+    verifier: [collectSubsessionsHook],
+    "goal-review": [goalReviewDecisionHook, taskCreationHook, refreshGuardrailProposalsHook, collectSubsessionsHook],
   } as Record<string, StopHook[]>;
   if (!raw) {
     return hooks;
   }
   for (const hook of raw.split(",")) {
     if (hook === "create-runs") {
-      hooks.planner.push(runCreationHook);
+      hooks.planner.splice(Math.max(0, hooks.planner.length - 1), 0, runCreationHook);
       continue;
     }
     if (hook === "create-tasks") {
-      hooks.planner.push(taskCreationHook);
+      hooks.planner.splice(Math.max(0, hooks.planner.length - 1), 0, taskCreationHook);
       continue;
     }
     if (hook === "create-verifier") {
-      hooks.worker.push(createVerifierTaskHook({ harness }));
+      hooks.worker.splice(Math.max(0, hooks.worker.length - 1), 0, createVerifierTaskHook({ harness }));
       continue;
     }
     if (hook === "create-repair") {
-      hooks.verifier.push(createRepairTaskHook({ harness }));
+      hooks.verifier.splice(Math.max(0, hooks.verifier.length - 1), 0, createRepairTaskHook({ harness }));
       continue;
     }
     if (hook === "context-summary" || hook === "context-subagent") {
-      hooks.verifier.push(createContextSummaryHook());
+      hooks.verifier.splice(Math.max(0, hooks.verifier.length - 1), 0, createContextSummaryHook());
       continue;
     }
     fail("--stop-hook must contain create-runs, create-tasks, create-verifier, create-repair, or context-summary");

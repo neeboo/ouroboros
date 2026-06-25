@@ -16,6 +16,18 @@ export {
   superviseCodexRuns,
 } from "./codex-resumable-runner";
 export { createAcpxAgentExecutor, createAcpxCodexExecutor } from "./executors/acpx";
+export {
+  acpxSubsessionBaseCommand,
+  buildAcpxPromptCommand,
+  createAcpxSubsessionRunner,
+  SUBSESSION_DEFAULT_TIMEOUT_MS,
+  SUBSESSION_DEFAULT_IDLE_TIMEOUT_MS,
+} from "./acpx-subsessions";
+export type {
+  AcpxSubsessionRunnerOptions,
+  AcpxSubsessionSpawnInput,
+  AcpxSubsessionSpawnResult,
+} from "./acpx-subsessions";
 export { createCodexCliExecutor } from "./executors/codex-cli";
 export { createCodexResumableClient } from "./executors/codex-resumable";
 export { createRouteExecutor } from "./route-executor";
@@ -36,6 +48,8 @@ export {
   proxyEnvFromScutilOutput,
 } from "./executors/proxy-env";
 export { createContextSubagentHook, createContextSummaryHook } from "./hooks/context-summary";
+export { createCollectSubsessionsHook } from "./hooks/collect-subsessions";
+export type { CollectSubsessionsHookOptions } from "./hooks/collect-subsessions";
 export { createRepairTaskHook } from "./hooks/create-repair";
 export { createRunsFromOutputHook } from "./hooks/create-runs";
 export { createTasksFromOutputHook } from "./hooks/create-tasks";

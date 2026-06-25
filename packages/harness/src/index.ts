@@ -18,7 +18,23 @@ export { applyHarnessAction, parseHarnessAction, describeIntegrationReadiness } 
 export { acceptGuardrailProposal, proposeGuardrailsFromLessons, refreshGuardrailProposalsForRun } from "./guardrails";
 export { diagnoseRunOverview } from "./overseer";
 export { readableList, readableValue } from "./readable";
-export type { HarnessAction, HarnessActionOptions, HarnessActionResult, IntegrationReadiness, UnintegratedVerifiedWorker } from "./actions";
+export type {
+  ContractAmendmentEntry,
+  ExecutionThreadStatusFilter,
+  HarnessAction,
+  HarnessActionOptions,
+  HarnessActionResult,
+  IntegrationReadiness,
+  ResolvedSubsessionBackend,
+  SubsessionRunner,
+  SubsessionRunnerCancelChild,
+  SubsessionRunnerCancelResult,
+  SubsessionRunnerCollectChild,
+  SubsessionRunnerCollectResult,
+  SubsessionRunnerStartInput,
+  SubsessionRunnerStartResult,
+  UnintegratedVerifiedWorker,
+} from "./actions";
 export type { GuardrailProposalRecord, RefreshGuardrailProposalsHarness, RefreshGuardrailProposalsResult } from "./guardrails";
 export type { OverseerDiagnosis, RunSupervisorState } from "./overseer";
 export type {

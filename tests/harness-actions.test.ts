@@ -2,7 +2,16 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { applyHarnessAction, describeIntegrationReadiness, Harness } from "../packages/harness/src";
+import {
+  applyHarnessAction,
+  describeIntegrationReadiness,
+  Harness,
+  type SubsessionRunner,
+  type SubsessionRunnerCancelChild,
+  type SubsessionRunnerCollectChild,
+  type SubsessionRunnerStartInput,
+  type SubsessionRunnerStartResult,
+} from "../packages/harness/src";
 import { handleHarnessActionRequest } from "../packages/cli/src/action-server";
 
 describe("Harness actions", () => {
@@ -2062,6 +2071,164 @@ describe("Harness actions", () => {
       active: false,
     });
     expect(overview.run?.context.guardrails ?? []).toEqual([]);
+  });
+
+  test("startSubsession passes and persists the harness-created child thread id", () => {
+    const worktreePath = join(dir, "worker-tree");
+    const runId = harness.createRun({
+      goal: "Run subsession research",
+      projectRoot: worktreePath,
+      context: {
+        agentBackends: {
+          "codex-resumable": { kind: "codex-resumable" },
+        },
+      },
+    });
+    const taskId = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Drive child research",
+      prompt: "Request a harness-managed subsession.",
+      worktreePath,
+    });
+    const calls: SubsessionRunnerStartInput[] = [];
+    const runner: SubsessionRunner = {
+      start(input: SubsessionRunnerStartInput): SubsessionRunnerStartResult {
+        calls.push(input);
+        return {
+          threadId: "thread_runner_replacement_should_not_win",
+          sessionName: input.sessionName,
+          agentSessionId: "external-session-id",
+          status: "running",
+          summary: "runner queued child session",
+          checks: [],
+          artifacts: [],
+          problems: [],
+        };
+      },
+      collect(_children: SubsessionRunnerCollectChild[]) {
+        return [];
+      },
+      cancel(_children: SubsessionRunnerCancelChild[], _reason: string) {
+        return [];
+      },
+    };
+
+    const result = applyHarnessAction(
+      harness,
+      {
+        type: "startSubsession",
+        parentTaskId: taskId,
+        purpose: "Research API contracts",
+        prompt: "Inspect the protocol docs and summarize the harness-managed subsession contract.",
+        backend: "codex-resumable",
+      },
+      { subsessionRunner: runner },
+    );
+
+    expect(result).toMatchObject({ status: "done", actionType: "startSubsession" });
+    expect(calls).toHaveLength(1);
+    const recordedThread = harness.listExecutionThreads({ runId }).find((thread) => thread.ownerType === "subsession");
+    expect(recordedThread).toBeTruthy();
+    const recordedThreadId = recordedThread!.id;
+    expect(calls[0]!.threadId).toBe(recordedThreadId);
+    expect(recordedThreadId).not.toBe("thread_runner_replacement_should_not_win");
+    expect(recordedThread).toMatchObject({
+      ownerType: "subsession",
+      taskId,
+      worktreePath,
+      agentSessionId: "external-session-id",
+      status: "running",
+    });
+    expect(result.artifacts).toContainEqual(expect.objectContaining({
+      kind: "subsession_thread",
+      threadId: recordedThreadId,
+    }));
+  });
+
+  test("collectSubsessions and cancelSubsessions update recorded child thread evidence", () => {
+    const worktreePath = join(dir, "worker-tree");
+    const runId = harness.createRun({
+      goal: "Collect and cancel subsessions",
+      projectRoot: worktreePath,
+      context: {
+        agentBackends: {
+          "claude-code": { kind: "acpx", agent: "claude", approval: "approve-reads" },
+        },
+      },
+    });
+    const taskId = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Drive child research",
+      prompt: "Request a harness-managed subsession.",
+      worktreePath,
+    });
+    const runner: SubsessionRunner = {
+      start(input) {
+        return {
+          threadId: input.threadId,
+          sessionName: input.sessionName,
+          agentSessionId: input.sessionName,
+          status: "running",
+        };
+      },
+      collect(children) {
+        return children.map((child) => ({
+          threadId: child.threadId,
+          status: "done",
+          summary: `summary for ${child.sessionName}`,
+          agentSessionId: child.agentSessionId,
+        }));
+      },
+      cancel(children, reason) {
+        return children.map((child) => ({
+          threadId: child.threadId,
+          canceled: true,
+          message: reason,
+        }));
+      },
+    };
+    const start = applyHarnessAction(
+      harness,
+      {
+        type: "startSubsession",
+        parentTaskId: taskId,
+        purpose: "Research API contracts",
+        prompt: "Inspect the protocol docs and summarize the harness-managed subsession contract.",
+        backend: "claude-code",
+      },
+      { subsessionRunner: runner },
+    );
+    const threadId = String(start.artifacts.find((artifact) => artifact.kind === "subsession_thread")?.threadId);
+
+    const collect = applyHarnessAction(
+      harness,
+      { type: "collectSubsessions", parentTaskId: taskId },
+      { subsessionRunner: runner },
+    );
+    const cancel = applyHarnessAction(
+      harness,
+      { type: "cancelSubsessions", parentTaskId: taskId, threadIds: [threadId], reason: "parent stopping" },
+      { subsessionRunner: runner },
+    );
+    const thread = harness.listExecutionThreads({ runId }).find((candidate) => candidate.id === threadId);
+
+    expect(collect).toMatchObject({ status: "done", actionType: "collectSubsessions" });
+    expect(collect.artifacts).toContainEqual(expect.objectContaining({
+      kind: "subsession_summary",
+      threadId,
+      status: "done",
+      summary: expect.stringContaining("summary for"),
+    }));
+    expect(cancel).toMatchObject({ status: "done", actionType: "cancelSubsessions" });
+    expect(cancel.artifacts).toContainEqual(expect.objectContaining({
+      kind: "subsession_cancel",
+      threadId,
+      canceled: true,
+    }));
+    expect(thread?.status).toBe("interrupted");
+    expect(thread?.interruptReason).toBe("parent stopping");
   });
 });
 

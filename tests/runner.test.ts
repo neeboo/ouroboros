@@ -8,6 +8,7 @@ import { acceptGuardrailProposal, Harness } from "../packages/harness/src";
 import {
   buildTaskPrompt,
   createRunsAction,
+  createCollectSubsessionsHook,
   createContextSummaryHook,
   createGitWorktreeHook,
   createGoalReviewDecisionHook,
@@ -2580,6 +2581,66 @@ describe("runner", () => {
     expect(attempt.output.artifacts).toEqual([{ kind: "summary", taskId }]);
   });
 
+  test("collect subsessions stop hook records child summaries in the parent attempt output", async () => {
+    const runId = harness.createRun({ goal: "Collect child evidence" });
+    const taskId = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Drive child session",
+      prompt: "Start a child session and finish.",
+    });
+    let childThreadId = "";
+    const subsessionRunner = {
+      start: () => ({
+        threadId: "unused",
+        sessionName: "unused",
+        status: "running" as const,
+      }),
+      collect: (children: Array<{ threadId: string; sessionName: string | null }>) =>
+        children.map((child) => ({
+          threadId: child.threadId,
+          status: "done" as const,
+          summary: `collected ${child.sessionName}`,
+          agentSessionId: child.sessionName,
+        })),
+      cancel: () => [],
+    };
+
+    const result = await runNextReadyTask({
+      harness,
+      runId,
+      executor: async () => {
+        childThreadId = harness.upsertExecutionThread({
+          runId,
+          taskId,
+          ownerType: "subsession",
+          ownerId: "action_1",
+          role: "researcher",
+          status: "done",
+          sessionName: "task_child__research",
+          agentSessionId: "task_child__research",
+        });
+        return {
+          status: "done",
+          summary: "parent done",
+          changedFiles: [],
+          checks: [],
+          artifacts: [],
+          problems: [],
+        };
+      },
+      stopHooks: [createCollectSubsessionsHook({ harness, subsessionRunner })],
+    });
+
+    const attempt = harness.getAttempt(result!.attemptId)!;
+    expect(attempt.output.artifacts).toContainEqual(expect.objectContaining({
+      kind: "subsession_summary",
+      threadId: childThreadId,
+      status: "done",
+      summary: "collected task_child__research",
+    }));
+  });
+
   test("stop hooks can block an otherwise successful attempt", async () => {
     const runId = harness.createRun({ goal: "Build loop" });
     const taskId = harness.createTask({
@@ -4043,6 +4104,54 @@ describe("runner", () => {
       taskId: repair.id,
       verifierTaskId: verifierTask,
     });
+  });
+
+  test("blocked repair verifier stop hook does not create recursive repair tasks for the same branch", async () => {
+    const runId = harness.createRun({ goal: "Build loop" });
+    const originalVerifier = harness.createTask({
+      runId,
+      role: "verifier",
+      goal: "Verify runner",
+      prompt: "Verify the runner.",
+    });
+    const repairWorker = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Repair: Verify runner",
+      prompt: "Repair the verifier failure.",
+      parentId: originalVerifier,
+    });
+    const repairVerifier = harness.createTask({
+      runId,
+      role: "verifier",
+      goal: "Verify repair",
+      prompt: "Verify the repair.",
+      parentId: repairWorker,
+      dependsOn: [repairWorker],
+    });
+
+    const result = await createRepairTaskHook({ harness })({
+      run: harness.getRun(runId)!,
+      task: harness.getTask(repairVerifier)!,
+      sessionName: "repair-verifier",
+      prompt: "Verify the repair.",
+      output: {
+        status: "blocked",
+        summary: "Repair still does not satisfy the original verifier.",
+        artifacts: [],
+        checks: [{ name: "repair verification", status: "failed" }],
+        problems: ["same blocked branch still failing"],
+      },
+    });
+
+    const repairChildren = harness.getRunOverview({ runId }).tasks.filter((task) => task.parentId === repairVerifier);
+    expect(result.decision).toBe("exit");
+    expect(result.artifacts).toContainEqual(expect.objectContaining({
+      kind: "repair_skipped_recursive_branch",
+      verifierTaskId: repairVerifier,
+      originalVerifierTaskId: originalVerifier,
+    }));
+    expect(repairChildren).toEqual([]);
   });
 
   test("blocked verifier stop hook binds repair to the verified source worktree", async () => {

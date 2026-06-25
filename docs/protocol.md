@@ -513,6 +513,9 @@ Supported actions:
 { "type": "completeSystemTask", "taskId": "task_...", "actionEventId": "action_...", "reason": "optional" }
 { "type": "integrateVerifiedRun", "runId": "run_...", "workerTaskId": "optional", "targetBranch": "main", "push": false, "reason": "optional" }
 { "type": "amendRunContract", "runId": "run_...", "contractKey": "goalContract", "value": { ... }, "version": 2, "expectedVersion": "optional non-negative integer", "reason": "optional" }
+{ "type": "startSubsession", "parentTaskId": "task_...", "purpose": "research api", "prompt": "Inspect the protocol and summarize the harness-managed subsession contract.", "backend": "claude-code", "reason": "optional" }
+{ "type": "collectSubsessions", "parentTaskId": "task_...", "status": "optional running|done|blocked|interrupted|orphaned", "reason": "optional" }
+{ "type": "cancelSubsessions", "parentTaskId": "task_...", "threadIds": ["optional subset"], "reason": "parent attempt aborted" }
 ```
 
 `prepareRunDrain` reclaims orphaned task leases, marks the run `todo`, and then drains the empty-queue case. If a completed `goal-review` already returned `runDecision: "complete"`, it marks the run `done`. Otherwise it creates or retries a bounded `goal-review` task when the queue is empty. It never weakens the verifier contract.
@@ -524,6 +527,71 @@ Supported actions:
 `integrateVerifiedRun` is the overseer-owned integration path. It can integrate a specific verified worker before the entire run is done when `workerTaskId` is provided, or integrate a complete run after `goal-review` has returned `runDecision: "complete"`. In both modes the execution task must have changed-file evidence and a worktree, and the verifier depending on that task must have completed without failed checks. The action may commit dirty worker worktree changes, merge the worker branch into the target branch, and optionally push. If any preflight or git command fails, it records a blocked action event and leaves integration for repair or human review.
 
 `amendRunContract` is the audited run-level contract amendment path. It writes `run.context[contractKey] = value` and appends a `contractAmendments` entry to `run.context` with the previous value, the new value, the integer `version`, an optional `reason`, and an ISO `amendedAt` timestamp. Versions are monotonic per `contractKey`: a new amendment must use a positive integer `version` strictly greater than the latest recorded version for that key (or greater than 0 when no prior amendment exists). An optional `expectedVersion` asserts the version the caller read before issuing the amendment; if it does not match the current latest version, the action is blocked as stale and the run context is left untouched. The action never mutates the task-level verifier-contract baseline; it only amends JSON in the run context, and every accepted or rejected attempt records a `harness_action_events` audit row.
+
+## Harness-Managed Subsessions
+
+Subsessions are fixed harness actions, not prompt-managed behavior. A planner, worker, verifier, or goal-review task may request a child ACP/acpx session by emitting a fixed `HarnessAction` payload. The harness validates ownership, cwd, backend, limits, and payload shape; only the harness starts, watches, cancels, and collects child sessions. Prompt text may describe intent, but it must not be the control plane.
+
+Lifecycle states map to `execution_threads.status`: `requested` is the brief window between validation and the acpx start call; `running`, `done`, `blocked`, `interrupted`, and `orphaned` reuse the existing execution-thread statuses. A child session is recorded as `execution_threads.owner_type = "subsession"` with `task_id = parentTaskId`, `worktree_path = parent worktree path`, `parent_thread_id` pointing at the parent task attempt thread when available, `session_name = task_<id>__<slug>`, and `agent_session_id` set to the acpx session identifier when one is observed.
+
+Three actions cover the lifecycle:
+
+```json
+{
+  "type": "startSubsession",
+  "parentTaskId": "task_...",
+  "purpose": "research api",
+  "prompt": "Inspect the protocol and summarize the harness-managed subsession contract.",
+  "role": "optional child role",
+  "backend": "claude-code",
+  "sessionName": "optional suffix slug",
+  "timeoutMs": 1800000,
+  "idleTimeoutMs": 300000
+}
+{
+  "type": "collectSubsessions",
+  "parentTaskId": "task_...",
+  "status": "optional running|done|blocked|interrupted|orphaned filter hint",
+  "reason": "optional"
+}
+{
+  "type": "cancelSubsessions",
+  "parentTaskId": "task_...",
+  "threadIds": ["optional explicit subset"],
+  "reason": "parent attempt aborted"
+}
+```
+
+Validation rules:
+
+- `parentTaskId` must exist and belong to a run.
+- The child `cwd` is fixed to the parent task `worktreePath`, falling back to `run.projectRoot`. A child action cannot choose an arbitrary cwd.
+- `backend` must be declared in `run.context.agentBackends` (or be a built-in like `claude-code`, `codex`, `codex-resumable`, `codex-cli`, or `noop`). Unknown backends are blocked.
+- Prompt strings shorter than 24 characters are blocked as too small to be meaningful.
+- A parent task may hold at most `maxSubsessionsPerTask = 3` running children.
+- Timeouts default to 30 minutes (`timeoutMs`) and 10 minutes (`idleTimeoutMs`) and are clamped to four-hour and one-hour upper bounds.
+- `collectSubsessions` and `cancelSubsessions` are blocked when the parent task has no recorded child subsession threads.
+
+`startSubsession` records a `harness_action_events` row, upserts a child `execution_threads` row with `owner_type = "subsession"` and the resolved backend/cwd/session, then calls an injected `subsessionRunner.start` to spawn acpx asynchronously. The action returns the thread id, session name, backend, cwd, and policy checks; long-running acpx output is observed by the runner, not by the action caller.
+
+`collectSubsessions` lists child threads for the parent task, asks the runner for summaries, updates each child thread status from the summary, and writes `subsession_summary` artifacts through the action result so parent attempt evidence captures the child work.
+
+`cancelSubsessions` lists matching child threads, asks the runner for a cooperative acpx cancel, marks each canceled thread `interrupted` with the supplied `reason`, and reports any cancel failures as problems while still leaving the thread row observable.
+
+The harness owns the runner. The action server (or an equivalent CLI entrypoint) must inject a real `subsessionRunner`; in tests, a fake runner records calls without spawning acpx. This keeps `@ouroboros/harness` decoupled from `@ouroboros/runner` and avoids a package cycle.
+
+acpx-specific notes:
+
+- Orbs passes `--cwd <parent worktree>` so children cannot escape the parent worktree.
+- Orbs uses named acpx sessions, with the harness-normalized `task_<id>__<slug>` name. If acpx only exposes a named session, the same name is recorded as `agent_session_id`.
+- ACP streams are observability for the runner. The evidence contract is the structured `subsession_summary` artifact plus the audited `harness_action_events` row.
+- The first safe scope is read/propose. A child session that writes inside the parent worktree requires explicit backend policy; otherwise children should be configured read-only to avoid merge conflicts with the parent task's own changes.
+
+Visibility:
+
+- Run overview exposes child threads grouped under their parent task. Each group includes role/backend, lifecycle status, last heartbeat, session name, and the latest collected summary when one is available.
+- CLI: `orbs run-threads --run-id <run_id>` prints the threads attached to a run, including parent/child linkage and observed summaries.
+- Dashboard: child sessions render under their parent task in the flow workspace and inspector. Child-session rendering must not block the dashboard refresh polling; summaries come from the run overview payload, not from synchronous acpx calls.
 
 `supervise-runs` and `supervise-daemon` can call this action automatically with `--integrate-complete-runs`. The default remains off so planning-only runs and read-only experiments do not unexpectedly touch git. `--integration-target-branch <branch>` defaults to `main`; `--integration-push` opts into pushing after a successful local merge.
 

@@ -682,6 +682,22 @@ describe("dashboard", () => {
     expect(html).not.toContain('setHtmlIfChanged("inspector-panel", renderInspector(overview, selectedGroup) + renderRunner(overview));');
   });
 
+  test("renders harness-managed subsession threads inside the inspector panel", () => {
+    const html = dashboardHtml({ runId: "run_123" });
+
+    expect(html).toContain("renderSubsessionThreadsSection");
+    expect(html).toContain('data-inspector-section="subsessions"');
+    expect(html).toContain("subsessionSummaryByThread");
+    expect(html).toContain('thread.ownerType === "subsession"');
+    expect(html).toContain(".subsession-list");
+    expect(html).toContain(".subsession-row");
+    expect(html).toContain(".subsession-summary");
+    expect(html).toContain("Child sessions come from the run overview payload.");
+    expect(html).toContain("formatHeartbeat");
+    expect(html).toContain('data-subsession-thread=');
+    expect(html).toContain('data-subsession-status=');
+  });
+
   test("explains when queued work is waiting for an idle runner", () => {
     const html = dashboardHtml({ runId: "run_123" });
 
@@ -2027,7 +2043,8 @@ describe("dashboard", () => {
     expect(shouldRetryDashboardBind({ port: 0, error: new Error("Permission denied"), attempt: 1 })).toBe(false);
     expect(shouldRetryDashboardBind({ port: 0, error: "not an error", attempt: 1 })).toBe(false);
     expect(shouldRetryDashboardBind({ port: 0, error: busy, attempt: Number.POSITIVE_INFINITY })).toBe(false);
-    expect(shouldRetryDashboardBind({ port: 0, error: busy, attempt: 5 })).toBe(false);
+    expect(shouldRetryDashboardBind({ port: 0, error: busy, attempt: 5 })).toBe(true);
+    expect(shouldRetryDashboardBind({ port: 0, error: busy, attempt: 10 })).toBe(false);
   });
 
   test("serveDashboard retries ephemeral port allocation on transient EADDRINUSE", () => {
@@ -2085,7 +2102,9 @@ describe("dashboard", () => {
       try {
         expect(server).toBe(stubServer);
         expect(callCount).toBe(3);
-        expect(observedPorts).toEqual([0, 0, 0]);
+        expect(observedPorts).toHaveLength(3);
+        expect(new Set(observedPorts).size).toBe(3);
+        expect(observedPorts.every((port) => port > 0)).toBe(true);
       } finally {
         server.stop(true);
       }

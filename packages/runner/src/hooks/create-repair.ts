@@ -7,6 +7,21 @@ export function createRepairTaskHook(options: { harness: Harness }): StopHook {
     if (task.role !== "verifier" || output.status !== "blocked") {
       return { decision: "exit" };
     }
+    const recursiveRepair = recursiveRepairBranch(options.harness, task);
+    if (recursiveRepair) {
+      return {
+        decision: "exit",
+        artifacts: [
+          {
+            kind: "repair_skipped_recursive_branch",
+            verifierTaskId: task.id,
+            repairTaskId: recursiveRepair.repairTaskId,
+            originalVerifierTaskId: recursiveRepair.originalVerifierTaskId,
+            reason: "repair verifier blocked on an already-repaired verifier branch",
+          },
+        ],
+      };
+    }
     const externalBlocker = externalSetupBlockerReason(output);
     if (externalBlocker) {
       return {
@@ -56,6 +71,33 @@ export function createRepairTaskHook(options: { harness: Harness }): StopHook {
       ],
     };
   };
+}
+
+function recursiveRepairBranch(
+  harness: Harness,
+  verifierTask: { dependsOn: string[]; parentId: string | null },
+): { repairTaskId: string; originalVerifierTaskId: string | null } | null {
+  const candidateIds = new Set<string>([
+    ...verifierTask.dependsOn,
+    ...(verifierTask.parentId ? [verifierTask.parentId] : []),
+  ]);
+  for (const candidateId of candidateIds) {
+    const candidate = harness.getTask(candidateId);
+    if (!candidate || candidate.role !== "worker") {
+      continue;
+    }
+    if (!candidate.goal.toLowerCase().startsWith("repair:") && !candidate.parentId) {
+      continue;
+    }
+    const parent = candidate.parentId ? harness.getTask(candidate.parentId) : null;
+    if (candidate.goal.toLowerCase().startsWith("repair:") || parent?.role === "verifier") {
+      return {
+        repairTaskId: candidate.id,
+        originalVerifierTaskId: parent?.role === "verifier" ? parent.id : candidate.parentId,
+      };
+    }
+  }
+  return null;
 }
 
 function selectRepairSourceTask(

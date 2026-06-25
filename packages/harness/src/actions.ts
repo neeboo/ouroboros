@@ -10,7 +10,13 @@ import {
 } from "./goal-review";
 import { Harness } from "./harness";
 import { filterOuroborosRuntimePaths } from "./runtime-paths";
-import type { AttemptOutput, ReclaimedRunningTask, RunOverview, Task } from "./types";
+import type {
+  AttemptOutput,
+  ExecutionThread,
+  ReclaimedRunningTask,
+  RunOverview,
+  Task,
+} from "./types";
 
 export interface UnintegratedVerifiedWorker {
   taskId: string;
@@ -86,7 +92,34 @@ export type HarnessAction =
       version: number;
       expectedVersion?: number;
       reason?: string;
+    }
+  | {
+      type: "startSubsession";
+      parentTaskId: string;
+      purpose: string;
+      prompt: string;
+      role?: string;
+      backend?: string;
+      sessionName?: string;
+      timeoutMs?: number;
+      idleTimeoutMs?: number;
+    }
+  | {
+      type: "collectSubsessions";
+      parentTaskId: string;
+      status?: ExecutionThreadStatusFilter;
+      reason?: string;
+    }
+  | {
+      type: "cancelSubsessions";
+      parentTaskId: string;
+      threadIds?: string[];
+      reason: string;
     };
+
+export type ExecutionThreadStatusFilter = "running" | "done" | "blocked" | "interrupted" | "orphaned";
+
+export type SubsessionAction = Extract<HarnessAction, { type: "startSubsession" | "collectSubsessions" | "cancelSubsessions" }>;
 
 export interface ContractAmendmentEntry {
   contractKey: string;
@@ -95,6 +128,79 @@ export interface ContractAmendmentEntry {
   value: unknown;
   reason: string | null;
   amendedAt: string;
+}
+
+export interface SubsessionRunnerStartInput {
+  threadId: string;
+  parentTaskId: string;
+  parentAttemptId: string | null;
+  parentThreadId: string | null;
+  runId: string;
+  worktreePath: string;
+  sessionName: string;
+  purpose: string;
+  prompt: string;
+  role: string;
+  backend: ResolvedSubsessionBackend;
+  timeoutMs: number;
+  idleTimeoutMs: number;
+}
+
+export interface SubsessionRunnerStartResult {
+  threadId: string;
+  sessionName: string;
+  agentSessionId?: string | null;
+  pid?: number | null;
+  status: ExecutionThreadStatusFilter;
+  summary?: string;
+  message?: string;
+  checks?: HarnessActionResult["checks"];
+  artifacts?: HarnessActionResult["artifacts"];
+  problems?: string[];
+}
+
+export interface SubsessionRunnerCollectChild {
+  threadId: string;
+  sessionName: string | null;
+  agentSessionId: string | null;
+  backend: ResolvedSubsessionBackend;
+  worktreePath: string;
+}
+
+export interface SubsessionRunnerCollectResult {
+  threadId: string;
+  status: ExecutionThreadStatusFilter;
+  summary: string;
+  agentSessionId?: string | null;
+}
+
+export interface SubsessionRunnerCancelChild {
+  threadId: string;
+  sessionName: string | null;
+  agentSessionId: string | null;
+  backend: ResolvedSubsessionBackend;
+  worktreePath: string;
+}
+
+export interface SubsessionRunnerCancelResult {
+  threadId: string;
+  canceled: boolean;
+  message?: string;
+}
+
+export interface ResolvedSubsessionBackend {
+  id: string;
+  kind: string;
+  agent?: string;
+  agentCommand?: string;
+  approval?: string;
+  format?: string;
+}
+
+export interface SubsessionRunner {
+  start(input: SubsessionRunnerStartInput): SubsessionRunnerStartResult;
+  collect(children: SubsessionRunnerCollectChild[]): SubsessionRunnerCollectResult[];
+  cancel(children: SubsessionRunnerCancelChild[], reason: string): SubsessionRunnerCancelResult[];
 }
 
 export interface HarnessActionResult {
@@ -108,6 +214,7 @@ export interface HarnessActionResult {
 
 export interface HarnessActionOptions {
   runGit?: GitRunner;
+  subsessionRunner?: SubsessionRunner;
 }
 
 interface GitCommandInput {
@@ -212,8 +319,37 @@ export function parseHarnessAction(value: unknown): HarnessAction {
       reason: optionalStringField(record, "reason"),
     };
   }
+  if (type === "startSubsession") {
+    return {
+      type,
+      parentTaskId: stringField(record, "parentTaskId"),
+      purpose: stringField(record, "purpose"),
+      prompt: stringField(record, "prompt"),
+      role: optionalStringField(record, "role"),
+      backend: optionalStringField(record, "backend"),
+      sessionName: optionalStringField(record, "sessionName"),
+      timeoutMs: optionalPositiveInteger(record, "timeoutMs"),
+      idleTimeoutMs: optionalPositiveInteger(record, "idleTimeoutMs"),
+    };
+  }
+  if (type === "collectSubsessions") {
+    return {
+      type,
+      parentTaskId: stringField(record, "parentTaskId"),
+      status: optionalThreadStatusFilter(record, "status"),
+      reason: optionalStringField(record, "reason"),
+    };
+  }
+  if (type === "cancelSubsessions") {
+    return {
+      type,
+      parentTaskId: stringField(record, "parentTaskId"),
+      threadIds: optionalStringArrayField(record, "threadIds"),
+      reason: stringField(record, "reason"),
+    };
+  }
   throw new Error(
-    "harness action type must be reclaimRunningTasks, retryTask, markRunTodo, updateRunContext, amendRunContract, retireRun, prepareRunDrain, completeSystemTask, integrateVerifiedRun, interruptAttemptAndCreateTask, interruptRunningAttemptsAndCreateTask, or acceptGuardrailProposal",
+    "harness action type must be reclaimRunningTasks, retryTask, markRunTodo, updateRunContext, amendRunContract, retireRun, prepareRunDrain, completeSystemTask, integrateVerifiedRun, interruptAttemptAndCreateTask, interruptRunningAttemptsAndCreateTask, acceptGuardrailProposal, startSubsession, collectSubsessions, or cancelSubsessions",
   );
 }
 
@@ -236,6 +372,12 @@ export function applyHarnessAction(
     return { ...result, eventId };
   }
 
+  if (action.type === "startSubsession" || action.type === "collectSubsessions" || action.type === "cancelSubsessions") {
+    const result = applySubsessionAction(harness, action, options);
+    const eventId = recordSubsessionEvent(harness, action, result);
+    return { ...result, eventId };
+  }
+
   const result = applyParsedHarnessAction(harness, action, options);
   const eventId = harness.recordHarnessActionEvent({
     actionType: action.type,
@@ -246,7 +388,7 @@ export function applyHarnessAction(
   return { ...result, eventId };
 }
 
-function applyParsedHarnessAction(harness: Harness, action: HarnessAction, options: HarnessActionOptions): HarnessActionResult {
+function applyParsedHarnessAction(harness: Harness, action: Exclude<HarnessAction, SubsessionAction>, options: HarnessActionOptions): HarnessActionResult {
   if (action.type === "reclaimRunningTasks") {
     const run = harness.getRun(action.runId);
     if (!run) {
@@ -383,6 +525,689 @@ function applyParsedHarnessAction(harness: Harness, action: HarnessAction, optio
   }
 
   return prepareRunDrain(harness, action);
+}
+
+const SUBSESSION_DEFAULT_TIMEOUT_MS = 30 * 60 * 1000;
+const SUBSESSION_MAX_TIMEOUT_MS = 4 * 60 * 60 * 1000;
+const SUBSESSION_DEFAULT_IDLE_TIMEOUT_MS = 10 * 60 * 1000;
+const SUBSESSION_MAX_IDLE_TIMEOUT_MS = 60 * 60 * 1000;
+const SUBSESSION_MAX_PER_TASK = 3;
+const SUBSESSION_MIN_PROMPT_LENGTH = 24;
+const SUBSESSION_BUILT_IN_BACKEND_IDS = new Set([
+  "claude-code",
+  "codex",
+  "codex-resumable",
+  "codex-cli",
+  "acpx-codex",
+  "noop",
+  "opencode",
+  "openclaw",
+]);
+
+function applySubsessionAction(
+  harness: Harness,
+  action: Extract<HarnessAction, { type: "startSubsession" | "collectSubsessions" | "cancelSubsessions" }>,
+  options: HarnessActionOptions,
+): HarnessActionResult {
+  if (action.type === "startSubsession") {
+    return applyStartSubsession(harness, action, options);
+  }
+  if (action.type === "collectSubsessions") {
+    return applyCollectSubsessions(harness, action, options);
+  }
+  return applyCancelSubsessions(harness, action, options);
+}
+
+function recordSubsessionEvent(
+  harness: Harness,
+  action: Extract<HarnessAction, { type: "startSubsession" | "collectSubsessions" | "cancelSubsessions" }>,
+  result: HarnessActionResult,
+) {
+  return harness.recordHarnessActionEvent({
+    actionType: action.type,
+    status: result.status,
+    request: action as unknown as Record<string, unknown>,
+    result: resultToRecord(result),
+  });
+}
+
+interface SubsessionValidationContext {
+  task: NonNullable<ReturnType<Harness["getTask"]>>;
+  run: NonNullable<ReturnType<Harness["getRun"]>>;
+  worktreePath: string;
+  backend: ResolvedSubsessionBackend;
+  checks: HarnessActionResult["checks"];
+}
+
+function resolveParentTaskWithRun(harness: Harness, parentTaskId: string, actionType: string) {
+  const task = harness.getTask(parentTaskId);
+  if (!task) {
+    return {
+      ok: false as const,
+      result: blockedResult(actionType, `Parent task not found: ${parentTaskId}`, [`parent task not found: ${parentTaskId}`]),
+    };
+  }
+  const run = harness.getRun(task.runId);
+  if (!run) {
+    return {
+      ok: false as const,
+      result: blockedResult(actionType, `Run not found for parent task: ${parentTaskId}`, [`run not found for parent task: ${parentTaskId}`]),
+    };
+  }
+  return { ok: true as const, task, run };
+}
+
+function resolveParentWorktree(task: Task, run: NonNullable<ReturnType<Harness["getRun"]>>): string | null {
+  if (task.worktreePath) {
+    return task.worktreePath;
+  }
+  const projectRoot = run.projectRoot ?? null;
+  return projectRoot;
+}
+
+function normalizeSubsessionName(taskId: string, suggestion: string | undefined): string {
+  const slug = safeSlug(suggestion ?? "child");
+  return `${taskId}__${slug}`;
+}
+
+function safeSlug(value: string): string {
+  const cleaned = value
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "")
+    .slice(0, 48);
+  return cleaned || "child";
+}
+
+function enforceSubsessionLimit(existing: ExecutionThread[], actionType: string): { ok: true } | { ok: false; result: HarnessActionResult } {
+  const running = existing.filter((thread) => thread.status === "running");
+  if (running.length >= SUBSESSION_MAX_PER_TASK) {
+    return {
+      ok: false,
+      result: blockedResult(
+        actionType,
+        `Parent task already has ${running.length} running subsession${running.length === 1 ? "" : "s"} (max ${SUBSESSION_MAX_PER_TASK}).`,
+        [`subsession limit reached: ${running.length}/${SUBSESSION_MAX_PER_TASK}`],
+      ),
+    };
+  }
+  return { ok: true };
+}
+
+function resolveSubsessionBackend(
+  run: NonNullable<ReturnType<Harness["getRun"]>>,
+  requested: string | undefined,
+  actionType: string,
+): { ok: true; backend: ResolvedSubsessionBackend } | { ok: false; result: HarnessActionResult } {
+  const id = requested ?? "claude-code";
+  const fromContext = readSubsessionBackendDefinition(run.context, id);
+  if (fromContext) {
+    return { ok: true, backend: fromContext };
+  }
+  if (SUBSESSION_BUILT_IN_BACKEND_IDS.has(id)) {
+    return { ok: true, backend: builtInSubsessionBackend(id) };
+  }
+  return {
+    ok: false,
+    result: blockedResult(
+      actionType,
+      `Unknown subsession backend: ${id}`,
+      [`backend ${id} is not declared in run.context.agentBackends and is not a built-in backend`],
+    ),
+  };
+}
+
+function readSubsessionBackendDefinition(
+  context: Record<string, unknown>,
+  id: string,
+): ResolvedSubsessionBackend | null {
+  const map = context.agentBackends;
+  if (!map || typeof map !== "object" || Array.isArray(map)) {
+    return null;
+  }
+  const definition = (map as Record<string, unknown>)[id];
+  if (!definition || typeof definition !== "object" || Array.isArray(definition)) {
+    return null;
+  }
+  const record = definition as Record<string, unknown>;
+  const kind = typeof record.kind === "string" ? record.kind : null;
+  if (kind !== "acpx" && kind !== "codex-cli" && kind !== "codex-resumable" && kind !== "noop") {
+    return null;
+  }
+  const backend: ResolvedSubsessionBackend = { id, kind };
+  if (typeof record.agent === "string") {
+    backend.agent = record.agent;
+  }
+  if (typeof record.agentCommand === "string") {
+    backend.agentCommand = record.agentCommand;
+  }
+  if (typeof record.approval === "string") {
+    backend.approval = record.approval;
+  }
+  if (typeof record.format === "string") {
+    backend.format = record.format;
+  }
+  return backend;
+}
+
+function builtInSubsessionBackend(id: string): ResolvedSubsessionBackend {
+  if (id === "claude-code") {
+    return { id, kind: "acpx", agent: "claude", approval: "approve-reads" };
+  }
+  if (id === "codex" || id === "acpx-codex") {
+    return { id, kind: "acpx", agent: "codex", approval: "approve-reads" };
+  }
+  if (id === "codex-resumable") {
+    return { id, kind: "codex-resumable" };
+  }
+  if (id === "codex-cli") {
+    return { id, kind: "codex-cli" };
+  }
+  return { id, kind: "noop" };
+}
+
+function clampSubsessionTimeouts(timeoutMs: number | undefined, idleTimeoutMs: number | undefined) {
+  const timeout = clampPositive(timeoutMs, SUBSESSION_DEFAULT_TIMEOUT_MS, SUBSESSION_MAX_TIMEOUT_MS);
+  const idle = clampPositive(idleTimeoutMs, SUBSESSION_DEFAULT_IDLE_TIMEOUT_MS, SUBSESSION_MAX_IDLE_TIMEOUT_MS);
+  return { timeout, idle };
+}
+
+function clampPositive(value: number | undefined, defaultValue: number, maxValue: number) {
+  if (!value || !Number.isFinite(value) || value <= 0) {
+    return defaultValue;
+  }
+  return Math.min(Math.floor(value), maxValue);
+}
+
+function listSubsessionThreadsForTask(harness: Harness, parentTaskId: string): ExecutionThread[] {
+  const task = harness.getTask(parentTaskId);
+  if (!task) {
+    return [];
+  }
+  return harness
+    .listExecutionThreads({ runId: task.runId })
+    .filter((thread) => thread.ownerType === "subsession" && thread.taskId === parentTaskId);
+}
+
+function findParentAttemptThread(harness: Harness, task: Task): ExecutionThread | null {
+  const threads = harness.listExecutionThreads({ runId: task.runId });
+  const attempt = task.id ? harness.listLatestAttemptsForTasks([task.id])[0] : null;
+  if (attempt) {
+    const byAttempt = threads.find((thread) => thread.attemptId === attempt.attemptId && thread.ownerType !== "subsession");
+    if (byAttempt) {
+      return byAttempt;
+    }
+  }
+  const byTask = threads.find((thread) => thread.taskId === task.id && thread.ownerType !== "subsession");
+  return byTask ?? null;
+}
+
+function applyStartSubsession(
+  harness: Harness,
+  action: Extract<HarnessAction, { type: "startSubsession" }>,
+  options: HarnessActionOptions,
+): HarnessActionResult {
+  const actionType = action.type;
+  const checks: HarnessActionResult["checks"] = [];
+  const validation = validateParentTaskForSubsession(harness, action.parentTaskId, actionType, checks);
+  if (!validation.ok) {
+    return validation.result;
+  }
+  const { task, run } = validation;
+
+  const worktreePath = resolveParentWorktree(task, run);
+  if (!worktreePath) {
+    return blockedResult(actionType, `Parent task ${task.id} has no resolvable worktree cwd.`, [
+      `parent task ${task.id} has no worktreePath and run has no projectRoot`,
+    ]);
+  }
+  checks.push({ name: "parent worktree", status: "passed", evidence: worktreePath });
+
+  if (action.prompt.trim().length < SUBSESSION_MIN_PROMPT_LENGTH) {
+    return blockedResult(
+      actionType,
+      `Subsession prompt must be at least ${SUBSESSION_MIN_PROMPT_LENGTH} characters.`,
+      [`prompt too short: ${action.prompt.trim().length}/${SUBSESSION_MIN_PROMPT_LENGTH}`],
+    );
+  }
+  checks.push({ name: "prompt length", status: "passed", evidence: `${action.prompt.trim().length} chars` });
+
+  const backendResult = resolveSubsessionBackend(run, action.backend, actionType);
+  if (!backendResult.ok) {
+    return backendResult.result;
+  }
+  const backend = backendResult.backend;
+  checks.push({ name: "backend resolved", status: "passed", evidence: `${backend.id} (${backend.kind})` });
+
+  const existing = listSubsessionThreadsForTask(harness, task.id);
+  const limit = enforceSubsessionLimit(existing, actionType);
+  if (!limit.ok) {
+    return limit.result;
+  }
+  checks.push({
+    name: "subsession limit",
+    status: "passed",
+    evidence: `${existing.filter((thread) => thread.status === "running").length}/${SUBSESSION_MAX_PER_TASK} running`,
+  });
+
+  const { timeout, idle } = clampSubsessionTimeouts(action.timeoutMs, action.idleTimeoutMs);
+  checks.push({ name: "timeout policy", status: "passed", evidence: `${timeout}ms/${idle}ms idle` });
+
+  const sessionName = normalizeSubsessionName(task.id, action.sessionName ?? action.purpose);
+  const parentThread = findParentAttemptThread(harness, task);
+  const latestAttempt = harness.listLatestAttemptsForTasks([task.id])[0] ?? null;
+  const threadId = harness.upsertExecutionThread({
+    runId: run.id,
+    taskId: task.id,
+    attemptId: latestAttempt?.attemptId ?? null,
+    parentThreadId: parentThread?.id ?? null,
+    ownerType: "subsession",
+    ownerId: null,
+    role: action.role ?? "subsession",
+    status: "running",
+    sessionName,
+    agentSessionId: sessionName,
+    worktreePath,
+  });
+  harness.updateExecutionThread({ id: threadId, ownerId: threadId, heartbeat: true });
+  checks.push({ name: "thread recorded", status: "passed", evidence: threadId });
+
+  const runner = options.subsessionRunner;
+  if (!runner) {
+    harness.updateExecutionThread({
+      id: threadId,
+      status: "blocked",
+      interruptReason: "no subsessionRunner injected",
+    });
+    const result: HarnessActionResult = {
+      status: "blocked",
+      actionType,
+      summary: `Subsession ${threadId} recorded but no runner was injected to start acpx.`,
+      checks: [...checks, { name: "subsession runner", status: "failed", evidence: "no subsessionRunner provided" }],
+      artifacts: [{
+        kind: "subsession_thread",
+        threadId,
+        sessionName,
+        parentTaskId: task.id,
+        runId: run.id,
+        backend,
+        worktreePath,
+        status: "blocked",
+        reason: "no subsessionRunner injected",
+      }],
+      problems: ["no subsessionRunner injected; harness cannot start acpx child sessions in this process"],
+    };
+    return result;
+  }
+
+  let startResult: SubsessionRunnerStartResult;
+  try {
+    startResult = runner.start({
+      threadId,
+      parentTaskId: task.id,
+      parentAttemptId: latestAttempt?.attemptId ?? null,
+      parentThreadId: parentThread?.id ?? null,
+      runId: run.id,
+      worktreePath,
+      sessionName,
+      purpose: action.purpose,
+      prompt: action.prompt,
+      role: action.role ?? "subsession",
+      backend,
+      timeoutMs: timeout,
+      idleTimeoutMs: idle,
+    });
+  } catch (error) {
+    harness.updateExecutionThread({
+      id: threadId,
+      status: "blocked",
+      interruptReason: errorMessage(error),
+    });
+    return {
+      status: "blocked",
+      actionType,
+      summary: `Subsession start threw: ${errorMessage(error)}`,
+      checks: [...checks, { name: "subsession runner start", status: "failed", evidence: errorMessage(error) }],
+      artifacts: [{
+        kind: "subsession_thread",
+        threadId,
+        sessionName,
+        parentTaskId: task.id,
+        runId: run.id,
+        backend,
+        worktreePath,
+        status: "blocked",
+        reason: errorMessage(error),
+      }],
+      problems: [`subsessionRunner.start threw: ${errorMessage(error)}`],
+    };
+  }
+
+  harness.updateExecutionThread({
+    id: threadId,
+    status: startResult.status,
+    agentSessionId: startResult.agentSessionId ?? startResult.sessionName,
+    pid: startResult.pid ?? null,
+  });
+
+  const runnerReturnedDifferentThreadId = Boolean(startResult.threadId && startResult.threadId !== threadId);
+
+  return {
+    status: "done",
+    actionType,
+    summary: startResult.summary ?? startResult.message ?? `Subsession ${threadId} started as ${sessionName}.`,
+    checks: [
+      ...checks,
+      {
+        name: "harness thread id retained",
+        status: "passed",
+        evidence: runnerReturnedDifferentThreadId
+          ? `ignored runner thread id ${startResult.threadId}; persisted ${threadId}`
+          : threadId,
+      },
+      { name: "subsession started", status: "passed", evidence: startResult.sessionName },
+      ...(startResult.checks ?? []),
+    ],
+    artifacts: [
+      {
+        kind: "subsession_thread",
+        threadId,
+        runnerThreadId: runnerReturnedDifferentThreadId ? startResult.threadId : null,
+        sessionName: startResult.sessionName,
+        agentSessionId: startResult.agentSessionId ?? null,
+        parentTaskId: task.id,
+        parentThreadId: parentThread?.id ?? null,
+        runId: run.id,
+        backend,
+        worktreePath,
+        status: startResult.status,
+        timeoutMs: timeout,
+        idleTimeoutMs: idle,
+      },
+      ...(startResult.artifacts ?? []),
+    ],
+    problems: startResult.problems ?? [],
+  };
+}
+
+function validateParentTaskForSubsession(
+  harness: Harness,
+  parentTaskId: string,
+  actionType: string,
+  checks: HarnessActionResult["checks"],
+): { ok: true; task: Task; run: NonNullable<ReturnType<Harness["getRun"]>> } | { ok: false; result: HarnessActionResult } {
+  const resolved = resolveParentTaskWithRun(harness, parentTaskId, actionType);
+  if (!resolved.ok) {
+    return resolved;
+  }
+  checks.push({ name: "parent task exists", status: "passed", evidence: resolved.task.id });
+  checks.push({ name: "parent run exists", status: "passed", evidence: resolved.run.id });
+  return { ok: true, task: resolved.task, run: resolved.run };
+}
+
+function applyCollectSubsessions(
+  harness: Harness,
+  action: Extract<HarnessAction, { type: "collectSubsessions" }>,
+  options: HarnessActionOptions,
+): HarnessActionResult {
+  const actionType = action.type;
+  const checks: HarnessActionResult["checks"] = [];
+  const validation = validateParentTaskForSubsession(harness, action.parentTaskId, actionType, checks);
+  if (!validation.ok) {
+    return validation.result;
+  }
+  const { task, run } = validation;
+
+  const allChildren = listSubsessionThreadsForTask(harness, task.id);
+  if (allChildren.length === 0) {
+    return blockedResult(actionType, `Parent task ${task.id} has no recorded subsession threads.`, [
+      `no subsession threads recorded for parent task ${task.id}`,
+    ]);
+  }
+  checks.push({ name: "child threads", status: "passed", evidence: String(allChildren.length) });
+
+  const filtered = action.status ? allChildren.filter((thread) => thread.status === action.status) : allChildren;
+  if (filtered.length === 0) {
+    return blockedResult(actionType, `No child threads matched status filter ${action.status}.`, [
+      `no child threads matched status=${action.status ?? "(any)"}`,
+    ]);
+  }
+
+  const backendByThread = collectSubsessionBackends(harness, filtered);
+  const runner = options.subsessionRunner;
+  if (!runner) {
+    const artifacts = filtered.map((thread) => buildCollectedArtifactWithoutRunner(thread));
+    return {
+      status: "done",
+      actionType,
+      summary: `Collected ${filtered.length} subsession thread(s) without a runner.`,
+      checks: [...checks, { name: "subsession runner", status: "failed", evidence: "no subsessionRunner provided" }],
+      artifacts,
+      problems: ["no subsessionRunner injected; collection is best-effort from thread state only"],
+    };
+  }
+
+  const children: SubsessionRunnerCollectChild[] = filtered.map((thread) => ({
+    threadId: thread.id,
+    sessionName: thread.sessionName,
+    agentSessionId: thread.agentSessionId,
+    backend: backendByThread.get(thread.id) ?? { id: thread.role || "subsession", kind: "noop" },
+    worktreePath: thread.worktreePath ?? run.projectRoot ?? "",
+  }));
+
+  let collected: SubsessionRunnerCollectResult[];
+  try {
+    collected = runner.collect(children);
+  } catch (error) {
+    return {
+      status: "blocked",
+      actionType,
+      summary: `Subsession collect threw: ${errorMessage(error)}`,
+      checks: [...checks, { name: "subsession runner collect", status: "failed", evidence: errorMessage(error) }],
+      artifacts: [],
+      problems: [`subsessionRunner.collect threw: ${errorMessage(error)}`],
+    };
+  }
+
+  const artifacts: HarnessActionResult["artifacts"] = [];
+  for (const result of collected) {
+    harness.updateExecutionThread({
+      id: result.threadId,
+      status: result.status,
+      agentSessionId: result.agentSessionId ?? null,
+      heartbeat: true,
+    });
+    artifacts.push({
+      kind: "subsession_summary",
+      threadId: result.threadId,
+      status: result.status,
+      summary: result.summary,
+      collectedAt: new Date().toISOString(),
+    });
+  }
+
+  return {
+    status: "done",
+    actionType,
+    summary: `Collected ${collected.length} subsession thread(s).`,
+    checks: [...checks, { name: "subsession summaries", status: "passed", evidence: String(collected.length) }],
+    artifacts,
+    problems: [],
+  };
+}
+
+function applyCancelSubsessions(
+  harness: Harness,
+  action: Extract<HarnessAction, { type: "cancelSubsessions" }>,
+  options: HarnessActionOptions,
+): HarnessActionResult {
+  const actionType = action.type;
+  const checks: HarnessActionResult["checks"] = [];
+  const validation = validateParentTaskForSubsession(harness, action.parentTaskId, actionType, checks);
+  if (!validation.ok) {
+    return validation.result;
+  }
+  const { run } = validation;
+
+  const allChildren = listSubsessionThreadsForTask(harness, action.parentTaskId);
+  if (allChildren.length === 0) {
+    return blockedResult(actionType, `Parent task ${action.parentTaskId} has no recorded subsession threads.`, [
+      `no subsession threads recorded for parent task ${action.parentTaskId}`,
+    ]);
+  }
+  checks.push({ name: "child threads", status: "passed", evidence: String(allChildren.length) });
+
+  const idFilter = action.threadIds ? new Set(action.threadIds) : null;
+  const targets = idFilter
+    ? allChildren.filter((thread) => idFilter.has(thread.id))
+    : allChildren.filter((thread) => thread.status === "running" || thread.status === "blocked");
+  if (targets.length === 0) {
+    return blockedResult(actionType, `No matching child threads to cancel for parent task ${action.parentTaskId}.`, [
+      `no child threads matched threadIds=${idFilter ? [...idFilter].join(",") : "(running/blocked)"}`,
+    ]);
+  }
+  checks.push({ name: "cancel targets", status: "passed", evidence: String(targets.length) });
+
+  const runner = options.subsessionRunner;
+  const problems: string[] = [];
+  const artifacts: HarnessActionResult["artifacts"] = [];
+
+  if (!runner) {
+    for (const thread of targets) {
+      harness.updateExecutionThread({
+        id: thread.id,
+        status: "interrupted",
+        interruptReason: action.reason,
+        heartbeat: true,
+      });
+      artifacts.push({
+        kind: "subsession_cancel",
+        threadId: thread.id,
+        canceled: false,
+        status: "interrupted",
+        reason: action.reason,
+        message: "no subsessionRunner injected; acpx cancel signal not sent",
+      });
+    }
+    problems.push("no subsessionRunner injected; acpx cancel signal was not sent");
+    return {
+      status: "done",
+      actionType,
+      summary: `Marked ${targets.length} subsession thread(s) interrupted without acpx cancel.`,
+      checks: [...checks, { name: "subsession runner", status: "failed", evidence: "no subsessionRunner provided" }],
+      artifacts,
+      problems,
+    };
+  }
+
+  const backendByThread = collectSubsessionBackends(harness, targets);
+  const children: SubsessionRunnerCancelChild[] = targets.map((thread) => ({
+    threadId: thread.id,
+    sessionName: thread.sessionName,
+    agentSessionId: thread.agentSessionId,
+    backend: backendByThread.get(thread.id) ?? { id: thread.role || "subsession", kind: "noop" },
+    worktreePath: thread.worktreePath ?? run.projectRoot ?? "",
+  }));
+
+  let canceled: SubsessionRunnerCancelResult[];
+  try {
+    canceled = runner.cancel(children, action.reason);
+  } catch (error) {
+    for (const child of children) {
+      harness.updateExecutionThread({
+        id: child.threadId,
+        status: "interrupted",
+        interruptReason: action.reason,
+        heartbeat: true,
+      });
+    }
+    return {
+      status: "blocked",
+      actionType,
+      summary: `Subsession cancel threw: ${errorMessage(error)}`,
+      checks: [...checks, { name: "subsession runner cancel", status: "failed", evidence: errorMessage(error) }],
+      artifacts,
+      problems: [`subsessionRunner.cancel threw: ${errorMessage(error)}`],
+    };
+  }
+
+  for (const result of canceled) {
+    harness.updateExecutionThread({
+      id: result.threadId,
+      status: "interrupted",
+      interruptReason: action.reason,
+      heartbeat: true,
+    });
+    artifacts.push({
+      kind: "subsession_cancel",
+      threadId: result.threadId,
+      canceled: result.canceled,
+      reason: action.reason,
+      message: result.message ?? null,
+    });
+    if (!result.canceled) {
+      problems.push(`cancel reported failure for ${result.threadId}${result.message ? `: ${result.message}` : ""}`);
+    }
+  }
+
+  return {
+    status: "done",
+    actionType,
+    summary: `Canceled ${canceled.length} subsession thread(s).`,
+    checks: [...checks, { name: "subsession cancels", status: "passed", evidence: String(canceled.length) }],
+    artifacts,
+    problems,
+  };
+}
+
+function collectSubsessionBackends(harness: Harness, threads: ExecutionThread[]): Map<string, ResolvedSubsessionBackend> {
+  const byThread = new Map<string, ResolvedSubsessionBackend>();
+  const events = harness.listHarnessActionEvents({ limit: 500 });
+  for (const thread of threads) {
+    const event = events.find((candidate) => {
+      if (candidate.actionType !== "startSubsession" || candidate.status !== "done") {
+        return false;
+      }
+      const artifacts = Array.isArray(candidate.result.artifacts) ? candidate.result.artifacts : [];
+      return artifacts.some((artifact) => {
+        if (!artifact || typeof artifact !== "object") {
+          return false;
+        }
+        const record = artifact as Record<string, unknown>;
+        return record.kind === "subsession_thread" && record.threadId === thread.id;
+      });
+    });
+    if (event) {
+      const artifacts = Array.isArray(event.result.artifacts) ? event.result.artifacts : [];
+      for (const artifact of artifacts) {
+        const record = artifact as Record<string, unknown> | null;
+        if (!record || record.kind !== "subsession_thread" || record.threadId !== thread.id) {
+          continue;
+        }
+        const backend = record.backend as Record<string, unknown> | undefined;
+        if (!backend) continue;
+        byThread.set(thread.id, {
+          id: typeof backend.id === "string" ? backend.id : thread.role || "subsession",
+          kind: typeof backend.kind === "string" ? backend.kind : "noop",
+          agent: typeof backend.agent === "string" ? backend.agent : undefined,
+          agentCommand: typeof backend.agentCommand === "string" ? backend.agentCommand : undefined,
+          approval: typeof backend.approval === "string" ? backend.approval : undefined,
+        });
+        break;
+      }
+    }
+  }
+  return byThread;
+}
+
+function buildCollectedArtifactWithoutRunner(thread: ExecutionThread) {
+  return {
+    kind: "subsession_summary",
+    threadId: thread.id,
+    status: thread.status,
+    summary: thread.interruptReason ?? `thread status ${thread.status}`,
+    collectedAt: new Date().toISOString(),
+  };
 }
 
 function completeSystemTask(
@@ -1885,6 +2710,23 @@ function optionalStringArrayField(record: Record<string, unknown>, key: string) 
     }
     return item.trim();
   });
+}
+
+function optionalThreadStatusFilter(record: Record<string, unknown>, key: string) {
+  const value = record[key];
+  if (value === undefined) {
+    return undefined;
+  }
+  if (
+    value !== "running" &&
+    value !== "done" &&
+    value !== "blocked" &&
+    value !== "interrupted" &&
+    value !== "orphaned"
+  ) {
+    throw new Error(`${key} must be running, done, blocked, interrupted, or orphaned`);
+  }
+  return value as ExecutionThreadStatusFilter;
 }
 
 function stringArrayField(record: Record<string, unknown>, key: string) {

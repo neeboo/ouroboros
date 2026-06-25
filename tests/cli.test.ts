@@ -4972,6 +4972,154 @@ describe("CLI", () => {
     expect(result.stderr).toContain("run not found: run_missing");
   });
 
+  test("run-threads CLI groups harness-managed subsession threads under their parent task", async () => {
+    await runCli("init");
+    const run = await runCliJson("create-run", "--goal", "Validate run-threads output");
+    const parent = await runCliJson(
+      "create-task",
+      "--run-id",
+      run.id,
+      "--role",
+      "worker",
+      "--goal",
+      "Drive subsession research",
+      "--prompt",
+      "Spawn a research subsession.",
+    );
+    const harness = new Harness(dbPath);
+    const attemptId = harness.recordAttempt({
+      taskId: parent.id,
+      input: {},
+      output: {
+        status: "done",
+        summary: "Collected subsession summaries.",
+        artifacts: [],
+        changedFiles: [],
+        checks: [],
+        problems: [],
+      },
+    });
+    const parentThreadId = harness.upsertExecutionThread({
+      runId: run.id,
+      taskId: parent.id,
+      attemptId,
+      ownerType: "runner",
+      role: "worker",
+      status: "running",
+      sessionName: "parent-session",
+      agentSessionId: "codex_parent",
+    });
+    const childThreadId = harness.upsertExecutionThread({
+      runId: run.id,
+      taskId: parent.id,
+      attemptId,
+      parentThreadId,
+      ownerType: "subsession",
+      role: "researcher",
+      status: "running",
+      sessionName: "parent__research_api",
+      agentSessionId: "claude_research_child",
+    });
+    harness.recordAttempt({
+      taskId: parent.id,
+      input: {},
+      output: {
+        status: "done",
+        summary: "Collected subsession summaries.",
+        artifacts: [
+          {
+            kind: "subsession_summary",
+            threadId: childThreadId,
+            sessionName: "parent__research_api",
+            status: "done",
+            summary: "Found three relevant APIs.",
+          },
+        ],
+        changedFiles: [],
+        checks: [],
+        problems: [],
+      },
+    });
+
+    const stdout = await runCli("run-threads", "--run-id", run.id);
+
+    expect(stdout).toContain(`Run ${run.id}`);
+    expect(stdout).toContain(`Parent task ${shortTaskId(parent.id)}`);
+    expect(stdout).toContain("Drive subsession research");
+    expect(stdout).toContain(`parent_thread: ${shortTaskId(parentThreadId)}`);
+    expect(stdout).toContain(shortTaskId(childThreadId));
+    expect(stdout).toContain("researcher");
+    expect(stdout).toContain("parent__research_api");
+    expect(stdout).toContain("Found three relevant APIs.");
+  });
+
+  test("run-threads CLI emits JSON overview with child thread grouping", async () => {
+    await runCli("init");
+    const run = await runCliJson("create-run", "--goal", "Validate run-threads JSON");
+    const parent = await runCliJson(
+      "create-task",
+      "--run-id",
+      run.id,
+      "--role",
+      "worker",
+      "--goal",
+      "Drive JSON subsession",
+      "--prompt",
+      "Spawn a subsession.",
+    );
+    const harness = new Harness(dbPath);
+    const attemptId = harness.startAttempt({ taskId: parent.id, input: {} });
+    const parentThreadId = harness.upsertExecutionThread({
+      runId: run.id,
+      taskId: parent.id,
+      attemptId,
+      ownerType: "runner",
+      role: "worker",
+      status: "running",
+      sessionName: "parent-session",
+      agentSessionId: "codex_parent_json",
+    });
+    const childThreadId = harness.upsertExecutionThread({
+      runId: run.id,
+      taskId: parent.id,
+      attemptId,
+      parentThreadId,
+      ownerType: "subsession",
+      role: "researcher",
+      status: "running",
+      sessionName: "parent__research_json",
+      agentSessionId: "claude_research_json",
+    });
+
+    const overview = await runCliJson("run-threads", "--run-id", run.id, "--json", "true") as {
+      groups: Array<{
+        taskId: string;
+        childThreads: Array<{ id: string; ownerType: string; role: string }>;
+        latestSummaries: Array<{ threadId: string; status: string; summary: string }>;
+      }>;
+      parentTaskCount: number;
+      childThreadCount: number;
+      standaloneThreadCount: number;
+    };
+
+    expect(overview.parentTaskCount).toBe(1);
+    expect(overview.childThreadCount).toBe(1);
+    expect(overview.standaloneThreadCount).toBe(0);
+    expect(overview.groups[0].taskId).toBe(parent.id);
+    expect(overview.groups[0].childThreads[0].id).toBe(childThreadId);
+    expect(overview.groups[0].childThreads[0].ownerType).toBe("subsession");
+    expect(overview.groups[0].childThreads[0].role).toBe("researcher");
+    expect(overview.groups[0].latestSummaries).toHaveLength(0);
+  });
+
+  test("run-threads CLI fails with a helpful message when the run is missing", async () => {
+    await runCli("init");
+    const result = await runCliRaw("run-threads", "--run-id", "run_missing");
+
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain("run not found: run_missing");
+  });
+
   test("retries a blocked task", async () => {
     await runCli("init");
     const run = await runCliJson("create-run", "--goal", "Bootstrap ouroboros");

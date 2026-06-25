@@ -308,6 +308,35 @@ Session resume has two paths. The generic acpx executor relies on acpx named ses
 
 Stop and interrupt behavior is not uniform across agents. Orbs can stop a local runner process and mark the attempt blocked. acpx also exposes cooperative cancellation for ACP sessions, but each backend must be smoke-tested before Orbs treats cancel as durable cleanup.
 
+## Harness-Managed Subsessions
+
+A subsession is an acpx child session that an Orbs task can request through a fixed harness action instead of through prompt text. The harness owns the lifecycle: it validates the parent task, resolves the parent worktree as the child `cwd`, picks the named backend, records an `execution_threads` row with `owner_type = "subsession"`, and only then asks an injected runner to spawn acpx.
+
+Backend resolution follows the same `run.context.agentBackends` map as ordinary task routing:
+
+```json
+{
+  "agentBackends": {
+    "claude-code": { "kind": "acpx", "agent": "claude", "approval": "approve-reads" },
+    "codex": { "kind": "acpx", "agent": "codex" },
+    "codex-resumable": { "kind": "codex-resumable" },
+    "noop": { "kind": "noop" }
+  }
+}
+```
+
+A subsession `backend` must be declared in that map (or be one of the built-in aliases: `claude-code`, `codex`, `codex-resumable`, `codex-cli`, `noop`). The resolved `kind`, `agent`/`agentCommand`, and `approval` are recorded with the child thread.
+
+The first safe scope is read/propose. The harness fixes the child `cwd` to the parent task `worktreePath`, never to an arbitrary path. A backend with `approval: "approve-reads"` keeps the child session out of the parent worktree's write surface. Promote a backend to `approve-all` only after a separate write smoke proves the agent can read, write, run commands, and emit final Orbs JSON from the parent worktree without corrupting the parent's own diff.
+
+Cooperative cancel and durable cleanup still depend on the backend:
+
+- `claude-code`, `opencode`, and `openclaw` cancel through acpx cooperative cancel; durable cleanup is unverified until the backend has been smoke-tested.
+- `codex-resumable` does not have an Orbs-native acpx cancel path yet. `cancelSubsessions` records the requested cancel, marks the thread `interrupted`, and reports any failure as a problem.
+- `hermes` stores a cancel event per ACP session, but the cleanup must still be verified by a smoke before Orbs treats it as durable.
+
+See `docs/protocol.md` Harness-Managed Subsessions for the action payloads, validation rules, and lifecycle states.
+
 Remote or Gateway-backed agents require cwd and worktree verification before normal use. The Orbs task may be assigned `/repo/.ouroboros/worktrees/task_...`, but a remote ACP server's file tools may run on another host. Do not enable remote Hermes, OpenClaw Gateway, or similar targets for write tasks until a smoke test proves the agent reads, writes, runs commands, and reports diffs in the intended worktree.
 
 ## Capability Boundaries
