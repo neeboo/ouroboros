@@ -6,6 +6,9 @@ import { applyHarnessAction, Harness } from "../packages/harness/src";
 import { buildTaskPrompt } from "../packages/runner/src";
 import {
   buildDashboardTaskGraph,
+  DASHBOARD_ROUTE_NEXT_MILESTONE,
+  DASHBOARD_ROUTES,
+  dashboardRoutePaths,
   dashboardCodexEventPartsForTest,
   dashboardEventLineForTest,
   dashboardEvidenceItemTextForTest,
@@ -192,6 +195,64 @@ verifyDashboardOverflow("desktop and mobile widths");
 `;
 
 describe("dashboard", () => {
+  test("defines a TanStack-ready dashboard route manifest without adding TanStack dependencies", async () => {
+    const packageJson = JSON.parse(await readFile(join(import.meta.dir, "../package.json"), "utf8"));
+    const cliPackageJson = JSON.parse(await readFile(join(import.meta.dir, "../packages/cli/package.json"), "utf8"));
+    const dependencyNames = [
+      ...Object.keys(packageJson.dependencies ?? {}),
+      ...Object.keys(packageJson.devDependencies ?? {}),
+      ...Object.keys(cliPackageJson.dependencies ?? {}),
+      ...Object.keys(cliPackageJson.devDependencies ?? {}),
+    ];
+
+    expect(dependencyNames.filter((name) => name.startsWith("@tanstack/"))).toEqual([]);
+    expect(DASHBOARD_ROUTE_NEXT_MILESTONE).toContain("Vite dashboard app boundary");
+    expect(DASHBOARD_ROUTE_NEXT_MILESTONE).toContain("generated routeTree");
+    expect(DASHBOARD_ROUTE_NEXT_MILESTONE).toContain("TanStack Router");
+    expect(DASHBOARD_ROUTES.map((route) => route.name)).toEqual([
+      "dashboard.document",
+      "dashboard.asset.canvasScript",
+      "dashboard.asset.canvasCss",
+      "dashboard.api.recentRuns",
+      "dashboard.api.runOverview",
+      "dashboard.api.changedFiles",
+      "dashboard.api.diff",
+      "dashboard.api.guardrailAccept",
+      "dashboard.api.runnerStart",
+      "dashboard.api.runnerStop",
+      "dashboard.api.supervisorStart",
+      "dashboard.api.supervisorStop",
+      "dashboard.api.intake",
+      "dashboard.api.goalCreate",
+      "dashboard.api.goalInterrupt",
+      "dashboard.api.taskResume",
+      "dashboard.api.taskRerun",
+      "dashboard.api.attemptStop",
+      "dashboard.taskPrompt",
+    ]);
+    expect(dashboardRoutePaths()).toEqual([
+      "/",
+      "/assets/dashboard-canvas.js",
+      "/assets/dashboard-canvas.css",
+      "/api/runs",
+      "/api/runs/:runId/overview",
+      "/api/runs/:runId/changed-files",
+      "/api/runs/:runId/diff",
+      "/api/runs/:runId/guardrails/:proposalId/accept",
+      "/api/runs/:runId/runner/start",
+      "/api/runs/:runId/runner/stop",
+      "/api/supervisor/start",
+      "/api/supervisor/stop",
+      "/api/runs/:runId/intake",
+      "/api/runs/:runId/goals",
+      "/api/runs/:runId/interrupt",
+      "/api/tasks/:taskId/resume",
+      "/api/tasks/:taskId/rerun",
+      "/api/attempts/:attemptId/stop",
+      "/tasks/:taskId/prompt",
+    ]);
+  });
+
   test("exposes a React dashboard module boundary for the incremental migration", () => {
     expect(DASHBOARD_REACT_MODULES.map((module) => module.id)).toEqual([
       "shell",
