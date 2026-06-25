@@ -1,3 +1,4 @@
+import { Button, Panel, Separator, Tabs, TabsTrigger } from "./dashboard-ui/primitives";
 import type { DashboardComposerState, DashboardSupervisorState, DashboardWorkspaceMode } from "./dashboard-types";
 
 export function IntakeComposerControls({ composer }: { composer: DashboardComposerState }) {
@@ -11,9 +12,9 @@ export function IntakeComposerControls({ composer }: { composer: DashboardCompos
         {composer.attachments.map((attachment, index) => (
           <div className="attachment-chip" data-attachment-index={index} key={`${attachment.name}:${index}`}>
             <span title={attachment.name}>{attachment.name}</span>
-            <button type="button" aria-label="Remove attachment" data-remove-attachment={index}>
-              x
-            </button>
+        <Button variant="ghost" type="button" aria-label="Remove attachment" data-remove-attachment={index}>
+          x
+        </Button>
           </div>
         ))}
       </div>
@@ -25,18 +26,18 @@ export function IntakeComposerControls({ composer }: { composer: DashboardCompos
         defaultValue={composer.prompt}
       />
       <div className="intake-actions">
-        <button className="plain-button secondary" type="button" data-attach-files>
+        <Button className="plain-button secondary" variant="secondary" type="button" data-attach-files>
           +
-        </button>
-        <button className="plain-button secondary" type="button" data-clear-attachments>
+        </Button>
+        <Button className="plain-button secondary" variant="secondary" type="button" data-clear-attachments>
           Clear
-        </button>
+        </Button>
         <div className="form-status" id="intake-form-status">
           {composer.status || ""}
         </div>
-        <button className="plain-button" type="submit" data-send-intake>
+        <Button className="plain-button" type="submit" data-send-intake>
           Send
-        </button>
+        </Button>
       </div>
     </form>
   );
@@ -44,14 +45,14 @@ export function IntakeComposerControls({ composer }: { composer: DashboardCompos
 
 export function WorkspaceModeControls({ mode }: { mode: DashboardWorkspaceMode }) {
   return (
-    <div className="workspace-toggle" aria-label="Workspace view">
-      <button type="button" data-workspace-mode="canvas" aria-pressed={mode === "canvas"} className={mode === "canvas" ? "active" : ""}>
+    <Tabs className="workspace-toggle" aria-label="Workspace view">
+      <TabsTrigger type="button" data-workspace-mode="canvas" active={mode === "canvas"}>
         Canvas
-      </button>
-      <button type="button" data-workspace-mode="flow" aria-pressed={mode === "flow"} className={mode === "flow" ? "active" : ""}>
+      </TabsTrigger>
+      <TabsTrigger type="button" data-workspace-mode="flow" active={mode === "flow"}>
         Flow
-      </button>
-    </div>
+      </TabsTrigger>
+    </Tabs>
   );
 }
 
@@ -62,7 +63,7 @@ export function SupervisorControls({ supervisor }: { supervisor: DashboardSuperv
   const canStop = supervisor.status === "running" && !supervisor.externallyManaged;
 
   return (
-    <section className="inspector-card" data-inspector-section="supervisor">
+    <Panel className="inspector-card" data-inspector-section="supervisor">
       <h2>Supervisor</h2>
       <div className="current-task">
         <div className="current-task-title">Global supervisor</div>
@@ -72,21 +73,22 @@ export function SupervisorControls({ supervisor }: { supervisor: DashboardSuperv
           {supervisor.externallyManaged ? <span className="code-meta"> external supervisor observed</span> : null}
         </div>
       </div>
+      <Separator className="inspector-separator" />
       {supervisor.lastOutput ? <div className="stream-output">{supervisor.lastOutput}</div> : null}
       {canStart || canStop ? (
         <div className="control-row">
           {canStart ? (
-            <button className="plain-button" data-start-supervisor>
+            <Button className="plain-button" data-start-supervisor>
               Start supervisor
-            </button>
+            </Button>
           ) : null}
           {canStop ? (
-            <button className="plain-button danger" data-stop-supervisor>
+            <Button className="plain-button danger" variant="danger" data-stop-supervisor>
               Stop supervisor
-            </button>
+            </Button>
           ) : null}
         </div>
       ) : null}
-    </section>
+    </Panel>
   );
 }

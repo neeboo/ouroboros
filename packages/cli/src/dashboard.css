@@ -1,0 +1,32 @@
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Geist", "Aptos", "Segoe UI Variable", ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+  --font-mono: "JetBrains Mono", "SFMono-Regular", Consolas, monospace;
+  --color-dashboard-app: #fafafa;
+  --color-dashboard-panel: #ffffff;
+  --color-dashboard-ink: #09090b;
+  --color-dashboard-muted: #71717a;
+  --color-dashboard-line: #e4e4e7;
+}
+
+@layer components {
+  .ui-button {
+    min-width: 0;
+  }
+
+  .ui-tabs,
+  .ui-panel,
+  .ui-scroll-area {
+    min-width: 0;
+  }
+
+  .ui-scroll-area {
+    scrollbar-gutter: stable;
+  }
+
+  .ui-separator {
+    height: 1px;
+    background: var(--line, #e4e4e7);
+  }
+}

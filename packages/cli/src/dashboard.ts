@@ -600,6 +600,7 @@ export function dashboardHtml(input: { runId: string }) {
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Ouroboros Dashboard</title>
   <meta name="ouroboros-dashboard-react-modules" content="${escapeHtml(DASHBOARD_REACT_MODULES.map((module) => module.id).join(","))}">
+  <link rel="stylesheet" href="/assets/dashboard.css">
   <link rel="stylesheet" href="/assets/dashboard-canvas.css">
   <style>
     :root {
@@ -3794,6 +3795,11 @@ export async function handleDashboardRequest(
       headers: { "content-type": "text/css; charset=utf-8" },
     });
   }
+  if (url.pathname === "/assets/dashboard.css") {
+    return new Response(await bundledDashboardCss(), {
+      headers: { "content-type": "text/css; charset=utf-8" },
+    });
+  }
   if (url.pathname === "/api/runs") {
     return handleRecentRunsRequest(url, input.recentRuns);
   }
@@ -4212,6 +4218,7 @@ function escapeHtml(value: string) {
 
 let canvasScriptCache: Promise<string> | null = null;
 let canvasCssCache: Promise<string> | null = null;
+let dashboardCssCache: Promise<string> | null = null;
 
 function bundledDashboardCanvasScript() {
   canvasScriptCache ??= buildDashboardCanvasScript();
@@ -4236,6 +4243,11 @@ async function buildDashboardCanvasScript() {
 function bundledDashboardCanvasCss() {
   canvasCssCache ??= buildDashboardCanvasCss();
   return canvasCssCache;
+}
+
+function bundledDashboardCss() {
+  dashboardCssCache ??= Bun.file(fileURLToPath(new URL("./dashboard.css", import.meta.url))).text();
+  return dashboardCssCache;
 }
 
 async function buildDashboardCanvasCss() {
