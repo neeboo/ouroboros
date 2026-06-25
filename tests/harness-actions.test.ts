@@ -133,6 +133,77 @@ describe("Harness actions", () => {
     );
   });
 
+  test("prepares a drained run by reviewing the project root after verified worker integration", () => {
+    const runId = harness.createRun({ goal: "Review integrated implementation" });
+    const worktreePath = "/tmp/ouroboros-integrated-worker";
+    const workerTaskId = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Implement dashboard shell",
+      prompt: "Move the dashboard to React.",
+      worktreePath,
+    });
+    harness.recordAttempt({
+      taskId: workerTaskId,
+      input: { executor: "test" },
+      output: {
+        status: "done",
+        summary: "Implemented dashboard shell",
+        changedFiles: ["packages/cli/src/dashboard-shell.tsx"],
+        checks: [{ name: "bun test", status: "passed" }],
+        artifacts: [],
+        problems: [],
+      },
+    });
+    const verifierTaskId = harness.createTask({
+      runId,
+      role: "verifier",
+      goal: "Verify dashboard shell",
+      prompt: "Verify the dashboard shell.",
+      dependsOn: [workerTaskId],
+    });
+    harness.recordAttempt({
+      taskId: verifierTaskId,
+      input: { executor: "test" },
+      output: {
+        status: "done",
+        summary: "Verified dashboard shell",
+        changedFiles: [],
+        checks: [{ name: "bun test", status: "passed" }],
+        artifacts: [],
+        problems: [],
+      },
+    });
+    harness.recordHarnessActionEvent({
+      actionType: "integrateVerifiedRun",
+      status: "done",
+      request: { type: "integrateVerifiedRun", runId, workerTaskId },
+      result: {
+        status: "done",
+        artifacts: [{ kind: "integration", workerTaskId, mergeCommit: "abc123" }],
+      },
+    });
+
+    const result = applyHarnessAction(harness, {
+      type: "prepareRunDrain",
+      runId,
+      maxTries: 2,
+    });
+    const overview = harness.getRunOverview({ runId });
+    const review = overview.tasks.find((task) => task.role === "goal-review");
+
+    expect(result).toMatchObject({
+      status: "done",
+      actionType: "prepareRunDrain",
+    });
+    expect(review).toMatchObject({
+      role: "goal-review",
+      status: "todo",
+      dependsOn: [],
+      worktreePath: null,
+    });
+  });
+
   test("prepareRunDrain proposes repeated lesson guardrails before goal review", () => {
     const runId = harness.createRun({
       goal: "Promote repeated lessons while draining",

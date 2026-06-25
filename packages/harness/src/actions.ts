@@ -2262,7 +2262,7 @@ function createGoalReviewTask(
   runId: string,
   overview: ReturnType<Harness["getRunOverview"]>,
 ) {
-  const sourceTask = selectGoalReviewSourceTask(overview);
+  const sourceTask = selectGoalReviewSourceTask(harness, runId, overview);
   const taskId = harness.createTask({
     runId,
     role: "goal-review",
@@ -2275,11 +2275,17 @@ function createGoalReviewTask(
   return { taskId, sourceTask };
 }
 
-function selectGoalReviewSourceTask(overview: ReturnType<Harness["getRunOverview"]>) {
+function selectGoalReviewSourceTask(
+  harness: Harness,
+  runId: string,
+  overview: ReturnType<Harness["getRunOverview"]>,
+) {
+  const integratedWorkerTaskIds = collectIntegratedWorkerTaskIds(harness, runId);
   return [...overview.tasks].reverse().find((task) =>
     task.status === "done" &&
     task.worktreePath !== null &&
-    !["planner", "verifier", "goal-review"].includes(task.role)
+    !["planner", "verifier", "goal-review"].includes(task.role) &&
+    !integratedWorkerTaskIds.has(task.id)
   ) ?? null;
 }
 
