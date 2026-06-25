@@ -73,6 +73,68 @@ const DASHBOARD_RUNS_HISTORY_LIMIT_DEFAULT = 10;
 const DASHBOARD_RUN_SUMMARY_GOAL_MAX = 140;
 const DASHBOARD_CSS_PATH = fileURLToPath(new URL("./dashboard.css", import.meta.url));
 
+type DashboardRouteMethod = "GET" | "POST";
+
+export interface DashboardRouteDefinition {
+  name: string;
+  method: DashboardRouteMethod;
+  path: string;
+  kind: "document" | "asset" | "api" | "prompt";
+}
+
+export const DASHBOARD_ROUTE_NEXT_MILESTONE =
+  "TanStack Router is deferred until the dashboard has a Vite dashboard app boundary that can host a generated routeTree; add that boundary first, then introduce @tanstack/react-router and @tanstack/router-plugin/vite.";
+
+export const DASHBOARD_ROUTE_PATHS = {
+  document: "/",
+  canvasScriptAsset: "/assets/dashboard-canvas.js",
+  canvasCssAsset: "/assets/dashboard-canvas.css",
+  dashboardCssAsset: "/assets/dashboard.css",
+  recentRunsApi: "/api/runs",
+  runOverviewApi: "/api/runs/:runId/overview",
+  changedFilesApi: "/api/runs/:runId/changed-files",
+  diffApi: "/api/runs/:runId/diff",
+  guardrailAcceptApi: "/api/runs/:runId/guardrails/:proposalId/accept",
+  runnerStartApi: "/api/runs/:runId/runner/start",
+  runnerStopApi: "/api/runs/:runId/runner/stop",
+  supervisorStartApi: "/api/supervisor/start",
+  supervisorStopApi: "/api/supervisor/stop",
+  intakeApi: "/api/runs/:runId/intake",
+  goalCreateApi: "/api/runs/:runId/goals",
+  goalInterruptApi: "/api/runs/:runId/interrupt",
+  taskResumeApi: "/api/tasks/:taskId/resume",
+  taskRerunApi: "/api/tasks/:taskId/rerun",
+  attemptStopApi: "/api/attempts/:attemptId/stop",
+  taskPrompt: "/tasks/:taskId/prompt",
+} as const;
+
+export const DASHBOARD_ROUTES: DashboardRouteDefinition[] = [
+  { name: "dashboard.document", method: "GET", path: DASHBOARD_ROUTE_PATHS.document, kind: "document" },
+  { name: "dashboard.asset.canvasScript", method: "GET", path: DASHBOARD_ROUTE_PATHS.canvasScriptAsset, kind: "asset" },
+  { name: "dashboard.asset.canvasCss", method: "GET", path: DASHBOARD_ROUTE_PATHS.canvasCssAsset, kind: "asset" },
+  { name: "dashboard.asset.dashboardCss", method: "GET", path: DASHBOARD_ROUTE_PATHS.dashboardCssAsset, kind: "asset" },
+  { name: "dashboard.api.recentRuns", method: "GET", path: DASHBOARD_ROUTE_PATHS.recentRunsApi, kind: "api" },
+  { name: "dashboard.api.runOverview", method: "GET", path: DASHBOARD_ROUTE_PATHS.runOverviewApi, kind: "api" },
+  { name: "dashboard.api.changedFiles", method: "GET", path: DASHBOARD_ROUTE_PATHS.changedFilesApi, kind: "api" },
+  { name: "dashboard.api.diff", method: "GET", path: DASHBOARD_ROUTE_PATHS.diffApi, kind: "api" },
+  { name: "dashboard.api.guardrailAccept", method: "POST", path: DASHBOARD_ROUTE_PATHS.guardrailAcceptApi, kind: "api" },
+  { name: "dashboard.api.runnerStart", method: "POST", path: DASHBOARD_ROUTE_PATHS.runnerStartApi, kind: "api" },
+  { name: "dashboard.api.runnerStop", method: "POST", path: DASHBOARD_ROUTE_PATHS.runnerStopApi, kind: "api" },
+  { name: "dashboard.api.supervisorStart", method: "POST", path: DASHBOARD_ROUTE_PATHS.supervisorStartApi, kind: "api" },
+  { name: "dashboard.api.supervisorStop", method: "POST", path: DASHBOARD_ROUTE_PATHS.supervisorStopApi, kind: "api" },
+  { name: "dashboard.api.intake", method: "POST", path: DASHBOARD_ROUTE_PATHS.intakeApi, kind: "api" },
+  { name: "dashboard.api.goalCreate", method: "POST", path: DASHBOARD_ROUTE_PATHS.goalCreateApi, kind: "api" },
+  { name: "dashboard.api.goalInterrupt", method: "POST", path: DASHBOARD_ROUTE_PATHS.goalInterruptApi, kind: "api" },
+  { name: "dashboard.api.taskResume", method: "POST", path: DASHBOARD_ROUTE_PATHS.taskResumeApi, kind: "api" },
+  { name: "dashboard.api.taskRerun", method: "POST", path: DASHBOARD_ROUTE_PATHS.taskRerunApi, kind: "api" },
+  { name: "dashboard.api.attemptStop", method: "POST", path: DASHBOARD_ROUTE_PATHS.attemptStopApi, kind: "api" },
+  { name: "dashboard.taskPrompt", method: "GET", path: DASHBOARD_ROUTE_PATHS.taskPrompt, kind: "prompt" },
+];
+
+export function dashboardRoutePaths() {
+  return DASHBOARD_ROUTES.map((route) => route.path);
+}
+
 interface DashboardTaskGraphNode {
   id: string;
   type: "task";
@@ -2410,32 +2472,27 @@ export async function handleDashboardRequest(
   },
 ) {
   const url = new URL(request.url);
-  if (url.pathname === "/") {
+  if (url.pathname === DASHBOARD_ROUTE_PATHS.document) {
     return new Response(dashboardHtml({ runId: input.runId }), {
       headers: { "content-type": "text/html; charset=utf-8" },
     });
   }
-  if (url.pathname === "/assets/dashboard.css") {
+  if (url.pathname === DASHBOARD_ROUTE_PATHS.dashboardCssAsset) {
     return new Response(await bundledDashboardCss(), {
       headers: { "content-type": "text/css; charset=utf-8" },
     });
   }
-  if (url.pathname === "/assets/dashboard-canvas.js") {
+  if (url.pathname === DASHBOARD_ROUTE_PATHS.canvasScriptAsset) {
     return new Response(await bundledDashboardCanvasScript(), {
       headers: { "content-type": "text/javascript; charset=utf-8" },
     });
   }
-  if (url.pathname === "/assets/dashboard-canvas.css") {
+  if (url.pathname === DASHBOARD_ROUTE_PATHS.canvasCssAsset) {
     return new Response(await bundledDashboardCanvasCss(), {
       headers: { "content-type": "text/css; charset=utf-8" },
     });
   }
-  if (url.pathname === "/assets/dashboard.css") {
-    return new Response(await bundledDashboardCss(), {
-      headers: { "content-type": "text/css; charset=utf-8" },
-    });
-  }
-  if (url.pathname === "/api/runs") {
+  if (url.pathname === DASHBOARD_ROUTE_PATHS.recentRunsApi) {
     return handleRecentRunsRequest(url, input.recentRuns);
   }
   const runGetMatch = url.pathname.match(/^\/api\/runs\/([^/]+)\/(overview|changed-files|diff)$/);
@@ -2533,7 +2590,7 @@ export async function handleDashboardRequest(
       return input.actions.stopRunner();
     });
   }
-  if (request.method === "POST" && url.pathname === "/api/supervisor/start") {
+  if (request.method === "POST" && url.pathname === DASHBOARD_ROUTE_PATHS.supervisorStartApi) {
     return withDashboardAction(async () => {
       if (!input.actions?.startSupervisor) {
         throw new Error("dashboard supervisor start is not configured");
@@ -2541,7 +2598,7 @@ export async function handleDashboardRequest(
       return input.actions.startSupervisor();
     });
   }
-  if (request.method === "POST" && url.pathname === "/api/supervisor/stop") {
+  if (request.method === "POST" && url.pathname === DASHBOARD_ROUTE_PATHS.supervisorStopApi) {
     return withDashboardAction(async () => {
       if (!input.actions?.stopSupervisor) {
         throw new Error("dashboard supervisor stop is not configured");
