@@ -3,6 +3,7 @@ import type { OverseerDiagnosis, RunOverview, RunStatusCounts } from "@ouroboros
 import { isAbsolute, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { DASHBOARD_REACT_MODULES } from "./dashboard-app";
+import { renderDashboardShell } from "./dashboard-shell";
 import { summarizeOverseerDiagnosis } from "./run-evidence";
 
 interface DashboardActionResult {
@@ -1966,67 +1967,7 @@ export function dashboardHtml(input: { runId: string }) {
   <script type="module" src="/assets/dashboard-canvas.js"></script>
 </head>
 <body>
-  <div class="app-shell">
-    <aside class="task-sidebar">
-      <div class="sidebar-head">
-        <div class="brand-row">
-          <h1>Ouroboros</h1>
-          <div class="run-status" id="run-status">Loading</div>
-        </div>
-        <div id="run-title">Loading ${escapeHtml(input.runId)}</div>
-        <div class="project-title project-header" id="project-title" data-project-header>
-          <div class="project-name" data-project-name>Project Workspace</div>
-          <div class="project-root" data-project-root></div>
-        </div>
-        <form class="intake-composer" id="intake-composer">
-          <label class="intake-label" for="intake-input">New intake</label>
-          <input id="attachment-input" type="file" multiple hidden>
-          <div class="attachment-chips" id="attachment-chips" aria-live="polite"></div>
-          <textarea class="intake-input" id="intake-input" name="prompt" placeholder="Describe the next goal or change request"></textarea>
-          <div class="intake-actions">
-            <button class="plain-button secondary" type="button" data-attach-files>+</button>
-            <button class="plain-button secondary" type="button" data-clear-attachments>Clear</button>
-            <div class="form-status" id="intake-form-status"></div>
-            <button class="plain-button" type="submit" data-send-intake>Send</button>
-          </div>
-        </form>
-      </div>
-      <section class="sidebar-stats" id="sidebar-stats"></section>
-      <nav class="task-nav" aria-label="Goals">
-        <section class="nav-section">
-          <h2 class="section-label">Active Goals</h2>
-          <div class="task-list" id="active-goal-list"></div>
-        </section>
-        <section class="nav-section">
-          <h2 class="section-label">History</h2>
-          <div class="task-list" id="history-goal-list"></div>
-        </section>
-        <section class="nav-section" data-history-runs>
-          <h2 class="section-label">Recent runs</h2>
-          <div class="task-list" id="recent-runs-list" data-history-runs-list aria-live="polite">Loading recent runs…</div>
-        </section>
-      </nav>
-    </aside>
-    <main class="workspace">
-      <header class="workspace-head">
-        <div class="workspace-head-row">
-          <div class="workspace-title-block">
-            <div class="workspace-kicker" id="workspace-kicker">Task Flow</div>
-            <div class="workspace-title-row">
-              <div class="workspace-title is-collapsed" id="workspace-title" title="Loading">Loading</div>
-              <button class="workspace-title-toggle" id="workspace-title-toggle" type="button" data-workspace-title-toggle aria-expanded="false" aria-controls="workspace-title" aria-label="Expand workspace title">Expand</button>
-            </div>
-          </div>
-          <div class="workspace-toggle" aria-label="Workspace view">
-            <button type="button" data-workspace-mode="canvas" aria-pressed="false">Canvas</button>
-            <button type="button" data-workspace-mode="flow" aria-pressed="true" class="active">Flow</button>
-          </div>
-        </div>
-      </header>
-      <section class="workspace-flow" id="workspace-flow"></section>
-    </main>
-    <aside class="inspector-panel" id="inspector-panel"></aside>
-  </div>
+  ${renderDashboardShell(input)}
   <script>
     const defaultRunId = ${JSON.stringify(input.runId)};
     const activeRunStorageKey = "ouroboros:dashboard:activeRun";
@@ -2337,9 +2278,11 @@ export function dashboardHtml(input: { runId: string }) {
           selectedGoalId: typeof parsed.selectedGoalId === "string" ? parsed.selectedGoalId : null,
           workspaceMode: isWorkspaceMode(parsed.workspaceMode) ? parsed.workspaceMode : null,
           workspaceTitleExpanded: parsed.workspaceTitleExpanded === true,
+          selectedChangedFilePath: typeof parsed.selectedChangedFilePath === "string" ? parsed.selectedChangedFilePath : null,
+          flowScroll: parsed.flowScroll && typeof parsed.flowScroll === "object" ? parsed.flowScroll : null,
         };
       } catch {
-        return { selectedGoalId: null, workspaceMode: null, workspaceTitleExpanded: false };
+        return { selectedGoalId: null, workspaceMode: null, workspaceTitleExpanded: false, selectedChangedFilePath: null, flowScroll: null };
       }
     };
     const writeDashboardState = (state) => {
@@ -2348,6 +2291,8 @@ export function dashboardHtml(input: { runId: string }) {
           selectedGoalId: typeof state.selectedGoalId === "string" ? state.selectedGoalId : null,
           workspaceMode: isWorkspaceMode(state.workspaceMode) ? state.workspaceMode : "flow",
           workspaceTitleExpanded: state.workspaceTitleExpanded === true,
+          selectedChangedFilePath: typeof state.selectedChangedFilePath === "string" ? state.selectedChangedFilePath : null,
+          flowScroll: state.flowScroll && typeof state.flowScroll === "object" ? state.flowScroll : null,
         }));
       } catch {
       }
@@ -2357,7 +2302,8 @@ export function dashboardHtml(input: { runId: string }) {
     let workspaceMode = restoredDashboardState.workspaceMode || "flow";
     let workspaceTitleExpanded = restoredDashboardState.workspaceTitleExpanded === true;
     let latestOverview = null;
-    let selectedChangedFilePath = null;
+    let selectedChangedFilePath = restoredDashboardState.selectedChangedFilePath || null;
+    let restoredFlowScrollState = restoredDashboardState.flowScroll || null;
     const diffByPath = new Map();
     let attachments = [];
     const resolvedBlockedTaskIdsFor = (tasks) => {
@@ -3199,6 +3145,14 @@ export function dashboardHtml(input: { runId: string }) {
         }),
       };
     };
+    const persistDashboardState = () => {
+      writeDashboardState({ selectedGoalId, workspaceMode, workspaceTitleExpanded, selectedChangedFilePath, flowScroll: captureFlowScrollState() });
+    };
+    const persistFlowScrollState = () => {
+      const flowScroll = captureFlowScrollState();
+      if (!flowScroll) return;
+      writeDashboardState({ selectedGoalId, workspaceMode, workspaceTitleExpanded, selectedChangedFilePath, flowScroll });
+    };
     const restoreFlowScrollState = (scrollState) => {
       if (workspaceMode !== "flow" || !scrollState) return;
       const node = document.getElementById("workspace-flow");
@@ -3267,7 +3221,8 @@ export function dashboardHtml(input: { runId: string }) {
       if (!nextTranscript || !currentTranscript) {
         renderedHtml.set("workspace-flow", html);
         node.innerHTML = html;
-        restoreFlowScrollState(scrollState);
+        restoreFlowScrollState(restoredFlowScrollState || scrollState);
+        restoredFlowScrollState = null;
         return;
       }
       const nextTurns = Array.from(nextTranscript.querySelectorAll("[data-turn-key]"));
@@ -3286,7 +3241,8 @@ export function dashboardHtml(input: { runId: string }) {
         currentTranscript.appendChild(currentTurn);
       }
       renderedHtml.set("workspace-flow", html);
-      restoreFlowScrollState(scrollState);
+      restoreFlowScrollState(restoredFlowScrollState || scrollState);
+      restoredFlowScrollState = null;
     };
     const overviewWorkerSource = [
       'let runId = null;',
@@ -3333,7 +3289,7 @@ export function dashboardHtml(input: { runId: string }) {
       if (!selectedGoalId || !goalGroups.some((group) => group.id === selectedGoalId)) {
         selectedGoalId = (activeGroups[0] || goalGroups[goalGroups.length - 1] || {}).id || null;
         workspaceTitleExpanded = false;
-        writeDashboardState({ selectedGoalId, workspaceMode, workspaceTitleExpanded });
+        persistDashboardState();
       }
       const selectedGroup = goalGroups.find((group) => group.id === selectedGoalId);
       const projectName = overview.project ? overview.project.name : "Project Workspace";
@@ -3367,25 +3323,32 @@ export function dashboardHtml(input: { runId: string }) {
     }
     let recentRunsCache = [];
     const RECENT_RUNS_LIMIT = 10;
-    const renderRecentRunsList = (runs) => {
-      const node = document.getElementById("recent-runs-list");
+    const runHistoryRow = (entry) => {
+      const id = typeof entry?.id === "string" ? entry.id : "";
+      if (!id) return "";
+      const status = typeof entry?.status === "string" ? entry.status : "unknown";
+      const goal = typeof entry?.goal === "string" && entry.goal.trim() ? entry.goal : "(no goal)";
+      const isActive = id === runId;
+      return '<button type="button" class="history-run-row' + (isActive ? " is-active" : "") + '" data-history-run-id="' + escapeHtml(id) + '" data-active-run-id="' + escapeHtml(runId) + '" data-history-run-selected="' + (isActive ? "true" : "false") + '" aria-current="' + (isActive ? "true" : "false") + '" title="' + escapeHtml(entry?.goal || id) + '">' +
+        '<span class="history-run-status status-' + escapeHtml(status) + '">' + escapeHtml(status) + '</span>' +
+        '<span class="history-run-goal">' + escapeHtml(goal) + '</span>' +
+        '<span class="history-run-id code-meta">' + escapeHtml(id) + '</span>' +
+      '</button>';
+    };
+    const renderRunHistorySection = (id, runs, label) => {
+      const node = document.getElementById(id);
       if (!node) return;
       if (!Array.isArray(runs) || runs.length === 0) {
-        node.innerHTML = '<div class="empty">No recent runs available.</div>';
+        node.innerHTML = '<div class="empty">' + escapeHtml(label) + ' unavailable.</div>';
         return;
       }
-      node.innerHTML = runs.map((entry) => {
-        const id = typeof entry?.id === "string" ? entry.id : "";
-        if (!id) return "";
-        const status = typeof entry?.status === "string" ? entry.status : "unknown";
-        const goal = typeof entry?.goal === "string" && entry.goal.trim() ? entry.goal : "(no goal)";
-        const isActive = id === runId;
-        return '<button type="button" class="history-run-row' + (isActive ? " is-active" : "") + '" data-history-run-id="' + escapeHtml(id) + '" aria-current="' + (isActive ? "true" : "false") + '" title="' + escapeHtml(entry?.goal || id) + '">' +
-          '<span class="history-run-status status-' + escapeHtml(status) + '">' + escapeHtml(status) + '</span>' +
-          '<span class="history-run-goal">' + escapeHtml(goal) + '</span>' +
-          '<span class="history-run-id code-meta">' + escapeHtml(id) + '</span>' +
-        '</button>';
-      }).join("");
+      node.innerHTML = runs.map(runHistoryRow).join("");
+    };
+    const renderRecentRunsList = (runs) => {
+      const activeRun = runs.find((entry) => entry?.id === runId);
+      const historyRuns = runs.filter((entry) => entry?.id !== runId);
+      renderRunHistorySection("active-run-list", activeRun ? [activeRun] : [], "Active run");
+      renderRunHistorySection("recent-runs-list", historyRuns, "Run history");
     };
     const refreshRecentRuns = () => {
       fetch("/api/runs?limit=" + encodeURIComponent(RECENT_RUNS_LIMIT))
@@ -3417,9 +3380,9 @@ export function dashboardHtml(input: { runId: string }) {
       selectedGoalId = restored.selectedGoalId;
       workspaceMode = restored.workspaceMode || "flow";
       workspaceTitleExpanded = restored.workspaceTitleExpanded === true;
-      selectedChangedFilePath = null;
+      selectedChangedFilePath = restored.selectedChangedFilePath || null;
+      restoredFlowScrollState = restored.flowScroll || null;
       diffByPath.clear();
-      try { window.localStorage?.removeItem("ouroboros:dashboard:changedFile:" + runId); } catch {}
       overviewWorker.postMessage({ type: "start", runId, apiBase: window.location.origin });
       refreshRecentRuns();
     };
@@ -3434,20 +3397,21 @@ export function dashboardHtml(input: { runId: string }) {
       const titleToggle = event.target.closest("[data-workspace-title-toggle]");
       if (titleToggle) {
         workspaceTitleExpanded = !workspaceTitleExpanded;
-        writeDashboardState({ selectedGoalId, workspaceMode, workspaceTitleExpanded });
+        persistDashboardState();
         syncWorkspaceTitle(document.getElementById("workspace-title")?.textContent || "");
         return;
       }
       const modeButton = event.target.closest("[data-workspace-mode]");
       if (modeButton) {
         workspaceMode = modeButton.getAttribute("data-workspace-mode") || "flow";
-        writeDashboardState({ selectedGoalId, workspaceMode, workspaceTitleExpanded });
+        persistDashboardState();
         if (latestOverview) render(latestOverview);
         return;
       }
       const changedFileButton = event.target.closest("[data-changed-file-node='file'][data-changed-file-path]");
       if (changedFileButton) {
         selectedChangedFilePath = changedFileButton.getAttribute("data-changed-file-path");
+        persistDashboardState();
         if (latestOverview) render(latestOverview);
         fetchDiffForChangedFile(selectedChangedFilePath);
         return;
@@ -3585,9 +3549,10 @@ export function dashboardHtml(input: { runId: string }) {
       if (!row) return;
       selectedGoalId = row.getAttribute("data-goal-id");
       workspaceTitleExpanded = false;
-      writeDashboardState({ selectedGoalId, workspaceMode, workspaceTitleExpanded });
+      persistDashboardState();
       if (latestOverview) render(latestOverview);
     });
+    document.getElementById("workspace-flow")?.addEventListener("scroll", persistFlowScrollState, { passive: true });
     document.getElementById("attachment-input").addEventListener("change", async (event) => {
       const input = event.currentTarget;
       const files = Array.from(input.files || []);
@@ -3631,7 +3596,7 @@ export function dashboardHtml(input: { runId: string }) {
           renderAttachmentChips();
           selectedGoalId = payload.runId || payload.taskId || selectedGoalId;
           workspaceTitleExpanded = false;
-          writeDashboardState({ selectedGoalId, workspaceMode, workspaceTitleExpanded });
+          persistDashboardState();
           setIntakeStatus("Intake planner queued.");
           refreshOverview();
         })

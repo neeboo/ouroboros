@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { applyHarnessAction, Harness } from "../packages/harness/src";
@@ -210,6 +210,19 @@ describe("dashboard", () => {
         "diff-panel",
       ]),
     );
+  });
+
+  test("serves the dashboard shell through the React server-rendered boundary", async () => {
+    const dashboardSource = await readFile(join(import.meta.dir, "../packages/cli/src/dashboard.ts"), "utf8");
+    const html = dashboardHtml({ runId: "run_123" });
+
+    expect(dashboardSource).toContain('import { renderDashboardShell } from "./dashboard-shell"');
+    expect(dashboardSource).toContain("${renderDashboardShell(input)}");
+    expect(dashboardSource).not.toContain('<div class="app-shell">');
+    expect(html).toContain('data-react-dashboard-shell="true"');
+    expect(html).toContain('class="app-shell"');
+    expect(html).toContain('id="active-run-list"');
+    expect(html).toContain('data-history-source="GET /api/runs"');
   });
 
   test("renders Codex-style intake composer and goal navigation", () => {
@@ -478,11 +491,42 @@ describe("dashboard", () => {
     expect(html).toContain("let workspaceTitleExpanded = restoredDashboardState.workspaceTitleExpanded === true;");
     expect(html).toContain("workspaceTitleExpanded: parsed.workspaceTitleExpanded === true");
     expect(html).toContain("workspaceTitleExpanded: state.workspaceTitleExpanded === true");
-    expect(html).toContain("writeDashboardState({ selectedGoalId, workspaceMode, workspaceTitleExpanded });");
+    expect(html).toContain("persistDashboardState");
     expect(html).toContain("selectedGoalId = payload.runId || payload.taskId || selectedGoalId;");
     expect(html).toContain("workspaceTitleExpanded = false;");
     expect(html).not.toContain('localStorage.setItem("selectedGoalId"');
     expect(html).not.toContain('localStorage.getItem("selectedGoalId"');
+  });
+
+  test("persists changed-file selection and flow scroll in run-scoped browser storage", () => {
+    const html = dashboardHtml({ runId: "run_123" });
+
+    expect(html).toContain("selectedChangedFilePath: typeof parsed.selectedChangedFilePath === \"string\" ? parsed.selectedChangedFilePath : null");
+    expect(html).toContain("flowScroll: parsed.flowScroll && typeof parsed.flowScroll === \"object\" ? parsed.flowScroll : null");
+    expect(html).toContain("let selectedChangedFilePath = restoredDashboardState.selectedChangedFilePath || null;");
+    expect(html).toContain("let restoredFlowScrollState = restoredDashboardState.flowScroll || null;");
+    expect(html).toContain("selectedChangedFilePath: typeof state.selectedChangedFilePath === \"string\" ? state.selectedChangedFilePath : null");
+    expect(html).toContain("flowScroll: state.flowScroll && typeof state.flowScroll === \"object\" ? state.flowScroll : null");
+    expect(html).toContain("persistDashboardState();");
+    expect(html).toContain("persistFlowScrollState");
+    expect(html).toContain("restoredFlowScrollState = null;");
+    expect(html).toContain("writeDashboardState({ selectedGoalId, workspaceMode, workspaceTitleExpanded, selectedChangedFilePath, flowScroll: captureFlowScrollState() });");
+    expect(html).not.toContain("ouroboros:dashboard:changedFile:");
+  });
+
+  test("renders active run and database-backed history with semantic labels", () => {
+    const html = dashboardHtml({ runId: "run_123" });
+
+    expect(html).toContain("Active run");
+    expect(html).toContain("Run history");
+    expect(html).toContain("renderRecentRunsList(recentRunsCache);");
+    expect(html).toContain('data-history-source="GET /api/runs"');
+    expect(html).toContain('data-active-run-id="');
+    expect(html).toContain('data-history-run-selected="true"');
+    expect(html).toContain("const activeRun = runs.find((entry) => entry?.id === runId);");
+    expect(html).toContain("const historyRuns = runs.filter((entry) => entry?.id !== runId);");
+    expect(html).toContain("renderRunHistorySection(\"active-run-list\", activeRun ? [activeRun] : [], \"Active run\")");
+    expect(html).toContain("renderRunHistorySection(\"recent-runs-list\", historyRuns, \"Run history\")");
   });
 
   test("keeps sidebar goal row titles shrink-safe and truncated", () => {
@@ -522,7 +566,7 @@ describe("dashboard", () => {
     expect(html).toContain('toggle.setAttribute("aria-label", workspaceTitleExpanded ? "Collapse workspace title" : "Expand workspace title");');
     expect(html).toContain('toggle.textContent = workspaceTitleExpanded ? "Collapse" : "Expand";');
     expect(html).toContain("workspaceTitleExpanded = !workspaceTitleExpanded;");
-    expect(html).toContain("writeDashboardState({ selectedGoalId, workspaceMode, workspaceTitleExpanded });");
+    expect(html).toContain("persistDashboardState();");
     expect(html).toContain("selectedGoalId, workspaceMode, workspaceTitleExpanded");
   });
 
@@ -1498,6 +1542,58 @@ describe("dashboard", () => {
           children: [{ name: "app.ts", path: "src/app.ts", type: "file" }],
         },
       ]);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("changed files endpoint filters Ouroboros runtime control paths", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "ouroboros-dashboard-runtime-files-"));
+    const harness = new Harness(join(dir, "ouroboros.db"));
+    harness.init();
+    const runId = harness.createRun({ goal: "Filter runtime files" });
+    const taskId = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Report changed files",
+      prompt: "Report files.",
+    });
+    const attemptId = harness.recordAttempt({
+      taskId,
+      input: {},
+      output: {
+        status: "done",
+        summary: "Reported files",
+        changedFiles: [
+          "packages/cli/src/dashboard.ts",
+          ".ouroboros/worktrees/task_123/state.json",
+          ".orbs/runtime.json",
+          ".git/orbs/lease.json",
+        ],
+        checks: [],
+        artifacts: [],
+        problems: [],
+      },
+    });
+
+    try {
+      const response = await handleDashboardRequest(
+        new Request(`http://localhost/api/runs/${runId}/changed-files`),
+        {
+          runId,
+          overview: () => harness.getRunOverview({ runId }),
+          renderTaskPrompt: () => "",
+        },
+      );
+      const body = await response.json();
+
+      expect(response.status).toBe(200);
+      expect(body.files).toEqual([
+        { path: "packages/cli/src/dashboard.ts", taskId, attemptId, worktreePath: null },
+      ]);
+      expect(JSON.stringify(body)).not.toContain(".ouroboros");
+      expect(JSON.stringify(body)).not.toContain(".orbs");
+      expect(JSON.stringify(body)).not.toContain(".git/orbs");
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

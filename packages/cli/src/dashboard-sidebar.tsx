@@ -71,6 +71,29 @@ export function DashboardSidebar({
             ))}
           </div>
         </section>
+        <section className="nav-section" data-history-runs>
+          <h2 className="section-label">Recent runs</h2>
+          <h2 className="section-label">Active run</h2>
+          <div
+            className="task-list"
+            id="active-run-list"
+            data-history-source="GET /api/runs"
+            data-history-run-selected="true"
+            aria-live="polite"
+          >
+            Loading active run...
+          </div>
+          <h2 className="section-label">Run history</h2>
+          <div
+            className="task-list"
+            id="recent-runs-list"
+            data-history-runs-list
+            data-history-source="GET /api/runs"
+            aria-live="polite"
+          >
+            Loading recent runs...
+          </div>
+        </section>
       </nav>
     </aside>
   );
