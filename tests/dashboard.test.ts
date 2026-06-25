@@ -7,6 +7,7 @@ import { buildTaskPrompt } from "../packages/runner/src";
 import {
   buildDashboardTaskGraph,
   dashboardCodexEventPartsForTest,
+  dashboardCssSourceForTest,
   dashboardEventLineForTest,
   dashboardEvidenceItemTextForTest,
   dashboardHtml,
@@ -121,14 +122,13 @@ function createdTaskIdFromActionResult(result: { artifacts: Array<Record<string,
   return typeof created?.taskId === "string" ? created.taskId : undefined;
 }
 
-function styleBlock(html: string) {
-  const match = html.match(/<style>([\s\S]*?)<\/style>/);
-  if (!match) throw new Error("dashboard style block not found");
-  return match[1];
+function dashboardCss() {
+  return dashboardCssSourceForTest();
 }
 
-function cssRule(html: string, selector: string) {
-  for (const block of styleBlock(html).split("}")) {
+function cssRule(css: string, selector: string) {
+  const flattenedCss = css.replace(/@layer\s+\w+\s*\{\n/g, "");
+  for (const block of flattenedCss.split("}")) {
     const [rawSelector, rule] = block.split("{");
     if (!rawSelector || !rule) continue;
     if (rawSelector.trim() === selector) return rule;
@@ -136,8 +136,8 @@ function cssRule(html: string, selector: string) {
   throw new Error(`CSS rule not found: ${selector}`);
 }
 
-function expectCssRule(html: string, selector: string, declarations: string[]) {
-  const rule = cssRule(html, selector);
+function expectCssRule(css: string, selector: string, declarations: string[]) {
+  const rule = cssRule(css, selector);
   for (const declaration of declarations) {
     expect(rule).toContain(declaration);
   }
@@ -398,6 +398,7 @@ describe("dashboard", () => {
 
   test("renders changed-file tree controls and diff inspection hooks for the selected goal", () => {
     const html = dashboardHtml({ runId: "run_123" });
+    const styles = dashboardCss();
 
     expect(html).toContain("Changed Files");
     expect(html).toContain("changedFilesForGroup");
@@ -419,10 +420,10 @@ describe("dashboard", () => {
     expect(html).toContain('"no-diff"');
     expect(html).toContain('data-diff-row');
     expect(html).toContain("data-diff-row-type");
-    expect(html).toContain(".diff-row.added");
-    expect(html).toContain(".diff-row.removed");
-    expect(html).toContain(".diff-row.hunk");
-    expect(html).toContain(".diff-row.context");
+    expect(styles).toContain(".diff-row.added");
+    expect(styles).toContain(".diff-row.removed");
+    expect(styles).toContain(".diff-row.hunk");
+    expect(styles).toContain(".diff-row.context");
     expect(html).toContain("renderDiffRows");
     expect(html).toContain("diffLineType");
     expect(html).toContain('aria-current="true"');
@@ -432,6 +433,7 @@ describe("dashboard", () => {
 
   test("renders active guardrails and a harness-routed Accept control for pending guardrail proposals", () => {
     const html = dashboardHtml({ runId: "run_123" });
+    const styles = dashboardCss();
 
     expect(html).toContain("renderGuardrailsSection");
     expect(html).toContain("guardrailRecords");
@@ -446,9 +448,9 @@ describe("dashboard", () => {
     expect(html).toContain("guardrailRoles");
     expect(html).toContain("guardrailCount");
     expect(html).toContain("compact(record.summary, 220)");
-    expect(html).toContain(".guardrail-summary");
-    expect(html).toContain(".guardrail-id");
-    expect(html).toContain(".guardrail-meta");
+    expect(styles).toContain(".guardrail-summary");
+    expect(styles).toContain(".guardrail-id");
+    expect(styles).toContain(".guardrail-meta");
     expect(html).toContain('data-accept-guardrail="');
     expect(html).toContain('data-accept-guardrail-run="');
     expect(html).toContain("escapeHtml(proposalId)");
@@ -464,6 +466,7 @@ describe("dashboard", () => {
     expect(html).toContain('data-workspace-mode="canvas"');
     expect(html).toContain('data-workspace-mode="flow"');
     expect(html).toContain('id="dashboard-canvas-root"');
+    expect(html).toContain("/assets/dashboard.css");
     expect(html).toContain("/assets/dashboard-canvas.js");
     expect(html).toContain("/assets/dashboard-canvas.css");
     expect(html).toContain("mountReactFlowCanvas");
@@ -551,8 +554,14 @@ describe("dashboard", () => {
 
   test("uses a restrained neutral dashboard palette without saturated status colors or gradients", () => {
     const html = dashboardHtml({ runId: "run_123" });
-    const styles = styleBlock(html);
+    const styles = dashboardCss();
 
+    expect(html).toContain('<link rel="stylesheet" href="/assets/dashboard.css">');
+    expect(html).not.toContain("<style>");
+    expect(styles).toContain('@import "tailwindcss";');
+    expect(styles).toContain("@theme");
+    expect(styles).toContain("@layer base");
+    expect(styles).toContain("@layer components");
     expect(styles).toContain("--app: #fafafa;");
     expect(styles).toContain("--sidebar: #ffffff;");
     expect(styles).toContain("--ink: #09090b;");
@@ -578,16 +587,17 @@ describe("dashboard", () => {
 
   test("keeps sidebar goal row titles shrink-safe and truncated", () => {
     const html = dashboardHtml({ runId: "run_123" });
+    const styles = dashboardCss();
 
-    expect(html).toContain("grid-template-columns: 12px minmax(0, 1fr) minmax(0, 72px);");
-    expect(html).toContain(".task-row-text");
-    expect(html).toContain("min-width: 0;");
-    expect(html).toContain("overflow: hidden;");
+    expect(styles).toContain("grid-template-columns: 12px minmax(0, 1fr) minmax(0, 72px);");
+    expect(styles).toContain(".task-row-text");
+    expect(styles).toContain("min-width: 0;");
+    expect(styles).toContain("overflow: hidden;");
     expect(html).toContain('<span class="task-row-text"><strong>');
-    expect(html).toContain(".task-row strong");
-    expect(html).toContain(".task-row .row-meta");
-    expect(html).toContain("text-overflow: ellipsis;");
-    expect(html).toContain("white-space: nowrap;");
+    expect(styles).toContain(".task-row strong");
+    expect(styles).toContain(".task-row .row-meta");
+    expect(styles).toContain("text-overflow: ellipsis;");
+    expect(styles).toContain("white-space: nowrap;");
   });
 
   test("truncates workspace title by default and exposes an accessible expander", () => {
@@ -599,7 +609,7 @@ describe("dashboard", () => {
     expect(html).toContain('aria-expanded="false"');
     expect(html).toContain('aria-controls="workspace-title"');
     expect(html).toContain('aria-label="Expand workspace title"');
-    expect(html).toContain("-webkit-line-clamp: 2;");
+    expect(dashboardCss()).toContain("-webkit-line-clamp: 2;");
     expect(html).toContain("workspaceTitleExpanded");
   });
 
@@ -663,78 +673,78 @@ describe("dashboard", () => {
   });
 
   test("defines reusable static overflow contracts for dashboard long text surfaces", () => {
-    const html = dashboardHtml({ runId: "run_123" });
+    const styles = dashboardCss();
 
-    expectCssRule(html, "body", ["overflow: hidden;"]);
-    expectCssRule(html, ".app-shell", ["height: 100dvh;", "display: grid;", "grid-template-columns: 300px minmax(0, 1fr) clamp(380px, 30vw, 520px);", "overflow-x: hidden;"]);
-    expectCssRule(html, ".task-sidebar", ["height: 100dvh;", "min-width: 0;", "min-height: 0;", "overflow: hidden;"]);
-    expectCssRule(html, ".project-header", ["min-width: 0;", "overflow: hidden;"]);
-    expectCssRule(html, ".project-name", ["overflow: hidden;", "text-overflow: ellipsis;", "white-space: nowrap;"]);
-    expectCssRule(html, ".project-root", ["overflow: hidden;", "text-overflow: ellipsis;", "white-space: nowrap;"]);
-    expectCssRule(html, ".task-nav", ["width: 100%;", "min-width: 0;", "max-width: 100%;", "min-height: 0;", "overflow-x: hidden;", "overflow-y: auto;", "scrollbar-gutter: stable;"]);
-    expectCssRule(html, ".nav-section", ["width: 100%;", "min-width: 0;", "max-width: 100%;", "overflow-x: hidden;"]);
-    expectCssRule(html, ".task-list", ["width: 100%;", "min-width: 0;", "max-width: 100%;", "overflow-x: hidden;"]);
-    expectCssRule(html, ".workspace", ["min-width: 0;", "overflow: hidden;"]);
-    expectCssRule(html, ".workspace-title-block", ["min-width: 0;"]);
-    expectCssRule(html, ".workspace-title-row", ["grid-template-columns: minmax(0, 1fr) auto;"]);
-    expectCssRule(html, ".workspace-title", ["min-width: 0;", "overflow-wrap: anywhere;"]);
-    expectCssRule(html, ".workspace-title.is-collapsed", ["-webkit-line-clamp: 2;", "overflow: hidden;"]);
-    expectCssRule(html, ".task-row", ["min-width: 0;", "grid-template-columns: 12px minmax(0, 1fr) minmax(0, 72px);", "overflow: hidden;"]);
-    expectCssRule(html, ".task-row-text", ["min-width: 0;", "overflow: hidden;"]);
-    expectCssRule(html, ".task-row strong", ["text-overflow: ellipsis;", "white-space: nowrap;"]);
-    expectCssRule(html, ".task-row .row-meta", ["text-overflow: ellipsis;", "white-space: nowrap;"]);
-    expectCssRule(html, ".status-text", ["width: 100%;", "max-width: 100%;", "overflow: hidden;", "text-overflow: ellipsis;", "white-space: nowrap;"]);
-    expectCssRule(html, ".plain-button", ["min-width: 0;", "overflow: hidden;", "text-overflow: ellipsis;", "white-space: nowrap;"]);
-    expectCssRule(html, ".workspace-flow", ["min-height: 0;", "overflow: auto;"]);
-    expectCssRule(html, ".flow-inner", ["min-width: 0;"]);
-    expectCssRule(html, ".turn", ["grid-template-columns: 34px minmax(0, 1fr);"]);
-    expectCssRule(html, ".turn-body", ["min-width: 0;"]);
-    expectCssRule(html, ".turn-author", ["overflow-wrap: anywhere;"]);
-    expectCssRule(html, ".turn-summary", ["overflow-wrap: anywhere;"]);
-    expectCssRule(html, ".turn-text", ["white-space: pre-wrap;", "overflow-wrap: anywhere;"]);
-    expectCssRule(html, ".conversation-evidence", ["display: grid;", "gap: 12px;"]);
-    expectCssRule(html, ".evidence-item", ["font-size: 12px;", "overflow-wrap: anywhere;"]);
-    expectCssRule(html, ".raw-stream", ["font-size: 11px;"]);
-    expectCssRule(html, ".stream-output", ["overflow: auto;", "white-space: pre-wrap;", "overflow-wrap: anywhere;"]);
-    expectCssRule(html, ".inspector-panel", ["width: clamp(380px, 30vw, 520px);", "min-width: 380px;", "max-width: 520px;", "overflow-y: auto;", "overflow-x: hidden;", "scrollbar-gutter: stable;"]);
-    expectCssRule(html, ".inspector-card", ["min-width: 0;", "border-radius: 0;", "background: transparent;"]);
-    expectCssRule(html, ".current-task-title", ["overflow-wrap: anywhere;"]);
-    expectCssRule(html, ".current-task-meta", ["overflow-wrap: anywhere;"]);
-    expectCssRule(html, ".todo-list, .lesson-list, .info-list", ["gap: 9px;"]);
-    expectCssRule(html, ".todo-item", ["grid-template-columns: 18px minmax(0, 1fr);", "gap: 9px;", "font-size: 13px;", "line-height: 1.42;"]);
-    expectCssRule(html, ".todo-text", ["min-width: 0;", "overflow-wrap: anywhere;"]);
-    expectCssRule(html, ".meta", ["overflow-wrap: anywhere;"]);
-    expectCssRule(html, ".changed-files-section", ["min-width: 0;"]);
-    expectCssRule(html, ".changed-file-tree", ["min-width: 0;", "overflow-x: hidden;"]);
-    expectCssRule(html, ".changed-file-node", ["min-width: 0;", "grid-template-columns: 28px minmax(0, 1fr);"]);
-    expectCssRule(html, ".changed-file-name", ["min-width: 0;", "overflow: hidden;", "text-overflow: ellipsis;", "white-space: nowrap;"]);
-    expectCssRule(html, ".changed-file-type", ["color: var(--muted-2);", "font-family: var(--mono);"]);
-    expectCssRule(html, ".diff-panel", ["min-width: 0;", "max-width: 100%;", "overflow: hidden;"]);
-    expectCssRule(html, ".diff-header", ["position: sticky;", "top: 0;", "overflow: hidden;"]);
-    expectCssRule(html, ".diff-path", ["overflow-wrap: anywhere;"]);
-    expectCssRule(html, ".diff-output", ["overflow-x: auto;", "overflow-y: auto;", "white-space: pre;", "overflow-wrap: normal;"]);
-    expectCssRule(html, ".diff-row", ["display: grid;", "grid-template-columns: 42px max-content;", "min-width: max-content;"]);
-    expectCssRule(html, ".diff-line", ["white-space: pre;", "font-family: var(--mono);"]);
-    expectCssRule(html, ".diff-row.added", ["background: #f4f4f5;"]);
-    expectCssRule(html, ".diff-row.removed", ["background: #f4f4f5;"]);
-    expectCssRule(html, ".diff-row.hunk", ["background: #f4f4f5;"]);
-    expectCssRule(html, ".diff-row.context", ["background: transparent;"]);
-    expect(html).toContain("grid-template-columns: minmax(0, 1fr);");
-    expect(html).toContain(".inspector-panel { width: auto; min-width: 0; max-width: none; }");
-    expect(html).toContain(".task-sidebar { min-width: 0; overflow-x: hidden; overflow-y: visible; }");
+    expectCssRule(styles, "body", ["overflow: hidden;"]);
+    expectCssRule(styles, ".app-shell", ["height: 100dvh;", "display: grid;", "grid-template-columns: 300px minmax(0, 1fr) clamp(380px, 30vw, 520px);", "overflow-x: hidden;"]);
+    expectCssRule(styles, ".task-sidebar", ["height: 100dvh;", "min-width: 0;", "min-height: 0;", "overflow: hidden;"]);
+    expectCssRule(styles, ".project-header", ["min-width: 0;", "overflow: hidden;"]);
+    expectCssRule(styles, ".project-name", ["overflow: hidden;", "text-overflow: ellipsis;", "white-space: nowrap;"]);
+    expectCssRule(styles, ".project-root", ["overflow: hidden;", "text-overflow: ellipsis;", "white-space: nowrap;"]);
+    expectCssRule(styles, ".task-nav", ["width: 100%;", "min-width: 0;", "max-width: 100%;", "min-height: 0;", "overflow-x: hidden;", "overflow-y: auto;", "scrollbar-gutter: stable;"]);
+    expectCssRule(styles, ".nav-section", ["width: 100%;", "min-width: 0;", "max-width: 100%;", "overflow-x: hidden;"]);
+    expectCssRule(styles, ".task-list", ["width: 100%;", "min-width: 0;", "max-width: 100%;", "overflow-x: hidden;"]);
+    expectCssRule(styles, ".workspace", ["min-width: 0;", "overflow: hidden;"]);
+    expectCssRule(styles, ".workspace-title-block", ["min-width: 0;"]);
+    expectCssRule(styles, ".workspace-title-row", ["grid-template-columns: minmax(0, 1fr) auto;"]);
+    expectCssRule(styles, ".workspace-title", ["min-width: 0;", "overflow-wrap: anywhere;"]);
+    expectCssRule(styles, ".workspace-title.is-collapsed", ["-webkit-line-clamp: 2;", "overflow: hidden;"]);
+    expectCssRule(styles, ".task-row", ["min-width: 0;", "grid-template-columns: 12px minmax(0, 1fr) minmax(0, 72px);", "overflow: hidden;"]);
+    expectCssRule(styles, ".task-row-text", ["min-width: 0;", "overflow: hidden;"]);
+    expectCssRule(styles, ".task-row strong", ["text-overflow: ellipsis;", "white-space: nowrap;"]);
+    expectCssRule(styles, ".task-row .row-meta", ["text-overflow: ellipsis;", "white-space: nowrap;"]);
+    expectCssRule(styles, ".status-text", ["width: 100%;", "max-width: 100%;", "overflow: hidden;", "text-overflow: ellipsis;", "white-space: nowrap;"]);
+    expectCssRule(styles, ".plain-button", ["min-width: 0;", "overflow: hidden;", "text-overflow: ellipsis;", "white-space: nowrap;"]);
+    expectCssRule(styles, ".workspace-flow", ["min-height: 0;", "overflow: auto;"]);
+    expectCssRule(styles, ".flow-inner", ["min-width: 0;"]);
+    expectCssRule(styles, ".turn", ["grid-template-columns: 34px minmax(0, 1fr);"]);
+    expectCssRule(styles, ".turn-body", ["min-width: 0;"]);
+    expectCssRule(styles, ".turn-author", ["overflow-wrap: anywhere;"]);
+    expectCssRule(styles, ".turn-summary", ["overflow-wrap: anywhere;"]);
+    expectCssRule(styles, ".turn-text", ["white-space: pre-wrap;", "overflow-wrap: anywhere;"]);
+    expectCssRule(styles, ".conversation-evidence", ["display: grid;", "gap: 12px;"]);
+    expectCssRule(styles, ".evidence-item", ["font-size: 12px;", "overflow-wrap: anywhere;"]);
+    expectCssRule(styles, ".raw-stream", ["font-size: 11px;"]);
+    expectCssRule(styles, ".stream-output", ["overflow: auto;", "white-space: pre-wrap;", "overflow-wrap: anywhere;"]);
+    expectCssRule(styles, ".inspector-panel", ["width: clamp(380px, 30vw, 520px);", "min-width: 380px;", "max-width: 520px;", "overflow-y: auto;", "overflow-x: hidden;", "scrollbar-gutter: stable;"]);
+    expectCssRule(styles, ".inspector-card", ["min-width: 0;", "border-radius: 0;", "background: transparent;"]);
+    expectCssRule(styles, ".current-task-title", ["overflow-wrap: anywhere;"]);
+    expectCssRule(styles, ".current-task-meta", ["overflow-wrap: anywhere;"]);
+    expectCssRule(styles, ".todo-list, .lesson-list, .info-list", ["gap: 9px;"]);
+    expectCssRule(styles, ".todo-item", ["grid-template-columns: 18px minmax(0, 1fr);", "gap: 9px;", "font-size: 13px;", "line-height: 1.42;"]);
+    expectCssRule(styles, ".todo-text", ["min-width: 0;", "overflow-wrap: anywhere;"]);
+    expectCssRule(styles, ".meta", ["overflow-wrap: anywhere;"]);
+    expectCssRule(styles, ".changed-files-section", ["min-width: 0;"]);
+    expectCssRule(styles, ".changed-file-tree", ["min-width: 0;", "overflow-x: hidden;"]);
+    expectCssRule(styles, ".changed-file-node", ["min-width: 0;", "grid-template-columns: 28px minmax(0, 1fr);"]);
+    expectCssRule(styles, ".changed-file-name", ["min-width: 0;", "overflow: hidden;", "text-overflow: ellipsis;", "white-space: nowrap;"]);
+    expectCssRule(styles, ".changed-file-type", ["color: var(--muted-2);", "font-family: var(--mono);"]);
+    expectCssRule(styles, ".diff-panel", ["min-width: 0;", "max-width: 100%;", "overflow: hidden;"]);
+    expectCssRule(styles, ".diff-header", ["position: sticky;", "top: 0;", "overflow: hidden;"]);
+    expectCssRule(styles, ".diff-path", ["overflow-wrap: anywhere;"]);
+    expectCssRule(styles, ".diff-output", ["overflow-x: auto;", "overflow-y: auto;", "white-space: pre;", "overflow-wrap: normal;"]);
+    expectCssRule(styles, ".diff-row", ["display: grid;", "grid-template-columns: 42px max-content;", "min-width: max-content;"]);
+    expectCssRule(styles, ".diff-line", ["white-space: pre;", "font-family: var(--mono);"]);
+    expectCssRule(styles, ".diff-row.added", ["background: #f4f4f5;"]);
+    expectCssRule(styles, ".diff-row.removed", ["background: #f4f4f5;"]);
+    expectCssRule(styles, ".diff-row.hunk", ["background: #f4f4f5;"]);
+    expectCssRule(styles, ".diff-row.context", ["background: transparent;"]);
+    expect(styles).toContain("grid-template-columns: minmax(0, 1fr);");
+    expect(styles).toContain(".inspector-panel { width: auto; min-width: 0; max-width: none; }");
+    expect(styles).toContain(".task-sidebar { min-width: 0; overflow-x: hidden; overflow-y: visible; }");
   });
 
   test("defines reusable static overflow contracts for canvas node surfaces", () => {
-    const html = dashboardHtml({ runId: "run_123" });
+    const styles = dashboardCss();
 
-    expectCssRule(html, ".workspace-flow.canvas-workspace", ["overflow: hidden;"]);
-    expectCssRule(html, ".canvas-inner", ["overflow: hidden;"]);
-    expectCssRule(html, "#dashboard-canvas-root", ["width: 100%;", "height: 100%;"]);
-    expectCssRule(html, ".of-node", ["width: 250px;"]);
-    expectCssRule(html, ".of-node-head", ["min-width: 0;"]);
-    expectCssRule(html, ".of-node-head span", ["min-width: 0;", "overflow: hidden;", "text-overflow: ellipsis;", "white-space: nowrap;"]);
-    expectCssRule(html, ".of-node-goal", ["overflow-wrap: anywhere;"]);
-    expectCssRule(html, ".of-node-meta", ["overflow-wrap: anywhere;"]);
+    expectCssRule(styles, ".workspace-flow.canvas-workspace", ["overflow: hidden;"]);
+    expectCssRule(styles, ".canvas-inner", ["overflow: hidden;"]);
+    expectCssRule(styles, "#dashboard-canvas-root", ["width: 100%;", "height: 100%;"]);
+    expectCssRule(styles, ".of-node", ["width: 250px;"]);
+    expectCssRule(styles, ".of-node-head", ["min-width: 0;"]);
+    expectCssRule(styles, ".of-node-head span", ["min-width: 0;", "overflow: hidden;", "text-overflow: ellipsis;", "white-space: nowrap;"]);
+    expectCssRule(styles, ".of-node-goal", ["overflow-wrap: anywhere;"]);
+    expectCssRule(styles, ".of-node-meta", ["overflow-wrap: anywhere;"]);
   });
 
   test("documents browser overflow measurement for dashboard verifiers without adding dependencies", () => {
@@ -777,14 +787,15 @@ describe("dashboard", () => {
 
   test("renders harness-managed subsession threads inside the inspector panel", () => {
     const html = dashboardHtml({ runId: "run_123" });
+    const styles = dashboardCss();
 
     expect(html).toContain("renderSubsessionThreadsSection");
     expect(html).toContain('data-inspector-section="subsessions"');
     expect(html).toContain("subsessionSummaryByThread");
     expect(html).toContain('thread.ownerType === "subsession"');
-    expect(html).toContain(".subsession-list");
-    expect(html).toContain(".subsession-row");
-    expect(html).toContain(".subsession-summary");
+    expect(styles).toContain(".subsession-list");
+    expect(styles).toContain(".subsession-row");
+    expect(styles).toContain(".subsession-summary");
     expect(html).toContain("Child sessions come from the run overview payload.");
     expect(html).toContain("formatHeartbeat");
     expect(html).toContain('data-subsession-thread=');
@@ -814,14 +825,15 @@ describe("dashboard", () => {
 
   test("renders structured codex-json event payloads as readable session stream lines", () => {
     const html = dashboardHtml({ runId: "run_123" });
+    const styles = dashboardCss();
 
     expect(html).toContain("codexEventParts");
     expect(html).toContain("summarizeToolArguments");
     expect(html).toContain("rawEventDump");
     expect(html).toContain("Raw JSON payloads");
-    expect(html).toContain(".stream-line.event-message .stream-line-label");
-    expect(html).toContain(".stream-line.event-tool .stream-line-label");
-    expect(html).toContain(".stream-line.event-session .stream-line-label");
+    expect(styles).toContain(".stream-line.event-message .stream-line-label");
+    expect(styles).toContain(".stream-line.event-tool .stream-line-label");
+    expect(styles).toContain(".stream-line.event-session .stream-line-label");
     expect(html).toContain('"stream-line event-\' + escapeHtml(line.category)');
     expect(html).toContain('<span class="stream-line-label">');
     expect(html).toContain('<span class="stream-line-text">');
@@ -898,12 +910,23 @@ describe("dashboard", () => {
     expect(empty).toBeNull();
   });
 
-  test("serves bundled React Flow canvas assets", async () => {
+  test("serves dashboard CSS and bundled React Flow canvas assets", async () => {
     const dashboardInput = {
       runId: "run_123",
       overview: () => ({ run: null, project: null, tasks: [], sessions: [], threads: [], lessons: [] }),
       renderTaskPrompt: () => "",
     };
+
+    const dashboardCssResponse = await handleDashboardRequest(
+      new Request("http://localhost/assets/dashboard.css"),
+      dashboardInput,
+    );
+    const dashboardCssBody = await dashboardCssResponse.text();
+    expect(dashboardCssResponse.status).toBe(200);
+    expect(dashboardCssResponse.headers.get("content-type")).toContain("text/css");
+    expect(dashboardCssBody).toContain("--app: #fafafa");
+    expect(dashboardCssBody).toContain(".app-shell");
+    expect(dashboardCssBody).not.toContain("linear-gradient");
 
     const jsResponse = await handleDashboardRequest(
       new Request("http://localhost/assets/dashboard-canvas.js"),
@@ -1183,13 +1206,14 @@ describe("dashboard", () => {
 
   test("renders task doneWhen items in the todo inspector", () => {
     const html = dashboardHtml({ runId: "run_123" });
+    const styles = dashboardCss();
 
     expect(html).toContain("todo-list");
     expect(html).toContain("doneWhen");
     expect(html).toContain("checkbox");
-    expect(html).toContain(".todo-item.done");
-    expect(html).toContain("font-size: 13px;");
-    expect(html).toContain("font-size: 10.5px;");
+    expect(styles).toContain(".todo-item.done");
+    expect(styles).toContain("font-size: 13px;");
+    expect(styles).toContain("font-size: 10.5px;");
     expect(html).toContain("current-task");
     expect(html).toContain("aria-hidden");
     expect(html).toContain("Progress");
