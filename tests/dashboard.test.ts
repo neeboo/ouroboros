@@ -493,7 +493,7 @@ describe("dashboard", () => {
     const html = dashboardHtml({ runId: "run_123" });
     const styles = dashboardCss();
 
-    expect(html).toContain("Changed Files");
+    expect(html).toContain("Files");
     expect(html).toContain("changedFilesForGroup");
     expect(html).toContain("changedFilesTree");
     expect(html).toContain("renderChangedFilesTree");
@@ -532,8 +532,8 @@ describe("dashboard", () => {
     expect(html).toContain("guardrailRecords");
     expect(html).toContain("overview.run?.context?.guardrails");
     expect(html).toContain("overview.run?.context?.guardrailProposals");
-    expect(html).toContain("Active Guardrails");
-    expect(html).toContain("Pending Guardrail Proposals");
+    expect(html).toContain("Active");
+    expect(html).toContain("Pending");
     expect(html).toContain('data-inspector-section="guardrails"');
     expect(html).toContain('data-guardrail-state="active"');
     expect(html).toContain('data-guardrail-state="proposed"');
@@ -799,8 +799,9 @@ describe("dashboard", () => {
     expectCssRule(styles, ".evidence-item", ["font-size: 12px;", "overflow-wrap: anywhere;"]);
     expectCssRule(styles, ".raw-stream", ["font-size: 11px;"]);
     expectCssRule(styles, ".stream-output", ["overflow: auto;", "white-space: pre-wrap;", "overflow-wrap: anywhere;"]);
-    expectCssRule(styles, ".inspector-panel", ["width: clamp(380px, 30vw, 520px);", "min-width: 380px;", "max-width: 520px;", "overflow-y: auto;", "overflow-x: hidden;", "scrollbar-gutter: stable;"]);
-    expectCssRule(styles, ".inspector-card", ["min-width: 0;", "border-radius: 0;", "background: transparent;"]);
+    expectCssRule(styles, ".inspector-panel", ["width: clamp(380px, 30vw, 520px);", "min-width: 380px;", "max-width: 520px;", "padding: 30px 22px 24px;", "overflow-y: auto;", "overflow-x: hidden;", "scrollbar-gutter: stable;"]);
+    expectCssRule(styles, ".inspector-card", ["min-width: 0;", "padding: 16px 0 18px;", "border-radius: 0;", "background: transparent;"]);
+    expectCssRule(styles, ".inspector-card h2", ["margin: 0 0 12px;", "color: var(--muted);", "font-size: 11px;", "text-transform: uppercase;"]);
     expectCssRule(styles, ".current-task-title", ["overflow-wrap: anywhere;"]);
     expectCssRule(styles, ".current-task-meta", ["overflow-wrap: anywhere;"]);
     expectCssRule(styles, ".todo-list, .lesson-list, .info-list", ["gap: 9px;"]);
@@ -808,12 +809,20 @@ describe("dashboard", () => {
     expectCssRule(styles, ".todo-text", ["min-width: 0;", "overflow-wrap: anywhere;"]);
     expectCssRule(styles, ".meta", ["overflow-wrap: anywhere;"]);
     expectCssRule(styles, ".changed-files-section", ["min-width: 0;"]);
-    expectCssRule(styles, ".changed-file-tree", ["min-width: 0;", "overflow-x: hidden;"]);
+    expectCssRule(styles, ".changed-file-tree", ["min-width: 0;", "max-height: 240px;", "overflow-x: hidden;"]);
     expectCssRule(styles, ".changed-file-node", ["min-width: 0;", "grid-template-columns: 28px minmax(0, 1fr);"]);
     expectCssRule(styles, ".changed-file-name", ["min-width: 0;", "overflow: hidden;", "text-overflow: ellipsis;", "white-space: nowrap;"]);
     expectCssRule(styles, ".changed-file-type", ["color: var(--muted-2);", "font-family: var(--mono);"]);
-    expectCssRule(styles, ".diff-panel", ["min-width: 0;", "max-width: 100%;", "overflow: hidden;"]);
-    expectCssRule(styles, ".diff-header", ["position: sticky;", "top: 0;", "overflow: hidden;"]);
+    expectCssRule(styles, ".guardrail-list", ["gap: 8px;"]);
+    expectCssRule(styles, ".guardrail-group + .guardrail-group", ["margin-top: 14px;", "padding-top: 12px;"]);
+    expectCssRule(styles, ".guardrail-group-title", ["margin-bottom: 6px;", "color: var(--muted);", "font-size: 11px;"]);
+    expectCssRule(styles, ".guardrail-item", ["padding: 8px 0 9px;"]);
+    expectCssRule(styles, ".subsession-list", ["gap: 8px;"]);
+    expectCssRule(styles, ".subsession-row", ["padding: 8px 0 9px;"]);
+    expectCssRule(styles, ".subsession-meta", ["margin-top: 4px;"]);
+    expectCssRule(styles, ".subsession-summary", ["margin-top: 5px;"]);
+    expectCssRule(styles, ".diff-panel", ["min-width: 0;", "max-width: 100%;", "margin-top: 12px;", "padding-top: 12px;", "overflow: hidden;"]);
+    expectCssRule(styles, ".diff-header", ["position: sticky;", "top: 0;", "padding: 0 0 8px;", "overflow: hidden;"]);
     expectCssRule(styles, ".diff-path", ["overflow-wrap: anywhere;"]);
     expectCssRule(styles, ".diff-output", ["overflow-x: auto;", "overflow-y: auto;", "white-space: pre;", "overflow-wrap: normal;"]);
     expectCssRule(styles, ".diff-row", ["display: grid;", "grid-template-columns: 42px max-content;", "min-width: max-content;"]);
@@ -1330,7 +1339,7 @@ describe("dashboard", () => {
     expect(styles).toContain("font-size: 10.5px;");
     expect(html).toContain("current-task");
     expect(html).toContain("aria-hidden");
-    expect(html).toContain("Progress");
+    expect(html).toContain("Context");
     expect(html).not.toContain("<h2>Lessons</h2>");
     expect(html).not.toContain("<h2>Queue</h2>");
     expect(html).not.toContain("<h2>Run Info</h2>");
@@ -2911,16 +2920,16 @@ describe("dashboard", () => {
     const html = dashboardHtml({ runId: "run_overseer_panel" });
 
     expect(html).toContain('data-inspector-section="diagnosis"');
-    expect(html).toContain("Overseer diagnosis");
-    expect(html).toContain("Run supervisor state");
+    expect(html).toContain("Diagnosis");
+    expect(html).toContain("Run state");
     expect(html).toContain("renderDiagnosis(overview)");
     expect(html).toContain("renderSupervisor(overview)");
     expect(html).toContain("renderRunner(overview)");
-    // The inspector panel render call composes the diagnosis, supervisor, and runner
-    // sections in that order so the overseer state is visible alongside runner/supervisor
-    // status without hiding task, session, or evidence panels.
+    expect(html).toContain("renderRunner(overview) + renderSupervisor(overview) + renderDiagnosis(overview) + renderGuardrailsSection(overview)");
+    // The inspector panel render call composes the run-level status sections before the
+    // group evidence sections so the overview stays compact without hiding files or diffs.
     expect(html).toContain(
-      "renderGuardrailsSection(overview) + renderDiagnosis(overview) + renderSupervisor(overview) + renderRunner(overview)",
+      "renderRunner(overview) + renderSupervisor(overview) + renderDiagnosis(overview) + renderGuardrailsSection(overview)",
     );
   });
 
@@ -3256,24 +3265,29 @@ describe("dashboard", () => {
 
     // The inspector panel renders the active goal title, the workspace flow/task stream,
     // the todo list of doneWhen items, the runner section, and the supervisor/diagnosis
-    // sections in a single compose call so a verifier can confirm every evidence signal
-    // from one dashboard fetch.
+    // sections before the subsession and changed-file evidence so a verifier can confirm
+    // every signal from one dashboard fetch.
     expect(html).toContain('data-inspector-section="progress"');
     expect(html).toContain('data-inspector-section="runner"');
     expect(html).toContain('data-inspector-section="supervisor"');
     expect(html).toContain('data-inspector-section="diagnosis"');
+    expect(html).toContain('data-inspector-section="guardrails"');
+    expect(html).toContain('data-inspector-section="subsessions"');
+    expect(html).toContain('data-inspector-section="changed-files"');
     expect(html).toContain('id="workspace-flow"');
     expect(html).toContain("dashboardWorkspaceHtml(selectedGroup)");
     expect(html).toContain("dashboardInspectorHtml(overview, selectedGroup)");
-    expect(html).toContain("patchInspectorPanel(dashboardInspectorHtml(overview, selectedGroup)");
-    expect(html).toContain("dashboardRunStatusHtml(overview)");
+    expect(html).toContain("dashboardInspectorEvidenceHtml(overview, selectedGroup)");
+    expect(html).toContain("patchInspectorPanel(dashboardInspectorHtml(overview, selectedGroup), dashboardRunStatusHtml(overview) + dashboardInspectorEvidenceHtml(overview, selectedGroup))");
+    expect(html).toContain("renderRunner(overview) + renderSupervisor(overview) + renderDiagnosis(overview) + renderGuardrailsSection(overview)");
+    expect(html).toContain("renderSubsessionThreadsSection(overview, group) + renderChangedFilesSection(group)");
     // The runner section explicitly flags queued work waiting for a runner so a verifier can
     // tell self-iteration is paused on the runner rather than on missing work.
     expect(html).toContain("Queue waiting for runner");
     expect(html).toContain("Background runner");
     // The diagnosis section explicitly surfaces ready + running counts and orphaned lease
     // reasoning so a verifier can confirm supervisor state from the inspector panel.
-    expect(html).toContain("Run supervisor state");
+    expect(html).toContain("Run state");
     expect(html).toContain("Running attempts");
     expect(html).toContain("Orphaned leases");
   });
