@@ -56,7 +56,7 @@ export function DashboardFlowView({
 export function DashboardCanvasMount({ graphJson }: { graphJson: string }) {
   return (
     <div className="canvas-inner">
-      <div id="dashboard-canvas-root" data-canvas-graph={graphJson} />
+      <div id="dashboard-canvas-root" className="canvas-shell" data-canvas-graph={graphJson} />
     </div>
   );
 }

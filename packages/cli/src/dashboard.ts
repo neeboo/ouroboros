@@ -145,6 +145,11 @@ interface DashboardTaskGraphNode {
     goal: string;
     taskId: string;
     doneWhenCount: number;
+    sessionCount: number;
+    evidenceCount: number;
+    todoCount: number;
+    changedFileCount: number;
+    diffCount: number;
     latestSession: {
       status: string;
       attemptId: string;
@@ -190,11 +195,61 @@ export function buildDashboardTaskGraph(overview: RunOverview, groupId?: string 
         },
       ]),
   );
+  const sessionCountByTask = new Map<string, number>();
+  const evidenceCountByTask = new Map<string, number>();
+  const changedFileCountByTask = new Map<string, number>();
+  const diffPathsByTask = new Map<string, Set<string>>();
+  for (const task of selectedTasks) {
+    evidenceCountByTask.set(task.id, 0);
+    sessionCountByTask.set(task.id, 0);
+    changedFileCountByTask.set(task.id, 0);
+    diffPathsByTask.set(task.id, new Set<string>());
+  }
+  for (const session of overview.sessions) {
+    if (!taskIds.has(session.taskId)) continue;
+    sessionCountByTask.set(session.taskId, (sessionCountByTask.get(session.taskId) ?? 0) + 1);
+    let evidenceCount = evidenceCountByTask.get(session.taskId) ?? 0;
+    if (session.output?.summary) evidenceCount += 1;
+    evidenceCount += Array.isArray(session.output?.checks) ? session.output.checks.length : 0;
+    evidenceCount += Array.isArray(session.output?.artifacts) ? session.output.artifacts.length : 0;
+    evidenceCount += Array.isArray(session.output?.problems) ? session.output.problems.length : 0;
+    evidenceCountByTask.set(session.taskId, evidenceCount);
+
+    const seenChangedFiles = new Set<string>();
+    for (const path of session.output?.changedFiles ?? []) {
+      if (!path || seenChangedFiles.has(path)) continue;
+      seenChangedFiles.add(path);
+    }
+    changedFileCountByTask.set(session.taskId, (changedFileCountByTask.get(session.taskId) ?? 0) + seenChangedFiles.size);
+
+    const diffPaths = diffPathsByTask.get(session.taskId) ?? new Set<string>();
+    for (const path of session.output?.changedFiles ?? []) {
+      if (path) diffPaths.add(path);
+    }
+    for (const artifact of session.output?.artifacts ?? []) {
+      const record = artifact && typeof artifact === "object" ? (artifact as Record<string, unknown>) : null;
+      const kind = typeof record?.kind === "string" ? record.kind.toLowerCase() : "";
+      const path = typeof record?.path === "string" ? record.path : "";
+      if (path && kind.includes("diff")) {
+        diffPaths.add(path);
+      }
+    }
+    diffPathsByTask.set(session.taskId, diffPaths);
+  }
+  for (const lesson of overview.lessons) {
+    if (!taskIds.has(lesson.taskId)) continue;
+    evidenceCountByTask.set(lesson.taskId, (evidenceCountByTask.get(lesson.taskId) ?? 0) + 1);
+  }
   const columns = new Map<string, number>();
   const nodes = selectedTasks.map((task, index) => {
     const column = roleColumn(task.role);
     const row = columns.get(column) ?? 0;
     columns.set(column, row + 1);
+    const sessionCount = sessionCountByTask.get(task.id) ?? 0;
+    const evidenceCount = evidenceCountByTask.get(task.id) ?? 0;
+    const todoCount = Array.isArray(task.doneWhen) ? task.doneWhen.length : 0;
+    const changedFileCount = changedFileCountByTask.get(task.id) ?? 0;
+    const diffCount = diffPathsByTask.get(task.id)?.size ?? 0;
     return {
       id: task.id,
       type: "task" as const,
@@ -204,7 +259,12 @@ export function buildDashboardTaskGraph(overview: RunOverview, groupId?: string 
         status: task.status,
         goal: compactText(task.goal, 118),
         taskId: task.id,
-        doneWhenCount: Array.isArray(task.doneWhen) ? task.doneWhen.length : 0,
+        doneWhenCount: todoCount,
+        sessionCount,
+        evidenceCount,
+        todoCount,
+        changedFileCount,
+        diffCount,
         latestSession: latestSessionByTask.get(task.id) ?? null,
       },
     };
@@ -1488,6 +1548,49 @@ export function dashboardHtml(input: { runId: string }) {
         latestText: latestText(session),
         model: session.model || null,
       }]));
+      const sessionCountByTask = new Map();
+      const evidenceCountByTask = new Map();
+      const changedFileCountByTask = new Map();
+      const diffPathsByTask = new Map();
+      for (const task of tasks) {
+        sessionCountByTask.set(task.id, 0);
+        evidenceCountByTask.set(task.id, 0);
+        changedFileCountByTask.set(task.id, 0);
+        diffPathsByTask.set(task.id, new Set());
+      }
+      for (const session of overview.sessions || []) {
+        if (!groupTaskIds.has(session.taskId)) continue;
+        sessionCountByTask.set(session.taskId, (sessionCountByTask.get(session.taskId) || 0) + 1);
+        let evidenceCount = evidenceCountByTask.get(session.taskId) || 0;
+        if (session.output && session.output.summary) evidenceCount += 1;
+        evidenceCount += session.output && Array.isArray(session.output.checks) ? session.output.checks.length : 0;
+        evidenceCount += session.output && Array.isArray(session.output.artifacts) ? session.output.artifacts.length : 0;
+        evidenceCount += session.output && Array.isArray(session.output.problems) ? session.output.problems.length : 0;
+        evidenceCountByTask.set(session.taskId, evidenceCount);
+
+        const changedFiles = new Set();
+        for (const path of (session.output && session.output.changedFiles) || []) {
+          if (!path || changedFiles.has(path)) continue;
+          changedFiles.add(path);
+        }
+        changedFileCountByTask.set(session.taskId, (changedFileCountByTask.get(session.taskId) || 0) + changedFiles.size);
+
+        const diffPaths = diffPathsByTask.get(session.taskId) || new Set();
+        for (const path of (session.output && session.output.changedFiles) || []) {
+          if (path) diffPaths.add(path);
+        }
+        for (const artifact of (session.output && session.output.artifacts) || []) {
+          const record = artifact && typeof artifact === "object" ? artifact : null;
+          const kind = record && typeof record.kind === "string" ? record.kind.toLowerCase() : "";
+          const path = record && typeof record.path === "string" ? record.path : "";
+          if (path && kind.includes("diff")) diffPaths.add(path);
+        }
+        diffPathsByTask.set(session.taskId, diffPaths);
+      }
+      for (const lesson of overview.lessons || []) {
+        if (!groupTaskIds.has(lesson.taskId)) continue;
+        evidenceCountByTask.set(lesson.taskId, (evidenceCountByTask.get(lesson.taskId) || 0) + 1);
+      }
       const columns = new Map();
       const nodes = tasks.map((task, index) => {
         const column = graphColumn(task.role);
@@ -1503,6 +1606,11 @@ export function dashboardHtml(input: { runId: string }) {
             goal: compact(task.goal, 118),
             taskId: task.id,
             doneWhenCount: Array.isArray(task.doneWhen) ? task.doneWhen.length : 0,
+            sessionCount: sessionCountByTask.get(task.id) || 0,
+            evidenceCount: evidenceCountByTask.get(task.id) || 0,
+            todoCount: Array.isArray(task.doneWhen) ? task.doneWhen.length : 0,
+            changedFileCount: changedFileCountByTask.get(task.id) || 0,
+            diffCount: (diffPathsByTask.get(task.id) || new Set()).size,
             latestSession: sessions.get(task.id) || null,
           },
         };
@@ -1522,15 +1630,31 @@ export function dashboardHtml(input: { runId: string }) {
       if (!group) return '<div class="canvas-inner"><div class="empty">No goal selected</div></div>';
       const graph = canvasGraphFor(latestOverview || { tasks: group.tasks, sessions: group.sessions, lessons: group.lessons }, group);
       return '<div class="canvas-inner" data-canvas-goal-id="' + escapeHtml(group.id) + '">' +
-        '<div id="dashboard-canvas-root" data-canvas-graph="' + escapeHtml(JSON.stringify(graph)) + '"></div>' +
+        '<div id="dashboard-canvas-root" class="canvas-shell" data-canvas-graph="' + escapeHtml(JSON.stringify(graph)) + '" data-canvas-task-count="' + escapeHtml(graph.nodes.length) + '" data-canvas-edge-count="' + escapeHtml(graph.edges.length) + '">' +
+        '<div class="canvas-fallback" aria-label="Canvas task map">' +
+        '<div class="canvas-fallback-head"><div class="canvas-fallback-title">Task map</div><div class="canvas-fallback-meta">' + escapeHtml(graph.nodes.length) + ' tasks | ' + escapeHtml(graph.edges.length) + ' links</div></div>' +
+        (graph.nodes.length ? '<ul class="canvas-fallback-list">' + graph.nodes.map((node) => {
+          const task = node.data;
+          const latest = task.latestSession;
+          const latestMeta = latest ? [latest.status, latest.sessionName || latest.codexSessionId || latest.attemptId].filter(Boolean).join(" | ") : "no session";
+          const model = latest && latest.model ? latest.model : null;
+          return '<li class="canvas-fallback-node" data-canvas-task-id="' + escapeHtml(task.taskId) + '" data-canvas-task-status="' + escapeHtml(task.status) + '" data-canvas-task-session-count="' + escapeHtml(task.sessionCount) + '" data-canvas-task-evidence-count="' + escapeHtml(task.evidenceCount) + '" data-canvas-task-todo-count="' + escapeHtml(task.todoCount) + '" data-canvas-task-diff-count="' + escapeHtml(task.diffCount) + '">' +
+            '<div class="canvas-fallback-node-head"><span class="canvas-fallback-role">' + escapeHtml(task.role) + '</span><span class="status-text ' + escapeHtml(task.status) + '">' + escapeHtml(task.status) + '</span></div>' +
+            '<div class="canvas-fallback-node-goal">' + escapeHtml(task.goal) + '</div>' +
+            '<div class="canvas-fallback-node-meta">task ' + escapeHtml(task.taskId) + ' | sessions ' + escapeHtml(task.sessionCount) + ' | evidence ' + escapeHtml(task.evidenceCount) + ' | todos ' + escapeHtml(task.todoCount) + ' | diffs ' + escapeHtml(task.diffCount) + ' | ' + escapeHtml(latestMeta) + (model ? ' | model ' + escapeHtml(model.model || "") + ' | source ' + escapeHtml(model.source || "") : '') + '</div>' +
+          '</li>';
+        }).join("") + '</ul>' : '<div class="empty">No tasks available for this goal.</div>') +
+        (graph.edges.length ? '<div class="canvas-fallback-links"><div class="canvas-fallback-links-label">Links</div><div class="canvas-fallback-links-meta">' + graph.edges.slice(0, 12).map((edge) => '<span data-canvas-edge="' + escapeHtml(edge.id) + '">' + escapeHtml(edge.label) + ': ' + escapeHtml(edge.source) + ' -> ' + escapeHtml(edge.target) + '</span>').join("") + '</div></div>' : '') +
         '<div hidden>' + graph.nodes.map((node) => {
           const task = node.data;
           const model = task.latestSession && task.latestSession.model ? task.latestSession.model : null;
           return '<span data-canvas-task-id="' + escapeHtml(task.taskId) + '">' + escapeHtml(task.role) + ' ' + escapeHtml(task.status) +
-            (model ? ' model ' + escapeHtml(model.model || "") + ' source ' + escapeHtml(model.source || "") : '') + '</span>';
+            (model ? ' latestSession.model ' + escapeHtml(model.model || "") + ' latestSession.source ' + escapeHtml(model.source || "") : '') +
+            '</span>';
         }).join("") + graph.edges.map((edge) =>
           '<span data-canvas-edge="' + escapeHtml(edge.id) + '">' + escapeHtml(edge.label) + '</span>'
         ).join("") + '</div>' +
+        '</div>' +
         '</div>';
     };
     const dashboardWorkspaceHtml = (group) => workspaceMode === "canvas" ? renderCanvasWorkspace(group) : renderFlowWorkspace(group);
@@ -2994,7 +3118,15 @@ async function buildDashboardCanvasCss() {
   return `${xyflowCss}
 
 .react-flow {
+  width: 100%;
+  height: 100%;
   font-family: "Aptos", "Segoe UI Variable", ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+}
+
+.react-flow__renderer,
+.react-flow__viewport {
+  min-width: 0;
+  min-height: 0;
 }
 `;
 }
