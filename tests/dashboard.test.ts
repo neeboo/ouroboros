@@ -610,8 +610,11 @@ describe("dashboard", () => {
     expect(html).toContain('data-inspector-section="conversation"');
     expect(html).toContain('id="conversation-timeline"');
     expect(html).toContain('data-conversation-timeline');
-    expect(html).toContain("dashboardInspectorTimelineHtml(selectedGroup) + dashboardInspectorHtml");
-    expect(html).toContain("dashboardInspectorEvidenceHtml(overview, selectedGroup) + dashboardInspectorComposerHtml()");
+    expect(html).toContain("dashboardInspectorTimelineHtml(selectedGroup) + dashboardInspectorComposerHtml()");
+    expect(html).toContain("dashboardInspectorSecondaryHtml(overview, selectedGroup)");
+    expect(html).toContain("dashboardInspectorHtml(overview, group) +");
+    expect(html).toContain("dashboardRunStatusHtml(overview) +");
+    expect(html).toContain("dashboardInspectorEvidenceHtml(overview, group)");
     expect(html).toContain('id="flow-transcript"');
     expect(html).toContain('role="log"');
     expect(html).toContain('aria-live="polite"');
@@ -724,7 +727,7 @@ describe("dashboard", () => {
     expect(html).toContain("persistDashboardState();");
     expect(html).toContain("persistFlowScrollState");
     expect(html).toContain("restoredFlowScrollState = null;");
-    expect(html).toContain("writeDashboardState({ selectedGoalId, workspaceMode, workspaceTitleExpanded, selectedChangedFilePath, flowScroll: captureFlowScrollState() });");
+    expect(html).toContain("writeDashboardState({ selectedGoalId, workspaceMode, workspaceTitleExpanded, selectedChangedFilePath, secondaryEvidenceOpen, flowScroll: captureFlowScrollState() });");
     expect(html).toContain("scrollState.scrollHeight");
     expect(html).toContain("flowDelta");
     expect(html).toContain("Math.max(0, scrollState.scrollTop + flowDelta)");
@@ -957,7 +960,7 @@ describe("dashboard", () => {
     expectCssRule(styles, ".evidence-item", ["font-size: 12px;", "overflow-wrap: anywhere;"]);
     expectCssRule(styles, ".raw-stream", ["font-size: 11px;"]);
     expectCssRule(styles, ".stream-output", ["overflow: auto;", "white-space: pre-wrap;", "overflow-wrap: anywhere;"]);
-    expectCssRule(styles, ".inspector-panel", ["width: clamp(360px, 28vw, 480px);", "min-width: 360px;", "max-width: 480px;", "padding: 22px 18px 20px;", "overflow-y: auto;", "overflow-x: hidden;", "scrollbar-gutter: stable;"]);
+    expectCssRule(styles, ".inspector-panel", ["width: clamp(360px, 28vw, 480px);", "min-width: 360px;", "max-width: 480px;", "padding: 22px 18px 20px;", "overflow-x: hidden;", "overflow-y: hidden;", "scrollbar-gutter: stable;"]);
     expectCssRule(styles, ".inspector-card", ["min-width: 0;", "padding: 16px 0 18px;", "border-radius: 0;", "background: transparent;"]);
     expectCssRule(styles, ".inspector-card h2", ["margin: 0 0 12px;", "color: var(--muted);", "font-size: 11px;", "text-transform: uppercase;"]);
     expectCssRule(styles, ".current-task-title", ["overflow-wrap: anywhere;"]);
@@ -3515,13 +3518,24 @@ describe("dashboard", () => {
     }
   });
 
-  test("dashboard HTML composes self-iteration evidence in the inspector panel for verifier review", () => {
+  test("dashboard HTML composes self-iteration evidence inside the right-panel disclosure for verifier review", () => {
     const html = dashboardHtml({ runId: "run_self_iteration" });
 
-    // The inspector panel renders the active goal title, the workspace flow/task stream,
-    // the todo list of doneWhen items, the runner section, and the supervisor/diagnosis
-    // sections before the subsession and changed-file evidence so a verifier can confirm
-    // every signal from one dashboard fetch.
+    // The right panel keeps the chronological conversation timeline and composer as
+    // primary content, then wraps every secondary run-evidence signal inside a single
+    // collapsed disclosure so a verifier still sees every signal from one dashboard fetch
+    // without the inspector reading as an admin card stack.
+    expect(html).toContain('data-inspector-section="conversation"');
+    expect(html).toContain('id="conversation-timeline"');
+    expect(html).toContain('data-inspector-section="composer"');
+    expect(html).toContain('data-inspector-section="run-evidence"');
+    expect(html).toContain('data-secondary-evidence');
+    expect(html).toContain('data-secondary-evidence-summary');
+    expect(html).toContain('data-secondary-evidence-body');
+
+    // The runner, supervisor, diagnosis, guardrails, subsessions, changed-files, and
+    // progress sections still render their markers, but they are composed inside the
+    // secondary disclosure body instead of being stacked as direct inspector children.
     expect(html).toContain('data-inspector-section="progress"');
     expect(html).toContain('data-inspector-section="runner"');
     expect(html).toContain('data-inspector-section="supervisor"');
@@ -3529,21 +3543,58 @@ describe("dashboard", () => {
     expect(html).toContain('data-inspector-section="guardrails"');
     expect(html).toContain('data-inspector-section="subsessions"');
     expect(html).toContain('data-inspector-section="changed-files"');
+
+    // The runtime composes the secondary disclosure body from the existing render
+    // helpers so the verifier evidence contract is preserved even after the reshell.
     expect(html).toContain('id="workspace-flow"');
     expect(html).toContain("dashboardWorkspaceHtml(selectedGroup)");
-    expect(html).toContain("dashboardInspectorHtml(overview, selectedGroup)");
-    expect(html).toContain("dashboardInspectorEvidenceHtml(overview, selectedGroup)");
-    expect(html).toContain("patchInspectorPanel(dashboardInspectorTimelineHtml(selectedGroup) + dashboardInspectorHtml(overview, selectedGroup), dashboardRunStatusHtml(overview) + dashboardInspectorEvidenceHtml(overview, selectedGroup) + dashboardInspectorComposerHtml())");
+    expect(html).toContain("dashboardInspectorHtml(overview, group)");
+    expect(html).toContain("dashboardRunStatusHtml(overview)");
+    expect(html).toContain("dashboardInspectorEvidenceHtml(overview, group)");
+    expect(html).toContain("dashboardInspectorSecondaryHtml(overview, selectedGroup)");
+    expect(html).toContain("dashboardInspectorTimelineHtml(selectedGroup) + dashboardInspectorComposerHtml()");
+    expect(html).toContain("dashboardInspectorHtml(overview, group) +");
+    expect(html).toContain("dashboardRunStatusHtml(overview) +");
+    expect(html).toContain("dashboardInspectorEvidenceHtml(overview, group)");
     expect(html).toContain("renderRunner(overview) + renderSupervisor(overview) + renderDiagnosis(overview) + renderGuardrailsSection(overview)");
     expect(html).toContain("renderSubsessionThreadsSection(overview, group) + renderChangedFilesSection(group)");
-    // The runner section explicitly flags queued work waiting for a runner so a verifier can
-    // tell self-iteration is paused on the runner rather than on missing work.
+
+    // The runner section explicitly flags queued work waiting for a runner so a verifier
+    // can tell self-iteration is paused on the runner rather than on missing work.
     expect(html).toContain("Queue waiting for runner");
     expect(html).toContain("Background runner");
     // The diagnosis section explicitly surfaces ready + running counts and orphaned lease
-    // reasoning so a verifier can confirm supervisor state from the inspector panel.
+    // reasoning so a verifier can confirm supervisor state from the disclosure body.
     expect(html).toContain("Run state");
     expect(html).toContain("Running attempts");
     expect(html).toContain("Orphaned leases");
+  });
+
+  test("dashboard HTML keeps secondary evidence out of the primary chatbox children", () => {
+    const html = dashboardHtml({ runId: "run_123" });
+
+    // The runtime call passes the conversation timeline plus composer as primary children
+    // of the inspector panel; the secondary evidence helpers are composed inside the
+    // disclosure wrapper rather than appearing as direct inspector-panel children.
+    const primaryCallMatch = html.match(/patchInspectorPanel\((dashboardInspectorTimelineHtml\(selectedGroup\)[^,]*),\s*(dashboardInspectorSecondaryHtml\(overview, selectedGroup\))\)/);
+    expect(primaryCallMatch).not.toBeNull();
+    expect(primaryCallMatch ? primaryCallMatch[1] : "").toContain("dashboardInspectorComposerHtml()");
+    expect(html).not.toContain("patchInspectorPanel(dashboardInspectorTimelineHtml(selectedGroup) + dashboardInspectorHtml(overview, selectedGroup), dashboardRunStatusHtml(overview) + dashboardInspectorEvidenceHtml(overview, selectedGroup) + dashboardInspectorComposerHtml())");
+
+    // The secondary helper renders a single disclosure section that owns the body markup.
+    expect(html).toContain('data-inspector-section="run-evidence"');
+    expect(html).toContain("data-secondary-evidence-body");
+    expect(html).toContain("data-secondary-evidence-summary");
+  });
+
+  test("dashboard HTML preserves secondary evidence open state across refreshes", () => {
+    const html = dashboardHtml({ runId: "run_123" });
+
+    expect(html).toContain("secondaryEvidenceOpen = restoredDashboardState.secondaryEvidenceOpen === true;");
+    expect(html).toContain("secondaryEvidenceOpen = disclosure.hasAttribute(\"open\");");
+    expect(html).toContain("'<details' + (secondaryEvidenceOpen ? ' open' : '') + '>'");
+    expect(html).toContain("secondaryEvidenceOpen: parsed.secondaryEvidenceOpen === true,");
+    expect(html).toContain("secondaryEvidenceOpen: state.secondaryEvidenceOpen === true,");
+    expect(html).toContain("secondaryEvidenceOpen, flowScroll: captureFlowScrollState()");
   });
 });

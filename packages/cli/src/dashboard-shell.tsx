@@ -2,13 +2,11 @@ import { DashboardFlowView } from "./dashboard-flow-view";
 import { DashboardInspector } from "./dashboard-inspector";
 import { DashboardSidebar } from "./dashboard-sidebar";
 import { renderStaticNode } from "./dashboard-static-render";
-import type { DashboardChangedFile, DashboardComposerState, DashboardGoalSummary, DashboardSupervisorState } from "./dashboard-types";
+import type { DashboardComposerState, DashboardGoalSummary } from "./dashboard-types";
 
 function DashboardShell({ runId }: { runId: string }) {
   const composer: DashboardComposerState = { prompt: "", attachments: [] };
   const goals: DashboardGoalSummary[] = [];
-  const supervisor: DashboardSupervisorState = { status: "idle" };
-  const changedFiles: DashboardChangedFile[] = [];
 
   return (
     <div className="app-shell" data-rail="collapsed" data-react-dashboard-shell="true">
@@ -22,7 +20,7 @@ function DashboardShell({ runId }: { runId: string }) {
         historyGoals={goals}
       />
       <DashboardFlowView title="Loading" kicker="Conversation timeline" mode="flow" titleExpanded={false} />
-      <DashboardInspector supervisor={supervisor} changedFiles={changedFiles} />
+      <DashboardInspector />
     </div>
   );
 }

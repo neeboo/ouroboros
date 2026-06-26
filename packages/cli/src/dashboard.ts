@@ -1041,10 +1041,11 @@ export function dashboardHtml(input: { runId: string }) {
           workspaceMode: isWorkspaceMode(parsed.workspaceMode) ? parsed.workspaceMode : null,
           workspaceTitleExpanded: parsed.workspaceTitleExpanded === true,
           selectedChangedFilePath: typeof parsed.selectedChangedFilePath === "string" ? parsed.selectedChangedFilePath : null,
+          secondaryEvidenceOpen: parsed.secondaryEvidenceOpen === true,
           flowScroll: parsed.flowScroll && typeof parsed.flowScroll === "object" ? parsed.flowScroll : null,
         };
       } catch {
-        return { selectedGoalId: null, workspaceMode: null, workspaceTitleExpanded: false, selectedChangedFilePath: null, flowScroll: null };
+        return { selectedGoalId: null, workspaceMode: null, workspaceTitleExpanded: false, selectedChangedFilePath: null, secondaryEvidenceOpen: false, flowScroll: null };
       }
     };
     const writeDashboardState = (state) => {
@@ -1054,6 +1055,7 @@ export function dashboardHtml(input: { runId: string }) {
           workspaceMode: isWorkspaceMode(state.workspaceMode) ? state.workspaceMode : "canvas",
           workspaceTitleExpanded: state.workspaceTitleExpanded === true,
           selectedChangedFilePath: typeof state.selectedChangedFilePath === "string" ? state.selectedChangedFilePath : null,
+          secondaryEvidenceOpen: state.secondaryEvidenceOpen === true,
           flowScroll: state.flowScroll && typeof state.flowScroll === "object" ? state.flowScroll : null,
         }));
       } catch {
@@ -1065,6 +1067,7 @@ export function dashboardHtml(input: { runId: string }) {
     let workspaceTitleExpanded = restoredDashboardState.workspaceTitleExpanded === true;
     let latestOverview = null;
     let selectedChangedFilePath = restoredDashboardState.selectedChangedFilePath || null;
+    let secondaryEvidenceOpen = restoredDashboardState.secondaryEvidenceOpen === true;
     let restoredFlowScrollState = restoredDashboardState.flowScroll || null;
     const diffByPath = new Map();
     let attachments = [];
@@ -1748,6 +1751,17 @@ export function dashboardHtml(input: { runId: string }) {
       '</section>';
     const dashboardInspectorEvidenceHtml = (overview, group) =>
       group ? renderSubsessionThreadsSection(overview, group) + renderChangedFilesSection(group) : "";
+    const dashboardInspectorSecondaryHtml = (overview, group) => {
+      const body = dashboardInspectorHtml(overview, group) +
+        dashboardRunStatusHtml(overview) +
+        dashboardInspectorEvidenceHtml(overview, group);
+      return '<section class="inspector-card inspector-evidence-disclosure" data-inspector-section="run-evidence" data-secondary-evidence>' +
+        '<details' + (secondaryEvidenceOpen ? ' open' : '') + '>' +
+          '<summary class="inspector-evidence-summary" data-secondary-evidence-summary>Run evidence</summary>' +
+          '<div class="inspector-evidence-body" data-secondary-evidence-body>' + body + '</div>' +
+        '</details>' +
+      '</section>';
+    };
     const latestRunnerSignal = (overview) => {
       const session = [...(overview.sessions || [])].reverse()[0];
       const text = session ? latestText(session) : "";
@@ -1977,7 +1991,17 @@ export function dashboardHtml(input: { runId: string }) {
       renderedHtml.set(id, html);
     };
     const patchInspectorPanel = (inspectorHtml, runnerHtml) => {
+      const panel = document.getElementById("inspector-panel");
+      const scrollNode = panel?.querySelector("[data-conversation-timeline-scroll]") ;
+      const scrollTop = scrollNode instanceof HTMLElement ? scrollNode.scrollTop : 0;
+      const distanceFromBottom = scrollNode instanceof HTMLElement
+        ? scrollNode.scrollHeight - scrollNode.scrollTop - scrollNode.clientHeight
+        : 0;
       patchKeyedChildren("inspector-panel", inspectorHtml + runnerHtml, "data-inspector-section");
+      const nextScroll = panel?.querySelector("[data-conversation-timeline-scroll]");
+      if (nextScroll instanceof HTMLElement) {
+        nextScroll.scrollTop = distanceFromBottom <= 48 ? nextScroll.scrollHeight : scrollTop;
+      }
     };
     const syncWorkspaceToggle = () => {
       for (const button of document.querySelectorAll("[data-workspace-mode]")) {
@@ -2023,12 +2047,12 @@ export function dashboardHtml(input: { runId: string }) {
       };
     };
     const persistDashboardState = () => {
-      writeDashboardState({ selectedGoalId, workspaceMode, workspaceTitleExpanded, selectedChangedFilePath, flowScroll: captureFlowScrollState() });
+      writeDashboardState({ selectedGoalId, workspaceMode, workspaceTitleExpanded, selectedChangedFilePath, secondaryEvidenceOpen, flowScroll: captureFlowScrollState() });
     };
     const persistFlowScrollState = () => {
       const flowScroll = captureFlowScrollState();
       if (!flowScroll) return;
-      writeDashboardState({ selectedGoalId, workspaceMode, workspaceTitleExpanded, selectedChangedFilePath, flowScroll });
+      writeDashboardState({ selectedGoalId, workspaceMode, workspaceTitleExpanded, selectedChangedFilePath, secondaryEvidenceOpen, flowScroll });
     };
     const restoreFlowScrollState = (scrollState) => {
       if (workspaceMode !== "flow" || !scrollState) return;
@@ -2198,7 +2222,7 @@ export function dashboardHtml(input: { runId: string }) {
       patchStaticHtml("history-goal-list", [...goalGroups].reverse().filter((group) => group.activeTasks.length === 0).map(goalRow).join(""));
       patchWorkspace(dashboardWorkspaceHtml(selectedGroup));
       mountReactFlowCanvas();
-      patchInspectorPanel(dashboardInspectorTimelineHtml(selectedGroup) + dashboardInspectorHtml(overview, selectedGroup), dashboardRunStatusHtml(overview) + dashboardInspectorEvidenceHtml(overview, selectedGroup) + dashboardInspectorComposerHtml());
+      patchInspectorPanel(dashboardInspectorTimelineHtml(selectedGroup) + dashboardInspectorComposerHtml(), dashboardInspectorSecondaryHtml(overview, selectedGroup));
     }
     let recentRunsCache = [];
     const RECENT_RUNS_LIMIT = 10;
@@ -2292,6 +2316,14 @@ export function dashboardHtml(input: { runId: string }) {
         setSelectedRun(fromHash);
       }
     });
+    document.addEventListener("toggle", (event) => {
+      const target = event.target;
+      if (!target || !target.closest) return;
+      const disclosure = target.closest("[data-secondary-evidence] > details");
+      if (!disclosure) return;
+      secondaryEvidenceOpen = disclosure.hasAttribute("open");
+      persistDashboardState();
+    }, { capture: true });
     document.addEventListener("click", (event) => {
       if (!event.target || !event.target.closest) return;
       const titleToggle = event.target.closest("[data-workspace-title-toggle]");
