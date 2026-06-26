@@ -559,6 +559,10 @@ describe("dashboard", () => {
     expect(html).toContain('data-workspace-mode="canvas"');
     expect(html).toContain('data-workspace-mode="flow"');
     expect(html).toContain('id="dashboard-canvas-root"');
+    expect(html).toContain('class="canvas-shell"');
+    expect(html).toContain("canvas-fallback");
+    expect(html).toContain("data-canvas-task-count");
+    expect(html).toContain("data-canvas-edge-count");
     expect(html).toContain("/assets/dashboard.css");
     expect(html).toContain("/assets/dashboard-canvas.js");
     expect(html).toContain("/assets/dashboard-canvas.css");
@@ -567,6 +571,10 @@ describe("dashboard", () => {
     expect(html).toContain("renderCanvasWorkspace");
     expect(html).toContain("renderFlowWorkspace");
     expect(html).toContain("data-canvas-task-id");
+    expect(html).toContain("data-canvas-task-session-count");
+    expect(html).toContain("data-canvas-task-evidence-count");
+    expect(html).toContain("data-canvas-task-todo-count");
+    expect(html).toContain("data-canvas-task-diff-count");
     expect(html).toContain("dependsOn");
     expect(html).toContain("parentId");
     expect(html).toContain("created");
@@ -841,12 +849,18 @@ describe("dashboard", () => {
 
     expectCssRule(styles, ".workspace-flow.canvas-workspace", ["overflow: hidden;"]);
     expectCssRule(styles, ".canvas-inner", ["overflow: hidden;"]);
-    expectCssRule(styles, "#dashboard-canvas-root", ["width: 100%;", "height: 100%;"]);
+    expectCssRule(styles, ".canvas-inner", ["display: grid;", "background: var(--canvas);"]);
+    expectCssRule(styles, "#dashboard-canvas-root", ["width: 100%;", "height: 100%;", "min-height: 0;", "overflow: hidden;"]);
+    expectCssRule(styles, ".canvas-shell", ["width: 100%;", "height: 100%;", "overflow: hidden;"]);
+    expectCssRule(styles, ".canvas-fallback", ["height: 100%;", "display: grid;", "background: var(--canvas);"]);
+    expectCssRule(styles, ".canvas-fallback-list", ["grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));"]);
     expectCssRule(styles, ".of-node", ["width: 250px;"]);
     expectCssRule(styles, ".of-node-head", ["min-width: 0;"]);
     expectCssRule(styles, ".of-node-head span", ["min-width: 0;", "overflow: hidden;", "text-overflow: ellipsis;", "white-space: nowrap;"]);
     expectCssRule(styles, ".of-node-goal", ["overflow-wrap: anywhere;"]);
     expectCssRule(styles, ".of-node-meta", ["overflow-wrap: anywhere;"]);
+    expect(styles).not.toContain("#f6f6f3");
+    expect(styles).not.toContain("linear-gradient");
   });
 
   test("documents browser overflow measurement for dashboard verifiers without adding dependencies", () => {
@@ -1108,10 +1122,10 @@ describe("dashboard", () => {
       output: {
         status: "done",
         summary: "Worker implemented graph",
-        changedFiles: ["packages/cli/src/dashboard.ts"],
-        checks: [],
-        artifacts: [],
-        problems: [],
+        checks: [{ name: "graph test", status: "passed" }],
+        artifacts: [{ kind: "diff", path: "packages/cli/src/dashboard.ts" }],
+        problems: ["No open graph issues"],
+        changedFiles: ["packages/cli/src/dashboard.ts", "packages/cli/src/dashboard.css"],
       },
     });
     const verifierId = harness.createTask({
@@ -1135,6 +1149,11 @@ describe("dashboard", () => {
       expect(graph.nodes.find((node) => node.id === plannerId)?.data.role).toBe("planner");
       expect(graph.nodes.find((node) => node.id === workerId)?.data.status).toBe("done");
       expect(graph.nodes.find((node) => node.id === workerId)?.data.doneWhenCount).toBe(2);
+      expect(graph.nodes.find((node) => node.id === workerId)?.data.sessionCount).toBe(1);
+      expect(graph.nodes.find((node) => node.id === workerId)?.data.evidenceCount).toBe(5);
+      expect(graph.nodes.find((node) => node.id === workerId)?.data.todoCount).toBe(2);
+      expect(graph.nodes.find((node) => node.id === workerId)?.data.changedFileCount).toBe(2);
+      expect(graph.nodes.find((node) => node.id === workerId)?.data.diffCount).toBe(2);
       expect(graph.nodes.find((node) => node.id === verifierId)?.data.latestSession?.status).toBe("running");
       expect(graph.edges).toContainEqual(
         expect.objectContaining({ source: plannerId, target: workerId, label: "dependsOn" }),
