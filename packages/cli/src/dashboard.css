@@ -594,12 +594,13 @@ h1 {
   scrollbar-gutter: auto;
 }
 .flow-inner {
-  width: min(100%, 720px);
+  width: min(100%, 760px);
   min-width: 0;
   margin: 0 auto;
 }
 .transcript {
   display: grid;
+  gap: 0;
 }
 .canvas-inner {
   width: 100%;
@@ -686,9 +687,9 @@ h1 {
 }
 .turn {
   display: grid;
-  grid-template-columns: 34px minmax(0, 1fr);
-  gap: 18px;
-  padding: 28px 0 36px;
+  grid-template-columns: 28px minmax(0, 1fr);
+  gap: 14px;
+  padding: 20px 0 22px;
   border-top: 1px solid #f4f4f5;
   background: transparent;
   animation: liftIn 260ms cubic-bezier(0.16, 1, 0.3, 1) both;
@@ -697,28 +698,36 @@ h1 {
   min-width: 0;
 }
 .turn.primary {
-  padding-top: 12px;
+  padding-top: 8px;
   border-top: 0;
 }
 .turn-gutter {
   display: grid;
-  grid-template-rows: 26px 1fr;
+  grid-template-rows: 24px 1fr;
   justify-items: center;
   min-height: 100%;
 }
 .turn-avatar {
-  width: 26px;
-  height: 26px;
+  width: 24px;
+  height: 24px;
   display: inline-grid;
   place-items: center;
   border: 1px solid var(--line);
   border-radius: 999px;
   background: #f4f4f5;
   color: var(--ink);
-  font-size: 11px;
+  font-size: 10px;
   font-weight: 760;
-  letter-spacing: 0.04em;
+  letter-spacing: 0.08em;
   text-transform: uppercase;
+}
+.turn[data-turn-kind="goal"] .turn-avatar {
+  background: #111111;
+  border-color: #111111;
+  color: #ffffff;
+}
+.turn[data-turn-kind="lesson"] .turn-avatar {
+  color: var(--muted);
 }
 .turn-rail {
   width: 1px;
@@ -740,14 +749,22 @@ h1 {
   overflow-wrap: anywhere;
 }
 .turn-summary {
-  margin-top: 6px;
+  margin-top: 5px;
   color: var(--muted);
   font-size: 11px;
   line-height: 1.55;
   overflow-wrap: anywhere;
 }
+.turn-meta {
+  margin-top: 10px;
+  color: var(--muted-2);
+  font-size: 11px;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
 .turn-text {
-  margin-top: 18px;
+  margin-top: 12px;
   color: var(--ink);
   font-size: 14px;
   line-height: 1.85;
@@ -757,12 +774,14 @@ h1 {
 .conversation-evidence {
   display: grid;
   gap: 12px;
-  margin-top: 16px;
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
 }
 .evidence-group {
   min-width: 0;
-  padding-top: 12px;
-  border-top: 1px solid var(--line);
+  padding-top: 0;
+  border-top: 0;
 }
 .evidence-title {
   color: var(--muted);
@@ -789,7 +808,7 @@ h1 {
   font-size: 10.5px;
 }
 .raw-stream {
-  margin-top: 14px;
+  margin-top: 12px;
   color: var(--muted);
   font-size: 11px;
   line-height: 1.45;
@@ -800,10 +819,10 @@ h1 {
   font-weight: 650;
 }
 .stream-output {
-  margin: 18px 0 0;
-  max-height: 320px;
+  margin: 14px 0 0;
+  max-height: 280px;
   overflow: auto;
-  padding: 14px 0 0 16px;
+  padding: 12px 0 0 16px;
   border-left: 1px solid var(--line);
   color: var(--ink);
   font-family: var(--mono);

@@ -1417,19 +1417,29 @@ export function dashboardHtml(input: { runId: string }) {
       '<span class="task-row-text"><strong>' + escapeHtml(group.titleTask.goal) + '</strong><span class="row-meta">' + group.tasks.length + ' tasks · ' + escapeHtml(roleSummary(group.tasks)) + (group.resolvedBlockedCount ? ' · ' + escapeHtml(group.resolvedBlockedCount) + ' repaired block' : '') + '</span></span>' +
       '<span class="status-text ' + escapeHtml(group.status) + '">' + escapeHtml(group.status) + '</span></button>';
     const turn = (input) =>
-      '<article class="turn ' + (input.primary ? "primary" : "") + '" data-turn-key="' + escapeHtml(input.key || input.mark) + '"><div class="turn-gutter"><div class="turn-avatar">' + input.mark + '</div><div class="turn-rail"></div></div>' +
+      '<article class="turn ' + (input.primary ? "primary" : "") + (input.kind ? " turn-" + input.kind : "") + '" data-turn-key="' + escapeHtml(input.key || input.mark) + '"' +
+      (input.kind ? ' data-turn-kind="' + escapeHtml(input.kind) + '"' : '') +
+      (input.role ? ' data-turn-role="' + escapeHtml(input.role) + '"' : '') +
+      (input.sessionId ? ' data-turn-session-id="' + escapeHtml(input.sessionId) + '"' : '') +
+      (input.createdAt ? ' data-turn-created-at="' + escapeHtml(input.createdAt) + '"' : '') +
+      (Number.isFinite(input.sequence) ? ' data-turn-sequence="' + escapeHtml(String(input.sequence)) + '"' : '') +
+      '><div class="turn-gutter"><div class="turn-avatar">' + input.mark + '</div><div class="turn-rail"></div></div>' +
       '<div class="turn-body"><div class="turn-head"><div><div class="turn-author">' + input.author + '</div>' +
       (input.summary ? '<div class="turn-summary">' + input.summary + '</div>' : '') + '</div>' +
       (input.action || '') + '</div>' + (input.body || '') + '</div></article>';
     const sessionFlowTurn = (session) =>
       turn({
+        kind: "session",
         key: session.attemptId,
         mark: roleMark(session.role),
         author: escapeHtml(session.role),
         summary: escapeHtml(session.taskGoal) + ' · ' + escapeHtml(session.status) + (modelMetaForSession(session) ? ' · ' + escapeHtml(modelMetaForSession(session)) : ''),
         action: '<span class="status-text ' + escapeHtml(session.status) + '">' + escapeHtml(session.status) + '</span>',
+        role: session.role,
+        sessionId: session.attemptId,
+        createdAt: session.finishedAt || session.startedAt || null,
         body:
-          '<div class="tool-line code-meta">task ' + escapeHtml(session.taskId) + ' · attempt ' + escapeHtml(session.attemptId) +
+          '<div class="turn-meta code-meta">task ' + escapeHtml(session.taskId) + ' · attempt ' + escapeHtml(session.attemptId) +
           (session.sessionName ? '<br>session ' + escapeHtml(session.sessionName) : '') +
           (session.codexSessionId ? '<br>codex ' + escapeHtml(session.codexSessionId) : '') +
           (modelMetaForSession(session) ? '<br>' + escapeHtml(modelMetaForSession(session)) : '') + '</div>' +
@@ -1446,26 +1456,30 @@ export function dashboardHtml(input: { runId: string }) {
       });
       const taskIdsWithSessions = new Set(orderedSessions.map((session) => session.taskId));
       const pendingFlow = group.tasks.filter((task) => !taskIdsWithSessions.has(task.id) && (task.status === "todo" || task.status === "running"));
-      return '<div class="flow-inner"><div class="transcript">' +
+      return '<div class="flow-inner"><div class="transcript" id="flow-transcript" role="log" aria-live="polite" aria-relevant="additions text" aria-label="Agent conversation timeline" data-timeline-order="oldest-first">' +
         turn({
           primary: true,
+          kind: "goal",
           key: "goal:" + group.id,
           mark: "go",
-          author: escapeHtml(group.titleTask.goal),
-          summary: '<span class="role-label">' + escapeHtml(roleSummary(group.tasks)) + '</span> · <span class="status-text ' + escapeHtml(group.status) + '">' + escapeHtml(group.status) + '</span>',
+          author: "Run goal",
+          summary: escapeHtml(group.titleTask.goal) + ' · <span class="role-label">' + escapeHtml(roleSummary(group.tasks)) + '</span> · <span class="status-text ' + escapeHtml(group.status) + '">' + escapeHtml(group.status) + '</span>',
           action: promptLink(group.titleTask),
-          body: '<div class="tool-line">' + taskMeta(group.root) + '</div><div class="turn-text">' + escapeHtml(group.root.prompt) + '</div>',
+          body: '<div class="turn-meta">' + taskMeta(group.root) + '</div><div class="turn-text">' + escapeHtml(group.root.prompt) + '</div>',
         }) +
         (orderedSessions.length ? orderedSessions.map(sessionFlowTurn).join("") : '<div class="empty">No sessions recorded for this goal yet.</div>') +
         (pendingFlow.length ? pendingFlow.map((task) => turn({
+          kind: "task",
           key: "task:" + task.id,
           mark: roleMark(task.role),
           author: escapeHtml(task.role),
           summary: escapeHtml(task.goal),
           action: '<span class="status-text ' + escapeHtml(task.status) + '">' + escapeHtml(task.status) + '</span>',
-          body: '<div class="tool-line">' + taskMeta(task) + '</div>',
+          role: task.role,
+          body: '<div class="turn-meta">' + taskMeta(task) + '</div>',
         })).join("") : '') +
         (group.lessons.length ? turn({
+          kind: "lesson",
           key: "lessons:" + group.id,
           mark: "le",
           author: "Lessons and experiences",
@@ -1839,12 +1853,14 @@ export function dashboardHtml(input: { runId: string }) {
       const distanceFromBottom = node.scrollHeight - node.scrollTop - node.clientHeight;
       return {
         scrollTop: node.scrollTop,
+        scrollHeight: node.scrollHeight,
         shouldFollowBottom: distanceFromBottom <= 48,
         streams: Array.from(node.querySelectorAll(".stream-output[data-attempt-stream]")).map((stream) => {
           const streamDistanceFromBottom = stream.scrollHeight - stream.scrollTop - stream.clientHeight;
           return {
             attemptId: stream.getAttribute("data-attempt-stream"),
             scrollTop: stream.scrollTop,
+            scrollHeight: stream.scrollHeight,
             shouldFollowBottom: streamDistanceFromBottom <= 48,
           };
         }),
@@ -1863,11 +1879,13 @@ export function dashboardHtml(input: { runId: string }) {
       const node = document.getElementById("workspace-flow");
       if (!node) return;
       requestAnimationFrame(() => {
-        node.scrollTop = scrollState.shouldFollowBottom ? node.scrollHeight : scrollState.scrollTop;
+        const flowDelta = node.scrollHeight - (scrollState.scrollHeight || 0);
+        node.scrollTop = scrollState.shouldFollowBottom ? node.scrollHeight : Math.max(0, scrollState.scrollTop + flowDelta);
         for (const stream of node.querySelectorAll(".stream-output[data-attempt-stream]")) {
           const streamScroll = scrollState.streams.find((item) => item.attemptId === stream.getAttribute("data-attempt-stream"));
           if (!streamScroll) continue;
-          stream.scrollTop = streamScroll.shouldFollowBottom ? stream.scrollHeight : streamScroll.scrollTop;
+          const streamDelta = stream.scrollHeight - (streamScroll.scrollHeight || 0);
+          stream.scrollTop = streamScroll.shouldFollowBottom ? stream.scrollHeight : Math.max(0, streamScroll.scrollTop + streamDelta);
         }
       });
     };
@@ -1921,8 +1939,8 @@ export function dashboardHtml(input: { runId: string }) {
       }
       const template = document.createElement("template");
       template.innerHTML = html;
-      const nextTranscript = template.content.querySelector(".transcript");
-      const currentTranscript = node.querySelector(".transcript");
+      const nextTranscript = template.content.querySelector("#flow-transcript") || template.content.querySelector(".transcript");
+      const currentTranscript = node.querySelector("#flow-transcript") || node.querySelector(".transcript");
       if (!nextTranscript || !currentTranscript) {
         patchStaticHtml("workspace-flow", html);
         restoreFlowScrollState(restoredFlowScrollState || scrollState);
@@ -2007,7 +2025,7 @@ export function dashboardHtml(input: { runId: string }) {
       if (projectNameNode && projectNameNode.textContent !== projectName) projectNameNode.textContent = projectName;
       const projectRootNode = document.querySelector("[data-project-root]");
       if (projectRootNode && projectRootNode.textContent !== projectRoot) projectRootNode.textContent = projectRoot;
-      setTextIfChanged("workspace-kicker", selectedGroup ? selectedGroup.status + " / " + selectedGroup.tasks.length + " tasks" : "Goal Flow");
+      setTextIfChanged("workspace-kicker", "Conversation timeline");
       syncWorkspaceTitle(selectedGroup ? selectedGroup.titleTask.goal : "No goal selected");
       syncWorkspaceToggle();
       document.getElementById("workspace-flow")?.classList.toggle("canvas-workspace", workspaceMode === "canvas");
