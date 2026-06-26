@@ -868,7 +868,7 @@ h1 {
   max-width: 520px;
   height: 100dvh;
   min-height: 0;
-  padding: 46px 26px 28px;
+  padding: 30px 22px 24px;
   background: var(--app);
   border-left: 1px solid var(--line);
   overflow-x: hidden;
@@ -877,7 +877,7 @@ h1 {
 }
 .inspector-card {
   min-width: 0;
-  padding: 22px 0 24px;
+  padding: 16px 0 18px;
   border: 0;
   border-radius: 0;
   background: transparent;
@@ -890,12 +890,15 @@ h1 {
   border-top: 1px solid var(--line);
 }
 .inspector-card h2 {
-  margin: 0 0 18px;
-  color: #a8a7a1;
-  font-size: 13px;
+  margin: 0 0 12px;
+  color: var(--muted);
+  font-size: 11px;
   font-weight: 760;
-  letter-spacing: 0;
-  text-transform: none;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.inspector-card .empty {
+  margin-top: 2px;
 }
 .todo-list, .lesson-list, .info-list {
   display: grid;
@@ -905,8 +908,8 @@ h1 {
   list-style: none;
 }
 .current-task {
-  margin: 0 0 20px;
-  padding-bottom: 18px;
+  margin: 0 0 14px;
+  padding-bottom: 14px;
   border-bottom: 1px solid var(--line);
 }
 .current-task-title {
@@ -954,8 +957,8 @@ h1 {
   border-top: 1px solid var(--line);
 }
 .action-group {
-  margin-top: 20px;
-  padding-top: 18px;
+  margin-top: 14px;
+  padding-top: 14px;
   border-top: 1px solid var(--line);
 }
 .action-title {
@@ -981,7 +984,7 @@ h1 {
 }
 .changed-file-tree {
   min-width: 0;
-  max-height: 280px;
+  max-height: 240px;
   display: grid;
   gap: 2px;
   overflow-x: hidden;
@@ -1052,8 +1055,8 @@ button.changed-file-node.selected .changed-file-type {
   min-width: 0;
   max-width: 100%;
   overflow: hidden;
-  margin-top: 16px;
-  padding-top: 16px;
+  margin-top: 12px;
+  padding-top: 12px;
   border-top: 1px solid var(--line);
 }
 .diff-header {
@@ -1061,7 +1064,7 @@ button.changed-file-node.selected .changed-file-type {
   top: 0;
   z-index: 1;
   overflow: hidden;
-  padding: 0 0 10px;
+  padding: 0 0 8px;
   background: var(--app);
 }
 .diff-path {
@@ -1160,23 +1163,23 @@ button.changed-file-node.selected .changed-file-type {
 }
 .guardrail-list {
   display: grid;
-  gap: 10px;
+  gap: 8px;
 }
 .guardrail-group + .guardrail-group {
-  margin-top: 18px;
-  padding-top: 16px;
+  margin-top: 14px;
+  padding-top: 12px;
   border-top: 1px solid var(--line);
 }
 .guardrail-group-title {
-  margin-bottom: 9px;
-  color: var(--ink);
-  font-size: 12px;
+  margin-bottom: 6px;
+  color: var(--muted);
+  font-size: 11px;
   font-weight: 720;
   line-height: 1.4;
 }
 .guardrail-item {
   min-width: 0;
-  padding: 10px 0 11px;
+  padding: 8px 0 9px;
   border-top: 1px solid var(--line);
 }
 .guardrail-id {
@@ -1278,14 +1281,14 @@ button.changed-file-node.selected .changed-file-type {
 .status-text.orphaned { color: var(--status-ink); }
 .subsession-list {
   display: grid;
-  gap: 10px;
+  gap: 8px;
   margin: 0;
   padding: 0;
   list-style: none;
 }
 .subsession-row {
   min-width: 0;
-  padding: 9px 0 11px;
+  padding: 8px 0 9px;
   border-top: 1px solid var(--line);
 }
 .subsession-row:first-child {
@@ -1310,14 +1313,14 @@ button.changed-file-node.selected .changed-file-type {
   white-space: nowrap;
 }
 .subsession-meta {
-  margin-top: 5px;
+  margin-top: 4px;
   color: var(--muted);
   font-size: 11px;
   line-height: 1.5;
   overflow-wrap: anywhere;
 }
 .subsession-summary {
-  margin-top: 6px;
+  margin-top: 5px;
   color: var(--ink);
   font-size: 12px;
   line-height: 1.5;

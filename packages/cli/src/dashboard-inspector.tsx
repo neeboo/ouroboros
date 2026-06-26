@@ -11,7 +11,7 @@ export function ChangedFilesInspector({
 }) {
   return (
     <Panel className="inspector-card changed-files-section" data-inspector-section="changed-files" data-changed-files-section>
-      <h2>Changed Files</h2>
+      <h2>Files</h2>
       <ScrollArea className="changed-file-tree" data-changed-file-tree>
         {files.map((file) => (
           <Button

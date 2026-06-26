@@ -68,7 +68,7 @@ export function SupervisorControls({ supervisor }: { supervisor: DashboardSuperv
       <div className="current-task">
         <div className="current-task-title">Global supervisor</div>
         <div className="current-task-meta">
-          {todoRuns} todo runs - {runningRuns} running runs -{" "}
+          {todoRuns} todo runs · {runningRuns} running runs ·{" "}
           <span className={`status-text ${supervisor.status}`}>{supervisor.status}</span>
           {supervisor.externallyManaged ? <span className="code-meta"> external supervisor observed</span> : null}
         </div>

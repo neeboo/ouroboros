@@ -1258,7 +1258,7 @@ export function dashboardHtml(input: { runId: string }) {
       const files = changedFilesForGroup(group);
       if (!files.some((file) => file.path === selectedChangedFilePath)) selectedChangedFilePath = files[0]?.path || null;
       const tree = changedFilesTree(files);
-      return '<section class="inspector-card changed-files-section" data-inspector-section="changed-files" data-changed-files-section><h2>Changed Files</h2>' +
+      return '<section class="inspector-card changed-files-section" data-inspector-section="changed-files" data-changed-files-section><h2>Files</h2>' +
         (files.length ? '<div class="changed-file-tree" data-changed-file-tree>' + renderChangedFilesTree(tree) + '</div>' : '<div class="empty">No changed files reported for this goal.</div>') +
         renderDiffPanel(selectedChangedFilePath) +
         '</section>';
@@ -1306,8 +1306,8 @@ export function dashboardHtml(input: { runId: string }) {
       const pendingProposals = guardrailRecords(overview.run?.context?.guardrailProposals).filter((record) => record.accepted !== true);
       if (activeGuardrails.length === 0 && pendingProposals.length === 0) return "";
       return '<section class="inspector-card" data-inspector-section="guardrails"><h2>Guardrails</h2>' +
-        guardrailGroup("Active Guardrails", activeGuardrails, "active") +
-        guardrailGroup("Pending Guardrail Proposals", pendingProposals, "proposed") +
+        guardrailGroup("Active", activeGuardrails, "active") +
+        guardrailGroup("Pending", pendingProposals, "proposed") +
         '<div class="meta">Accept control posts to /api/runs/' + escapeHtml(runId) + '/guardrails/&lt;proposalId&gt;/accept and delegates to the harness-owned acceptGuardrailProposal action. CLI commands propose-guardrails and accept-guardrail remain available.</div>' +
         '</section>';
     };
@@ -1553,7 +1553,7 @@ export function dashboardHtml(input: { runId: string }) {
       }
     };
     const dashboardInspectorHtml = (overview, group) => {
-      if (!group) return '<section class="inspector-card" data-inspector-section="progress"><h2>Detail</h2><div class="empty">Select a goal</div></section>';
+      if (!group) return '<section class="inspector-card" data-inspector-section="progress"><h2>Context</h2><div class="empty">Select a goal</div></section>';
       const doneWhen = group.tasks.flatMap((task) => (Array.isArray(task.doneWhen) ? task.doneWhen : []).map((item) => ({ task, item })));
       const runningSessions = group.sessions.filter((session) => session.status === "running");
       const unresolvedBlockedTasks = group.tasks.filter((task) => task.status === "blocked" && !group.resolvedBlockedTaskIds.has(task.id));
@@ -1569,15 +1569,17 @@ export function dashboardHtml(input: { runId: string }) {
         resumableTask ? '<button class="plain-button" data-resume-task-id="' + escapeHtml(resumableTask.id) + '">Resume selected task</button>' : '',
         rerunnableTask ? '<button class="plain-button" data-rerun-task-id="' + escapeHtml(rerunnableTask.id) + '">Rerun selected task</button>' : ''
       ].filter(Boolean).join("");
-      return '<section class="inspector-card" data-inspector-section="progress"><h2>Progress</h2>' +
+      return '<section class="inspector-card" data-inspector-section="progress"><h2>Context</h2>' +
         (currentTask ? '<div class="current-task"><div class="current-task-title">' + escapeHtml(currentTask.goal) + '</div><div class="current-task-meta">' + escapeHtml(currentTask.role) + ' · <span class="status-text ' + escapeHtml(currentTask.status) + '">' + escapeHtml(currentTask.status) + '</span><br><span class="code-meta">' + escapeHtml(currentTask.id) + '</span></div></div>' : '') +
         (doneWhen.length ? '<ul class="todo-list">' + doneWhen.map(({ task, item }) =>
           '<li class="todo-item ' + (effectiveTaskStatus(task, group.resolvedBlockedTaskIds) === "done" ? "done" : "") + '"><span class="checkbox ' + (effectiveTaskStatus(task, group.resolvedBlockedTaskIds) === "done" ? "done" : "") + '" aria-hidden="true"></span><span class="todo-text">' + escapeHtml(item) + '<span class="meta">' + escapeHtml(task.role) + '</span></span></li>'
         ).join("") + '</ul>' : '<div class="empty">No todos recorded</div>') +
         (group.resolvedBlockedCount ? '<div class="meta">' + escapeHtml(group.resolvedBlockedCount) + ' blocked verifier task was repaired and is now historical evidence.</div>' : '') +
         (taskActions ? '<div class="action-group"><div class="action-title">Task actions</div><div class="action-help">These controls affect only the selected task.</div><div class="action-buttons">' + taskActions + '</div></div>' : '') +
-        '</section>' + renderSubsessionThreadsSection(overview, group) + renderChangedFilesSection(group);
+        '</section>';
     };
+    const dashboardInspectorEvidenceHtml = (overview, group) =>
+      group ? renderSubsessionThreadsSection(overview, group) + renderChangedFilesSection(group) : "";
     const latestRunnerSignal = (overview) => {
       const session = [...(overview.sessions || [])].reverse()[0];
       const text = session ? latestText(session) : "";
@@ -1638,8 +1640,8 @@ export function dashboardHtml(input: { runId: string }) {
       const raceRisk = Boolean(diagnosis.emptyRunGoalReviewRaceRisk);
       const stateClass = state === "complete" ? "done" : state === "paused" || state === "blocked" ? "blocked" : state === "orphaned" ? "blocked" : state === "draining" ? "running" : "todo";
       const parts = [];
-      parts.push('<section class="inspector-card" data-inspector-section="diagnosis"><h2>Overseer diagnosis</h2>');
-      parts.push('<div class="current-task"><div class="current-task-title">Run supervisor state</div><div class="current-task-meta">');
+      parts.push('<section class="inspector-card" data-inspector-section="diagnosis"><h2>Diagnosis</h2>');
+      parts.push('<div class="current-task"><div class="current-task-title">Run state</div><div class="current-task-meta">');
       parts.push(escapeHtml(readyCount) + ' ready · ' + escapeHtml(runningCount) + ' running · <span class="status-text ' + escapeHtml(stateClass) + '">' + escapeHtml(state) + '</span>');
       parts.push('<br><span class="code-meta">' + escapeHtml(reason) + '</span>');
       if (queueStarvation) parts.push('<br><span class="code-meta">queue starvation: ready work without a live runner</span>');
@@ -1695,7 +1697,7 @@ export function dashboardHtml(input: { runId: string }) {
         '</div></div>' : '') +
         '</section>';
     };
-    const dashboardRunStatusHtml = (overview) => renderGuardrailsSection(overview) + renderDiagnosis(overview) + renderSupervisor(overview) + renderRunner(overview);
+    const dashboardRunStatusHtml = (overview) => renderRunner(overview) + renderSupervisor(overview) + renderDiagnosis(overview) + renderGuardrailsSection(overview);
     const postJson = async (path, body) => {
       const response = await fetch(path, {
         method: "POST",
@@ -2023,7 +2025,7 @@ export function dashboardHtml(input: { runId: string }) {
       patchStaticHtml("history-goal-list", [...goalGroups].reverse().filter((group) => group.activeTasks.length === 0).map(goalRow).join(""));
       patchWorkspace(dashboardWorkspaceHtml(selectedGroup));
       mountReactFlowCanvas();
-      patchInspectorPanel(dashboardInspectorHtml(overview, selectedGroup), dashboardRunStatusHtml(overview));
+      patchInspectorPanel(dashboardInspectorHtml(overview, selectedGroup), dashboardRunStatusHtml(overview) + dashboardInspectorEvidenceHtml(overview, selectedGroup));
     }
     let recentRunsCache = [];
     const RECENT_RUNS_LIMIT = 10;
