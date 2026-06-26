@@ -596,6 +596,58 @@ describe("dashboard", () => {
     expect(html).toContain("transcript");
     expect(html).toContain("stream-output");
     expect(html).toContain("Conversation timeline");
+    expect(html).toContain("renderConversationTimeline");
+    expect(html).toContain('data-inspector-section="conversation"');
+    expect(html).toContain('id="conversation-timeline"');
+  });
+
+  test("mounts the chronological conversation timeline inside the right inspector panel", () => {
+    const html = dashboardHtml({ runId: "run_123" });
+
+    expect(html).toContain("renderConversationTimeline");
+    expect(html).toContain("dashboardInspectorTimelineHtml");
+    expect(html).toContain("dashboardInspectorComposerHtml");
+    expect(html).toContain('data-inspector-section="conversation"');
+    expect(html).toContain('id="conversation-timeline"');
+    expect(html).toContain('data-conversation-timeline');
+    expect(html).toContain("dashboardInspectorTimelineHtml(selectedGroup) + dashboardInspectorHtml");
+    expect(html).toContain("dashboardInspectorEvidenceHtml(overview, selectedGroup) + dashboardInspectorComposerHtml()");
+    expect(html).toContain('id="flow-transcript"');
+    expect(html).toContain('role="log"');
+    expect(html).toContain('aria-live="polite"');
+    expect(html).toContain('aria-relevant="additions text"');
+    expect(html).toContain('aria-label="Agent conversation timeline"');
+    expect(html).toContain('data-timeline-order="oldest-first"');
+    expect(html).toContain("turn-author");
+    expect(html).toContain("turn-summary");
+    expect(html).toContain("turn-meta");
+    expect(html).toContain("turn-text");
+    expect(html).toContain("conversation-evidence");
+    expect(html).toContain("stream-output");
+    expect(html).toContain('data-inspector-section="composer"');
+    expect(html).toContain('id="inspector-composer"');
+    expect(html).toContain('data-inspector-composer-form');
+    expect(html).toContain('data-inspector-composer-send');
+  });
+
+  test("keeps the center workspace focused on the canvas instead of the primary conversation transcript", () => {
+    const html = dashboardHtml({ runId: "run_123" });
+
+    expect(html).toContain("renderFlowWorkspace");
+    expect(html).toContain("flow-moved-card");
+    expect(html).toContain("Conversation moved to the right panel");
+    expect(html).toContain("flow-inner-moved");
+
+    const dashboardInspectorTimelineStart = html.indexOf("dashboardInspectorTimelineHtml");
+    expect(dashboardInspectorTimelineStart).toBeGreaterThan(-1);
+    const renderConversationTimelineStart = html.indexOf("renderConversationTimeline");
+    expect(renderConversationTimelineStart).toBeGreaterThan(-1);
+
+    const renderFlowWorkspaceMatch = html.match(/const renderFlowWorkspace = \(group\) => \{([\s\S]*?)\n    \};/);
+    expect(renderFlowWorkspaceMatch).not.toBeNull();
+    const flowWorkspaceBody = renderFlowWorkspaceMatch ? renderFlowWorkspaceMatch[1] : "";
+    expect(flowWorkspaceBody).toContain("flow-moved-card");
+    expect(flowWorkspaceBody).not.toContain("renderConversationTimeline(group)");
   });
 
   test("persists selected goal workspace mode and title expansion in run-scoped browser storage", () => {
@@ -606,7 +658,7 @@ describe("dashboard", () => {
     expect(html).toContain("writeDashboardState");
     expect(html).toContain("const restoredDashboardState = readDashboardState();");
     expect(html).toContain("let selectedGoalId = restoredDashboardState.selectedGoalId || null;");
-    expect(html).toContain('let workspaceMode = restoredDashboardState.workspaceMode || "flow";');
+    expect(html).toContain('let workspaceMode = restoredDashboardState.workspaceMode || "canvas";');
     expect(html).toContain("let workspaceTitleExpanded = restoredDashboardState.workspaceTitleExpanded === true;");
     expect(html).toContain("workspaceTitleExpanded: parsed.workspaceTitleExpanded === true");
     expect(html).toContain("workspaceTitleExpanded: state.workspaceTitleExpanded === true");
@@ -616,6 +668,48 @@ describe("dashboard", () => {
     expect(html).toContain('setTextIfChanged("workspace-kicker", "Conversation timeline");');
     expect(html).not.toContain('localStorage.setItem("selectedGoalId"');
     expect(html).not.toContain('localStorage.getItem("selectedGoalId"');
+  });
+
+  test("defaults workspaceMode to canvas for fresh loads without restored state", () => {
+    const html = dashboardHtml({ runId: "run_123" });
+
+    expect(html).toContain('let workspaceMode = restoredDashboardState.workspaceMode || "canvas";');
+    expect(html).toContain('workspaceMode = restored.workspaceMode || "canvas";');
+    expect(html).toContain('workspaceMode = modeButton.getAttribute("data-workspace-mode") || "canvas";');
+    expect(html).toContain('workspaceMode: isWorkspaceMode(state.workspaceMode) ? state.workspaceMode : "canvas",');
+    expect(html).toContain('classList.toggle("canvas-workspace", workspaceMode === "canvas")');
+    expect(html).toContain('classList.toggle("is-canvas-dark", workspaceMode === "canvas")');
+    expect(html).not.toContain('restoredDashboardState.workspaceMode || "flow"');
+    expect(html).not.toContain('restored.workspaceMode || "flow"');
+  });
+
+  test("renders an Excalidraw-like dark dotted-grid background scoped to the canvas workspace", () => {
+    const styles = dashboardCss();
+
+    expect(styles).toContain(".workspace-flow.is-canvas-dark");
+    expect(styles).toContain(".workspace-flow.canvas-workspace.is-canvas-dark");
+    expect(styles).toContain("radial-gradient(#3f3f46 1px, transparent 1px)");
+    expect(styles).toContain("background-size: 20px 20px;");
+    expect(styles).toContain("background-color: #0a0a0a;");
+    expect(styles).toContain(".workspace-flow.is-canvas-dark .canvas-inner");
+    expect(styles).toContain(".workspace-flow.is-canvas-dark #dashboard-canvas-root");
+    expect(styles).toContain(".workspace-flow.is-canvas-dark .canvas-shell");
+    expect(styles).toContain(".workspace-flow.is-canvas-dark .canvas-fallback");
+  });
+
+  test("keeps the canvas dotted-grid as the only allowed gradient and palette stays neutral", () => {
+    const styles = dashboardCss();
+
+    expect(styles).not.toContain("linear-gradient");
+    const gradientMatches = styles.match(/radial-gradient\([^)]*\)/g) || [];
+    for (const match of gradientMatches) {
+      expect(match).toBe("radial-gradient(#3f3f46 1px, transparent 1px)");
+    }
+    expect(styles).not.toContain("#b8d4c2");
+    expect(styles).not.toContain("#d4c7a8");
+    expect(styles).not.toContain("#d2aaa8");
+    expect(styles).not.toContain("rgba(111, 160, 122");
+    expect(styles).not.toContain("rgba(184, 113, 111");
   });
 
   test("persists changed-file selection and flow scroll in run-scoped browser storage", () => {
@@ -826,7 +920,7 @@ describe("dashboard", () => {
     const styles = dashboardCss();
 
     expectCssRule(styles, "body", ["overflow: hidden;"]);
-    expectCssRule(styles, ".app-shell", ["height: 100dvh;", "display: grid;", "grid-template-columns: 300px minmax(0, 1fr) clamp(380px, 30vw, 520px);", "overflow-x: hidden;"]);
+    expectCssRule(styles, ".app-shell", ["height: 100dvh;", "display: grid;", "grid-template-columns: clamp(56px, 4vw, 72px) minmax(0, 1fr) clamp(360px, 28vw, 480px);", "overflow-x: hidden;"]);
     expectCssRule(styles, ".task-sidebar", ["height: 100dvh;", "min-width: 0;", "min-height: 0;", "overflow: hidden;"]);
     expectCssRule(styles, ".sidebar-context", ["display: grid;", "min-width: 0;"]);
     expectCssRule(styles, ".project-header", ["min-width: 0;", "overflow: hidden;"]);
@@ -863,7 +957,7 @@ describe("dashboard", () => {
     expectCssRule(styles, ".evidence-item", ["font-size: 12px;", "overflow-wrap: anywhere;"]);
     expectCssRule(styles, ".raw-stream", ["font-size: 11px;"]);
     expectCssRule(styles, ".stream-output", ["overflow: auto;", "white-space: pre-wrap;", "overflow-wrap: anywhere;"]);
-    expectCssRule(styles, ".inspector-panel", ["width: clamp(380px, 30vw, 520px);", "min-width: 380px;", "max-width: 520px;", "padding: 30px 22px 24px;", "overflow-y: auto;", "overflow-x: hidden;", "scrollbar-gutter: stable;"]);
+    expectCssRule(styles, ".inspector-panel", ["width: clamp(360px, 28vw, 480px);", "min-width: 360px;", "max-width: 480px;", "padding: 22px 18px 20px;", "overflow-y: auto;", "overflow-x: hidden;", "scrollbar-gutter: stable;"]);
     expectCssRule(styles, ".inspector-card", ["min-width: 0;", "padding: 16px 0 18px;", "border-radius: 0;", "background: transparent;"]);
     expectCssRule(styles, ".inspector-card h2", ["margin: 0 0 12px;", "color: var(--muted);", "font-size: 11px;", "text-transform: uppercase;"]);
     expectCssRule(styles, ".current-task-title", ["overflow-wrap: anywhere;"]);
@@ -917,6 +1011,86 @@ describe("dashboard", () => {
     expectCssRule(styles, ".of-node-meta", ["overflow-wrap: anywhere;"]);
     expect(styles).not.toContain("#f6f6f3");
     expect(styles).not.toContain("linear-gradient");
+  });
+
+  test("reshells the dashboard into a slim left rail, full canvas column, and right chat panel", () => {
+    const html = dashboardHtml({ runId: "run_123" });
+    const styles = dashboardCss();
+
+    expectCssRule(styles, ".app-shell", [
+      "height: 100dvh;",
+      "display: grid;",
+      "grid-template-columns: clamp(56px, 4vw, 72px) minmax(0, 1fr) clamp(360px, 28vw, 480px);",
+      "overflow-x: hidden;",
+    ]);
+    expectCssRule(styles, ".app-shell[data-rail=\"collapsed\"]", [
+      "grid-template-columns: clamp(56px, 4vw, 72px) minmax(0, 1fr) clamp(360px, 28vw, 480px);",
+    ]);
+    expectCssRule(styles, ".inspector-panel", [
+      "width: clamp(360px, 28vw, 480px);",
+      "min-width: 360px;",
+      "max-width: 480px;",
+    ]);
+    expect(styles).toContain(".sidebar-rail-icons");
+    expect(styles).toContain(".rail-icon-button");
+    expect(styles).toContain(".app-shell[data-rail=\"collapsed\"] .sidebar-rail-icons");
+    expect(styles).toContain(".app-shell[data-rail=\"collapsed\"] .task-sidebar");
+    expect(html).toContain('class="app-shell"');
+    expect(html).toContain('data-rail="collapsed"');
+    expect(html).toContain('data-rail-icons');
+    expect(html).toContain('data-rail-action="brand"');
+    expect(html).toContain('data-rail-action="status"');
+    expect(html).toContain('data-rail-action="project"');
+    expect(html).toContain('data-rail-action="history"');
+    expect(html).toContain('data-rail-action="intake"');
+    expect(html).not.toContain("linear-gradient");
+  });
+
+  test("preserves the dashboard API route manifest and paths after the rail reshell", () => {
+    expect(DASHBOARD_ROUTES.map((route) => route.name)).toEqual([
+      "dashboard.document",
+      "dashboard.asset.canvasScript",
+      "dashboard.asset.canvasCss",
+      "dashboard.asset.dashboardCss",
+      "dashboard.api.recentRuns",
+      "dashboard.api.runOverview",
+      "dashboard.api.changedFiles",
+      "dashboard.api.diff",
+      "dashboard.api.guardrailAccept",
+      "dashboard.api.runnerStart",
+      "dashboard.api.runnerStop",
+      "dashboard.api.supervisorStart",
+      "dashboard.api.supervisorStop",
+      "dashboard.api.intake",
+      "dashboard.api.goalCreate",
+      "dashboard.api.goalInterrupt",
+      "dashboard.api.taskResume",
+      "dashboard.api.taskRerun",
+      "dashboard.api.attemptStop",
+      "dashboard.taskPrompt",
+    ]);
+    expect(dashboardRoutePaths()).toEqual([
+      "/",
+      "/assets/dashboard-canvas.js",
+      "/assets/dashboard-canvas.css",
+      "/assets/dashboard.css",
+      "/api/runs",
+      "/api/runs/:runId/overview",
+      "/api/runs/:runId/changed-files",
+      "/api/runs/:runId/diff",
+      "/api/runs/:runId/guardrails/:proposalId/accept",
+      "/api/runs/:runId/runner/start",
+      "/api/runs/:runId/runner/stop",
+      "/api/supervisor/start",
+      "/api/supervisor/stop",
+      "/api/runs/:runId/intake",
+      "/api/runs/:runId/goals",
+      "/api/runs/:runId/interrupt",
+      "/api/tasks/:taskId/resume",
+      "/api/tasks/:taskId/rerun",
+      "/api/attempts/:attemptId/stop",
+      "/tasks/:taskId/prompt",
+    ]);
   });
 
   test("documents browser overflow measurement for dashboard verifiers without adding dependencies", () => {
@@ -3359,7 +3533,7 @@ describe("dashboard", () => {
     expect(html).toContain("dashboardWorkspaceHtml(selectedGroup)");
     expect(html).toContain("dashboardInspectorHtml(overview, selectedGroup)");
     expect(html).toContain("dashboardInspectorEvidenceHtml(overview, selectedGroup)");
-    expect(html).toContain("patchInspectorPanel(dashboardInspectorHtml(overview, selectedGroup), dashboardRunStatusHtml(overview) + dashboardInspectorEvidenceHtml(overview, selectedGroup))");
+    expect(html).toContain("patchInspectorPanel(dashboardInspectorTimelineHtml(selectedGroup) + dashboardInspectorHtml(overview, selectedGroup), dashboardRunStatusHtml(overview) + dashboardInspectorEvidenceHtml(overview, selectedGroup) + dashboardInspectorComposerHtml())");
     expect(html).toContain("renderRunner(overview) + renderSupervisor(overview) + renderDiagnosis(overview) + renderGuardrailsSection(overview)");
     expect(html).toContain("renderSubsessionThreadsSection(overview, group) + renderChangedFilesSection(group)");
     // The runner section explicitly flags queued work waiting for a runner so a verifier can

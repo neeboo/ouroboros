@@ -1051,7 +1051,7 @@ export function dashboardHtml(input: { runId: string }) {
       try {
         window.localStorage?.setItem(dashboardStorageKey, JSON.stringify({
           selectedGoalId: typeof state.selectedGoalId === "string" ? state.selectedGoalId : null,
-          workspaceMode: isWorkspaceMode(state.workspaceMode) ? state.workspaceMode : "flow",
+          workspaceMode: isWorkspaceMode(state.workspaceMode) ? state.workspaceMode : "canvas",
           workspaceTitleExpanded: state.workspaceTitleExpanded === true,
           selectedChangedFilePath: typeof state.selectedChangedFilePath === "string" ? state.selectedChangedFilePath : null,
           flowScroll: state.flowScroll && typeof state.flowScroll === "object" ? state.flowScroll : null,
@@ -1061,7 +1061,7 @@ export function dashboardHtml(input: { runId: string }) {
     };
     const restoredDashboardState = readDashboardState();
     let selectedGoalId = restoredDashboardState.selectedGoalId || null;
-    let workspaceMode = restoredDashboardState.workspaceMode || "flow";
+    let workspaceMode = restoredDashboardState.workspaceMode || "canvas";
     let workspaceTitleExpanded = restoredDashboardState.workspaceTitleExpanded === true;
     let latestOverview = null;
     let selectedChangedFilePath = restoredDashboardState.selectedChangedFilePath || null;
@@ -1507,8 +1507,8 @@ export function dashboardHtml(input: { runId: string }) {
           conversationEvidence(session) +
           rawStreamDetails(session),
       });
-    const renderFlowWorkspace = (group) => {
-      if (!group) return '<div class="flow-inner"><div class="empty">No goal selected</div></div>';
+    const renderConversationTimeline = (group) => {
+      if (!group) return '<div class="empty">No goal selected</div>';
       const orderedSessions = [...group.sessions].sort((left, right) => {
         const leftTime = Date.parse(left.startedAt || "") || 0;
         const rightTime = Date.parse(right.startedAt || "") || 0;
@@ -1516,7 +1516,7 @@ export function dashboardHtml(input: { runId: string }) {
       });
       const taskIdsWithSessions = new Set(orderedSessions.map((session) => session.taskId));
       const pendingFlow = group.tasks.filter((task) => !taskIdsWithSessions.has(task.id) && (task.status === "todo" || task.status === "running"));
-      return '<div class="flow-inner"><div class="transcript" id="flow-transcript" role="log" aria-live="polite" aria-relevant="additions text" aria-label="Agent conversation timeline" data-timeline-order="oldest-first">' +
+      return '<div class="transcript" id="flow-transcript" role="log" aria-live="polite" aria-relevant="additions text" aria-label="Agent conversation timeline" data-timeline-order="oldest-first">' +
         turn({
           primary: true,
           kind: "goal",
@@ -1546,7 +1546,17 @@ export function dashboardHtml(input: { runId: string }) {
           summary: escapeHtml(group.lessons.length + " records"),
           body: lessonList(group.lessons.slice(-6)),
         }) : '') +
-        '</div></div>';
+        '</div>';
+    };
+    const renderFlowWorkspace = (group) => {
+      if (!group) return '<div class="flow-inner"><div class="empty">No goal selected</div></div>';
+      return '<div class="flow-inner flow-inner-moved">' +
+        '<div class="flow-moved-card" data-flow-moved-card>' +
+          '<div class="flow-moved-title">Conversation moved to the right panel</div>' +
+          '<div class="flow-moved-meta">Switch to canvas for the spatial task map. The chronological chat/session timeline now lives in the inspector side panel.</div>' +
+          '<div class="flow-moved-hint">Canvas mode shows the task graph; the right panel hosts the conversation, evidence, and composer.</div>' +
+        '</div>' +
+        '</div>';
     };
     const graphColumn = (role) => role === "planner" || role === "goal-review" ? "planner" : role === "verifier" ? "verifier" : "worker";
     const graphColumnX = (column) => column === "planner" ? 0 : column === "verifier" ? 720 : 360;
@@ -1716,6 +1726,26 @@ export function dashboardHtml(input: { runId: string }) {
         (taskActions ? '<div class="action-group"><div class="action-title">Task actions</div><div class="action-help">These controls affect only the selected task.</div><div class="action-buttons">' + taskActions + '</div></div>' : '') +
         '</section>';
     };
+    const dashboardInspectorTimelineHtml = (group) => {
+      if (!group) return '<section class="inspector-card conversation-timeline-section" data-inspector-section="conversation" id="conversation-timeline"><h2>Conversation</h2><div class="empty">Select a goal to view the chronological conversation timeline.</div></section>';
+      return '<section class="inspector-card conversation-timeline-section" data-inspector-section="conversation" id="conversation-timeline" data-conversation-timeline><h2>Conversation</h2>' +
+        '<div class="conversation-timeline-meta">Chronological session timeline · oldest first.</div>' +
+        '<div class="conversation-timeline-scroll">' +
+        renderConversationTimeline(group) +
+        '</div>' +
+        '</section>';
+    };
+    const dashboardInspectorComposerHtml = () =>
+      '<section class="inspector-card inspector-composer-section" data-inspector-section="composer" id="inspector-composer-section" data-inspector-composer-section>' +
+        '<h2>Composer</h2>' +
+        '<form class="inspector-composer" id="inspector-composer" data-inspector-composer-form>' +
+          '<textarea id="inspector-composer-input" name="prompt" class="inspector-composer-input" rows="2" placeholder="Reply or direct the next step" aria-label="Inspector composer"></textarea>' +
+          '<div class="inspector-composer-actions">' +
+            '<span class="inspector-composer-hint">Enter sends via the intake planner.</span>' +
+            '<button type="submit" class="plain-button" data-inspector-composer-send>Send</button>' +
+          '</div>' +
+        '</form>' +
+      '</section>';
     const dashboardInspectorEvidenceHtml = (overview, group) =>
       group ? renderSubsessionThreadsSection(overview, group) + renderChangedFilesSection(group) : "";
     const latestRunnerSignal = (overview) => {
@@ -2155,6 +2185,7 @@ export function dashboardHtml(input: { runId: string }) {
       syncWorkspaceTitle(selectedGroup ? selectedGroup.titleTask.goal : "No goal selected");
       syncWorkspaceToggle();
       document.getElementById("workspace-flow")?.classList.toggle("canvas-workspace", workspaceMode === "canvas");
+      document.getElementById("workspace-flow")?.classList.toggle("is-canvas-dark", workspaceMode === "canvas");
       patchStaticHtml("sidebar-stats", [
         ["Goals", goalGroups.length],
         ["Active goals", activeGroups.length],
@@ -2167,7 +2198,7 @@ export function dashboardHtml(input: { runId: string }) {
       patchStaticHtml("history-goal-list", [...goalGroups].reverse().filter((group) => group.activeTasks.length === 0).map(goalRow).join(""));
       patchWorkspace(dashboardWorkspaceHtml(selectedGroup));
       mountReactFlowCanvas();
-      patchInspectorPanel(dashboardInspectorHtml(overview, selectedGroup), dashboardRunStatusHtml(overview) + dashboardInspectorEvidenceHtml(overview, selectedGroup));
+      patchInspectorPanel(dashboardInspectorTimelineHtml(selectedGroup) + dashboardInspectorHtml(overview, selectedGroup), dashboardRunStatusHtml(overview) + dashboardInspectorEvidenceHtml(overview, selectedGroup) + dashboardInspectorComposerHtml());
     }
     let recentRunsCache = [];
     const RECENT_RUNS_LIMIT = 10;
@@ -2247,7 +2278,7 @@ export function dashboardHtml(input: { runId: string }) {
       try { window.history.replaceState(null, "", "#run=" + encodeURIComponent(runId)); } catch {}
       const restored = readDashboardState();
       selectedGoalId = restored.selectedGoalId;
-      workspaceMode = restored.workspaceMode || "flow";
+      workspaceMode = restored.workspaceMode || "canvas";
       workspaceTitleExpanded = restored.workspaceTitleExpanded === true;
       selectedChangedFilePath = restored.selectedChangedFilePath || null;
       restoredFlowScrollState = restored.flowScroll || null;
@@ -2272,7 +2303,7 @@ export function dashboardHtml(input: { runId: string }) {
       }
       const modeButton = event.target.closest("[data-workspace-mode]");
       if (modeButton) {
-        workspaceMode = modeButton.getAttribute("data-workspace-mode") || "flow";
+        workspaceMode = modeButton.getAttribute("data-workspace-mode") || "canvas";
         persistDashboardState();
         if (latestOverview) render(latestOverview);
         return;
@@ -2472,6 +2503,27 @@ export function dashboardHtml(input: { runId: string }) {
         .catch((error) => setIntakeStatus(error.message))
         .finally(() => { if (submitter) submitter.disabled = false; });
     });
+    const inspectorComposer = document.getElementById("inspector-composer");
+    const inspectorComposerInput = document.getElementById("inspector-composer-input");
+    if (inspectorComposer && inspectorComposerInput) {
+      inspectorComposerInput.addEventListener("keydown", (event) => {
+        if (event.key !== "Enter" || event.shiftKey || (!event.metaKey && !event.ctrlKey)) return;
+        event.preventDefault();
+        inspectorComposer.requestSubmit(document.querySelector("[data-inspector-composer-send]"));
+      });
+      inspectorComposer.addEventListener("submit", (event) => {
+        event.preventDefault();
+        const intakeInput = document.getElementById("intake-input");
+        const inspectorInputValue = String(inspectorComposerInput.value || "").trim();
+        if (!inspectorInputValue) {
+          setIntakeStatus("Write a prompt to send from the composer.");
+          return;
+        }
+        if (intakeInput) intakeInput.value = inspectorInputValue;
+        inspectorComposerInput.value = "";
+        document.getElementById("intake-composer").requestSubmit();
+      });
+    }
     overviewWorker.postMessage({ type: "start", runId, apiBase: window.location.origin });
     refreshRecentRuns();
   </script>

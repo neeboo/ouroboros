@@ -26,7 +26,7 @@ export const DASHBOARD_REACT_MODULES: DashboardReactModule[] = [
     id: "inspector",
     label: "Run inspector",
     status: "active",
-    owns: ["inspector-panel", "changed-files", "diff-panel"],
+    owns: ["inspector-panel", "changed-files", "diff-panel", "conversation-timeline", "inspector-composer-section"],
   },
   {
     id: "controls",
@@ -45,7 +45,11 @@ export function DashboardApp({ state }: { state: DashboardAppState }) {
   const title = state.activeGoals.find((goal) => goal.selected)?.title || runTitle;
 
   return (
-    <div className="app-shell" data-react-dashboard-modules={DASHBOARD_REACT_MODULES.map((module) => module.id).join(",")}>
+    <div
+      className="app-shell"
+      data-rail="collapsed"
+      data-react-dashboard-modules={DASHBOARD_REACT_MODULES.map((module) => module.id).join(",")}
+    >
       <DashboardSidebar
         runTitle={runTitle}
         runStatus={runStatus}

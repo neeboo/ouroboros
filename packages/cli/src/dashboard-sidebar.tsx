@@ -35,6 +35,9 @@ export function DashboardSidebar({
   activeGoals: DashboardGoalSummary[];
   historyGoals: DashboardGoalSummary[];
 }) {
+  const brandInitial = "O";
+  const statusInitial = runStatus ? runStatus.charAt(0).toUpperCase() : "·";
+  const projectInitial = projectName ? projectName.charAt(0).toUpperCase() : "·";
   return (
     <Panel as="aside" className="task-sidebar">
       <div className="sidebar-head">
@@ -58,6 +61,52 @@ export function DashboardSidebar({
           </div>
         </section>
         <IntakeComposerControls composer={composer} />
+      </div>
+      <div className="sidebar-rail-icons" aria-label="Dashboard rail actions" data-rail-icons>
+        <button
+          type="button"
+          className="rail-icon-button"
+          data-rail-action="brand"
+          title="Ouroboros"
+          aria-label="Ouroboros"
+        >
+          {brandInitial}
+        </button>
+        <span
+          className="rail-icon-button"
+          data-rail-action="status"
+          title={`Run status: ${runStatus}`}
+          aria-label={`Run status: ${runStatus}`}
+        >
+          {statusInitial}
+        </span>
+        <button
+          type="button"
+          className="rail-icon-button"
+          data-rail-action="project"
+          title={`${projectName}${projectRoot ? ` · ${projectRoot}` : ""}`}
+          aria-label={`${projectName}${projectRoot ? ` · ${projectRoot}` : ""}`}
+        >
+          {projectInitial}
+        </button>
+        <button
+          type="button"
+          className="rail-icon-button"
+          data-rail-action="history"
+          title="Run history"
+          aria-label="Run history"
+        >
+          H
+        </button>
+        <button
+          type="button"
+          className="rail-icon-button"
+          data-rail-action="intake"
+          title="New intake"
+          aria-label="New intake"
+        >
+          +
+        </button>
       </div>
       <ScrollArea as="nav" className="task-nav" aria-label="Goals and run history">
         <section className="nav-section">

@@ -11,7 +11,7 @@ function DashboardShell({ runId }: { runId: string }) {
   const changedFiles: DashboardChangedFile[] = [];
 
   return (
-    <div className="app-shell" data-react-dashboard-shell="true">
+    <div className="app-shell" data-rail="collapsed" data-react-dashboard-shell="true">
       <DashboardSidebar
         runTitle={`Loading ${runId}`}
         runStatus="Loading"

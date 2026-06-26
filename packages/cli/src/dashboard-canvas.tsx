@@ -71,18 +71,22 @@ function Canvas({ graph }: { graph: DashboardCanvasGraph }) {
         minZoom={0.35}
         maxZoom={1.4}
       >
-        <Background color="#d4d4d8" gap={20} size={1} />
+        <Background color="#27272a" gap={20} size={1} />
         <Controls showInteractive={false} />
         <MiniMap
           pannable
           zoomable
           nodeColor={(node) => {
             const status = String(node.data?.status || "");
-            if (status === "running") return "#18181b";
-            if (status === "blocked") return "#71717a";
-            if (status === "done") return "#e4e4e7";
-            return "#a1a1aa";
+            if (status === "running") return "#a1a1aa";
+            if (status === "blocked") return "#52525b";
+            if (status === "done") return "#71717a";
+            return "#3f3f46";
           }}
+          nodeStrokeColor="#27272a"
+          nodeBorderRadius={4}
+          maskColor="rgba(10, 10, 10, 0.65)"
+          style={{ background: "#0a0a0a" }}
         />
       </ReactFlow>
     </div>
