@@ -44,19 +44,22 @@ export function DashboardSidebar({
             {runStatus}
           </div>
         </div>
-        <div id="run-title">{runTitle}</div>
-        <div className="project-title project-header" id="project-title" data-project-header>
-          <div className="project-name" data-project-name>
-            {projectName}
+        <section className="sidebar-context" data-sidebar-context aria-label="Run context">
+          <div className="run-title" id="run-title">
+            {runTitle}
           </div>
-          <div className="project-root" data-project-root>
-            {projectRoot || ""}
+          <div className="project-title project-header" id="project-title" data-project-header>
+            <div className="project-name" data-project-name>
+              {projectName}
+            </div>
+            <div className="project-root" data-project-root>
+              {projectRoot || ""}
+            </div>
           </div>
-        </div>
+        </section>
         <IntakeComposerControls composer={composer} />
       </div>
-      <section className="sidebar-stats" id="sidebar-stats" />
-      <ScrollArea as="nav" className="task-nav" aria-label="Goals">
+      <ScrollArea as="nav" className="task-nav" aria-label="Goals and run history">
         <section className="nav-section">
           <h2 className="section-label">Active Goals</h2>
           <div className="task-list" id="active-goal-list">
@@ -73,27 +76,36 @@ export function DashboardSidebar({
             ))}
           </div>
         </section>
-        <section className="nav-section" data-history-runs>
-          <h2 className="section-label">Recent runs</h2>
-          <h2 className="section-label">Active run</h2>
-          <div
-            className="task-list"
-            id="active-run-list"
-            data-history-source="GET /api/runs"
-            data-history-run-selected="true"
-            aria-live="polite"
-          >
-            Loading active run...
+        <section className="nav-section history-rail" data-history-runs aria-label="Run history">
+          <div className="history-rail-head">
+            <div>
+              <h2 className="section-label">Run history</h2>
+              <div className="section-note">Active run pinned above recent runs.</div>
+            </div>
           </div>
-          <h2 className="section-label">Run history</h2>
-          <div
-            className="task-list"
-            id="recent-runs-list"
-            data-history-runs-list
-            data-history-source="GET /api/runs"
-            aria-live="polite"
-          >
-            Loading recent runs...
+          <div className="history-run-group" data-history-run-group="active">
+            <div className="history-run-group-label">Active run</div>
+            <div
+              className="task-list history-run-list"
+              id="active-run-list"
+              data-history-source="GET /api/runs"
+              data-history-run-selected="true"
+              aria-live="polite"
+            >
+              Loading active run...
+            </div>
+          </div>
+          <div className="history-run-group" data-history-run-group="recent">
+            <div className="history-run-group-label">Recent runs</div>
+            <div
+              className="task-list history-run-list"
+              id="recent-runs-list"
+              data-history-runs-list
+              data-history-source="GET /api/runs"
+              aria-live="polite"
+            >
+              Loading recent runs...
+            </div>
           </div>
         </section>
       </ScrollArea>

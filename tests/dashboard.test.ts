@@ -150,7 +150,7 @@ const browserOverflowVerifierSnippet = `
 // Run in a local browser verifier after loading the dashboard at desktop and mobile widths.
 // Example labels: verifyDashboardOverflow("desktop 1440x900") and verifyDashboardOverflow("mobile 390x844").
 function verifyDashboardOverflow(label) {
-  const selectors = ["html", "body", ".app-shell", ".task-sidebar", ".task-nav", ".workspace", ".workspace-head", ".inspector-panel", ".changed-file-tree", ".diff-panel"];
+  const selectors = ["html", "body", ".app-shell", ".task-sidebar", ".task-nav", ".history-run-row", ".history-run-status", ".history-run-goal", ".history-run-id", ".workspace", ".workspace-head", ".inspector-panel", ".changed-file-tree", ".diff-panel"];
   const rows = selectors.map((selector) => {
     const node = document.querySelector(selector) || document.scrollingElement;
     return {
@@ -617,6 +617,10 @@ describe("dashboard", () => {
 
     expect(html).toContain("Active run");
     expect(html).toContain("Run history");
+    expect(html).toContain('aria-label="Goals and run history"');
+    expect(html).toContain('data-sidebar-context');
+    expect(html).toContain('data-history-run-group="active"');
+    expect(html).toContain('data-history-run-group="recent"');
     expect(html).toContain("renderRecentRunsList(recentRunsCache);");
     expect(html).toContain('data-history-source="GET /api/runs"');
     expect(html).toContain('data-active-run-id=\\"');
@@ -645,6 +649,29 @@ describe("dashboard", () => {
     expect(rows).toContain("Earlier run");
   });
 
+  test("keeps run history rows shrink-safe and truncated", () => {
+    const rows = dashboardRunHistoryRowsHtmlForTest([
+      {
+        id: pathologicalText.id,
+        status: pathologicalText.status,
+        goal: `History goal ${pathologicalText.token} ${pathologicalText.prose}`,
+        projectId: null,
+        createdAt: null,
+      },
+    ], pathologicalText.id);
+    const styles = dashboardCss();
+
+    expect(rows).toContain('class="history-run-row is-active"');
+    expect(rows).toContain('data-history-run-selected="true"');
+    expect(rows).toContain('class="history-run-goal"');
+    expect(rows).toContain('class="history-run-id code-meta"');
+    expect(rows).toContain(pathologicalText.id);
+    expectCssRule(styles, ".history-run-row", ["min-width: 0;", "grid-template-columns: minmax(0, 64px) minmax(0, 1fr);", "overflow: hidden;"]);
+    expectCssRule(styles, ".history-run-status", ["width: 100%;", "min-width: 0;", "max-width: 100%;", "overflow: hidden;", "text-overflow: ellipsis;", "white-space: nowrap;"]);
+    expectCssRule(styles, ".history-run-goal", ["min-width: 0;", "overflow: hidden;", "text-overflow: ellipsis;", "white-space: nowrap;"]);
+    expectCssRule(styles, ".history-run-id", ["overflow: hidden;", "text-overflow: ellipsis;", "white-space: nowrap;"]);
+  });
+
   test("uses a restrained neutral dashboard palette without saturated status colors or gradients", () => {
     const html = dashboardHtml({ runId: "run_123" });
     const styles = dashboardCss();
@@ -660,6 +687,8 @@ describe("dashboard", () => {
     expect(styles).toContain("--ink: #09090b;");
     expect(styles).toContain("--muted: #71717a;");
     expect(styles).toContain("--status-ink: #18181b;");
+    expect(styles).toContain(".section-note");
+    expect(styles).toContain("color: var(--muted-2);");
     expect(styles).not.toContain("linear-gradient");
     expect(styles).not.toContain("#b8d4c2");
     expect(styles).not.toContain("#d4c7a8");
@@ -771,11 +800,14 @@ describe("dashboard", () => {
     expectCssRule(styles, "body", ["overflow: hidden;"]);
     expectCssRule(styles, ".app-shell", ["height: 100dvh;", "display: grid;", "grid-template-columns: 300px minmax(0, 1fr) clamp(380px, 30vw, 520px);", "overflow-x: hidden;"]);
     expectCssRule(styles, ".task-sidebar", ["height: 100dvh;", "min-width: 0;", "min-height: 0;", "overflow: hidden;"]);
+    expectCssRule(styles, ".sidebar-context", ["display: grid;", "min-width: 0;"]);
     expectCssRule(styles, ".project-header", ["min-width: 0;", "overflow: hidden;"]);
     expectCssRule(styles, ".project-name", ["overflow: hidden;", "text-overflow: ellipsis;", "white-space: nowrap;"]);
     expectCssRule(styles, ".project-root", ["overflow: hidden;", "text-overflow: ellipsis;", "white-space: nowrap;"]);
     expectCssRule(styles, ".task-nav", ["width: 100%;", "min-width: 0;", "max-width: 100%;", "min-height: 0;", "overflow-x: hidden;", "overflow-y: auto;", "scrollbar-gutter: stable;"]);
     expectCssRule(styles, ".nav-section", ["width: 100%;", "min-width: 0;", "max-width: 100%;", "overflow-x: hidden;"]);
+    expectCssRule(styles, ".history-rail", ["display: grid;", "gap: 12px;"]);
+    expectCssRule(styles, ".history-run-group", ["min-width: 0;", "padding-top: 12px;", "border-top: 1px solid var(--line);"]);
     expectCssRule(styles, ".task-list", ["width: 100%;", "min-width: 0;", "max-width: 100%;", "overflow-x: hidden;"]);
     expectCssRule(styles, ".workspace", ["min-width: 0;", "overflow: hidden;"]);
     expectCssRule(styles, ".workspace-title-block", ["min-width: 0;"]);
@@ -786,6 +818,10 @@ describe("dashboard", () => {
     expectCssRule(styles, ".task-row-text", ["min-width: 0;", "overflow: hidden;"]);
     expectCssRule(styles, ".task-row strong", ["text-overflow: ellipsis;", "white-space: nowrap;"]);
     expectCssRule(styles, ".task-row .row-meta", ["text-overflow: ellipsis;", "white-space: nowrap;"]);
+    expectCssRule(styles, ".history-run-row", ["min-width: 0;", "overflow: hidden;"]);
+    expectCssRule(styles, ".history-run-goal", ["min-width: 0;", "overflow: hidden;"]);
+    expectCssRule(styles, ".history-run-id", ["overflow: hidden;", "text-overflow: ellipsis;", "white-space: nowrap;"]);
+    expectCssRule(styles, ".history-run-status", ["width: 100%;", "overflow: hidden;", "text-overflow: ellipsis;", "white-space: nowrap;"]);
     expectCssRule(styles, ".status-text", ["width: 100%;", "max-width: 100%;", "overflow: hidden;", "text-overflow: ellipsis;", "white-space: nowrap;"]);
     expectCssRule(styles, ".plain-button", ["min-width: 0;", "overflow: hidden;", "text-overflow: ellipsis;", "white-space: nowrap;"]);
     expectCssRule(styles, ".workspace-flow", ["min-height: 0;", "overflow: auto;"]);
@@ -842,6 +878,10 @@ describe("dashboard", () => {
 
   test("documents browser overflow measurement for dashboard verifiers without adding dependencies", () => {
     expect(browserOverflowVerifierSnippet).toContain(".task-sidebar");
+    expect(browserOverflowVerifierSnippet).toContain(".history-run-row");
+    expect(browserOverflowVerifierSnippet).toContain(".history-run-status");
+    expect(browserOverflowVerifierSnippet).toContain(".history-run-goal");
+    expect(browserOverflowVerifierSnippet).toContain(".history-run-id");
     expect(browserOverflowVerifierSnippet).toContain(".workspace-head");
     expect(browserOverflowVerifierSnippet).toContain(".changed-file-tree");
     expect(browserOverflowVerifierSnippet).toContain(".diff-panel");
