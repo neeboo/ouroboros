@@ -374,10 +374,19 @@ describe("dashboard", () => {
     const html = dashboardHtml({ runId: "run_123" });
 
     expect(html).toContain('id="workspace-flow"');
+    expect(html).toContain('id="flow-transcript"');
     expect(html).toContain('id="inspector-panel"');
+    expect(html).toContain('role="log"');
+    expect(html).toContain('aria-live="polite"');
+    expect(html).toContain('aria-label="Agent conversation timeline"');
+    expect(html).toContain('data-timeline-order="oldest-first"');
+    expect(html).toContain('kind: "goal"');
+    expect(html).toContain('kind: "session"');
+    expect(html).toContain('kind: "lesson"');
     expect(html).toContain("buildGoalGroups");
     expect(html).toContain("task.cycleId");
     expect(html).toContain("transcript");
+    expect(html).toContain("Conversation timeline");
     expect(html).toContain("readableSummary");
     expect(html).toContain("conversationEvidence");
     expect(html).toContain("evidenceSection");
@@ -389,7 +398,8 @@ describe("dashboard", () => {
     expect(html).toContain("orderedSessions");
     expect(html).toContain("captureFlowScrollState");
     expect(html).toContain("restoreFlowScrollState");
-    expect(html).toContain("node.scrollTop = scrollState.shouldFollowBottom ? node.scrollHeight : scrollState.scrollTop");
+    expect(html).toContain("flowDelta");
+    expect(html).toContain("Math.max(0, scrollState.scrollTop + flowDelta)");
   });
 
   test("renders structured dashboard evidence as readable text", () => {
@@ -575,6 +585,8 @@ describe("dashboard", () => {
     expect(html).toContain("data-canvas-task-evidence-count");
     expect(html).toContain("data-canvas-task-todo-count");
     expect(html).toContain("data-canvas-task-diff-count");
+    expect(html).toContain('data-timeline-order="oldest-first"');
+    expect(html).toContain('kind: "task"');
     expect(html).toContain("dependsOn");
     expect(html).toContain("parentId");
     expect(html).toContain("created");
@@ -583,6 +595,7 @@ describe("dashboard", () => {
     expect(html).toContain("task.cycleId");
     expect(html).toContain("transcript");
     expect(html).toContain("stream-output");
+    expect(html).toContain("Conversation timeline");
   });
 
   test("persists selected goal workspace mode and title expansion in run-scoped browser storage", () => {
@@ -600,6 +613,7 @@ describe("dashboard", () => {
     expect(html).toContain("persistDashboardState");
     expect(html).toContain("selectedGoalId = payload.runId || payload.taskId || selectedGoalId;");
     expect(html).toContain("workspaceTitleExpanded = false;");
+    expect(html).toContain('setTextIfChanged("workspace-kicker", "Conversation timeline");');
     expect(html).not.toContain('localStorage.setItem("selectedGoalId"');
     expect(html).not.toContain('localStorage.getItem("selectedGoalId"');
   });
@@ -617,6 +631,12 @@ describe("dashboard", () => {
     expect(html).toContain("persistFlowScrollState");
     expect(html).toContain("restoredFlowScrollState = null;");
     expect(html).toContain("writeDashboardState({ selectedGoalId, workspaceMode, workspaceTitleExpanded, selectedChangedFilePath, flowScroll: captureFlowScrollState() });");
+    expect(html).toContain("scrollState.scrollHeight");
+    expect(html).toContain("flowDelta");
+    expect(html).toContain("Math.max(0, scrollState.scrollTop + flowDelta)");
+    expect(html).toContain("streamScroll.scrollHeight");
+    expect(html).toContain("streamDelta");
+    expect(html).toContain("Math.max(0, streamScroll.scrollTop + streamDelta)");
     expect(html).not.toContain("ouroboros:dashboard:changedFile:");
   });
 
@@ -834,7 +854,7 @@ describe("dashboard", () => {
     expectCssRule(styles, ".plain-button", ["min-width: 0;", "overflow: hidden;", "text-overflow: ellipsis;", "white-space: nowrap;"]);
     expectCssRule(styles, ".workspace-flow", ["min-height: 0;", "overflow: auto;"]);
     expectCssRule(styles, ".flow-inner", ["min-width: 0;"]);
-    expectCssRule(styles, ".turn", ["grid-template-columns: 34px minmax(0, 1fr);"]);
+    expectCssRule(styles, ".turn", ["grid-template-columns: 28px minmax(0, 1fr);"]);
     expectCssRule(styles, ".turn-body", ["min-width: 0;"]);
     expectCssRule(styles, ".turn-author", ["overflow-wrap: anywhere;"]);
     expectCssRule(styles, ".turn-summary", ["overflow-wrap: anywhere;"]);
@@ -923,9 +943,11 @@ describe("dashboard", () => {
     expect(html).toContain("restoreFlowScrollState");
     expect(html).toContain("shouldFollowBottom");
     expect(html).toContain("distanceFromBottom <= 48");
-    expect(html).toContain("node.scrollTop = scrollState.shouldFollowBottom ? node.scrollHeight : scrollState.scrollTop;");
-    expect(html).toContain("stream.scrollTop = streamScroll.shouldFollowBottom ? stream.scrollHeight : streamScroll.scrollTop;");
-    expect(html).not.toContain("node.scrollTop = node.scrollHeight;");
+    expect(html).toContain("flowDelta");
+    expect(html).toContain("node.scrollTop = scrollState.shouldFollowBottom ? node.scrollHeight : Math.max(0, scrollState.scrollTop + flowDelta);");
+    expect(html).toContain("streamDelta");
+    expect(html).toContain("stream.scrollTop = streamScroll.shouldFollowBottom ? stream.scrollHeight : Math.max(0, streamScroll.scrollTop + streamDelta);");
+    expect(html).not.toContain("node.scrollTop = scrollState.shouldFollowBottom ? node.scrollHeight : scrollState.scrollTop;");
   });
 
   test("patches dashboard refreshes without replacing major visible panels", () => {

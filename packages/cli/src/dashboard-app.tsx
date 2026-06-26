@@ -55,7 +55,7 @@ export function DashboardApp({ state }: { state: DashboardAppState }) {
         activeGoals={state.activeGoals}
         historyGoals={state.historyGoals}
       />
-      <DashboardFlowView title={title} kicker="Task Flow" mode={state.workspaceMode} titleExpanded={false} />
+      <DashboardFlowView title={title} kicker="Conversation timeline" mode={state.workspaceMode} titleExpanded={false} />
       <DashboardInspector
         supervisor={state.supervisor}
         changedFiles={state.changedFiles}

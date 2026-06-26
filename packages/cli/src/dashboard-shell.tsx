@@ -21,7 +21,7 @@ function DashboardShell({ runId }: { runId: string }) {
         activeGoals={goals}
         historyGoals={goals}
       />
-      <DashboardFlowView title="Loading" kicker="Task Flow" mode="flow" titleExpanded={false} />
+      <DashboardFlowView title="Loading" kicker="Conversation timeline" mode="flow" titleExpanded={false} />
       <DashboardInspector supervisor={supervisor} changedFiles={changedFiles} />
     </div>
   );
