@@ -1177,7 +1177,9 @@ h1 {
   background: var(--app);
   border-left: 1px solid var(--line);
   overflow-x: hidden;
-  overflow-y: auto;
+  overflow-y: hidden;
+  display: flex;
+  flex-direction: column;
   scrollbar-gutter: stable;
 }
 .inspector-card {
@@ -1206,8 +1208,11 @@ h1 {
   margin-top: 2px;
 }
 .conversation-timeline-section {
-  display: grid;
+  display: flex;
+  flex-direction: column;
   gap: 10px;
+  flex: 1 1 auto;
+  min-height: 0;
 }
 .conversation-timeline-meta {
   color: var(--muted-2);
@@ -1215,8 +1220,8 @@ h1 {
   line-height: 1.5;
 }
 .conversation-timeline-scroll {
+  flex: 1 1 auto;
   min-height: 0;
-  max-height: 360px;
   overflow-y: auto;
   overflow-x: hidden;
   padding-right: 4px;
@@ -1265,8 +1270,48 @@ h1 {
   font-size: 11px;
 }
 .inspector-composer-section {
+  flex: 0 0 auto;
   display: grid;
   gap: 10px;
+}
+.inspector-evidence-disclosure {
+  flex: 0 0 auto;
+}
+.inspector-evidence-disclosure > details {
+  min-width: 0;
+}
+.inspector-evidence-summary {
+  cursor: pointer;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 760;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  list-style: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.inspector-evidence-summary::-webkit-details-marker { display: none; }
+.inspector-evidence-summary::before {
+  content: "+";
+  display: inline-grid;
+  place-items: center;
+  width: 14px;
+  height: 14px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  color: var(--muted);
+  font-weight: 700;
+  font-size: 10px;
+}
+.inspector-evidence-disclosure > details[open] > .inspector-evidence-summary::before {
+  content: "-";
+}
+.inspector-evidence-body {
+  padding-top: 10px;
+  display: grid;
+  gap: 0;
 }
 .inspector-composer {
   display: grid;

@@ -1,6 +1,4 @@
-import { SupervisorControls } from "./dashboard-controls";
-import { Button, Panel, ScrollArea } from "./dashboard-ui/primitives";
-import type { DashboardChangedFile, DashboardSupervisorState } from "./dashboard-types";
+import { Button, Panel, ScrollArea, Separator } from "./dashboard-ui/primitives";
 
 export function ConversationTimeline({
   children,
@@ -52,65 +50,40 @@ export function InspectorComposer() {
   );
 }
 
-export function ChangedFilesInspector({
-  files,
-  selectedPath,
+export function RunEvidenceDisclosure({
+  children,
 }: {
-  files: DashboardChangedFile[];
-  selectedPath?: string | null;
+  children?: React.ReactNode;
 }) {
   return (
-    <Panel className="inspector-card changed-files-section" data-inspector-section="changed-files" data-changed-files-section>
-      <h2>Files</h2>
-      <ScrollArea className="changed-file-tree" data-changed-file-tree>
-        {files.map((file) => (
-          <Button
-            type="button"
-            className={`changed-file-node ${file.selected || file.path === selectedPath ? "selected" : ""}`}
-            variant="ghost"
-            data-changed-file-node="file"
-            data-changed-file-path={file.path}
-            data-selected-changed-file={file.selected || file.path === selectedPath ? "true" : undefined}
-            aria-current={file.selected || file.path === selectedPath ? "true" : undefined}
-            title={file.path}
-            key={file.path}
-          >
-            <span className="changed-file-type" aria-hidden="true">
-              file
-            </span>
-            <span className="changed-file-name">{file.path}</span>
-          </Button>
-        ))}
-      </ScrollArea>
-      <Panel as="div" className="diff-panel" data-diff-panel data-diff-state={selectedPath ? "loading" : "empty-selection"}>
-        <div className="diff-header" data-diff-header>
-          <span className="diff-path" data-diff-path>
-            {selectedPath || "Select a changed file"}
-          </span>
+    <Panel
+      className="inspector-card inspector-evidence-disclosure"
+      data-inspector-section="run-evidence"
+      data-secondary-evidence
+    >
+      <details>
+        <summary className="inspector-evidence-summary" data-secondary-evidence-summary>
+          Run evidence
+        </summary>
+        <div className="inspector-evidence-body" data-secondary-evidence-body>
+          <Separator className="inspector-separator" />
+          {children}
         </div>
-      </Panel>
+      </details>
     </Panel>
   );
 }
 
 export function DashboardInspector({
-  supervisor,
-  changedFiles,
-  selectedChangedFilePath,
   children,
 }: {
-  supervisor: DashboardSupervisorState;
-  changedFiles: DashboardChangedFile[];
-  selectedChangedFilePath?: string | null;
   children?: React.ReactNode;
 }) {
   return (
     <ScrollArea as="aside" className="inspector-panel" id="inspector-panel">
       <ConversationTimeline />
-      {children}
-      <SupervisorControls supervisor={supervisor} />
-      <ChangedFilesInspector files={changedFiles} selectedPath={selectedChangedFilePath} />
       <InspectorComposer />
+      <RunEvidenceDisclosure>{children}</RunEvidenceDisclosure>
     </ScrollArea>
   );
 }

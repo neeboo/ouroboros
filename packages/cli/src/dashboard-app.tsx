@@ -26,7 +26,14 @@ export const DASHBOARD_REACT_MODULES: DashboardReactModule[] = [
     id: "inspector",
     label: "Run inspector",
     status: "active",
-    owns: ["inspector-panel", "changed-files", "diff-panel", "conversation-timeline", "inspector-composer-section"],
+    owns: [
+      "inspector-panel",
+      "conversation-timeline",
+      "inspector-composer-section",
+      "inspector-evidence-disclosure",
+      "changed-files",
+      "diff-panel",
+    ],
   },
   {
     id: "controls",
@@ -60,11 +67,7 @@ export function DashboardApp({ state }: { state: DashboardAppState }) {
         historyGoals={state.historyGoals}
       />
       <DashboardFlowView title={title} kicker="Conversation timeline" mode={state.workspaceMode} titleExpanded={false} />
-      <DashboardInspector
-        supervisor={state.supervisor}
-        changedFiles={state.changedFiles}
-        selectedChangedFilePath={state.selectedChangedFilePath}
-      />
+      <DashboardInspector />
     </div>
   );
 }
