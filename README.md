@@ -100,7 +100,7 @@ Launch the dashboard and background runner:
 
 ```bash
 orbs self-iterate-launch \
-  --concurrency 3 \
+  --parallel auto \
   --worktree-root .ouroboros/worktrees \
   --start-hook git-worktree
 ```
@@ -139,7 +139,7 @@ orbs run-loop \
   --timeout-ms 1800000 \
   --idle-timeout-ms 300000 \
   --stop-hook create-tasks,create-verifier,create-repair,context-summary \
-  --concurrency 3 \
+  --tasks auto \
   --worktree-root .ouroboros/worktrees \
   --start-hook git-worktree \
   --max-rounds 8

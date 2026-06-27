@@ -80,6 +80,9 @@ describe("CLI", () => {
     expect(help).toMatchObject({ exitCode: 0, stderr: "" });
     expect(help.stdout).toContain("Usage:");
     expect(help.stdout).toContain("orbs --help");
+    expect(help.stdout).toContain("--parallel auto");
+    expect(help.stdout).toContain("--runs <n|auto>");
+    expect(help.stdout).toContain("--tasks <n|auto>");
     expect(shortHelp).toMatchObject({ exitCode: 0, stderr: "" });
     expect(shortHelp.stdout).toContain("Core commands:");
     expect(commandHelp).toMatchObject({ exitCode: 0, stderr: "" });
@@ -254,12 +257,12 @@ describe("CLI", () => {
     expect(result.dashboardCommand).toContain(`dashboard --run-id ${result.runId}`);
     expect(result.runnerCommand).toContain(`run-loop --run-id ${result.runId}`);
     expect(result.launchCommand).toContain("self-iterate-launch");
-    expect(result.launchCommand).toContain("--concurrency 3");
+    expect(result.launchCommand).toContain("--parallel auto");
     expect(result.launchCommand).toContain("--worktree-root .ouroboros/worktrees");
     expect(result.launchCommand).toContain("--start-hook git-worktree");
     expect(result.dashboardCommand).toContain("--port 7331");
     expect(result.runnerCommand).toContain("--executor codex-resumable");
-    expect(result.runnerCommand).toContain("--concurrency 3");
+    expect(result.runnerCommand).toContain("--tasks auto");
     expect(result.runnerCommand).toContain("--worktree-root .ouroboros/worktrees");
     expect(result.runnerCommand).toContain("--start-hook git-worktree");
     expect(result.runnerCommand).toContain("--stop-hook create-runs,create-tasks,create-verifier,create-repair,context-summary");
@@ -608,7 +611,7 @@ describe("CLI", () => {
         runnerPid: expect.any(Number),
         runnerStatus: expect.objectContaining({ status: "running" }),
       });
-      expect(launch.runnerCommand).toContain("--concurrency 3");
+      expect(launch.runnerCommand).toContain("--tasks 3");
       expect(launch.runnerCommand).toContain("--start-hook none");
       expect(overview.runner).toMatchObject({ status: "running" });
       expect(overview.run).toMatchObject({
@@ -1486,6 +1489,48 @@ describe("CLI", () => {
     );
     expect(result.tasks.map((task: { sessionName: string }) => task.sessionName).sort()).toEqual(
       [`task-${first.id}`, `task-${second.id}`].sort(),
+    );
+  });
+
+  test("runs multiple ready tasks with automatic task parallelism", async () => {
+    await runCli("init");
+    const run = await runCliJson("create-run", "--goal", "Bootstrap ouroboros");
+    const first = await runCliJson(
+      "create-task",
+      "--run-id",
+      run.id,
+      "--role",
+      "worker",
+      "--goal",
+      "Task A",
+      "--prompt",
+      "Do A.",
+    );
+    const second = await runCliJson(
+      "create-task",
+      "--run-id",
+      run.id,
+      "--role",
+      "worker",
+      "--goal",
+      "Task B",
+      "--prompt",
+      "Do B.",
+    );
+
+    const result = await runCliJson(
+      "run-next",
+      "--run-id",
+      run.id,
+      "--executor",
+      "noop",
+      "--tasks",
+      "auto",
+      { ORBS_AUTO_TASK_CONCURRENCY: "2" },
+    );
+
+    expect(result.tasks.map((task: { taskId: string }) => task.taskId).sort()).toEqual(
+      [first.id, second.id].sort(),
     );
   });
 
@@ -3595,6 +3640,34 @@ describe("CLI", () => {
       index: 0,
       result: expect.objectContaining({ status: "idle" }),
       runCounts: expect.objectContaining({ todo: 0 }),
+    });
+  });
+
+  test("supervise-daemon accepts automatic parallelism without separate run and task flags", async () => {
+    await runCli("init");
+    const result = await runCliJson(
+      "supervise-daemon",
+      "--executor",
+      "codex-resumable",
+      "--parallel",
+      "auto",
+      "--max-ticks",
+      "1",
+      "--tick-cycles",
+      "1",
+      "--max-rounds",
+      "1",
+      "--idle-ms",
+      "1",
+      "--interval-ms",
+      "1",
+      { ORBS_AUTO_RUN_CONCURRENCY: "2", ORBS_AUTO_TASK_CONCURRENCY: "3" },
+    );
+
+    expect(result.status).toBe("tick_limit");
+    expect(result.ticks[0]).toMatchObject({
+      type: "daemon.tick",
+      result: expect.objectContaining({ status: "idle" }),
     });
   });
 

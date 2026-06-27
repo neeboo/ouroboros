@@ -49,12 +49,15 @@ import { formatRunGraph } from "./run-graph";
 import { buildRunThreadOverview, formatRunThreads } from "./run-threads";
 import { buildAgentMatrix, doctorAgent } from "../../../scripts/acpx-agent-smoke";
 import { join } from "node:path";
+import { cpus, totalmem } from "node:os";
 import type { Task } from "@ouroboros/harness";
 
 const parsed = parseArgs(Bun.argv.slice(2));
 const harness = new Harness(parsed.db);
 const DEFAULT_MAX_TRIES = 3;
 const DEFAULT_SELF_ITERATION_CONCURRENCY = 3;
+const AUTO_MAX_RUN_CONCURRENCY = 3;
+const AUTO_MAX_TASK_CONCURRENCY = 4;
 const DEFAULT_SELF_ITERATION_WORKTREE_ROOT = ".ouroboros/worktrees";
 const DEFAULT_GENERIC_ATTEMPT_IDLE_TIMEOUT_MS = 5 * 60 * 1000;
 const DEFAULT_GENERIC_ATTEMPT_HARD_TIMEOUT_MS = 30 * 60 * 1000;
@@ -147,8 +150,8 @@ switch (parsed.command) {
         "workspace-write",
         "--stop-hook",
         DEFAULT_STOP_HOOKS,
-        "--concurrency",
-        String(DEFAULT_SELF_ITERATION_CONCURRENCY),
+        "--tasks",
+        "auto",
         "--worktree-root",
         DEFAULT_SELF_ITERATION_WORKTREE_ROOT,
         "--start-hook",
@@ -160,8 +163,8 @@ switch (parsed.command) {
         "self-iterate-launch",
         "--port",
         "7331",
-        "--concurrency",
-        String(DEFAULT_SELF_ITERATION_CONCURRENCY),
+        "--parallel",
+        "auto",
         "--worktree-root",
         DEFAULT_SELF_ITERATION_WORKTREE_ROOT,
         "--start-hook",
@@ -201,8 +204,8 @@ switch (parsed.command) {
         "workspace-write",
         "--stop-hook",
         DEFAULT_STOP_HOOKS,
-        "--concurrency",
-        flag(parsed, "concurrency") ?? flag(parsed, "limit") ?? String(DEFAULT_SELF_ITERATION_CONCURRENCY),
+        "--tasks",
+        firstFlag(["tasks", "task-concurrency", "concurrency", "limit"]) ?? (parallelModeIsAuto() ? "auto" : String(DEFAULT_SELF_ITERATION_CONCURRENCY)),
         ...selfIterationWorktreeArgs,
         "--max-rounds",
         "8",
@@ -261,10 +264,8 @@ switch (parsed.command) {
         "workspace-write",
         "--stop-hook",
         DEFAULT_STOP_HOOKS,
-        "--run-concurrency",
-        "2",
-        "--concurrency",
-        String(DEFAULT_SELF_ITERATION_CONCURRENCY),
+        "--parallel",
+        "auto",
         "--worktree-root",
         DEFAULT_SELF_ITERATION_WORKTREE_ROOT,
         "--start-hook",
@@ -478,7 +479,7 @@ switch (parsed.command) {
   case "run-next": {
     const executorName = cliExecutorName();
     const runId = required(parsed, "run-id");
-    const limit = parseConcurrency();
+    const limit = parseTaskConcurrency();
     if (usesCodexResumablePath(executorName)) {
       const maxTries = parsePositiveInteger(flag(parsed, "max-tries") ?? String(DEFAULT_MAX_TRIES), "--max-tries");
       const result = await runCodexResumableLoop({ ...codexRunnerInput(), runId, maxRounds: 1, limit, maxTries });
@@ -506,7 +507,7 @@ switch (parsed.command) {
   case "run-loop": {
     const executorName = cliExecutorName();
     const runId = required(parsed, "run-id");
-    const limit = parseConcurrency();
+    const limit = parseTaskConcurrency();
     const maxRounds = parsePositiveInteger(flag(parsed, "max-rounds") ?? "10", "--max-rounds");
     const maxTries = parsePositiveInteger(flag(parsed, "max-tries") ?? String(DEFAULT_MAX_TRIES), "--max-tries");
     if (usesCodexResumablePath(executorName)) {
@@ -541,7 +542,7 @@ switch (parsed.command) {
       await runCodexAutopilot({
         ...codexRunnerInput(),
         runId: required(parsed, "run-id"),
-        limit: parseConcurrency(),
+        limit: parseTaskConcurrency(),
         maxRounds: parsePositiveInteger(flag(parsed, "max-rounds") ?? "1", "--max-rounds"),
         maxCycles: parsePositiveInteger(flag(parsed, "max-cycles") ?? "100", "--max-cycles"),
         maxTries: parsePositiveInteger(flag(parsed, "max-tries") ?? String(DEFAULT_MAX_TRIES), "--max-tries"),
@@ -559,8 +560,8 @@ switch (parsed.command) {
       await superviseCodexRuns({
         ...codexRunnerInput(),
         rootRunId: flag(parsed, "root-run-id") ?? null,
-        runConcurrency: parsePositiveInteger(flag(parsed, "run-concurrency") ?? "2", "--run-concurrency"),
-        taskConcurrency: parseConcurrency(),
+        runConcurrency: parseRunConcurrency(),
+        taskConcurrency: parseTaskConcurrency(),
         maxCycles: parsePositiveInteger(flag(parsed, "max-cycles") ?? "100", "--max-cycles"),
         maxRounds: parsePositiveInteger(flag(parsed, "max-rounds") ?? "1", "--max-rounds"),
         maxTries: parsePositiveInteger(flag(parsed, "max-tries") ?? String(DEFAULT_MAX_TRIES), "--max-tries"),
@@ -581,8 +582,8 @@ switch (parsed.command) {
     const result = await superviseCodexDaemon({
       ...codexRunnerInput(),
       rootRunId: flag(parsed, "root-run-id") ?? null,
-      runConcurrency: parsePositiveInteger(flag(parsed, "run-concurrency") ?? "2", "--run-concurrency"),
-      taskConcurrency: parseConcurrency(),
+      runConcurrency: parseRunConcurrency(),
+      taskConcurrency: parseTaskConcurrency(),
       tickCycles: parsePositiveInteger(flag(parsed, "tick-cycles") ?? flag(parsed, "max-cycles") ?? "1", "--tick-cycles"),
       maxRounds: parsePositiveInteger(flag(parsed, "max-rounds") ?? "1", "--max-rounds"),
       maxTries: parsePositiveInteger(flag(parsed, "max-tries") ?? String(DEFAULT_MAX_TRIES), "--max-tries"),
@@ -799,11 +800,18 @@ function printHelp() {
     "  orbs init",
     "  orbs create-run --goal 'Refactor platform admin' --project-root $(pwd)",
     "  orbs run-loop --run-id <run_id> --executor codex-resumable --cwd $(pwd)",
+    "  orbs supervise-daemon --executor codex-resumable --parallel auto",
+    "  orbs supervise-daemon --executor codex-resumable --runs 2 --tasks 3",
     "  orbs dashboard --run-id <run_id> --port 7331",
     "  orbs run-threads --run-id <run_id>",
     "  orbs run-threads --run-id <run_id> --json true",
     "  orbs action --action-json '{\"type\":\"collectSubsessions\",\"parentTaskId\":\"task_...\"}'",
     "  orbs action --action-json '{\"type\":\"cancelSubsessions\",\"parentTaskId\":\"task_...\",\"reason\":\"manual stop\"}'",
+    "",
+    "Parallelism:",
+    "  --parallel auto       Pick conservative run/task slots from local CPU and memory size",
+    "  --runs <n|auto>       Runnable runs to supervise together; alias for --run-concurrency",
+    "  --tasks <n|auto>      Ready tasks per run; alias for --concurrency",
   ].join("\n"));
 }
 
@@ -1792,6 +1800,9 @@ function dashboardRunnerCommand(
   for (const name of [
     "limit",
     "concurrency",
+    "tasks",
+    "task-concurrency",
+    "parallel",
     "max-rounds",
     "max-cycles",
     "max-tries",
@@ -1810,8 +1821,11 @@ function dashboardRunnerCommand(
       cmd.push(`--${name}`, value);
     }
   }
-  if (flag(parsed, "concurrency") === undefined && flag(parsed, "limit") === undefined && options.defaultConcurrency) {
-    cmd.push("--concurrency", String(options.defaultConcurrency));
+  if (
+    firstFlag(["tasks", "task-concurrency", "concurrency", "limit", "parallel"]) === undefined &&
+    options.defaultConcurrency
+  ) {
+    cmd.push("--tasks", String(options.defaultConcurrency));
   }
   if (flag(parsed, "worktree-root") === undefined && options.defaultWorktreeRoot && flag(parsed, "start-hook") !== "none") {
     cmd.push("--worktree-root", options.defaultWorktreeRoot);
@@ -1840,7 +1854,11 @@ function supervisorCommand(
   for (const name of [
     "limit",
     "concurrency",
+    "tasks",
+    "task-concurrency",
+    "runs",
     "run-concurrency",
+    "parallel",
     "max-rounds",
     "max-cycles",
     "max-tries",
@@ -1859,8 +1877,11 @@ function supervisorCommand(
       cmd.push(`--${name}`, value);
     }
   }
-  if (flag(parsed, "concurrency") === undefined && flag(parsed, "limit") === undefined && options.defaultConcurrency) {
-    cmd.push("--concurrency", String(options.defaultConcurrency));
+  if (
+    firstFlag(["tasks", "task-concurrency", "concurrency", "limit", "parallel"]) === undefined &&
+    options.defaultConcurrency
+  ) {
+    cmd.push("--tasks", String(options.defaultConcurrency));
   }
   if (flag(parsed, "worktree-root") === undefined && options.defaultWorktreeRoot && flag(parsed, "start-hook") !== "none") {
     cmd.push("--worktree-root", options.defaultWorktreeRoot);
@@ -1901,8 +1922,67 @@ function parsePositiveInteger(raw: string, name: string) {
   return value;
 }
 
-function parseConcurrency() {
-  return parsePositiveInteger(flag(parsed, "concurrency") ?? flag(parsed, "limit") ?? "1", "--concurrency");
+function parseRunConcurrency() {
+  return parseConcurrencyValue({
+    names: ["runs", "run-concurrency"],
+    fallback: parallelModeIsAuto() ? "auto" : "2",
+    autoValue: autoRunConcurrency(),
+    displayName: "--runs",
+  });
+}
+
+function parseTaskConcurrency() {
+  return parseConcurrencyValue({
+    names: ["tasks", "task-concurrency", "concurrency", "limit"],
+    fallback: parallelModeIsAuto() ? "auto" : "1",
+    autoValue: autoTaskConcurrency(),
+    displayName: "--tasks",
+  });
+}
+
+function parseConcurrencyValue(input: { names: string[]; fallback: string; autoValue: number; displayName: string }) {
+  const raw = firstFlag(input.names) ?? input.fallback;
+  if (raw === "auto") {
+    return input.autoValue;
+  }
+  return parsePositiveInteger(raw, input.displayName);
+}
+
+function firstFlag(names: string[]) {
+  for (const name of names) {
+    const value = flag(parsed, name);
+    if (value !== undefined) return value;
+  }
+  return undefined;
+}
+
+function parallelModeIsAuto() {
+  const value = flag(parsed, "parallel");
+  if (value === undefined) return false;
+  if (value !== "auto") {
+    fail("--parallel currently supports auto");
+  }
+  return true;
+}
+
+function autoTaskConcurrency() {
+  const override = process.env.ORBS_AUTO_TASK_CONCURRENCY;
+  if (override !== undefined) {
+    return parsePositiveInteger(override, "ORBS_AUTO_TASK_CONCURRENCY");
+  }
+  const cpuCount = cpus().length || 1;
+  const cpuSlots = cpuCount >= 12 ? 4 : cpuCount >= 8 ? 3 : cpuCount >= 4 ? 2 : 1;
+  const memoryGiB = totalmem() / 1024 / 1024 / 1024;
+  const memorySlots = memoryGiB >= 24 ? 4 : memoryGiB >= 12 ? 3 : memoryGiB >= 6 ? 2 : 1;
+  return Math.max(1, Math.min(AUTO_MAX_TASK_CONCURRENCY, cpuSlots, memorySlots));
+}
+
+function autoRunConcurrency() {
+  const override = process.env.ORBS_AUTO_RUN_CONCURRENCY;
+  if (override !== undefined) {
+    return parsePositiveInteger(override, "ORBS_AUTO_RUN_CONCURRENCY");
+  }
+  return Math.max(1, Math.min(AUTO_MAX_RUN_CONCURRENCY, Math.ceil(autoTaskConcurrency() / 2)));
 }
 
 function parseNonNegativeInteger(raw: string, name: string) {
