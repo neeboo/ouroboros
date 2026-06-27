@@ -24,11 +24,12 @@ export const DASHBOARD_REACT_MODULES: DashboardReactModule[] = [
   },
   {
     id: "inspector",
-    label: "Run inspector",
+    label: "Codex-like chat inspector",
     status: "active",
     owns: [
       "inspector-panel",
       "conversation-timeline",
+      "chat-transcript",
       "inspector-composer-section",
       "inspector-evidence-disclosure",
       "changed-files",

@@ -547,6 +547,7 @@ class CodexResumableOrchestrator {
       sessionName: input.sessionName,
       cwd: input.cwd,
       status: "running",
+      agentSessionId: genericAgentSessionId(input.route, input.sessionName),
     });
     const recorder = this.createAttemptEventRecorder(attemptId);
     const result = await this.client({
@@ -713,7 +714,12 @@ class CodexResumableOrchestrator {
     this.harness.finishAttempt({ attemptId, output });
     const finishedAttempt = this.harness.getAttempt(attemptId);
     applyPostAttemptRunEffects(this.harness, input.run.id, input.task, finishedAttempt?.output ?? output);
-    this.updateAttemptThread({ attemptId, status: output.status, heartbeat: true });
+    this.updateAttemptThread({
+      attemptId,
+      status: output.status,
+      agentSessionId: genericAgentSessionId(input.route, input.sessionName),
+      heartbeat: true,
+    });
     if (decision === "retry") {
       this.harness.retryTask({ taskId: input.task.id });
     }
@@ -1045,6 +1051,13 @@ function missingResumableSessionOutput(source: string): AttemptOutput {
       "running attempt is missing an agent session id; automatic retry is disabled because this attempt cannot be resumed safely",
     ],
   };
+}
+
+function genericAgentSessionId(route: ResolvedExecutionRoute, sessionName: string) {
+  if (route.backend.kind === "acpx") {
+    return sessionName;
+  }
+  return null;
 }
 
 function jsonObjectsFromText(text: string | null) {

@@ -5,7 +5,9 @@ import { join } from "node:path";
 import { applyHarnessAction, Harness } from "../packages/harness/src";
 import { buildTaskPrompt } from "../packages/runner/src";
 import {
+  buildChatTranscriptForTest,
   buildDashboardTaskGraph,
+  codexEventToMessagePartForTest,
   DASHBOARD_ROUTE_NEXT_MILESTONE,
   DASHBOARD_ROUTES,
   dashboardRoutePaths,
@@ -15,9 +17,11 @@ import {
   dashboardEvidenceItemTextForTest,
   dashboardHtml,
   dashboardRunHistoryRowsHtmlForTest,
+  eventToMessagePartForTest,
   handleDashboardRequest,
   serveDashboard,
   shouldRetryDashboardBind,
+  shouldRouteInterruptForTest,
 } from "../packages/cli/src/dashboard";
 import { DASHBOARD_REACT_MODULES } from "../packages/cli/src/dashboard-app";
 import { buildDashboardWorkspaceModel } from "../packages/cli/src/dashboard-workspace-model";
@@ -238,6 +242,7 @@ describe("dashboard", () => {
       "dashboard.asset.canvasScript",
       "dashboard.asset.canvasCss",
       "dashboard.asset.dashboardCss",
+      "dashboard.asset.tailwindCss",
       "dashboard.api.recentRuns",
       "dashboard.api.runOverview",
       "dashboard.api.changedFiles",
@@ -260,6 +265,7 @@ describe("dashboard", () => {
       "/assets/dashboard-canvas.js",
       "/assets/dashboard-canvas.css",
       "/assets/dashboard.css",
+      "/assets/tailwindcss",
       "/api/runs",
       "/api/runs/:runId/overview",
       "/api/runs/:runId/changed-files",
@@ -1055,6 +1061,7 @@ describe("dashboard", () => {
       "dashboard.asset.canvasScript",
       "dashboard.asset.canvasCss",
       "dashboard.asset.dashboardCss",
+      "dashboard.asset.tailwindCss",
       "dashboard.api.recentRuns",
       "dashboard.api.runOverview",
       "dashboard.api.changedFiles",
@@ -1077,6 +1084,7 @@ describe("dashboard", () => {
       "/assets/dashboard-canvas.js",
       "/assets/dashboard-canvas.css",
       "/assets/dashboard.css",
+      "/assets/tailwindcss",
       "/api/runs",
       "/api/runs/:runId/overview",
       "/api/runs/:runId/changed-files",
@@ -1282,6 +1290,13 @@ describe("dashboard", () => {
     expect(dashboardCssBody).toContain("--app: #fafafa");
     expect(dashboardCssBody).toContain(".app-shell");
     expect(dashboardCssBody).not.toContain("linear-gradient");
+
+    const tailwindBoundaryResponse = await handleDashboardRequest(
+      new Request("http://localhost/assets/tailwindcss"),
+      dashboardInput,
+    );
+    expect(tailwindBoundaryResponse.status).toBe(200);
+    expect(tailwindBoundaryResponse.headers.get("content-type")).toContain("text/css");
 
     const jsResponse = await handleDashboardRequest(
       new Request("http://localhost/assets/dashboard-canvas.js"),
@@ -3596,5 +3611,421 @@ describe("dashboard", () => {
     expect(html).toContain("secondaryEvidenceOpen: parsed.secondaryEvidenceOpen === true,");
     expect(html).toContain("secondaryEvidenceOpen: state.secondaryEvidenceOpen === true,");
     expect(html).toContain("secondaryEvidenceOpen, flowScroll: captureFlowScrollState()");
+  });
+
+  test("AI SDK message-part mapper covers assistant text, reasoning, tool input/output, approval, and error events", () => {
+    const assistantMessage = codexEventToMessagePartForTest({
+      type: "item.created",
+      item: {
+        type: "message",
+        role: "assistant",
+        content: [{ type: "output_text", text: "Adding the dashboard chatbox tests." }],
+      },
+    });
+    expect(assistantMessage).toMatchObject({ type: "text", state: "done", label: "assistant" });
+    expect(assistantMessage?.text).toContain("Adding the dashboard chatbox tests.");
+
+    const assistantDelta = codexEventToMessagePartForTest({
+      type: "response.output_text.delta",
+      delta: "Composing chatbox prose",
+    });
+    expect(assistantDelta).toMatchObject({ type: "text", state: "active", label: "assistant" });
+
+    const assistantDone = codexEventToMessagePartForTest({
+      type: "response.output_text.done",
+      delta: "Final assistant text",
+    });
+    expect(assistantDone).toMatchObject({ type: "text", state: "done", label: "assistant" });
+
+    const reasoningStart = codexEventToMessagePartForTest({
+      type: "response.reasoning.start",
+      delta: "Planning",
+    });
+    expect(reasoningStart).toMatchObject({ type: "reasoning", state: "active", label: "thinking" });
+
+    const reasoningDelta = codexEventToMessagePartForTest({
+      type: "response.reasoning.delta",
+      delta: "Considering alternatives",
+    });
+    expect(reasoningDelta).toMatchObject({ type: "reasoning", state: "active" });
+
+    const reasoningEnd = codexEventToMessagePartForTest({
+      type: "response.reasoning.end",
+      delta: "Decision made",
+    });
+    expect(reasoningEnd).toMatchObject({ type: "reasoning", state: "done" });
+
+    const reasoningItem = codexEventToMessagePartForTest({
+      type: "item.created",
+      item: {
+        type: "reasoning",
+        summary: [{ type: "summary_text", text: "Planning the next step." }],
+      },
+    });
+    expect(reasoningItem).toMatchObject({ type: "reasoning", state: "done", label: "thinking" });
+
+    const toolInputStart = codexEventToMessagePartForTest({
+      type: "tool-input-start",
+      name: "shell",
+      delta: '{"command":["bun"',
+    });
+    expect(toolInputStart).toMatchObject({
+      type: "tool-input",
+      state: "input-streaming",
+      label: "shell",
+      name: "shell",
+    });
+
+    const toolInputAvailable = codexEventToMessagePartForTest({
+      type: "tool-input-available",
+      name: "shell",
+      arguments: JSON.stringify({ command: ["bun", "test", "tests/dashboard.test.ts"] }),
+    });
+    expect(toolInputAvailable).toMatchObject({ type: "tool-input", state: "input-available", label: "shell" });
+    expect(toolInputAvailable?.text).toContain("bun");
+    expect(toolInputAvailable?.text).toContain("tests/dashboard.test.ts");
+
+    const toolCall = codexEventToMessagePartForTest({
+      type: "item.created",
+      item: {
+        type: "function_call",
+        name: "shell",
+        arguments: JSON.stringify({ command: ["bun", "test"] }),
+      },
+    });
+    expect(toolCall).toMatchObject({ type: "tool-input", state: "input-available", label: "shell" });
+
+    const toolOutput = codexEventToMessagePartForTest({
+      type: "tool-output-available",
+      output: "1 test passed.",
+    });
+    expect(toolOutput).toMatchObject({ type: "tool-output", state: "output-available", label: "tool output" });
+    expect(toolOutput?.text).toBe("1 test passed.");
+
+    const toolOutputItem = codexEventToMessagePartForTest({
+      type: "item.created",
+      item: { type: "function_call_output", output: "1 test passed." },
+    });
+    expect(toolOutputItem).toMatchObject({ type: "tool-output", state: "output-available" });
+
+    const toolOutputError = codexEventToMessagePartForTest({
+      type: "tool-output-error",
+      error: "command failed: exit 1",
+    });
+    expect(toolOutputError).toMatchObject({ type: "tool-output", state: "output-error" });
+    expect(toolOutputError?.text).toContain("command failed");
+
+    const toolOutputItemError = codexEventToMessagePartForTest({
+      type: "item.created",
+      item: { type: "function_call_output", output: "Error: command failed with exception" },
+    });
+    expect(toolOutputItemError).toMatchObject({ type: "tool-output", state: "output-error" });
+
+    const approval = codexEventToMessagePartForTest({
+      type: "item.created",
+      item: { type: "approval_request", summary: "Approve shell command" },
+    });
+    expect(approval).toMatchObject({ type: "approval", state: "approval-requested", label: "approval" });
+    expect(approval?.text).toContain("Approve shell command");
+
+    const sessionCheck = codexEventToMessagePartForTest({ type: "session.created" });
+    expect(sessionCheck).toMatchObject({ type: "check", state: "active", label: "session" });
+
+    const errorMessage = codexEventToMessagePartForTest({ error: "API Error: 529 Overloaded" });
+    expect(errorMessage).toMatchObject({ type: "error", state: "error", label: "error" });
+
+    const unknown = codexEventToMessagePartForTest({ unrelated: "field" });
+    expect(unknown).toBeNull();
+  });
+
+  test("AI SDK message-part mapper maps hyphenated reasoning-start/delta/end chunks including textless markers", () => {
+    const hyphenatedStart = codexEventToMessagePartForTest({ type: "reasoning-start", delta: "Planning" });
+    expect(hyphenatedStart).toMatchObject({ type: "reasoning", state: "active", label: "thinking" });
+    expect(hyphenatedStart?.text).toBe("Planning");
+
+    const hyphenatedDelta = codexEventToMessagePartForTest({ type: "reasoning-delta", delta: "Considering options" });
+    expect(hyphenatedDelta).toMatchObject({ type: "reasoning", state: "active", label: "thinking" });
+    expect(hyphenatedDelta?.text).toBe("Considering options");
+
+    const hyphenatedEnd = codexEventToMessagePartForTest({ type: "reasoning-end", delta: "Decision made" });
+    expect(hyphenatedEnd).toMatchObject({ type: "reasoning", state: "done", label: "thinking" });
+    expect(hyphenatedEnd?.text).toBe("Decision made");
+
+    // start/end markers must still surface reasoning state when no delta text is present
+    const startWithoutDelta = codexEventToMessagePartForTest({ type: "reasoning-start" });
+    expect(startWithoutDelta).toMatchObject({ type: "reasoning", state: "active", label: "thinking" });
+
+    const endWithoutDelta = codexEventToMessagePartForTest({ type: "reasoning-end" });
+    expect(endWithoutDelta).toMatchObject({ type: "reasoning", state: "done", label: "thinking" });
+
+    // delta without text remains null so it does not produce empty reasoning noise
+    const deltaWithoutText = codexEventToMessagePartForTest({ type: "reasoning-delta" });
+    expect(deltaWithoutText).toBeNull();
+
+    // The dotworshipped response.reasoning_text.* aliases keep working alongside the hyphenated names
+    const aliasedStart = codexEventToMessagePartForTest({ type: "response.reasoning_text.start" });
+    expect(aliasedStart).toMatchObject({ type: "reasoning", state: "active", label: "thinking" });
+
+    const aliasedEnd = codexEventToMessagePartForTest({ type: "response.reasoning_text.end" });
+    expect(aliasedEnd).toMatchObject({ type: "reasoning", state: "done", label: "thinking" });
+  });
+
+  test("eventToMessagePart falls back to raw and stderr parts for unstructured streams", () => {
+    const stderrPart = eventToMessagePartForTest({ stream: "stderr", text: "child process exited" });
+    expect(stderrPart).toMatchObject({ type: "error", state: "error", label: "stderr" });
+
+    const stdoutPart = eventToMessagePartForTest({ stream: "stdout", text: "[client] initialize (running)" });
+    expect(stdoutPart).toMatchObject({ type: "raw", state: "active", label: "stdout" });
+    expect(stdoutPart?.text).toContain("[client] initialize");
+
+    const structuredPart = eventToMessagePartForTest({
+      stream: "codex-json",
+      payload: { type: "response.output_text.delta", delta: "Composing response." },
+    });
+    expect(structuredPart).toMatchObject({ type: "text", state: "active", label: "assistant" });
+
+    const empty = eventToMessagePartForTest({ stream: "codex-json", payload: { unrelated: "field" } });
+    expect(empty).toBeNull();
+  });
+
+  test("live dashboard renderer wires the canonical mapper names into the inline script", () => {
+    const html = dashboardHtml({ runId: "run_123" });
+
+    // The live renderer must reference the canonical AI SDK message-part mapper
+    // names so behavior verified through codexEventToMessagePartForTest matches
+    // what the browser sees. Divergent inline aliases (e.g. *ToChatPart) let
+    // tests pass while live rendering drifts.
+    expect(html).toContain("const codexEventToMessagePart = ");
+    expect(html).toContain("const eventToMessagePart = ");
+    expect(html).toContain("events.map(eventToMessagePart)");
+    expect(html).not.toContain("codexEventToChatPart");
+    expect(html).not.toContain("eventToChatPart");
+
+    // Hyphenated reasoning chunks must be mapped inline so the live dashboard
+    // surfaces reasoning-start/delta/end the same way the canonical mapper does.
+    expect(html).toContain('"reasoning-start"');
+    expect(html).toContain('"reasoning-delta"');
+    expect(html).toContain('"reasoning-end"');
+  });
+
+  test("buildChatTranscript orders messages chronologically with goal, sessions, and pending tasks", () => {
+    const earlier = new Date("2026-01-01T00:00:00.000Z").toISOString();
+    const later = new Date("2026-01-02T00:00:00.000Z").toISOString();
+    const group = {
+      id: "goal_1",
+      titleTask: { goal: "Run goal: redesign chatbox" },
+      root: { prompt: "Make the right panel a true chatbox." },
+      tasks: [
+        { id: "task_a", role: "worker", goal: "Implement chat parts", status: "done" },
+        { id: "task_b", role: "verifier", goal: "Verify chat parts", status: "running" },
+        { id: "task_c", role: "worker", goal: "Pending follow-up", status: "todo" },
+      ],
+      sessions: [
+        {
+          taskId: "task_b",
+          taskGoal: "Verify chat parts",
+          role: "verifier",
+          status: "running",
+          attemptId: "attempt_b",
+          sessionName: "session-b",
+          codexSessionId: "codex_b",
+          startedAt: later,
+          finishedAt: null,
+          latestText: null,
+          events: [
+            { stream: "codex-json", payload: { type: "response.output_text.delta", delta: "Verifying chat parts." } },
+            { stream: "stdout", text: "raw stdout line" },
+          ],
+          output: {
+            summary: "Verifier run in flight",
+            checks: [{ status: "passed", command: "bun test tests/dashboard.test.ts" }],
+            problems: [],
+            artifacts: [],
+            changedFiles: [],
+          },
+        },
+        {
+          taskId: "task_a",
+          taskGoal: "Implement chat parts",
+          role: "worker",
+          status: "done",
+          attemptId: "attempt_a",
+          sessionName: "session-a",
+          codexSessionId: "codex_a",
+          startedAt: earlier,
+          finishedAt: earlier,
+          latestText: null,
+          events: [
+            { stream: "codex-json", payload: { type: "item.created", item: { type: "message", role: "assistant", content: [{ type: "output_text", text: "Done." }] } } },
+          ],
+          output: { summary: "Shipped chat parts", checks: [], problems: [], artifacts: [], changedFiles: [] },
+        },
+      ],
+      lessons: [],
+      status: "running",
+    };
+
+    const transcript = buildChatTranscriptForTest(group);
+    expect(transcript.length).toBeGreaterThan(0);
+
+    // First message is always the run goal.
+    expect(transcript[0].role).toBe("goal");
+    expect(transcript[0].parts[0]).toMatchObject({ type: "text", label: "Run goal" });
+    expect(transcript[0].parts[0].text).toContain("redesign chatbox");
+
+    // Sessions are sorted oldest-first by startedAt: worker (earlier) before verifier (later).
+    const sessionMessages = transcript.filter((message) => message.role === "assistant");
+    expect(sessionMessages.length).toBe(2);
+    expect(sessionMessages[0].source?.attemptId).toBe("attempt_a");
+    expect(sessionMessages[1].source?.attemptId).toBe("attempt_b");
+
+    // The verifier session surfaces structured text plus a check and a raw fallback.
+    const verifierMessage = sessionMessages[1];
+    const verifierPartTypes = verifierMessage.parts.map((part) => part.type);
+    expect(verifierPartTypes).toContain("text");
+    expect(verifierPartTypes).toContain("check");
+    expect(verifierPartTypes).toContain("raw");
+
+    // Pending todo tasks without sessions appear after sessions.
+    const pendingTaskMessage = transcript.find((message) => message.source?.taskId === "task_c");
+    expect(pendingTaskMessage).toBeDefined();
+    expect(pendingTaskMessage?.role).toBe("system");
+  });
+
+  test("buildChatTranscript renders interruption parts for blocked or interrupted sessions", () => {
+    const group = {
+      id: "goal_interrupt",
+      titleTask: { goal: "Interrupt-driven goal" },
+      root: { prompt: "Original prompt" },
+      tasks: [
+        { id: "task_i", role: "worker", goal: "Worker goal", status: "blocked" },
+      ],
+      sessions: [
+        {
+          taskId: "task_i",
+          taskGoal: "Worker goal",
+          role: "worker",
+          status: "interrupted",
+          attemptId: "attempt_i",
+          startedAt: "2026-01-01T00:00:00.000Z",
+          finishedAt: null,
+          latestText: "Add more dashboard tests",
+          events: [],
+          output: null,
+        },
+      ],
+      lessons: [],
+      status: "blocked",
+    };
+
+    const transcript = buildChatTranscriptForTest(group);
+    const sessionMessage = transcript.find((message) => message.source?.attemptId === "attempt_i");
+    expect(sessionMessage).toBeDefined();
+    const interruption = sessionMessage?.parts.find((part) => part.type === "interruption");
+    expect(interruption).toBeDefined();
+    expect(interruption?.state).toBe("active");
+    expect(interruption?.text).toContain("Add more dashboard tests");
+  });
+
+  test("shouldRouteInterrupt returns true only when active work exists", () => {
+    type OverviewParam = NonNullable<Parameters<typeof shouldRouteInterruptForTest>[0]>;
+    const asOverview = (value: unknown): OverviewParam => value as unknown as OverviewParam;
+    const baseOverview = asOverview({
+      run: { id: "run_1", goal: "g", status: "done", projectId: null, createdAt: null },
+      project: null,
+      tasks: [],
+      sessions: [],
+      threads: [],
+      lessons: [],
+    });
+
+    expect(shouldRouteInterruptForTest(baseOverview, null)).toBe(false);
+
+    const runningRunOverview = asOverview({ ...baseOverview, run: { ...(baseOverview.run as object), status: "running" } });
+    expect(shouldRouteInterruptForTest(runningRunOverview, null)).toBe(true);
+
+    const runningSessionOverview = asOverview({
+      ...baseOverview,
+      sessions: [{ taskId: "task_a", taskGoal: "g", role: "worker", status: "running", attemptId: "attempt_a" }],
+    });
+    expect(shouldRouteInterruptForTest(runningSessionOverview, null)).toBe(true);
+
+    const queuedTaskOverview = asOverview({
+      ...baseOverview,
+      tasks: [{ id: "task_a", role: "worker", goal: "g", status: "todo", runId: "run_1", prompt: "", dependsOn: [], parentId: null, cycleId: "c" }],
+    });
+    expect(shouldRouteInterruptForTest(queuedTaskOverview, null)).toBe(true);
+
+    const groupWithRunningSession = {
+      id: "goal_1",
+      titleTask: { goal: "g" },
+      root: { prompt: "" },
+      tasks: [{ id: "task_a", role: "worker", goal: "g", status: "running" }],
+      sessions: [{ taskId: "task_a", status: "running", attemptId: "attempt_a" }],
+      lessons: [],
+    };
+    const groupOverview = asOverview({
+      ...baseOverview,
+      tasks: [{ id: "task_a", role: "worker", goal: "g", status: "running", runId: "run_1", prompt: "", dependsOn: [], parentId: null, cycleId: "c" }],
+      sessions: [{ taskId: "task_a", taskGoal: "g", role: "worker", status: "running", attemptId: "attempt_a" }],
+    });
+    expect(shouldRouteInterruptForTest(groupOverview, groupWithRunningSession)).toBe(true);
+  });
+
+  test("dashboard composer section renders data-composer-mode attribute that flips between interrupt and intake", () => {
+    const html = dashboardHtml({ runId: "run_123" });
+
+    // The composer section carries a dynamic data-composer-mode attribute driven by
+    // the browser-side interrupt router, plus placeholder/hint/button copy that adapts to it.
+    expect(html).toContain("data-composer-mode=\"' + escapeHtml(mode) + '\"");
+    expect(html).toContain("const shouldRouteInterruptClient = (overview, group) => {");
+    expect(html).toContain('const composerMode = () => shouldRouteInterruptClient(');
+    expect(html).toContain('const dashboardInspectorComposerHtml = () => {');
+    expect(html).toContain('mode === "interrupt"');
+    expect(html).toContain('? "Interrupt the active run with a new instruction"');
+    expect(html).toContain(': "Reply or direct the next step"');
+    expect(html).toContain('? "Cmd/Ctrl+Enter interrupts the active run · Shift+Enter for newline"');
+    expect(html).toContain(': "Cmd/Ctrl+Enter sends via intake · Shift+Enter for newline"');
+    expect(html).toContain('const buttonLabel = mode === "interrupt" ? "Interrupt" : "Send";');
+
+    // The client-side submitter reads the attribute and chooses the interrupt or intake endpoint.
+    expect(html).toContain('const composerRouteMode = () => {');
+    expect(html).toContain('const value = section.getAttribute("data-composer-mode") || "intake";');
+    expect(html).toContain('return value === "interrupt" ? "interrupt" : "intake";');
+    expect(html).toContain('? "/api/runs/" + encodeURIComponent(runId) + "/interrupt"');
+    expect(html).toContain(': "/api/runs/" + encodeURIComponent(runId) + "/intake"');
+    expect(html).toContain('const body = mode === "interrupt"');
+    expect(html).toContain('? { goal: prompt }');
+    expect(html).toContain(': { prompt, attachments: [], document: intakeDocument(prompt, []) };');
+    expect(html).toContain('setComposerStatus(mode === "interrupt" ? "Sending interrupt..." : "Creating intake run...", "pending");');
+    expect(html).toContain('setComposerStatus(mode === "interrupt" ? "Interrupt sent." : "Intake queued.", "sent");');
+  });
+
+  test("dashboard CSS styles chat parts so text, reasoning, tool, approval, and error are visually distinct", () => {
+    const css = dashboardCss();
+
+    // Primary chat-part container and per-type visual treatment.
+    expect(css).toContain(".chat-message-parts");
+    expect(css).toContain(".chat-part");
+    expect(css).toContain(".chat-part-label");
+    expect(css).toContain(".chat-part-text");
+    expect(css).toContain(".chat-part.chat-part-text");
+    expect(css).toContain(".chat-part.chat-part-reasoning");
+    expect(css).toContain(".chat-part.chat-part-tool-input");
+    expect(css).toContain(".chat-part.chat-part-tool-output");
+    expect(css).toContain(".chat-part.chat-part-approval");
+    expect(css).toContain(".chat-part.chat-part-interruption");
+    expect(css).toContain(".chat-part.chat-part-check");
+    expect(css).toContain(".chat-part.chat-part-evidence");
+    expect(css).toContain(".chat-part.chat-part-error");
+    expect(css).toContain(".chat-part.chat-part-raw");
+
+    // Composer status state styling matches the pending/sent/error contract.
+    expect(css).toContain(".inspector-composer-status.pending");
+    expect(css).toContain(".inspector-composer-status.sent");
+    expect(css).toContain(".inspector-composer-status.error");
+
+    // The interrupt-mode send button gets a stronger visual treatment.
+    expect(css).toContain('.inspector-composer-section[data-composer-mode="interrupt"]');
   });
 });

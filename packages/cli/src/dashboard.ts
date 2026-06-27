@@ -4,6 +4,24 @@ import { readFileSync } from "node:fs";
 import { isAbsolute, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { DASHBOARD_REACT_MODULES } from "./dashboard-app";
+import {
+  buildChatTranscript,
+  codexEventToMessagePart,
+  eventToMessagePart,
+  shouldRouteInterrupt,
+  type ChatGroupLike,
+  type ChatMessage,
+  type ChatMessagePart,
+  type ChatSessionLike,
+} from "./dashboard-messages";
+
+export {
+  buildChatTranscript as buildChatTranscriptForTest,
+  codexEventToMessagePart as codexEventToMessagePartForTest,
+  eventToMessagePart as eventToMessagePartForTest,
+  shouldRouteInterrupt as shouldRouteInterruptForTest,
+};
+export type { ChatMessage, ChatMessagePart, ChatGroupLike, ChatSessionLike };
 import { renderDashboardRunHistoryRows as renderDashboardRunHistoryRowsReact } from "./dashboard-sidebar";
 import { renderDashboardShell } from "./dashboard-shell";
 import type { DashboardRunHistoryEntry } from "./dashboard-types";
@@ -90,6 +108,7 @@ export const DASHBOARD_ROUTE_PATHS = {
   canvasScriptAsset: "/assets/dashboard-canvas.js",
   canvasCssAsset: "/assets/dashboard-canvas.css",
   dashboardCssAsset: "/assets/dashboard.css",
+  tailwindCssAsset: "/assets/tailwindcss",
   recentRunsApi: "/api/runs",
   runOverviewApi: "/api/runs/:runId/overview",
   changedFilesApi: "/api/runs/:runId/changed-files",
@@ -113,6 +132,7 @@ export const DASHBOARD_ROUTES: DashboardRouteDefinition[] = [
   { name: "dashboard.asset.canvasScript", method: "GET", path: DASHBOARD_ROUTE_PATHS.canvasScriptAsset, kind: "asset" },
   { name: "dashboard.asset.canvasCss", method: "GET", path: DASHBOARD_ROUTE_PATHS.canvasCssAsset, kind: "asset" },
   { name: "dashboard.asset.dashboardCss", method: "GET", path: DASHBOARD_ROUTE_PATHS.dashboardCssAsset, kind: "asset" },
+  { name: "dashboard.asset.tailwindCss", method: "GET", path: DASHBOARD_ROUTE_PATHS.tailwindCssAsset, kind: "asset" },
   { name: "dashboard.api.recentRuns", method: "GET", path: DASHBOARD_ROUTE_PATHS.recentRunsApi, kind: "api" },
   { name: "dashboard.api.runOverview", method: "GET", path: DASHBOARD_ROUTE_PATHS.runOverviewApi, kind: "api" },
   { name: "dashboard.api.changedFiles", method: "GET", path: DASHBOARD_ROUTE_PATHS.changedFilesApi, kind: "api" },
@@ -1070,6 +1090,7 @@ export function dashboardHtml(input: { runId: string }) {
     let secondaryEvidenceOpen = restoredDashboardState.secondaryEvidenceOpen === true;
     let restoredFlowScrollState = restoredDashboardState.flowScroll || null;
     const diffByPath = new Map();
+    let selectedGroupRef = null;
     let attachments = [];
     const resolvedBlockedTaskIdsFor = (tasks) => {
       const repairsByParent = new Map();
@@ -1490,6 +1511,169 @@ export function dashboardHtml(input: { runId: string }) {
       '<div class="turn-body"><div class="turn-head"><div><div class="turn-author">' + input.author + '</div>' +
       (input.summary ? '<div class="turn-summary">' + input.summary + '</div>' : '') + '</div>' +
       (input.action || '') + '</div>' + (input.body || '') + '</div></article>';
+    const chatPartClassName = (type, state) =>
+      'chat-part chat-part-' + escapeHtml(type) + ' chat-part-state-' + escapeHtml(state);
+    const chatPartHtml = (part) => {
+      if (!part || typeof part !== "object") return "";
+      const type = String(part.type || "raw");
+      const state = String(part.state || "active");
+      const label = String(part.label || "").trim();
+      const text = String(part.text || "").trim();
+      if (!text && !label) return "";
+      return '<div class="' + chatPartClassName(type, state) + '" data-chat-part-type="' + escapeHtml(type) + '" data-chat-part-state="' + escapeHtml(state) + '">' +
+        (label ? '<span class="chat-part-label">' + escapeHtml(label) + '</span>' : '') +
+        (text ? '<span class="chat-part-text">' + escapeHtml(text) + '</span>' : '') +
+        '</div>';
+    };
+    // Canonical AI SDK message-part mapper. Mirrors packages/cli/src/dashboard-messages.ts
+    // so tests against the imported boundary reflect live renderer behavior.
+    const codexEventToMessagePart = (payload) => {
+      if (!payload || typeof payload !== "object") return null;
+      const type = typeof payload.type === "string" ? payload.type : "";
+      const item = payload.item && typeof payload.item === "object" ? payload.item : null;
+      if (item) {
+        const itemType = typeof item.type === "string" ? item.type : "";
+        if (itemType === "message") {
+          const role = typeof item.role === "string" && item.role ? item.role : "message";
+          const content = Array.isArray(item.content) ? item.content : [];
+          const parts = [];
+          for (const part of content) {
+            if (!part || typeof part !== "object") continue;
+            const text = typeof part.text === "string" ? part.text : typeof part.output === "string" ? part.output : "";
+            if (text.trim()) parts.push(text.trim());
+          }
+          if (parts.length === 0) return null;
+          return { type: "text", state: "done", label: role, text: parts.join(" ").replace(/\\s+/g, " ") };
+        }
+        if (itemType === "function_call" || itemType === "tool_call") {
+          const name = typeof item.name === "string" && item.name ? item.name : "tool";
+          const summary = summarizeToolArguments(item.arguments) || "(invoked)";
+          return { type: "tool-input", state: "input-available", label: name, name, text: summary };
+        }
+        if (itemType === "function_call_output" || itemType === "tool_call_output") {
+          const raw = typeof item.output === "string" ? item.output : "";
+          const text = raw.replace(/\\s+/g, " ").trim();
+          if (!text) return null;
+          const isError = /error|failed|exception|traceback/i.test(text);
+          return { type: "tool-output", state: isError ? "output-error" : "output-available", label: "tool output", text: clampText(text, 480) };
+        }
+        if (itemType === "reasoning") {
+          const summary = Array.isArray(item.summary) ? item.summary : [];
+          const parts = [];
+          for (const part of summary) {
+            if (!part || typeof part !== "object") continue;
+            const text = typeof part.text === "string" ? part.text : typeof part.summary === "string" ? part.summary : "";
+            if (text.trim()) parts.push(text.trim());
+          }
+          if (parts.length === 0) return null;
+          return { type: "reasoning", state: "done", label: "thinking", text: parts.join(" ").replace(/\\s+/g, " ") };
+        }
+        if (itemType === "approval_request" || itemType === "approval") {
+          const summary = typeof item.summary === "string" ? item.summary : typeof item.reason === "string" ? item.reason : typeof item.message === "string" ? item.message : "";
+          return { type: "approval", state: "approval-requested", label: "approval", text: summary || "Approval requested" };
+        }
+      }
+      if (type === "response.output_text.delta" || type === "response.output_text.done") {
+        const delta = typeof payload.delta === "string" ? payload.delta : "";
+        const text = delta.replace(/\\s+/g, " ").trim();
+        if (!text) return null;
+        return { type: "text", state: type.indexOf(".delta") === type.length - 6 ? "active" : "done", label: "assistant", text };
+      }
+      // AI SDK UI stream chunk: reasoning-start / response.reasoning.start.
+      // Emits an active reasoning marker even without delta text.
+      if (type === "reasoning-start" || type === "response.reasoning.start" || type === "response.reasoning_text.start") {
+        const delta = typeof payload.delta === "string" ? payload.delta : "";
+        const text = delta.replace(/\\s+/g, " ").trim();
+        return { type: "reasoning", state: "active", label: "thinking", text };
+      }
+      // AI SDK UI stream chunk: reasoning-delta / response.reasoning.delta
+      if (type === "reasoning-delta" || type === "response.reasoning.delta" || type === "response.reasoning_text.delta") {
+        const delta = typeof payload.delta === "string" ? payload.delta : "";
+        const text = delta.replace(/\\s+/g, " ").trim();
+        if (!text) return null;
+        return { type: "reasoning", state: "active", label: "thinking", text };
+      }
+      // AI SDK UI stream chunk: reasoning-end / response.reasoning.end.
+      // Closes the reasoning span even without delta text.
+      if (type === "reasoning-end" || type === "response.reasoning.end" || type === "response.reasoning_text.end") {
+        const delta = typeof payload.delta === "string" ? payload.delta : "";
+        const text = delta.replace(/\\s+/g, " ").trim();
+        return { type: "reasoning", state: "done", label: "thinking", text };
+      }
+      if (type === "response.function_call_arguments.delta" || type === "response.function_call.delta" || type === "tool-input-start") {
+        const delta = typeof payload.delta === "string" ? payload.delta : "";
+        const text = delta.replace(/\\s+/g, " ").trim();
+        if (!text) return null;
+        const name = typeof payload.name === "string" ? payload.name : "tool";
+        return { type: "tool-input", state: "input-streaming", label: name, name, text };
+      }
+      if (type === "tool-input-available" || type === "response.function_call_arguments.done") {
+        const name = typeof payload.name === "string" ? payload.name : "tool";
+        const text = (typeof payload.arguments === "string" ? payload.arguments : typeof payload.delta === "string" ? payload.delta : "") || "";
+        return { type: "tool-input", state: "input-available", label: name, name, text: summarizeToolArguments(text) || "(invoked)" };
+      }
+      if (type === "tool-output-available" || type === "tool.call.output") {
+        const output = typeof payload.output === "string" ? payload.output : "";
+        const text = output.replace(/\\s+/g, " ").trim();
+        if (!text) return null;
+        const isError = /error|failed|exception|traceback/i.test(text);
+        return { type: "tool-output", state: isError ? "output-error" : "output-available", label: "tool output", text: clampText(text, 480) };
+      }
+      if (type === "tool-output-error" || type === "tool.call.error") {
+        const message = typeof payload.error === "string" ? payload.error : typeof payload.message === "string" ? payload.message : "";
+        return { type: "tool-output", state: "output-error", label: "tool output", text: message || "tool error" };
+      }
+      if (type === "session.created" || type === "session.updated" || type === "session.completed") {
+        const action = type.split(".")[1] || "started";
+        return { type: "check", state: "active", label: "session", text: action };
+      }
+      if (typeof payload.error === "string" && payload.error.trim()) {
+        return { type: "error", state: "error", label: "error", text: payload.error.trim() };
+      }
+      if (typeof payload.message === "string" && payload.message.trim()) {
+        return { type: "text", state: "done", label: "message", text: payload.message.trim() };
+      }
+      if (typeof payload.delta === "string" && payload.delta.trim()) {
+        return { type: "text", state: "active", label: "delta", text: payload.delta.trim() };
+      }
+      return null;
+    };
+    const eventToMessagePart = (event) => {
+      const structured = codexEventToMessagePart(event.payload || {});
+      if (structured) return structured;
+      const text = typeof event.text === "string" ? event.text.trim() : "";
+      if (!text) return null;
+      const stream = typeof event.stream === "string" ? event.stream : "stdout";
+      if (stream === "stderr") {
+        return { type: "error", state: "error", label: "stderr", text: clampText(text, 480) };
+      }
+      return { type: "raw", state: "active", label: stream || "log", text: clampText(text, 480) };
+    };
+    const renderChatPartsForSession = (session) => {
+      const events = Array.isArray(session.events) ? session.events : [];
+      const parts = events.map(eventToMessagePart).filter(Boolean);
+      let html = '';
+      if (parts.length === 0) return '';
+      const grouped = [];
+      let buffer = null;
+      for (const part of parts) {
+        if (!buffer) {
+          buffer = { ...part, text: part.text || "" };
+          continue;
+        }
+        if (buffer.type === part.type && buffer.label === part.label) {
+          buffer.text = clampText(String(buffer.text || "") + " " + String(part.text || ""), 600);
+          if (part.state === "done") buffer.state = "done";
+          continue;
+        }
+        grouped.push(buffer);
+        buffer = { ...part, text: part.text || "" };
+      }
+      if (buffer) grouped.push(buffer);
+      html = grouped.map(chatPartHtml).join("");
+      if (!html) return '';
+      return '<div class="chat-message-parts" data-chat-message-parts>' + html + '</div>';
+    };
     const sessionFlowTurn = (session) =>
       turn({
         kind: "session",
@@ -1507,6 +1691,7 @@ export function dashboardHtml(input: { runId: string }) {
           (session.codexSessionId ? '<br>codex ' + escapeHtml(session.codexSessionId) : '') +
           (modelMetaForSession(session) ? '<br>' + escapeHtml(modelMetaForSession(session)) : '') + '</div>' +
           '<div class="turn-text">' + escapeHtml(readableSummary(session)) + '</div>' +
+          renderChatPartsForSession(session) +
           conversationEvidence(session) +
           rawStreamDetails(session),
       });
@@ -1730,25 +1915,51 @@ export function dashboardHtml(input: { runId: string }) {
         '</section>';
     };
     const dashboardInspectorTimelineHtml = (group) => {
-      if (!group) return '<section class="inspector-card conversation-timeline-section" data-inspector-section="conversation" id="conversation-timeline"><h2>Conversation</h2><div class="empty">Select a goal to view the chronological conversation timeline.</div></section>';
-      return '<section class="inspector-card conversation-timeline-section" data-inspector-section="conversation" id="conversation-timeline" data-conversation-timeline><h2>Conversation</h2>' +
-        '<div class="conversation-timeline-meta">Chronological session timeline · oldest first.</div>' +
-        '<div class="conversation-timeline-scroll">' +
+      if (!group) return '<section class="inspector-card conversation-timeline-section chat-transcript-section" data-inspector-section="conversation" id="conversation-timeline" data-conversation-timeline data-chat-transcript><h2>Chat</h2><div class="chat-transcript-meta">Codex-style agent conversation · oldest first.</div><div class="chat-transcript-scroll conversation-timeline-scroll" data-conversation-timeline-scroll data-chat-transcript-scroll><div class="empty">Select a goal to view the chronological conversation timeline.</div></div></section>';
+      return '<section class="inspector-card conversation-timeline-section chat-transcript-section" data-inspector-section="conversation" id="conversation-timeline" data-conversation-timeline data-chat-transcript>' +
+        '<h2>Chat</h2>' +
+        '<div class="chat-transcript-meta conversation-timeline-meta">Codex-style agent conversation · oldest first.</div>' +
+        '<div class="chat-transcript-scroll conversation-timeline-scroll" data-conversation-timeline-scroll data-chat-transcript-scroll>' +
         renderConversationTimeline(group) +
         '</div>' +
         '</section>';
     };
-    const dashboardInspectorComposerHtml = () =>
-      '<section class="inspector-card inspector-composer-section" data-inspector-section="composer" id="inspector-composer-section" data-inspector-composer-section>' +
+    const shouldRouteInterruptClient = (overview, group) => {
+      if (!overview) return false;
+      const runStatus = overview.run?.status;
+      if (runStatus === "running") return true;
+      const sessions = overview.sessions || [];
+      if (sessions.some((session) => session.status === "running")) return true;
+      const tasks = overview.tasks || [];
+      if (tasks.some((task) => task.status === "running" || task.status === "todo")) return true;
+      if (group) {
+        const groupTaskIds = new Set((group.tasks || []).map((task) => task.id));
+        if (sessions.some((session) => groupTaskIds.has(session.taskId) && session.status === "running")) return true;
+      }
+      return false;
+    };
+    const composerMode = () => shouldRouteInterruptClient(latestOverview, selectedGroupRef) ? "interrupt" : "intake";
+    const dashboardInspectorComposerHtml = () => {
+      const mode = composerMode();
+      const placeholder = mode === "interrupt"
+        ? "Interrupt the active run with a new instruction"
+        : "Reply or direct the next step";
+      const hint = mode === "interrupt"
+        ? "Cmd/Ctrl+Enter interrupts the active run · Shift+Enter for newline"
+        : "Cmd/Ctrl+Enter sends via intake · Shift+Enter for newline";
+      const buttonLabel = mode === "interrupt" ? "Interrupt" : "Send";
+      return '<section class="inspector-card inspector-composer-section" data-inspector-section="composer" id="inspector-composer-section" data-inspector-composer-section data-composer-mode="' + escapeHtml(mode) + '">' +
         '<h2>Composer</h2>' +
         '<form class="inspector-composer" id="inspector-composer" data-inspector-composer-form>' +
-          '<textarea id="inspector-composer-input" name="prompt" class="inspector-composer-input" rows="2" placeholder="Reply or direct the next step" aria-label="Inspector composer"></textarea>' +
+          '<textarea id="inspector-composer-input" name="prompt" class="inspector-composer-input" rows="2" placeholder="' + escapeHtml(placeholder) + '" aria-label="Inspector composer"></textarea>' +
           '<div class="inspector-composer-actions">' +
-            '<span class="inspector-composer-hint">Enter sends via the intake planner.</span>' +
-            '<button type="submit" class="plain-button" data-inspector-composer-send>Send</button>' +
+            '<span class="inspector-composer-hint" data-composer-mode-hint>' + escapeHtml(hint) + '</span>' +
+            '<span class="inspector-composer-status" id="inspector-composer-status" data-composer-status aria-live="polite"></span>' +
+            '<button type="submit" class="plain-button" data-inspector-composer-send data-composer-send>' + escapeHtml(buttonLabel) + '</button>' +
           '</div>' +
         '</form>' +
       '</section>';
+    };
     const dashboardInspectorEvidenceHtml = (overview, group) =>
       group ? renderSubsessionThreadsSection(overview, group) + renderChangedFilesSection(group) : "";
     const dashboardInspectorSecondaryHtml = (overview, group) => {
@@ -2194,6 +2405,7 @@ export function dashboardHtml(input: { runId: string }) {
         persistDashboardState();
       }
       const selectedGroup = goalGroups.find((group) => group.id === selectedGoalId);
+      selectedGroupRef = selectedGroup || null;
       const projectName = overview.project ? overview.project.name : "Project Workspace";
       const projectRoot = overview.project ? overview.project.rootPath : "";
       const projectTitle = projectRoot ? projectName + " · " + projectRoot : projectName;
@@ -2537,6 +2749,44 @@ export function dashboardHtml(input: { runId: string }) {
     });
     const inspectorComposer = document.getElementById("inspector-composer");
     const inspectorComposerInput = document.getElementById("inspector-composer-input");
+    const inspectorComposerStatus = () => document.getElementById("inspector-composer-status");
+    const setComposerStatus = (message, kind) => {
+      const node = inspectorComposerStatus();
+      if (!node) return;
+      node.textContent = message || "";
+      node.classList.remove("pending", "sent", "error");
+      if (kind) node.classList.add(kind);
+    };
+    const composerRouteMode = () => {
+      const section = document.getElementById("inspector-composer-section");
+      if (!section) return "intake";
+      const value = section.getAttribute("data-composer-mode") || "intake";
+      return value === "interrupt" ? "interrupt" : "intake";
+    };
+    const submitInspectorComposer = (prompt) => {
+      const mode = composerRouteMode();
+      const endpoint = mode === "interrupt"
+        ? "/api/runs/" + encodeURIComponent(runId) + "/interrupt"
+        : "/api/runs/" + encodeURIComponent(runId) + "/intake";
+      const body = mode === "interrupt"
+        ? { goal: prompt }
+        : { prompt, attachments: [], document: intakeDocument(prompt, []) };
+      setComposerStatus(mode === "interrupt" ? "Sending interrupt..." : "Creating intake run...", "pending");
+      return postJson(endpoint, body)
+        .then((payload) => {
+          inspectorComposerInput.value = "";
+          setComposerStatus(mode === "interrupt" ? "Interrupt sent." : "Intake queued.", "sent");
+          if (mode === "intake") {
+            selectedGoalId = payload.runId || payload.taskId || selectedGoalId;
+            workspaceTitleExpanded = false;
+            persistDashboardState();
+          }
+          refreshOverview();
+        })
+        .catch((error) => {
+          setComposerStatus(error && error.message ? error.message : String(error), "error");
+        });
+    };
     if (inspectorComposer && inspectorComposerInput) {
       inspectorComposerInput.addEventListener("keydown", (event) => {
         if (event.key !== "Enter" || event.shiftKey || (!event.metaKey && !event.ctrlKey)) return;
@@ -2545,15 +2795,12 @@ export function dashboardHtml(input: { runId: string }) {
       });
       inspectorComposer.addEventListener("submit", (event) => {
         event.preventDefault();
-        const intakeInput = document.getElementById("intake-input");
         const inspectorInputValue = String(inspectorComposerInput.value || "").trim();
         if (!inspectorInputValue) {
-          setIntakeStatus("Write a prompt to send from the composer.");
+          setComposerStatus("Write a prompt to send from the composer.", "error");
           return;
         }
-        if (intakeInput) intakeInput.value = inspectorInputValue;
-        inspectorComposerInput.value = "";
-        document.getElementById("intake-composer").requestSubmit();
+        submitInspectorComposer(inspectorInputValue);
       });
     }
     overviewWorker.postMessage({ type: "start", runId, apiBase: window.location.origin });
@@ -2707,6 +2954,11 @@ export async function handleDashboardRequest(
   }
   if (url.pathname === DASHBOARD_ROUTE_PATHS.dashboardCssAsset) {
     return new Response(await bundledDashboardCss(), {
+      headers: { "content-type": "text/css; charset=utf-8" },
+    });
+  }
+  if (url.pathname === DASHBOARD_ROUTE_PATHS.tailwindCssAsset) {
+    return new Response("", {
       headers: { "content-type": "text/css; charset=utf-8" },
     });
   }

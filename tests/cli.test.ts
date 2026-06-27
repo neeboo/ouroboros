@@ -2102,6 +2102,11 @@ describe("CLI", () => {
     expect(attempt.input.model).toBeNull();
     expect(attempt.input.executor).toBe("acpx");
     expect(attempt.output.summary).toBe("claude selected");
+    expect(new Harness(dbPath).listExecutionThreads({ runId: run.id })[0]).toMatchObject({
+      attemptId,
+      agentSessionId: `task-${task.id}`,
+      sessionName: `task-${task.id}`,
+    });
     expect(
       new Harness(dbPath)
         .listAttemptEvents(attemptId)
