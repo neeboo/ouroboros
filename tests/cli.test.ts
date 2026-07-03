@@ -208,17 +208,13 @@ describe("CLI", () => {
       configPath,
       [
         "[agentDefaults.roles]",
-        'worker = "opencode"',
+        'worker = "claude-code"',
         'verifier = "claude-code"',
-        "",
-        "[agentBackends.opencode]",
-        'kind = "acpx"',
-        'agent = "opencode"',
-        'approval = "approve-reads"',
         "",
         '["agentBackends"."claude-code"]',
         'kind = "acpx"',
         'agent = "claude"',
+        'approval = "approve-reads"',
       ].join("\n"),
     );
 
@@ -227,19 +223,15 @@ describe("CLI", () => {
 
     expect(overview.run.context.agentDefaults).toEqual({
       roles: {
-        worker: "opencode",
+        worker: "claude-code",
         verifier: "claude-code",
       },
     });
     expect(overview.run.context.agentBackends).toMatchObject({
-      opencode: {
-        kind: "acpx",
-        agent: "opencode",
-        approval: "approve-reads",
-      },
       "claude-code": {
         kind: "acpx",
         agent: "claude",
+        approval: "approve-reads",
       },
     });
   });
@@ -2023,7 +2015,7 @@ describe("CLI", () => {
       "--goal",
       "Bootstrap ouroboros",
       "--context-json",
-      '{"agentDefaults":{"roles":{"worker":"opencode"}}}',
+      '{"agentDefaults":{"roles":{"worker":"claude-code"}}}',
     );
     const task = await runCliJson(
       "create-task",
@@ -2032,9 +2024,9 @@ describe("CLI", () => {
       "--role",
       "worker",
       "--goal",
-      "Run through opencode",
+      "Run through Claude Code",
       "--prompt",
-      "Use the fake opencode executor.",
+      "Use the fake Claude Code executor.",
     );
     const binDir = join(dir, "bin-agent-backend");
     const logPath = join(dir, "acpx-args.json");
@@ -2047,7 +2039,7 @@ describe("CLI", () => {
         "const args = Bun.argv.slice(2);",
         `writeFileSync(${JSON.stringify(logPath)}, JSON.stringify(args));`,
         "await new Response(Bun.stdin.stream()).text();",
-        "console.log(JSON.stringify({ status: 'done', summary: 'opencode selected', changedFiles: [], checks: [], artifacts: [], problems: [] }));",
+        "console.log(JSON.stringify({ status: 'done', summary: 'claude selected', changedFiles: [], checks: [], artifacts: [], problems: [] }));",
       ].join("\n"),
     );
     await chmod(join(binDir, "acpx"), 0o755);
@@ -2065,11 +2057,11 @@ describe("CLI", () => {
     const attempt = new Harness(dbPath).getAttempt(result.tasks[0].attemptId)!;
 
     expect(result.tasks[0].taskId).toBe(task.id);
-    expect(JSON.parse(await Bun.file(logPath).text())).toContain("opencode");
+    expect(JSON.parse(await Bun.file(logPath).text())).toContain("claude");
     expect(attempt.input.backend).toMatchObject({
-      id: "opencode",
+      id: "claude-code",
       kind: "acpx",
-      agent: "opencode",
+      agent: "claude",
       source: "role-default",
     });
     expect(attempt.input.cwd).toBe("/repo");
@@ -2802,7 +2794,7 @@ describe("CLI", () => {
 
   test("run-loop defers a run when goal-review is waiting on external recovery", async () => {
     await runCli("init");
-    const run = await runCliJson("create-run", "--goal", "Prove Hermes provider readiness");
+    const run = await runCliJson("create-run", "--goal", "Prove Claude Code provider readiness");
     const codexBin = join(dir, "fake-codex-goal-defer");
     await writeFile(
       codexBin,

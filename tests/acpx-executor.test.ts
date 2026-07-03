@@ -122,14 +122,14 @@ describe("acpx executor", () => {
     const calls: Array<{ cmd: string[]; stdin: string }> = [];
     const executor = createAcpxAgentExecutor({
       cwd: "/repo",
-      agent: "opencode",
+      agent: "codex",
       model: "sonnet",
       runCommand: async ({ cmd, stdin }) => {
         calls.push({ cmd, stdin });
         return {
           exitCode: 0,
           stdout: cmd.includes("-s")
-            ? '{"status":"done","summary":"opencode ok","changedFiles":[],"checks":[],"artifacts":[],"problems":[]}'
+            ? '{"status":"done","summary":"codex ok","changedFiles":[],"checks":[],"artifacts":[],"problems":[]}'
             : "",
           stderr: "",
         };
@@ -159,10 +159,10 @@ describe("acpx executor", () => {
     });
 
     expect(calls.map((call) => call.cmd)).toEqual([
-      ["acpx", "--cwd", "/repo", "--approve-reads", "--format", "text", "--model", "sonnet", "opencode", "sessions", "show", "task_1"],
-      ["acpx", "--cwd", "/repo", "--approve-reads", "--format", "text", "--model", "sonnet", "opencode", "-s", "task_1"],
+      ["acpx", "--cwd", "/repo", "--approve-reads", "--format", "text", "--model", "sonnet", "codex", "sessions", "show", "task_1"],
+      ["acpx", "--cwd", "/repo", "--approve-reads", "--format", "text", "--model", "sonnet", "codex", "-s", "task_1"],
     ]);
-    expect(output.summary).toBe("opencode ok");
+    expect(output.summary).toBe("codex ok");
   });
 
   test("constructs acpx commands for the built-in claude agent", async () => {
@@ -288,14 +288,14 @@ describe("acpx executor", () => {
     const calls: string[][] = [];
     const executor = createAcpxAgentExecutor({
       cwd: "/repo",
-      agentCommand: "reasonix acp",
+      agentCommand: "custom-acp",
       approval: "deny-all",
       runCommand: async ({ cmd }) => {
         calls.push(cmd);
         return {
           exitCode: 0,
           stdout: cmd.includes("-s")
-            ? '{"status":"done","summary":"reasonix ok","changedFiles":[],"checks":[],"artifacts":[],"problems":[]}'
+            ? '{"status":"done","summary":"custom acp ok","changedFiles":[],"checks":[],"artifacts":[],"problems":[]}'
             : "",
           stderr: "",
         };
@@ -325,8 +325,8 @@ describe("acpx executor", () => {
     });
 
     expect(calls).toEqual([
-      ["acpx", "--cwd", "/repo", "--deny-all", "--format", "text", "--agent", "reasonix acp", "sessions", "show", "task_1"],
-      ["acpx", "--cwd", "/repo", "--deny-all", "--format", "text", "--agent", "reasonix acp", "-s", "task_1"],
+      ["acpx", "--cwd", "/repo", "--deny-all", "--format", "text", "--agent", "custom-acp", "sessions", "show", "task_1"],
+      ["acpx", "--cwd", "/repo", "--deny-all", "--format", "text", "--agent", "custom-acp", "-s", "task_1"],
     ]);
   });
 
@@ -334,8 +334,8 @@ describe("acpx executor", () => {
     const envs: Array<Record<string, string | undefined> | undefined> = [];
     const executor = createAcpxAgentExecutor({
       cwd: "/repo",
-      agentCommand: "reasonix acp",
-      env: { REASONIX_HOME: "/tmp/reasonix-home" },
+      agentCommand: "custom-acp",
+      env: { CUSTOM_ACP_HOME: "/tmp/custom-acp-home" },
       runCommand: async ({ cmd, env }) => {
         envs.push(env);
         return {
@@ -370,55 +370,7 @@ describe("acpx executor", () => {
       },
     });
 
-    expect(envs.every((env) => env?.REASONIX_HOME === "/tmp/reasonix-home")).toBe(true);
-  });
-
-  test("prepares a writable Hermes home for hermes acp backends", async () => {
-    const envs: Array<Record<string, string | undefined> | undefined> = [];
-    const executor = createAcpxAgentExecutor({
-      cwd: "/repo",
-      agentCommand: "hermes acp",
-      prepareHermesHome: async ({ cwd, sessionName, sourceHome }) => {
-        expect(cwd).toBe("/repo");
-        expect(sessionName).toBe("task_1");
-        expect(sourceHome).toContain(".hermes");
-        return "/tmp/orbs-hermes-task_1";
-      },
-      runCommand: async ({ cmd, env }) => {
-        envs.push(env);
-        return {
-          exitCode: 0,
-          stdout: cmd.includes("-s")
-            ? '{"status":"done","summary":"hermes env ok","changedFiles":[],"checks":[],"artifacts":[],"problems":[]}'
-            : "",
-          stderr: "",
-        };
-      },
-    });
-
-    await executor({
-      prompt: "Do the task",
-      sessionName: "task_1",
-      run: runFixture,
-      route: routeFixture,
-      task: {
-        id: "task_1",
-        runId: "run_1",
-        parentId: null,
-        cycleId: "task_1",
-        status: "todo",
-        role: "worker",
-        goal: "Task",
-        prompt: "Do it",
-        dependsOn: [],
-        doneWhen: [],
-        worktreePath: null,
-        sessionRef: null,
-        contextVersion: 1,
-      },
-    });
-
-    expect(envs.every((env) => env?.HERMES_HOME === "/tmp/orbs-hermes-task_1")).toBe(true);
+    expect(envs.every((env) => env?.CUSTOM_ACP_HOME === "/tmp/custom-acp-home")).toBe(true);
   });
 
   test("reuses an existing acpx session when show succeeds", async () => {

@@ -1,25 +1,16 @@
 import { describe, expect, test } from "bun:test";
-import { access, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 
-import { buildAgentMatrix, doctorAgent, doctorHermes, parseAgentOutput, runSmokeMatrix } from "../scripts/acpx-agent-smoke";
+import { buildAgentMatrix, doctorAgent, parseAgentOutput, runSmokeMatrix } from "../scripts/acpx-agent-smoke";
 
 describe("acpx agent smoke script", () => {
-  test("builds optional agent matrix with experimental non-builtins", () => {
+  test("builds the supported agent matrix", () => {
     const matrix = buildAgentMatrix();
 
     expect(matrix.map((agent) => agent.id)).toEqual([
       "codex",
       "claude-code",
-      "opencode",
-      "openclaw",
-      "hermes",
-      "reasonix",
     ]);
-    expect(matrix.find((agent) => agent.id === "openclaw")?.experimental).toBe(true);
-    expect(matrix.find((agent) => agent.id === "hermes")?.experimental).toBe(true);
-    expect(matrix.find((agent) => agent.id === "reasonix")?.experimental).toBe(true);
+    expect(matrix.every((agent) => agent.experimental === false)).toBe(true);
   });
 
   test("parses final Orbs JSON from noisy agent output", () => {
@@ -143,60 +134,6 @@ describe("acpx agent smoke script", () => {
     expect(calls[0].stdin).toContain("Do not write, edit, delete, move, or create files.");
   });
 
-  test("runs Hermes smoke with a writable temporary HERMES_HOME", async () => {
-    const sourceHome = await mkdtemp(join(tmpdir(), "orbs-hermes-source-"));
-    const previousHome = process.env.HERMES_HOME;
-    const envs: Array<Record<string, string | undefined> | undefined> = [];
-    let preparedHome: string | undefined;
-    process.env.HERMES_HOME = sourceHome;
-    await writeFile(join(sourceHome, ".env"), "HERMES_TEST=1\n");
-
-    try {
-      const results = await runSmokeMatrix({
-        agents: [
-          {
-            id: "hermes",
-            rawAgentCommand: "hermes acp",
-            requiredCommands: ["hermes"],
-            experimental: true,
-          },
-        ],
-        commandExists: async () => true,
-        makeTempCwd: async () => "/tmp/orbs-smoke-test",
-        cleanupTempCwd: async () => undefined,
-        runCommand: async ({ env }) => {
-          envs.push(env);
-          preparedHome = env?.HERMES_HOME;
-          expect(preparedHome).toBeDefined();
-          expect(preparedHome).not.toBe(sourceHome);
-          expect(await readFile(join(preparedHome!, ".env"), "utf8")).toBe("HERMES_TEST=1\n");
-          return {
-            exitCode: 0,
-            stdout:
-              '{"status":"done","summary":"hermes smoke ok","changedFiles":[],"checks":[{"name":"cwd","status":"passed"},{"name":"read-only prompt","status":"passed"},{"name":"final Orbs JSON","status":"passed"}],"artifacts":[],"problems":[]}',
-            stderr: "",
-          };
-        },
-      });
-
-      expect(results[0]).toMatchObject({
-        agent: "hermes",
-        status: "passed",
-        experimental: true,
-        summary: "hermes smoke ok",
-      });
-      expect(envs[0]?.HERMES_HOME).toMatch(/orbs-hermes-smoke-/);
-      await expect(access(preparedHome!)).rejects.toThrow();
-    } finally {
-      if (previousHome === undefined) {
-        delete process.env.HERMES_HOME;
-      } else {
-        process.env.HERMES_HOME = previousHome;
-      }
-      await rm(sourceHome, { recursive: true, force: true });
-    }
-  });
-
   test("skips claude-code when the local ACP adapter is unavailable offline", async () => {
     const results = await runSmokeMatrix({
       agents: [
@@ -223,154 +160,6 @@ describe("acpx agent smoke script", () => {
         diagnostics: ["missing local npm package: @agentclientprotocol/claude-agent-acp@^0.36.1"],
       },
     ]);
-  });
-
-  test("reports Hermes doctor diagnostics without starting ACP when hermes is missing", async () => {
-    const result = await doctorHermes({
-      commandPath: async (command) => (command === "acpx" ? "/opt/homebrew/bin/acpx" : null),
-      runCommand: async () => {
-        throw new Error("must not start Hermes ACP checks without a Hermes command");
-      },
-    });
-
-    expect(result).toMatchObject({
-      agent: "hermes",
-      status: "skipped",
-      experimental: true,
-      artifacts: expect.arrayContaining([
-        "acpx: /opt/homebrew/bin/acpx",
-        "hermes: missing",
-        "hermes-acp: missing",
-        "selected raw agentCommand: hermes acp",
-        "scope: Hermes ACP/acpx doctor only; no write probe or worker default enabled",
-        expect.stringMatching(/^child PATH: /),
-      ]),
-    });
-    expect(result.diagnostics).toEqual(
-      expect.arrayContaining([
-        "missing command: hermes",
-        "missing command: hermes-acp",
-        "setup blocker: install Hermes CLI or expose hermes/hermes-acp on the normalized child PATH",
-        expect.stringMatching(/^child PATH: /),
-      ]),
-    );
-  });
-
-  test("selects hermes-acp only when discovery proves it is the available Hermes command", async () => {
-    const result = await doctorHermes({
-      commandPath: async (command) => {
-        if (command === "acpx") {
-          return "/opt/homebrew/bin/acpx";
-        }
-        if (command === "hermes-acp") {
-          return "/opt/homebrew/bin/hermes-acp";
-        }
-        return null;
-      },
-      runCommand: async ({ cmd }) => {
-        if (cmd.join(" ") === "acpx config show --format json") {
-          return { exitCode: 0, stdout: '{"authMethods":["custom"]}', stderr: "" };
-        }
-        throw new Error(`unexpected command: ${cmd.join(" ")}`);
-      },
-    });
-
-    expect(result).toMatchObject({
-      agent: "hermes",
-      status: "skipped",
-      artifacts: expect.arrayContaining([
-        "acpx: /opt/homebrew/bin/acpx",
-        "hermes: missing",
-        "hermes-acp: /opt/homebrew/bin/hermes-acp",
-        "selected raw agentCommand: hermes-acp",
-        "Hermes ACP check: skipped",
-        "acpx authMethods: custom",
-      ]),
-      diagnostics: expect.arrayContaining([
-        "Hermes ACP check skipped: hermes-acp was discovered without hermes; verify the adapter command manually before enabling execution",
-      ]),
-    });
-  });
-
-  test("reports Hermes ACP check success and missing acpx auth as the real setup blocker", async () => {
-    const calls: string[][] = [];
-    const result = await doctorHermes({
-      commandPath: async (command) => {
-        if (command === "acpx") {
-          return "/opt/homebrew/bin/acpx";
-        }
-        if (command === "hermes") {
-          return "/Users/ghostcorn/.local/bin/hermes";
-        }
-        return null;
-      },
-      runCommand: async ({ cmd }) => {
-        calls.push(cmd);
-        if (cmd.join(" ") === "hermes acp --check") {
-          return { exitCode: 0, stdout: "Hermes ACP check OK\n", stderr: "" };
-        }
-        if (cmd.join(" ") === "acpx config show --format json") {
-          return { exitCode: 0, stdout: '{"authMethods":[]}', stderr: "" };
-        }
-        throw new Error(`unexpected command: ${cmd.join(" ")}`);
-      },
-    });
-
-    expect(calls).toEqual([
-      ["hermes", "acp", "--check"],
-      ["acpx", "config", "show", "--format", "json"],
-    ]);
-    expect(result.artifacts).toEqual(
-      expect.arrayContaining([
-        "hermes: /Users/ghostcorn/.local/bin/hermes",
-        "Hermes ACP check: passed",
-        "acpx authMethods: none",
-      ]),
-    );
-    expect(result.diagnostics).toEqual(
-      expect.arrayContaining([
-        "setup blocker: acpx auth missing for Hermes; add auth.custom or auth.hermes-setup, or export ACPX_AUTH_CUSTOM / ACPX_AUTH_HERMES_SETUP",
-      ]),
-    );
-    expect(result.status).toBe("skipped");
-    expect(result.diagnostics).not.toContain("missing command: hermes-acp");
-  });
-
-  test("passes Hermes doctor when selected command, ACP check, and acpx auth are ready", async () => {
-    const result = await doctorHermes({
-      commandPath: async (command) => {
-        if (command === "acpx") {
-          return "/opt/homebrew/bin/acpx";
-        }
-        if (command === "hermes") {
-          return "/Users/ghostcorn/.local/bin/hermes";
-        }
-        return null;
-      },
-      runCommand: async ({ cmd }) => {
-        if (cmd.join(" ") === "hermes acp --check") {
-          return { exitCode: 0, stdout: "Hermes ACP check OK\n", stderr: "" };
-        }
-        if (cmd.join(" ") === "acpx config show --format json") {
-          return { exitCode: 0, stdout: '{"authMethods":["hermes-setup"]}', stderr: "" };
-        }
-        throw new Error(`unexpected command: ${cmd.join(" ")}`);
-      },
-    });
-
-    expect(result).toMatchObject({
-      agent: "hermes",
-      status: "passed",
-      experimental: true,
-      artifacts: expect.arrayContaining([
-        "hermes: /Users/ghostcorn/.local/bin/hermes",
-        "hermes-acp: missing",
-        "selected raw agentCommand: hermes acp",
-        "Hermes ACP check: passed",
-        "acpx authMethods: hermes-setup",
-      ]),
-      diagnostics: [expect.stringMatching(/^child PATH: /)],
-    });
   });
 
   test("passes Claude Code doctor without starting a prompt smoke", async () => {

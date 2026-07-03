@@ -1,13 +1,13 @@
 #!/usr/bin/env bun
 
-import { access, copyFile, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
-import { homedir, tmpdir } from "node:os";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { childEnvForProcess } from "../packages/runner/src/executors/proxy-env";
 import { parseAttemptOutput } from "../packages/runner/src/executors/output";
 
-type AgentId = "codex" | "claude-code" | "opencode" | "openclaw" | "hermes" | "reasonix";
+type AgentId = "codex" | "claude-code";
 
 export type SmokeAgent = {
   id: AgentId;
@@ -50,11 +50,6 @@ export type RunSmokeMatrixOptions = {
   timeoutMs?: number;
 };
 
-export type HermesDoctorOptions = {
-  commandPath?: (command: string) => Promise<string | null>;
-  runCommand?: (input: RunCommandInput) => Promise<CommandResult>;
-};
-
 export type AgentDoctorOptions = {
   commandPath?: (command: string) => Promise<string | null>;
   runCommand?: (input: RunCommandInput) => Promise<CommandResult>;
@@ -65,10 +60,6 @@ export function buildAgentMatrix(): SmokeAgent[] {
   return [
     { id: "codex", acpxAgent: "codex", requiredCommands: ["codex"], experimental: false },
     { id: "claude-code", acpxAgent: "claude", requiredCommands: ["claude"], experimental: false },
-    { id: "opencode", acpxAgent: "opencode", requiredCommands: ["opencode"], experimental: false },
-    { id: "openclaw", acpxAgent: "openclaw", requiredCommands: ["openclaw"], experimental: true },
-    { id: "hermes", rawAgentCommand: "hermes acp", requiredCommands: ["hermes"], experimental: true },
-    { id: "reasonix", rawAgentCommand: "reasonix acp", requiredCommands: ["reasonix"], experimental: true },
   ];
 }
 
@@ -123,69 +114,7 @@ export async function runSmokeMatrix(options: RunSmokeMatrixOptions = {}): Promi
   return results;
 }
 
-export async function doctorHermes(options: HermesDoctorOptions = {}): Promise<SmokeResult> {
-  const commandPath = options.commandPath ?? defaultCommandPath;
-  const runCommand = options.runCommand ?? defaultRunCommand;
-  const env = childEnvForProcess();
-  const [acpx, hermes, hermesAcp] = await Promise.all([commandPath("acpx"), commandPath("hermes"), commandPath("hermes-acp")]);
-  const selectedRawAgentCommand = hermes ? "hermes acp" : hermesAcp ? "hermes-acp" : "hermes acp";
-  const diagnostics = [`child PATH: ${env.PATH ?? ""}`];
-  const artifacts = [
-    `child PATH: ${env.PATH ?? ""}`,
-    `acpx: ${acpx ?? "missing"}`,
-    `hermes: ${hermes ?? "missing"}`,
-    `hermes-acp: ${hermesAcp ?? "missing"}`,
-    `selected raw agentCommand: ${selectedRawAgentCommand}`,
-    "scope: Hermes ACP/acpx doctor only; no write probe or worker default enabled",
-  ];
-
-  if (!acpx) {
-    diagnostics.push("missing command: acpx");
-  }
-  if (!hermes && !hermesAcp) {
-    diagnostics.push("missing command: hermes");
-    diagnostics.push("missing command: hermes-acp");
-  }
-  let hermesCheckStatus: "passed" | "failed" | "skipped" = "skipped";
-  let hasCompatibleAuth = false;
-  if (!hermes && !hermesAcp) {
-    diagnostics.push("setup blocker: install Hermes CLI or expose hermes/hermes-acp on the normalized child PATH");
-  } else {
-    const hermesCheck = await checkHermesAcp({ hermes, hermesAcp, runCommand });
-    hermesCheckStatus = hermesCheck.status;
-    artifacts.push(`Hermes ACP check: ${hermesCheck.status}`);
-    if (hermesCheck.diagnostic) {
-      diagnostics.push(hermesCheck.diagnostic);
-    }
-
-    const auth = acpx ? await readAcpxAuthMethods(runCommand) : { methods: [], diagnostic: "acpx authMethods: skipped because acpx is missing" };
-    hasCompatibleAuth = hasHermesAcpxAuth(auth.methods, env);
-    artifacts.push(`acpx authMethods: ${auth.methods.length > 0 ? auth.methods.join(", ") : "none"}`);
-    if (auth.diagnostic) {
-      diagnostics.push(auth.diagnostic);
-    }
-    if (hermesCheck.status === "passed" && !hasCompatibleAuth) {
-      diagnostics.push(
-        "setup blocker: acpx auth missing for Hermes; add auth.custom or auth.hermes-setup, or export ACPX_AUTH_CUSTOM / ACPX_AUTH_HERMES_SETUP",
-      );
-    }
-  }
-
-  const status = acpx && hermesCheckStatus === "passed" && hasCompatibleAuth ? "passed" : "skipped";
-
-  return {
-    agent: "hermes",
-    status,
-    experimental: true,
-    artifacts: artifacts.map(redact),
-    diagnostics: diagnostics.map(redact),
-  };
-}
-
 export async function doctorAgent(agentId: AgentId, options: AgentDoctorOptions = {}): Promise<SmokeResult> {
-  if (agentId === "hermes") {
-    return doctorHermes(options);
-  }
   const agent = buildAgentMatrix().find((candidate) => candidate.id === agentId);
   if (!agent) {
     throw new Error(`unknown smoke agent: ${agentId}`);
@@ -249,30 +178,6 @@ export async function doctorAcpxAgent(agent: SmokeAgent, options: AgentDoctorOpt
   };
 }
 
-async function checkHermesAcp(input: {
-  hermes: string | null;
-  hermesAcp: string | null;
-  runCommand: (input: RunCommandInput) => Promise<CommandResult>;
-}) {
-  if (input.hermes) {
-    const result = await input.runCommand({ cmd: ["hermes", "acp", "--check"], stdin: "", timeoutMs: 20_000 });
-    if (result.exitCode === 0) {
-      return { status: "passed" as const };
-    }
-    return {
-      status: "failed" as const,
-      diagnostic: `setup blocker: Hermes ACP check failed; run hermes acp --check or hermes acp --setup\n${commandDiagnostic(result)}`,
-    };
-  }
-  if (input.hermesAcp) {
-    return {
-      status: "skipped" as const,
-      diagnostic: "Hermes ACP check skipped: hermes-acp was discovered without hermes; verify the adapter command manually before enabling execution",
-    };
-  }
-  return { status: "skipped" as const };
-}
-
 async function readAcpxAuthMethods(runCommand: (input: RunCommandInput) => Promise<CommandResult>) {
   const result = await runCommand({ cmd: ["acpx", "config", "show", "--format", "json"], stdin: "", timeoutMs: 10_000 });
   if (result.exitCode !== 0) {
@@ -292,15 +197,6 @@ async function readAcpxAuthMethods(runCommand: (input: RunCommandInput) => Promi
   }
 }
 
-function hasHermesAcpxAuth(methods: string[], env: Record<string, string | undefined>) {
-  return (
-    methods.includes("custom") ||
-    methods.includes("hermes-setup") ||
-    Boolean(env.ACPX_AUTH_CUSTOM?.trim()) ||
-    Boolean(env.ACPX_AUTH_HERMES_SETUP?.trim())
-  );
-}
-
 async function smokeAgent(input: {
   agent: SmokeAgent;
   cwd: string;
@@ -309,19 +205,12 @@ async function smokeAgent(input: {
 }): Promise<SmokeResult> {
   const base = acpxBaseCommand(input.agent, input.cwd);
   const prompt = smokePrompt(input.cwd, input.agent);
-  const hermesEnv = await prepareHermesSmokeEnv(input.agent);
-  let response: CommandResult;
-  try {
-    response = await input.runCommand({
-      cmd: [...base, "exec"],
-      stdin: prompt,
-      cwd: input.cwd,
-      env: hermesEnv.env,
-      timeoutMs: input.timeoutMs,
-    });
-  } finally {
-    await hermesEnv.cleanup();
-  }
+  const response = await input.runCommand({
+    cmd: [...base, "exec"],
+    stdin: prompt,
+    cwd: input.cwd,
+    timeoutMs: input.timeoutMs,
+  });
   if (response.exitCode !== 0) {
     return failed(input.agent, ["prompt failed", commandDiagnostic(response)]);
   }
@@ -482,42 +371,6 @@ async function defaultCleanupTempCwd(cwd: string) {
   await rm(cwd, { recursive: true, force: true });
 }
 
-async function prepareHermesSmokeEnv(agent: SmokeAgent) {
-  if (!isHermesAgentCommand(agent.rawAgentCommand)) {
-    return { env: undefined, cleanup: async () => undefined };
-  }
-
-  const sourceHome = process.env.HERMES_HOME?.trim() || join(homedir(), ".hermes");
-  const target = await mkdtemp(join(tmpdir(), "orbs-hermes-smoke-"));
-  await mkdir(join(target, "logs"), { recursive: true });
-  await mkdir(join(target, "sessions"), { recursive: true });
-  await copyIfExists(join(sourceHome, ".env"), join(target, ".env"));
-  await copyIfExists(join(sourceHome, "config.yaml"), join(target, "config.yaml"));
-  await copyIfExists(join(sourceHome, "auth.json"), join(target, "auth.json"));
-
-  return {
-    env: { HERMES_HOME: target },
-    cleanup: async () => {
-      await rm(target, { recursive: true, force: true });
-    },
-  };
-}
-
-function isHermesAgentCommand(agentCommand: string | undefined) {
-  return agentCommand?.trim() === "hermes acp" || agentCommand?.trim() === "hermes-acp";
-}
-
-async function copyIfExists(from: string, to: string) {
-  try {
-    await access(from);
-    await copyFile(from, to);
-  } catch (error) {
-    if ((error as { code?: string }).code !== "ENOENT") {
-      throw error;
-    }
-  }
-}
-
 function failed(agent: SmokeAgent, diagnostics: string[]): SmokeResult {
   return {
     agent: agent.id,
@@ -549,14 +402,18 @@ function redact(value: string) {
 if (import.meta.main) {
   const args = Bun.argv.slice(2);
   const selected = new Set(args.filter((arg) => !arg.startsWith("-")));
-  const doctor = args.includes("--doctor") || selected.has("hermes-doctor");
-  const selectedAgents = buildAgentMatrix().filter((agent) => selected.has(agent.id));
-  const doctorAgentIds = selected.has("hermes-doctor")
-    ? ["hermes" as AgentId]
-    : selectedAgents.length === 0
-      ? ["hermes" as AgentId]
-      : selectedAgents.map((agent) => agent.id);
-  const results = doctor ? await Promise.all(doctorAgentIds.map((agentId) => doctorAgent(agentId))) : await runSmokeMatrix({ agents: selectedAgents.length === 0 ? buildAgentMatrix() : selectedAgents });
+  const doctor = args.includes("--doctor");
+  const matrix = buildAgentMatrix();
+  const supportedIds = new Set<string>(matrix.map((agent) => agent.id));
+  const unknownAgents = [...selected].filter((agentId) => !supportedIds.has(agentId));
+  if (unknownAgents.length > 0) {
+    console.error(`unsupported agent(s): ${unknownAgents.join(", ")}. Supported agents: ${matrix.map((agent) => agent.id).join(", ")}`);
+    process.exit(1);
+  }
+
+  const selectedAgents = matrix.filter((agent) => selected.has(agent.id));
+  const agents = selectedAgents.length === 0 ? matrix : selectedAgents;
+  const results = doctor ? await Promise.all(agents.map((agent) => doctorAgent(agent.id))) : await runSmokeMatrix({ agents });
   console.log(JSON.stringify({ status: results.some((result) => result.status === "failed") ? "failed" : "done", results }, null, 2));
   process.exitCode = results.some((result) => result.status === "failed" && !result.experimental) ? 1 : 0;
 }

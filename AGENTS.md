@@ -4,6 +4,8 @@ This repository is building a local harness for autonomous coding loops. Treat i
 
 ## Core Loop
 
+For normal project work, follow `docs/default-runbook.md` first. The default route is Codex for `planner`, `verifier`, and `goal-review`, plus Claude Code for `worker`.
+
 Use this order for non-trivial work:
 
 1. Define or inspect the goal contract.

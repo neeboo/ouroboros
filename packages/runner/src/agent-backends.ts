@@ -115,7 +115,7 @@ function runDefault(context: Record<string, unknown>) {
 }
 
 function acpxAgent(value: string | null): AcpxBuiltInAgent | null {
-  return value === "codex" || value === "claude" || value === "opencode" || value === "openclaw" ? value : null;
+  return value === "codex" || value === "claude" ? value : null;
 }
 
 function approvalMode(value: string | null): ApprovalMode | null {

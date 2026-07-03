@@ -149,7 +149,7 @@ function externalSetupBlockerReason(output: AttemptOutput) {
       haystack.includes("apiconnectionerror") ||
       haystack.includes("connection error") ||
       haystack.includes("provider connectivity")) &&
-    (haystack.includes("hermes") || haystack.includes("acpx") || haystack.includes("provider"))
+    (haystack.includes("acpx") || haystack.includes("provider") || haystack.includes("claude") || haystack.includes("codex"))
   ) {
     return "provider connectivity requires external environment change";
   }

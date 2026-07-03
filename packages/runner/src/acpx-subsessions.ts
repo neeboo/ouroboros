@@ -28,7 +28,6 @@ export interface AcpxSubsessionRunnerOptions {
   runCommand?: RunCommand;
   spawn?: (input: AcpxSubsessionSpawnInput) => AcpxSubsessionSpawnResult;
   runSync?: (input: AcpxSubsessionSpawnInput) => CommandResult;
-  prepareHermesHome?: (input: { cwd: string; sessionName: string; sourceHome: string }) => Promise<string | null>;
   env?: Record<string, string | undefined>;
 }
 

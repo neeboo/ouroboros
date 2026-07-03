@@ -60,42 +60,28 @@ describe("config", () => {
       configPath,
       [
         "[agentDefaults.roles]",
-        'worker = "opencode"',
+        'worker = "claude-code"',
         'verifier = "claude-code"',
-        "",
-        "[agentBackends.opencode]",
-        'kind = "acpx"',
-        'agent = "opencode"',
-        'approval = "approve-reads"',
-        "",
-        "[agentBackends.opencode.env]",
-        'OPENCODE_HOME = "/tmp/opencode-home"',
         "",
         '["agentBackends"."claude-code"]',
         'kind = "acpx"',
         'agent = "claude"',
+        'approval = "approve-reads"',
       ].join("\n"),
     );
 
     await expect(loadOuroborosConfig(configPath)).resolves.toMatchObject({
       agentDefaults: {
         roles: {
-          worker: "opencode",
+          worker: "claude-code",
           verifier: "claude-code",
         },
       },
       agentBackends: {
-        opencode: {
-          kind: "acpx",
-          agent: "opencode",
-          approval: "approve-reads",
-          env: {
-            OPENCODE_HOME: "/tmp/opencode-home",
-          },
-        },
         "claude-code": {
           kind: "acpx",
           agent: "claude",
+          approval: "approve-reads",
         },
       },
     });
@@ -107,7 +93,7 @@ describe("config", () => {
       configPath,
       [
         "[agentDefaults]",
-        'global = "opencode"',
+        'global = "claude-code"',
         "",
         "[agentDefaults.roles]",
         'verifier = "claude-code"',
@@ -116,7 +102,7 @@ describe("config", () => {
 
     await expect(loadOuroborosConfig(configPath)).resolves.toMatchObject({
       agentDefaults: {
-        global: "opencode",
+        global: "claude-code",
         roles: {
           verifier: "claude-code",
         },

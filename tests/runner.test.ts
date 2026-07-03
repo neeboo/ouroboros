@@ -3634,8 +3634,8 @@ describe("runner", () => {
         },
         agentBackends: {
           "task-acpx": { kind: "acpx", agent: "claude" },
-          "role-acpx": { kind: "acpx", agent: "opencode" },
-          "global-acpx": { kind: "acpx", agentCommand: "reasonix acp", env: { REASONIX_HOME: "/tmp/reasonix-home" } },
+          "role-acpx": { kind: "acpx", agent: "claude" },
+          "global-acpx": { kind: "acpx", agentCommand: "custom-acp", env: { CUSTOM_ACP_HOME: "/tmp/custom-acp-home" } },
         },
       },
     };
@@ -3664,14 +3664,14 @@ describe("runner", () => {
     expect(resolveAgentBackend({ run, task: baseTask })).toMatchObject({
       id: "role-acpx",
       kind: "acpx",
-      agent: "opencode",
+      agent: "claude",
       source: "role-default",
     });
     expect(resolveAgentBackend({ run, task: { ...baseTask, role: "planner" } })).toMatchObject({
       id: "global-acpx",
       kind: "acpx",
-      agentCommand: "reasonix acp",
-      env: { REASONIX_HOME: "/tmp/reasonix-home" },
+      agentCommand: "custom-acp",
+      env: { CUSTOM_ACP_HOME: "/tmp/custom-acp-home" },
       source: "run-default",
     });
     expect(resolveAgentBackend({ run: { ...run, context: {} }, task: baseTask, cliAgentBackend: "claude" })).toMatchObject({
@@ -3823,7 +3823,7 @@ describe("runner", () => {
       context: {
         agentDefaults: {
           roles: {
-            worker: "opencode",
+            worker: "claude-code",
           },
         },
       },
@@ -3831,7 +3831,7 @@ describe("runner", () => {
     const taskId = harness.createTask({
       runId,
       role: "worker",
-      goal: "Use opencode",
+      goal: "Use Claude Code",
       prompt: "Work.",
     });
 
@@ -3862,24 +3862,21 @@ describe("runner", () => {
       sessionName: `task-${taskId}`,
       cwd: process.cwd(),
       backend: {
-        id: "opencode",
+        id: "claude-code",
         kind: "acpx",
-        agent: "opencode",
+        agent: "claude",
         source: "role-default",
       },
       route: {
         role: "worker",
         executionMode: "generic",
         backend: {
-          id: "opencode",
+          id: "claude-code",
           kind: "acpx",
         },
+        model: null,
       },
-      model: {
-        model: "global-model",
-        source: "global",
-        role: "worker",
-      },
+      model: null,
     });
   });
 
@@ -4217,12 +4214,12 @@ describe("runner", () => {
   });
 
   test("blocked verifier stop hook skips repair for external setup blockers", async () => {
-    const runId = harness.createRun({ goal: "Prove Hermes support" });
+    const runId = harness.createRun({ goal: "Prove Claude Code support" });
     const verifierTask = harness.createTask({
       runId,
       role: "verifier",
-      goal: "Verify Hermes readiness",
-      prompt: "Verify Hermes.",
+      goal: "Verify Claude Code readiness",
+      prompt: "Verify Claude Code.",
     });
 
     const result = await runNextReadyTask({
@@ -4230,16 +4227,16 @@ describe("runner", () => {
       runId,
       executor: async () => ({
         status: "blocked",
-        summary: "Hermes readiness is blocked by an external setup blocker.",
+        summary: "Claude Code readiness is blocked by an external setup blocker.",
         artifacts: [
           {
             kind: "external_setup_blocker",
-            command: "bun run scripts/acpx-agent-smoke.ts hermes --doctor",
-            diagnostic: "setup blocker: install Hermes CLI or expose hermes/hermes-acp on the normalized child PATH",
+            command: "bun run scripts/acpx-agent-smoke.ts claude-code --doctor",
+            diagnostic: "setup blocker: install Claude Code CLI or expose claude on the normalized child PATH",
           },
         ],
-        checks: [{ name: "Hermes doctor", status: "failed", evidence: "missing command: hermes" }],
-        problems: ["missing command: hermes; install or expose it on PATH"],
+        checks: [{ name: "Claude Code doctor", status: "failed", evidence: "missing command: claude" }],
+        problems: ["missing command: claude; install or expose it on PATH"],
       }),
       stopHooks: [createRepairTaskHook({ harness })],
     });
@@ -4255,12 +4252,12 @@ describe("runner", () => {
   });
 
   test("blocked verifier stop hook skips repair for acpx auth setup blockers", async () => {
-    const runId = harness.createRun({ goal: "Prove Hermes support" });
+    const runId = harness.createRun({ goal: "Prove Claude Code support" });
     const verifierTask = harness.createTask({
       runId,
       role: "verifier",
-      goal: "Verify Hermes auth",
-      prompt: "Verify Hermes acpx auth.",
+      goal: "Verify Claude Code auth",
+      prompt: "Verify Claude Code acpx auth.",
     });
 
     const result = await runNextReadyTask({
@@ -4268,17 +4265,17 @@ describe("runner", () => {
       runId,
       executor: async () => ({
         status: "blocked",
-        summary: "Hermes ACP is available, but acpx auth is not configured.",
+        summary: "Claude Code ACP is available, but acpx auth is not configured.",
         artifacts: [
           {
             kind: "external_setup_blocker",
-            command: "bun run scripts/acpx-agent-smoke.ts hermes --doctor",
+            command: "bun run scripts/acpx-agent-smoke.ts claude-code --doctor",
             diagnostic:
-              "setup blocker: acpx auth missing for Hermes; add auth.custom or auth.hermes-setup, or export ACPX_AUTH_CUSTOM / ACPX_AUTH_HERMES_SETUP",
+              "setup blocker: acpx auth missing for Claude Code; add auth.custom or export ACPX_AUTH_CUSTOM",
           },
         ],
-        checks: [{ name: "Hermes ACP check", status: "passed", evidence: "Hermes ACP check OK" }],
-        problems: ["setup blocker: acpx auth missing for Hermes"],
+        checks: [{ name: "Claude Code ACP check", status: "passed", evidence: "Claude Code ACP adapter OK" }],
+        problems: ["setup blocker: acpx auth missing for Claude Code"],
       }),
       stopHooks: [createRepairTaskHook({ harness })],
     });
@@ -4294,12 +4291,12 @@ describe("runner", () => {
   });
 
   test("blocked verifier stop hook treats setup auth text as external even without artifact kind", async () => {
-    const runId = harness.createRun({ goal: "Prove Hermes support" });
+    const runId = harness.createRun({ goal: "Prove Claude Code support" });
     const verifierTask = harness.createTask({
       runId,
       role: "verifier",
-      goal: "Verify Hermes auth",
-      prompt: "Verify Hermes acpx auth.",
+      goal: "Verify Claude Code auth",
+      prompt: "Verify Claude Code acpx auth.",
     });
 
     const result = await runNextReadyTask({
@@ -4307,8 +4304,8 @@ describe("runner", () => {
       runId,
       executor: async () => ({
         status: "blocked",
-        summary: "setup blocker: acpx auth missing for Hermes",
-        problems: ["add auth.custom or auth.hermes-setup before enabling execution"],
+        summary: "setup blocker: acpx auth missing for Claude Code",
+        problems: ["add auth.custom before enabling execution"],
       }),
       stopHooks: [createRepairTaskHook({ harness })],
     });
@@ -4323,13 +4320,13 @@ describe("runner", () => {
     });
   });
 
-  test("blocked verifier stop hook skips repair for Hermes provider connection blockers", async () => {
-    const runId = harness.createRun({ goal: "Prove Hermes support" });
+  test("blocked verifier stop hook skips repair for provider connection blockers", async () => {
+    const runId = harness.createRun({ goal: "Prove Claude Code support" });
     const verifierTask = harness.createTask({
       runId,
       role: "verifier",
-      goal: "Verify Hermes smoke",
-      prompt: "Verify Hermes acpx read-only prompt.",
+      goal: "Verify Claude Code smoke",
+      prompt: "Verify Claude Code acpx read-only prompt.",
     });
 
     const result = await runNextReadyTask({
@@ -4337,15 +4334,15 @@ describe("runner", () => {
       runId,
       executor: async () => ({
         status: "blocked",
-        summary: "Hermes ACP/acpx read-only prompt readiness remains unproven because provider connectivity failed.",
+        summary: "Claude Code ACP/acpx read-only prompt readiness remains unproven because provider connectivity failed.",
         checks: [
           {
-            name: "bun run scripts/acpx-agent-smoke.ts hermes",
+            name: "bun run scripts/acpx-agent-smoke.ts claude-code",
             status: "failed",
             evidence: "API call failed after 3 retries: Connection error.",
           },
         ],
-        problems: ["Hermes smoke reached session/new, then the provider returned APIConnectionError."],
+        problems: ["Claude Code smoke reached session/new, then the provider returned APIConnectionError."],
       }),
       stopHooks: [createRepairTaskHook({ harness })],
     });

@@ -90,6 +90,14 @@ Initialize the local database:
 orbs init
 ```
 
+For normal project work, use the default runbook:
+
+```text
+docs/default-runbook.md
+```
+
+It keeps the default path simple: Codex runs `planner`, `verifier`, and `goal-review`; Claude Code runs `worker`.
+
 Create a self-iteration run:
 
 ```bash
@@ -211,7 +219,7 @@ orbs create-task \
   --config-json '{"agentBackend":"claude-code"}'
 ```
 
-See `docs/agent-backends.md` for capability boundaries, smoke testing, and custom `agentCommand` examples for ACP servers such as Hermes or Reasonix.
+See `docs/default-runbook.md` for the recommended end-to-end run commands. See `docs/agent-backends.md` for capability boundaries, smoke testing, and the experimental custom `agentCommand` escape hatch.
 
 Claude Code uses its local Claude configuration by default. When a route resolves to `claude-code`, Orbs drops inherited `modelDefaults` and CLI `--model` values, including inert metadata such as `base_url` and `env_key`. A task can still set an explicit `config.modelPreference` when the Claude adapter should receive a specific `--model`.
 

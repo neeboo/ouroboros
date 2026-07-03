@@ -130,7 +130,7 @@ Optional but useful fields:
 
 ### ExecutionThread
 
-An execution thread is the harness-owned record for a live or recently live agent process/session. It is intentionally agent-neutral: Codex, Claude Code, opencode, Reasonix, or another ACP-compatible agent may all write the same shape.
+An execution thread is the harness-owned record for a live or recently live agent process/session. It is intentionally agent-neutral: Codex, Claude Code, or an experimental ACP-compatible adapter may all write the same shape.
 
 Required fields:
 
@@ -246,9 +246,8 @@ Agent backend resolution is also protocol-level state. A run can define named ba
     }
   },
   "agentBackends": {
-    "opencode": { "kind": "acpx", "agent": "opencode" },
     "claude-code": { "kind": "acpx", "agent": "claude" },
-    "hermes": { "kind": "acpx", "agentCommand": "hermes acp" },
+    "acpx-codex": { "kind": "acpx", "agent": "codex" },
     "codex-resumable": { "kind": "codex-resumable" }
   }
 }
@@ -272,7 +271,7 @@ then CLI --executor
 
 Model and backend selection are joined into one execution route before a task runs. The route records the task role, resolved backend, resolved model preference, and execution mode. `executionMode = "codex-resumable"` means the Codex resumable client owns start/resume. `executionMode = "generic"` means the runner uses the resolved backend through the normal executor factory, including ACP/acpx agents such as Claude Code. New role-specific agents should plug into this route layer before executor implementation details.
 
-Supported backend kinds are `acpx`, `codex-cli`, `codex-resumable`, and `noop`. For `acpx`, built-in agent ids are `codex`, `claude`, `opencode`, and `openclaw`; custom ACP servers use `agentCommand`. Agent event streams are supplemental evidence only. Attempt status, checks, artifacts, problems, and changed files still come from the final Orbs structured JSON plus Orbs stop hooks. See `docs/agent-backends.md` for the researched boundaries, including the warning that remote or Gateway agents must prove cwd/worktree behavior before write tasks.
+Supported backend kinds are `acpx`, `codex-cli`, `codex-resumable`, and `noop`. For `acpx`, built-in agent ids are limited to `codex` and `claude`; `claude-code` is the recommended worker backend alias. Custom ACP servers can still be reached through `agentCommand`, but that path is experimental and is not part of the supported backend matrix. Agent event streams are supplemental evidence only. Attempt status, checks, artifacts, problems, and changed files still come from the final Orbs structured JSON plus Orbs stop hooks. See `docs/agent-backends.md` for the supported boundaries and deprecated backend policy.
 
 Runs may be bound to a project by `project_id`, or by a project root path that creates/reuses a matching `projects.root_path` row. Old databases keep `runs.project_id` nullable, and existing `context_json` remains compatible.
 

@@ -27,7 +27,6 @@ export interface AcpxCodexExecutorOptions {
   approval?: ApprovalMode;
   model?: string;
   env?: Record<string, string | undefined>;
-  prepareHermesHome?: (input: { cwd: string; sessionName: string; sourceHome: string }) => Promise<string | null>;
   timeoutMs?: number;
   idleTimeoutMs?: number;
   runCommand?: RunCommand;
@@ -37,7 +36,7 @@ export interface AcpxCodexExecutorFactory {
   (options: AcpxCodexExecutorOptions): TaskExecutor;
 }
 
-export type AcpxBuiltInAgent = "codex" | "claude" | "opencode" | "openclaw";
+export type AcpxBuiltInAgent = "codex" | "claude";
 
 export type AcpxAgentExecutorOptions = AcpxCodexExecutorOptions &
   (

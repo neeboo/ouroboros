@@ -1552,7 +1552,7 @@ describe("Harness actions", () => {
     const runId = harness.createRun({
       goal: "Prove backend support",
       context: {
-        targetBackends: ["codex", "hermes"],
+        targetBackends: ["codex", "claude-code"],
         keep: true,
       },
     });
@@ -1560,12 +1560,12 @@ describe("Harness actions", () => {
     const result = applyHarnessAction(harness, {
       type: "updateRunContext",
       runId,
-      goal: "Prove Hermes support first",
+      goal: "Prove Claude Code support first",
       contextPatch: {
-        targetBackends: ["hermes"],
-        scope: "hermes-first",
+        targetBackends: ["claude-code"],
+        scope: "claude-first",
       },
-      reason: "narrow user scope to Hermes",
+      reason: "narrow user scope to Claude Code",
     });
     const run = harness.getRun(runId)!;
     const event = harness.listHarnessActionEvents({ limit: 1 })[0];
@@ -1575,26 +1575,26 @@ describe("Harness actions", () => {
       actionType: "updateRunContext",
       eventId: expect.any(String),
     });
-    expect(run.goal).toBe("Prove Hermes support first");
+    expect(run.goal).toBe("Prove Claude Code support first");
     expect(run.status).toBe("todo");
     expect(run.context).toEqual({
-      targetBackends: ["hermes"],
+      targetBackends: ["claude-code"],
       keep: true,
-      scope: "hermes-first",
+      scope: "claude-first",
     });
     expect(result.artifacts).toContainEqual(
       expect.objectContaining({
         kind: "run_context_update",
         runId,
         previousGoal: "Prove backend support",
-        goal: "Prove Hermes support first",
+        goal: "Prove Claude Code support first",
         patchedKeys: ["scope", "targetBackends"],
       }),
     );
     expect(event).toMatchObject({
       actionType: "updateRunContext",
       status: "done",
-      request: expect.objectContaining({ runId, reason: "narrow user scope to Hermes" }),
+      request: expect.objectContaining({ runId, reason: "narrow user scope to Claude Code" }),
     });
   });
 

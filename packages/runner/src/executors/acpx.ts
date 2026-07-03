@@ -1,7 +1,3 @@
-import { access, copyFile, mkdir, mkdtemp } from "node:fs/promises";
-import { homedir, tmpdir } from "node:os";
-import { join } from "node:path";
-
 import { parseAttemptOutput, parseAttemptOutputOrBlocked } from "./output";
 import { commandProblem, runLocalCommand } from "./command";
 import type { AcpxAgentExecutorFactory, AcpxCodexExecutorFactory, ApprovalMode, RunCommand } from "./types";
@@ -19,11 +15,7 @@ export const createAcpxAgentExecutor: AcpxAgentExecutorFactory = (options) => {
 
   return async ({ prompt, sessionName, recorder }) => {
     const env = await acpxCommandEnv({
-      cwd: options.cwd,
-      sessionName,
-      agentCommand: options.agentCommand,
       env: options.env,
-      prepareHermesHome: options.prepareHermesHome,
     });
     const base = acpxBaseCommand({
       cwd: options.cwd,
@@ -156,51 +148,9 @@ function acpxBaseCommand(input: {
 }
 
 async function acpxCommandEnv(input: {
-  cwd: string;
-  sessionName: string;
-  agentCommand?: string;
   env?: Record<string, string | undefined>;
-  prepareHermesHome?: (input: { cwd: string; sessionName: string; sourceHome: string }) => Promise<string | null>;
 }) {
-  const env = { ...(input.env ?? {}) };
-  if (isHermesAgentCommand(input.agentCommand) && !env.HERMES_HOME) {
-    const sourceHome = process.env.HERMES_HOME?.trim() || join(homedir(), ".hermes");
-    const prepareHermesHome = input.prepareHermesHome ?? defaultPrepareHermesHome;
-    const hermesHome = await prepareHermesHome({ cwd: input.cwd, sessionName: input.sessionName, sourceHome });
-    if (hermesHome) {
-      env.HERMES_HOME = hermesHome;
-    }
-  }
-  return env;
-}
-
-function isHermesAgentCommand(agentCommand: string | undefined) {
-  return agentCommand?.trim() === "hermes acp" || agentCommand?.trim() === "hermes-acp";
-}
-
-async function defaultPrepareHermesHome(input: { sessionName: string; sourceHome: string }) {
-  const target = await mkdtemp(join(tmpdir(), `orbs-hermes-${safePathPart(input.sessionName)}-`));
-  await mkdir(join(target, "logs"), { recursive: true });
-  await mkdir(join(target, "sessions"), { recursive: true });
-  await copyIfExists(join(input.sourceHome, ".env"), join(target, ".env"));
-  await copyIfExists(join(input.sourceHome, "config.yaml"), join(target, "config.yaml"));
-  await copyIfExists(join(input.sourceHome, "auth.json"), join(target, "auth.json"));
-  return target;
-}
-
-async function copyIfExists(from: string, to: string) {
-  try {
-    await access(from);
-    await copyFile(from, to);
-  } catch (error) {
-    if ((error as { code?: string }).code !== "ENOENT") {
-      throw error;
-    }
-  }
-}
-
-function safePathPart(value: string) {
-  return value.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 48) || "session";
+  return { ...(input.env ?? {}) };
 }
 
 function agentLabel(input: { agent?: string; agentCommand?: string }) {

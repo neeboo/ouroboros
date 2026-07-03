@@ -540,8 +540,6 @@ const SUBSESSION_BUILT_IN_BACKEND_IDS = new Set([
   "codex-cli",
   "acpx-codex",
   "noop",
-  "opencode",
-  "openclaw",
 ]);
 
 function applySubsessionAction(
