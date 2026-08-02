@@ -4,19 +4,69 @@ This repository is building a local harness for autonomous coding loops. Treat i
 
 ## Core Loop
 
-For normal project work, follow `docs/default-runbook.md` first. The default route is Codex for `planner`, `verifier`, and `goal-review`, plus Claude Code for `worker`.
+For normal project work, follow `docs/default-runbook.md` first. The default route is Codex for `designer`, `planner`, `verifier`, `outcome-review`, and `goal-review`, plus Claude Code for `worker`.
+
+The Designer-first control plane is the default operating mode. A run starts with a `designer` task that reads the active founder charter, strategy signals, lessons, run evidence, and due outcome reviews. The designer emits one of:
+
+- an evidence-backed `proposeDesign` action with a frozen evaluation contract;
+- a cited quiescent decision when no signal justifies new work;
+- a `recordSignal` action that captures fresh evidence for a later cycle.
+
+Planner runs only start from accepted proposals. A high-risk proposal that has not passed its authority gate cannot create delivery runs by writing prompt prose — the fixed `createRunsFromDesign` action reads the stored accepted proposal and copies the frozen contract into the child run context.
 
 Use this order for non-trivial work:
 
-1. Define or inspect the goal contract.
-2. Let planning sharpen the task graph and verifier contract.
-3. Freeze the verifier contract before execution.
-4. Run workers against the frozen contract.
-5. Run verifiers against evidence, not agent confidence.
-6. Create repair tasks for verifier failures.
-7. Run goal review only when active work is drained.
+1. Activate or inspect the founder charter.
+2. Let the designer research evidence and propose (or quiesce).
+3. Apply the deterministic authority gate; record human decisions through `decideDesign`.
+4. Let planning sharpen the task graph and verifier contract from the accepted proposal.
+5. Freeze the verifier contract before execution.
+6. Run workers against the frozen contract.
+7. Run verifiers against evidence, not agent confidence.
+8. Create repair tasks for verifier failures.
+9. Run goal review only when active work is drained.
+10. After verified integration, run outcome review against the frozen evaluation contract.
 
 Execution may satisfy a contract, but it must not quietly weaken the contract.
+
+## Designer Boundaries
+
+The designer is a bounded product founder. It can research, form hypotheses, compare alternatives, and propose product or system changes inside the active charter. It does not optimize for its own survival, revenue alone, benchmark scores alone, or novelty.
+
+Hard boundaries:
+
+- The designer cannot amend the founder charter. Only a human or explicitly configured governance actor can activate a new charter version.
+- The designer cannot represent a high-risk proposal as human-approved through its own output payload. Decisions are recorded as `design_decisions` rows by the authority gate or by an explicit `decideDesign` action.
+- The designer cannot bypass budget, reversibility, evidence expiry, or human checkpoints. The authority evaluator rejects proposals that violate the charter before any scoring.
+- The designer cannot mutate strategy records through prose. Durable conclusions return through fixed actions: `recordSignal`, `proposeDesign`, `decideDesign`, `recordDesignOutcome`, `createRunsFromDesign`.
+- The designer must consider removal. A proposal that adds complexity without naming its maintenance cost is incomplete.
+
+## Authority And Human Checkpoints
+
+The authority evaluator is a pure function over the active charter and a proposal. Automatic authority is limited to changes that are reversible, inside the experiment budget, free of new sensitive-data or legal obligations, and below recurring-spend thresholds.
+
+Always-human checkpoints:
+
+- mission, capital limits, or charter principles;
+- new legal, privacy, or security obligations;
+- destructive operations and production deployment;
+- new runtime dependencies, schema migrations, or infrastructure commitments;
+- prompt or verifier contract amendments;
+- ambiguous product behavior that evidence cannot resolve.
+
+The designer may propose a charter amendment. The proposal records the diff and rationale; only the configured governance actor can activate it.
+
+## Evidence Expiry And Quiescence
+
+Every strategy signal records its source, observation time, confidence, evidence, and expiry. Expired market, pricing, and model claims cannot authorize a new investment until refreshed. Conflicting signals are preserved rather than overwritten.
+
+When no trigger and no evidence-backed opportunity exists, the designer returns a cited quiescent decision. A quiescent decision is not silence: it is an auditable record that names which signals were inspected, why no work is justified, and when the next review cadence falls.
+
+## Outcome Review
+
+An implemented proposal moves into `measuring` after verified integration. The harness creates a bounded `outcome-review` task whose config carries the frozen evaluation contract, baseline, success metrics, guard metrics, and review time. The reviewer records baseline, observed metrics, evidence, unexpected effects, and a `retain`, `revise`, or `retire` recommendation through `recordDesignOutcome`.
+
+Adverse outcomes (revise, retire) become new strategy signals without silently reopening completed delivery tasks. The next designer cycle decides whether the signal justifies new work.
 
 ## Contracts
 

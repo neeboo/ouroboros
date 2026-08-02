@@ -279,7 +279,116 @@ Supported backend kinds are `acpx`, `codex-cli`, `codex-resumable`, and `noop`. 
 
 Runs may be bound to a project by `project_id`, or by a project root path that creates/reuses a matching `projects.root_path` row. Old databases keep `runs.project_id` nullable, and existing `context_json` remains compatible.
 
-The CLI exposes `self-iterate-launch` as the autonomous self-improvement entry point. It creates a root assessment run, starts the dashboard, and launches `self-improve-daemon`. Each assessment emits at most one evidence-backed child goal through `nextRuns`; that child planner creates the executable task graph. The daemon supervises the full run tree, integrates verified changes locally, and creates another assessment only after the repository fingerprint changes. An unchanged fingerprint leaves the controller quiescent. The launch defaults to automatic parallelism, `--worktree-root .ouroboros/worktrees`, and `--start-hook git-worktree`.
+The CLI exposes `self-iterate-launch` as the autonomous self-improvement entry point. It creates a root assessment run, starts the dashboard, and launches `self-improve-daemon`. The root run starts with a `designer` task. The designer reads the active founder charter, strategy signals, lessons, run evidence, and due outcome reviews, then emits one evidence-backed proposal (with a frozen evaluation contract) or a cited quiescent decision through fixed actions. Accepted low-risk proposals create a child planner run automatically; high-risk proposals block on a human `decideDesign`. Implemented proposals move into outcome review after verified integration. The daemon supervises the full run tree, integrates verified changes locally, and creates another assessment only after the repository fingerprint changes. An unchanged fingerprint leaves the controller quiescent. The launch defaults to automatic parallelism, `--worktree-root .ouroboros/worktrees`, and `--start-hook git-worktree`.
+
+## Designer Control Plane
+
+The Designer Control Plane is the strategy loop above planning. It owns product direction, system shape, capital allocation, and the decision to add, replace, simplify, or remove capabilities. See `docs/designer-control-plane.md` for the full design.
+
+### Strategy entities
+
+The minimal database model:
+
+- `founder_charters` — immutable versions, one active version per project.
+- `strategy_signals` — sourced observations with confidence, evidence, and expiry.
+- `design_proposals` — options, recommendation, frozen evaluation contract, investment shape, status, and run references.
+- `design_decisions` — append-only approval, rejection, deferral, or retirement records with reasons and charter version.
+- `design_outcomes` — post-integration or post-release results tied to metrics and evidence.
+
+Proposal state machine:
+
+```text
+draft -> proposed -> experimenting -> accepted -> implemented -> measuring -> retained
+                       |              |              |
+                       v              v              v
+                    rejected        retired        revise
+```
+
+### Fixed designer actions
+
+Agents and adapters must use fixed action methods for any durable strategy record. The runner exports small builders; the parser validates each payload before stop hooks run.
+
+```json
+{
+  "actions": [
+    {
+      "type": "recordSignal",
+      "payload": {
+        "signalClass": "delivery",
+        "source": "retro-2026-09-01",
+        "title": "Idle timeout false positive under CPU saturation",
+        "summary": "Worker attempts report exit 124 when first chunk arrives after idle window.",
+        "confidence": 0.7,
+        "observationTime": "2026-09-01T12:00:00Z",
+        "expiresAt": "2026-12-01T00:00:00Z",
+        "evidence": ["attempt_...", "lesson_..."]
+      }
+    },
+    {
+      "type": "proposeDesign",
+      "payload": {
+        "title": "Defer initial idle deadline until first output chunk",
+        "problem": "...",
+        "recommendation": "...",
+        "evidenceRefs": ["signal_..."],
+        "options": [{ "name": "...", "benefits": [], "costs": [], "risks": [], "lockIn": [] }],
+        "additions": [],
+        "removals": [],
+        "assumptions": [],
+        "uncertainty": [],
+        "evaluationContract": {
+          "baseline": [],
+          "successMetrics": [],
+          "guardMetrics": [],
+          "requiredEvidence": [],
+          "reviewAt": "2026-09-15"
+        },
+        "investment": {
+          "reversibility": "easy",
+          "portfolio": "core",
+          "oneTimeCost": 0,
+          "recurringCost": 0,
+          "timeBudget": "1 day"
+        },
+        "experiment": {
+          "hypothesis": "...",
+          "smallestTest": "...",
+          "stopConditions": [],
+          "rollback": "git revert"
+        }
+      }
+    },
+    { "type": "decideDesign", "payload": { "proposalId": "proposal_...", "decision": "approved", "reasons": [] } },
+    { "type": "recordDesignOutcome", "payload": { "proposalId": "proposal_...", "stage": "review", "recommendation": "retain", "evidence": [], "reviewAt": "2026-09-15" } },
+    { "type": "createRunsFromDesign", "payload": { "proposalId": "proposal_..." } }
+  ]
+}
+```
+
+`decideDesign` decisions are `approved`, `rejected`, `deferred`, or `retired`. `recordDesignOutcome` recommendations are `retain`, `revise`, or `retire`. Invalid payloads block the attempt during parsing.
+
+### Authority gate
+
+The authority evaluator is a pure function over the active charter and a proposal. Automatic authority is limited to proposals that:
+
+- are reversible (`investment.reversibility = "easy"`);
+- fit one-time and recurring costs inside the configured experiment budget;
+- cite current (non-expired) evidence;
+- do not cross a mission, capital, legal, privacy, destructive, production, dependency, schema, or infrastructure-commitment checkpoint.
+
+Proposals outside automatic authority block on a human `decideDesign`. The proposing designer cannot represent a high-risk proposal as human-approved through its own output payload — the gate writes the `design_decisions` row, not the prompt.
+
+`createRunsFromDesign` reads the stored accepted proposal, copies the frozen evaluation contract and proposal id into the child run context, and rejects direct prompt-only run creation for a proposal that has not passed its authority gate.
+
+### Quiescence
+
+When no trigger and no evidence-backed opportunity exists, the designer records a cited quiescent decision through `recordSignal` (with `signalClass = "system"` and a short summary that names which signals were inspected and why no work is justified) and stops. A quiescent decision is auditable evidence — the dashboard and CLI surface it alongside active proposals, and the next cycle uses it as baseline evidence.
+
+### Outcome loop
+
+After verified integration, the linked proposal moves into `measuring` and a bounded `outcome-review` task is created whose config carries the frozen evaluation contract, baseline, success metrics, guard metrics, and `reviewAt`. The reviewer records baseline, observed metrics, evidence, unexpected effects, and a `retain`, `revise`, or `retire` recommendation through `recordDesignOutcome`.
+
+Adverse outcomes (revise, retire) emit a fresh `strategy_signal` so the next designer cycle can decide whether the signal justifies new work. The linked delivery task is never silently reopened.
 
 ## Prompt Contract
 

@@ -96,7 +96,7 @@ For normal project work, use the default runbook:
 docs/default-runbook.md
 ```
 
-It keeps the default path simple: Codex runs `planner`, `verifier`, and `goal-review`; Claude Code runs `worker`.
+It keeps the default path Designer-first: Codex runs `designer`, `planner`, `verifier`, `outcome-review`, and `goal-review`; Claude Code runs `worker`.
 
 Launch continuous self-improvement with the dashboard:
 
@@ -107,7 +107,7 @@ orbs self-iterate-launch \
   --start-hook git-worktree
 ```
 
-Ouroboros assesses its current repository and run evidence, derives one child-run goal, drains and verifies that run, integrates successful changes locally, and starts another assessment after the repository changes. It waits when the evidence does not justify another change.
+The root run starts with a `designer` task that reads the active founder charter, strategy signals, lessons, run evidence, and due outcome reviews. The designer emits one evidence-backed proposal (with a frozen evaluation contract) or a cited quiescent decision. Accepted low-risk proposals create a child planner run automatically; high-risk proposals block on a human `decideDesign`. Implemented proposals move into outcome review after verified integration. Ouroboros waits when the evidence does not justify another change.
 
 Open:
 
@@ -291,12 +291,38 @@ orbs linear-ingest-event --event-type issue.created --external-id LIN-123 --payl
 
 | Role | Responsibility |
 | --- | --- |
-| `planner` | Reads the goal, constraints, and prior lessons; creates an executable task graph. |
+| `designer` | Reads the active founder charter and current world model; researches evidence; compares alternatives; proposes designs; revisits decisions using outcome evidence. |
+| `planner` | Accepts a frozen proposal and evaluation contract; creates executable tasks, dependencies, verifier contracts, and repair paths. Cannot invent product direction or weaken the design contract. |
 | `worker` | Implements one scoped task in its own session and, usually, its own worktree. |
 | `verifier` | Checks evidence through tests, commands, diff review, browser checks, or contract-specific criteria. |
 | `repair` | Fixes verifier failures while preserving the original success contract. |
+| `outcome-review` | Compares post-integration or post-release evidence with the proposal baseline; records `retain`, `revise`, or `retire`; feeds discrepancies back as strategy signals. |
 | `goal-review` | Runs when the queue is empty and decides whether the original goal is complete. |
 | `integrator` | Planned stage that turns verified worktree output into reviewable integration output. |
+
+## Founder Charter
+
+The founder charter is the durable, versioned, human-owned contract that bounds the designer. It defines the mission, value metrics, principles, non-goals, constraints, capital policy, delegated authority, and review cadence. The designer may propose amendments; only a human or explicitly configured governance actor can activate them.
+
+The Ouroboros default charter is seeded automatically on first use. It is also reproduced in `docs/default-runbook.md` so operators can copy, edit, and activate a project-specific variant.
+
+```bash
+orbs show-design                       # active charter, current proposal, latest decision, next review
+orbs list-signals                      # expiring evidence by class and status
+orbs show-design --proposal-id <id>    # frozen contract, options, decisions, outcomes
+```
+
+## Designer Operating Contract
+
+The designer runs before planning. It must produce durable conclusions through fixed actions:
+
+- `recordSignal` — store a sourced, expiring observation.
+- `proposeDesign` — store a proposal with options, recommendation, evaluation contract, and investment shape.
+- `decideDesign` — human or governance actor records an approval, rejection, deferral, or retirement.
+- `recordDesignOutcome` — record baseline, observed metrics, evidence, unexpected effects, and recommendation.
+- `createRunsFromDesign` — read an accepted proposal and create a child planner run with the frozen contract.
+
+The authority evaluator applies hard charter constraints (mission, capital, reversibility, evidence expiry, sensitive-data, destructive operations, production deployment) before scoring options. Automatic authority is limited to reversible experiments inside the experiment budget. Everything else becomes an explicit human decision recorded as a `design_decisions` row.
 
 ## Dashboard
 

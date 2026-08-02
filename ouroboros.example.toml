@@ -35,6 +35,10 @@ reasoning_effort = "high"
 model = "gpt-5.6-sol"
 reasoning_effort = "high"
 
+[models.roles."outcome-review"]
+model = "gpt-5.6-sol"
+reasoning_effort = "high"
+
 [agentDefaults]
 global = "claude-code"
 
@@ -42,7 +46,8 @@ global = "claude-code"
 planner = "codex-resumable"
 designer = "codex-resumable"
 verifier = "codex-resumable"
-goal-review = "codex-resumable"
+"outcome-review" = "codex-resumable"
+"goal-review" = "codex-resumable"
 
 ["agentBackends"."claude-code"]
 kind = "acpx"
@@ -74,3 +79,34 @@ forbidden_paths = [
   "ouroboros.toml",
   ".linear",
 ]
+
+# Designer Control Plane defaults. The active founder charter is seeded on
+# first use of `orbs self-iterate` or `orbs self-iterate-launch`. Override
+# only when the project needs a different experiment budget, recurring-spend
+# threshold, or human-checkpoint list. Mission, capital limits, and charter
+# principles remain human checkpoints; the designer may propose amendments as
+# a diff with rationale but cannot activate them.
+[designer]
+review_cadence_days = 30
+auto_research = true
+auto_reversible_experiments = true
+auto_integrate_verified_code = false
+require_human_for = [
+  "mission-amendment",
+  "capital-policy-amendment",
+  "legal-or-privacy",
+  "sensitive-data",
+  "destructive-operation",
+  "production-deployment",
+  "unplanned-dependency",
+  "schema-migration",
+  "recurring-infrastructure",
+]
+
+[designer.capitalPolicy]
+currency = "USD"
+experiment_budget = 100
+recurring_spend_approval_above = 0
+portfolio_core = 4
+portfolio_growth = 2
+portfolio_exploration = 1
