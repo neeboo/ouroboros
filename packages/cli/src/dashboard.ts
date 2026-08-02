@@ -117,7 +117,7 @@ export interface DashboardDesignStatusSummary {
 }
 
 export interface DashboardDesignTimelineEntry {
-  kind: "designer" | "outcome-review" | "research" | "planner" | "decision";
+  kind: "designer" | "outcome-review" | "research" | "planner" | "decision" | "worker" | "verifier";
   taskId?: string | null;
   attemptId?: string | null;
   runId?: string | null;
@@ -126,6 +126,149 @@ export interface DashboardDesignTimelineEntry {
   detail?: string;
   status?: string;
   createdAt: string | null;
+}
+
+export type DashboardDesignTimelineHarness = {
+  getRunOverview(input: { runId: string; eventLimit?: number }): {
+    tasks: Array<{ id: string; runId: string; role: string; goal: string; status: string }>;
+    sessions: Array<{
+      taskId: string;
+      attemptId: string | null;
+      finishedAt: string | null;
+      startedAt: string | null;
+    }>;
+  };
+  listExecutionThreads(input: { runId: string }): Array<{
+    ownerType: string;
+    taskId: string | null;
+    attemptId: string | null;
+    sessionName: string | null;
+    role: string | null;
+    status: string;
+    heartbeatAt: string;
+    createdAt: string;
+  }>;
+  listDesignDecisions(input: { proposalId: string; limit: number }): Array<{
+    decision: string;
+    actorKind: string;
+    reasons: string[];
+    createdAt: string;
+  }>;
+  listDesignOutcomes(input: { proposalId: string; limit: number }): Array<{
+    stage: string;
+    recommendation: string;
+    unexpectedEffects: unknown[];
+    createdAt: string;
+  }>;
+};
+
+export function buildDashboardDesignTimeline(
+  runId: string,
+  proposalId: string | null,
+  harness: DashboardDesignTimelineHarness,
+): DashboardDesignTimelineEntry[] {
+  const overview = harness.getRunOverview({ runId, eventLimit: 0 });
+  const sessionsByTaskId = new Map(overview.sessions.map((session) => [session.taskId, session]));
+  const stamped: Array<{ entry: DashboardDesignTimelineEntry; order: number; when: number }> = [];
+  let order = 0;
+  for (const task of overview.tasks) {
+    const kind = designTimelineKindForTask(task);
+    if (!kind) continue;
+    const session = sessionsByTaskId.get(task.id);
+    const createdAt = session?.finishedAt ?? session?.startedAt ?? null;
+    stamped.push({
+      entry: {
+        kind,
+        taskId: task.id,
+        attemptId: session?.attemptId ?? null,
+        runId: task.runId,
+        proposalId,
+        label: task.goal,
+        status: task.status,
+        createdAt,
+      },
+      order: order++,
+      when: createdAt ? Date.parse(createdAt) : 0,
+    });
+  }
+  const threads = harness.listExecutionThreads({ runId });
+  for (const thread of threads) {
+    if (thread.ownerType !== "subsession") continue;
+    const createdAt = thread.heartbeatAt ?? thread.createdAt ?? null;
+    stamped.push({
+      entry: {
+        kind: "research",
+        taskId: thread.taskId ?? null,
+        attemptId: thread.attemptId ?? null,
+        runId,
+        proposalId,
+        label: thread.sessionName ?? "research subsession",
+        detail: thread.role ?? undefined,
+        status: thread.status,
+        createdAt,
+      },
+      order: order++,
+      when: createdAt ? Date.parse(createdAt) : 0,
+    });
+  }
+  if (proposalId) {
+    const decisions = harness.listDesignDecisions({ proposalId, limit: 50 });
+    for (const decision of decisions) {
+      stamped.push({
+        entry: {
+          kind: "decision",
+          proposalId,
+          label: `${decision.decision} by ${decision.actorKind}`,
+          detail: decision.reasons.join("; ") || undefined,
+          status: decision.decision,
+          createdAt: decision.createdAt,
+        },
+        order: order++,
+        when: decision.createdAt ? Date.parse(decision.createdAt) : 0,
+      });
+    }
+    const outcomes = harness.listDesignOutcomes({ proposalId, limit: 50 });
+    for (const outcome of outcomes) {
+      const unexpected = Array.isArray(outcome.unexpectedEffects) ? outcome.unexpectedEffects : [];
+      stamped.push({
+        entry: {
+          kind: "outcome-review",
+          proposalId,
+          label: `${outcome.stage} review: ${outcome.recommendation}`,
+          detail: unexpected.length > 0 ? "unexpected effects recorded" : undefined,
+          status: outcome.recommendation,
+          createdAt: outcome.createdAt,
+        },
+        order: order++,
+        when: outcome.createdAt ? Date.parse(outcome.createdAt) : 0,
+      });
+    }
+  }
+  stamped.sort((left, right) => {
+    if (left.when !== right.when) {
+      return left.when - right.when;
+    }
+    return left.order - right.order;
+  });
+  return stamped.slice(0, 50).map((item) => item.entry);
+}
+
+function designTimelineKindForTask(task: {
+  role: string;
+  goal: string;
+}): DashboardDesignTimelineEntry["kind"] | null {
+  const knownRoles = new Set(["designer", "planner", "worker", "verifier", "outcome-review"]);
+  if (task.role === "repair") return "worker";
+  if (knownRoles.has(task.role)) {
+    return task.role as DashboardDesignTimelineEntry["kind"];
+  }
+  const goal = task.goal || "";
+  if (/outcome review/i.test(goal)) return "outcome-review";
+  if (/design proposal|designer/i.test(goal)) return "designer";
+  if (/plan(ned|ner)?\b/i.test(goal)) return "planner";
+  if (/implement|repair|worker/i.test(goal)) return "worker";
+  if (/verif/i.test(goal)) return "verifier";
+  return null;
 }
 
 type DashboardDesignStatusProvider = () => DashboardDesignStatusSummary | null;
@@ -2175,7 +2318,44 @@ export function dashboardHtml(input: { runId: string }) {
         }
         lines.push('</div>');
       }
+      const timelineLines = dashboardDesignTimelineLinesHtml(status.timeline);
+      if (timelineLines) {
+        lines.push('<div class="design-detail-block" data-design-timeline-block>');
+        lines.push('<div class="design-detail-title">Design timeline</div>');
+        lines.push('<ol class="design-timeline" data-design-timeline data-timeline-order="oldest-first">');
+        lines.push(timelineLines);
+        lines.push('</ol>');
+        lines.push('</div>');
+      }
       return lines.length ? lines.join("") : '<div class="empty">No design details available.</div>';
+    };
+    const dashboardDesignTimelineLinesHtml = (timeline) => {
+      if (!Array.isArray(timeline) || timeline.length === 0) return "";
+      return timeline
+        .map((entry) => {
+          const kind = entry.kind || "research";
+          const label = entry.label || "(no label)";
+          const status = entry.status ? ' · ' + escapeHtml(entry.status) : '';
+          const detail = entry.detail ? ' · ' + escapeHtml(entry.detail) : '';
+          const when = entry.createdAt ? ' · ' + escapeHtml(formatDesignTimelineWhen(entry.createdAt)) : '';
+          return '<li class="design-timeline-entry" data-design-timeline-entry data-design-timeline-kind="' + escapeHtml(kind) + '" data-design-timeline-label="' + escapeHtml(label.toLowerCase()) + '">' +
+            '<span class="design-timeline-kind">' + escapeHtml(kind) + '</span>' +
+            '<span class="design-timeline-label">' + escapeHtml(label) + '</span>' +
+            '<span class="design-timeline-meta">' + status + detail + when + '</span>' +
+          '</li>';
+        })
+        .join("");
+    };
+    const formatDesignTimelineWhen = (value) => {
+      if (!value) return "";
+      const text = String(value);
+      const parsed = Date.parse(text);
+      if (!Number.isFinite(parsed)) return text;
+      try {
+        return new Date(parsed).toISOString();
+      } catch {
+        return text;
+      }
     };
     const dashboardInspectorDesignSummaryHtml = (status) => {
       if (!status) return "";

@@ -10,7 +10,13 @@ import {
   readableList,
   readableValue,
 } from "@ouroboros/harness";
-import type { AttemptOutput } from "@ouroboros/harness";
+import type {
+  AttemptOutput,
+  DesignDecision,
+  DesignOutcome,
+  ExecutionThread,
+  RunOverview,
+} from "@ouroboros/harness";
 import {
   buildTaskPrompt,
   createApplyDesignActionsHook,
@@ -42,7 +48,7 @@ import { fail, flag, parseArgs, required } from "./args";
 import { loadOuroborosConfig } from "./config";
 import { parseArray, parseObject, printJson } from "./json";
 import { checkLinearAccess, ingestLinearEvent, linkLinearIssue } from "./linear";
-import { serveDashboard } from "./dashboard";
+import { serveDashboard, buildDashboardDesignTimeline } from "./dashboard";
 import type {
   DashboardDesignStatusSummary,
   DashboardDesignTimelineEntry,
@@ -2418,7 +2424,7 @@ function buildDashboardDesignStatus(runId: string): DashboardDesignStatusSummary
       observationTime: signal.observationTime,
     }));
   const proposalCountsByStatus = tallyDesignProposalStatuses(projectId);
-  const timeline = buildDashboardDesignTimeline(runId, projectId, currentProposal?.id ?? null);
+  const timeline = buildDashboardDesignTimelineForCli(runId, projectId, currentProposal?.id ?? null);
   const summary: DashboardDesignStatusSummary = {
     projectId,
     charter: charter
@@ -2488,79 +2494,19 @@ function buildDashboardDesignStatus(runId: string): DashboardDesignStatusSummary
   return summary;
 }
 
-function buildDashboardDesignTimeline(
+type DashboardDesignTimelineHarness = {
+  getRunOverview(input: { runId: string; eventLimit?: number }): RunOverview;
+  listExecutionThreads(input: { runId: string }): ExecutionThread[];
+  listDesignDecisions(input: { proposalId: string; limit: number }): DesignDecision[];
+  listDesignOutcomes(input: { proposalId: string; limit: number }): DesignOutcome[];
+};
+
+export function buildDashboardDesignTimelineForCli(
   runId: string,
-  _projectId: string,
+  projectId: string,
   proposalId: string | null,
 ): DashboardDesignTimelineEntry[] {
-  const overview = harness.getRunOverview({ runId, eventLimit: 0 });
-  const tasks = overview.tasks.filter(
-    (task) =>
-      task.role === "designer" ||
-      task.role === "outcome-review" ||
-      task.role === "planner" ||
-      /designer|outcome review|design proposal/i.test(task.goal),
-  );
-  const sessionsByTaskId = new Map(overview.sessions.map((session) => [session.taskId, session]));
-  const entries: DashboardDesignTimelineEntry[] = [];
-  for (const task of tasks) {
-    let kind: DashboardDesignTimelineEntry["kind"] = "research";
-    if (task.role === "designer") {
-      kind = "designer";
-    } else if (task.role === "outcome-review") {
-      kind = "outcome-review";
-    } else if (task.role === "planner") {
-      kind = "planner";
-    } else if (/outcome review/i.test(task.goal)) {
-      kind = "outcome-review";
-    } else if (/designer|design proposal/i.test(task.goal)) {
-      kind = "designer";
-    }
-    const session = sessionsByTaskId.get(task.id);
-    entries.push({
-      kind,
-      taskId: task.id,
-      attemptId: session?.attemptId ?? null,
-      runId: task.runId,
-      proposalId,
-      label: task.goal,
-      status: task.status,
-      createdAt: session?.finishedAt ?? session?.startedAt ?? null,
-    });
-  }
-  if (proposalId) {
-    const decisions = harness.listDesignDecisions({ proposalId, limit: 50 });
-    for (const decision of decisions) {
-      entries.push({
-        kind: "decision",
-        proposalId,
-        label: `${decision.decision} by ${decision.actorKind}`,
-        detail: decision.reasons.join("; ") || undefined,
-        status: decision.decision,
-        createdAt: decision.createdAt,
-      });
-    }
-    const outcomes = harness.listDesignOutcomes({ proposalId, limit: 50 });
-    for (const outcome of outcomes) {
-      entries.push({
-        kind: "outcome-review",
-        proposalId,
-        label: `${outcome.stage} review: ${outcome.recommendation}`,
-        detail: outcome.unexpectedEffects.length > 0 ? "unexpected effects recorded" : undefined,
-        status: outcome.recommendation,
-        createdAt: outcome.createdAt,
-      });
-    }
-  }
-  entries.sort((left, right) => {
-    const leftTime = left.createdAt ? Date.parse(left.createdAt) : 0;
-    const rightTime = right.createdAt ? Date.parse(right.createdAt) : 0;
-    if (leftTime !== rightTime) {
-      return leftTime - rightTime;
-    }
-    return (left.label || "").localeCompare(right.label || "");
-  });
-  return entries.slice(0, 25);
+  return buildDashboardDesignTimeline(runId, proposalId, harness as DashboardDesignTimelineHarness);
 }
 
 function applyCliPostAttemptRunEffects(runId: string, task: Pick<Task, "role">, output: AttemptOutput) {

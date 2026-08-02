@@ -6,6 +6,7 @@ import { applyHarnessAction, Harness } from "../packages/harness/src";
 import { buildTaskPrompt } from "../packages/runner/src";
 import {
   buildChatTranscriptForTest,
+  buildDashboardDesignTimeline,
   buildDashboardTaskGraph,
   codexEventToMessagePartForTest,
   DASHBOARD_ROUTE_NEXT_MILESTONE,
@@ -2946,6 +2947,176 @@ describe("dashboard", () => {
     expect(html).toContain("/design/status");
     expect(html).toContain("dashboardInspectorDesignHtml");
     expect(html).toContain("refreshDesignStatus");
+  });
+
+  test("dashboard designer card renders the chronological design timeline", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "ouroboros-dashboard-design-timeline-"));
+    const harness = new Harness(join(dir, "ouroboros.db"));
+    harness.init();
+    const projectId = harness.createProject({ name: "Design Timeline", rootPath: dir });
+    const runId = harness.createRun({ goal: "Render design timeline", projectId });
+    const designerTaskId = harness.createTask({
+      runId,
+      role: "designer",
+      goal: "Inspect design evidence",
+      prompt: "Designer prompt",
+      dependsOn: [],
+      doneWhen: [],
+      config: {},
+    });
+    const designerAttempt = harness.startAttempt({ taskId: designerTaskId, input: {} });
+    harness.finishAttempt({
+      attemptId: designerAttempt,
+      output: { status: "done" as const, summary: "designer done" },
+    });
+    const plannerTaskId = harness.createTask({
+      runId,
+      role: "planner",
+      goal: "Plan delivery",
+      prompt: "Planner prompt",
+      dependsOn: [designerTaskId],
+      doneWhen: [],
+      config: {},
+    });
+    const plannerAttempt = harness.startAttempt({ taskId: plannerTaskId, input: {} });
+    harness.finishAttempt({
+      attemptId: plannerAttempt,
+      output: { status: "done" as const, summary: "planner done" },
+    });
+    const workerTaskId = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Implement scoped change",
+      prompt: "Worker prompt",
+      dependsOn: [plannerTaskId],
+      doneWhen: [],
+      config: {},
+    });
+    const workerAttempt = harness.startAttempt({ taskId: workerTaskId, input: {} });
+    harness.finishAttempt({
+      attemptId: workerAttempt,
+      output: { status: "done" as const, summary: "worker done" },
+    });
+    const verifierTaskId = harness.createTask({
+      runId,
+      role: "verifier",
+      goal: "Verify frozen contract",
+      prompt: "Verifier prompt",
+      dependsOn: [workerTaskId],
+      doneWhen: [],
+      config: {},
+    });
+    const verifierAttempt = harness.startAttempt({ taskId: verifierTaskId, input: {} });
+    harness.finishAttempt({
+      attemptId: verifierAttempt,
+      output: { status: "done" as const, summary: "verifier done" },
+    });
+    const charter = harness.createFounderCharter({
+      projectId,
+      mission: "Render timeline",
+      activate: true,
+      charter: {
+        mission: "Render timeline",
+        capitalPolicy: { currency: "USD" },
+        authority: {
+          autoResearch: true,
+          autoReversibleExperiments: false,
+          autoIntegrateVerifiedCode: false,
+          requireHumanFor: [],
+        },
+        reviewCadenceDays: 14,
+      },
+    });
+    const proposal = harness.createDesignProposal({
+      projectId,
+      runId,
+      charterId: charter.id,
+      title: "Timeline proposal",
+      problem: "Hidden chronology",
+      recommendation: "Render entries",
+      status: "experimenting",
+      proposal: {
+        problem: "Hidden chronology",
+        recommendation: "Render entries",
+        investment: { reversibility: "easy", portfolio: "core" },
+        evaluationContract: {
+          baseline: ["no timeline"],
+          successMetrics: ["chronological entries"],
+          guardMetrics: ["no flicker"],
+          requiredEvidence: ["dashboard html"],
+          reviewAt: "2026-09-01",
+        },
+      },
+    });
+    harness.recordDesignDecision({
+      proposalId: proposal.id,
+      charterId: charter.id,
+      decision: "approved",
+      actorKind: "human",
+      actorRef: "founder@local",
+      reasons: ["need timeline"],
+    });
+    harness.recordDesignOutcome({
+      proposalId: proposal.id,
+      runId,
+      stage: "review",
+      recommendation: "retain",
+      evidence: ["timeline visible"],
+      reviewAt: "2026-09-08",
+    });
+
+    try {
+      const decision = harness.listDesignDecisions({ proposalId: proposal.id, limit: 1 })[0];
+      const outcomes = harness.listDesignOutcomes({ proposalId: proposal.id, limit: 5 });
+      const designStatus = {
+        projectId,
+        charter: { ...charter, summary: { mission: charter.mission, version: charter.version, reviewCadenceDays: charter.charter.reviewCadenceDays } },
+        currentProposal: { ...proposal, summary: { title: proposal.title, status: proposal.status, recommendation: proposal.recommendation } },
+        latestDecision: decision,
+        budget: charter.charter.capitalPolicy ?? null,
+        authority: charter.charter.authority ?? null,
+        nextOutcomeReview: outcomes[0] ?? null,
+        recentOutcomes: outcomes,
+        recentSignals: [],
+        proposalCountsByStatus: { experimenting: 1 },
+        activeSignalCount: 0,
+        timeline: buildDashboardDesignTimeline(runId, proposal.id, harness),
+      };
+      const response = await handleDashboardRequest(
+        new Request(`http://localhost/api/runs/${runId}/design/status`),
+        {
+          runId,
+          overview: () => harness.getRunOverview({ runId }),
+          renderTaskPrompt: () => "",
+          designStatus: () => designStatus,
+        },
+      );
+      expect(response.status).toBe(200);
+      const body = await response.json();
+      const kinds = body.timeline.map((entry: { kind: string }) => entry.kind);
+      expect(kinds).toContain("designer");
+      expect(kinds).toContain("planner");
+      expect(kinds).toContain("worker");
+      expect(kinds).toContain("verifier");
+      expect(kinds).toContain("decision");
+      expect(kinds).toContain("outcome-review");
+      const designerIdx = kinds.indexOf("designer");
+      const plannerIdx = kinds.indexOf("planner");
+      const workerIdx = kinds.indexOf("worker");
+      const verifierIdx = kinds.indexOf("verifier");
+      const decisionIdx = kinds.indexOf("decision");
+      const outcomeIdx = kinds.indexOf("outcome-review");
+      expect(designerIdx).toBeLessThan(plannerIdx);
+      expect(plannerIdx).toBeLessThan(workerIdx);
+      expect(workerIdx).toBeLessThan(verifierIdx);
+      expect(verifierIdx).toBeLessThan(decisionIdx);
+      expect(decisionIdx).toBeLessThan(outcomeIdx);
+      const html = dashboardHtml({ runId });
+      expect(html).toContain("data-design-timeline");
+      expect(html).toContain('data-timeline-order="oldest-first"');
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 
   test("shouldRetryDashboardBind only retries bounded ephemeral port conflicts", () => {
