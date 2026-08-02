@@ -10,6 +10,10 @@ Keep the route simple:
 - Use a git worktree only when the target repository is clean or the task should be isolated.
 - If Claude Code through acpx times out, run Claude Code manually and record the result back into Ouroboros.
 
+## Shared default database
+
+The default database is resolved from Git's common directory (`git rev-parse --git-common-dir`) and stored at `<git-common-dir>/orbs/ouroboros.db`. A main checkout and any linked Git worktree created with `git worktree add` therefore share one repository-common default database, so isolated agents can read durable run evidence without passing `--db`. Explicit `--db`, special SQLite paths (`:memory:`, `file:`), and the `.ouroboros/ouroboros.db` fallback used outside Git repositories remain unchanged.
+
 For Ouroboros improving its own repository, the default entry point is:
 
 ```bash

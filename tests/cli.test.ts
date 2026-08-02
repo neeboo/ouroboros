@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { existsSync } from "node:fs";
+import { join, resolve } from "node:path";
 import { homedir, tmpdir } from "node:os";
 import { Harness } from "../packages/harness/src";
 import { formatRunEvidence } from "../packages/cli/src/run-evidence";
@@ -56,20 +57,100 @@ describe("CLI", () => {
     });
   });
 
-  test("default database path stays outside a git worktree", async () => {
-    const repoPath = join(dir, "target-repo");
+  test("default database path resolves through the shared git common directory for main and linked worktrees", async () => {
+    const repoPath = join(dir, "shared-default-repo");
+    const worktreePath = join(dir, "shared-default-worktree");
     await mkdir(repoPath, { recursive: true });
     gitCli(repoPath, ["init", "-b", "main"]);
+    gitCli(repoPath, ["config", "user.name", "Ouroboros Test"]);
+    gitCli(repoPath, ["config", "user.email", "test@example.com"]);
+    gitCli(repoPath, ["config", "commit.gpgSign", "false"]);
+    await writeFile(join(repoPath, "README.md"), "initial\n");
+    gitCli(repoPath, ["add", "README.md"]);
+    gitCli(repoPath, ["commit", "-m", "Initial commit"]);
+    gitCli(repoPath, ["worktree", "add", "-b", "worker", worktreePath, "main"]);
+
+    const commonDirResult = gitCli(repoPath, ["rev-parse", "--path-format=absolute", "--git-common-dir"]);
+    const commonDir = commonDirResult.stdout.trim();
+    const expectedDefaultDb = join(commonDir, "orbs", "ouroboros.db");
+
+    const mainPath = await runDefaultCliJson(repoPath, "init");
+    expect(mainPath.db).toBe(expectedDefaultDb);
+
+    const mainDefault = defaultDatabasePath(repoPath);
+    const worktreeDefault = defaultDatabasePath(worktreePath);
+    expect(mainDefault).toBe(expectedDefaultDb);
+    expect(worktreeDefault).toBe(expectedDefaultDb);
+    expect(worktreeDefault).toBe(mainDefault);
+
+    const worktreeGitDirResult = gitCli(worktreePath, ["rev-parse", "--path-format=absolute", "--absolute-git-dir"]);
+    const worktreeGitDir = worktreeGitDirResult.stdout.trim();
+    const worktreeOrbsDir = join(worktreeGitDir, "orbs");
+    expect(existsSync(worktreeOrbsDir)).toBe(false);
+
+    const listResult = await runDefaultCliJson(worktreePath, "list-runs", "--limit", "1");
+    expect(Array.isArray(listResult)).toBe(true);
+    expect(existsSync(worktreeOrbsDir)).toBe(false);
+    expect(existsSync(expectedDefaultDb)).toBe(true);
+
+    const mainPathEvidence = mainPath.db;
+    const linkedPathEvidence = worktreeDefault;
+    const commonDirEvidence = commonDir;
+    const linkedGitDirEvidence = worktreeGitDir;
+    expect(mainPathEvidence).toBe(linkedPathEvidence);
+    expect(mainPathEvidence).toContain("/orbs/ouroboros.db");
+    expect(commonDirEvidence).not.toContain("/worktrees/");
+    expect(linkedGitDirEvidence).toContain("/worktrees/");
+  });
+
+  test("explicit --db overrides default database discovery", async () => {
+    const repoPath = join(dir, "explicit-db-repo");
+    await mkdir(repoPath, { recursive: true });
+    gitCli(repoPath, ["init", "-b", "main"]);
+    const explicitDb = join(dir, "explicit.db");
 
     const originalCwd = process.cwd();
     try {
       process.chdir(repoPath);
-      const parsed = parseArgs(["run-overview", "--run-id", "run_missing"]);
-      expect(parsed.db).toBe(defaultDatabasePath(repoPath));
-      expect(parsed.db).toContain("/.git/orbs/ouroboros.db");
+      const parsed = parseArgs(["--db", explicitDb, "list-runs", "--limit", "1"]);
+      expect(parsed.db).toBe(resolve(explicitDb));
+      expect(parsed.db).not.toBe(defaultDatabasePath(repoPath));
     } finally {
       process.chdir(originalCwd);
     }
+  });
+
+  test("default database path resolves inside a normal non-linked repository", async () => {
+    const repoPath = join(dir, "normal-repo");
+    await mkdir(repoPath, { recursive: true });
+    gitCli(repoPath, ["init", "-b", "main"]);
+
+    const gitDirResult = gitCli(repoPath, ["rev-parse", "--path-format=absolute", "--absolute-git-dir"]);
+    const expectedDefaultDb = join(gitDirResult.stdout.trim(), "orbs", "ouroboros.db");
+    expect(defaultDatabasePath(repoPath)).toBe(expectedDefaultDb);
+    expect(defaultDatabasePath(repoPath)).toContain("/.git/orbs/ouroboros.db");
+  });
+
+  test("default database path falls back to .ouroboros outside git", async () => {
+    const nonGitDir = join(dir, "non-git");
+    await mkdir(nonGitDir, { recursive: true });
+
+    const originalCwd = process.cwd();
+    try {
+      process.chdir(nonGitDir);
+      const parsed = parseArgs(["list-runs", "--limit", "1"]);
+      expect(parsed.db).toBe(resolve(".ouroboros/ouroboros.db"));
+    } finally {
+      process.chdir(originalCwd);
+    }
+  });
+
+  test(":memory: and file: database paths pass through CLI normalization", () => {
+    const memoryParsed = parseArgs(["--db", ":memory:", "list-runs", "--limit", "1"]);
+    expect(memoryParsed.db).toBe(":memory:");
+
+    const fileParsed = parseArgs(["--db", "file:memory:", "list-runs", "--limit", "1"]);
+    expect(fileParsed.db).toBe("file:memory:");
   });
 
   test("prints help without requiring a command or flag value", async () => {
@@ -5742,6 +5823,32 @@ describe("CLI", () => {
 
   async function runCliJson(...args: Array<string | Record<string, string>>) {
     return JSON.parse(await runCli(...args));
+  }
+
+  async function runDefaultCliRaw(cwd: string, ...rawArgs: string[]) {
+    const configArgs = rawArgs.includes("--config") ? [] : ["--config", join(dir, "missing-config.toml")];
+    const mainEntry = join(import.meta.dir, "..", "packages", "cli", "src", "main.ts");
+    const proc = Bun.spawn({
+      cmd: ["bun", "run", mainEntry, ...configArgs, ...rawArgs],
+      cwd,
+      env: process.env,
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const [stdout, stderr, exitCode] = await Promise.all([
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+      proc.exited,
+    ]);
+    return { stdout: stdout.trim(), stderr: stderr.trim(), exitCode };
+  }
+
+  async function runDefaultCliJson(cwd: string, ...args: string[]) {
+    const result = await runDefaultCliRaw(cwd, ...args);
+    if (result.exitCode !== 0) {
+      throw new Error(`CLI failed with ${result.exitCode}\n${result.stdout}\n${result.stderr}`);
+    }
+    return JSON.parse(result.stdout.trim());
   }
 
   function gitCli(cwd: string, args: string[]) {
