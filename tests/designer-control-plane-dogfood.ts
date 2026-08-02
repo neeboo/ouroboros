@@ -128,7 +128,7 @@ function buildRiskSurface(
   const summaryText = `${proposal.title} ${proposal.problem} ${proposal.recommendation}`.toLowerCase();
 
   const amendsMission = /mission|charter/.test(summaryText);
-  const amendsCapitalPolicy = /capital|recurring|spend|budget/.test(summaryText) && investment.recurringCost > 0;
+  const amendsCapitalPolicy = /capital|recurring|spend|budget/.test(summaryText) && (investment.recurringCost ?? 0) > 0;
   const legalOrPrivacy =
     textMatches(["legal", "privacy", "gdpr", " pii "]) ||
     /legal|privacy|gdpr/.test(optionRiskText);
@@ -144,14 +144,14 @@ function buildRiskSurface(
   const schemaMigration =
     textMatches(["schema", "migration"]) || /schema|migration/.test(optionRiskText);
   const recurringInfrastructure =
-    investment.recurringCost > 0 || /recurring|infrastructure/.test(optionRiskText);
+    (investment.recurringCost ?? 0) > 0 || /recurring|infrastructure/.test(optionRiskText);
 
   return {
     proposalId: proposal.id,
     reversibility: investment.reversibility,
     portfolio: investment.portfolio,
-    oneTimeCost: investment.oneTimeCost,
-    recurringCost: investment.recurringCost,
+    oneTimeCost: investment.oneTimeCost ?? 0,
+    recurringCost: investment.recurringCost ?? 0,
     evidenceRefs,
     amendsMission,
     amendsCapitalPolicy,
@@ -271,12 +271,18 @@ async function runDogfood() {
   const designActionsHook = createApplyDesignActionsHook({ harness });
 
   function runDesignActions(output: AttemptOutput): StopHookResult {
+    const overview = harness.getRunOverview({ runId: rootRunId, eventLimit: 0 });
+    if (!overview.run) {
+      throw new Error(`root run ${rootRunId} not found`);
+    }
     const hookInput: StopHookInput = {
-      run: harness.getRunOverview({ runId: rootRunId, eventLimit: 0 }).run,
+      run: overview.run,
       task: harness.getTask(designerTaskId)!,
+      sessionName: "designer-dogfood",
+      prompt: "Inspect repo and propose (or quiesce).",
       output,
     };
-    return designActionsHook(hookInput);
+    return designActionsHook(hookInput) as StopHookResult;
   }
 
   // ----------------------------------------------------------------------------
@@ -457,7 +463,7 @@ async function runDogfood() {
     actorRef: null,
     charterId: charter.id,
     reasons: evaluation.reasons.map((reason) => reason.message),
-    authority: evaluation.authority,
+    authority: evaluation as unknown as Record<string, unknown>,
   });
   harness.updateDesignProposalStatus({ proposalId: lowRiskProposal.id, status: "accepted" });
   record(
@@ -513,6 +519,14 @@ async function runDogfood() {
       proposalId: string;
     };
     const childRun = harness.getRunOverview({ runId: artifact.runId, eventLimit: 0 }).run;
+    if (!childRun) {
+      record(
+        "scenario B: createRunsFromDesign",
+        false,
+        `child run ${artifact.runId} not found`,
+      );
+      throw new Error(`child run ${artifact.runId} not found`);
+    }
     const inheritsProposal = childRun.context?.designProposalId === lowRiskProposal.id;
     const inheritsFrozenContract = Boolean(childRun.context?.designEvaluationContract);
     const inheritsDesignProposal = Boolean(childRun.context?.designProposal);
