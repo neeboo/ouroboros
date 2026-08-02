@@ -258,6 +258,7 @@ describe("dashboard", () => {
       "dashboard.api.taskResume",
       "dashboard.api.taskRerun",
       "dashboard.api.attemptStop",
+      "dashboard.api.designStatus",
       "dashboard.taskPrompt",
     ]);
     expect(dashboardRoutePaths()).toEqual([
@@ -281,6 +282,7 @@ describe("dashboard", () => {
       "/api/tasks/:taskId/resume",
       "/api/tasks/:taskId/rerun",
       "/api/attempts/:attemptId/stop",
+      "/api/runs/:runId/design/status",
       "/tasks/:taskId/prompt",
     ]);
   });
@@ -733,7 +735,7 @@ describe("dashboard", () => {
     expect(html).toContain("persistDashboardState();");
     expect(html).toContain("persistFlowScrollState");
     expect(html).toContain("restoredFlowScrollState = null;");
-    expect(html).toContain("writeDashboardState({ selectedGoalId, workspaceMode, workspaceTitleExpanded, selectedChangedFilePath, secondaryEvidenceOpen, flowScroll: captureFlowScrollState() });");
+    expect(html).toContain("writeDashboardState({ selectedGoalId, workspaceMode, workspaceTitleExpanded, selectedChangedFilePath, secondaryEvidenceOpen, designDetailsOpen, flowScroll: captureFlowScrollState() });");
     expect(html).toContain("scrollState.scrollHeight");
     expect(html).toContain("flowDelta");
     expect(html).toContain("Math.max(0, scrollState.scrollTop + flowDelta)");
@@ -1077,6 +1079,7 @@ describe("dashboard", () => {
       "dashboard.api.taskResume",
       "dashboard.api.taskRerun",
       "dashboard.api.attemptStop",
+      "dashboard.api.designStatus",
       "dashboard.taskPrompt",
     ]);
     expect(dashboardRoutePaths()).toEqual([
@@ -1100,6 +1103,7 @@ describe("dashboard", () => {
       "/api/tasks/:taskId/resume",
       "/api/tasks/:taskId/rerun",
       "/api/attempts/:attemptId/stop",
+      "/api/runs/:runId/design/status",
       "/tasks/:taskId/prompt",
     ]);
   });
@@ -2713,6 +2717,237 @@ describe("dashboard", () => {
     }
   });
 
+  test("GET /api/runs/:runId/design/status returns concise project-scoped design state", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "ouroboros-dashboard-design-status-"));
+    const harness = new Harness(join(dir, "ouroboros.db"));
+    harness.init();
+    const projectId = harness.createProject({
+      name: "Design Dashboard Project",
+      rootPath: dir,
+    });
+    const runId = harness.createRun({ goal: "Calm design dashboard", projectId });
+    const charter = harness.createFounderCharter({
+      projectId,
+      mission: "Ship design dashboard visibility",
+      activate: true,
+      charter: {
+        mission: "Ship design dashboard visibility",
+        capitalPolicy: {
+          currency: "USD",
+          monthlyBudget: 4000,
+          experimentBudget: 1200,
+          recurringSpendApprovalAbove: 600,
+          runwayFloorMonths: 9,
+          portfolio: { core: 70, growth: 20, exploration: 10 },
+        },
+        authority: {
+          autoResearch: true,
+          autoReversibleExperiments: false,
+          autoIntegrateVerifiedCode: false,
+          requireHumanFor: ["irreversible-spend"],
+        },
+        reviewCadenceDays: 21,
+      },
+    });
+    const proposal = harness.createDesignProposal({
+      projectId,
+      runId,
+      charterId: charter.id,
+      title: "Render designer inspector card",
+      problem: "Designer state is invisible.",
+      recommendation: "Add a concise inspector disclosure.",
+      status: "experimenting",
+      proposal: {
+        problem: "Designer state is invisible.",
+        recommendation: "Add a concise inspector disclosure.",
+        investment: {
+          reversibility: "easy",
+          portfolio: "growth",
+          oneTimeCost: 600,
+          recurringCost: 0,
+          timeBudget: "1 week",
+        },
+        evaluationContract: {
+          baseline: ["no designer card"],
+          successMetrics: ["decisions visible"],
+          guardMetrics: ["render time under 200ms"],
+          requiredEvidence: ["disclosure screenshot"],
+          reviewAt: "2026-09-01",
+        },
+      },
+    });
+    harness.recordDesignDecision({
+      proposalId: proposal.id,
+      charterId: charter.id,
+      decision: "approved",
+      actorKind: "human",
+      actorRef: "founder@local",
+      reasons: ["cheap to ship"],
+    });
+    harness.recordDesignOutcome({
+      proposalId: proposal.id,
+      runId,
+      stage: "review",
+      recommendation: "retain",
+      evidence: ["disclosure shows budget"],
+      reviewAt: "2026-08-25",
+    });
+    harness.createStrategySignal({
+      projectId,
+      runId,
+      signalClass: "delivery",
+      source: "retro-1",
+      title: "Calm dashboard matters",
+      summary: "Default surface should stay calm.",
+      confidence: 0.5,
+      observationTime: "2026-08-01T08:00:00Z",
+    });
+
+    try {
+      const designStatus = {
+        projectId,
+        charter: { ...charter, summary: { mission: charter.mission, version: charter.version, reviewCadenceDays: charter.charter.reviewCadenceDays } },
+        currentProposal: { ...proposal, summary: { title: proposal.title, status: proposal.status, recommendation: proposal.recommendation } },
+        latestDecision: {
+          id: "decision_1",
+          decision: "approved" as const,
+          actorKind: "human" as const,
+          actorRef: "founder@local",
+          reasons: ["cheap to ship"],
+          createdAt: "2026-08-02T12:00:00Z",
+        },
+        budget: charter.charter.capitalPolicy ?? null,
+        authority: charter.charter.authority ?? null,
+        nextOutcomeReview: null,
+        recentOutcomes: [],
+        recentSignals: [],
+        proposalCountsByStatus: { experimenting: 1 },
+        activeSignalCount: 1,
+        timeline: [],
+      };
+
+      const response = await handleDashboardRequest(
+        new Request(`http://localhost/api/runs/${runId}/design/status`),
+        {
+          runId,
+          overview: () => harness.getRunOverview({ runId }),
+          renderTaskPrompt: () => "",
+          designStatus: () => designStatus,
+        },
+      );
+      expect(response.status).toBe(200);
+      const body = await response.json();
+      expect(body).toMatchObject({
+        projectId,
+        charter: expect.objectContaining({
+          id: charter.id,
+          mission: "Ship design dashboard visibility",
+        }),
+        currentProposal: expect.objectContaining({
+          id: proposal.id,
+          status: "experimenting",
+          title: "Render designer inspector card",
+        }),
+        latestDecision: expect.objectContaining({
+          decision: "approved",
+          actorKind: "human",
+        }),
+        budget: expect.objectContaining({
+          currency: "USD",
+          monthlyBudget: 4000,
+          portfolio: { core: 70, growth: 20, exploration: 10 },
+        }),
+        authority: expect.objectContaining({
+          autoResearch: true,
+          requireHumanFor: ["irreversible-spend"],
+        }),
+        activeSignalCount: 1,
+        proposalCountsByStatus: { experimenting: 1 },
+      });
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("GET /api/runs/:runId/design/status returns 404 when design status is unavailable", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "ouroboros-dashboard-design-status-missing-"));
+    const harness = new Harness(join(dir, "ouroboros.db"));
+    harness.init();
+    const runId = harness.createRun({ goal: "No design state" });
+    const projectId = harness.createProject({ name: "Project", rootPath: dir });
+
+    try {
+      const ownRunResponse = await handleDashboardRequest(
+        new Request(`http://localhost/api/runs/${runId}/design/status`),
+        {
+          runId,
+          overview: () => harness.getRunOverview({ runId }),
+          renderTaskPrompt: () => "",
+        },
+      );
+      expect(ownRunResponse.status).toBe(404);
+
+      const otherRunResponse = await handleDashboardRequest(
+        new Request(`http://localhost/api/runs/run_other/design/status`),
+        {
+          runId,
+          overview: () => harness.getRunOverview({ runId }),
+          renderTaskPrompt: () => "",
+          designStatus: () => ({
+            projectId,
+            charter: null,
+            currentProposal: null,
+            latestDecision: null,
+            budget: null,
+            authority: null,
+            nextOutcomeReview: null,
+            recentOutcomes: [],
+            recentSignals: [],
+            proposalCountsByStatus: {},
+            activeSignalCount: 0,
+            timeline: [],
+          }),
+        },
+      );
+      expect(otherRunResponse.status).toBe(404);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("GET /api/runs/:runId/design/status returns 404 when the design status provider returns null", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "ouroboros-dashboard-design-status-null-"));
+    const harness = new Harness(join(dir, "ouroboros.db"));
+    harness.init();
+    const runId = harness.createRun({ goal: "Null design state" });
+
+    try {
+      const response = await handleDashboardRequest(
+        new Request(`http://localhost/api/runs/${runId}/design/status`),
+        {
+          runId,
+          overview: () => harness.getRunOverview({ runId }),
+          renderTaskPrompt: () => "",
+          designStatus: () => null,
+        },
+      );
+      expect(response.status).toBe(404);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("dashboard HTML ships designer disclosure scaffolding that fetches design status", async () => {
+    const html = dashboardHtml({ runId: "run_designer_html" });
+    expect(html).toContain("data-inspector-section=\"design-status\"");
+    expect(html).toContain("data-design-status-section");
+    expect(html).toContain("data-design-details");
+    expect(html).toContain("Charter, budget and proposal evidence");
+    expect(html).toContain("/design/status");
+    expect(html).toContain("dashboardInspectorDesignHtml");
+    expect(html).toContain("refreshDesignStatus");
+  });
+
   test("shouldRetryDashboardBind only retries bounded ephemeral port conflicts", () => {
     const busy = Object.assign(new Error("Address already in use"), { code: "EADDRINUSE" });
 
@@ -3591,9 +3826,7 @@ describe("dashboard", () => {
     // The runtime call passes the conversation timeline plus composer as primary children
     // of the inspector panel; the secondary evidence helpers are composed inside the
     // disclosure wrapper rather than appearing as direct inspector-panel children.
-    const primaryCallMatch = html.match(/patchInspectorPanel\((dashboardInspectorTimelineHtml\(selectedGroup\)[^,]*),\s*(dashboardInspectorSecondaryHtml\(overview, selectedGroup\))\)/);
-    expect(primaryCallMatch).not.toBeNull();
-    expect(primaryCallMatch ? primaryCallMatch[1] : "").toContain("dashboardInspectorComposerHtml()");
+    expect(html).toContain("patchInspectorPanel(dashboardInspectorTimelineHtml(selectedGroup) + dashboardInspectorComposerHtml(), dashboardInspectorDesignHtml() + dashboardInspectorSecondaryHtml(overview, selectedGroup))");
     expect(html).not.toContain("patchInspectorPanel(dashboardInspectorTimelineHtml(selectedGroup) + dashboardInspectorHtml(overview, selectedGroup), dashboardRunStatusHtml(overview) + dashboardInspectorEvidenceHtml(overview, selectedGroup) + dashboardInspectorComposerHtml())");
 
     // The secondary helper renders a single disclosure section that owns the body markup.
@@ -3606,11 +3839,11 @@ describe("dashboard", () => {
     const html = dashboardHtml({ runId: "run_123" });
 
     expect(html).toContain("secondaryEvidenceOpen = restoredDashboardState.secondaryEvidenceOpen === true;");
-    expect(html).toContain("secondaryEvidenceOpen = disclosure.hasAttribute(\"open\");");
+    expect(html).toContain("secondaryEvidenceOpen = secondaryDisclosure.hasAttribute(\"open\");");
     expect(html).toContain("'<details' + (secondaryEvidenceOpen ? ' open' : '') + '>'");
     expect(html).toContain("secondaryEvidenceOpen: parsed.secondaryEvidenceOpen === true,");
     expect(html).toContain("secondaryEvidenceOpen: state.secondaryEvidenceOpen === true,");
-    expect(html).toContain("secondaryEvidenceOpen, flowScroll: captureFlowScrollState()");
+    expect(html).toContain("secondaryEvidenceOpen, designDetailsOpen, flowScroll: captureFlowScrollState()");
   });
 
   test("AI SDK message-part mapper covers assistant text, reasoning, tool input/output, approval, and error events", () => {

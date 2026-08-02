@@ -1,5 +1,14 @@
 import { diagnoseRunOverview, isOuroborosRuntimePath, readableValue } from "@ouroboros/harness";
-import type { OverseerDiagnosis, RunOverview, RunStatusCounts } from "@ouroboros/harness";
+import type {
+  DesignDecision,
+  DesignOutcome,
+  DesignProposal,
+  FounderCharter,
+  OverseerDiagnosis,
+  RunOverview,
+  RunStatusCounts,
+  StrategySignal,
+} from "@ouroboros/harness";
 import { readFileSync } from "node:fs";
 import { isAbsolute, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -57,6 +66,69 @@ interface DashboardActions {
   createIntake?: (document: string, title?: string) => DashboardActionResult | Promise<DashboardActionResult>;
   acceptGuardrailProposal?: (proposalId: string, acceptedBy?: string) => DashboardActionResult | Promise<DashboardActionResult>;
 }
+
+export interface DashboardDesignStatusSummary {
+  projectId: string | null;
+  charter: (FounderCharter & { summary: { mission: string; version: number; reviewCadenceDays?: number } }) | null;
+  currentProposal: (DesignProposal & {
+    summary: {
+      title: string;
+      status: string;
+      recommendation: string;
+      reversibility?: string;
+      portfolio?: string;
+      nextReviewAt?: string;
+    };
+  }) | null;
+  latestDecision: Pick<
+    DesignDecision,
+    "id" | "decision" | "actorKind" | "actorRef" | "reasons" | "createdAt"
+  > | null;
+  budget: {
+    currency?: string;
+    monthlyBudget?: number;
+    experimentBudget?: number;
+    recurringSpendApprovalAbove?: number;
+    runwayFloorMonths?: number;
+    portfolio?: { core?: number; growth?: number; exploration?: number };
+  } | null;
+  authority: {
+    autoResearch?: boolean;
+    autoReversibleExperiments?: boolean;
+    autoIntegrateVerifiedCode?: boolean;
+    requireHumanFor?: string[];
+  } | null;
+  nextOutcomeReview: Pick<
+    DesignOutcome,
+    "id" | "proposalId" | "stage" | "recommendation" | "reviewAt" | "createdAt"
+  > | null;
+  recentOutcomes: Array<
+    Pick<DesignOutcome, "id" | "proposalId" | "stage" | "recommendation" | "reviewAt" | "createdAt">
+  >;
+  recentSignals: Array<
+    Pick<
+      StrategySignal,
+      "id" | "signalClass" | "source" | "title" | "status" | "confidence" | "expiresAt" | "observationTime"
+    >
+  >;
+  proposalCountsByStatus: Record<string, number>;
+  activeSignalCount: number;
+  timeline: DashboardDesignTimelineEntry[];
+}
+
+export interface DashboardDesignTimelineEntry {
+  kind: "designer" | "outcome-review" | "research" | "planner" | "decision";
+  taskId?: string | null;
+  attemptId?: string | null;
+  runId?: string | null;
+  proposalId?: string | null;
+  label: string;
+  detail?: string;
+  status?: string;
+  createdAt: string | null;
+}
+
+type DashboardDesignStatusProvider = () => DashboardDesignStatusSummary | null;
 
 type DashboardAutoStartRunner = (overview: RunOverview, runner: DashboardRunnerStatus | null) => boolean;
 
@@ -124,6 +196,7 @@ export const DASHBOARD_ROUTE_PATHS = {
   taskResumeApi: "/api/tasks/:taskId/resume",
   taskRerunApi: "/api/tasks/:taskId/rerun",
   attemptStopApi: "/api/attempts/:attemptId/stop",
+  designStatusApi: "/api/runs/:runId/design/status",
   taskPrompt: "/tasks/:taskId/prompt",
 } as const;
 
@@ -148,6 +221,7 @@ export const DASHBOARD_ROUTES: DashboardRouteDefinition[] = [
   { name: "dashboard.api.taskResume", method: "POST", path: DASHBOARD_ROUTE_PATHS.taskResumeApi, kind: "api" },
   { name: "dashboard.api.taskRerun", method: "POST", path: DASHBOARD_ROUTE_PATHS.taskRerunApi, kind: "api" },
   { name: "dashboard.api.attemptStop", method: "POST", path: DASHBOARD_ROUTE_PATHS.attemptStopApi, kind: "api" },
+  { name: "dashboard.api.designStatus", method: "GET", path: DASHBOARD_ROUTE_PATHS.designStatusApi, kind: "api" },
   { name: "dashboard.taskPrompt", method: "GET", path: DASHBOARD_ROUTE_PATHS.taskPrompt, kind: "prompt" },
 ];
 
@@ -1062,10 +1136,11 @@ export function dashboardHtml(input: { runId: string }) {
           workspaceTitleExpanded: parsed.workspaceTitleExpanded === true,
           selectedChangedFilePath: typeof parsed.selectedChangedFilePath === "string" ? parsed.selectedChangedFilePath : null,
           secondaryEvidenceOpen: parsed.secondaryEvidenceOpen === true,
+          designDetailsOpen: parsed.designDetailsOpen === true,
           flowScroll: parsed.flowScroll && typeof parsed.flowScroll === "object" ? parsed.flowScroll : null,
         };
       } catch {
-        return { selectedGoalId: null, workspaceMode: null, workspaceTitleExpanded: false, selectedChangedFilePath: null, secondaryEvidenceOpen: false, flowScroll: null };
+        return { selectedGoalId: null, workspaceMode: null, workspaceTitleExpanded: false, selectedChangedFilePath: null, secondaryEvidenceOpen: false, designDetailsOpen: false, flowScroll: null };
       }
     };
     const writeDashboardState = (state) => {
@@ -1076,6 +1151,7 @@ export function dashboardHtml(input: { runId: string }) {
           workspaceTitleExpanded: state.workspaceTitleExpanded === true,
           selectedChangedFilePath: typeof state.selectedChangedFilePath === "string" ? state.selectedChangedFilePath : null,
           secondaryEvidenceOpen: state.secondaryEvidenceOpen === true,
+          designDetailsOpen: state.designDetailsOpen === true,
           flowScroll: state.flowScroll && typeof state.flowScroll === "object" ? state.flowScroll : null,
         }));
       } catch {
@@ -1088,6 +1164,8 @@ export function dashboardHtml(input: { runId: string }) {
     let latestOverview = null;
     let selectedChangedFilePath = restoredDashboardState.selectedChangedFilePath || null;
     let secondaryEvidenceOpen = restoredDashboardState.secondaryEvidenceOpen === true;
+    let designDetailsOpen = restoredDashboardState.designDetailsOpen === true;
+    let latestDesignStatus = null;
     let restoredFlowScrollState = restoredDashboardState.flowScroll || null;
     const diffByPath = new Map();
     let selectedGroupRef = null;
@@ -1973,6 +2051,160 @@ export function dashboardHtml(input: { runId: string }) {
         '</details>' +
       '</section>';
     };
+    const formatDesignCurrency = (value, currency) => {
+      if (typeof value !== "number") return "";
+      return currency ? currency + " " + value : String(value);
+    };
+    const dashboardDesignDetailsHtml = (status) => {
+      const lines = [];
+      const charter = status.charter;
+      if (charter) {
+        lines.push('<div class="design-detail-block"><div class="design-detail-title">Charter</div>');
+        lines.push('<div class="design-detail-row"><span>id</span><code>' + escapeHtml(charter.id) + '</code></div>');
+        lines.push('<div class="design-detail-row"><span>version</span><span>v' + escapeHtml(String(charter.version)) + '</span></div>');
+        if (charter.summary?.mission) {
+          lines.push('<div class="design-detail-row"><span>mission</span><span>' + escapeHtml(charter.summary.mission) + '</span></div>');
+        }
+        if (charter.activatedAt) {
+          lines.push('<div class="design-detail-row"><span>activated</span><span>' + escapeHtml(charter.activatedAt) + '</span></div>');
+        }
+        if (typeof charter.summary?.reviewCadenceDays === "number") {
+          lines.push('<div class="design-detail-row"><span>review cadence</span><span>every ' + escapeHtml(String(charter.summary.reviewCadenceDays)) + 'd</span></div>');
+        }
+        lines.push('</div>');
+      }
+      const budget = status.budget;
+      if (budget) {
+        lines.push('<div class="design-detail-block"><div class="design-detail-title">Budget</div>');
+        if (typeof budget.monthlyBudget === "number") {
+          lines.push('<div class="design-detail-row"><span>monthly</span><span>' + escapeHtml(formatDesignCurrency(budget.monthlyBudget, budget.currency)) + '</span></div>');
+        }
+        if (typeof budget.experimentBudget === "number") {
+          lines.push('<div class="design-detail-row"><span>experiment</span><span>' + escapeHtml(formatDesignCurrency(budget.experimentBudget, budget.currency)) + '</span></div>');
+        }
+        if (typeof budget.recurringSpendApprovalAbove === "number") {
+          lines.push('<div class="design-detail-row"><span>recurring approval &gt;</span><span>' + escapeHtml(formatDesignCurrency(budget.recurringSpendApprovalAbove, budget.currency)) + '</span></div>');
+        }
+        if (typeof budget.runwayFloorMonths === "number") {
+          lines.push('<div class="design-detail-row"><span>runway floor</span><span>' + escapeHtml(String(budget.runwayFloorMonths)) + 'mo</span></div>');
+        }
+        if (budget.portfolio) {
+          const parts = [];
+          if (typeof budget.portfolio.core === "number") parts.push("core " + budget.portfolio.core + "%");
+          if (typeof budget.portfolio.growth === "number") parts.push("growth " + budget.portfolio.growth + "%");
+          if (typeof budget.portfolio.exploration === "number") parts.push("exploration " + budget.portfolio.exploration + "%");
+          if (parts.length) {
+            lines.push('<div class="design-detail-row"><span>portfolio</span><span>' + escapeHtml(parts.join(", ")) + '</span></div>');
+          }
+        }
+        lines.push('</div>');
+      }
+      const authority = status.authority;
+      if (authority) {
+        const flags = [];
+        if (authority.autoResearch) flags.push("auto-research");
+        if (authority.autoReversibleExperiments) flags.push("auto-experiments");
+        if (authority.autoIntegrateVerifiedCode) flags.push("auto-integrate");
+        const checkpoints = Array.isArray(authority.requireHumanFor) ? authority.requireHumanFor : [];
+        if (flags.length || checkpoints.length) {
+          lines.push('<div class="design-detail-block"><div class="design-detail-title">Authority</div>');
+          if (flags.length) {
+            lines.push('<div class="design-detail-row"><span>delegated</span><span>' + escapeHtml(flags.join(", ")) + '</span></div>');
+          }
+          if (checkpoints.length) {
+            lines.push('<div class="design-detail-row"><span>human checkpoints</span><span>' + escapeHtml(checkpoints.join(", ")) + '</span></div>');
+          }
+          lines.push('</div>');
+        }
+      }
+      const proposal = status.currentProposal;
+      if (proposal) {
+        lines.push('<div class="design-detail-block"><div class="design-detail-title">Proposal evidence</div>');
+        lines.push('<div class="design-detail-row"><span>id</span><code>' + escapeHtml(proposal.id) + '</code></div>');
+        if (proposal.summary?.recommendation) {
+          lines.push('<div class="design-detail-row"><span>recommendation</span><span>' + escapeHtml(proposal.summary.recommendation) + '</span></div>');
+        }
+        const investment = proposal.proposal?.investment;
+        if (investment) {
+          if (typeof investment.oneTimeCost === "number") {
+            lines.push('<div class="design-detail-row"><span>one-time cost</span><span>' + escapeHtml(String(investment.oneTimeCost)) + '</span></div>');
+          }
+          if (typeof investment.recurringCost === "number") {
+            lines.push('<div class="design-detail-row"><span>recurring cost</span><span>' + escapeHtml(String(investment.recurringCost)) + '</span></div>');
+          }
+          if (investment.reversibility) {
+            lines.push('<div class="design-detail-row"><span>reversibility</span><span>' + escapeHtml(investment.reversibility) + '</span></div>');
+          }
+          if (investment.portfolio) {
+            lines.push('<div class="design-detail-row"><span>portfolio</span><span>' + escapeHtml(investment.portfolio) + '</span></div>');
+          }
+          if (investment.timeBudget) {
+            lines.push('<div class="design-detail-row"><span>time budget</span><span>' + escapeHtml(investment.timeBudget) + '</span></div>');
+          }
+        }
+        const contract = proposal.proposal?.evaluationContract;
+        if (contract) {
+          if (Array.isArray(contract.successMetrics) && contract.successMetrics.length) {
+            lines.push('<div class="design-detail-row"><span>success metrics</span><span>' + escapeHtml(contract.successMetrics.join("; ")) + '</span></div>');
+          }
+          if (Array.isArray(contract.guardMetrics) && contract.guardMetrics.length) {
+            lines.push('<div class="design-detail-row"><span>guard metrics</span><span>' + escapeHtml(contract.guardMetrics.join("; ")) + '</span></div>');
+          }
+          if (Array.isArray(contract.requiredEvidence) && contract.requiredEvidence.length) {
+            lines.push('<div class="design-detail-row"><span>required evidence</span><span>' + escapeHtml(contract.requiredEvidence.join("; ")) + '</span></div>');
+          }
+          if (contract.reviewAt) {
+            lines.push('<div class="design-detail-row"><span>review at</span><span>' + escapeHtml(contract.reviewAt) + '</span></div>');
+          }
+        }
+        lines.push('</div>');
+      }
+      if (status.latestDecision) {
+        const decision = status.latestDecision;
+        lines.push('<div class="design-detail-block"><div class="design-detail-title">Latest decision</div>');
+        lines.push('<div class="design-detail-row"><span>decision</span><span>' + escapeHtml(decision.decision) + ' by ' + escapeHtml(decision.actorKind) + (decision.actorRef ? ' (' + escapeHtml(decision.actorRef) + ')' : '') + '</span></div>');
+        if (Array.isArray(decision.reasons) && decision.reasons.length) {
+          lines.push('<div class="design-detail-row"><span>reasons</span><span>' + escapeHtml(decision.reasons.join("; ")) + '</span></div>');
+        }
+        lines.push('</div>');
+      }
+      if (status.recentOutcomes?.length) {
+        lines.push('<div class="design-detail-block"><div class="design-detail-title">Recent outcomes</div>');
+        for (const outcome of status.recentOutcomes.slice(0, 3)) {
+          lines.push('<div class="design-detail-row"><span>' + escapeHtml(outcome.stage) + '</span><span>' + escapeHtml(outcome.recommendation) + (outcome.reviewAt ? ' · review ' + escapeHtml(outcome.reviewAt) : '') + '</span></div>');
+        }
+        lines.push('</div>');
+      }
+      return lines.length ? lines.join("") : '<div class="empty">No design details available.</div>';
+    };
+    const dashboardInspectorDesignSummaryHtml = (status) => {
+      if (!status) return "";
+      const proposal = status.currentProposal;
+      const headerBits = [];
+      if (proposal?.summary?.status) headerBits.push(escapeHtml(proposal.summary.status));
+      if (status.activeSignalCount > 0) headerBits.push(escapeHtml(String(status.activeSignalCount)) + " active signal" + (status.activeSignalCount === 1 ? "" : "s"));
+      const summary = proposal?.summary?.title || "(no active proposal)";
+      const decision = status.latestDecision;
+      const recommendation = proposal?.summary?.recommendation;
+      const nextReview = proposal?.summary?.nextReviewAt || status.nextOutcomeReview?.reviewAt;
+      const counts = Object.entries(status.proposalCountsByStatus || {}).sort(([left], [right]) => left.localeCompare(right));
+      return '<section class="inspector-card inspector-evidence-disclosure inspector-design-section" data-inspector-section="design-status" data-design-status-section>' +
+        '<h2>Designer</h2>' +
+        '<div class="design-summary">' +
+          '<div class="design-summary-title">' + escapeHtml(summary) + '</div>' +
+          '<div class="design-summary-meta">' + (headerBits.length ? headerBits.join(" · ") : "no active proposals") + '</div>' +
+          (recommendation ? '<div class="design-summary-row"><span>recommendation</span><span>' + escapeHtml(recommendation) + '</span></div>' : '') +
+          (decision ? '<div class="design-summary-row"><span>latest decision</span><span>' + escapeHtml(decision.decision) + ' by ' + escapeHtml(decision.actorKind) + '</span></div>' : '') +
+          (nextReview ? '<div class="design-summary-row"><span>next review</span><span>' + escapeHtml(nextReview) + '</span></div>' : '') +
+          (counts.length ? '<div class="design-summary-row"><span>proposals</span><span>' + escapeHtml(counts.map(([state, count]) => state + "=" + count).join(", ")) + '</span></div>' : '') +
+        '</div>' +
+        '<details' + (designDetailsOpen ? ' open' : '') + ' data-design-details>' +
+          '<summary class="inspector-evidence-summary" data-design-details-summary>Charter, budget and proposal evidence</summary>' +
+          '<div class="inspector-evidence-body" data-design-details-body>' + dashboardDesignDetailsHtml(status) + '</div>' +
+        '</details>' +
+      '</section>';
+    };
+    const dashboardInspectorDesignHtml = () => dashboardInspectorDesignSummaryHtml(latestDesignStatus);
     const latestRunnerSignal = (overview) => {
       const session = [...(overview.sessions || [])].reverse()[0];
       const text = session ? latestText(session) : "";
@@ -2258,12 +2490,12 @@ export function dashboardHtml(input: { runId: string }) {
       };
     };
     const persistDashboardState = () => {
-      writeDashboardState({ selectedGoalId, workspaceMode, workspaceTitleExpanded, selectedChangedFilePath, secondaryEvidenceOpen, flowScroll: captureFlowScrollState() });
+      writeDashboardState({ selectedGoalId, workspaceMode, workspaceTitleExpanded, selectedChangedFilePath, secondaryEvidenceOpen, designDetailsOpen, flowScroll: captureFlowScrollState() });
     };
     const persistFlowScrollState = () => {
       const flowScroll = captureFlowScrollState();
       if (!flowScroll) return;
-      writeDashboardState({ selectedGoalId, workspaceMode, workspaceTitleExpanded, selectedChangedFilePath, secondaryEvidenceOpen, flowScroll });
+      writeDashboardState({ selectedGoalId, workspaceMode, workspaceTitleExpanded, selectedChangedFilePath, secondaryEvidenceOpen, designDetailsOpen, flowScroll });
     };
     const restoreFlowScrollState = (scrollState) => {
       if (workspaceMode !== "flow" || !scrollState) return;
@@ -2383,8 +2615,19 @@ export function dashboardHtml(input: { runId: string }) {
       '};'
     ].join("\\n");
     const overviewWorker = new Worker(URL.createObjectURL(new Blob([overviewWorkerSource], { type: "text/javascript" })));
+    let lastDesignStatusFetchAt = 0;
+    const DESIGN_STATUS_REFRESH_INTERVAL_MS = 15000;
+    const maybeRefreshDesignStatus = (force) => {
+      const now = Date.now();
+      if (!force && now - lastDesignStatusFetchAt < DESIGN_STATUS_REFRESH_INTERVAL_MS) return;
+      lastDesignStatusFetchAt = now;
+      refreshDesignStatus();
+    };
     overviewWorker.onmessage = (event) => {
-      if (event.data?.type === "refreshing") document.getElementById("run-status")?.classList.add("updating");
+      if (event.data?.type === "refreshing") {
+        document.getElementById("run-status")?.classList.add("updating");
+        maybeRefreshDesignStatus(false);
+      }
       if (event.data?.type === "overview") {
         document.getElementById("run-status")?.classList.remove("updating");
         render(event.data.overview);
@@ -2434,7 +2677,7 @@ export function dashboardHtml(input: { runId: string }) {
       patchStaticHtml("history-goal-list", [...goalGroups].reverse().filter((group) => group.activeTasks.length === 0).map(goalRow).join(""));
       patchWorkspace(dashboardWorkspaceHtml(selectedGroup));
       mountReactFlowCanvas();
-      patchInspectorPanel(dashboardInspectorTimelineHtml(selectedGroup) + dashboardInspectorComposerHtml(), dashboardInspectorSecondaryHtml(overview, selectedGroup));
+      patchInspectorPanel(dashboardInspectorTimelineHtml(selectedGroup) + dashboardInspectorComposerHtml(), dashboardInspectorDesignHtml() + dashboardInspectorSecondaryHtml(overview, selectedGroup));
     }
     let recentRunsCache = [];
     const RECENT_RUNS_LIMIT = 10;
@@ -2503,6 +2746,22 @@ export function dashboardHtml(input: { runId: string }) {
           }
         });
     };
+    const refreshDesignStatus = () => {
+      fetch("/api/runs/" + encodeURIComponent(runId) + "/design/status")
+        .then((response) => {
+          if (response.status === 404) return null;
+          if (!response.ok) throw new Error("design status request failed: " + response.status);
+          return response.json();
+        })
+        .then((snapshot) => {
+          latestDesignStatus = snapshot && typeof snapshot === "object" ? snapshot : null;
+          if (latestOverview) render(latestOverview);
+        })
+        .catch(() => {
+          latestDesignStatus = null;
+          if (latestOverview) render(latestOverview);
+        });
+    };
     const setSelectedRun = (nextRunId) => {
       if (typeof nextRunId !== "string" || !nextRunId || nextRunId === runId) {
         renderRecentRunsList(recentRunsCache);
@@ -2519,8 +2778,10 @@ export function dashboardHtml(input: { runId: string }) {
       selectedChangedFilePath = restored.selectedChangedFilePath || null;
       restoredFlowScrollState = restored.flowScroll || null;
       diffByPath.clear();
+      latestDesignStatus = null;
       overviewWorker.postMessage({ type: "start", runId, apiBase: window.location.origin });
       refreshRecentRuns();
+      maybeRefreshDesignStatus(true);
     };
     window.addEventListener("hashchange", () => {
       const fromHash = parseRunIdFromHash(window.location.hash || "");
@@ -2531,10 +2792,17 @@ export function dashboardHtml(input: { runId: string }) {
     document.addEventListener("toggle", (event) => {
       const target = event.target;
       if (!target || !target.closest) return;
-      const disclosure = target.closest("[data-secondary-evidence] > details");
-      if (!disclosure) return;
-      secondaryEvidenceOpen = disclosure.hasAttribute("open");
-      persistDashboardState();
+      const secondaryDisclosure = target.closest("[data-secondary-evidence] > details");
+      if (secondaryDisclosure) {
+        secondaryEvidenceOpen = secondaryDisclosure.hasAttribute("open");
+        persistDashboardState();
+        return;
+      }
+      const designDisclosure = target.closest("[data-design-details]");
+      if (designDisclosure) {
+        designDetailsOpen = designDisclosure.hasAttribute("open");
+        persistDashboardState();
+      }
     }, { capture: true });
     document.addEventListener("click", (event) => {
       if (!event.target || !event.target.closest) return;
@@ -2805,6 +3073,7 @@ export function dashboardHtml(input: { runId: string }) {
     }
     overviewWorker.postMessage({ type: "start", runId, apiBase: window.location.origin });
     refreshRecentRuns();
+    maybeRefreshDesignStatus(true);
   </script>
 </body>
 </html>`;
@@ -2844,6 +3113,7 @@ export function serveDashboard(input: {
   autoStartRunner?: DashboardAutoStartRunner;
   actions?: DashboardActions;
   recentRuns?: (limit: number) => DashboardRunSummary[];
+  designStatus?: DashboardDesignStatusProvider;
 }) {
   const fetchHandler = (request: Request) =>
     withDashboardErrors(request, () => handleDashboardRequest(request, input));
@@ -2944,6 +3214,7 @@ export async function handleDashboardRequest(
     autoStartRunner?: DashboardAutoStartRunner;
     actions?: DashboardActions;
     recentRuns?: (limit: number) => DashboardRunSummary[];
+    designStatus?: DashboardDesignStatusProvider;
   },
 ) {
   const url = new URL(request.url);
@@ -3142,6 +3413,40 @@ export async function handleDashboardRequest(
       }
       return input.actions.stopAttempt(decodeURIComponent(stopMatch[1]));
     });
+  }
+  const designStatusMatch = url.pathname.match(
+    /^\/api\/runs\/([^/]+)\/design\/status$/,
+  );
+  if (request.method === "GET" && designStatusMatch) {
+    const routeRunId = decodeURIComponent(designStatusMatch[1]);
+    if (routeRunId !== input.runId) {
+      return Response.json(
+        { error: `design status is only available on the primary run ${input.runId}` },
+        { status: 404 },
+      );
+    }
+    if (!input.designStatus) {
+      return Response.json(
+        { error: "dashboard design status is not configured" },
+        { status: 404 },
+      );
+    }
+    let snapshot: DashboardDesignStatusSummary | null;
+    try {
+      snapshot = input.designStatus();
+    } catch (error) {
+      return Response.json(
+        { error: error instanceof Error ? error.message : String(error) },
+        { status: 500 },
+      );
+    }
+    if (!snapshot) {
+      return Response.json(
+        { error: "no active project charter configured for this run" },
+        { status: 404 },
+      );
+    }
+    return Response.json(snapshot);
   }
   const promptMatch = url.pathname.match(/^\/tasks\/([^/]+)\/prompt$/);
   if (promptMatch) {

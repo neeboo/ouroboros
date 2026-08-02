@@ -43,13 +43,23 @@ import { loadOuroborosConfig } from "./config";
 import { parseArray, parseObject, printJson } from "./json";
 import { checkLinearAccess, ingestLinearEvent, linkLinearIssue } from "./linear";
 import { serveDashboard } from "./dashboard";
+import type {
+  DashboardDesignStatusSummary,
+  DashboardDesignTimelineEntry,
+} from "./dashboard";
 import { requestHarnessAction, serveHarnessActions } from "./action-server";
 import { formatRunEvidence } from "./run-evidence";
 import { formatAttemptExplanation } from "./explain-attempt";
 import { formatRunGraph } from "./run-graph";
 import { buildRunThreadOverview, formatRunThreads } from "./run-threads";
+import {
+  buildDesignStatus,
+  formatDesignStatus,
+  formatListSignals,
+  formatShowDesign,
+} from "./design-status";
 import { buildAgentMatrix, doctorAgent } from "../../../scripts/acpx-agent-smoke";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { cpus, totalmem } from "node:os";
 import { createHash } from "node:crypto";
 import type { Task } from "@ouroboros/harness";
@@ -899,6 +909,83 @@ switch (parsed.command) {
     printJson({ taskId, status: "todo" });
     break;
   }
+  case "design-status": {
+    harness.init();
+    const projectId = resolveDesignProjectId(parsed);
+    const asJson = flag(parsed, "json") !== undefined;
+    const summary = buildDesignStatus({
+      projectId,
+      loadCharter: () => (projectId ? harness.getActiveFounderCharter({ projectId }) : null),
+      loadCurrentProposal: () => loadCurrentDesignProposal(projectId),
+      loadLatestDecision: (proposalId) =>
+        harness.listDesignDecisions({ proposalId, limit: 50 }).at(-1) ?? null,
+      loadOutcomes: (proposalId) =>
+        harness.listDesignOutcomes({ proposalId, limit: 50 }).slice().reverse(),
+      countActiveSignals: () =>
+        harness.listStrategySignals({ projectId, statuses: ["active"], limit: 1000 }).length,
+      loadProposalCounts: () => tallyDesignProposalStatuses(projectId),
+    });
+    if (asJson) {
+      printJson(designStatusJson(summary, projectId));
+      break;
+    }
+    console.log(formatDesignStatus(summary));
+    break;
+  }
+  case "list-signals": {
+    harness.init();
+    const projectId = resolveDesignProjectId(parsed);
+    const signalClassRaw = flag(parsed, "class");
+    const signalClass = signalClassRaw
+      ? parseStrategySignalClass(signalClassRaw)
+      : undefined;
+    const statusesRaw = flag(parsed, "statuses") ?? "active";
+    const statuses = statusesRaw
+      .split(",")
+      .map((entry) => entry.trim())
+      .filter(Boolean) as Array<"active" | "expired" | "superseded">;
+    const limit = parsePositiveInteger(flag(parsed, "limit") ?? "25", "--limit");
+    const signals = harness.listStrategySignals({
+      projectId,
+      signalClass,
+      statuses: statuses.length > 0 ? statuses : undefined,
+      limit,
+    });
+    const totalCount = harness.listStrategySignals({
+      projectId,
+      signalClass,
+      statuses: statuses.length > 0 ? statuses : undefined,
+      limit: 100000,
+    }).length;
+    if (flag(parsed, "json") !== undefined) {
+      printJson({
+        projectId,
+        signalClass: signalClass ?? null,
+        statuses: statuses.length > 0 ? statuses : null,
+        totalCount,
+        signals,
+      });
+      break;
+    }
+    console.log(formatListSignals({ signals, totalCount }));
+    break;
+  }
+  case "show-design": {
+    harness.init();
+    const proposalId = required(parsed, "proposal-id");
+    const proposal = harness.getDesignProposal({ id: proposalId });
+    if (!proposal) {
+      fail(`design proposal not found: ${proposalId}`);
+    }
+    const decisions = harness.listDesignDecisions({ proposalId, limit: 100 });
+    const outcomes = harness.listDesignOutcomes({ proposalId, limit: 100 }).slice().reverse();
+    if (flag(parsed, "json") !== undefined) {
+      printJson({ proposal, decisions, outcomes });
+      break;
+    }
+    console.log(formatShowDesign({ proposal, decisions, outcomes }));
+    break;
+  }
   default:
     fail(`unknown command: ${parsed.command}`);
 }
@@ -935,6 +1022,9 @@ function printHelp() {
     "  run-threads          Print harness-managed subsession threads grouped by parent task",
     "  show-task-prompt     Render a task prompt",
     "  explain-attempt      Explain an attempt from captured events",
+    "  design-status        Print active charter, current proposal, and outcome review state",
+    "  list-signals         List strategy signals filtered by class and status",
+    "  show-design          Print a design proposal with decisions and outcomes",
     "",
     "Examples:",
     "  orbs init",
@@ -2161,6 +2251,7 @@ function createDashboardRuntime(input: {
         };
       },
     },
+    designStatus: () => buildDashboardDesignStatus(input.runId),
   });
   const shutdown = once(() => {
     stopRunner();
@@ -2196,6 +2287,280 @@ function markAttemptThreadInterrupted(attemptId: string, reason: string) {
 
 function parseCodexResumableSandbox() {
   return parseSandbox(flag(parsed, "sandbox") ?? "workspace-write");
+}
+
+function parseStrategySignalClass(raw: string) {
+  const allowed = ["user", "delivery", "technology", "market", "economics", "system"] as const;
+  if (!allowed.includes(raw as (typeof allowed)[number])) {
+    fail(`--class must be one of ${allowed.join(", ")}`);
+  }
+  return raw as (typeof allowed)[number];
+}
+
+function resolveDesignProjectId(args: ReturnType<typeof parseArgs>) {
+  const explicit = flag(args, "project-id");
+  if (explicit) {
+    return explicit;
+  }
+  const root = flag(args, "project-root");
+  if (root) {
+    return resolveProjectIdByRoot(root) ?? fail(`project not found for root: ${root}`);
+  }
+  const resolved = resolveImplicitDesignProjectId();
+  if (!resolved) {
+    fail("--project-id or --project-root is required outside a registered project root");
+  }
+  return resolved;
+}
+
+function resolveImplicitDesignProjectId() {
+  if (!process.cwd()) {
+    return null;
+  }
+  return resolveProjectIdByRoot(process.cwd());
+}
+
+function resolveProjectIdByRoot(rootPath: string) {
+  const projects = harness.listProjects();
+  const resolved = resolve(rootPath);
+  const match = projects.find((project) => {
+    try {
+      return resolve(project.rootPath) === resolved;
+    } catch {
+      return false;
+    }
+  });
+  return match?.id ?? null;
+}
+
+function loadCurrentDesignProposal(projectId: string | null) {
+  if (!projectId) {
+    return null;
+  }
+  const proposals = harness.listDesignProposals({
+    projectId: projectId ?? undefined,
+    statuses: ["proposed", "experimenting", "accepted", "implemented", "measuring"],
+    limit: 100,
+  });
+  return proposals[0] ?? null;
+}
+
+function tallyDesignProposalStatuses(projectId: string | null) {
+  const proposals = harness.listDesignProposals({ projectId: projectId ?? undefined, limit: 1000 });
+  const counts: Record<string, number> = {};
+  for (const proposal of proposals) {
+    counts[proposal.status] = (counts[proposal.status] ?? 0) + 1;
+  }
+  return counts;
+}
+
+function designStatusJson(
+  summary: ReturnType<typeof buildDesignStatus>,
+  projectId: string,
+) {
+  return {
+    projectId,
+    charter: summary.charter,
+    currentProposal: summary.currentProposal,
+    latestDecision: summary.latestDecision,
+    nextOutcomeReview: summary.nextOutcomeReview,
+    recentOutcomes: summary.recentOutcomes,
+    activeSignalCount: summary.activeSignalCount,
+    proposalCountsByStatus: summary.proposalCountsByStatus,
+  };
+}
+
+function buildDashboardDesignStatus(runId: string): DashboardDesignStatusSummary | null {
+  const run = harness.getRun(runId);
+  if (!run) {
+    return null;
+  }
+  const projectId = run.projectId ?? resolveImplicitDesignProjectId();
+  if (!projectId) {
+    return null;
+  }
+  const charter = harness.getActiveFounderCharter({ projectId });
+  const proposals = harness.listDesignProposals({
+    projectId,
+    statuses: ["proposed", "experimenting", "accepted", "implemented", "measuring"],
+    limit: 50,
+  });
+  const currentProposal = proposals[0] ?? null;
+  const decisions = currentProposal
+    ? harness.listDesignDecisions({ proposalId: currentProposal.id, limit: 50 })
+    : [];
+  const latestDecision = decisions.at(-1) ?? null;
+  const outcomes = currentProposal
+    ? harness
+        .listDesignOutcomes({ proposalId: currentProposal.id, limit: 50 })
+        .slice()
+        .reverse()
+    : [];
+  const nextOutcomeReview = outcomes.find((outcome) => outcome.reviewAt) ?? null;
+  const recentOutcomes = outcomes.slice(0, 5).map((outcome) => ({
+    id: outcome.id,
+    proposalId: outcome.proposalId,
+    stage: outcome.stage,
+    recommendation: outcome.recommendation,
+    reviewAt: outcome.reviewAt,
+    createdAt: outcome.createdAt,
+  }));
+  const recentSignals = harness
+    .listStrategySignals({ projectId, statuses: ["active"], limit: 5 })
+    .map((signal) => ({
+      id: signal.id,
+      signalClass: signal.signalClass,
+      source: signal.source,
+      title: signal.title,
+      status: signal.status,
+      confidence: signal.confidence,
+      expiresAt: signal.expiresAt,
+      observationTime: signal.observationTime,
+    }));
+  const proposalCountsByStatus = tallyDesignProposalStatuses(projectId);
+  const timeline = buildDashboardDesignTimeline(runId, projectId, currentProposal?.id ?? null);
+  const summary: DashboardDesignStatusSummary = {
+    projectId,
+    charter: charter
+      ? {
+          ...charter,
+          summary: {
+            mission: charter.mission,
+            version: charter.version,
+            reviewCadenceDays: charter.charter.reviewCadenceDays,
+          },
+        }
+      : null,
+    currentProposal: currentProposal
+      ? {
+          ...currentProposal,
+          summary: {
+            title: currentProposal.title,
+            status: currentProposal.status,
+            recommendation: currentProposal.recommendation,
+            reversibility: currentProposal.proposal.investment?.reversibility,
+            portfolio: currentProposal.proposal.investment?.portfolio,
+            nextReviewAt: currentProposal.proposal.evaluationContract?.reviewAt,
+          },
+        }
+      : null,
+    latestDecision: latestDecision
+      ? {
+          id: latestDecision.id,
+          decision: latestDecision.decision,
+          actorKind: latestDecision.actorKind,
+          actorRef: latestDecision.actorRef,
+          reasons: latestDecision.reasons,
+          createdAt: latestDecision.createdAt,
+        }
+      : null,
+    budget: charter?.charter.capitalPolicy
+      ? {
+          currency: charter.charter.capitalPolicy.currency,
+          monthlyBudget: charter.charter.capitalPolicy.monthlyBudget,
+          experimentBudget: charter.charter.capitalPolicy.experimentBudget,
+          recurringSpendApprovalAbove: charter.charter.capitalPolicy.recurringSpendApprovalAbove,
+          runwayFloorMonths: charter.charter.capitalPolicy.runwayFloorMonths,
+          portfolio: charter.charter.capitalPolicy.portfolio,
+        }
+      : null,
+    authority: charter?.charter.authority ?? null,
+    nextOutcomeReview: nextOutcomeReview
+      ? {
+          id: nextOutcomeReview.id,
+          proposalId: nextOutcomeReview.proposalId,
+          stage: nextOutcomeReview.stage,
+          recommendation: nextOutcomeReview.recommendation,
+          reviewAt: nextOutcomeReview.reviewAt,
+          createdAt: nextOutcomeReview.createdAt,
+        }
+      : null,
+    recentOutcomes,
+    recentSignals,
+    proposalCountsByStatus,
+    activeSignalCount: recentSignals.length === 0 ? 0 : harness.listStrategySignals({
+      projectId,
+      statuses: ["active"],
+      limit: 1000,
+    }).length,
+    timeline,
+  };
+  return summary;
+}
+
+function buildDashboardDesignTimeline(
+  runId: string,
+  _projectId: string,
+  proposalId: string | null,
+): DashboardDesignTimelineEntry[] {
+  const overview = harness.getRunOverview({ runId, eventLimit: 0 });
+  const tasks = overview.tasks.filter(
+    (task) =>
+      task.role === "designer" ||
+      task.role === "outcome-review" ||
+      task.role === "planner" ||
+      /designer|outcome review|design proposal/i.test(task.goal),
+  );
+  const sessionsByTaskId = new Map(overview.sessions.map((session) => [session.taskId, session]));
+  const entries: DashboardDesignTimelineEntry[] = [];
+  for (const task of tasks) {
+    let kind: DashboardDesignTimelineEntry["kind"] = "research";
+    if (task.role === "designer") {
+      kind = "designer";
+    } else if (task.role === "outcome-review") {
+      kind = "outcome-review";
+    } else if (task.role === "planner") {
+      kind = "planner";
+    } else if (/outcome review/i.test(task.goal)) {
+      kind = "outcome-review";
+    } else if (/designer|design proposal/i.test(task.goal)) {
+      kind = "designer";
+    }
+    const session = sessionsByTaskId.get(task.id);
+    entries.push({
+      kind,
+      taskId: task.id,
+      attemptId: session?.attemptId ?? null,
+      runId: task.runId,
+      proposalId,
+      label: task.goal,
+      status: task.status,
+      createdAt: session?.finishedAt ?? session?.startedAt ?? null,
+    });
+  }
+  if (proposalId) {
+    const decisions = harness.listDesignDecisions({ proposalId, limit: 50 });
+    for (const decision of decisions) {
+      entries.push({
+        kind: "decision",
+        proposalId,
+        label: `${decision.decision} by ${decision.actorKind}`,
+        detail: decision.reasons.join("; ") || undefined,
+        status: decision.decision,
+        createdAt: decision.createdAt,
+      });
+    }
+    const outcomes = harness.listDesignOutcomes({ proposalId, limit: 50 });
+    for (const outcome of outcomes) {
+      entries.push({
+        kind: "outcome-review",
+        proposalId,
+        label: `${outcome.stage} review: ${outcome.recommendation}`,
+        detail: outcome.unexpectedEffects.length > 0 ? "unexpected effects recorded" : undefined,
+        status: outcome.recommendation,
+        createdAt: outcome.createdAt,
+      });
+    }
+  }
+  entries.sort((left, right) => {
+    const leftTime = left.createdAt ? Date.parse(left.createdAt) : 0;
+    const rightTime = right.createdAt ? Date.parse(right.createdAt) : 0;
+    if (leftTime !== rightTime) {
+      return leftTime - rightTime;
+    }
+    return (left.label || "").localeCompare(right.label || "");
+  });
+  return entries.slice(0, 25);
 }
 
 function applyCliPostAttemptRunEffects(runId: string, task: Pick<Task, "role">, output: AttemptOutput) {

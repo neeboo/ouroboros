@@ -6352,6 +6352,376 @@ describe("CLI", () => {
     expect(todoRuns.some((todoRun: { id: string }) => todoRun.id === run.id)).toBe(false);
   });
 
+  test("design-status prints concise charter, proposal, and outcome summaries", async () => {
+    await runCli("init");
+    const project = await runCliJson(
+      "create-project",
+      "--name",
+      "Design Project",
+      "--root-path",
+      dir,
+    );
+    const harness = new Harness(dbPath);
+    harness.createFounderCharter({
+      projectId: project.id,
+      mission: "Ship calm dashboard visibility for the design loop",
+      activate: true,
+      charter: {
+        mission: "Ship calm dashboard visibility for the design loop",
+        capitalPolicy: {
+          currency: "USD",
+          monthlyBudget: 5000,
+          experimentBudget: 1500,
+          recurringSpendApprovalAbove: 800,
+          runwayFloorMonths: 12,
+          portfolio: { core: 60, growth: 30, exploration: 10 },
+        },
+        authority: {
+          autoResearch: true,
+          autoReversibleExperiments: true,
+          autoIntegrateVerifiedCode: false,
+          requireHumanFor: ["irreversible-spend"],
+        },
+        reviewCadenceDays: 14,
+      },
+    });
+    const proposal = harness.createDesignProposal({
+      projectId: project.id,
+      title: "Add designer inspector disclosure",
+      problem: "Dashboard lacks visibility into the design loop.",
+      recommendation: "Render a concise designer card with details behind disclosure.",
+      status: "experimenting",
+      proposal: {
+        problem: "Dashboard lacks visibility into the design loop.",
+        recommendation: "Render a concise designer card with details behind disclosure.",
+        investment: {
+          reversibility: "easy",
+          portfolio: "growth",
+          oneTimeCost: 1200,
+          recurringCost: 0,
+          timeBudget: "2 weeks",
+        },
+        evaluationContract: {
+          baseline: ["no designer card"],
+          successMetrics: ["decisions visible within one glance"],
+          guardMetrics: ["dashboard render time under 200ms"],
+          requiredEvidence: ["screenshot of disclosure expanded"],
+          reviewAt: "2026-08-20",
+        },
+      },
+    });
+    harness.recordDesignDecision({
+      proposalId: proposal.id,
+      decision: "approved",
+      actorKind: "human",
+      reasons: ["visibility is cheap", "disclosure keeps the calm default"],
+    });
+    harness.recordDesignOutcome({
+      proposalId: proposal.id,
+      stage: "review",
+      recommendation: "retain",
+      evidence: ["disclosure expanded shows budget"],
+      reviewAt: "2026-08-18",
+    });
+    harness.createStrategySignal({
+      projectId: project.id,
+      signalClass: "delivery",
+      source: "dashboard-walkthrough",
+      title: "Default dashboard should stay calm",
+      summary: "Calm default matters for founder attention.",
+      confidence: 0.6,
+      observationTime: "2026-08-02T10:00:00Z",
+    });
+
+    const output = await runCli("design-status", "--project-id", project.id);
+    expect(output).toContain("Designer status");
+    expect(output).toContain("Active charter");
+    expect(output).toContain("mission: Ship calm dashboard visibility for the design loop");
+    expect(output).toContain("budget: monthly USD 5000, experiment USD 1500");
+    expect(output).toContain("portfolio: core 60%, growth 30%, exploration 10%");
+    expect(output).toContain("authority: auto-research, auto-experiments");
+    expect(output).toContain("human checkpoints: irreversible-spend");
+    expect(output).toContain("Current proposal");
+    expect(output).toContain("status: experimenting");
+    expect(output).toContain("title: Add designer inspector disclosure");
+    expect(output).toContain("investment: one-time 1200, recurring 0");
+    expect(output).toContain("latest decision: approved by human");
+    expect(output).toContain("Outcomes");
+    expect(output).toContain("Signals and proposals");
+    expect(output).toContain("active signals: 1");
+    expect(output).toContain("proposals: experimenting=1");
+
+    const json = await runCliJson("design-status", "--project-id", project.id, "--json", "true");
+    expect(json).toMatchObject({
+      projectId: project.id,
+      charter: expect.objectContaining({
+        mission: "Ship calm dashboard visibility for the design loop",
+      }),
+      currentProposal: expect.objectContaining({
+        status: "experimenting",
+        title: "Add designer inspector disclosure",
+      }),
+      latestDecision: expect.objectContaining({
+        decision: "approved",
+        actorKind: "human",
+      }),
+      activeSignalCount: 1,
+      proposalCountsByStatus: { experimenting: 1 },
+    });
+    expect(json.recentOutcomes[0]).toMatchObject({
+      stage: "review",
+      recommendation: "retain",
+      reviewAt: "2026-08-18",
+    });
+  });
+
+  test("design-status handles projects with no charter or proposals", async () => {
+    await runCli("init");
+    const project = await runCliJson(
+      "create-project",
+      "--name",
+      "Empty Project",
+      "--root-path",
+      dir,
+    );
+    const output = await runCli("design-status", "--project-id", project.id);
+    expect(output).toContain("Designer status");
+    expect(output).toContain("Active charter");
+    expect(output).toContain("(none)");
+    expect(output).toContain("Current proposal");
+    expect(output).toContain("(none)");
+    expect(output).toContain("active signals: 0");
+
+    const json = await runCliJson("design-status", "--project-id", project.id, "--json", "true");
+    expect(json).toMatchObject({
+      projectId: project.id,
+      charter: null,
+      currentProposal: null,
+      latestDecision: null,
+      activeSignalCount: 0,
+    });
+  });
+
+  test("design-status resolves project-id from project-root flag", async () => {
+    await runCli("init");
+    const project = await runCliJson(
+      "create-project",
+      "--name",
+      "Root Resolved Project",
+      "--root-path",
+      dir,
+    );
+    const output = await runCli("design-status", "--project-root", dir);
+    expect(output).toContain("Designer status");
+    expect(output).toContain("active signals: 0");
+
+    const json = await runCliJson("design-status", "--project-root", dir, "--json", "true");
+    expect(json.projectId).toBe(project.id);
+  });
+
+  test("list-signals filters by class and status with concise and JSON output", async () => {
+    await runCli("init");
+    const project = await runCliJson(
+      "create-project",
+      "--name",
+      "Signals Project",
+      "--root-path",
+      dir,
+    );
+    const harness = new Harness(dbPath);
+    harness.createStrategySignal({
+      projectId: project.id,
+      signalClass: "delivery",
+      source: "retro-1",
+      title: "Tighten design loop cadence",
+      summary: "Weekly reviews slip.",
+      confidence: 0.7,
+      observationTime: "2026-08-01T08:00:00Z",
+    });
+    harness.createStrategySignal({
+      projectId: project.id,
+      signalClass: "market",
+      source: "user-interview-3",
+      title: "User asks for designer visibility",
+      summary: "Common request across interviews.",
+      confidence: 0.4,
+      observationTime: "2026-07-30T08:00:00Z",
+    });
+    harness.createStrategySignal({
+      projectId: project.id,
+      signalClass: "delivery",
+      source: "retro-2",
+      title: "Stale signal",
+      summary: "Should drop.",
+      confidence: 0.2,
+      status: "superseded",
+      observationTime: "2026-07-15T08:00:00Z",
+    });
+
+    const concise = await runCli("list-signals", "--project-id", project.id);
+    expect(concise).toContain("Strategy signals (2)");
+    expect(concise).toContain("[delivery] active");
+    expect(concise).toContain("source: retro-1");
+    expect(concise).toContain("title: Tighten design loop cadence");
+    expect(concise).toContain("[market] active");
+    expect(concise).not.toContain("Stale signal");
+
+    const filtered = await runCli(
+      "list-signals",
+      "--project-id",
+      project.id,
+      "--class",
+      "market",
+    );
+    expect(filtered).toContain("Strategy signals (1)");
+    expect(filtered).toContain("[market] active");
+    expect(filtered).not.toContain("[delivery]");
+
+    const json = await runCliJson(
+      "list-signals",
+      "--project-id",
+      project.id,
+      "--json",
+      "true",
+    );
+    expect(json).toMatchObject({
+      projectId: project.id,
+      totalCount: 2,
+      signalClass: null,
+    });
+    expect(json.signals).toHaveLength(2);
+    expect(json.signals[0]).toMatchObject({
+      signalClass: "delivery",
+      source: "retro-1",
+      title: "Tighten design loop cadence",
+      status: "active",
+    });
+
+    const superseded = await runCliJson(
+      "list-signals",
+      "--project-id",
+      project.id,
+      "--statuses",
+      "superseded",
+      "--json",
+      "true",
+    );
+    expect(superseded.totalCount).toBe(1);
+    expect(superseded.signals[0]).toMatchObject({ source: "retro-2", status: "superseded" });
+  });
+
+  test("show-design prints proposal detail with decisions and outcomes", async () => {
+    await runCli("init");
+    const project = await runCliJson(
+      "create-project",
+      "--name",
+      "Show Design Project",
+      "--root-path",
+      dir,
+    );
+    const harness = new Harness(dbPath);
+    const proposal = harness.createDesignProposal({
+      projectId: project.id,
+      title: "Show design proposal detail",
+      problem: "Inspector does not surface proposal evidence.",
+      recommendation: "Add show-design command.",
+      status: "accepted",
+      proposal: {
+        problem: "Inspector does not surface proposal evidence.",
+        recommendation: "Add show-design command.",
+        options: [
+          {
+            name: "cli-only",
+            benefits: ["fast to implement"],
+            costs: ["requires terminal"],
+            risks: ["power users only"],
+            lockIn: ["cli surface contract"],
+          },
+        ],
+        evaluationContract: {
+          baseline: ["manual sqlite queries"],
+          successMetrics: ["readable proposal from one command"],
+          guardMetrics: ["no PII leaked"],
+          requiredEvidence: ["command output captured"],
+          reviewAt: "2026-09-01",
+        },
+        investment: {
+          reversibility: "easy",
+          portfolio: "core",
+          oneTimeCost: 800,
+          recurringCost: 0,
+          timeBudget: "1 week",
+        },
+        experiment: {
+          hypothesis: "Founders can read a proposal in one command.",
+          smallestTest: "Run show-design in the next design review.",
+          stopConditions: ["unreadable output"],
+          rollback: "Drop the command.",
+        },
+      },
+    });
+    harness.recordDesignDecision({
+      proposalId: proposal.id,
+      decision: "approved",
+      actorKind: "human",
+      actorRef: "founder@local",
+      reasons: ["cheap to ship", "reversible"],
+    });
+    harness.recordDesignOutcome({
+      proposalId: proposal.id,
+      stage: "review",
+      recommendation: "retain",
+      evidence: ["reviewer read the proposal out loud"],
+      unexpectedEffects: [],
+    });
+
+    const output = await runCli("show-design", "--proposal-id", proposal.id);
+    expect(output).toContain(`Design proposal ${proposal.id}`);
+    expect(output).toContain("status: accepted");
+    expect(output).toContain("Options");
+    expect(output).toContain("- cli-only");
+    expect(output).toContain("benefits: fast to implement");
+    expect(output).toContain("costs: requires terminal");
+    expect(output).toContain("Evaluation contract (frozen)");
+    expect(output).toContain("success metrics: readable proposal from one command");
+    expect(output).toContain("Investment");
+    expect(output).toContain("reversibility: easy");
+    expect(output).toContain("Experiment");
+    expect(output).toContain("hypothesis: Founders can read a proposal in one command.");
+    expect(output).toContain("Decisions (1)");
+    expect(output).toContain("approved by human (founder@local)");
+    expect(output).toContain("Outcomes (1)");
+
+    const json = await runCliJson("show-design", "--proposal-id", proposal.id, "--json", "true");
+    expect(json).toMatchObject({
+      proposal: expect.objectContaining({
+        id: proposal.id,
+        status: "accepted",
+        title: "Show design proposal detail",
+      }),
+      decisions: [
+        expect.objectContaining({
+          decision: "approved",
+          actorKind: "human",
+          actorRef: "founder@local",
+        }),
+      ],
+      outcomes: [
+        expect.objectContaining({
+          stage: "review",
+          recommendation: "retain",
+        }),
+      ],
+    });
+  });
+
+  test("show-design fails clearly for unknown proposal ids", async () => {
+    await runCli("init");
+    const result = await runCliRaw("show-design", "--proposal-id", "design_missing");
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stderr).toContain("design proposal not found: design_missing");
+  });
+
   async function runCli(...rawArgs: Array<string | Record<string, string>>) {
     const result = await runCliRaw(...rawArgs);
     if (result.exitCode !== 0) {
