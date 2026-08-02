@@ -54,6 +54,8 @@ export type HarnessAction =
       commitMessage?: string;
       push?: boolean;
       reason?: string;
+      /** Treat the linked design proposal's outcome review as due immediately. */
+      immediateOutcomeReview?: boolean;
     }
   | {
       type: "interruptAttemptAndCreateTask";
@@ -281,6 +283,7 @@ export function parseHarnessAction(value: unknown): HarnessAction {
       commitMessage: optionalStringField(record, "commitMessage"),
       push: optionalBooleanField(record, "push"),
       reason: optionalStringField(record, "reason"),
+      immediateOutcomeReview: optionalBooleanField(record, "immediateOutcomeReview"),
     };
   }
   if (type === "interruptAttemptAndCreateTask") {
@@ -505,7 +508,7 @@ function applyParsedHarnessAction(harness: Harness, action: Exclude<HarnessActio
   }
 
   if (action.type === "integrateVerifiedRun") {
-    return integrateVerifiedRun(harness, action, options);
+    return finalizeIntegrationOutcomeReview(harness, action, integrateVerifiedRun(harness, action, options));
   }
 
   if (action.type === "interruptAttemptAndCreateTask") {
@@ -2788,4 +2791,76 @@ function resultToRecord(result: HarnessActionResult): Record<string, unknown> {
 
 function errorMessage(error: unknown) {
   return error instanceof Error ? error.message : String(error);
+}
+
+// After a successful integration, transition the linked design proposal into
+// `measuring` and (when due) seed a bounded outcome-review task. The reviewer
+// records the formal retain/revise/retire outcome; the delivery task graph is
+// not reopened. Idempotent: a second integration for the same run is a no-op.
+function finalizeIntegrationOutcomeReview(
+  harness: Harness,
+  action: Extract<HarnessAction, { type: "integrateVerifiedRun" }>,
+  result: HarnessActionResult,
+): HarnessActionResult {
+  if (result.status !== "done") {
+    return result;
+  }
+  const integrationArtifact = result.artifacts.find(
+    (artifact) =>
+      typeof artifact === "object" &&
+      artifact !== null &&
+      (artifact as { kind?: unknown }).kind === "integration",
+  );
+  if (!integrationArtifact) {
+    return result;
+  }
+  const immediate = action.immediateOutcomeReview === true;
+  let linked: ReturnType<Harness["linkProposalOutcomeReview"]> | null = null;
+  try {
+    linked = harness.linkProposalOutcomeReview({
+      runId: action.runId,
+      immediateProxyReview: immediate,
+    });
+  } catch (error) {
+    return {
+      ...result,
+      problems: [...(result.problems ?? []), `outcome review link failed: ${errorMessage(error)}`],
+    };
+  }
+  if (!linked.proposalId) {
+    return result;
+  }
+  if (linked.proposalStatus) {
+    result.checks.push({
+      name: "design proposal measuring",
+      status: "passed",
+      evidence: `${linked.proposalId}:${linked.proposalStatus}`,
+    });
+  }
+  if (linked.outcomeReviewTaskId) {
+    result.checks.push({
+      name: "outcome review task",
+      status: "passed",
+      evidence: linked.outcomeReviewTaskId,
+    });
+    result.artifacts = [
+      ...result.artifacts,
+      {
+        kind: "outcome-review",
+        runId: action.runId,
+        proposalId: linked.proposalId,
+        taskId: linked.outcomeReviewTaskId,
+        reviewDue: linked.reviewDue,
+        reviewAt: linked.reviewAt,
+        reason: linked.reason,
+      },
+    ];
+  } else if (linked.reviewAt) {
+    result.checks.push({
+      name: "outcome review scheduled",
+      status: "passed",
+      evidence: `${linked.proposalId}:${linked.reviewAt}`,
+    });
+  }
+  return result;
 }

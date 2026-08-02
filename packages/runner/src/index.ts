@@ -2,8 +2,13 @@ export { buildTaskPrompt, normalizedLessonSummary } from "./prompt";
 export {
   blockedOutput,
   createRunsAction,
+  createRunsFromDesignAction,
   createTasksAction,
+  decideDesignAction,
   doneOutput,
+  proposeDesignAction,
+  recordDesignOutcomeAction,
+  recordSignalAction,
   setRunDecisionAction,
 } from "./agent-actions";
 export { applyStartHooks, runNextReadyTask, runReadyTasks, runUntilIdle } from "./runner";
@@ -47,6 +52,8 @@ export {
   proxyEnvForChildProcess,
   proxyEnvFromScutilOutput,
 } from "./executors/proxy-env";
+export { createApplyDesignActionsHook } from "./hooks/apply-design-actions";
+export type { ApplyDesignActionsHookOptions } from "./hooks/apply-design-actions";
 export { createContextSubagentHook, createContextSummaryHook } from "./hooks/context-summary";
 export { createCollectSubsessionsHook } from "./hooks/collect-subsessions";
 export type { CollectSubsessionsHookOptions } from "./hooks/collect-subsessions";
@@ -62,7 +69,12 @@ export type {
   AgentOutput,
   AgentOutputInput,
   CreateRunsAction,
+  CreateRunsFromDesignAction,
   CreateTasksAction,
+  DecideDesignAction,
+  ProposeDesignAction,
+  RecordDesignOutcomeAction,
+  RecordSignalAction,
   SetRunDecisionAction,
 } from "./agent-actions";
 export type {

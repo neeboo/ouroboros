@@ -4,10 +4,12 @@ import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
-import { acceptGuardrailProposal, Harness } from "../packages/harness/src";
+import { acceptGuardrailProposal, Harness, type AttemptOutput } from "../packages/harness/src";
 import {
   buildTaskPrompt,
+  createApplyDesignActionsHook,
   createRunsAction,
+  createRunsFromDesignAction,
   createCollectSubsessionsHook,
   createContextSummaryHook,
   createGitWorktreeHook,
@@ -18,10 +20,15 @@ import {
   createTasksAction,
   createTasksFromOutputHook,
   createVerifierTaskHook,
+  decideDesignAction,
   doneOutput,
   parseAttemptOutput,
+  proposeDesignAction,
+  recordDesignOutcomeAction,
+  recordSignalAction,
   resolveAgentBackend,
   resolveExecutionRoute,
+  resolveModelPreference,
   runCodexResumableLoop,
   resumeCodexResumableAttempt,
   runNextReadyTask,
@@ -366,6 +373,68 @@ describe("runner", () => {
     expect(rawLessonsSection).toContain('"attemptId": "attempt_a"');
     expect(rawLessonsSection).not.toContain("Candidate guardrail guidance");
     expect(rawLessonsSection).not.toContain("candidateGuardrail");
+  });
+
+  test("builds designer prompts that advertise the five fixed design actions", () => {
+    const runId = harness.createRun({
+      goal: "Designer drives the autonomous strategy loop",
+      context: {
+        founderCharterId: "charter_default",
+        designCharterId: "charter_default",
+      },
+    });
+    const taskId = harness.createTask({
+      runId,
+      role: "designer",
+      goal: "Decide whether to propose, accept, or stay quiescent",
+      prompt: "Read the active charter and signals before proposing.",
+    });
+
+    const prompt = buildTaskPrompt({
+      run: harness.getRun(runId)!,
+      task: harness.getTask(taskId)!,
+      dependencyAttempts: [],
+    });
+
+    const requiredOutput = prompt.split("## Required Output")[1]!;
+    expect(requiredOutput).toContain("recordSignal");
+    expect(requiredOutput).toContain("proposeDesign");
+    expect(requiredOutput).toContain("decideDesign");
+    expect(requiredOutput).toContain("recordDesignOutcome");
+    expect(requiredOutput).toContain("createRunsFromDesign");
+  });
+
+  test("resolveModelPreference uses designer role defaults from run context", () => {
+    const runId = harness.createRun({
+      goal: "Designer defaults flow through role preference",
+      context: {
+        modelDefaults: {
+          global: { model: "gpt-5.6-luna", reasoning_effort: "high" },
+          roles: {
+            designer: { model: "gpt-5.6-sol", reasoning_effort: "high" },
+            worker: { model: "gpt-5.6-luna", reasoning_effort: "high" },
+          },
+        },
+      },
+    });
+    const taskId = harness.createTask({
+      runId,
+      role: "designer",
+      goal: "Designer role resolves to configured defaults",
+      prompt: "Resolve designer model preference.",
+    });
+
+    const preference = resolveModelPreference({
+      run: harness.getRun(runId)!,
+      task: harness.getTask(taskId)!,
+    });
+
+    expect(preference).toMatchObject({
+      model: "gpt-5.6-sol",
+      reasoning_effort: "high",
+      source: "role-default",
+      role: "designer",
+    });
   });
 
   test("runs the next ready task with an executor and records the attempt", async () => {
@@ -5392,6 +5461,1070 @@ describe("runner", () => {
         }),
       ),
     ).toThrow(/planned task/);
+  });
+
+  const validProposal = {
+    problem: "Test runner flakes on cold cache",
+    recommendation: "Pre-warm the cache before running",
+    evidenceRefs: ["signal_abc"],
+    options: [
+      {
+        name: "pre-warm cache",
+        benefits: ["faster startup"],
+        costs: ["small boot cost"],
+        risks: ["none"],
+        lockIn: ["none"],
+      },
+      {
+        name: "leave as-is",
+        benefits: ["no change"],
+        costs: ["ongoing flake"],
+        risks: ["continued flake"],
+        lockIn: ["none"],
+      },
+    ],
+    evaluationContract: {
+      baseline: ["cold-cache startup 12s"],
+      successMetrics: ["cold-cache startup under 7s"],
+      guardMetrics: ["test reliability stays at 100%"],
+      requiredEvidence: ["bun test results from three runs"],
+    },
+    investment: {
+      reversibility: "easy" as const,
+      portfolio: "core" as const,
+      oneTimeCost: 0,
+      recurringCost: 0,
+      timeBudget: "1 hour",
+    },
+  };
+
+  test("parses valid recordSignal designer action", () => {
+    const output = parseAttemptOutput(
+      JSON.stringify({
+        status: "done",
+        summary: "recorded signal",
+        actions: [
+          {
+            type: "recordSignal",
+            payload: {
+              projectId: "project_1",
+              signalClass: "delivery",
+              source: "test-runs",
+              title: "flaky runner",
+              summary: "runner flaked twice",
+              observationTime: "2026-08-02T00:00:00Z",
+              confidence: 0.6,
+              evidence: [{ path: "tests/runner.test.ts" }],
+            },
+          },
+        ],
+      }),
+    );
+
+    expect(output.designActions).toEqual([
+      {
+        type: "recordSignal",
+        payload: expect.objectContaining({
+          projectId: "project_1",
+          signalClass: "delivery",
+          source: "test-runs",
+          title: "flaky runner",
+          summary: "runner flaked twice",
+          observationTime: "2026-08-02T00:00:00Z",
+          confidence: 0.6,
+          evidence: [{ path: "tests/runner.test.ts" }],
+        }),
+      },
+    ]);
+    expect(output.nextRuns).toEqual([]);
+    expect(output.nextTasks).toEqual([]);
+  });
+
+  test("parses valid proposeDesign designer action with builder", () => {
+    const output = parseAttemptOutput(
+      JSON.stringify(
+        doneOutput({
+          summary: "proposed",
+          actions: [
+            proposeDesignAction({
+              projectId: "project_1",
+              title: "Pre-warm cache",
+              proposal: validProposal,
+              status: "proposed",
+            }),
+          ],
+        }),
+      ),
+    );
+
+    expect(output.designActions).toHaveLength(1);
+    expect(output.designActions?.[0].type).toBe("proposeDesign");
+    expect(output.designActions?.[0].payload.proposal).toMatchObject({
+      problem: "Test runner flakes on cold cache",
+      recommendation: "Pre-warm the cache before running",
+    });
+  });
+
+  test("parses valid decideDesign designer action", () => {
+    const output = parseAttemptOutput(
+      JSON.stringify({
+        status: "done",
+        summary: "decided",
+        actions: [
+          decideDesignAction({
+            proposalId: "design_1",
+            decision: "rejected",
+            reasons: ["no evidence of impact"],
+          }),
+        ],
+      }),
+    );
+
+    expect(output.designActions?.[0]).toMatchObject({
+      type: "decideDesign",
+      payload: { proposalId: "design_1", decision: "rejected", actorKind: "auto" },
+    });
+  });
+
+  test("parses valid recordDesignOutcome designer action", () => {
+    const output = parseAttemptOutput(
+      JSON.stringify({
+        status: "done",
+        summary: "outcome",
+        actions: [
+          recordDesignOutcomeAction({
+            proposalId: "design_1",
+            stage: "review",
+            recommendation: "retain",
+            baseline: { startup: 12 },
+            observed: { startup: 5 },
+            evidence: [{ runId: "run_1" }],
+          }),
+        ],
+      }),
+    );
+
+    expect(output.designActions?.[0].payload.recommendation).toBe("retain");
+  });
+
+  test("parses valid createRunsFromDesign designer action", () => {
+    const output = parseAttemptOutput(
+      JSON.stringify({
+        status: "done",
+        summary: "delivery",
+        actions: [
+          createRunsFromDesignAction({
+            proposalId: "design_1",
+            runs: [
+              {
+                goal: "Plan cache pre-warm",
+                prompt: "Plan the change.",
+                doneWhen: ["planner returns tasks"],
+              },
+            ],
+          }),
+        ],
+      }),
+    );
+
+    expect(output.designActions?.[0].type).toBe("createRunsFromDesign");
+    expect(output.designActions?.[0].payload.runs).toHaveLength(1);
+    expect(output.nextRuns).toEqual([]);
+  });
+
+  test("coexists createTasks, createRuns, setRunDecision, and design actions", () => {
+    const output = parseAttemptOutput(
+      JSON.stringify(
+        doneOutput({
+          summary: "design and delivery",
+          actions: [
+            createTasksAction([
+              {
+                role: "worker",
+                goal: "wire gate",
+                prompt: "wire gate",
+              },
+            ]),
+            createRunsAction([
+              {
+                goal: "auxiliary run",
+                prompt: "auxiliary run",
+              },
+            ]),
+            setRunDecisionAction("continue"),
+            recordSignalAction({
+              projectId: "project_1",
+              signalClass: "delivery",
+              source: "test",
+              title: "signal",
+              summary: "ok",
+              observationTime: "2026-08-02T00:00:00Z",
+              confidence: 0.5,
+            }),
+          ],
+        }),
+      ),
+    );
+
+    expect(output.nextTasks).toHaveLength(1);
+    expect(output.nextRuns).toHaveLength(1);
+    expect(output.runDecision).toBe("continue");
+    expect(output.designActions).toHaveLength(1);
+    expect(output.designActions?.[0].type).toBe("recordSignal");
+  });
+
+  test.each([
+    ["missing projectId", { signalClass: "delivery", source: "x", title: "x", summary: "x", observationTime: "2026-08-02T00:00:00Z", confidence: 0.5 }],
+    ["missing signalClass", { projectId: "project_1", source: "x", title: "x", summary: "x", observationTime: "2026-08-02T00:00:00Z", confidence: 0.5 }],
+    ["invalid signalClass", { projectId: "project_1", signalClass: "weather", source: "x", title: "x", summary: "x", observationTime: "2026-08-02T00:00:00Z", confidence: 0.5 }],
+    ["invalid confidence", { projectId: "project_1", signalClass: "delivery", source: "x", title: "x", summary: "x", observationTime: "2026-08-02T00:00:00Z", confidence: 1.4 }],
+    ["missing observationTime", { projectId: "project_1", signalClass: "delivery", source: "x", title: "x", summary: "x", confidence: 0.5 }],
+    ["non-timestamp observationTime", { projectId: "project_1", signalClass: "delivery", source: "x", title: "x", summary: "x", observationTime: "not-a-timestamp", confidence: 0.5 }],
+    ["invalid expiresAt", { projectId: "project_1", signalClass: "delivery", source: "x", title: "x", summary: "x", observationTime: "2026-08-02T00:00:00Z", confidence: 0.5, expiresAt: "not-a-date" }],
+  ])("rejects malformed recordSignal payloads with %s", (_name, payload) => {
+    expect(() =>
+      parseAttemptOutput(
+        JSON.stringify({
+          status: "done",
+          summary: "x",
+          actions: [{ type: "recordSignal", payload }],
+        }),
+      ),
+    ).toThrow(/recordSignal/);
+  });
+
+  test.each([
+    ["missing proposal", { projectId: "project_1", title: "x" }],
+    ["missing problem", { projectId: "project_1", title: "x", proposal: { recommendation: "x", evidenceRefs: ["signal_1"], evaluationContract: { successMetrics: ["x"] }, investment: { reversibility: "easy", portfolio: "core" } } }],
+    ["empty options array", { projectId: "project_1", title: "x", proposal: { problem: "x", recommendation: "x", evidenceRefs: ["signal_1"], options: [], evaluationContract: { successMetrics: ["x"] }, investment: { reversibility: "easy", portfolio: "core" } } }],
+    ["missing options", { projectId: "project_1", title: "x", proposal: { problem: "x", recommendation: "x", evidenceRefs: ["signal_1"], evaluationContract: { successMetrics: ["x"] }, investment: { reversibility: "easy", portfolio: "core" } } }],
+    ["missing evaluation contract", { projectId: "project_1", title: "x", proposal: { problem: "x", recommendation: "x", evidenceRefs: ["signal_1"], investment: { reversibility: "easy", portfolio: "core" } } }],
+    ["missing investment", { projectId: "project_1", title: "x", proposal: { problem: "x", recommendation: "x", evidenceRefs: ["signal_1"], evaluationContract: { successMetrics: ["x"] } } }],
+    ["invalid reversibility", { projectId: "project_1", title: "x", proposal: { problem: "x", recommendation: "x", evidenceRefs: ["signal_1"], evaluationContract: { successMetrics: ["x"] }, investment: { reversibility: "trivial", portfolio: "core" } } }],
+    ["negative oneTimeCost", { projectId: "project_1", title: "x", proposal: { problem: "x", recommendation: "x", evidenceRefs: ["signal_1"], evaluationContract: { successMetrics: ["x"] }, investment: { reversibility: "easy", portfolio: "core", oneTimeCost: -5 } } }],
+    ["empty evidenceRefs", { projectId: "project_1", title: "x", proposal: { problem: "x", recommendation: "x", evidenceRefs: [], evaluationContract: { successMetrics: ["x"] }, investment: { reversibility: "easy", portfolio: "core" } } }],
+    ["missing evidenceRefs", { projectId: "project_1", title: "x", proposal: { problem: "x", recommendation: "x", evaluationContract: { successMetrics: ["x"] }, investment: { reversibility: "easy", portfolio: "core" } } }],
+  ])("rejects malformed proposeDesign payloads with %s", (_name, payload) => {
+    expect(() =>
+      parseAttemptOutput(
+        JSON.stringify({
+          status: "done",
+          summary: "x",
+          actions: [{ type: "proposeDesign", payload }],
+        }),
+      ),
+    ).toThrow(/proposeDesign/);
+  });
+
+  test.each([
+    ["missing proposalId", { decision: "rejected" }],
+    ["invalid decision", { proposalId: "design_1", decision: "defer" }],
+    ["invalid actorKind", { proposalId: "design_1", decision: "rejected", actorKind: "founder" }],
+    ["designer approval", { proposalId: "design_1", decision: "approved" }],
+    ["designer human actor", { proposalId: "design_1", decision: "rejected", actorKind: "human" }],
+    ["designer governance actor", { proposalId: "design_1", decision: "revise", actorKind: "governance" }],
+  ])("rejects malformed decideDesign payloads with %s", (_name, payload) => {
+    expect(() =>
+      parseAttemptOutput(
+        JSON.stringify({
+          status: "done",
+          summary: "x",
+          actions: [{ type: "decideDesign", payload }],
+        }),
+      ),
+    ).toThrow(/decideDesign/);
+  });
+
+  test.each([
+    ["missing proposalId", { stage: "review", recommendation: "retain" }],
+    ["invalid stage", { proposalId: "design_1", stage: "post", recommendation: "retain" }],
+    ["invalid recommendation", { proposalId: "design_1", stage: "review", recommendation: "hold" }],
+  ])("rejects malformed recordDesignOutcome payloads with %s", (_name, payload) => {
+    expect(() =>
+      parseAttemptOutput(
+        JSON.stringify({
+          status: "done",
+          summary: "x",
+          actions: [{ type: "recordDesignOutcome", payload }],
+        }),
+      ),
+    ).toThrow(/recordDesignOutcome/);
+  });
+
+  test("rejects createRunsFromDesign without proposalId", () => {
+    expect(() =>
+      parseAttemptOutput(
+        JSON.stringify({
+          status: "done",
+          summary: "x",
+          actions: [{ type: "createRunsFromDesign", payload: { runs: [] } }],
+        }),
+      ),
+    ).toThrow(/createRunsFromDesign/);
+  });
+
+  test("rejects unknown design action types", () => {
+    expect(() =>
+      parseAttemptOutput(
+        JSON.stringify({
+          status: "done",
+          summary: "x",
+          actions: [{ type: "approveDesign", payload: {} }],
+        }),
+      ),
+    ).toThrow(/action type/);
+  });
+
+  test("apply-design-actions hook records durable entities from valid actions", async () => {
+    const runId = harness.createRun({ goal: "design run" });
+    const taskId = harness.createTask({
+      runId,
+      role: "designer",
+      goal: "design",
+      prompt: "design",
+    });
+    const projectId = harness.createProject({ name: "ouroboros", rootPath: dir });
+    const hook = createApplyDesignActionsHook({ harness });
+
+    const output: AttemptOutput = {
+      status: "done",
+      summary: "design",
+      designActions: [
+        {
+          type: "recordSignal",
+          payload: {
+            projectId,
+            signalClass: "delivery",
+            source: "tests",
+            title: "flaky",
+            summary: "twice",
+            observationTime: "2026-08-02T00:00:00Z",
+            confidence: 0.5,
+          },
+        },
+      ],
+    } as AttemptOutput;
+
+    const result = await hook({
+      run: harness.getRun(runId)!,
+      task: harness.getTask(taskId)!,
+      sessionName: "session",
+      prompt: "design",
+      output,
+    });
+
+    expect(result.decision).toBe("exit");
+    const signals = harness.listStrategySignals({ projectId });
+    expect(signals).toHaveLength(1);
+    expect(signals[0]).toMatchObject({ title: "flaky", runId });
+    const events = harness.listHarnessActionEvents({ limit: 5 });
+    expect(events[0]).toMatchObject({
+      actionType: "design.recordSignal",
+      status: "done",
+    });
+    expect(events[0].request).toMatchObject({
+      type: "recordSignal",
+      runId,
+      taskId,
+    });
+    expect(events[0].result).toMatchObject({ signalId: signals[0].id });
+  });
+
+  test("apply-design-actions hook records proposal, decision, outcome, and runs", async () => {
+    const runId = harness.createRun({ goal: "design run" });
+    const taskId = harness.createTask({
+      runId,
+      role: "designer",
+      goal: "design",
+      prompt: "design",
+    });
+    const projectId = harness.createProject({ name: "ouroboros", rootPath: dir });
+    const hook = createApplyDesignActionsHook({ harness });
+
+    const proposalOutput: AttemptOutput = {
+      status: "done",
+      summary: "proposal",
+      designActions: [
+        {
+          type: "proposeDesign",
+          payload: {
+            projectId,
+            title: "Pre-warm cache",
+            proposal: validProposal,
+            status: "proposed",
+          },
+        },
+      ],
+    } as AttemptOutput;
+
+    const proposalResult = await hook({
+      run: harness.getRun(runId)!,
+      task: harness.getTask(taskId)!,
+      sessionName: "session",
+      prompt: "design",
+      output: proposalOutput,
+    });
+    expect(proposalResult.decision).toBe("exit");
+
+    const proposals = harness.listDesignProposals({ projectId });
+    expect(proposals).toHaveLength(1);
+    const proposalId = proposals[0].id;
+
+    harness.recordDesignDecision({
+      proposalId,
+      decision: "approved",
+      actorKind: "human",
+      actorRef: "founder@example.com",
+      reasons: ["reversible change reviewed by founder"],
+    });
+    harness.updateDesignProposalStatus({ proposalId, status: "accepted" });
+
+    const approvedProposal = harness.getDesignProposal({ id: proposalId });
+    expect(approvedProposal?.status).toBe("accepted");
+    const decisions = harness.listDesignDecisions({ proposalId });
+    expect(decisions[0]).toMatchObject({ decision: "approved", actorKind: "human" });
+
+    const deliveryOutput: AttemptOutput = {
+      status: "done",
+      summary: "delivery",
+      designActions: [
+        {
+          type: "createRunsFromDesign",
+          payload: {
+            proposalId,
+            runs: [
+              {
+                goal: "Plan pre-warm",
+                prompt: "Plan the change.",
+              },
+            ],
+          },
+        },
+      ],
+    } as AttemptOutput;
+
+    const deliveryResult = await hook({
+      run: harness.getRun(runId)!,
+      task: harness.getTask(taskId)!,
+      sessionName: "session",
+      prompt: "design",
+      output: deliveryOutput,
+    });
+
+    expect(deliveryResult.decision).toBe("continue");
+    const createdRunArtifacts = (deliveryResult.artifacts ?? []).filter(
+      (artifact) => (artifact as { kind?: string }).kind === "created_run",
+    );
+    expect(createdRunArtifacts).toHaveLength(1);
+    const childRunId = (createdRunArtifacts[0] as { runId: string }).runId;
+    const childRun = harness.getRun(childRunId);
+    expect(childRun?.context).toMatchObject({
+      designProposalId: proposalId,
+      source: "design",
+      designEvaluationContract: expect.objectContaining({
+        successMetrics: ["cold-cache startup under 7s"],
+        requiredEvidence: ["bun test results from three runs"],
+      }),
+      designProposal: expect.objectContaining({
+        problem: "Test runner flakes on cold cache",
+        recommendation: "Pre-warm the cache before running",
+        options: expect.arrayContaining([expect.objectContaining({ name: "pre-warm cache" })]),
+        evidenceRefs: ["signal_abc"],
+      }),
+      designInvestment: expect.objectContaining({
+        reversibility: "easy",
+        portfolio: "core",
+        oneTimeCost: 0,
+        recurringCost: 0,
+        timeBudget: "1 hour",
+      }),
+      designAdditions: [],
+      designRemovals: [],
+      designApprovalAuthority: expect.objectContaining({
+        decisionId: expect.any(String),
+        decision: "approved",
+        actorKind: "human",
+        actorRef: "founder@example.com",
+        authority: expect.objectContaining({}),
+      }),
+    });
+
+    const outcomeOutput: AttemptOutput = {
+      status: "done",
+      summary: "outcome",
+      designActions: [
+        {
+          type: "recordDesignOutcome",
+          payload: {
+            proposalId,
+            stage: "review",
+            recommendation: "retain",
+            baseline: { startup: 12 },
+            observed: { startup: 5 },
+            evidence: [{ runId: childRunId }],
+          },
+        },
+      ],
+    } as AttemptOutput;
+
+    await hook({
+      run: harness.getRun(runId)!,
+      task: harness.getTask(taskId)!,
+      sessionName: "session",
+      prompt: "design",
+      output: outcomeOutput,
+    });
+
+    const outcomes = harness.listDesignOutcomes({ proposalId });
+    expect(outcomes).toHaveLength(1);
+    expect(harness.getDesignProposal({ id: proposalId })?.status).toBe("retained");
+
+    const designEvents = harness
+      .listHarnessActionEvents({ limit: 50 })
+      .filter((event) => event.actionType.startsWith("design."));
+    const actionTypes = designEvents.map((event) => event.actionType);
+    expect(actionTypes).toEqual(
+      expect.arrayContaining([
+        "design.proposeDesign",
+        "design.createRunsFromDesign",
+        "design.recordDesignOutcome",
+      ]),
+    );
+    for (const event of designEvents) {
+      expect(event.status).toBe("done");
+      expect(event.request).toMatchObject({ runId, taskId });
+    }
+  });
+
+  test("createRunsFromDesign preserves extension fields stored on the proposal envelope", async () => {
+    const runId = harness.createRun({ goal: "design run" });
+    const taskId = harness.createTask({
+      runId,
+      role: "designer",
+      goal: "design",
+      prompt: "design",
+    });
+    const projectId = harness.createProject({ name: "ouroboros", rootPath: dir });
+    const hook = createApplyDesignActionsHook({ harness });
+
+    const proposalWithExtensions = {
+      ...validProposal,
+      targetOutcome: "Cold-cache startup falls below 7s without reliability loss",
+      additions: ["packages/runner/src/prewarm.ts"],
+      removals: ["legacy cold-cache handling"],
+      assumptions: ["prewarm runs before test discovery"],
+      uncertainty: ["effect under load"],
+      experiment: {
+        hypothesis: "Pre-warming eliminates the cold-cache startup tail",
+        smallestTest: "Run three cold-cache suites with and without prewarm",
+        stopConditions: ["startup stays above 7s after prewarm"],
+        rollback: "Delete prewarm and rerun the suite",
+      },
+      // Designer-authored extension fields must survive the freeze so planners
+      // and verifiers inherit a single durable source of truth.
+      customRolloutNotes: "Coordinate with release manager before merging",
+      telemetryHypothesis: {
+        metric: "cold_cache_startup_ms",
+        expectedDelta: -5000,
+      },
+    } as typeof validProposal;
+
+    const proposalOutput: AttemptOutput = {
+      status: "done",
+      summary: "proposal",
+      designActions: [
+        {
+          type: "proposeDesign",
+          payload: {
+            projectId,
+            title: "Pre-warm cache",
+            proposal: proposalWithExtensions,
+            status: "proposed",
+          },
+        },
+      ],
+    } as AttemptOutput;
+
+    const proposalResult = await hook({
+      run: harness.getRun(runId)!,
+      task: harness.getTask(taskId)!,
+      sessionName: "session",
+      prompt: "design",
+      output: proposalOutput,
+    });
+    expect(proposalResult.decision).toBe("exit");
+
+    const proposals = harness.listDesignProposals({ projectId });
+    expect(proposals).toHaveLength(1);
+    const proposalId = proposals[0].id;
+
+    harness.recordDesignDecision({
+      proposalId,
+      decision: "approved",
+      actorKind: "human",
+      actorRef: "founder@example.com",
+      reasons: ["reversible change reviewed by founder"],
+    });
+    harness.updateDesignProposalStatus({ proposalId, status: "accepted" });
+
+    const deliveryOutput: AttemptOutput = {
+      status: "done",
+      summary: "delivery",
+      designActions: [
+        {
+          type: "createRunsFromDesign",
+          payload: {
+            proposalId,
+            runs: [
+              {
+                goal: "Plan pre-warm",
+                prompt: "Plan the change.",
+              },
+            ],
+          },
+        },
+      ],
+    } as AttemptOutput;
+
+    const deliveryResult = await hook({
+      run: harness.getRun(runId)!,
+      task: harness.getTask(taskId)!,
+      sessionName: "session",
+      prompt: "design",
+      output: deliveryOutput,
+    });
+
+    expect(deliveryResult.decision).toBe("continue");
+    const createdRunArtifacts = (deliveryResult.artifacts ?? []).filter(
+      (artifact) => (artifact as { kind?: string }).kind === "created_run",
+    );
+    expect(createdRunArtifacts).toHaveLength(1);
+    const childRunId = (createdRunArtifacts[0] as { runId: string }).runId;
+    const childRun = harness.getRun(childRunId);
+    expect(childRun?.context).toMatchObject({
+      designProposal: expect.objectContaining({
+        problem: "Test runner flakes on cold cache",
+        recommendation: "Pre-warm the cache before running",
+        targetOutcome: "Cold-cache startup falls below 7s without reliability loss",
+        additions: ["packages/runner/src/prewarm.ts"],
+        removals: ["legacy cold-cache handling"],
+        assumptions: ["prewarm runs before test discovery"],
+        uncertainty: ["effect under load"],
+        experiment: expect.objectContaining({
+          hypothesis: "Pre-warming eliminates the cold-cache startup tail",
+        }),
+        customRolloutNotes: "Coordinate with release manager before merging",
+        telemetryHypothesis: expect.objectContaining({
+          metric: "cold_cache_startup_ms",
+          expectedDelta: -5000,
+        }),
+      }),
+    });
+  });
+
+  test("apply-design-actions hook rejects unaccepted proposal for delivery", async () => {
+    const runId = harness.createRun({ goal: "design run" });
+    const taskId = harness.createTask({
+      runId,
+      role: "designer",
+      goal: "design",
+      prompt: "design",
+    });
+    const projectId = harness.createProject({ name: "ouroboros", rootPath: dir });
+    const proposal = harness.createDesignProposal({
+      projectId,
+      title: "Pre-warm cache",
+      problem: "x",
+      recommendation: "x",
+      proposal: validProposal as never,
+      status: "proposed",
+    });
+    const hook = createApplyDesignActionsHook({ harness });
+
+    const output: AttemptOutput = {
+      status: "done",
+      summary: "delivery",
+      designActions: [
+        {
+          type: "createRunsFromDesign",
+          payload: {
+            proposalId: proposal.id,
+            runs: [{ goal: "Plan pre-warm", prompt: "Plan the change." }],
+          },
+        },
+      ],
+    } as AttemptOutput;
+
+    const result = await hook({
+      run: harness.getRun(runId)!,
+      task: harness.getTask(taskId)!,
+      sessionName: "session",
+      prompt: "design",
+      output,
+    });
+
+    expect(result.decision).toBe("exit");
+    expect(result.problems?.[0]).toContain("createRunsFromDesign requires an accepted proposal");
+  });
+
+  test("apply-design-actions hook emits adverse strategy signals for revise and retire recommendations", async () => {
+    const runId = harness.createRun({ goal: "design run" });
+    const taskId = harness.createTask({
+      runId,
+      role: "designer",
+      goal: "design",
+      prompt: "design",
+    });
+    const projectId = harness.createProject({ name: "ouroboros", rootPath: dir });
+    const proposal = harness.createDesignProposal({
+      projectId,
+      title: "Pre-warm cache",
+      problem: "x",
+      recommendation: "x",
+      proposal: validProposal as never,
+      status: "measuring",
+    });
+    const hook = createApplyDesignActionsHook({ harness });
+
+    for (const recommendation of ["revise", "retire"] as const) {
+      const output: AttemptOutput = {
+        status: "done",
+        summary: "outcome",
+        designActions: [
+          {
+            type: "recordDesignOutcome",
+            payload: {
+              proposalId: proposal.id,
+              stage: "review",
+              recommendation,
+              baseline: { startup: 12 },
+              observed: { startup: 14 },
+              evidence: [{ runId }],
+              unexpectedEffects: ["latency spike at 99p"],
+            },
+          },
+        ],
+      } as AttemptOutput;
+
+      const result = await hook({
+        run: harness.getRun(runId)!,
+        task: harness.getTask(taskId)!,
+        sessionName: "session",
+        prompt: "design",
+        output,
+      });
+
+      const signalArtifacts = (result.artifacts ?? []).filter(
+        (artifact) => (artifact as { kind?: string }).kind === "design_signal",
+      );
+      expect(signalArtifacts).toHaveLength(1);
+      const signalId = (signalArtifacts[0] as { signalId: string }).signalId;
+      expect(
+        (result.checks ?? []).some((check) => {
+          const c = check as { name?: string; evidence?: string };
+          return c.name === "adverse outcome signal" && c.evidence === signalId;
+        }),
+      ).toBe(true);
+
+      const signals = harness.listStrategySignals({ projectId }).filter((s) => s.id === signalId);
+      expect(signals).toHaveLength(1);
+      expect(signals[0]).toMatchObject({
+        signalClass: "delivery",
+        source: "outcome-review",
+        proposalId: proposal.id,
+        runId,
+        taskId,
+      });
+      expect(signals[0].title).toContain(recommendation);
+      expect(signals[0].summary).toContain("latency spike at 99p");
+      expect(signals[0].evidence).toEqual(
+        expect.arrayContaining([`design_proposal:${proposal.id}`]),
+      );
+    }
+
+    expect(harness.getDesignProposal({ id: proposal.id })?.status).toBe("retired");
+  });
+
+  test("apply-design-actions hook does not emit adverse signals for retained outcomes", async () => {
+    const runId = harness.createRun({ goal: "design run" });
+    const taskId = harness.createTask({
+      runId,
+      role: "designer",
+      goal: "design",
+      prompt: "design",
+    });
+    const projectId = harness.createProject({ name: "ouroboros", rootPath: dir });
+    const proposal = harness.createDesignProposal({
+      projectId,
+      title: "Pre-warm cache",
+      problem: "x",
+      recommendation: "x",
+      proposal: validProposal as never,
+      status: "measuring",
+    });
+    const hook = createApplyDesignActionsHook({ harness });
+
+    const output: AttemptOutput = {
+      status: "done",
+      summary: "outcome",
+      designActions: [
+        {
+          type: "recordDesignOutcome",
+          payload: {
+            proposalId: proposal.id,
+            stage: "review",
+            recommendation: "retain",
+            baseline: { startup: 12 },
+            observed: { startup: 5 },
+            evidence: [{ runId }],
+          },
+        },
+      ],
+    } as AttemptOutput;
+
+    const result = await hook({
+      run: harness.getRun(runId)!,
+      task: harness.getTask(taskId)!,
+      sessionName: "session",
+      prompt: "design",
+      output,
+    });
+
+    expect((result.artifacts ?? []).some((a) => (a as { kind?: string }).kind === "design_signal")).toBe(false);
+    expect(harness.listStrategySignals({ projectId })).toHaveLength(0);
+    expect(harness.getDesignProposal({ id: proposal.id })?.status).toBe("retained");
+  });
+
+  test("apply-design-actions hook rejects designer-authored approvals of every actor kind", async () => {
+    const runId = harness.createRun({ goal: "design run" });
+    const taskId = harness.createTask({
+      runId,
+      role: "designer",
+      goal: "design",
+      prompt: "design",
+    });
+    const projectId = harness.createProject({ name: "ouroboros", rootPath: dir });
+    const proposal = harness.createDesignProposal({
+      projectId,
+      title: "Pre-warm cache",
+      problem: "x",
+      recommendation: "x",
+      proposal: validProposal as never,
+      status: "proposed",
+    });
+    const hook = createApplyDesignActionsHook({ harness });
+
+    for (const actorKind of ["auto", "human", "governance"] as const) {
+      const output: AttemptOutput = {
+        status: "done",
+        summary: "decision",
+        designActions: [
+          {
+            type: "decideDesign",
+            payload: {
+              proposalId: proposal.id,
+              decision: "approved",
+              actorKind,
+              actorRef: actorKind === "auto" ? null : "founder@example.com",
+            },
+          },
+        ],
+      } as AttemptOutput;
+
+      const result = await hook({
+        run: harness.getRun(runId)!,
+        task: harness.getTask(taskId)!,
+        sessionName: "session",
+        prompt: "design",
+        output,
+      });
+
+      expect(result.decision).toBe("exit");
+      expect(result.problems?.[0]).toContain("decideDesign payload.decision approved is not allowed from designer output");
+      const events = harness.listHarnessActionEvents({ limit: 5 });
+      expect(events[0]).toMatchObject({
+        actionType: "design.decideDesign",
+        status: "blocked",
+      });
+      expect(events[0].request).toMatchObject({
+        type: "decideDesign",
+        runId,
+        taskId,
+      });
+    }
+
+    const decisions = harness.listDesignDecisions({ proposalId: proposal.id });
+    expect(decisions).toHaveLength(0);
+    expect(harness.getDesignProposal({ id: proposal.id })?.status).toBe("proposed");
+  });
+
+  test("apply-design-actions hook rejects designer-authored human and governance actor kinds", async () => {
+    const runId = harness.createRun({ goal: "design run" });
+    const taskId = harness.createTask({
+      runId,
+      role: "designer",
+      goal: "design",
+      prompt: "design",
+    });
+    const projectId = harness.createProject({ name: "ouroboros", rootPath: dir });
+    const proposal = harness.createDesignProposal({
+      projectId,
+      title: "Pre-warm cache",
+      problem: "x",
+      recommendation: "x",
+      proposal: validProposal as never,
+      status: "proposed",
+    });
+    const hook = createApplyDesignActionsHook({ harness });
+
+    for (const actorKind of ["human", "governance"] as const) {
+      const output: AttemptOutput = {
+        status: "done",
+        summary: "decision",
+        designActions: [
+          {
+            type: "decideDesign",
+            payload: {
+              proposalId: proposal.id,
+              decision: "rejected",
+              actorKind,
+              actorRef: "founder@example.com",
+            },
+          },
+        ],
+      } as AttemptOutput;
+
+      const result = await hook({
+        run: harness.getRun(runId)!,
+        task: harness.getTask(taskId)!,
+        sessionName: "session",
+        prompt: "design",
+        output,
+      });
+
+      expect(result.decision).toBe("exit");
+      expect(result.problems?.[0]).toContain(
+        `decideDesign payload.actorKind ${actorKind} is not allowed from designer output`,
+      );
+    }
+
+    expect(harness.listDesignDecisions({ proposalId: proposal.id })).toHaveLength(0);
+  });
+
+  test("apply-design-actions hook rejects createRunsFromDesign when the approval lacks actorRef", async () => {
+    const runId = harness.createRun({ goal: "design run" });
+    const taskId = harness.createTask({
+      runId,
+      role: "designer",
+      goal: "design",
+      prompt: "design",
+    });
+    const projectId = harness.createProject({ name: "ouroboros", rootPath: dir });
+    const proposal = harness.createDesignProposal({
+      projectId,
+      title: "Pre-warm cache",
+      problem: "x",
+      recommendation: "x",
+      proposal: validProposal as never,
+      status: "proposed",
+    });
+    harness.recordDesignDecision({
+      proposalId: proposal.id,
+      decision: "approved",
+      actorKind: "human",
+      reasons: ["reviewed"],
+    });
+    harness.updateDesignProposalStatus({ proposalId: proposal.id, status: "accepted" });
+    const hook = createApplyDesignActionsHook({ harness });
+
+    const output: AttemptOutput = {
+      status: "done",
+      summary: "delivery",
+      designActions: [
+        {
+          type: "createRunsFromDesign",
+          payload: {
+            proposalId: proposal.id,
+            runs: [{ goal: "Plan", prompt: "Plan." }],
+          },
+        },
+      ],
+    } as AttemptOutput;
+
+    const result = await hook({
+      run: harness.getRun(runId)!,
+      task: harness.getTask(taskId)!,
+      sessionName: "session",
+      prompt: "design",
+      output,
+    });
+
+    expect(result.decision).toBe("exit");
+    expect(result.problems?.[0]).toContain("missing actorRef");
+  });
+
+  test("apply-design-actions hook rejects expired evidence", async () => {
+    const runId = harness.createRun({ goal: "design run" });
+    const taskId = harness.createTask({
+      runId,
+      role: "designer",
+      goal: "design",
+      prompt: "design",
+    });
+    const projectId = harness.createProject({ name: "ouroboros", rootPath: dir });
+    const hook = createApplyDesignActionsHook({ harness });
+
+    const output: AttemptOutput = {
+      status: "done",
+      summary: "signal",
+      designActions: [
+        {
+          type: "recordSignal",
+          payload: {
+            projectId,
+            signalClass: "delivery",
+            source: "tests",
+            title: "old",
+            summary: "old",
+            observationTime: "2024-01-01T00:00:00Z",
+            confidence: 0.5,
+            expiresAt: "2024-02-01T00:00:00Z",
+          },
+        },
+      ],
+    } as AttemptOutput;
+
+    const result = await hook({
+      run: harness.getRun(runId)!,
+      task: harness.getTask(taskId)!,
+      sessionName: "session",
+      prompt: "design",
+      output,
+    });
+
+    expect(result.problems?.[0]).toContain("expiresAt");
+  });
+
+  test("apply-design-actions hook is no-op without design actions", async () => {
+    const runId = harness.createRun({ goal: "design run" });
+    const taskId = harness.createTask({
+      runId,
+      role: "designer",
+      goal: "design",
+      prompt: "design",
+    });
+    const hook = createApplyDesignActionsHook({ harness });
+
+    const result = await hook({
+      run: harness.getRun(runId)!,
+      task: harness.getTask(taskId)!,
+      sessionName: "session",
+      prompt: "design",
+      output: { status: "done", summary: "no actions" } as AttemptOutput,
+    });
+
+    expect(result.decision).toBe("exit");
+    expect(result.problems).toBeUndefined();
   });
 
   test("runs multiple ready tasks with separate subagent sessions", async () => {

@@ -23,31 +23,129 @@ export function buildTaskPrompt(input: PromptInput) {
     candidateGuardrailsMarkdown: renderCandidateGuardrails(compactRecentLessons),
     reusableExperienceEvidenceMarkdown: renderReusableExperienceEvidence(compactRecentLessons),
     runLessonsJson: prettyJson(compactRecentLessons),
-    requiredOutputJson: prettyJson({
-      status: "done",
-      summary: "Short completion summary",
-      changedFiles: [],
-      checks: [],
-      artifacts: [],
-      problems: [],
-      actions: [
-        {
-          type: "createTasks",
-          payload: {
-            tasks: [
-              {
-                role: "worker",
-                goal: "Optional next task goal",
-                prompt: "Optional next task instructions",
-                dependsOn: [],
-                doneWhen: [],
-              },
-            ],
-          },
-        },
-      ],
-    }),
+    requiredOutputJson: prettyJson(requiredOutputForRole(input.task.role)),
   });
+}
+
+type RequiredOutputExample = {
+  status: string;
+  summary: string;
+  changedFiles: unknown[];
+  checks: unknown[];
+  artifacts: unknown[];
+  problems: unknown[];
+  actions: Array<Record<string, unknown>>;
+};
+
+const DEFAULT_REQUIRED_OUTPUT: RequiredOutputExample = {
+  status: "done",
+  summary: "Short completion summary",
+  changedFiles: [],
+  checks: [],
+  artifacts: [],
+  problems: [],
+  actions: [
+    {
+      type: "createTasks",
+      payload: {
+        tasks: [
+          {
+            role: "worker",
+            goal: "Optional next task goal",
+            prompt: "Optional next task instructions",
+            dependsOn: [],
+            doneWhen: [],
+          },
+        ],
+      },
+    },
+  ],
+};
+
+function requiredOutputForRole(role: string): RequiredOutputExample {
+  if (role !== "designer") {
+    return DEFAULT_REQUIRED_OUTPUT;
+  }
+  return {
+    status: "done",
+    summary: "Short completion summary",
+    changedFiles: [],
+    checks: [],
+    artifacts: [],
+    problems: [],
+    actions: [
+      {
+        type: "recordSignal",
+        payload: {
+          projectId: "<project_id>",
+          signalClass: "delivery",
+          source: "evidence source",
+          title: "short signal title",
+          summary: "what the evidence shows",
+          observationTime: "2026-08-02T00:00:00Z",
+          confidence: 0.5,
+          evidence: [{ ref: "evidence reference", kind: "evidence-ref" }],
+        },
+      },
+      {
+        type: "proposeDesign",
+        payload: {
+          projectId: "<project_id>",
+          title: "short proposal title",
+          charterId: "<optional charter id>",
+          proposal: {
+            problem: "the demonstrated gap",
+            recommendation: "the recommended option",
+            evidenceRefs: ["signal_<id>"],
+            evaluationContract: {
+              baseline: ["current behavior"],
+              successMetrics: ["measurable outcome"],
+              requiredEvidence: ["bun test runs"],
+            },
+            investment: {
+              reversibility: "easy",
+              portfolio: "core",
+              oneTimeCost: 0,
+              recurringCost: 0,
+            },
+          },
+          status: "proposed",
+        },
+      },
+      {
+        type: "decideDesign",
+        payload: {
+          proposalId: "<proposal id>",
+          decision: "rejected",
+          reasons: ["why the proposal was rejected, deferred, retired, or revised"],
+        },
+      },
+      {
+        type: "recordDesignOutcome",
+        payload: {
+          proposalId: "<proposal id>",
+          stage: "review",
+          recommendation: "retain",
+          baseline: { metric: 0 },
+          observed: { metric: 1 },
+          evidence: [{ runId: "<run id>" }],
+        },
+      },
+      {
+        type: "createRunsFromDesign",
+        payload: {
+          proposalId: "<accepted proposal id>",
+          runs: [
+            {
+              goal: "delivery run goal",
+              prompt: "initial planner prompt",
+              doneWhen: ["verification checks"],
+            },
+          ],
+        },
+      },
+    ],
+  };
 }
 
 type CompactLesson = ReturnType<typeof compactLessons>[number];

@@ -6,19 +6,62 @@ This document defines the intended loop shape for self-iteration and larger proj
 
 ## Core Principle
 
-A run has three different loops:
+A run has four different loops:
 
 ```text
-planning loop -> execution loop -> goal review loop
+designer loop -> planning loop -> execution loop -> goal review loop
+                                                              |
+                                                              v
+                                                       outcome review loop
 ```
 
 Each loop can create tasks, but each loop has a different authority.
 
-- The planning loop defines the goal contract, task graph, verifier contract, and stop policy.
+- The designer loop owns product direction. It reads the active founder charter and current world model, researches evidence, compares alternatives, and proposes designs (or quiesces) before any planning work begins.
+- The planning loop accepts a frozen proposal and evaluation contract; it sharpens the task graph, verifier contract, and stop policy without inventing product direction.
 - The execution loop changes artifacts until verifier evidence satisfies the frozen contract.
 - The goal review loop decides whether the whole run is complete or needs a new planning pass.
+- The outcome review loop compares post-integration evidence with the proposal baseline, records `retain`/`revise`/`retire`, and feeds discrepancies back as strategy signals for the next designer cycle.
 
 Execution should not redefine success. If the verifier contract is wrong, the run needs an explicit contract amendment instead of a silent standard change.
+
+## Founder Charter Ownership
+
+The founder charter is the versioned, durable, human-owned objective function. It defines mission, value metrics, principles, non-goals, constraints, capital policy, delegated authority, and review cadence.
+
+Ownership rules:
+
+- The designer may propose a charter amendment. The proposal records the diff and rationale.
+- Only a human or an explicitly configured governance actor can activate a new charter version.
+- The active charter version is immutable for the duration of a designer cycle.
+- The designer cites the charter version it observed in every proposal.
+
+The mission, capital limits, legal or privacy boundaries, destructive operations, production deployment, and irreversible infrastructure commitments are human checkpoints by default.
+
+## Strategy Signals And Evidence Expiry
+
+The designer maintains a time-aware world model from six signal classes: `user`, `delivery`, `technology`, `market`, `economics`, and `system`. Each signal records its source, observation time, confidence, evidence, and expiry.
+
+Expiry rules:
+
+- Expired `market`, `pricing`, and `technology` claims cannot authorize a new investment until refreshed.
+- Conflicting signals are preserved rather than overwritten.
+- A designer cycle cites the signals it used as `evidenceRefs` on every proposal.
+
+When no trigger and no evidence-backed opportunity exists, the designer returns a mutation-free quiescent decision. The decision lives in the durable attempt summary and the run's exit rationale — it names which signals were inspected, why no work is justified, and when the next review cadence falls. The quiescent cycle writes no new strategy signal, no new proposal, and no design decision, so a quiet repository stays quiet rather than waking itself.
+
+## Deterministic Budget And Human Gates
+
+The authority evaluator is a pure function over the active charter and a proposal. Automatic authority is limited to changes that:
+
+- are reversible (`investment.reversibility = "easy"`);
+- fit one-time and recurring costs inside the configured experiment budget;
+- cite current (non-expired) evidence;
+- do not cross a mission, capital, legal, privacy, destructive, production, dependency, schema, or infrastructure-commitment checkpoint.
+
+Everything else becomes an explicit human `decideDesign` decision. The proposing designer cannot represent a high-risk proposal as human-approved through its own output payload — the gate writes the `design_decisions` row, not the prompt.
+
+The gate records the charter version used, the matched rules, and the reasons for approval, rejection, deferral, or retirement. The decision is auditable evidence for verifiers and outcome reviewers.
 
 ## Goal Contract
 

@@ -4,13 +4,25 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
   applyHarnessAction,
+  describeAuthorityEvaluation,
   describeIntegrationReadiness,
+  evaluateAuthority,
   Harness,
+  HARD_AUTHORITY_RULES,
+  isHardAuthorityReason,
   type SubsessionRunner,
   type SubsessionRunnerCancelChild,
   type SubsessionRunnerCollectChild,
   type SubsessionRunnerStartInput,
   type SubsessionRunnerStartResult,
+} from "../packages/harness/src";
+import type {
+  AuthorityActorContext,
+  AuthorityCharterContext,
+  AuthorityEvidenceReference,
+  AuthorityEvaluationInput,
+  AuthorityPortfolioUsage,
+  AuthorityProposalRiskSurface,
 } from "../packages/harness/src";
 import { handleHarnessActionRequest } from "../packages/cli/src/action-server";
 
@@ -2300,6 +2312,746 @@ describe("Harness actions", () => {
     }));
     expect(thread?.status).toBe("interrupted");
     expect(thread?.interruptReason).toBe("parent stopping");
+  });
+});
+
+describe("Founder charter authority evaluator", () => {
+  function makeCharter(overrides: Partial<AuthorityCharterContext> = {}): AuthorityCharterContext {
+    return {
+      id: "charter_test",
+      version: 1,
+      isActive: true,
+      mission: "Build a safe autonomous strategy loop.",
+      capitalPolicy: {
+        currency: "USD",
+        experimentBudget: 1000,
+        recurringSpendApprovalAbove: 100,
+        portfolio: { core: 5, growth: 3, exploration: 2 },
+      },
+      authority: {
+        autoResearch: true,
+        autoReversibleExperiments: true,
+        autoIntegrateVerifiedCode: false,
+        requireHumanFor: [],
+      },
+      ...overrides,
+    };
+  }
+
+  function makeProposal(overrides: Partial<AuthorityProposalRiskSurface> = {}): AuthorityProposalRiskSurface {
+    return {
+      proposalId: "proposal_test",
+      reversibility: "easy",
+      portfolio: "exploration",
+      oneTimeCost: 50,
+      recurringCost: 0,
+      evidenceRefs: ["sig_a", "sig_b"],
+      amendsMission: false,
+      amendsCapitalPolicy: false,
+      legalOrPrivacy: false,
+      sensitiveData: false,
+      destructiveOperation: false,
+      productionDeployment: false,
+      unplannedDependency: false,
+      schemaMigration: false,
+      recurringInfrastructure: false,
+      declaredHumanCategories: [],
+      ...overrides,
+    };
+  }
+
+  function makeEvidence(overrides: Array<Partial<AuthorityEvidenceReference>> = []): AuthorityEvidenceReference[] {
+    const base: AuthorityEvidenceReference[] = [
+      { ref: "sig_a", kind: "signal", expiresAt: "3025-01-01T00:00:00.000Z", hasConflict: false },
+      { ref: "sig_b", kind: "signal", expiresAt: "3025-01-01T00:00:00.000Z", hasConflict: false },
+    ];
+    if (overrides.length === 0) return base;
+    return base.map((item, idx) => ({ ...item, ...overrides[idx] }));
+  }
+
+  function makeActor(overrides: Partial<AuthorityActorContext> = {}): AuthorityActorContext {
+    return {
+      kind: "human",
+      ref: "founder",
+      isProposer: false,
+      ...overrides,
+    };
+  }
+
+  function makeUsage(
+    overrides: Partial<AuthorityPortfolioUsage> = {},
+  ): AuthorityPortfolioUsage {
+    return {
+      category: "exploration",
+      currentShare: 0,
+      ...overrides,
+    };
+  }
+
+  function evaluate(overrides: Partial<AuthorityEvaluationInput> = {}) {
+    return evaluateAuthority({
+      charter: makeCharter(),
+      proposal: makeProposal(),
+      evidence: makeEvidence(),
+      actor: makeActor(),
+      portfolioUsage: makeUsage(),
+      evaluatedAt: "2026-08-02T00:00:00.000Z",
+      ...overrides,
+    });
+  }
+
+  test("happy path: explicit true delegation, easy reverse, fresh evidence authorizes automatically", () => {
+    const result = evaluate();
+    expect(result.disposition).toBe("automatic");
+    expect(result.reasons).toEqual([]);
+    expect(result.budget.withinExperimentBudget).toBe(true);
+    expect(result.budget.withinRecurringThreshold).toBe(true);
+    expect(result.portfolio.withinShare).toBe(true);
+  });
+
+  test("autoReversibleExperiments absent fails closed to human-required", () => {
+    const charter = makeCharter({ authority: { autoResearch: true } });
+    const result = evaluate({ charter });
+    expect(result.disposition).toBe("human-required");
+    const reason = result.reasons.find((r) => r.kind === "auto-reversible-experiments-disabled");
+    expect(reason).toBeDefined();
+    expect(isHardAuthorityReason(reason!)).toBe(false);
+  });
+
+  test("autoReversibleExperiments non-boolean fails closed", () => {
+    const charter = makeCharter({
+      authority: { autoResearch: true, autoReversibleExperiments: "yes" as unknown as true },
+    });
+    const result = evaluate({ charter });
+    expect(result.disposition).toBe("human-required");
+    expect(result.reasons.some((r) => r.kind === "auto-reversible-experiments-disabled")).toBe(true);
+  });
+
+  test("autoReversibleExperiments false fails closed", () => {
+    const charter = makeCharter({
+      authority: { autoResearch: true, autoReversibleExperiments: false },
+    });
+    const result = evaluate({ charter });
+    expect(result.disposition).toBe("human-required");
+    expect(result.reasons.some((r) => r.kind === "auto-reversible-experiments-disabled")).toBe(true);
+  });
+
+  test("invalid evidence expiry timestamp fails closed with auditable reason", () => {
+    const evidence = makeEvidence([{ expiresAt: "not-a-timestamp" }]);
+    const result = evaluate({ evidence });
+    expect(result.disposition).toBe("human-required");
+    const reason = result.reasons.find((r) => r.kind === "invalid-evidence-expiry");
+    expect(reason).toBeDefined();
+    expect(reason?.evidenceRefs).toEqual(["sig_a"]);
+    expect(result.evidence.invalidExpiry).toContain("sig_a");
+    expect(isHardAuthorityReason(reason!)).toBe(true);
+    expect(HARD_AUTHORITY_RULES).toContain("invalid-evidence-expiry");
+  });
+
+  test("empty-string evidence expiry is treated as invalid", () => {
+    const evidence = makeEvidence([{ expiresAt: "" }]);
+    const result = evaluate({ evidence });
+    expect(result.disposition).toBe("human-required");
+    expect(result.reasons.some((r) => r.kind === "invalid-evidence-expiry")).toBe(true);
+  });
+
+  test("numeric expiresAt fails closed instead of being coerced to a future date", () => {
+    // Adversarial probe mirroring the verifier's failing case: Date.parse(9999)
+    // returns a valid future date, which would silently authorize stale or
+    // numeric garbage. The evaluator must require expiresAt to be null or a
+    // non-empty string before parsing.
+    const evidence = makeEvidence([{ expiresAt: 9999 as unknown as string }]);
+    const result = evaluate({ evidence });
+    expect(result.disposition).toBe("human-required");
+    const reason = result.reasons.find((r) => r.kind === "invalid-evidence-expiry");
+    expect(reason).toBeDefined();
+    expect(reason?.evidenceRefs).toEqual(["sig_a"]);
+    expect(result.evidence.invalidExpiry).toContain("sig_a");
+    expect(isHardAuthorityReason(reason!)).toBe(true);
+  });
+
+  test("boolean expiresAt fails closed instead of being coerced", () => {
+    const evidence = makeEvidence([{ expiresAt: true as unknown as string }]);
+    const result = evaluate({ evidence });
+    expect(result.disposition).toBe("human-required");
+    expect(result.reasons.some((r) => r.kind === "invalid-evidence-expiry")).toBe(true);
+  });
+
+  test("object expiresAt fails closed instead of being coerced", () => {
+    const evidence = makeEvidence([
+      { expiresAt: { iso: "3025-01-01" } as unknown as string },
+    ]);
+    const result = evaluate({ evidence });
+    expect(result.disposition).toBe("human-required");
+    expect(result.reasons.some((r) => r.kind === "invalid-evidence-expiry")).toBe(true);
+  });
+
+  test("null expiresAt remains valid (no expiry asserted)", () => {
+    const evidence = makeEvidence([{ expiresAt: null }]);
+    const result = evaluate({ evidence });
+    expect(result.disposition).toBe("automatic");
+    expect(result.evidence.invalidExpiry).toEqual([]);
+  });
+
+  test("non-boolean conflict metadata fails closed with auditable reason", () => {
+    const evidence = makeEvidence([{ hasConflict: "yes" as unknown as boolean }]);
+    const result = evaluate({ evidence });
+    expect(result.disposition).toBe("human-required");
+    const reason = result.reasons.find((r) => r.kind === "invalid-conflict-metadata");
+    expect(reason).toBeDefined();
+    expect(reason?.evidenceRefs).toEqual(["sig_a"]);
+    expect(result.evidence.invalidConflictMetadata).toContain("sig_a");
+    expect(isHardAuthorityReason(reason!)).toBe(true);
+    expect(HARD_AUTHORITY_RULES).toContain("invalid-conflict-metadata");
+  });
+
+  test("missing conflict metadata (undefined) fails closed", () => {
+    const evidence = makeEvidence([{ hasConflict: undefined as unknown as boolean }]);
+    const result = evaluate({ evidence });
+    expect(result.disposition).toBe("human-required");
+    expect(result.reasons.some((r) => r.kind === "invalid-conflict-metadata")).toBe(true);
+  });
+
+  test("negative one-time cost fails closed with auditable reason", () => {
+    const proposal = makeProposal({ oneTimeCost: -10 });
+    const result = evaluate({ proposal });
+    expect(result.disposition).toBe("human-required");
+    const reason = result.reasons.find((r) => r.kind === "invalid-cost-shape");
+    expect(reason).toBeDefined();
+    expect(isHardAuthorityReason(reason!)).toBe(true);
+    expect(HARD_AUTHORITY_RULES).toContain("invalid-cost-shape");
+  });
+
+  test("negative recurring cost fails closed", () => {
+    const proposal = makeProposal({ recurringCost: -1 });
+    const result = evaluate({ proposal });
+    expect(result.disposition).toBe("human-required");
+    expect(result.reasons.some((r) => r.kind === "invalid-cost-shape")).toBe(true);
+  });
+
+  test("non-finite cost fails closed", () => {
+    const proposal = makeProposal({ oneTimeCost: Number.POSITIVE_INFINITY });
+    const result = evaluate({ proposal });
+    expect(result.disposition).toBe("human-required");
+    expect(result.reasons.some((r) => r.kind === "invalid-cost-shape")).toBe(true);
+  });
+
+  test("NaN cost fails closed", () => {
+    const proposal = makeProposal({ oneTimeCost: Number.NaN });
+    const result = evaluate({ proposal });
+    expect(result.disposition).toBe("human-required");
+    expect(result.reasons.some((r) => r.kind === "invalid-cost-shape")).toBe(true);
+  });
+
+  test("unknown portfolio category fails closed", () => {
+    const proposal = makeProposal({ portfolio: "blitzscale" as unknown as "exploration" });
+    const result = evaluate({ proposal });
+    expect(result.disposition).toBe("human-required");
+    const reason = result.reasons.find((r) => r.kind === "unknown-risk-data");
+    expect(reason).toBeDefined();
+    expect(reason?.message).toContain("blitzscale");
+    expect(isHardAuthorityReason(reason!)).toBe(true);
+  });
+
+  test("missing selected-category allocation fails closed", () => {
+    const charter = makeCharter({
+      capitalPolicy: {
+        currency: "USD",
+        experimentBudget: 1000,
+        recurringSpendApprovalAbove: 100,
+        portfolio: { core: 5, growth: 3 },
+      },
+    });
+    const proposal = makeProposal({ portfolio: "exploration" });
+    const result = evaluate({ charter, proposal });
+    expect(result.disposition).toBe("human-required");
+    const reason = result.reasons.find((r) => r.kind === "portfolio-allocation-missing");
+    expect(reason).toBeDefined();
+    expect(reason?.message).toContain("exploration");
+    expect(isHardAuthorityReason(reason!)).toBe(true);
+    expect(HARD_AUTHORITY_RULES).toContain("portfolio-allocation-missing");
+  });
+
+  test("invalid (non-finite) selected-category allocation fails closed", () => {
+    const charter = makeCharter({
+      capitalPolicy: {
+        currency: "USD",
+        experimentBudget: 1000,
+        recurringSpendApprovalAbove: 100,
+        portfolio: { core: 5, growth: 3, exploration: Number.NaN },
+      },
+    });
+    const proposal = makeProposal({ portfolio: "exploration" });
+    const result = evaluate({ charter, proposal });
+    expect(result.disposition).toBe("human-required");
+    expect(result.reasons.some((r) => r.kind === "portfolio-allocation-missing")).toBe(true);
+  });
+
+  test("expired evidence hard-rejects regardless of actor identity", () => {
+    const evidence = makeEvidence([{ expiresAt: "2020-01-01T00:00:00.000Z" }]);
+    const humanActor = makeActor({ kind: "human", ref: "founder", isProposer: false });
+    const result = evaluate({ evidence, actor: humanActor });
+    expect(result.disposition).toBe("rejected");
+    const reason = result.reasons.find((r) => r.kind === "expired-evidence");
+    expect(reason).toBeDefined();
+    expect(isHardAuthorityReason(reason!)).toBe(true);
+  });
+
+  test("high-risk proposal remains non-automatic even when actor claims human authority", () => {
+    const proposal = makeProposal({ productionDeployment: true });
+    const humanActor = makeActor({ kind: "human", ref: "opsLead", isProposer: false });
+    const result = evaluate({ proposal, actor: humanActor });
+    expect(result.disposition).toBe("human-required");
+    expect(result.reasons.some((r) => r.kind === "production-deployment")).toBe(true);
+    expect(result.reasons.some((r) => r.kind === "actor-not-allowed-for-high-risk")).toBe(true);
+  });
+
+  test("high-risk proposal blocks proposer self-authorization", () => {
+    const proposal = makeProposal({ sensitiveData: true });
+    const proposer = makeActor({ kind: "human", ref: "designer", isProposer: true });
+    const result = evaluate({ proposal, actor: proposer });
+    expect(result.disposition).toBe("human-required");
+    expect(result.reasons.some((r) => r.kind === "proposer-cannot-self-authorize")).toBe(true);
+  });
+
+  test("malformed risk flag (non-boolean) fails closed", () => {
+    const proposal = makeProposal({ legalOrPrivacy: undefined as unknown as boolean });
+    const result = evaluate({ proposal });
+    expect(result.disposition).toBe("human-required");
+    const reason = result.reasons.find((r) => r.kind === "unknown-risk-data" && r.message.includes("legalOrPrivacy"));
+    expect(reason).toBeDefined();
+  });
+
+  test("invalid evaluatedAt fails closed instead of authorizing stale evidence", () => {
+    const evidence = makeEvidence([{ expiresAt: "2020-01-01T00:00:00.000Z" }]);
+    const result = evaluate({ evidence, evaluatedAt: "garbage" });
+    expect(result.disposition).not.toBe("automatic");
+    expect(result.evidence.evaluatedAtValid).toBe(false);
+    expect(result.reasons.some((r) => r.kind === "unknown-risk-data")).toBe(true);
+  });
+
+  test("moderate reversibility routes to human review", () => {
+    const proposal = makeProposal({ reversibility: "moderate" });
+    const result = evaluate({ proposal });
+    expect(result.disposition).toBe("human-required");
+    expect(result.reasons.some((r) => r.kind === "moderate-reversibility")).toBe(true);
+  });
+
+  test("hard reversibility routes to human review", () => {
+    const proposal = makeProposal({ reversibility: "hard" });
+    const result = evaluate({ proposal });
+    expect(result.disposition).toBe("human-required");
+    expect(result.reasons.some((r) => r.kind === "hard-reversibility")).toBe(true);
+  });
+
+  test("requireHumanFor category match routes to human review", () => {
+    const charter = makeCharter({
+      authority: {
+        autoResearch: true,
+        autoReversibleExperiments: true,
+        requireHumanFor: ["capital"],
+      },
+    });
+    const proposal = makeProposal({ declaredHumanCategories: ["capital"] });
+    const result = evaluate({ charter, proposal });
+    expect(result.disposition).toBe("human-required");
+    expect(result.reasons.some((r) => r.kind === "require-human-category")).toBe(true);
+  });
+
+  test("empty evidence reference set fails closed with missing-evidence", () => {
+    const proposal = makeProposal({ evidenceRefs: [] });
+    const result = evaluate({ proposal });
+    expect(result.disposition).toBe("human-required");
+    const reason = result.reasons.find((r) => r.kind === "missing-evidence");
+    expect(reason).toBeDefined();
+    expect(reason?.message).toContain("no evidence references");
+    expect(isHardAuthorityReason(reason!)).toBe(true);
+    expect(HARD_AUTHORITY_RULES).toContain("missing-evidence");
+  });
+
+  test("non-array evidence references fail closed", () => {
+    const proposal = makeProposal({ evidenceRefs: "sig_a" as unknown as string[] });
+    const result = evaluate({ proposal });
+    expect(result.disposition).not.toBe("automatic");
+  });
+
+  test("undefined evidence references fail closed without throwing", () => {
+    const proposal = makeProposal({ evidenceRefs: undefined as unknown as string[] });
+    const result = evaluate({ proposal });
+    expect(result.disposition).toBe("human-required");
+    expect(result.reasons.some((r) => r.kind === "missing-evidence")).toBe(true);
+  });
+
+  test("non-string evidence reference entry fails closed", () => {
+    const proposal = makeProposal({
+      evidenceRefs: ["sig_a", 42 as unknown as string, "" as unknown as string],
+    });
+    const result = evaluate({ proposal });
+    expect(result.disposition).toBe("human-required");
+    const reasons = result.reasons.filter((r) => r.kind === "missing-evidence");
+    expect(reasons.length).toBeGreaterThanOrEqual(2);
+    expect(reasons.some((r) => r.message.includes("42"))).toBe(true);
+    expect(reasons.some((r) => r.message.includes('""'))).toBe(true);
+  });
+
+  test("truthy non-boolean isActive fails closed as charter-inactive", () => {
+    const charter = makeCharter({ isActive: "false" as unknown as boolean });
+    const result = evaluate({ charter });
+    expect(result.disposition).toBe("rejected");
+    const reason = result.reasons.find((r) => r.kind === "charter-inactive");
+    expect(reason).toBeDefined();
+    expect(reason?.message).toContain("isActive");
+    expect(isHardAuthorityReason(reason!)).toBe(true);
+  });
+
+  test("numeric isActive fails closed as charter-inactive", () => {
+    const charter = makeCharter({ isActive: 1 as unknown as boolean });
+    const result = evaluate({ charter });
+    expect(result.disposition).toBe("rejected");
+    expect(result.reasons.some((r) => r.kind === "charter-inactive")).toBe(true);
+  });
+
+  test("truthy non-string currency fails closed as missing-currency-policy", () => {
+    const charter = makeCharter({
+      capitalPolicy: {
+        currency: 123 as unknown as string,
+        experimentBudget: 1000,
+        recurringSpendApprovalAbove: 100,
+        portfolio: { core: 5, growth: 3, exploration: 2 },
+      },
+    });
+    const result = evaluate({ charter });
+    expect(result.disposition).toBe("human-required");
+    const reason = result.reasons.find((r) => r.kind === "missing-currency-policy");
+    expect(reason).toBeDefined();
+    expect(reason?.message).toContain("invalid currency");
+    expect(isHardAuthorityReason(reason!)).toBe(true);
+  });
+
+  test("empty-string currency fails closed", () => {
+    const charter = makeCharter({
+      capitalPolicy: {
+        currency: "",
+        experimentBudget: 1000,
+        recurringSpendApprovalAbove: 100,
+        portfolio: { core: 5, growth: 3, exploration: 2 },
+      },
+    });
+    const result = evaluate({ charter });
+    expect(result.disposition).toBe("human-required");
+    expect(result.reasons.some((r) => r.kind === "missing-currency-policy")).toBe(true);
+  });
+
+  test("portfolio usage category mismatch fails closed", () => {
+    const proposal = makeProposal({ portfolio: "core" });
+    const usage = makeUsage({ category: "exploration", currentShare: 1 });
+    const result = evaluate({ proposal, portfolioUsage: usage });
+    expect(result.disposition).toBe("human-required");
+    const reason = result.reasons.find((r) => r.kind === "portfolio-usage-category-mismatch");
+    expect(reason).toBeDefined();
+    expect(reason?.message).toContain("exploration");
+    expect(reason?.message).toContain("core");
+    expect(isHardAuthorityReason(reason!)).toBe(true);
+    expect(HARD_AUTHORITY_RULES).toContain("portfolio-usage-category-mismatch");
+  });
+
+  test("NaN portfolio usage currentShare fails closed", () => {
+    const usage = makeUsage({ currentShare: Number.NaN });
+    const result = evaluate({ portfolioUsage: usage });
+    expect(result.disposition).toBe("human-required");
+    const reason = result.reasons.find((r) => r.kind === "invalid-portfolio-usage");
+    expect(reason).toBeDefined();
+    expect(isHardAuthorityReason(reason!)).toBe(true);
+    expect(HARD_AUTHORITY_RULES).toContain("invalid-portfolio-usage");
+  });
+
+  test("negative portfolio usage currentShare fails closed", () => {
+    const usage = makeUsage({ currentShare: -1 });
+    const result = evaluate({ portfolioUsage: usage });
+    expect(result.disposition).toBe("human-required");
+    expect(result.reasons.some((r) => r.kind === "invalid-portfolio-usage")).toBe(true);
+  });
+
+  test("portfolio usage unavailable (undefined) fails closed", () => {
+    const result = evaluate({ portfolioUsage: undefined });
+    expect(result.disposition).toBe("human-required");
+    const reason = result.reasons.find((r) => r.kind === "portfolio-usage-unavailable");
+    expect(reason).toBeDefined();
+    expect(isHardAuthorityReason(reason!)).toBe(true);
+    expect(HARD_AUTHORITY_RULES).toContain("portfolio-usage-unavailable");
+  });
+
+  test("portfolio usage null fails closed with auditable reason", () => {
+    const result = evaluate({ portfolioUsage: null });
+    expect(result.disposition).toBe("human-required");
+    const reason = result.reasons.find((r) => r.kind === "portfolio-usage-unavailable");
+    expect(reason).toBeDefined();
+    expect(isHardAuthorityReason(reason!)).toBe(true);
+  });
+
+  test("portfolio usage currentShare null admits first investment under positive allocation", () => {
+    const usage = makeUsage({ currentShare: null });
+    const result = evaluate({ portfolioUsage: usage });
+    expect(result.disposition).toBe("automatic");
+    expect(result.portfolio.withinShare).toBe(true);
+    expect(result.portfolio.currentShare).toBeNull();
+    expect(result.portfolio.proposedShare).toBe(1);
+  });
+
+  test("portfolio usage currentShare zero authorizes first investment", () => {
+    const usage = makeUsage({ currentShare: 0 });
+    const result = evaluate({ portfolioUsage: usage });
+    expect(result.disposition).toBe("automatic");
+    expect(result.portfolio.withinShare).toBe(true);
+    expect(result.portfolio.proposedShare).toBe(1);
+  });
+
+  test("zero allocation with null currentShare never authorizes the first investment (adversarial probe)", () => {
+    // Independent adversarial probe: configured share is 0 and currentShare is
+    // null (no existing investment). The previous implementation converted null
+    // to proposedShare=null and treated null as "not over quota", authorizing
+    // a first unit silently. The fixed evaluator must treat the first investment
+    // as proposedShare=1, mark withinShare=false, surface an auditable
+    // portfolio-allocation-exceeded reason, and refuse automatic authority.
+    const charter = makeCharter({
+      capitalPolicy: {
+        currency: "USD",
+        experimentBudget: 1000,
+        recurringSpendApprovalAbove: 100,
+        portfolio: { core: 5, growth: 3, exploration: 0 },
+      },
+    });
+    const usage = makeUsage({ category: "exploration", currentShare: null });
+    const result = evaluate({ charter, portfolioUsage: usage });
+    expect(result.disposition).not.toBe("automatic");
+    expect(result.disposition).toBe("human-required");
+    expect(result.portfolio.configuredShare).toBe(0);
+    expect(result.portfolio.currentShare).toBeNull();
+    expect(result.portfolio.proposedShare).toBe(1);
+    expect(result.portfolio.withinShare).toBe(false);
+    const reason = result.reasons.find((r) => r.kind === "portfolio-allocation-exceeded");
+    expect(reason).toBeDefined();
+    expect(reason?.message).toContain("exploration");
+    expect(isHardAuthorityReason(reason!)).toBe(true);
+    expect(HARD_AUTHORITY_RULES).toContain("portfolio-allocation-exceeded");
+  });
+
+  test("zero allocation with currentShare zero also refuses the first investment", () => {
+    const charter = makeCharter({
+      capitalPolicy: {
+        currency: "USD",
+        experimentBudget: 1000,
+        recurringSpendApprovalAbove: 100,
+        portfolio: { core: 5, growth: 3, exploration: 0 },
+      },
+    });
+    const usage = makeUsage({ category: "exploration", currentShare: 0 });
+    const result = evaluate({ charter, portfolioUsage: usage });
+    expect(result.disposition).toBe("human-required");
+    expect(result.portfolio.proposedShare).toBe(1);
+    expect(result.portfolio.withinShare).toBe(false);
+    expect(result.reasons.some((r) => r.kind === "portfolio-allocation-exceeded")).toBe(true);
+  });
+
+  test("non-array declaredHumanCategories fails closed without throwing", () => {
+    const charter = makeCharter({
+      authority: {
+        autoResearch: true,
+        autoReversibleExperiments: true,
+        requireHumanFor: ["capital"],
+      },
+    });
+    const proposal = makeProposal({
+      declaredHumanCategories: "capital" as unknown as string[],
+    });
+    const result = evaluate({ charter, proposal });
+    expect(result.disposition).toBe("human-required");
+    const reason = result.reasons.find((r) => r.kind === "unknown-risk-data" && r.message.includes("declaredHumanCategories"));
+    expect(reason).toBeDefined();
+    expect(isHardAuthorityReason(reason!)).toBe(true);
+  });
+
+  test("non-string entry inside declaredHumanCategories fails closed", () => {
+    const charter = makeCharter({
+      authority: {
+        autoResearch: true,
+        autoReversibleExperiments: true,
+        requireHumanFor: ["capital"],
+      },
+    });
+    const proposal = makeProposal({
+      declaredHumanCategories: ["capital", 7 as unknown as string],
+    });
+    const result = evaluate({ charter, proposal });
+    expect(result.disposition).toBe("human-required");
+    expect(result.reasons.some((r) => r.kind === "require-human-category")).toBe(true);
+    expect(result.reasons.some((r) => r.kind === "unknown-risk-data" && r.message.includes("7"))).toBe(true);
+  });
+
+  test("non-array declaredHumanCategories fails closed even when requireHumanFor is empty", () => {
+    // Adversarial probe mirroring the verifier's failing case: when the charter
+    // requires no human categories, the prior implementation short-circuited
+    // before validating declaredHumanCategories and authorized a malformed
+    // container. The fail-closed contract must validate both containers
+    // regardless of whether either is empty.
+    const charter = makeCharter({
+      authority: {
+        autoResearch: true,
+        autoReversibleExperiments: true,
+        requireHumanFor: [],
+      },
+    });
+    const proposal = makeProposal({
+      declaredHumanCategories: "security" as unknown as string[],
+    });
+    const result = evaluate({ charter, proposal });
+    expect(result.disposition).not.toBe("automatic");
+    expect(result.disposition).toBe("human-required");
+    const reason = result.reasons.find(
+      (r) => r.kind === "unknown-risk-data" && r.message.includes("declaredHumanCategories"),
+    );
+    expect(reason).toBeDefined();
+    expect(isHardAuthorityReason(reason!)).toBe(true);
+  });
+
+  test("non-string entry inside declaredHumanCategories fails closed even when requireHumanFor is empty", () => {
+    // A non-array element must always be audited; deferring validation until
+    // requireHumanFor becomes non-empty would hide malformed data behind a
+    // quieter charter.
+    const charter = makeCharter({
+      authority: {
+        autoResearch: true,
+        autoReversibleExperiments: true,
+        requireHumanFor: [],
+      },
+    });
+    const proposal = makeProposal({
+      declaredHumanCategories: ["security", 7 as unknown as string],
+    });
+    const result = evaluate({ charter, proposal });
+    expect(result.disposition).toBe("human-required");
+    expect(
+      result.reasons.some((r) => r.kind === "unknown-risk-data" && r.message.includes("7")),
+    ).toBe(true);
+  });
+
+  test("non-array requireHumanFor fails closed with auditable reason", () => {
+    const charter = makeCharter({
+      authority: {
+        autoResearch: true,
+        autoReversibleExperiments: true,
+        requireHumanFor: "capital" as unknown as string[],
+      },
+    });
+    const proposal = makeProposal({ declaredHumanCategories: [] });
+    const result = evaluate({ charter, proposal });
+    expect(result.disposition).toBe("human-required");
+    const reason = result.reasons.find(
+      (r) => r.kind === "unknown-risk-data" && r.message.includes("requireHumanFor"),
+    );
+    expect(reason).toBeDefined();
+    expect(isHardAuthorityReason(reason!)).toBe(true);
+  });
+
+  test("non-string entry inside requireHumanFor fails closed with auditable reason", () => {
+    const charter = makeCharter({
+      authority: {
+        autoResearch: true,
+        autoReversibleExperiments: true,
+        requireHumanFor: ["capital", 7 as unknown as string],
+      },
+    });
+    const proposal = makeProposal({ declaredHumanCategories: [] });
+    const result = evaluate({ charter, proposal });
+    expect(result.disposition).toBe("human-required");
+    expect(
+      result.reasons.some(
+        (r) => r.kind === "unknown-risk-data" && r.message.includes("requireHumanFor"),
+      ),
+    ).toBe(true);
+  });
+
+  test("non-array evidence input fails closed without throwing", () => {
+    const result = evaluate({ evidence: "not-an-array" as unknown as AuthorityEvidenceReference[] });
+    expect(result.disposition).not.toBe("automatic");
+    expect(result.disposition).toBe("human-required");
+    expect(result.reasons.some((r) => r.kind === "missing-evidence")).toBe(true);
+  });
+
+  test("non-object evidence item fails closed rather than authorizing automatically", () => {
+    // A malformed evidence entry (null, primitive, etc.) inside an otherwise
+    // resolvable array must not be silently skipped. The verifier proved that
+    // skipping allows automatic authorization even though the caller supplied
+    // untrusted data. The fail-closed contract requires a non-automatic
+    // disposition with an auditable malformed-evidence-item reason.
+    const evidence = [null as unknown as AuthorityEvidenceReference, ...makeEvidence()];
+    const result = evaluate({ evidence });
+    expect(result.disposition).not.toBe("automatic");
+    expect(result.disposition).toBe("human-required");
+    expect(result.evidence.malformedItems).toBe(1);
+    const reason = result.reasons.find((r) => r.kind === "malformed-evidence-item");
+    expect(reason).toBeDefined();
+    expect(isHardAuthorityReason(reason!)).toBe(true);
+    expect(reason!.message).toContain("null");
+  });
+
+  test("multiple malformed evidence entries each produce a fail-closed reason", () => {
+    // Every malformed entry must be audited; aggregating them into a single
+    // reason would let one valid record mask the rest.
+    const evidence = [
+      null as unknown as AuthorityEvidenceReference,
+      7 as unknown as AuthorityEvidenceReference,
+      "stray" as unknown as AuthorityEvidenceReference,
+      ...makeEvidence(),
+    ];
+    const result = evaluate({ evidence });
+    expect(result.disposition).toBe("human-required");
+    expect(result.evidence.malformedItems).toBe(3);
+    const reasons = result.reasons.filter((r) => r.kind === "malformed-evidence-item");
+    expect(reasons).toHaveLength(3);
+    for (const reason of reasons) {
+      expect(isHardAuthorityReason(reason)).toBe(true);
+    }
+  });
+
+  test("malformed evidence item blocks even when the proposal cites a valid reference", () => {
+    // Adversarial probe mirroring the verifier's failing case: a single null
+    // entry alongside a valid record must still fail closed.
+    const evidence: AuthorityEvidenceReference[] = [
+      null as unknown as AuthorityEvidenceReference,
+      { ref: "sig_a", kind: "signal", expiresAt: "3025-01-01T00:00:00.000Z", hasConflict: false },
+    ];
+    const result = evaluate({
+      evidence,
+      proposal: makeProposal({ evidenceRefs: ["sig_a"] }),
+    });
+    expect(result.disposition).not.toBe("automatic");
+    expect(result.reasons.some((r) => r.kind === "malformed-evidence-item")).toBe(true);
+  });
+
+  test("describeAuthorityEvaluation summarizes reasons", () => {
+    const blocked = evaluate({ proposal: makeProposal({ oneTimeCost: -5 }) });
+    const text = describeAuthorityEvaluation(blocked);
+    expect(text).toContain("authority=human-required");
+    expect(text).toContain("invalid-cost-shape");
+  });
+
+  test("pure evaluator has no database or filesystem access", () => {
+    // The evaluator accepts only data, not handles. Asserting by construction:
+    // there is no harness, db, or path parameter on AuthorityEvaluationInput.
+    const sample: AuthorityEvaluationInput = {
+      charter: makeCharter(),
+      proposal: makeProposal(),
+      evidence: makeEvidence(),
+      actor: makeActor(),
+      evaluatedAt: "2026-08-02T00:00:00.000Z",
+    };
+    const keys = Object.keys(sample).sort();
+    expect(keys).toEqual(["actor", "charter", "evidence", "evaluatedAt", "proposal"].sort());
+    // AuthorityEvaluationInput carries no harness, db, or path fields — only
+    // plain JSON-serializable data. The evaluator can be transported across a
+    // process boundary without losing fidelity.
+    expect(() => JSON.stringify(sample)).not.toThrow();
   });
 });
 

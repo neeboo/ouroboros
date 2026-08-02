@@ -5,8 +5,14 @@ export {
   DEFAULT_VERIFIER_TASK_PROMPT_TEMPLATE,
 } from "./default-prompts";
 export { initDatabase, withDatabase } from "./database";
+export type { HarnessDatabase } from "./database";
 export { makeId } from "./ids";
 export { filterOuroborosRuntimePaths, isOuroborosRuntimePath, OUROBOROS_RUNTIME_PATHS } from "./runtime-paths";
+export {
+  isStrictIsoTimestamp,
+  optionalStrictIsoTimestamp,
+  requireStrictIsoTimestamp,
+} from "./iso-timestamp";
 export {
   GOAL_REVIEW_TASK_DONE_WHEN,
   GOAL_REVIEW_TASK_GOAL,
@@ -15,6 +21,12 @@ export {
   resolveRunDecision,
 } from "./goal-review";
 export { applyHarnessAction, parseHarnessAction, describeIntegrationReadiness } from "./actions";
+export {
+  describeAuthorityEvaluation,
+  evaluateAuthority,
+  HARD_AUTHORITY_RULES,
+  isHardAuthorityReason,
+} from "./design-authority";
 export { acceptGuardrailProposal, proposeGuardrailsFromLessons, refreshGuardrailProposalsForRun } from "./guardrails";
 export { diagnoseRunOverview } from "./overseer";
 export { readableList, readableValue } from "./readable";
@@ -43,8 +55,23 @@ export type {
   AttemptEvent,
   AttemptEventStream,
   AttemptOutput,
+  AuthorityActorContext,
+  AuthorityBudgetEvaluation,
+  AuthorityCharterContext,
+  AuthorityDisposition,
+  AuthorityEvidenceEvaluation,
+  AuthorityEvidenceReference,
+  AuthorityEvaluation,
+  AuthorityEvaluationInput,
+  AuthorityHardRule,
+  AuthorityPortfolioEvaluation,
+  AuthorityPortfolioUsage,
+  AuthorityProposalRiskSurface,
+  AuthorityReason,
+  AuthorityReasonKind,
   CharterStatus,
   CreateDesignProposalInput,
+  DesignActionInput,
   CreateExternalRefInput,
   CreateFounderCharterInput,
   CreateInboxEventInput,
@@ -83,6 +110,8 @@ export type {
   HarnessActionEvent,
   InboxEvent,
   LeaseReadyTasksInput,
+  LinkProposalOutcomeReviewInput,
+  LinkProposalOutcomeReviewResult,
   ListDesignDecisionsInput,
   ListDesignOutcomesInput,
   ListDesignProposalsInput,

@@ -6,6 +6,7 @@ import { applyHarnessAction, Harness } from "../packages/harness/src";
 import { buildTaskPrompt } from "../packages/runner/src";
 import {
   buildChatTranscriptForTest,
+  buildDashboardDesignTimeline,
   buildDashboardTaskGraph,
   codexEventToMessagePartForTest,
   DASHBOARD_ROUTE_NEXT_MILESTONE,
@@ -258,6 +259,7 @@ describe("dashboard", () => {
       "dashboard.api.taskResume",
       "dashboard.api.taskRerun",
       "dashboard.api.attemptStop",
+      "dashboard.api.designStatus",
       "dashboard.taskPrompt",
     ]);
     expect(dashboardRoutePaths()).toEqual([
@@ -281,6 +283,7 @@ describe("dashboard", () => {
       "/api/tasks/:taskId/resume",
       "/api/tasks/:taskId/rerun",
       "/api/attempts/:attemptId/stop",
+      "/api/runs/:runId/design/status",
       "/tasks/:taskId/prompt",
     ]);
   });
@@ -733,7 +736,7 @@ describe("dashboard", () => {
     expect(html).toContain("persistDashboardState();");
     expect(html).toContain("persistFlowScrollState");
     expect(html).toContain("restoredFlowScrollState = null;");
-    expect(html).toContain("writeDashboardState({ selectedGoalId, workspaceMode, workspaceTitleExpanded, selectedChangedFilePath, secondaryEvidenceOpen, flowScroll: captureFlowScrollState() });");
+    expect(html).toContain("writeDashboardState({ selectedGoalId, workspaceMode, workspaceTitleExpanded, selectedChangedFilePath, secondaryEvidenceOpen, designDetailsOpen, flowScroll: captureFlowScrollState() });");
     expect(html).toContain("scrollState.scrollHeight");
     expect(html).toContain("flowDelta");
     expect(html).toContain("Math.max(0, scrollState.scrollTop + flowDelta)");
@@ -1077,6 +1080,7 @@ describe("dashboard", () => {
       "dashboard.api.taskResume",
       "dashboard.api.taskRerun",
       "dashboard.api.attemptStop",
+      "dashboard.api.designStatus",
       "dashboard.taskPrompt",
     ]);
     expect(dashboardRoutePaths()).toEqual([
@@ -1100,6 +1104,7 @@ describe("dashboard", () => {
       "/api/tasks/:taskId/resume",
       "/api/tasks/:taskId/rerun",
       "/api/attempts/:attemptId/stop",
+      "/api/runs/:runId/design/status",
       "/tasks/:taskId/prompt",
     ]);
   });
@@ -2713,6 +2718,571 @@ describe("dashboard", () => {
     }
   });
 
+  test("GET /api/runs/:runId/design/status returns concise project-scoped design state", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "ouroboros-dashboard-design-status-"));
+    const harness = new Harness(join(dir, "ouroboros.db"));
+    harness.init();
+    const projectId = harness.createProject({
+      name: "Design Dashboard Project",
+      rootPath: dir,
+    });
+    const runId = harness.createRun({ goal: "Calm design dashboard", projectId });
+    const charter = harness.createFounderCharter({
+      projectId,
+      mission: "Ship design dashboard visibility",
+      activate: true,
+      charter: {
+        mission: "Ship design dashboard visibility",
+        capitalPolicy: {
+          currency: "USD",
+          monthlyBudget: 4000,
+          experimentBudget: 1200,
+          recurringSpendApprovalAbove: 600,
+          runwayFloorMonths: 9,
+          portfolio: { core: 70, growth: 20, exploration: 10 },
+        },
+        authority: {
+          autoResearch: true,
+          autoReversibleExperiments: false,
+          autoIntegrateVerifiedCode: false,
+          requireHumanFor: ["irreversible-spend"],
+        },
+        reviewCadenceDays: 21,
+      },
+    });
+    const proposal = harness.createDesignProposal({
+      projectId,
+      runId,
+      charterId: charter.id,
+      title: "Render designer inspector card",
+      problem: "Designer state is invisible.",
+      recommendation: "Add a concise inspector disclosure.",
+      status: "experimenting",
+      proposal: {
+        problem: "Designer state is invisible.",
+        recommendation: "Add a concise inspector disclosure.",
+        investment: {
+          reversibility: "easy",
+          portfolio: "growth",
+          oneTimeCost: 600,
+          recurringCost: 0,
+          timeBudget: "1 week",
+        },
+        evaluationContract: {
+          baseline: ["no designer card"],
+          successMetrics: ["decisions visible"],
+          guardMetrics: ["render time under 200ms"],
+          requiredEvidence: ["disclosure screenshot"],
+          reviewAt: "2026-09-01",
+        },
+      },
+    });
+    harness.recordDesignDecision({
+      proposalId: proposal.id,
+      charterId: charter.id,
+      decision: "approved",
+      actorKind: "human",
+      actorRef: "founder@local",
+      reasons: ["cheap to ship"],
+    });
+    harness.recordDesignOutcome({
+      proposalId: proposal.id,
+      runId,
+      stage: "review",
+      recommendation: "retain",
+      evidence: ["disclosure shows budget"],
+      reviewAt: "2026-08-25",
+    });
+    harness.createStrategySignal({
+      projectId,
+      runId,
+      signalClass: "delivery",
+      source: "retro-1",
+      title: "Calm dashboard matters",
+      summary: "Default surface should stay calm.",
+      confidence: 0.5,
+      observationTime: "2026-08-01T08:00:00Z",
+    });
+
+    try {
+      const designStatus = {
+        projectId,
+        charter: { ...charter, summary: { mission: charter.mission, version: charter.version, reviewCadenceDays: charter.charter.reviewCadenceDays } },
+        currentProposal: { ...proposal, summary: { title: proposal.title, status: proposal.status, recommendation: proposal.recommendation } },
+        latestDecision: {
+          id: "decision_1",
+          decision: "approved" as const,
+          actorKind: "human" as const,
+          actorRef: "founder@local",
+          reasons: ["cheap to ship"],
+          createdAt: "2026-08-02T12:00:00Z",
+        },
+        budget: charter.charter.capitalPolicy ?? null,
+        authority: charter.charter.authority ?? null,
+        nextOutcomeReview: null,
+        recentOutcomes: [],
+        recentSignals: [],
+        proposalCountsByStatus: { experimenting: 1 },
+        activeSignalCount: 1,
+        timeline: [],
+      };
+
+      const response = await handleDashboardRequest(
+        new Request(`http://localhost/api/runs/${runId}/design/status`),
+        {
+          runId,
+          overview: () => harness.getRunOverview({ runId }),
+          renderTaskPrompt: () => "",
+          designStatus: () => designStatus,
+        },
+      );
+      expect(response.status).toBe(200);
+      const body = await response.json();
+      expect(body).toMatchObject({
+        projectId,
+        charter: expect.objectContaining({
+          id: charter.id,
+          mission: "Ship design dashboard visibility",
+        }),
+        currentProposal: expect.objectContaining({
+          id: proposal.id,
+          status: "experimenting",
+          title: "Render designer inspector card",
+        }),
+        latestDecision: expect.objectContaining({
+          decision: "approved",
+          actorKind: "human",
+        }),
+        budget: expect.objectContaining({
+          currency: "USD",
+          monthlyBudget: 4000,
+          portfolio: { core: 70, growth: 20, exploration: 10 },
+        }),
+        authority: expect.objectContaining({
+          autoResearch: true,
+          requireHumanFor: ["irreversible-spend"],
+        }),
+        activeSignalCount: 1,
+        proposalCountsByStatus: { experimenting: 1 },
+      });
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("GET /api/runs/:runId/design/status returns 404 when design status provider is unconfigured", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "ouroboros-dashboard-design-status-missing-"));
+    const harness = new Harness(join(dir, "ouroboros.db"));
+    harness.init();
+    const runId = harness.createRun({ goal: "No design state" });
+
+    try {
+      const response = await handleDashboardRequest(
+        new Request(`http://localhost/api/runs/${runId}/design/status`),
+        {
+          runId,
+          overview: () => harness.getRunOverview({ runId }),
+          renderTaskPrompt: () => "",
+        },
+      );
+      expect(response.status).toBe(404);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("GET /api/runs/:runId/design/status forwards routeRunId to the provider so historical runs resolve their own project state", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "ouroboros-dashboard-design-status-historical-"));
+    const harness = new Harness(join(dir, "ouroboros.db"));
+    harness.init();
+    const runId = harness.createRun({ goal: "Primary run" });
+    const historicalRunId = "run_history_123";
+
+    try {
+      const observed: string[] = [];
+      const response = await handleDashboardRequest(
+        new Request(`http://localhost/api/runs/${historicalRunId}/design/status`),
+        {
+          runId,
+          overview: () => harness.getRunOverview({ runId }),
+          renderTaskPrompt: () => "",
+          designStatus: (routeRunId: string) => {
+            observed.push(routeRunId);
+            return {
+              projectId: "project_history",
+              charter: null,
+              currentProposal: null,
+              latestDecision: null,
+              budget: null,
+              authority: null,
+              nextOutcomeReview: null,
+              recentOutcomes: [],
+              recentSignals: [],
+              proposalCountsByStatus: {},
+              activeSignalCount: 0,
+              timeline: [],
+            };
+          },
+        },
+      );
+      expect(response.status).toBe(200);
+      expect(observed).toEqual([historicalRunId]);
+      const body = await response.json();
+      expect(body.projectId).toBe("project_history");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("GET /api/runs/:runId/design/status returns 404 when the design status provider returns null", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "ouroboros-dashboard-design-status-null-"));
+    const harness = new Harness(join(dir, "ouroboros.db"));
+    harness.init();
+    const runId = harness.createRun({ goal: "Null design state" });
+
+    try {
+      const response = await handleDashboardRequest(
+        new Request(`http://localhost/api/runs/${runId}/design/status`),
+        {
+          runId,
+          overview: () => harness.getRunOverview({ runId }),
+          renderTaskPrompt: () => "",
+          designStatus: () => null,
+        },
+      );
+      expect(response.status).toBe(404);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("dashboard HTML ships designer disclosure scaffolding that fetches design status", async () => {
+    const html = dashboardHtml({ runId: "run_designer_html" });
+    expect(html).toContain("data-inspector-section=\"design-status\"");
+    expect(html).toContain("data-design-status-section");
+    expect(html).toContain("data-design-details");
+    expect(html).toContain("Charter, budget and proposal evidence");
+    expect(html).toContain("/design/status");
+    expect(html).toContain("dashboardInspectorDesignHtml");
+    expect(html).toContain("refreshDesignStatus");
+  });
+
+  test("dashboard designer card renders the chronological design timeline", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "ouroboros-dashboard-design-timeline-"));
+    const harness = new Harness(join(dir, "ouroboros.db"));
+    harness.init();
+    const projectId = harness.createProject({ name: "Design Timeline", rootPath: dir });
+    const runId = harness.createRun({ goal: "Render design timeline", projectId });
+    const designerTaskId = harness.createTask({
+      runId,
+      role: "designer",
+      goal: "Inspect design evidence",
+      prompt: "Designer prompt",
+      dependsOn: [],
+      doneWhen: [],
+      config: {},
+    });
+    const designerAttempt = harness.startAttempt({ taskId: designerTaskId, input: {} });
+    harness.finishAttempt({
+      attemptId: designerAttempt,
+      output: { status: "done" as const, summary: "designer done" },
+    });
+    const plannerTaskId = harness.createTask({
+      runId,
+      role: "planner",
+      goal: "Plan delivery",
+      prompt: "Planner prompt",
+      dependsOn: [designerTaskId],
+      doneWhen: [],
+      config: {},
+    });
+    const plannerAttempt = harness.startAttempt({ taskId: plannerTaskId, input: {} });
+    harness.finishAttempt({
+      attemptId: plannerAttempt,
+      output: { status: "done" as const, summary: "planner done" },
+    });
+    const workerTaskId = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Implement scoped change",
+      prompt: "Worker prompt",
+      dependsOn: [plannerTaskId],
+      doneWhen: [],
+      config: {},
+    });
+    const workerAttempt = harness.startAttempt({ taskId: workerTaskId, input: {} });
+    harness.finishAttempt({
+      attemptId: workerAttempt,
+      output: { status: "done" as const, summary: "worker done" },
+    });
+    const verifierTaskId = harness.createTask({
+      runId,
+      role: "verifier",
+      goal: "Verify frozen contract",
+      prompt: "Verifier prompt",
+      dependsOn: [workerTaskId],
+      doneWhen: [],
+      config: {},
+    });
+    const verifierAttempt = harness.startAttempt({ taskId: verifierTaskId, input: {} });
+    harness.finishAttempt({
+      attemptId: verifierAttempt,
+      output: { status: "done" as const, summary: "verifier done" },
+    });
+    const charter = harness.createFounderCharter({
+      projectId,
+      mission: "Render timeline",
+      activate: true,
+      charter: {
+        mission: "Render timeline",
+        capitalPolicy: { currency: "USD" },
+        authority: {
+          autoResearch: true,
+          autoReversibleExperiments: false,
+          autoIntegrateVerifiedCode: false,
+          requireHumanFor: [],
+        },
+        reviewCadenceDays: 14,
+      },
+    });
+    const proposal = harness.createDesignProposal({
+      projectId,
+      runId,
+      charterId: charter.id,
+      title: "Timeline proposal",
+      problem: "Hidden chronology",
+      recommendation: "Render entries",
+      status: "experimenting",
+      proposal: {
+        problem: "Hidden chronology",
+        recommendation: "Render entries",
+        investment: { reversibility: "easy", portfolio: "core" },
+        evaluationContract: {
+          baseline: ["no timeline"],
+          successMetrics: ["chronological entries"],
+          guardMetrics: ["no flicker"],
+          requiredEvidence: ["dashboard html"],
+          reviewAt: "2026-09-01",
+        },
+      },
+    });
+    harness.recordDesignDecision({
+      proposalId: proposal.id,
+      charterId: charter.id,
+      decision: "approved",
+      actorKind: "human",
+      actorRef: "founder@local",
+      reasons: ["need timeline"],
+    });
+    harness.recordDesignOutcome({
+      proposalId: proposal.id,
+      runId,
+      stage: "review",
+      recommendation: "retain",
+      evidence: ["timeline visible"],
+      reviewAt: "2026-09-08",
+    });
+
+    try {
+      const decision = harness.listDesignDecisions({ proposalId: proposal.id, limit: 1 })[0];
+      const outcomes = harness.listDesignOutcomes({ proposalId: proposal.id, limit: 5 });
+      const designStatus = {
+        projectId,
+        charter: { ...charter, summary: { mission: charter.mission, version: charter.version, reviewCadenceDays: charter.charter.reviewCadenceDays } },
+        currentProposal: { ...proposal, summary: { title: proposal.title, status: proposal.status, recommendation: proposal.recommendation } },
+        latestDecision: decision,
+        budget: charter.charter.capitalPolicy ?? null,
+        authority: charter.charter.authority ?? null,
+        nextOutcomeReview: outcomes[0] ?? null,
+        recentOutcomes: outcomes,
+        recentSignals: [],
+        proposalCountsByStatus: { experimenting: 1 },
+        activeSignalCount: 0,
+        timeline: buildDashboardDesignTimeline(runId, proposal.id, harness),
+      };
+      const response = await handleDashboardRequest(
+        new Request(`http://localhost/api/runs/${runId}/design/status`),
+        {
+          runId,
+          overview: () => harness.getRunOverview({ runId }),
+          renderTaskPrompt: () => "",
+          designStatus: () => designStatus,
+        },
+      );
+      expect(response.status).toBe(200);
+      const body = await response.json();
+      const kinds = body.timeline.map((entry: { kind: string }) => entry.kind);
+      expect(kinds).toContain("designer");
+      expect(kinds).toContain("planner");
+      expect(kinds).toContain("worker");
+      expect(kinds).toContain("verifier");
+      expect(kinds).toContain("decision");
+      expect(kinds).toContain("outcome-review");
+      const designerIdx = kinds.indexOf("designer");
+      const plannerIdx = kinds.indexOf("planner");
+      const workerIdx = kinds.indexOf("worker");
+      const verifierIdx = kinds.indexOf("verifier");
+      const decisionIdx = kinds.indexOf("decision");
+      const outcomeIdx = kinds.indexOf("outcome-review");
+      expect(designerIdx).toBeLessThan(plannerIdx);
+      expect(plannerIdx).toBeLessThan(workerIdx);
+      expect(workerIdx).toBeLessThan(verifierIdx);
+      expect(verifierIdx).toBeLessThan(decisionIdx);
+      expect(decisionIdx).toBeLessThan(outcomeIdx);
+      const html = dashboardHtml({ runId });
+      expect(html).toContain("data-design-timeline");
+      expect(html).toContain('data-timeline-order="oldest-first"');
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("dashboard designer disclosure renders expanded proposal evidence fields when present", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "ouroboros-dashboard-design-evidence-"));
+    const harness = new Harness(join(dir, "ouroboros.db"));
+    harness.init();
+    const projectId = harness.createProject({ name: "Evidence Project", rootPath: dir });
+    const runId = harness.createRun({ goal: "Render full proposal evidence", projectId });
+    const charter = harness.createFounderCharter({
+      projectId,
+      mission: "Render proposal evidence",
+      activate: true,
+      charter: {
+        mission: "Render proposal evidence",
+        capitalPolicy: {
+          currency: "USD",
+          monthlyBudget: 4000,
+          experimentBudget: 1200,
+          recurringSpendApprovalAbove: 600,
+          runwayFloorMonths: 9,
+          portfolio: { core: 70, growth: 20, exploration: 10 },
+        },
+        authority: {
+          autoResearch: true,
+          autoReversibleExperiments: false,
+          autoIntegrateVerifiedCode: false,
+          requireHumanFor: ["irreversible-spend"],
+        },
+        reviewCadenceDays: 21,
+      },
+    });
+    const proposal = harness.createDesignProposal({
+      projectId,
+      runId,
+      charterId: charter.id,
+      title: "Calm disclosure with rich evidence",
+      problem: "Designer evidence is sparse.",
+      recommendation: "Render the full proposal context.",
+      status: "experimenting",
+      proposal: {
+        problem: "Designer evidence is sparse.",
+        recommendation: "Render the full proposal context.",
+        targetOutcome: "Founders can audit designer reasoning without leaving the dashboard.",
+        evidenceRefs: ["sig_1", "retro_42"],
+        options: [
+          {
+            name: "Disclosure expansion",
+            benefits: ["single calm summary", "auditable evidence"],
+            costs: ["additional html payload"],
+            risks: ["disclosure can grow long"],
+            lockIn: ["dashboard disclosure contract"],
+          },
+        ],
+        assumptions: ["dashboard remains canvas-first"],
+        uncertainty: ["long-term surface layout"],
+        investment: {
+          reversibility: "easy",
+          portfolio: "growth",
+          oneTimeCost: 600,
+          recurringCost: 0,
+          timeBudget: "1 week",
+        },
+        experiment: {
+          hypothesis: "Disclosure expansion surfaces evidence without noise.",
+          smallestTest: "Render proposal evidence on the inspector card.",
+          stopConditions: ["render time over 250ms"],
+          rollback: "Hide the disclosure details body.",
+        },
+        evaluationContract: {
+          baseline: ["no disclosure rendered"],
+          successMetrics: ["evidence visible"],
+          guardMetrics: ["render time under 200ms"],
+          requiredEvidence: ["disclosure screenshot"],
+          reviewAt: "2026-09-01",
+        },
+      },
+    });
+
+    try {
+      const designStatus = {
+        projectId,
+        charter: { ...charter, summary: { mission: charter.mission, version: charter.version, reviewCadenceDays: charter.charter.reviewCadenceDays } },
+        currentProposal: { ...proposal, summary: { title: proposal.title, status: proposal.status, recommendation: proposal.recommendation } },
+        latestDecision: null,
+        budget: charter.charter.capitalPolicy ?? null,
+        authority: charter.charter.authority ?? null,
+        nextOutcomeReview: null,
+        recentOutcomes: [],
+        recentSignals: [],
+        proposalCountsByStatus: { experimenting: 1 },
+        activeSignalCount: 0,
+        timeline: [],
+      };
+      const response = await handleDashboardRequest(
+        new Request(`http://localhost/api/runs/${runId}/design/status`),
+        {
+          runId,
+          overview: () => harness.getRunOverview({ runId }),
+          renderTaskPrompt: () => "",
+          designStatus: () => designStatus,
+        },
+      );
+      expect(response.status).toBe(200);
+      const html = dashboardHtml({ runId });
+      expect(html).toContain("data-design-details");
+      // The dashboard design details builder runs in the browser. The static HTML must
+      // carry the JS source that emits each expanded evidence field, recognized by the
+      // unique span labels and meta-field names the builder loops over.
+      expect(html).toContain('<span>problem</span>');
+      expect(html).toContain('<span>target outcome</span>');
+      expect(html).toContain('<span>evidence refs</span>');
+      expect(html).toContain('<span>option</span>');
+      expect(html).toContain('"benefits"');
+      expect(html).toContain('"costs"');
+      expect(html).toContain('"risks"');
+      expect(html).toContain('"lock-in"');
+      expect(html).toContain('<span>assumptions</span>');
+      expect(html).toContain('<span>uncertainty</span>');
+      expect(html).toContain("experiment hypothesis");
+      expect(html).toContain('<span>smallest test</span>');
+      expect(html).toContain('<span>stop conditions</span>');
+      expect(html).toContain('<span>rollback</span>');
+      expect(html).toContain('<span>baseline</span>');
+      // Verify the proposal evidence block title is present.
+      expect(html).toContain("Proposal evidence");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("dashboardHtml inline browser script parses as executable JavaScript", () => {
+    const html = dashboardHtml({ runId: "run_browser_parse_check" });
+    const startIdx = html.indexOf("<script>");
+    const endIdx = html.lastIndexOf("</script>");
+    expect(startIdx).toBeGreaterThan(-1);
+    expect(endIdx).toBeGreaterThan(startIdx);
+    const script = html.slice(startIdx + "<script>".length, endIdx);
+    // TypeScript-only syntax (type assertions, typed declarations) must not leak into the browser script.
+    expect(script).not.toMatch(/\bas \{/);
+    expect(script).not.toMatch(/:\s*Array</);
+    expect(script).not.toMatch(/:\s*Record</);
+    // The script must be parseable as plain JavaScript.
+    expect(() => {
+      // eslint-disable-next-line no-new-func
+      new Function(script);
+    }).not.toThrow();
+  });
+
   test("shouldRetryDashboardBind only retries bounded ephemeral port conflicts", () => {
     const busy = Object.assign(new Error("Address already in use"), { code: "EADDRINUSE" });
 
@@ -3591,9 +4161,7 @@ describe("dashboard", () => {
     // The runtime call passes the conversation timeline plus composer as primary children
     // of the inspector panel; the secondary evidence helpers are composed inside the
     // disclosure wrapper rather than appearing as direct inspector-panel children.
-    const primaryCallMatch = html.match(/patchInspectorPanel\((dashboardInspectorTimelineHtml\(selectedGroup\)[^,]*),\s*(dashboardInspectorSecondaryHtml\(overview, selectedGroup\))\)/);
-    expect(primaryCallMatch).not.toBeNull();
-    expect(primaryCallMatch ? primaryCallMatch[1] : "").toContain("dashboardInspectorComposerHtml()");
+    expect(html).toContain("patchInspectorPanel(dashboardInspectorTimelineHtml(selectedGroup) + dashboardInspectorComposerHtml(), dashboardInspectorDesignHtml() + dashboardInspectorSecondaryHtml(overview, selectedGroup))");
     expect(html).not.toContain("patchInspectorPanel(dashboardInspectorTimelineHtml(selectedGroup) + dashboardInspectorHtml(overview, selectedGroup), dashboardRunStatusHtml(overview) + dashboardInspectorEvidenceHtml(overview, selectedGroup) + dashboardInspectorComposerHtml())");
 
     // The secondary helper renders a single disclosure section that owns the body markup.
@@ -3606,11 +4174,11 @@ describe("dashboard", () => {
     const html = dashboardHtml({ runId: "run_123" });
 
     expect(html).toContain("secondaryEvidenceOpen = restoredDashboardState.secondaryEvidenceOpen === true;");
-    expect(html).toContain("secondaryEvidenceOpen = disclosure.hasAttribute(\"open\");");
+    expect(html).toContain("secondaryEvidenceOpen = secondaryDisclosure.hasAttribute(\"open\");");
     expect(html).toContain("'<details' + (secondaryEvidenceOpen ? ' open' : '') + '>'");
     expect(html).toContain("secondaryEvidenceOpen: parsed.secondaryEvidenceOpen === true,");
     expect(html).toContain("secondaryEvidenceOpen: state.secondaryEvidenceOpen === true,");
-    expect(html).toContain("secondaryEvidenceOpen, flowScroll: captureFlowScrollState()");
+    expect(html).toContain("secondaryEvidenceOpen, designDetailsOpen, flowScroll: captureFlowScrollState()");
   });
 
   test("AI SDK message-part mapper covers assistant text, reasoning, tool input/output, approval, and error events", () => {

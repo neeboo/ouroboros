@@ -24,7 +24,7 @@ ACP/acpx events, tool calls, diffs, and stream chunks are observability only. Th
 
 | Backend | Kind | Use |
 | --- | --- | --- |
-| `codex-resumable` | `codex-resumable` | Default planner, verifier, goal-review, and durable Codex work. Records native Codex session ids. |
+| `codex-resumable` | `codex-resumable` | Default designer, planner, verifier, outcome-review, goal-review, and durable Codex work. Records native Codex session ids. |
 | `codex` / `acpx-codex` | `acpx` | Codex through acpx named sessions. Useful for ACP smoke and subsessions. |
 | `codex-cli` | `codex-cli` | One-shot Codex CLI compatibility path. |
 | `claude-code` | `acpx` agent `claude` | Worker trials and explicitly routed Claude Code tasks. |
@@ -41,8 +41,10 @@ Backend selection lives in `run.context` and `task.config`.
   "agentDefaults": {
     "global": "claude-code",
     "roles": {
+      "designer": "codex-resumable",
       "planner": "codex-resumable",
       "verifier": "codex-resumable",
+      "outcome-review": "codex-resumable",
       "goal-review": "codex-resumable"
     }
   },
@@ -143,7 +145,7 @@ A passed smoke proves only read-only ACP execution in the temporary cwd. Write w
 
 ## Recommended Role Routing
 
-Self-iteration runs should keep `planner`, `verifier`, and `goal-review` on `codex-resumable` by default. Use Claude Code mainly for worker tasks until long-run planner/verifier behavior is proven.
+Self-iteration runs should keep `designer`, `planner`, `verifier`, `outcome-review`, and `goal-review` on `codex-resumable` by default. Use Claude Code mainly for worker tasks until long-run designer/planner/verifier behavior is proven.
 
 For the shortest operational recipe, start with `docs/default-runbook.md`.
 
@@ -152,9 +154,11 @@ For the shortest operational recipe, start with `docs/default-runbook.md`.
 global = "claude-code"
 
 [agentDefaults.roles]
+designer = "codex-resumable"
 planner = "codex-resumable"
 verifier = "codex-resumable"
-goal-review = "codex-resumable"
+"outcome-review" = "codex-resumable"
+"goal-review" = "codex-resumable"
 
 ["agentBackends"."claude-code"]
 kind = "acpx"

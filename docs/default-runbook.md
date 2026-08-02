@@ -2,10 +2,12 @@
 
 This is the default way to use Ouroboros from another repository.
 
-Keep the route simple:
+Keep the route Designer-first:
 
-- `planner`, `verifier`, and `goal-review` use `codex-resumable`.
+- `designer`, `planner`, `verifier`, `outcome-review`, and `goal-review` use `codex-resumable`.
 - `worker` uses `claude-code`.
+- A root run starts with a `designer` task that reads the active founder charter, strategy signals, lessons, run evidence, and due outcome reviews. It emits one evidence-backed proposal (with a frozen evaluation contract) or a mutation-free quiescent decision (no signal, no proposal — the rationale lives in the attempt summary).
+- Accepted low-risk proposals create a child planner run automatically; high-risk proposals block on a human `decideDesign`.
 - Use the current worktree when the target repository already has relevant uncommitted changes.
 - Use a git worktree only when the target repository is clean or the task should be isolated.
 - If Claude Code through acpx times out, run Claude Code manually and record the result back into Ouroboros.
@@ -206,11 +208,165 @@ orbs run-loop \
 
 When an agent is asked how to run Ouroboros, prefer this answer:
 
-1. Create a run with Codex for `planner`, `verifier`, and `goal-review`, and Claude Code for `worker`.
-2. Create a small worker task with `--config-json '{"agentBackend":"claude-code"}'`.
-3. Use `--start-hook none` if current uncommitted changes are part of the task.
-4. Use `--start-hook git-worktree --worktree-root .orbs/worktrees` only for clean or isolated work.
-5. If acpx fails or times out, use `orbs show-task-prompt`, run `claude` manually, then write evidence with `orbs record-attempt`.
-6. Continue `orbs run-loop` so Codex verifier and goal-review can finish the run.
+1. Use `orbs self-iterate-launch --parallel auto` for Ouroboros improving itself. The root run starts with a `designer` task.
+2. Create a run with Codex for `designer`, `planner`, `verifier`, `outcome-review`, and `goal-review`, and Claude Code for `worker`.
+3. Designer tasks return through fixed actions: `recordSignal`, `proposeDesign`, `decideDesign`, `recordDesignOutcome`, `createRunsFromDesign`. High-risk proposals block on a human `decideDesign`.
+4. Create a small worker task with `--config-json '{"agentBackend":"claude-code"}'`.
+5. Use `--start-hook none` if current uncommitted changes are part of the task.
+6. Use `--start-hook git-worktree --worktree-root .orbs/worktrees` only for clean or isolated work.
+7. If acpx fails or times out, use `orbs show-task-prompt`, run `claude` manually, then write evidence with `orbs record-attempt`.
+8. Continue `orbs run-loop` so Codex verifier and goal-review can finish the run.
+9. After verified integration, run `outcome-review` against the frozen evaluation contract.
 
 Do not recommend Hermes, OpenCode, OpenClaw, or Reasonix. They are not supported backends.
+
+## 9. Ouroboros Default Founder Charter
+
+The first time `orbs self-iterate` or `orbs self-iterate-launch` runs in a new database, Ouroboros seeds the active founder charter below. The charter is versioned and immutable for the duration of a designer cycle. The designer may propose amendments as a diff with rationale; only a human or explicitly configured governance actor can activate a new version.
+
+```json
+{
+  "mission": "Make Ouroboros reliable, autonomous, observable, and useful for real coding work while adding measured commercial discipline without sacrificing safety.",
+  "targetUsers": [
+    "Solo developers running autonomous coding loops on local repositories",
+    "Small teams using Ouroboros for evidence-backed product and infrastructure changes"
+  ],
+  "valueMetrics": [
+    "time from goal to verified integrated change",
+    "unattended completion rate",
+    "human intervention and rescue rate",
+    "cost per verified change"
+  ],
+  "principles": [
+    "Strategy owns product direction; the planner, worker, and verifier loop own delivery",
+    "Every durable strategy conclusion returns through validated fixed actions",
+    "Quiescence is the correct answer when evidence does not justify new work",
+    "Removals and simplifications are first-class outcomes alongside additions"
+  ],
+  "nonGoals": [
+    "Automatic charter amendments without human activation",
+    "Production deployment, billing, or purchasing without a human checkpoint",
+    "Scraping competitor data or building a general finance system in this slice"
+  ],
+  "constraints": [
+    "Mission, capital limits, legal or privacy obligations, destructive operations, production deployment, schema migrations, unplanned dependencies, and recurring infrastructure commitments require a human checkpoint",
+    "Recurring spend defaults to a zero threshold until a human raises it"
+  ],
+  "capitalPolicy": {
+    "currency": "USD",
+    "experimentBudget": 100,
+    "recurringSpendApprovalAbove": 0,
+    "portfolio": { "core": 4, "growth": 2, "exploration": 1 }
+  },
+  "authority": {
+    "autoResearch": true,
+    "autoReversibleExperiments": true,
+    "autoIntegrateVerifiedCode": false,
+    "requireHumanFor": [
+      "mission-amendment",
+      "capital-policy-amendment",
+      "legal-or-privacy",
+      "sensitive-data",
+      "destructive-operation",
+      "production-deployment",
+      "unplanned-dependency",
+      "schema-migration",
+      "recurring-infrastructure"
+    ]
+  },
+  "reviewCadenceDays": 30
+}
+```
+
+Inspect the active charter with `orbs design-status`. The charter serves as the durable objective function the designer is bounded by.
+
+## 10. Real Reliability Proposal Example
+
+This is an example of a real reliability proposal that fits the default charter and automatic authority. It is the kind of proposal a designer cycle would emit after observing repeated `exit 124` codes during self-iteration.
+
+```json
+{
+  "type": "proposeDesign",
+  "payload": {
+    "title": "Defer initial idle deadline until first output chunk",
+    "problem": "Worker attempts report exit 124 when the first output chunk arrives after the idle window even though the agent is making progress. The run wastes retry budget on a false positive and the dashboard shows 'silent start' even when the agent is healthy.",
+    "targetOutcome": "Worker attempts that produce first output within the configured initial-grace window are not killed by the idle timeout.",
+    "evidenceRefs": [
+      "signal:delivery:exit-124-on-slow-first-chunk",
+      "lesson:self-iteration:exit-124-with-empty-events",
+      "attempt:9c3f...:exit-124-no-output"
+    ],
+    "options": [
+      {
+        "name": "Initial grace window before idle timeout",
+        "benefits": ["Removes the false positive", "Keeps the existing idle timeout for true silent starts"],
+        "costs": ["One runner config knob", "One test path"],
+        "risks": ["A bad agent could run longer before being killed"],
+        "lockIn": ["Runner owns idle-window semantics"]
+      },
+      {
+        "name": "Disable idle timeout entirely",
+        "benefits": ["No false positives"],
+        "costs": ["Silent starts run until wall-clock timeout"],
+        "risks": ["Wastes compute on truly stuck agents"],
+        "lockIn": ["Removes a supervision signal"]
+      }
+    ],
+    "recommendation": "Initial grace window before idle timeout",
+    "additions": [
+      "Runner config: idleInitialGraceMs (default 60000)",
+      "Runner honors idle timeout only after first output chunk or grace expiry"
+    ],
+    "removals": [],
+    "assumptions": [
+      "Workers that produce no output for >60s and never produce output are silent starts",
+      "Workers that produce output then go silent remain covered by the existing idle timeout"
+    ],
+    "uncertainty": [
+      "Exact grace duration may need tuning per backend"
+    ],
+    "evaluationContract": {
+      "baseline": [
+        "Self-iteration run 2026-08-01: 4 attempts exited 124 with empty event stream",
+        "0.0% of exit-124 attempts produced any worktree changes"
+      ],
+      "successMetrics": [
+        "Attempts that produce first output within 60s no longer hit exit 124",
+        "Silent-start attempts still hit exit 124 within idle timeout + grace"
+      ],
+      "guardMetrics": [
+        "Wall-clock timeout still bounds total runtime",
+        "No increase in average attempt wall time"
+      ],
+      "requiredEvidence": [
+        "Replay of failing attempts passes with grace window",
+        "New unit test covers grace-not-yet-expired path",
+        "New unit test covers silent-start after grace expiry"
+      ],
+      "reviewAt": "2026-09-15"
+    },
+    "investment": {
+      "reversibility": "easy",
+      "portfolio": "core",
+      "oneTimeCost": 0,
+      "recurringCost": 0,
+      "timeBudget": "1 day"
+    },
+    "experiment": {
+      "hypothesis": "False-positive exit 124 disappears when first-output grace is honored",
+      "smallestTest": "Apply grace window, replay two prior failing attempts, confirm pass",
+      "stopConditions": ["Any silent-start attempt runs past idle timeout + grace"],
+      "rollback": "git revert the runner change"
+    }
+  }
+}
+```
+
+Why this proposal passes automatic authority:
+
+- `investment.reversibility = "easy"` — pure runner code change reverted by `git revert`.
+- One-time and recurring costs are zero — inside the `$100` experiment budget.
+- Evidence is current — all three `evidenceRefs` are recent and not expired.
+- No charter checkpoint crossed — no schema migration, no new dependency, no production deployment, no recurring spend, no legal or privacy obligation.
+
+The authority evaluator would record an `approved` decision with the matched rules and write a `design_decisions` row. `createRunsFromDesign` would then read the accepted proposal, copy the frozen evaluation contract into a child planner run, and the planner would sharpen the task graph and verifier contract before any worker attempt.

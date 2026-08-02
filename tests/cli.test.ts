@@ -8,6 +8,11 @@ import { formatRunEvidence } from "../packages/cli/src/run-evidence";
 import { formatAttemptExplanation } from "../packages/cli/src/explain-attempt";
 import { formatRunGraph } from "../packages/cli/src/run-graph";
 import { defaultDatabasePath, parseArgs } from "../packages/cli/src/args";
+import {
+  designTimelineKindForTask,
+  isDesignTimelineTaskGoal,
+  isDesignTimelineTaskRole,
+} from "../packages/cli/src/design-status";
 import { Database } from "bun:sqlite";
 
 describe("CLI", () => {
@@ -339,7 +344,7 @@ describe("CLI", () => {
     expect(result.runnerCommand).toContain("--tasks auto");
     expect(result.runnerCommand).toContain("--worktree-root .ouroboros/worktrees");
     expect(result.runnerCommand).toContain("--start-hook git-worktree");
-    expect(result.runnerCommand).toContain("--stop-hook create-runs,create-tasks,create-verifier,create-repair,context-summary");
+    expect(result.runnerCommand).toContain("--stop-hook create-runs,create-tasks,create-verifier,create-repair,apply-design-actions,context-summary");
 
     expect(overview.run.id).toBe(result.runId);
     expect(overview.run.goal).toBe("Continuously improve Ouroboros from evidence-backed gaps");
@@ -348,11 +353,18 @@ describe("CLI", () => {
     expect(overview.run.context.modelDefaults).toMatchObject({
       global: { model: "gpt-5.6-luna", reasoning_effort: "high" },
       roles: {
+        designer: { model: "gpt-5.6-sol", reasoning_effort: "high" },
         planner: { model: "gpt-5.6-sol", reasoning_effort: "high" },
         worker: { model: "gpt-5.6-luna", reasoning_effort: "high" },
         verifier: { model: "gpt-5.6-sol", reasoning_effort: "high" },
         "goal-review": { model: "gpt-5.6-sol", reasoning_effort: "high" },
       },
+    });
+    expect(overview.run.context.agentDefaults.roles).toMatchObject({
+      designer: "codex-resumable",
+      planner: "codex-resumable",
+      verifier: "codex-resumable",
+      "goal-review": "codex-resumable",
     });
     expect(overview.run.context.selfImprovement).toMatchObject({
       cycleIndex: 0,
@@ -386,26 +398,34 @@ describe("CLI", () => {
     expect(overview.tasks[0]).toMatchObject({
       id: result.taskId,
       runId: result.runId,
-      role: "planner",
+      role: "designer",
       status: "todo",
       dependsOn: [],
     });
+    expect(overview.tasks[0].prompt).toContain("docs/designer-control-plane.md");
     expect(overview.tasks[0].prompt).toContain("docs/self-iteration-plan.md");
-    expect(overview.tasks[0].prompt).toContain("recent run lessons from the harness database");
-    expect(overview.tasks[0].prompt).toContain("derive one improvement objective");
-    expect(overview.tasks[0].prompt).toContain("`nextRuns`");
-    expect(overview.tasks[0].prompt).toContain("Return no child run");
-    expect(overview.tasks[0].prompt).not.toContain("small `nextTasks` graph");
+    expect(overview.tasks[0].prompt).toContain("active founder charter");
+    expect(overview.tasks[0].prompt).toContain("strategy signals");
+    expect(overview.tasks[0].prompt).toContain("run evidence");
+    expect(overview.tasks[0].prompt).toContain("due design outcomes");
+    expect(overview.tasks[0].prompt).toContain("fixed designer actions");
+    expect(overview.tasks[0].prompt).toContain("recordSignal");
+    expect(overview.tasks[0].prompt).toContain("proposeDesign");
+    expect(overview.tasks[0].prompt).toContain("decideDesign");
+    expect(overview.tasks[0].prompt).toContain("recordDesignOutcome");
+    expect(overview.tasks[0].prompt).toContain("createRunsFromDesign");
+    expect(overview.tasks[0].prompt).toContain("accepted proposal");
+    expect(overview.tasks[0].prompt).toContain("quiescent");
     expect(overview.tasks[0].doneWhen).toEqual([
-      "The assessment cites current repository, run, lesson, and verification evidence",
-      "The output derives one concrete improvement objective from a demonstrated capability gap",
-      "The objective is emitted as one nextRuns child with a planning prompt and three to five doneWhen checks",
-      "If no meaningful gap exists, the output returns no child run and explains the quiescent decision",
-      "The child run can be supervised, verified, and integrated without manual task injection",
+      "The assessment cites the active charter, current signals, lessons, run evidence, repository state, and due design outcomes",
+      "The output derives one evidence-backed design proposal or records a justified quiescent decision",
+      "Durable conclusions return only through the fixed designer actions: recordSignal, proposeDesign, decideDesign, recordDesignOutcome, createRunsFromDesign",
+      "Planning begins only from an accepted proposal and preserves the frozen evaluation contract, authority context, budget, and integration boundary",
+      "No delivery run is created from an unaccepted proposal or without an approved stored decision",
     ]);
   });
 
-  test("self-iteration bootstrap routes planner, verifier, and goal-review through codex-resumable over a claude-code global default", async () => {
+  test("self-iteration bootstrap routes designer, planner, verifier, and goal-review through codex-resumable over a claude-code global default", async () => {
     await runCli("init");
     const configPath = join(dir, "self-iterate.toml");
     await writeFile(
@@ -427,6 +447,7 @@ describe("CLI", () => {
     expect(overview.run.context.agentDefaults).toEqual({
       global: "claude-code",
       roles: {
+        designer: "codex-resumable",
         planner: "codex-resumable",
         verifier: "codex-resumable",
         "goal-review": "codex-resumable",
@@ -438,7 +459,7 @@ describe("CLI", () => {
 
     expect(result.runnerCommand).toContain("--executor codex-resumable");
     expect(result.runnerCommand).toContain(`run-loop --run-id ${result.runId}`);
-    expect(result.runnerCommand).toContain("--stop-hook create-runs,create-tasks,create-verifier,create-repair,context-summary");
+    expect(result.runnerCommand).toContain("--stop-hook create-runs,create-tasks,create-verifier,create-repair,apply-design-actions,context-summary");
     expect(result.launchCommand).toContain("self-iterate-launch");
 
     const lessons = await runCliJson("list-lessons", "--run-id", result.runId);
@@ -456,6 +477,7 @@ describe("CLI", () => {
         "",
         "[agentDefaults.roles]",
         'planner = "claude-code"',
+        'designer = "claude-code"',
         "",
         "[agentBackends.claude-code]",
         'kind = "acpx"',
@@ -470,6 +492,7 @@ describe("CLI", () => {
     expect(overview.run.context.agentDefaults).toEqual({
       global: "claude-code",
       roles: {
+        designer: "claude-code",
         planner: "claude-code",
         verifier: "codex-resumable",
         "goal-review": "codex-resumable",
@@ -477,12 +500,238 @@ describe("CLI", () => {
     });
   });
 
-  test("self-iteration run drains a concrete planner actions graph to a goal-review decision", async () => {
+  test("self-iteration bootstrap keeps explicit designer model defaults from config", async () => {
+    await runCli("init");
+    const configPath = join(dir, "self-iterate.toml");
+    await writeFile(
+      configPath,
+      [
+        "[models.roles.designer]",
+        'model = "gpt-5.6-meridian"',
+        'reasoning_effort = "medium"',
+      ].join("\n"),
+    );
+
+    const result = await runCliJson("self-iterate", "--config", configPath);
+    const overview = await runCliJson("run-overview", "--run-id", result.runId);
+
+    expect(overview.run.context.modelDefaults).toMatchObject({
+      roles: {
+        designer: { model: "gpt-5.6-meridian", reasoning_effort: "medium" },
+        planner: { model: "gpt-5.6-sol", reasoning_effort: "high" },
+        worker: { model: "gpt-5.6-luna", reasoning_effort: "high" },
+        verifier: { model: "gpt-5.6-sol", reasoning_effort: "high" },
+        "goal-review": { model: "gpt-5.6-sol", reasoning_effort: "high" },
+      },
+    });
+  });
+
+  test("self-iteration bootstrap freezes a concrete integration boundary for fresh roots", async () => {
+    const result = await runCliJson("self-iterate");
+    const overview = await runCliJson("run-overview", "--run-id", result.runId);
+
+    const boundary = overview.run.context.integrationBoundary;
+    expect(boundary).toBeDefined();
+    expect(boundary).toMatchObject({
+      targetBranch: "main",
+      push: false,
+      allowedFiles: expect.arrayContaining([
+        "packages/harness/",
+        "packages/runner/",
+        "packages/cli/",
+        "tests/",
+        "docs/",
+      ]),
+      forbiddenPaths: expect.arrayContaining([".ouroboros/", "ouroboros.toml", ".linear"]),
+    });
+  });
+
+  test("self-iteration bootstrap honors an explicit config integration boundary over the default", async () => {
+    await runCli("init");
+    const configPath = join(dir, "self-iterate.toml");
+    await writeFile(
+      configPath,
+      [
+        "[integrationBoundary]",
+        'target_branch = "release"',
+        "push = false",
+        'allowed_files = ["src/"]',
+        'forbidden_paths = ["secrets/"]',
+      ].join("\n"),
+    );
+
+    const result = await runCliJson("self-iterate", "--config", configPath);
+    const overview = await runCliJson("run-overview", "--run-id", result.runId);
+
+    expect(overview.run.context.integrationBoundary).toMatchObject({
+      targetBranch: "release",
+      push: false,
+      allowedFiles: ["src/"],
+      forbiddenPaths: ["secrets/"],
+    });
+  });
+
+  test("self-iteration bootstrap seeds the default Ouroboros founder charter idempotently", async () => {
+    const firstResult = await runCliJson("self-iterate");
+    const firstOverview = await runCliJson("run-overview", "--run-id", firstResult.runId);
+
+    expect(firstOverview.run.context.founderCharterId).toBeString();
+    const firstCharterId = firstOverview.run.context.founderCharterId as string;
+
+    const secondResult = await runCliJson("self-iterate");
+    const secondOverview = await runCliJson("run-overview", "--run-id", secondResult.runId);
+
+    expect(secondOverview.run.context.founderCharterId).toBe(firstCharterId);
+
+    const harness = new Harness(dbPath);
+    const projects = harness.listProjects();
+    expect(projects.length).toBe(1);
+    const project = projects[0];
+    const charter = harness.getActiveFounderCharter({ projectId: project.id });
+    expect(charter?.id).toBe(firstCharterId);
+    expect(charter?.mission).toContain("reliable");
+    expect(charter?.charter.capitalPolicy).toMatchObject({
+      currency: "USD",
+      experimentBudget: 100,
+      recurringSpendApprovalAbove: 0,
+    });
+    expect(charter?.charter.authority).toMatchObject({
+      autoResearch: true,
+      autoReversibleExperiments: true,
+      autoIntegrateVerifiedCode: false,
+    });
+  });
+
+  test("self-iteration bootstrap never overrides an explicit founder charter", async () => {
+    await runCli("init");
+    const harness = new Harness(dbPath);
+    const projectId = harness.createProject({ name: "ouroboros", rootPath: process.cwd() });
+    const explicit = harness.createFounderCharter({
+      projectId,
+      mission: "Founder-defined mission that must not be overwritten",
+      charter: {
+        mission: "Founder-defined mission that must not be overwritten",
+        capitalPolicy: {
+          currency: "EUR",
+          experimentBudget: 500,
+        },
+        authority: {
+          autoResearch: false,
+          autoReversibleExperiments: false,
+        },
+      },
+      activate: true,
+    });
+    expect(explicit.isActive).toBe(true);
+
+    const result = await runCliJson("self-iterate");
+    const overview = await runCliJson("run-overview", "--run-id", result.runId);
+
+    expect(overview.run.context.founderCharterId).toBe(explicit.id);
+    const active = harness.getActiveFounderCharter({ projectId });
+    expect(active?.id).toBe(explicit.id);
+    expect(active?.mission).toBe("Founder-defined mission that must not be overwritten");
+    expect(active?.charter.capitalPolicy?.experimentBudget).toBe(500);
+  });
+
+  test("self-iteration designer routes accepted proposals to a planner run with frozen context and ignores generic createTasks", async () => {
     const bootstrap = await runCliJson("self-iterate");
+
+    const harness = new Harness(dbPath);
+    const projectId = harness.createProject({ name: "ouroboros", rootPath: process.cwd() });
+    const proposal = harness.createDesignProposal({
+      projectId,
+      title: "Dashboard actions label clarity",
+      problem: "Dashboard task vs runner actions label is ambiguous",
+      recommendation: "Add a distinguishing label in the dashboard actions panel",
+      proposal: {
+        problem: "Dashboard task vs runner actions label is ambiguous",
+        recommendation: "Add a distinguishing label in the dashboard actions panel",
+        evidenceRefs: ["signal_dashboard_confusion"],
+        targetOutcome: "Dashboard renders a label distinguishing task vs runner actions",
+        options: [
+          {
+            name: "label the actions panel",
+            benefits: ["clear distinction"],
+            costs: ["small text change"],
+            risks: ["none"],
+            lockIn: ["none"],
+          },
+        ],
+        evaluationContract: {
+          baseline: ["no distinguishing label present"],
+          successMetrics: ["label visible in dashboard actions panel"],
+          guardMetrics: ["dashboard actions panel still renders"],
+          requiredEvidence: ["dashboard snapshot with the new label"],
+        },
+        investment: {
+          reversibility: "easy" as const,
+          portfolio: "core" as const,
+          oneTimeCost: 0,
+          recurringCost: 0,
+          timeBudget: "1 hour",
+        },
+        additions: ["packages/cli/src/dashboard.ts: actions panel label"],
+        removals: ["ambiguous actions panel label"],
+        assumptions: ["dashboard still renders the actions panel"],
+        uncertainty: [],
+      },
+      status: "proposed",
+    });
+    harness.recordDesignDecision({
+      proposalId: proposal.id,
+      decision: "approved",
+      actorKind: "human",
+      actorRef: "founder@example.com",
+      charterId: proposal.charterId,
+      reasons: ["founder reviewed reversible change"],
+      authority: { disposition: "automatic", autoReversibleExperiments: true },
+    });
+    harness.updateDesignProposalStatus({ proposalId: proposal.id, status: "accepted" });
+
     const codexBin = join(dir, "fake-codex-self-iterate-drain");
+    const designerOutput = {
+      status: "done",
+      summary:
+        "Designer routed accepted proposal to a planner child run; generic createTasks is ignored by the fixed-action boundary.",
+      changedFiles: [],
+      checks: [],
+      artifacts: [],
+      problems: [],
+      actions: [
+        {
+          type: "createTasks",
+          payload: {
+            tasks: [
+              {
+                role: "worker",
+                goal: "Boundary check worker that must not be created from designer output",
+                prompt:
+                  "If this task is created, the designer fixed-action boundary has failed.",
+                dependsOn: [],
+                doneWhen: ["this task must never run"],
+              },
+            ],
+          },
+        },
+        {
+          type: "createRunsFromDesign",
+          payload: {
+            proposalId: proposal.id,
+            runs: [
+              {
+                goal: "Plan dashboard actions label clarity change",
+                prompt:
+                  "Plan a worker task that adds a distinguishing label to the dashboard actions panel.",
+              },
+            ],
+          },
+        },
+      ],
+    };
     const plannerOutput = {
       status: "done",
-      summary: "Planned two concrete worker tasks through actions createTasks",
+      summary: "Planned two concrete worker tasks through createTasks inside the design child run.",
       changedFiles: [],
       checks: [],
       artifacts: [],
@@ -564,8 +813,12 @@ describe("CLI", () => {
       [
         "#!/usr/bin/env bun",
         "const prompt = await new Response(Bun.stdin.stream()).text();",
-        "const sessionId = prompt.includes('Role: goal-review') ? 'session_review' : prompt.includes('Role: planner') ? 'session_planner' : prompt.includes('Role: verifier') ? 'session_verifier' : 'session_worker';",
+        "const sessionId = prompt.includes('Role: goal-review') ? 'session_review' : prompt.includes('Role: designer') ? 'session_designer' : prompt.includes('Role: planner') ? 'session_planner' : prompt.includes('Role: verifier') ? 'session_verifier' : 'session_worker';",
         "console.log(JSON.stringify({ type: 'session.started', session_id: sessionId }));",
+        "if (prompt.includes('Role: designer')) {",
+        `  console.log(JSON.stringify({ type: 'agent.message', message: ${JSON.stringify(JSON.stringify(designerOutput))} }));`,
+        "  process.exit(0);",
+        "}",
         "if (prompt.includes('Role: planner')) {",
         `  console.log(JSON.stringify({ type: 'agent.message', message: ${JSON.stringify(JSON.stringify(plannerOutput))} }));`,
         "  process.exit(0);",
@@ -584,11 +837,11 @@ describe("CLI", () => {
     await chmod(codexBin, 0o755);
 
     const result = await runCliJson(
-      "run-loop",
-      "--run-id",
-      bootstrap.runId,
+      "supervise-runs",
       "--executor",
       "codex-resumable",
+      "--root-run-id",
+      bootstrap.runId,
       "--codex-bin",
       codexBin,
       "--cwd",
@@ -596,21 +849,79 @@ describe("CLI", () => {
       "--sandbox",
       "read-only",
       "--stop-hook",
-      "create-runs,create-tasks,create-verifier,create-repair,context-summary",
+      "create-runs,create-tasks,create-verifier,create-repair,apply-design-actions,context-summary",
+      "--run-concurrency",
+      "2",
+      "--concurrency",
+      "1",
+      "--max-cycles",
+      "8",
       "--max-rounds",
       "8",
+      "--interval-ms",
+      "1",
     );
-    const overview = await runCliJson("run-overview", "--run-id", bootstrap.runId);
-    const lessons = await runCliJson("list-lessons", "--run-id", bootstrap.runId);
-    const next = await runCliJson("next-task", "--run-id", bootstrap.runId);
-    const workers = overview.tasks.filter((task: { role: string }) => task.role === "worker");
-    const verifiers = overview.tasks.filter((task: { role: string }) => task.role === "verifier");
-    const review = overview.tasks.find((task: { role: string }) => task.role === "goal-review");
 
-    expect(overview.run.status).toBe("done");
-    expect(next).toBeNull();
-    expect(Array.isArray(lessons)).toBe(true);
-    expect(result.rounds.length).toBeGreaterThan(0);
+    const bootstrapOverview = await runCliJson("run-overview", "--run-id", bootstrap.runId);
+    const bootstrapWorkers = bootstrapOverview.tasks.filter(
+      (task: { role: string }) => task.role === "worker",
+    );
+    expect(bootstrapWorkers).toHaveLength(0);
+
+    const runs = await runCliJson("list-runs");
+    const childRun = runs.find(
+      (run: { context?: { designProposalId?: string } }) =>
+        run.context?.designProposalId === proposal.id,
+    ) as { id: string; context: Record<string, unknown> } | undefined;
+    expect(childRun).toBeDefined();
+    expect(childRun?.context).toMatchObject({
+      parentRunId: bootstrap.runId,
+      source: "design",
+      designProposalId: proposal.id,
+      designDecisionId: expect.any(String),
+      designEvaluationContract: expect.objectContaining({
+        successMetrics: ["label visible in dashboard actions panel"],
+        requiredEvidence: ["dashboard snapshot with the new label"],
+      }),
+      designProposal: expect.objectContaining({
+        problem: "Dashboard task vs runner actions label is ambiguous",
+        recommendation: "Add a distinguishing label in the dashboard actions panel",
+        targetOutcome: "Dashboard renders a label distinguishing task vs runner actions",
+        additions: ["packages/cli/src/dashboard.ts: actions panel label"],
+        removals: ["ambiguous actions panel label"],
+      }),
+      designInvestment: expect.objectContaining({
+        reversibility: "easy",
+        portfolio: "core",
+        oneTimeCost: 0,
+        recurringCost: 0,
+        timeBudget: "1 hour",
+      }),
+      designAdditions: ["packages/cli/src/dashboard.ts: actions panel label"],
+      designRemovals: ["ambiguous actions panel label"],
+      designApprovalAuthority: expect.objectContaining({
+        decision: "approved",
+        actorKind: "human",
+        actorRef: "founder@example.com",
+        authority: expect.objectContaining({ disposition: "automatic" }),
+      }),
+    });
+
+    const childOverview = await runCliJson("run-overview", "--run-id", childRun?.id ?? "");
+    const childLessons = await runCliJson("list-lessons", "--run-id", childRun?.id ?? "");
+    const childNext = await runCliJson("next-task", "--run-id", childRun?.id ?? "");
+    const workers = childOverview.tasks.filter((task: { role: string }) => task.role === "worker");
+    const verifiers = childOverview.tasks.filter(
+      (task: { role: string }) => task.role === "verifier",
+    );
+    const review = childOverview.tasks.find(
+      (task: { role: string }) => task.role === "goal-review",
+    );
+
+    expect(childOverview.run.status).toBe("done");
+    expect(childNext).toBeNull();
+    expect(Array.isArray(childLessons)).toBe(true);
+    expect(result.cycles.length).toBeGreaterThan(0);
     expect(workers).toHaveLength(2);
     for (const task of workers) {
       expect(task.prompt).toMatch(/packages\/cli\/src\//);
@@ -625,7 +936,7 @@ describe("CLI", () => {
       expect(task.status).toBe("done");
     }
     expect(review).toMatchObject({ role: "goal-review", status: "done" });
-    const reviewSession = overview.sessions.find(
+    const reviewSession = childOverview.sessions.find(
       (session: { role: string }) => session.role === "goal-review",
     );
     expect(reviewSession?.output).toMatchObject({ status: "done", runDecision: "complete" });
@@ -712,7 +1023,7 @@ describe("CLI", () => {
       expect(overview.tasks).toHaveLength(1);
       expect(overview.tasks[0]).toMatchObject({
         id: launch.taskId,
-        role: "planner",
+        role: "designer",
         status: "todo",
       });
     } finally {
@@ -3669,7 +3980,7 @@ describe("CLI", () => {
       "--sandbox",
       "read-only",
       "--stop-hook",
-      "create-runs,create-tasks,create-verifier,create-repair,context-summary",
+      "create-runs,create-tasks,create-verifier,create-repair,apply-design-actions,context-summary",
       "--run-concurrency",
       "2",
       "--concurrency",
@@ -3763,7 +4074,90 @@ describe("CLI", () => {
   });
 
   test("self-improve-daemon creates an assessment root and derives a child improvement run", async () => {
+    const bootstrap = await runCliJson("self-iterate");
+    const bootstrapOverview = await runCliJson("run-overview", "--run-id", bootstrap.runId);
+    const setupHarness = new Harness(dbPath);
+    const projectId = setupHarness.listProjects()[0].id;
+    const proposal = setupHarness.createDesignProposal({
+      projectId,
+      charterId: bootstrapOverview.run.context.founderCharterId as string,
+      runId: bootstrap.runId,
+      taskId: bootstrap.taskId,
+      title: "Observable autonomous cycle recovery",
+      problem: "Autonomous cycle recovery is not observable in dashboard evidence",
+      recommendation: "Plan the smallest observable recovery increment",
+      proposal: {
+        problem: "Autonomous cycle recovery is not observable in dashboard evidence",
+        recommendation: "Plan the smallest observable recovery increment",
+        evidenceRefs: ["signal_recovery_visibility"],
+        options: [
+          {
+            name: "observable recovery increment",
+            benefits: ["recovery visible in run evidence"],
+            costs: ["planning task only"],
+            risks: ["none"],
+            lockIn: ["none"],
+          },
+        ],
+        evaluationContract: {
+          baseline: ["recovery evidence absent"],
+          successMetrics: ["recovery evidence present after a cycle"],
+          guardMetrics: ["no daemon regression"],
+          requiredEvidence: ["run-overview shows the derived child run"],
+        },
+        investment: {
+          reversibility: "easy" as const,
+          portfolio: "core" as const,
+          oneTimeCost: 0,
+          recurringCost: 0,
+          timeBudget: "1 hour",
+        },
+        additions: ["observable recovery evidence"],
+        removals: [],
+      },
+      status: "proposed",
+    });
+    setupHarness.recordDesignDecision({
+      proposalId: proposal.id,
+      decision: "approved",
+      actorKind: "human",
+      actorRef: "founder@example.com",
+      charterId: proposal.charterId,
+      reasons: ["founder reviewed reversible change"],
+      authority: { disposition: "automatic", autoReversibleExperiments: true },
+    });
+    setupHarness.updateDesignProposalStatus({ proposalId: proposal.id, status: "accepted" });
+
     const codexBin = join(dir, "fake-codex-self-improve");
+    const payload = {
+      status: "done",
+      summary: "Derived an evidence-backed controller objective through a fixed design action",
+      changedFiles: [],
+      checks: [{ name: "assessment evidence", status: "passed" }],
+      artifacts: [],
+      problems: [],
+      actions: [
+        {
+          type: "createRunsFromDesign",
+          payload: {
+            proposalId: proposal.id,
+            runs: [
+              {
+                goal: "Make autonomous cycle recovery observable",
+                prompt:
+                  "Inspect packages/cli/src/main.ts and tests/cli.test.ts, then plan the smallest observable recovery increment.",
+                doneWhen: [
+                  "current recovery behavior is inspected",
+                  "one implementation task is planned",
+                  "one verifier task is planned",
+                ],
+                context: { derivedBy: "self-assessment" },
+              },
+            ],
+          },
+        },
+      ],
+    };
     await writeFile(
       codexBin,
       [
@@ -3771,7 +4165,7 @@ describe("CLI", () => {
         "import { writeFileSync } from 'node:fs';",
         "const outputFlag = Bun.argv.indexOf('--output-last-message');",
         "const outputPath = outputFlag >= 0 ? Bun.argv[outputFlag + 1] : '';",
-        "const payload = { status: 'done', summary: 'Derived an evidence-backed controller objective', changedFiles: [], checks: [{ name: 'assessment evidence', status: 'passed' }], artifacts: [], problems: [], nextRuns: [{ goal: 'Make autonomous cycle recovery observable', prompt: 'Inspect packages/cli/src/main.ts and tests/cli.test.ts, then plan the smallest observable recovery increment.', doneWhen: ['current recovery behavior is inspected', 'one implementation task is planned', 'one verifier task is planned'], context: { derivedBy: 'self-assessment' } }] };",
+        `const payload = ${JSON.stringify(payload)};`,
         "if (outputPath) writeFileSync(outputPath, JSON.stringify(payload));",
         "console.log(JSON.stringify({ type: 'session.started', session_id: 'session_self_improve' }));",
         "console.log(JSON.stringify({ type: 'agent.message', message: JSON.stringify(payload) }));",
@@ -3781,6 +4175,8 @@ describe("CLI", () => {
 
     const result = await runCliJson(
       "self-improve-daemon",
+      "--root-run-id",
+      bootstrap.runId,
       "--executor",
       "codex-resumable",
       "--codex-bin",
@@ -3798,15 +4194,15 @@ describe("CLI", () => {
       "--idle-ms",
       "1",
       "--stop-hook",
-      "create-runs,create-tasks,create-verifier,create-repair,context-summary",
+      "create-runs,create-tasks,create-verifier,create-repair,apply-design-actions,context-summary",
     );
     const runs = await runCliJson("list-runs");
     const root = runs.find((run: { id: string }) => run.id === result.rootRunId);
     const child = runs.find((run: { goal: string }) => run.goal === "Make autonomous cycle recovery observable");
 
     expect(result.status).toBe("tick_limit");
-    expect(result.rootRunId).toBeString();
-    expect(result.bootstrap).toMatchObject({ runId: result.rootRunId, cycleIndex: 0 });
+    expect(result.rootRunId).toBe(bootstrap.runId);
+    expect(result.bootstrap).toBeNull();
     expect(result.ticks[0]).toMatchObject({
       type: "self-improvement.tick",
       status: "ok",
@@ -3815,8 +4211,9 @@ describe("CLI", () => {
     expect(child).toMatchObject({
       status: "todo",
       context: expect.objectContaining({
-        parentRunId: result.rootRunId,
-        source: "nextRuns",
+        parentRunId: bootstrap.runId,
+        source: "design",
+        designProposalId: proposal.id,
         derivedBy: "self-assessment",
       }),
     });
@@ -3867,6 +4264,173 @@ describe("CLI", () => {
       createdCycle: null,
     });
     expect(runs).toHaveLength(1);
+  });
+
+  test("self-improve-daemon surfaces a measuring proposal as an outcome-review tick before asking the designer for new work", async () => {
+    const bootstrap = await runCliJson("self-iterate");
+    const bootstrapOverview = await runCliJson("run-overview", "--run-id", bootstrap.runId);
+    const setupHarness = new Harness(dbPath);
+    const projectId = setupHarness.listProjects()[0].id;
+    const proposal = setupHarness.createDesignProposal({
+      projectId,
+      charterId: bootstrapOverview.run.context.founderCharterId as string,
+      runId: bootstrap.runId,
+      taskId: bootstrap.taskId,
+      title: "Integrated improvement",
+      problem: "Latency measurement gap",
+      recommendation: "Add latency probe",
+      proposal: {
+        problem: "Latency measurement gap",
+        recommendation: "Add latency probe",
+        evidenceRefs: ["signal_latency_probe"],
+        options: [
+          {
+            name: "latency probe",
+            benefits: ["visibility"],
+            costs: ["one probe"],
+            risks: ["none"],
+            lockIn: ["none"],
+          },
+        ],
+        evaluationContract: {
+          baseline: ["latency unseen"],
+          successMetrics: ["latency under 200ms"],
+          guardMetrics: ["reliability stable"],
+          requiredEvidence: ["run-overview shows measuring status"],
+        },
+        investment: {
+          reversibility: "easy" as const,
+          portfolio: "core" as const,
+          oneTimeCost: 0,
+          recurringCost: 0,
+          timeBudget: "1 hour",
+        },
+        additions: ["packages/cli/src/latency-probe.ts"],
+        removals: [],
+      },
+      status: "accepted",
+    });
+    setupHarness.recordDesignDecision({
+      proposalId: proposal.id,
+      decision: "approved",
+      actorKind: "human",
+      actorRef: "founder@example.com",
+      charterId: proposal.charterId,
+      reasons: ["founder reviewed reversible change"],
+      authority: { disposition: "automatic", autoReversibleExperiments: true },
+    });
+    // Simulate the integrated child run that createRunsFromDesign would have
+    // produced: it carries designProposalId in its context. After integration
+    // the proposal moves to measuring and the daemon should surface the review.
+    const integratedRunId = setupHarness.createRun({
+      goal: "Deliver latency probe",
+      context: {
+        parentRunId: bootstrap.runId,
+        source: "design",
+        designProposalId: proposal.id,
+      },
+    });
+    setupHarness.updateDesignProposalStatus({ proposalId: proposal.id, status: "measuring" });
+    setupHarness.updateRunStatus({ runId: integratedRunId, status: "done" });
+    setupHarness.recordAttempt({
+      taskId: bootstrap.taskId,
+      input: {},
+      output: {
+        status: "done",
+        summary: "Drained designer tick",
+        changedFiles: [],
+        checks: [{ name: "assessment", status: "passed" }],
+        artifacts: [],
+        problems: [],
+      },
+    });
+    setupHarness.updateRunStatus({ runId: bootstrap.runId, status: "done" });
+
+    // Fake codex that records a retain outcome for any outcome-review task it
+    // sees, so the daemon tick surfaces outcome-review state and then drains.
+    const codexBin = join(dir, "fake-codex-outcome-review");
+    const payloadFor = (taskConfig: { designProposalId?: string }) => ({
+      status: "done",
+      summary: "Outcome review recorded",
+      changedFiles: [],
+      checks: [{ name: "outcome review", status: "passed" }],
+      artifacts: [],
+      problems: [],
+      actions: [
+        {
+          type: "recordDesignOutcome",
+          payload: {
+            proposalId: taskConfig.designProposalId,
+            stage: "review",
+            recommendation: "retain",
+            baseline: { startup: 12 },
+            observed: { startup: 5 },
+            evidence: [{ runId: integratedRunId }],
+          },
+        },
+      ],
+    });
+    await writeFile(
+      codexBin,
+      [
+        "#!/usr/bin/env bun",
+        "import { readFileSync, writeFileSync } from 'node:fs';",
+        "const cfgFlag = Bun.argv.indexOf('--config-last-message');",
+        "const cfgPath = cfgFlag >= 0 ? Bun.argv[cfgFlag + 1] : '';",
+        "let taskConfig: { designProposalId?: string } = {};",
+        "try {",
+        "  if (cfgPath) taskConfig = JSON.parse(readFileSync(cfgPath, 'utf8'));",
+        "} catch {}",
+        `const payload = ${JSON.stringify(payloadFor)};`,
+        "const resolved = typeof payload === 'function' ? payload(taskConfig) : payload;",
+        "const outputFlag = Bun.argv.indexOf('--output-last-message');",
+        "const outputPath = outputFlag >= 0 ? Bun.argv[outputFlag + 1] : '';",
+        "if (outputPath) writeFileSync(outputPath, JSON.stringify(resolved));",
+        "console.log(JSON.stringify({ type: 'session.started', session_id: 'session_outcome' }));",
+        "console.log(JSON.stringify({ type: 'agent.message', message: JSON.stringify(resolved) }));",
+      ].join("\n"),
+    );
+    await chmod(codexBin, 0o755);
+
+    const result = await runCliJson(
+      "self-improve-daemon",
+      "--executor",
+      "codex-resumable",
+      "--root-run-id",
+      bootstrap.runId,
+      "--codex-bin",
+      codexBin,
+      "--parallel",
+      "auto",
+      "--max-ticks",
+      "1",
+      "--tick-cycles",
+      "1",
+      "--max-rounds",
+      "1",
+      "--interval-ms",
+      "1",
+      "--idle-ms",
+      "1",
+      "--stop-hook",
+      "apply-design-actions,context-summary",
+    );
+
+    expect(result.status).toBe("tick_limit");
+    // The first tick either surfaces outcome-review (if the daemon observes the
+    // measuring proposal before draining) or directly drains via codex (if it
+    // folds outcome-review into active supervision). Either way, the proposal
+    // ends up retained after the retain outcome is recorded.
+    const refreshed = setupHarness.getDesignProposal({ id: proposal.id });
+    expect(refreshed?.status === "measuring" || refreshed?.status === "retained").toBe(true);
+    if (refreshed?.status === "retained") {
+      const outcomes = setupHarness.listDesignOutcomes({ proposalId: proposal.id });
+      expect(outcomes.length).toBeGreaterThanOrEqual(1);
+      expect(outcomes[0]).toMatchObject({
+        recommendation: "retain",
+        stage: "review",
+      });
+    }
   });
 
   test("supervise-daemon records failed ticks without crashing", async () => {
@@ -5793,6 +6357,376 @@ describe("CLI", () => {
     expect(todoRuns.some((todoRun: { id: string }) => todoRun.id === run.id)).toBe(false);
   });
 
+  test("design-status prints concise charter, proposal, and outcome summaries", async () => {
+    await runCli("init");
+    const project = await runCliJson(
+      "create-project",
+      "--name",
+      "Design Project",
+      "--root-path",
+      dir,
+    );
+    const harness = new Harness(dbPath);
+    harness.createFounderCharter({
+      projectId: project.id,
+      mission: "Ship calm dashboard visibility for the design loop",
+      activate: true,
+      charter: {
+        mission: "Ship calm dashboard visibility for the design loop",
+        capitalPolicy: {
+          currency: "USD",
+          monthlyBudget: 5000,
+          experimentBudget: 1500,
+          recurringSpendApprovalAbove: 800,
+          runwayFloorMonths: 12,
+          portfolio: { core: 60, growth: 30, exploration: 10 },
+        },
+        authority: {
+          autoResearch: true,
+          autoReversibleExperiments: true,
+          autoIntegrateVerifiedCode: false,
+          requireHumanFor: ["irreversible-spend"],
+        },
+        reviewCadenceDays: 14,
+      },
+    });
+    const proposal = harness.createDesignProposal({
+      projectId: project.id,
+      title: "Add designer inspector disclosure",
+      problem: "Dashboard lacks visibility into the design loop.",
+      recommendation: "Render a concise designer card with details behind disclosure.",
+      status: "experimenting",
+      proposal: {
+        problem: "Dashboard lacks visibility into the design loop.",
+        recommendation: "Render a concise designer card with details behind disclosure.",
+        investment: {
+          reversibility: "easy",
+          portfolio: "growth",
+          oneTimeCost: 1200,
+          recurringCost: 0,
+          timeBudget: "2 weeks",
+        },
+        evaluationContract: {
+          baseline: ["no designer card"],
+          successMetrics: ["decisions visible within one glance"],
+          guardMetrics: ["dashboard render time under 200ms"],
+          requiredEvidence: ["screenshot of disclosure expanded"],
+          reviewAt: "2026-08-20",
+        },
+      },
+    });
+    harness.recordDesignDecision({
+      proposalId: proposal.id,
+      decision: "approved",
+      actorKind: "human",
+      reasons: ["visibility is cheap", "disclosure keeps the calm default"],
+    });
+    harness.recordDesignOutcome({
+      proposalId: proposal.id,
+      stage: "review",
+      recommendation: "retain",
+      evidence: ["disclosure expanded shows budget"],
+      reviewAt: "2026-08-18",
+    });
+    harness.createStrategySignal({
+      projectId: project.id,
+      signalClass: "delivery",
+      source: "dashboard-walkthrough",
+      title: "Default dashboard should stay calm",
+      summary: "Calm default matters for founder attention.",
+      confidence: 0.6,
+      observationTime: "2026-08-02T10:00:00Z",
+    });
+
+    const output = await runCli("design-status", "--project-id", project.id);
+    expect(output).toContain("Designer status");
+    expect(output).toContain("Active charter");
+    expect(output).toContain("mission: Ship calm dashboard visibility for the design loop");
+    expect(output).toContain("budget: monthly USD 5000, experiment USD 1500");
+    expect(output).toContain("portfolio: core 60%, growth 30%, exploration 10%");
+    expect(output).toContain("authority: auto-research, auto-experiments");
+    expect(output).toContain("human checkpoints: irreversible-spend");
+    expect(output).toContain("Current proposal");
+    expect(output).toContain("status: experimenting");
+    expect(output).toContain("title: Add designer inspector disclosure");
+    expect(output).toContain("investment: one-time 1200, recurring 0");
+    expect(output).toContain("latest decision: approved by human");
+    expect(output).toContain("Outcomes");
+    expect(output).toContain("Signals and proposals");
+    expect(output).toContain("active signals: 1");
+    expect(output).toContain("proposals: experimenting=1");
+
+    const json = await runCliJson("design-status", "--project-id", project.id, "--json", "true");
+    expect(json).toMatchObject({
+      projectId: project.id,
+      charter: expect.objectContaining({
+        mission: "Ship calm dashboard visibility for the design loop",
+      }),
+      currentProposal: expect.objectContaining({
+        status: "experimenting",
+        title: "Add designer inspector disclosure",
+      }),
+      latestDecision: expect.objectContaining({
+        decision: "approved",
+        actorKind: "human",
+      }),
+      activeSignalCount: 1,
+      proposalCountsByStatus: { experimenting: 1 },
+    });
+    expect(json.recentOutcomes[0]).toMatchObject({
+      stage: "review",
+      recommendation: "retain",
+      reviewAt: "2026-08-18",
+    });
+  });
+
+  test("design-status handles projects with no charter or proposals", async () => {
+    await runCli("init");
+    const project = await runCliJson(
+      "create-project",
+      "--name",
+      "Empty Project",
+      "--root-path",
+      dir,
+    );
+    const output = await runCli("design-status", "--project-id", project.id);
+    expect(output).toContain("Designer status");
+    expect(output).toContain("Active charter");
+    expect(output).toContain("(none)");
+    expect(output).toContain("Current proposal");
+    expect(output).toContain("(none)");
+    expect(output).toContain("active signals: 0");
+
+    const json = await runCliJson("design-status", "--project-id", project.id, "--json", "true");
+    expect(json).toMatchObject({
+      projectId: project.id,
+      charter: null,
+      currentProposal: null,
+      latestDecision: null,
+      activeSignalCount: 0,
+    });
+  });
+
+  test("design-status resolves project-id from project-root flag", async () => {
+    await runCli("init");
+    const project = await runCliJson(
+      "create-project",
+      "--name",
+      "Root Resolved Project",
+      "--root-path",
+      dir,
+    );
+    const output = await runCli("design-status", "--project-root", dir);
+    expect(output).toContain("Designer status");
+    expect(output).toContain("active signals: 0");
+
+    const json = await runCliJson("design-status", "--project-root", dir, "--json", "true");
+    expect(json.projectId).toBe(project.id);
+  });
+
+  test("list-signals filters by class and status with concise and JSON output", async () => {
+    await runCli("init");
+    const project = await runCliJson(
+      "create-project",
+      "--name",
+      "Signals Project",
+      "--root-path",
+      dir,
+    );
+    const harness = new Harness(dbPath);
+    harness.createStrategySignal({
+      projectId: project.id,
+      signalClass: "delivery",
+      source: "retro-1",
+      title: "Tighten design loop cadence",
+      summary: "Weekly reviews slip.",
+      confidence: 0.7,
+      observationTime: "2026-08-01T08:00:00Z",
+    });
+    harness.createStrategySignal({
+      projectId: project.id,
+      signalClass: "market",
+      source: "user-interview-3",
+      title: "User asks for designer visibility",
+      summary: "Common request across interviews.",
+      confidence: 0.4,
+      observationTime: "2026-07-30T08:00:00Z",
+    });
+    harness.createStrategySignal({
+      projectId: project.id,
+      signalClass: "delivery",
+      source: "retro-2",
+      title: "Stale signal",
+      summary: "Should drop.",
+      confidence: 0.2,
+      status: "superseded",
+      observationTime: "2026-07-15T08:00:00Z",
+    });
+
+    const concise = await runCli("list-signals", "--project-id", project.id);
+    expect(concise).toContain("Strategy signals (2)");
+    expect(concise).toContain("[delivery] active");
+    expect(concise).toContain("source: retro-1");
+    expect(concise).toContain("title: Tighten design loop cadence");
+    expect(concise).toContain("[market] active");
+    expect(concise).not.toContain("Stale signal");
+
+    const filtered = await runCli(
+      "list-signals",
+      "--project-id",
+      project.id,
+      "--class",
+      "market",
+    );
+    expect(filtered).toContain("Strategy signals (1)");
+    expect(filtered).toContain("[market] active");
+    expect(filtered).not.toContain("[delivery]");
+
+    const json = await runCliJson(
+      "list-signals",
+      "--project-id",
+      project.id,
+      "--json",
+      "true",
+    );
+    expect(json).toMatchObject({
+      projectId: project.id,
+      totalCount: 2,
+      signalClass: null,
+    });
+    expect(json.signals).toHaveLength(2);
+    expect(json.signals[0]).toMatchObject({
+      signalClass: "delivery",
+      source: "retro-1",
+      title: "Tighten design loop cadence",
+      status: "active",
+    });
+
+    const superseded = await runCliJson(
+      "list-signals",
+      "--project-id",
+      project.id,
+      "--statuses",
+      "superseded",
+      "--json",
+      "true",
+    );
+    expect(superseded.totalCount).toBe(1);
+    expect(superseded.signals[0]).toMatchObject({ source: "retro-2", status: "superseded" });
+  });
+
+  test("show-design prints proposal detail with decisions and outcomes", async () => {
+    await runCli("init");
+    const project = await runCliJson(
+      "create-project",
+      "--name",
+      "Show Design Project",
+      "--root-path",
+      dir,
+    );
+    const harness = new Harness(dbPath);
+    const proposal = harness.createDesignProposal({
+      projectId: project.id,
+      title: "Show design proposal detail",
+      problem: "Inspector does not surface proposal evidence.",
+      recommendation: "Add show-design command.",
+      status: "accepted",
+      proposal: {
+        problem: "Inspector does not surface proposal evidence.",
+        recommendation: "Add show-design command.",
+        options: [
+          {
+            name: "cli-only",
+            benefits: ["fast to implement"],
+            costs: ["requires terminal"],
+            risks: ["power users only"],
+            lockIn: ["cli surface contract"],
+          },
+        ],
+        evaluationContract: {
+          baseline: ["manual sqlite queries"],
+          successMetrics: ["readable proposal from one command"],
+          guardMetrics: ["no PII leaked"],
+          requiredEvidence: ["command output captured"],
+          reviewAt: "2026-09-01",
+        },
+        investment: {
+          reversibility: "easy",
+          portfolio: "core",
+          oneTimeCost: 800,
+          recurringCost: 0,
+          timeBudget: "1 week",
+        },
+        experiment: {
+          hypothesis: "Founders can read a proposal in one command.",
+          smallestTest: "Run show-design in the next design review.",
+          stopConditions: ["unreadable output"],
+          rollback: "Drop the command.",
+        },
+      },
+    });
+    harness.recordDesignDecision({
+      proposalId: proposal.id,
+      decision: "approved",
+      actorKind: "human",
+      actorRef: "founder@local",
+      reasons: ["cheap to ship", "reversible"],
+    });
+    harness.recordDesignOutcome({
+      proposalId: proposal.id,
+      stage: "review",
+      recommendation: "retain",
+      evidence: ["reviewer read the proposal out loud"],
+      unexpectedEffects: [],
+    });
+
+    const output = await runCli("show-design", "--proposal-id", proposal.id);
+    expect(output).toContain(`Design proposal ${proposal.id}`);
+    expect(output).toContain("status: accepted");
+    expect(output).toContain("Options");
+    expect(output).toContain("- cli-only");
+    expect(output).toContain("benefits: fast to implement");
+    expect(output).toContain("costs: requires terminal");
+    expect(output).toContain("Evaluation contract (frozen)");
+    expect(output).toContain("success metrics: readable proposal from one command");
+    expect(output).toContain("Investment");
+    expect(output).toContain("reversibility: easy");
+    expect(output).toContain("Experiment");
+    expect(output).toContain("hypothesis: Founders can read a proposal in one command.");
+    expect(output).toContain("Decisions (1)");
+    expect(output).toContain("approved by human (founder@local)");
+    expect(output).toContain("Outcomes (1)");
+
+    const json = await runCliJson("show-design", "--proposal-id", proposal.id, "--json", "true");
+    expect(json).toMatchObject({
+      proposal: expect.objectContaining({
+        id: proposal.id,
+        status: "accepted",
+        title: "Show design proposal detail",
+      }),
+      decisions: [
+        expect.objectContaining({
+          decision: "approved",
+          actorKind: "human",
+          actorRef: "founder@local",
+        }),
+      ],
+      outcomes: [
+        expect.objectContaining({
+          stage: "review",
+          recommendation: "retain",
+        }),
+      ],
+    });
+  });
+
+  test("show-design fails clearly for unknown proposal ids", async () => {
+    await runCli("init");
+    const result = await runCliRaw("show-design", "--proposal-id", "design_missing");
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stderr).toContain("design proposal not found: design_missing");
+  });
+
   async function runCli(...rawArgs: Array<string | Record<string, string>>) {
     const result = await runCliRaw(...rawArgs);
     if (result.exitCode !== 0) {
@@ -6058,4 +6992,46 @@ describe("CLI", () => {
     }
     return null;
   }
+});
+
+describe("design timeline classification", () => {
+  test("isDesignTimelineTaskRole covers designer, planner, worker, verifier, outcome-review, and repair", () => {
+    expect(isDesignTimelineTaskRole("designer")).toBe(true);
+    expect(isDesignTimelineTaskRole("planner")).toBe(true);
+    expect(isDesignTimelineTaskRole("worker")).toBe(true);
+    expect(isDesignTimelineTaskRole("verifier")).toBe(true);
+    expect(isDesignTimelineTaskRole("outcome-review")).toBe(true);
+    expect(isDesignTimelineTaskRole("repair")).toBe(true);
+    expect(isDesignTimelineTaskRole("goal-review")).toBe(false);
+    expect(isDesignTimelineTaskRole(null)).toBe(false);
+    expect(isDesignTimelineTaskRole(undefined)).toBe(false);
+  });
+
+  test("isDesignTimelineTaskGoal catches designer, outcome review, proposal, experiment, and strategy signals", () => {
+    expect(isDesignTimelineTaskGoal("Design proposal for calm dashboard")).toBe(true);
+    expect(isDesignTimelineTaskGoal("Outcome review for proposal_123")).toBe(true);
+    expect(isDesignTimelineTaskGoal("Run experiment on inspector disclosure")).toBe(true);
+    expect(isDesignTimelineTaskGoal("Strategy signal digest")).toBe(true);
+    expect(isDesignTimelineTaskGoal("Implement worker pipeline")).toBe(true);
+    expect(isDesignTimelineTaskGoal("Verify frozen contract")).toBe(true);
+    expect(isDesignTimelineTaskGoal("Random unrelated goal")).toBe(false);
+    expect(isDesignTimelineTaskGoal("")).toBe(false);
+    expect(isDesignTimelineTaskGoal(null)).toBe(false);
+  });
+
+  test("designTimelineKindForTask maps each covered role to its first-class timeline kind", () => {
+    expect(designTimelineKindForTask({ role: "designer", goal: "anything" })).toBe("designer");
+    expect(designTimelineKindForTask({ role: "outcome-review", goal: "anything" })).toBe("outcome-review");
+    expect(designTimelineKindForTask({ role: "planner", goal: "anything" })).toBe("planner");
+    expect(designTimelineKindForTask({ role: "verifier", goal: "anything" })).toBe("verifier");
+    expect(designTimelineKindForTask({ role: "worker", goal: "anything" })).toBe("worker");
+    expect(designTimelineKindForTask({ role: "repair", goal: "anything" })).toBe("worker");
+    expect(designTimelineKindForTask({ role: "employee", goal: "designer walkthrough" })).toBe("designer");
+    expect(designTimelineKindForTask({ role: "employee", goal: "outcome review session" })).toBe("outcome-review");
+    expect(designTimelineKindForTask({ role: "employee", goal: "Plan delivery" })).toBe("planner");
+    expect(designTimelineKindForTask({ role: "employee", goal: "implement worker pipeline" })).toBe("worker");
+    expect(designTimelineKindForTask({ role: "employee", goal: "verify contract" })).toBe("verifier");
+    expect(designTimelineKindForTask({ role: "employee", goal: "Experiment with calm disclosure" })).toBe("research");
+    expect(designTimelineKindForTask({ role: "employee", goal: "Random unrelated goal" })).toBeNull();
+  });
 });

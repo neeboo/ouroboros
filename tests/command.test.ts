@@ -233,6 +233,22 @@ describe("command runner", () => {
     expect(result.stderr).toContain("idle timed out");
   });
 
+  test("trips idle timeout before hard timeout when no output is ever produced", async () => {
+    const start = Date.now();
+    const result = await runLocalCommand({
+      cmd: ["bun", "-e", "await new Promise((resolve) => setTimeout(resolve, 5000));"],
+      stdin: "",
+      timeoutMs: 1000,
+      idleTimeoutMs: 100,
+    });
+    const elapsed = Date.now() - start;
+
+    expect(result.exitCode).toBe(124);
+    expect(result.stderr).toContain("idle timed out after 100ms");
+    expect(result.stderr).not.toContain("timed out after 1000ms");
+    expect(elapsed).toBeLessThan(1000);
+  });
+
   test("notifies stdout and stderr chunks while the command is running", async () => {
     const chunks: string[] = [];
 

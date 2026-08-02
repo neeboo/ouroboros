@@ -122,7 +122,15 @@ export interface AttemptOutput {
   problems?: string[];
   nextTasks?: PlannedTask[];
   nextRuns?: PlannedRun[];
+  designActions?: DesignActionInput[];
 }
+
+export type DesignActionInput =
+  | { type: "recordSignal"; payload: Record<string, unknown> }
+  | { type: "proposeDesign"; payload: Record<string, unknown> }
+  | { type: "decideDesign"; payload: Record<string, unknown> }
+  | { type: "recordDesignOutcome"; payload: Record<string, unknown> }
+  | { type: "createRunsFromDesign"; payload: Record<string, unknown> };
 
 export interface DependencyAttempt {
   taskId: string;
@@ -769,4 +777,183 @@ export interface ListDesignOutcomesInput {
   stage?: DesignOutcomeStage;
   dueBefore?: string;
   limit?: number;
+}
+
+export interface LinkProposalOutcomeReviewInput {
+  runId: string;
+  /** Epoch milliseconds. Defaults to Date.now(). */
+  now?: number;
+  /** Skip the reviewAt check and treat the review as due now. */
+  immediateProxyReview?: boolean;
+}
+
+export interface LinkProposalOutcomeReviewResult {
+  proposalId: string | null;
+  proposalStatus: DesignProposalStatus | null;
+  outcomeReviewTaskId: string | null;
+  reviewDue: boolean;
+  reviewAt: string | null;
+  reason: string;
+}
+
+export type AuthorityDisposition = "automatic" | "human-required" | "rejected";
+
+export type AuthorityReasonKind =
+  | "expired-evidence"
+  | "missing-evidence"
+  | "conflicting-evidence"
+  | "invalid-evidence-expiry"
+  | "invalid-conflict-metadata"
+  | "malformed-evidence-item"
+  | "budget-experiment-exceeded"
+  | "recurring-spend-over-threshold"
+  | "missing-experiment-budget-policy"
+  | "missing-recurring-spend-policy"
+  | "missing-currency-policy"
+  | "hard-reversibility"
+  | "moderate-reversibility"
+  | "charter-amendment-mission"
+  | "charter-amendment-capital"
+  | "legal-or-privacy"
+  | "sensitive-data"
+  | "destructive-operation"
+  | "production-deployment"
+  | "unplanned-dependency"
+  | "schema-migration"
+  | "recurring-infrastructure"
+  | "require-human-category"
+  | "auto-reversible-experiments-disabled"
+  | "portfolio-not-configured"
+  | "portfolio-allocation-missing"
+  | "portfolio-allocation-exceeded"
+  | "portfolio-usage-unavailable"
+  | "portfolio-usage-category-mismatch"
+  | "invalid-portfolio-usage"
+  | "invalid-cost-shape"
+  | "proposer-cannot-self-authorize"
+  | "actor-not-allowed-for-high-risk"
+  | "charter-inactive"
+  | "unknown-risk-data";
+
+export type AuthorityHardRule =
+  | "expired-evidence"
+  | "missing-evidence"
+  | "charter-inactive"
+  | "budget-experiment-exceeded"
+  | "portfolio-not-configured"
+  | "portfolio-allocation-missing"
+  | "portfolio-allocation-exceeded"
+  | "portfolio-usage-unavailable"
+  | "portfolio-usage-category-mismatch"
+  | "invalid-portfolio-usage"
+  | "missing-experiment-budget-policy"
+  | "missing-currency-policy"
+  | "invalid-cost-shape"
+  | "invalid-evidence-expiry"
+  | "invalid-conflict-metadata"
+  | "malformed-evidence-item"
+  | "unknown-risk-data";
+
+export interface AuthorityReason {
+  kind: AuthorityReasonKind;
+  message: string;
+  evidenceRefs?: string[];
+}
+
+export interface AuthorityEvidenceReference {
+  ref: string;
+  kind: "signal" | "evidence-ref" | "external";
+  expiresAt: string | null;
+  hasConflict: boolean;
+}
+
+export interface AuthorityEvidenceEvaluation {
+  referenced: string[];
+  expired: string[];
+  conflicting: string[];
+  invalidExpiry: string[];
+  invalidConflictMetadata: string[];
+  missing: string[];
+  malformedItems: number;
+  evaluatedAtValid: boolean;
+}
+
+export interface AuthorityBudgetEvaluation {
+  currency: string | null;
+  oneTimeCost: number;
+  recurringCost: number;
+  experimentBudget: number | null;
+  recurringThreshold: number | null;
+  withinExperimentBudget: boolean;
+  withinRecurringThreshold: boolean;
+}
+
+export interface AuthorityPortfolioEvaluation {
+  category: "core" | "growth" | "exploration";
+  configuredShare: number | null;
+  currentShare: number | null;
+  proposedShare: number | null;
+  withinShare: boolean;
+}
+
+export interface AuthorityActorContext {
+  kind: DesignDecisionActorKind;
+  ref: string | null;
+  isProposer: boolean;
+}
+
+export interface AuthorityProposalRiskSurface {
+  proposalId: string | null;
+  reversibility: "easy" | "moderate" | "hard";
+  portfolio: "core" | "growth" | "exploration";
+  oneTimeCost: number;
+  recurringCost: number;
+  evidenceRefs: string[];
+  amendsMission: boolean;
+  amendsCapitalPolicy: boolean;
+  legalOrPrivacy: boolean;
+  sensitiveData: boolean;
+  destructiveOperation: boolean;
+  productionDeployment: boolean;
+  unplannedDependency: boolean;
+  schemaMigration: boolean;
+  recurringInfrastructure: boolean;
+  declaredHumanCategories: string[];
+}
+
+export interface AuthorityCharterContext {
+  id: string;
+  version: number;
+  isActive: boolean;
+  mission: string;
+  capitalPolicy?: FounderCharterCapitalPolicy;
+  authority?: FounderCharterAuthority;
+}
+
+export interface AuthorityPortfolioUsage {
+  category: "core" | "growth" | "exploration";
+  currentShare: number | null;
+}
+
+export interface AuthorityEvaluationInput {
+  charter: AuthorityCharterContext;
+  proposal: AuthorityProposalRiskSurface;
+  evidence: AuthorityEvidenceReference[];
+  portfolioUsage?: AuthorityPortfolioUsage | null;
+  actor: AuthorityActorContext;
+  evaluatedAt: string;
+}
+
+export interface AuthorityEvaluation {
+  disposition: AuthorityDisposition;
+  reasons: AuthorityReason[];
+  charterId: string;
+  charterVersion: number;
+  proposalId: string | null;
+  evaluatedAt: string;
+  evidence: AuthorityEvidenceEvaluation;
+  budget: AuthorityBudgetEvaluation;
+  portfolio: AuthorityPortfolioEvaluation;
+  reversibility: "easy" | "moderate" | "hard";
+  actor: AuthorityActorContext;
 }

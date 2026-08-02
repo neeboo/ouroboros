@@ -19,6 +19,10 @@ reasoning_effort = "high"
 model = "gpt-5.6-sol"
 reasoning_effort = "high"
 
+[models.roles.designer]
+model = "gpt-5.6-sol"
+reasoning_effort = "high"
+
 [models.roles.worker]
 model = "gpt-5.6-luna"
 reasoning_effort = "high"
@@ -31,13 +35,19 @@ reasoning_effort = "high"
 model = "gpt-5.6-sol"
 reasoning_effort = "high"
 
+[models.roles."outcome-review"]
+model = "gpt-5.6-sol"
+reasoning_effort = "high"
+
 [agentDefaults]
 global = "claude-code"
 
 [agentDefaults.roles]
 planner = "codex-resumable"
+designer = "codex-resumable"
 verifier = "codex-resumable"
-goal-review = "codex-resumable"
+"outcome-review" = "codex-resumable"
+"goal-review" = "codex-resumable"
 
 ["agentBackends"."claude-code"]
 kind = "acpx"
@@ -46,3 +56,57 @@ approval = "approve-all"
 
 ["agentBackends"."codex-resumable"]
 kind = "codex-resumable"
+
+# Concrete integration boundary inherited by every self-iteration child run.
+# A fresh self-iteration root without an explicit boundary falls back to this
+# shape so design-spawned planner runs never inherit a null boundary.
+[integrationBoundary]
+target_branch = "main"
+push = false
+allowed_files = [
+  "packages/harness/",
+  "packages/runner/",
+  "packages/cli/",
+  "tests/",
+  "docs/",
+  "AGENTS.md",
+  "README.md",
+  "ouroboros.example.toml",
+]
+forbidden_paths = [
+  ".git/orbs/",
+  ".ouroboros/",
+  "ouroboros.toml",
+  ".linear",
+]
+
+# Designer Control Plane defaults. The active founder charter is seeded on
+# first use of `orbs self-iterate` or `orbs self-iterate-launch`. Override
+# only when the project needs a different experiment budget, recurring-spend
+# threshold, or human-checkpoint list. Mission, capital limits, and charter
+# principles remain human checkpoints; the designer may propose amendments as
+# a diff with rationale but cannot activate them.
+[designer]
+review_cadence_days = 30
+auto_research = true
+auto_reversible_experiments = true
+auto_integrate_verified_code = false
+require_human_for = [
+  "mission-amendment",
+  "capital-policy-amendment",
+  "legal-or-privacy",
+  "sensitive-data",
+  "destructive-operation",
+  "production-deployment",
+  "unplanned-dependency",
+  "schema-migration",
+  "recurring-infrastructure",
+]
+
+[designer.capitalPolicy]
+currency = "USD"
+experiment_budget = 100
+recurring_spend_approval_above = 0
+portfolio_core = 4
+portfolio_growth = 2
+portfolio_exploration = 1

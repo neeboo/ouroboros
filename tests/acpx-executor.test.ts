@@ -38,6 +38,7 @@ describe("acpx executor", () => {
       nextTasks: [],
       nextRuns: [],
       runDecision: undefined,
+      designActions: [],
     });
   });
 
