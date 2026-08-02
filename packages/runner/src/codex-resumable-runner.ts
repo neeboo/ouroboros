@@ -28,6 +28,7 @@ const DEFAULT_GENERIC_ATTEMPT_HEARTBEAT_MS = 30 * 1000;
 
 export type CodexResumableClientFactory = (input: {
   model?: string;
+  reasoningEffort?: string;
   cwd: string;
   task?: Task;
   route?: ResolvedExecutionRoute;
@@ -353,7 +354,7 @@ class CodexResumableOrchestrator {
     const resolvedModel = attemptModelPreference(attempt.input);
     const cwd = typeof attempt.input.cwd === "string" ? attempt.input.cwd : task.worktreePath ?? this.cwd;
     const recorder = this.createAttemptEventRecorder(attemptId);
-    const result = await this.client({ model: resolvedModel?.model, cwd, task }).resume({
+    const result = await this.client({ model: resolvedModel?.model, reasoningEffort: resolvedModel?.reasoning_effort, cwd, task }).resume({
       sessionId,
       sessionName,
       prompt,
@@ -434,7 +435,7 @@ class CodexResumableOrchestrator {
         status: "running",
       });
       const recorder = this.createAttemptEventRecorder(attempt.id);
-      const result = await this.client({ model: resolvedModel?.model, cwd, task }).resume({
+      const result = await this.client({ model: resolvedModel?.model, reasoningEffort: resolvedModel?.reasoning_effort, cwd, task }).resume({
         sessionId,
         sessionName,
         prompt,
@@ -552,6 +553,7 @@ class CodexResumableOrchestrator {
     const recorder = this.createAttemptEventRecorder(attemptId);
     const result = await this.client({
       model: input.route.model?.model,
+      reasoningEffort: input.route.model?.reasoning_effort,
       cwd: input.cwd,
       task: input.task,
       route: input.route,
@@ -812,7 +814,7 @@ class CodexResumableOrchestrator {
     return { output, decision };
   }
 
-  private client(input: { model?: string; cwd: string; task?: Task; route?: ResolvedExecutionRoute }) {
+  private client(input: { model?: string; reasoningEffort?: string; cwd: string; task?: Task; route?: ResolvedExecutionRoute }) {
     if (this.input.clientFactory) {
       return this.input.clientFactory(input);
     }
@@ -821,6 +823,7 @@ class CodexResumableOrchestrator {
       sandbox: "workspace-write",
       ...this.input.codexOptions,
       model: input.model,
+      reasoningEffort: input.reasoningEffort,
     });
   }
 
@@ -1078,13 +1081,15 @@ function jsonObjectsFromText(text: string | null) {
     });
 }
 
-function attemptModelPreference(input: Record<string, unknown>): { model: string } | null {
+function attemptModelPreference(input: Record<string, unknown>): { model: string; reasoning_effort?: string } | null {
   const model = input.model;
   if (!model || typeof model !== "object" || Array.isArray(model)) {
     return null;
   }
   const record = model as Record<string, unknown>;
-  return typeof record.model === "string" && record.model.trim().length > 0 ? (record as { model: string }) : null;
+  return typeof record.model === "string" && record.model.trim().length > 0
+    ? (record as { model: string; reasoning_effort?: string })
+    : null;
 }
 
 function withCodexArtifacts(output: AttemptOutput, sessionId: string | null): AttemptOutput {

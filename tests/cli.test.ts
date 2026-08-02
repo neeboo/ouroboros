@@ -237,18 +237,19 @@ describe("CLI", () => {
   });
 
   test("bootstraps a self-iteration planning run", async () => {
-    const configPath = join(dir, "self-iterate.toml");
-    await writeFile(configPath, "[models.roles.worker]\nmodel = \"gpt-5.4-mini\"\n");
-    const result = await runCliJson("self-iterate", "--config", configPath);
+    const result = await runCliJson("self-iterate");
     const overview = await runCliJson("run-overview", "--run-id", result.runId);
 
     expect(result.runId).toBeString();
     expect(result.taskId).toBeString();
     expect(result.dashboardCommand).toBeString();
     expect(result.runnerCommand).toBeString();
+    expect(result.daemonCommand).toBeString();
     expect(result.dashboardCommand).toContain(`dashboard --run-id ${result.runId}`);
     expect(result.runnerCommand).toContain(`run-loop --run-id ${result.runId}`);
     expect(result.launchCommand).toContain("self-iterate-launch");
+    expect(result.daemonCommand).toContain(`self-improve-daemon --root-run-id ${result.runId}`);
+    expect(result.daemonCommand).toContain("--parallel auto");
     expect(result.launchCommand).toContain("--parallel auto");
     expect(result.launchCommand).toContain("--worktree-root .ouroboros/worktrees");
     expect(result.launchCommand).toContain("--start-hook git-worktree");
@@ -260,17 +261,29 @@ describe("CLI", () => {
     expect(result.runnerCommand).toContain("--stop-hook create-runs,create-tasks,create-verifier,create-repair,context-summary");
 
     expect(overview.run.id).toBe(result.runId);
-    expect(overview.run.goal).toBe("Use Ouroboros to plan its own next self-iteration cycle");
-    expect(overview.run.context.source).toBe("self-iterate");
+    expect(overview.run.goal).toBe("Continuously improve Ouroboros from evidence-backed gaps");
+    expect(overview.run.context.source).toBe("self-improve");
     expect(overview.run.context.planDoc).toBe("docs/self-iteration-plan.md");
-    expect(overview.run.context.modelDefaults.roles.worker.model).toBe("gpt-5.4-mini");
+    expect(overview.run.context.modelDefaults).toMatchObject({
+      global: { model: "gpt-5.6-luna", reasoning_effort: "high" },
+      roles: {
+        planner: { model: "gpt-5.6-sol", reasoning_effort: "high" },
+        worker: { model: "gpt-5.6-luna", reasoning_effort: "high" },
+        verifier: { model: "gpt-5.6-sol", reasoning_effort: "high" },
+        "goal-review": { model: "gpt-5.6-sol", reasoning_effort: "high" },
+      },
+    });
+    expect(overview.run.context.selfImprovement).toMatchObject({
+      cycleIndex: 0,
+      assessmentFingerprint: expect.any(String),
+    });
     const goalContract = overview.run.context.goalContract;
     expect(goalContract).toBeDefined();
     expect(typeof goalContract.desiredState).toBe("string");
-    expect(goalContract.desiredState).toContain("plan and drain its own next improvement cycle");
+    expect(goalContract.desiredState).toContain("derive and complete successive improvement goals");
     expect(Array.isArray(goalContract.successCriteria)).toBe(true);
     expect(goalContract.successCriteria.length).toBeGreaterThan(0);
-    expect(goalContract.successCriteria).toContain("a new Ouroboros run exists for self-iteration");
+    expect(goalContract.successCriteria).toContain("each assessment derives one evidence-backed child run or records a justified quiescent decision");
     expect(goalContract.successCriteria).toContain("the generated graph points to concrete files and checks");
     expect(Array.isArray(goalContract.constraints)).toBe(true);
     expect(goalContract.constraints.length).toBeGreaterThan(0);
@@ -298,14 +311,16 @@ describe("CLI", () => {
     });
     expect(overview.tasks[0].prompt).toContain("docs/self-iteration-plan.md");
     expect(overview.tasks[0].prompt).toContain("recent run lessons from the harness database");
-    expect(overview.tasks[0].prompt).toContain("small `nextTasks` graph");
-    expect(overview.tasks[0].prompt).toContain("two to three independent improvement areas");
+    expect(overview.tasks[0].prompt).toContain("derive one improvement objective");
+    expect(overview.tasks[0].prompt).toContain("`nextRuns`");
+    expect(overview.tasks[0].prompt).toContain("Return no child run");
+    expect(overview.tasks[0].prompt).not.toContain("small `nextTasks` graph");
     expect(overview.tasks[0].doneWhen).toEqual([
-      "Planner output contains a small nextTasks graph, usually two to five tasks across two to three independent areas when possible",
-      "Every planned task has one role, one concrete goal, and one prompt with exact files or commands to inspect first",
-      "The task graph includes explicit dependsOn when ordering matters and each task has three to five doneWhen checks",
-      "Every planned task identifies a clear artifact, code change, test, or decision",
-      "The graph includes natural failure paths through verifier, repair, or another planner and can be drained by run-loop",
+      "The assessment cites current repository, run, lesson, and verification evidence",
+      "The output derives one concrete improvement objective from a demonstrated capability gap",
+      "The objective is emitted as one nextRuns child with a planning prompt and three to five doneWhen checks",
+      "If no meaningful gap exists, the output returns no child run and explains the quiescent decision",
+      "The child run can be supervised, verified, and integrated without manual task injection",
     ]);
   });
 
@@ -535,7 +550,7 @@ describe("CLI", () => {
     expect(reviewSession?.output).toMatchObject({ status: "done", runDecision: "complete" });
   });
 
-  test("launches the self-iteration dashboard and runner together", async () => {
+  test("launches the self-iteration dashboard and continuous supervisor together", async () => {
     await runCli("init");
     const dashboardPort = nextTestPort();
     if (!canStartServerOn(dashboardPort)) {
@@ -593,6 +608,7 @@ describe("CLI", () => {
 
     try {
       const launch = JSON.parse(await readFirstLine(proc.stdout));
+      const launchRunId = launch.runId;
       const overviewResponse = await fetch(`${launch.dashboardUrl}/api/runs/${launch.runId}/overview`);
       const overview = await overviewResponse.json();
 
@@ -600,15 +616,17 @@ describe("CLI", () => {
         runId: expect.any(String),
         taskId: expect.any(String),
         dashboardUrl: `http://localhost:${dashboardPort}`,
-        runnerPid: expect.any(Number),
-        runnerStatus: expect.objectContaining({ status: "running" }),
+        supervisorPid: expect.any(Number),
+        supervisorStatus: expect.objectContaining({ status: "running" }),
       });
-      expect(launch.runnerCommand).toContain("--tasks 3");
-      expect(launch.runnerCommand).toContain("--start-hook none");
-      expect(overview.runner).toMatchObject({ status: "running" });
+      expect(launch.daemonCommand).toContain("self-improve-daemon");
+      expect(launch.daemonCommand).toContain(`--root-run-id ${launchRunId}`);
+      expect(launch.daemonCommand).toContain("--tasks 3");
+      expect(launch.daemonCommand).toContain("--start-hook none");
+      expect(overview.supervisor).toMatchObject({ status: "running" });
       expect(overview.run).toMatchObject({
         id: launch.runId,
-        goal: "Use Ouroboros to plan its own next self-iteration cycle",
+        goal: "Continuously improve Ouroboros from evidence-backed gaps",
       });
       expect(overview.tasks).toHaveLength(1);
       expect(overview.tasks[0]).toMatchObject({
@@ -3661,6 +3679,113 @@ describe("CLI", () => {
       type: "daemon.tick",
       result: expect.objectContaining({ status: "idle" }),
     });
+  });
+
+  test("self-improve-daemon creates an assessment root and derives a child improvement run", async () => {
+    const codexBin = join(dir, "fake-codex-self-improve");
+    await writeFile(
+      codexBin,
+      [
+        "#!/usr/bin/env bun",
+        "import { writeFileSync } from 'node:fs';",
+        "const outputFlag = Bun.argv.indexOf('--output-last-message');",
+        "const outputPath = outputFlag >= 0 ? Bun.argv[outputFlag + 1] : '';",
+        "const payload = { status: 'done', summary: 'Derived an evidence-backed controller objective', changedFiles: [], checks: [{ name: 'assessment evidence', status: 'passed' }], artifacts: [], problems: [], nextRuns: [{ goal: 'Make autonomous cycle recovery observable', prompt: 'Inspect packages/cli/src/main.ts and tests/cli.test.ts, then plan the smallest observable recovery increment.', doneWhen: ['current recovery behavior is inspected', 'one implementation task is planned', 'one verifier task is planned'], context: { derivedBy: 'self-assessment' } }] };",
+        "if (outputPath) writeFileSync(outputPath, JSON.stringify(payload));",
+        "console.log(JSON.stringify({ type: 'session.started', session_id: 'session_self_improve' }));",
+        "console.log(JSON.stringify({ type: 'agent.message', message: JSON.stringify(payload) }));",
+      ].join("\n"),
+    );
+    await chmod(codexBin, 0o755);
+
+    const result = await runCliJson(
+      "self-improve-daemon",
+      "--executor",
+      "codex-resumable",
+      "--codex-bin",
+      codexBin,
+      "--parallel",
+      "auto",
+      "--max-ticks",
+      "1",
+      "--tick-cycles",
+      "1",
+      "--max-rounds",
+      "1",
+      "--interval-ms",
+      "1",
+      "--idle-ms",
+      "1",
+      "--stop-hook",
+      "create-runs,create-tasks,create-verifier,create-repair,context-summary",
+    );
+    const runs = await runCliJson("list-runs");
+    const root = runs.find((run: { id: string }) => run.id === result.rootRunId);
+    const child = runs.find((run: { goal: string }) => run.goal === "Make autonomous cycle recovery observable");
+
+    expect(result.status).toBe("tick_limit");
+    expect(result.rootRunId).toBeString();
+    expect(result.bootstrap).toMatchObject({ runId: result.rootRunId, cycleIndex: 0 });
+    expect(result.ticks[0]).toMatchObject({
+      type: "self-improvement.tick",
+      status: "ok",
+    });
+    expect(root.context.source).toBe("self-improve");
+    expect(child).toMatchObject({
+      status: "todo",
+      context: expect.objectContaining({
+        parentRunId: result.rootRunId,
+        source: "nextRuns",
+        derivedBy: "self-assessment",
+      }),
+    });
+  });
+
+  test("self-improve-daemon stays quiescent when a drained tree and repository fingerprint are unchanged", async () => {
+    const bootstrap = await runCliJson("self-iterate");
+    const harness = new Harness(dbPath);
+    harness.recordAttempt({
+      taskId: bootstrap.taskId,
+      input: {},
+      output: {
+        status: "done",
+        summary: "No evidence-backed improvement gap",
+        changedFiles: [],
+        checks: [{ name: "assessment", status: "passed" }],
+        artifacts: [],
+        problems: [],
+      },
+    });
+    harness.updateRunStatus({ runId: bootstrap.runId, status: "done" });
+
+    const result = await runCliJson(
+      "self-improve-daemon",
+      "--executor",
+      "codex-resumable",
+      "--root-run-id",
+      bootstrap.runId,
+      "--parallel",
+      "auto",
+      "--max-ticks",
+      "1",
+      "--tick-cycles",
+      "1",
+      "--max-rounds",
+      "1",
+      "--interval-ms",
+      "1",
+      "--idle-ms",
+      "1",
+    );
+    const runs = await runCliJson("list-runs");
+
+    expect(result.status).toBe("tick_limit");
+    expect(result.ticks[0]).toMatchObject({
+      type: "self-improvement.tick",
+      status: "quiescent",
+      createdCycle: null,
+    });
+    expect(runs).toHaveLength(1);
   });
 
   test("supervise-daemon records failed ticks without crashing", async () => {

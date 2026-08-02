@@ -53,12 +53,14 @@ export function createCodexResumableClient(options: CodexResumableClientOptions)
     start: async (input: CodexResumableStartInput) => {
       const outputPath = await makeOutputPath(options.outputDir, input.sessionName);
       const modelArgs = options.model ? ["-m", options.model] : [];
+      const reasoningArgs = options.reasoningEffort ? ["-c", `model_reasoning_effort=${JSON.stringify(options.reasoningEffort)}`] : [];
       const stdoutObserver = createStdoutObserver(input);
       const result = await runCommand({
         cmd: [
           codexBin,
           "exec",
           ...modelArgs,
+          ...reasoningArgs,
           "--json",
           "--skip-git-repo-check",
           "--ignore-user-config",
@@ -83,6 +85,7 @@ export function createCodexResumableClient(options: CodexResumableClientOptions)
     resume: async (input: CodexResumableResumeInput) => {
       const outputPath = await makeOutputPath(options.outputDir, input.sessionName);
       const modelArgs = options.model ? ["-m", options.model] : [];
+      const reasoningArgs = options.reasoningEffort ? ["-c", `model_reasoning_effort=${JSON.stringify(options.reasoningEffort)}`] : [];
       const stdoutObserver = createStdoutObserver(input);
       const result = await runCommand({
         cmd: [
@@ -91,6 +94,7 @@ export function createCodexResumableClient(options: CodexResumableClientOptions)
           "resume",
           input.sessionId,
           ...modelArgs,
+          ...reasoningArgs,
           "--json",
           "--skip-git-repo-check",
           "--ignore-user-config",

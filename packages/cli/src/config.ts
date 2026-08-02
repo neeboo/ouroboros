@@ -23,6 +23,7 @@ export interface ModelDefaultsConfig {
 
 export interface ModelPreferenceConfig {
   model: string;
+  reasoning_effort?: string;
   reason?: string;
   provider?: string;
   profile?: string;
@@ -122,6 +123,7 @@ function modelPreferenceValue(value: unknown): ModelPreferenceConfig | undefined
   }
   return {
     model,
+    ...optionalStringField(record, "reasoning_effort"),
     ...optionalStringField(record, "reason"),
     ...optionalStringField(record, "provider"),
     ...optionalStringField(record, "profile"),

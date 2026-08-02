@@ -61,6 +61,7 @@ export interface CodexCliExecutorOptions {
   sandbox?: CodexSandbox;
   codexBin?: string;
   model?: string;
+  reasoningEffort?: string;
   outputDir?: string;
   timeoutMs?: number;
   idleTimeoutMs?: number;

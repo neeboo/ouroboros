@@ -49,6 +49,7 @@ export function createRouteExecutor(options: RouteExecutorOptions): TaskExecutor
     sandbox: options.sandbox ?? "read-only",
     codexBin: options.codexBin,
     model: options.route.model?.model,
+    reasoningEffort: options.route.model?.reasoning_effort,
     outputDir: options.outputDir,
     timeoutMs: options.timeoutMs,
     idleTimeoutMs: options.idleTimeoutMs,

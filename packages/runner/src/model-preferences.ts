@@ -58,6 +58,7 @@ function normalizeModelPreference(value: unknown): ModelPreference | null {
   }
   return {
     model,
+    ...optionalStringField(record, "reasoning_effort"),
     ...optionalStringField(record, "reason"),
     ...optionalStringField(record, "provider"),
     ...optionalStringField(record, "profile"),

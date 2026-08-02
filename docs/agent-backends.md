@@ -92,17 +92,20 @@ Run model defaults can be seeded from TOML at run creation time. `--config <path
 
 ```toml
 [models]
-model = "gpt-5-codex"
+model = "gpt-5.6-luna"
+reasoning_effort = "high"
 
 [models.roles.worker]
-model = "gpt-5.4-mini"
+model = "gpt-5.6-luna"
+reasoning_effort = "high"
 provider = "openai"
 profile = "fast"
 base_url = "https://api.example.test/v1"
 env_key = "OPENAI_API_KEY"
 
 [models.roles.verifier]
-model = "gpt-5.5"
+model = "gpt-5.6-sol"
+reasoning_effort = "high"
 ```
 
 Model resolution order:
@@ -114,7 +117,7 @@ then run.context.modelDefaults.global
 then CLI --model
 ```
 
-Resolved attempts record `attempt.input.model` with `model`, `source`, `role`, and any supplied `provider`, `profile`, `base_url`, or `env_key` strings. Those extra fields are metadata only. Current Codex executors pass only the resolved `model` string.
+Resolved attempts record `attempt.input.model` with `model`, `reasoning_effort`, `source`, `role`, and any supplied `provider`, `profile`, `base_url`, or `env_key` strings. Direct Codex executors pass `model` and `reasoning_effort`; the remaining adapter fields stay as metadata.
 
 Claude Code is isolated from inherited Codex model defaults. When a route resolves to `claude-code`, Orbs drops model preferences from role defaults, run defaults, and CLI `--model`. Only a task-level `config.modelPreference` is treated as an explicit Claude model override.
 

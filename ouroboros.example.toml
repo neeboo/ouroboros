@@ -10,16 +10,34 @@ project_url = "https://linear.app/<workspace>/project/<project-slug>/overview"
 project_id = "<project-slug-or-id>"
 team_key = "<team-key>"
 
-# Optional: keep Codex verifier model defaults separate from agent backend selection.
+# Codex defaults. Claude Code workers do not inherit these values.
+[models]
+model = "gpt-5.6-luna"
+reasoning_effort = "high"
+
+[models.roles.planner]
+model = "gpt-5.6-sol"
+reasoning_effort = "high"
+
+[models.roles.worker]
+model = "gpt-5.6-luna"
+reasoning_effort = "high"
+
 [models.roles.verifier]
-model = "gpt-5.5"
-reason = "keep verifier on a stronger verifier model"
+model = "gpt-5.6-sol"
+reasoning_effort = "high"
+
+[models.roles."goal-review"]
+model = "gpt-5.6-sol"
+reasoning_effort = "high"
 
 [agentDefaults]
 global = "claude-code"
 
 [agentDefaults.roles]
+planner = "codex-resumable"
 verifier = "codex-resumable"
+goal-review = "codex-resumable"
 
 ["agentBackends"."claude-code"]
 kind = "acpx"

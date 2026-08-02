@@ -2985,7 +2985,21 @@ describe("runner", () => {
   });
 
   test("planner stop hook creates child runs from structured nextRuns output", async () => {
-    const runId = harness.createRun({ goal: "Intake requirement document" });
+    const runId = harness.createRun({
+      goal: "Intake requirement document",
+      context: {
+        modelDefaults: {
+          global: { model: "gpt-5.6-luna", reasoning_effort: "high" },
+          roles: { planner: { model: "gpt-5.6-sol", reasoning_effort: "high" } },
+        },
+        agentDefaults: { global: "claude-code", roles: { planner: "codex-resumable" } },
+        agentBackends: {
+          "claude-code": { kind: "acpx", agent: "claude", approval: "approve-all" },
+          "codex-resumable": { kind: "codex-resumable" },
+        },
+        guardrails: [{ id: "guardrail_1", role: "planner", rule: "cite evidence" }],
+      },
+    });
     const plannerTask = harness.createTask({
       runId,
       role: "planner",
@@ -3031,6 +3045,16 @@ describe("runner", () => {
         parentRunId: runId,
         sourceTaskId: plannerTask,
         source: "nextRuns",
+        modelDefaults: {
+          global: { model: "gpt-5.6-luna", reasoning_effort: "high" },
+          roles: { planner: { model: "gpt-5.6-sol", reasoning_effort: "high" } },
+        },
+        agentDefaults: { global: "claude-code", roles: { planner: "codex-resumable" } },
+        agentBackends: expect.objectContaining({
+          "claude-code": { kind: "acpx", agent: "claude", approval: "approve-all" },
+          "codex-resumable": { kind: "codex-resumable" },
+        }),
+        guardrails: [{ id: "guardrail_1", role: "planner", rule: "cite evidence" }],
       }),
     });
     expect(childPlanner).toMatchObject({
@@ -5187,7 +5211,8 @@ describe("runner", () => {
             doneWhen: ["child run planned"],
             context: { phase: "ui" },
             modelPreference: {
-              model: "gpt-5.4-mini",
+              model: "gpt-5.6-sol",
+              reasoning_effort: "high",
             },
           },
         ],
@@ -5201,7 +5226,8 @@ describe("runner", () => {
         doneWhen: ["child run planned"],
         context: { phase: "ui" },
         modelPreference: {
-          model: "gpt-5.4-mini",
+          model: "gpt-5.6-sol",
+          reasoning_effort: "high",
         },
       },
     ]);

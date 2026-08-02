@@ -34,10 +34,11 @@ Required fields:
 ```json
 {
   "modelDefaults": {
-    "global": { "model": "gpt-5-codex" },
+    "global": { "model": "gpt-5.6-luna", "reasoning_effort": "high" },
     "roles": {
-      "worker": { "model": "gpt-5-mini", "reason": "cheaper implementation passes" },
-      "verifier": { "model": "gpt-5-mini" }
+      "planner": { "model": "gpt-5.6-sol", "reasoning_effort": "high" },
+      "worker": { "model": "gpt-5.6-luna", "reasoning_effort": "high" },
+      "verifier": { "model": "gpt-5.6-sol", "reasoning_effort": "high" }
     }
   }
 }
@@ -47,20 +48,23 @@ The CLI can seed the same `modelDefaults` object from TOML when creating runs. M
 
 ```toml
 [models]
-model = "gpt-5-codex"
+model = "gpt-5.6-luna"
+reasoning_effort = "high"
 
 [models.roles.worker]
-model = "gpt-5.4-mini"
+model = "gpt-5.6-luna"
+reasoning_effort = "high"
 provider = "openai"
 profile = "fast"
 base_url = "https://api.example.test/v1"
 env_key = "OPENAI_API_KEY"
 
 [models.roles.verifier]
-model = "gpt-5.5"
+model = "gpt-5.6-sol"
+reasoning_effort = "high"
 ```
 
-`provider`, `profile`, `base_url`, and `env_key` are stored on the resolved model preference for future adapter work only. Current executors do not select providers, route base URLs, load env key values, or execute profiles from these fields.
+`reasoning_effort` is passed to direct Codex executors as `model_reasoning_effort`. `provider`, `profile`, `base_url`, and `env_key` remain stored metadata; current executors do not route providers, load env key values, or execute profiles from those fields.
 
 ### Task
 
@@ -231,7 +235,7 @@ then run.context.modelDefaults.global
 then CLI --model
 ```
 
-Explicit `--context-json` values win over config-seeded defaults: if `context.modelDefaults` is present, the CLI leaves it unchanged. The resolved model object is recorded in `attempts.input_json.model`, including `model`, `source`, `role`, and any inert metadata fields supplied in config. Run overview sessions expose the same stored object for dashboard visibility. `codex-cli` passes only the resolved `model` to `codex exec -m <model>`. `codex-resumable` passes only the resolved `model` on both `codex exec` start and `codex exec resume`, and resumed attempts reuse the model stored on the running attempt.
+Explicit `--context-json` values win over config-seeded defaults: if `context.modelDefaults` is present, the CLI leaves it unchanged. The resolved model object is recorded in `attempts.input_json.model`, including `model`, `reasoning_effort`, `source`, `role`, and any inert metadata fields supplied in config. Run overview sessions expose the same stored object for dashboard visibility. `codex-cli` and `codex-resumable` pass the resolved model through `-m` and the reasoning effort through `-c model_reasoning_effort=...`; resumed attempts reuse both values stored on the running attempt.
 
 Backend routing may further constrain model inheritance. The built-in `claude-code` backend does not inherit role defaults, run defaults, or CLI `--model`; in that case `attempts.input_json.model` is `null`, and `base_url`, `env_key`, and other model metadata are not passed to acpx. A task-level `config.modelPreference` remains an explicit model override for that single Claude Code task.
 
@@ -275,7 +279,7 @@ Supported backend kinds are `acpx`, `codex-cli`, `codex-resumable`, and `noop`. 
 
 Runs may be bound to a project by `project_id`, or by a project root path that creates/reuses a matching `projects.root_path` row. Old databases keep `runs.project_id` nullable, and existing `context_json` remains compatible.
 
-The CLI also exposes `self-iterate-launch` as a first-class opt-in workflow. It creates the self-iteration run, seeds the planner task, starts the dashboard, and starts the runner/autopilot together without requiring the user to chain the follow-up commands manually. Self-iteration launch defaults to a conservative parallel task budget, `--worktree-root .ouroboros/worktrees`, and `--start-hook git-worktree`, so independent planner-selected goals can run together in separate git worktrees unless the user overrides task slots or passes `--start-hook none`.
+The CLI exposes `self-iterate-launch` as the autonomous self-improvement entry point. It creates a root assessment run, starts the dashboard, and launches `self-improve-daemon`. Each assessment emits at most one evidence-backed child goal through `nextRuns`; that child planner creates the executable task graph. The daemon supervises the full run tree, integrates verified changes locally, and creates another assessment only after the repository fingerprint changes. An unchanged fingerprint leaves the controller quiescent. The launch defaults to automatic parallelism, `--worktree-root .ouroboros/worktrees`, and `--start-hook git-worktree`.
 
 ## Prompt Contract
 

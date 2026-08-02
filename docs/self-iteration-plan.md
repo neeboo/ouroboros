@@ -1,144 +1,112 @@
-# Ouroboros Self-Iteration Plan
+# Ouroboros Autonomous Self-Improvement
 
-This document is the seed plan for letting Ouroboros improve Ouroboros through its own run loop.
+Ouroboros owns the goals in this loop. The human supplies the durable mission and safety boundaries once; each cycle derives its own concrete improvement goal from repository state, run evidence, verifier results, lessons, and operational failures.
 
-The human role is to provide the iteration goal and review visible artifacts. The harness role is to turn that goal into a small task graph, execute one increment at a time, verify the result, record lessons, and decide whether the run goal is complete.
-
-## Current Baseline
-
-Ouroboros already has the minimum working loop:
-
-- SQLite-backed runs, tasks, attempts, lessons, prompt templates, sessions, and external refs.
-- Planner, worker, verifier, repair, and goal-review roles.
-- Stop hooks for task creation, verifier creation, repair creation, and context summaries.
-- Resumable Codex execution with streaming attempt events.
-- Dashboard visibility for goals, task flow, todos, sessions, runner state, and manual interruption.
-- Bounded goal-review retries and proxy-aware child process execution.
-- A first-class self-iteration bootstrap command that creates a self-iteration run, seeds the planner task, and can launch the dashboard and runner together.
-- Frozen verifier-contract plumbing for planner-created worker tasks: optional `verifierContract` planner output stays backward-compatible when omitted, is persisted in task config when supplied, is injected into verifier prompts, and is cited on `created_verifier_task` artifacts.
-- Prompt rendering already turns repeated lessons into prompt-only candidate guardrails and successful experiences into reusable evidence.
-- Accepted active guardrails can now be carried in `run.context.guardrails` and rendered into matching role prompts before prompt-only candidate guardrails.
-
-## Recovered Self-Iteration Backend Policy
-
-Self-iteration runs keep `planner`, `verifier`, and `goal-review` on `codex-resumable` by default. This is the recovered policy after a real run observed the silent-start failure mode below. The `claude-code`/acpx backend stays available for `worker` and as the `agentDefaults.global` default so worker routes can still use Claude Code when configured.
-
-Operational reason (concise): on `run_5a21fbd4ee724772bb543903b31dcf22`, attempt `attempt_49c1f7965ee74e5cbddb4eb9b79f89b7` on planner task `task_93d064b935f1484ba785a0f699bd4086` used route backend `claude-code`/acpx, stayed running from `2026-06-18 21:21:44` to `21:35:31`, produced zero attempt events, zero output, and no worktree changes, and was interrupted by the overseer after more than 13 minutes. The lesson is recorded in that run and rendered into future self-iteration planner prompts.
-
-The recovered policy lives in `run.context.agentDefaults`:
-
-```json
-{
-  "agentDefaults": {
-    "global": "claude-code",
-    "roles": {
-      "planner": "codex-resumable",
-      "verifier": "codex-resumable",
-      "goal-review": "codex-resumable"
-    }
-  },
-  "agentBackends": {
-    "claude-code": { "kind": "acpx", "agent": "claude", "approval": "approve-all" },
-    "codex-resumable": { "kind": "codex-resumable" }
-  }
-}
-```
-
-The bootstrap command does not force this context itself; it inherits `agentDefaults`/`agentBackends` from `ouroboros.toml` or `config.toml` via `withConfigDefaults`. Local configs that pin those roles to `codex-resumable` (as the committed `ouroboros.example.toml` recommends for `verifier`) carry the recovered policy forward into every self-iteration run.
-
-### Verifying Future Self-Iteration Evidence
-
-Use these commands to inspect a self-iteration run and confirm the recovered policy held:
+## Default Command
 
 ```bash
-# Run-level overview: goalContract, agentDefaults.roles, agentBackends, task graph, and latest attempts.
-orbs run-overview --run-id <run_id>
-
-# Run-level lessons: failure summaries and successful experiences with evidence.
-orbs list-lessons --run-id <run_id>
+orbs self-iterate-launch --parallel auto
 ```
 
-When reviewing whether a future self-iteration run stayed on the recovered policy:
+This starts the dashboard and `self-improve-daemon`. Use `orbs self-iterate` only when a root assessment run should be created without starting background processes.
 
-1. `orbs run-overview --run-id <run_id>` — confirm `run.context.goalContract` is present with desired state, success criteria, constraints, required evidence, budget, and stop policy; also confirm `run.context.agentDefaults.roles.planner`, `roles.verifier`, and `roles.goal-review` are all `codex-resumable`, and that `run.context.agentBackends` defines both `claude-code` and `codex-resumable`.
-2. `orbs list-lessons --run-id <run_id>` — confirm no new silent-start lesson was recorded against `claude-code`/acpx planner attempts.
-3. If a planner attempt blocked with a silent-start reason again, treat it as a regression of this policy and re-pin the role defaults before the next run.
+## Control Model
 
-## Next Iteration Goal
+The loop has three levels:
 
-Make Ouroboros able to plan and drain its own next improvement cycle before it asks for human intervention.
+1. The root run is the durable history anchor and carries the self-improvement mission, role routing, model defaults, guardrails, and repository fingerprint.
+2. An assessment run inspects current evidence and emits at most one concrete child goal through `nextRuns`.
+3. The child run plans worker and verifier tasks, executes them in isolated worktrees when configured, repairs failures, runs goal review, and integrates verified changes.
 
-The current self-iteration state is past bootstrap, past the first frozen verifier-contract slice, and past the candidate-guardrail prompt work. The self-iteration command exists, planner-created worker tasks can carry a frozen verifier contract through task config into verifier creation, repeated lessons are already rendered as prompt-only candidate guardrails, and successful experiences are already rendered as reusable evidence.
+After the run tree drains, the daemon compares the repository fingerprint with the fingerprint used by the last assessment:
 
-This slice follows commits `592d380` for role model defaults and `18265b4` for explicit goal-review decision recovery. Those behaviors are already accounted for and stay out of scope here.
+- changed repository: create another assessment cycle;
+- unchanged repository: enter `quiescent` and wait;
+- active or repairable work: continue supervising the same run tree;
+- exhausted retry budget or a human checkpoint: leave auditable blocked evidence.
 
-The next planning candidate after this slice is automatic lesson-to-guardrail promotion: repeated lessons can be proposed as active role-scoped guardrails, preflight checks, or schema-backed persistence through a later planner or amendment slice with an explicit boundary. Keep that future path separate. Do not change database schema or dependency sets until a planner has proposed the smallest verifiable slice and an amendment path.
+This prevents both “say next before it moves” and repeated no-op planning.
 
-## Split-Enough Rule
+## Assessment Contract
 
-A planner task has split the work enough when every proposed task has:
+The assessment planner must inspect:
 
-- one role: `worker`, `verifier`, or `planner`;
-- one concrete goal that can be finished in one agent turn;
-- one prompt with exact files, commands, or docs to inspect first;
-- explicit `dependsOn` when ordering matters;
+- `README.md` and the control-loop documentation;
+- current source, tests, and dashboard behavior;
+- recent run graphs, attempts, verifier decisions, and integrations;
+- lessons, repeated failure patterns, and active guardrails;
+- the repository diff and current Git state.
+
+It returns one `nextRuns` item only when the evidence demonstrates a meaningful capability gap. The child run must contain:
+
+- a concrete desired result;
+- the evidence that proves the gap exists;
+- exact files, commands, or runtime behavior for its planner to inspect;
+- three to five completion checks;
+- constraints and integration boundaries.
+
+When no useful change is justified, it returns no child run and explains the quiescent decision in its summary.
+
+## Role And Model Defaults
+
+Self-improvement uses these Codex defaults:
+
+| Role | Model | Reasoning |
+| --- | --- | --- |
+| planner | `gpt-5.6-sol` | `high` |
+| verifier | `gpt-5.6-sol` | `high` |
+| goal-review | `gpt-5.6-sol` | `high` |
+| worker on Codex | `gpt-5.6-luna` | `high` |
+
+Repository config can override these values. Claude Code workers remain isolated from inherited Codex model settings; only an explicit task-level Claude model preference is passed to that backend.
+
+The default backend split remains:
+
+- `planner`, `verifier`, and `goal-review`: `codex-resumable`;
+- `worker`: `claude-code` when configured as the global or worker backend;
+- repair work: worker routing.
+
+Child runs inherit model defaults, agent defaults, agent backend definitions, and active guardrails at the protocol layer. Planners do not need to repeat control-plane fields in prompts.
+
+## Planning Boundary
+
+A child planner has split the goal enough when every proposed task has:
+
+- one role and one concrete result;
+- explicit dependencies when order matters;
+- exact files, commands, or evidence to inspect;
 - three to five `doneWhen` checks;
-- a clear artifact, code change, test, or decision;
-- a natural failure path: verifier blocks, repair task is created, or goal-review asks for a new planner.
+- a deterministic or agent verifier path;
+- a repair path for failed verification.
 
-Do not start implementation from a vague task. If the next task still contains multiple unrelated product decisions, create another planner task instead.
+Worker execution cannot weaken the verifier contract. Contract amendments require an explicit planner or human checkpoint.
 
-## First Planning Prompt
+## Integration And Concurrency
 
-The initial planner should inspect:
+`self-improve-daemon` supervises the root and every descendant run. Automatic parallelism chooses conservative run and task slots. Independent tasks use separate worktrees when `git-worktree` is enabled.
 
-- `README.md`
-- `docs/protocol.md`
-- `docs/control-loop-contracts.md`
-- this document
-- `packages/cli/src/dashboard.ts`
-- `packages/cli/src/main.ts`
-- `packages/runner/src/runner.ts`
-- recent run lessons from the harness database
-
-It should return structured JSON with a small `nextTasks` graph. Prefer 2 to 5 tasks when there is enough certainty to split the work safely. A valid graph can include:
-
-- planner tasks when a subproblem needs more decomposition;
-- worker tasks for concrete implementation increments;
-- verifier tasks when a current baseline or worker output needs independent validation.
-
-Use `dependsOn` to express graph order. Independent worker tasks can run in parallel. Do not force everything into one task just because it is the first planning pass.
-
-## Candidate Improvement Areas
-
-The planner should choose as many areas as can be split into independent, verifiable tasks without making the graph vague. Prefer one area when dependencies or product decisions are still unclear. Prefer multiple areas when they can run independently under the configured concurrency:
-
-- make the dashboard explain task-level actions versus runner-level actions more clearly;
-- add a first-class self-iteration command that creates the run, planner task, dashboard, and runner together;
-- persist dashboard-selected goal and scroll position without flashing;
-- expose the generated task graph as a simple graph view;
-- add a Linear bridge skeleton that maps local runs and tasks to external issues;
-- improve run completion review so it can cite evidence from docs, tests, dashboard state, and lessons.
-- extend the planning loop beyond the verified task-level verifier-contract baseline toward run-level contract amendment and audit paths.
-- promote repeated lessons into durable active guardrails, preflight checks, or schema-backed guardrail storage in a later slice while keeping repeated experiences as reusable evidence patterns; this future path remains separate from the current prompt-only baseline.
+Verified self-improvement changes are integrated into the local target branch by default so the repository fingerprint advances and the next assessment sees the new baseline. Pushing remains opt-in through `--integration-push true`. Use `--no-integrate true` only for experiments that must leave worktrees unmerged.
 
 ## Human Checkpoints
 
-Pause for human review when:
+Pause with clear evidence when a cycle proposes:
 
-- a task wants to change repository structure;
-- a task wants to introduce a new dependency;
-- a task wants to alter the prompt contract or database schema;
-- a verifier finds ambiguous product behavior;
-- the run is done and the dashboard claims there is no queued work.
+- a database schema migration;
+- a new runtime dependency;
+- a repository ownership or module-boundary change;
+- a prompt or verifier contract amendment;
+- destructive Git or deployment actions;
+- ambiguous product behavior that evidence cannot resolve.
 
-## Completion Criteria
+The controller may continue through implementation, tests, verification, repair, and local integration without a human checkpoint when the frozen contracts and configured budgets cover the work.
 
-This self-iteration planning cycle is complete when:
+## Inspection
 
-- a new Ouroboros run exists for self-iteration;
-- its planner has produced a fine-grained task graph or a justified verifier task;
-- the dashboard shows the active goal, task stream, todos, and runner state for that run;
-- the generated graph points to concrete files and checks;
-- no implementation task starts from an underspecified prompt;
-- the run-loop can drain the generated graph to either done tasks, blocked tasks with repair paths, or a goal-review decision.
+```bash
+orbs run-overview --run-id <root_run_id>
+orbs run-graph --run-id <root_run_id>
+orbs run-evidence --run-id <root_run_id>
+orbs list-lessons --run-id <root_run_id>
+```
+
+The dashboard should show the root mission, assessment cycles, generated child goals, worker/verifier sessions, current todos, evidence, and supervisor state as one continuous history.

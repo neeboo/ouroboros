@@ -12,6 +12,7 @@ export interface Run {
 
 export interface ModelPreference {
   model: string;
+  reasoning_effort?: string;
   reason?: string;
   provider?: string;
   profile?: string;

@@ -14,6 +14,7 @@ export function createRunsFromOutputHook(options: { harness: Harness }): StopHoo
         goal: plannedRun.goal,
         context: {
           ...(plannedRun.context ?? {}),
+          ...inheritedControlContext(run.context),
           parentRunId: run.id,
           sourceTaskId: task.id,
           source: "nextRuns",
@@ -45,4 +46,12 @@ export function createRunsFromOutputHook(options: { harness: Harness }): StopHoo
       artifacts: created,
     };
   };
+}
+
+function inheritedControlContext(context: Record<string, unknown>) {
+  return Object.fromEntries(
+    ["modelDefaults", "agentDefaults", "agentBackends", "guardrails"]
+      .filter((key) => context[key] !== undefined)
+      .map((key) => [key, context[key]]),
+  );
 }

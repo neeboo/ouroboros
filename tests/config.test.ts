@@ -24,7 +24,8 @@ describe("config", () => {
         'model = "gpt-5-codex"',
         "",
         "[models.roles.worker]",
-        'model = "gpt-5.4-mini"',
+        'model = "gpt-5.6-luna"',
+        'reasoning_effort = "high"',
         'provider = "openai"',
         'profile = "fast"',
         'base_url = "https://api.example.test/v1"',
@@ -40,7 +41,8 @@ describe("config", () => {
         global: { model: "gpt-5-codex" },
         roles: {
           worker: {
-            model: "gpt-5.4-mini",
+            model: "gpt-5.6-luna",
+            reasoning_effort: "high",
             provider: "openai",
             profile: "fast",
             base_url: "https://api.example.test/v1",

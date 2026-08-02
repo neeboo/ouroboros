@@ -137,7 +137,8 @@ describe("codex cli executor", () => {
     const calls: Array<{ cmd: string[] }> = [];
     const executor = createCodexCliExecutor({
       cwd: "/repo",
-      model: "gpt-5-codex",
+      model: "gpt-5.6-luna",
+      reasoningEffort: "high",
       runCommand: async ({ cmd }) => {
         calls.push({ cmd });
         return {
@@ -171,7 +172,8 @@ describe("codex cli executor", () => {
     });
 
     expect(calls[0].cmd).toContain("-m");
-    expect(calls[0].cmd).toContain("gpt-5-codex");
+    expect(calls[0].cmd).toContain("gpt-5.6-luna");
+    expect(calls[0].cmd).toContain('model_reasoning_effort="high"');
   });
 
   test("passes hard and idle timeouts to the command runner", async () => {
@@ -424,7 +426,8 @@ describe("codex cli executor", () => {
     const client = createCodexResumableClient({
       cwd: "/repo",
       codexBin: "/custom/codex",
-      model: "gpt-5-codex",
+      model: "gpt-5.6-sol",
+      reasoningEffort: "high",
       runCommand: async ({ cmd, stdin }) => {
         calls.push({ cmd, stdin });
         return {
@@ -456,13 +459,15 @@ describe("codex cli executor", () => {
       status: "done",
       summary: "planned",
     });
-    expect(calls[0].cmd.slice(0, 8)).toEqual([
+    expect(calls[0].cmd.slice(0, 10)).toEqual([
       "/custom/codex",
       "exec",
       "resume",
       "session_123",
       "-m",
-      "gpt-5-codex",
+      "gpt-5.6-sol",
+      "-c",
+      'model_reasoning_effort="high"',
       "--json",
       "--skip-git-repo-check",
     ]);

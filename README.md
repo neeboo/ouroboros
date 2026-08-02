@@ -98,13 +98,7 @@ docs/default-runbook.md
 
 It keeps the default path simple: Codex runs `planner`, `verifier`, and `goal-review`; Claude Code runs `worker`.
 
-Create a self-iteration run:
-
-```bash
-orbs self-iterate
-```
-
-Launch the dashboard and background runner:
+Launch continuous self-improvement with the dashboard:
 
 ```bash
 orbs self-iterate-launch \
@@ -112,6 +106,8 @@ orbs self-iterate-launch \
   --worktree-root .ouroboros/worktrees \
   --start-hook git-worktree
 ```
+
+Ouroboros assesses its current repository and run evidence, derives one child-run goal, drains and verifies that run, integrates successful changes locally, and starts another assessment after the repository changes. It waits when the evidence does not justify another change.
 
 Open:
 
@@ -181,7 +177,7 @@ Model preference can live on the run or on a single task:
 ```bash
 orbs create-run \
   --goal "Use Ouroboros to iterate on Ouroboros" \
-  --context-json '{"modelDefaults":{"roles":{"worker":{"model":"gpt-5.4-mini"},"verifier":{"model":"gpt-5.5"}}}}'
+  --context-json '{"modelDefaults":{"global":{"model":"gpt-5.6-luna","reasoning_effort":"high"},"roles":{"planner":{"model":"gpt-5.6-sol","reasoning_effort":"high"},"verifier":{"model":"gpt-5.6-sol","reasoning_effort":"high"}}}}'
 ```
 
 ```bash
@@ -190,7 +186,7 @@ orbs create-task \
   --role worker \
   --goal "Cheap implementation pass" \
   --prompt "Implement the scoped change." \
-  --config-json '{"modelPreference":{"model":"gpt-5.4-mini","reason":"low-risk worker"}}'
+  --config-json '{"modelPreference":{"model":"gpt-5.6-luna","reasoning_effort":"high","reason":"implementation pass"}}'
 ```
 
 Resolution order:

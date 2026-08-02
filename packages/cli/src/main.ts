@@ -50,6 +50,7 @@ import { buildRunThreadOverview, formatRunThreads } from "./run-threads";
 import { buildAgentMatrix, doctorAgent } from "../../../scripts/acpx-agent-smoke";
 import { join } from "node:path";
 import { cpus, totalmem } from "node:os";
+import { createHash } from "node:crypto";
 import type { Task } from "@ouroboros/harness";
 
 const parsed = parseArgs(Bun.argv.slice(2));
@@ -61,14 +62,23 @@ const AUTO_MAX_TASK_CONCURRENCY = 4;
 const DEFAULT_SELF_ITERATION_WORKTREE_ROOT = ".ouroboros/worktrees";
 const DEFAULT_GENERIC_ATTEMPT_IDLE_TIMEOUT_MS = 5 * 60 * 1000;
 const DEFAULT_GENERIC_ATTEMPT_HARD_TIMEOUT_MS = 30 * 60 * 1000;
-const SELF_ITERATION_GOAL = "Use Ouroboros to plan its own next self-iteration cycle";
+const SELF_ITERATION_GOAL = "Continuously improve Ouroboros from evidence-backed gaps";
 const SELF_ITERATION_PLAN_DOC = "docs/self-iteration-plan.md";
 const DEFAULT_STOP_HOOKS = "create-runs,create-tasks,create-verifier,create-repair,context-summary";
+const SELF_ITERATION_MODEL_DEFAULTS = {
+  global: { model: "gpt-5.6-luna", reasoning_effort: "high" },
+  roles: {
+    planner: { model: "gpt-5.6-sol", reasoning_effort: "high" },
+    worker: { model: "gpt-5.6-luna", reasoning_effort: "high" },
+    verifier: { model: "gpt-5.6-sol", reasoning_effort: "high" },
+    "goal-review": { model: "gpt-5.6-sol", reasoning_effort: "high" },
+  },
+};
 const SELF_ITERATION_GOAL_CONTRACT = {
-  desiredState: "Ouroboros can plan and drain its own next improvement cycle before it asks for human intervention.",
+  desiredState: "Ouroboros can repeatedly assess its current capabilities, derive and complete successive improvement goals, verify and integrate the results, and pause safely when no evidence-backed gap remains.",
   successCriteria: [
-    "a new Ouroboros run exists for self-iteration",
-    "its planner has produced a fine-grained task graph or a justified verifier task",
+    "each assessment derives one evidence-backed child run or records a justified quiescent decision",
+    "each child run has a fine-grained task graph and frozen verification criteria",
     "the dashboard shows the active goal, task stream, todos, and runner state for that run",
     "the generated graph points to concrete files and checks",
     "no implementation task starts from an underspecified prompt",
@@ -92,7 +102,7 @@ const SELF_ITERATION_GOAL_CONTRACT = {
   },
   stopPolicy: {
     completeWhen: [
-      "all generated work is drained and goal-review marks the run complete",
+      "all generated work is drained and goal-review marks the current child run complete",
       "completion criteria are satisfied with cited evidence",
     ],
     blockWhen: [
@@ -104,16 +114,16 @@ const SELF_ITERATION_GOAL_CONTRACT = {
       "a task wants to introduce a new dependency",
       "a task wants to alter the prompt contract or database schema",
       "a verifier finds ambiguous product behavior",
-      "the run is done and the dashboard claims there is no queued work",
+      "a proposed change crosses a configured human checkpoint",
     ],
   },
 };
 const SELF_ITERATION_PLANNER_DONE_WHEN = [
-  "Planner output contains a small nextTasks graph, usually two to five tasks across two to three independent areas when possible",
-  "Every planned task has one role, one concrete goal, and one prompt with exact files or commands to inspect first",
-  "The task graph includes explicit dependsOn when ordering matters and each task has three to five doneWhen checks",
-  "Every planned task identifies a clear artifact, code change, test, or decision",
-  "The graph includes natural failure paths through verifier, repair, or another planner and can be drained by run-loop",
+  "The assessment cites current repository, run, lesson, and verification evidence",
+  "The output derives one concrete improvement objective from a demonstrated capability gap",
+  "The objective is emitted as one nextRuns child with a planning prompt and three to five doneWhen checks",
+  "If no meaningful gap exists, the output returns no child run and explains the quiescent decision",
+  "The child run can be supervised, verified, and integrated without manual task injection",
 ];
 const SELF_ITERATION_ROLE_AGENT_DEFAULTS: Record<"planner" | "verifier" | "goal-review", string> = {
   planner: "codex-resumable",
@@ -159,6 +169,19 @@ switch (parsed.command) {
         "--max-rounds",
         "8",
       ),
+      daemonCommand: cliCommand(
+        "self-improve-daemon",
+        "--root-run-id",
+        runId,
+        "--executor",
+        "codex-resumable",
+        "--parallel",
+        "auto",
+        "--worktree-root",
+        DEFAULT_SELF_ITERATION_WORKTREE_ROOT,
+        "--start-hook",
+        "git-worktree",
+      ),
       launchCommand: cliCommand(
         "self-iterate-launch",
         "--port",
@@ -183,18 +206,20 @@ switch (parsed.command) {
       defaultConcurrency: DEFAULT_SELF_ITERATION_CONCURRENCY,
       defaultWorktreeRoot: DEFAULT_SELF_ITERATION_WORKTREE_ROOT,
       defaultStartHook: "git-worktree",
+      supervisorCommandName: "self-improve-daemon",
+      defaultRootRunId: runId,
     });
-    const runner = dashboard.startRunner();
+    const supervisor = dashboard.startSupervisor();
     printJson({
       runId,
       taskId,
       dashboardUrl: `http://localhost:${dashboard.server.port}`,
-      runnerPid: runner.pid ?? null,
-      runnerStatus: dashboard.runnerStatus(),
+      supervisorPid: supervisor.pid ?? null,
+      supervisorStatus: dashboard.supervisorStatus(),
       dashboardCommand: cliCommand("dashboard", "--run-id", runId, "--port", String(port)),
-      runnerCommand: cliCommand(
-        "run-loop",
-        "--run-id",
+      daemonCommand: cliCommand(
+        "self-improve-daemon",
+        "--root-run-id",
         runId,
         "--executor",
         "codex-resumable",
@@ -598,6 +623,41 @@ switch (parsed.command) {
     printJson(result);
     break;
   }
+  case "self-improve-daemon": {
+    const executorName = parseExecutorName(required(parsed, "executor"));
+    if (executorName !== "codex-resumable") {
+      fail("self-improve-daemon currently supports codex-resumable");
+    }
+    const suppliedRootRunId = flag(parsed, "root-run-id") ?? null;
+    const created = suppliedRootRunId ? null : await createSelfIterationBootstrap();
+    const rootRunId = suppliedRootRunId ?? created!.runId;
+    if (!harness.getRun(rootRunId)) {
+      fail(`run not found: ${rootRunId}`);
+    }
+    const maxTicks = parseNonNegativeInteger(flag(parsed, "max-ticks") ?? "0", "--max-ticks");
+    const result = await superviseSelfImprovementDaemon({
+      ...codexRunnerInput(DEFAULT_STOP_HOOKS),
+      rootRunId,
+      runConcurrency: parseRunConcurrency(),
+      taskConcurrency: parseTaskConcurrency(),
+      tickCycles: parsePositiveInteger(flag(parsed, "tick-cycles") ?? flag(parsed, "max-cycles") ?? "1", "--tick-cycles"),
+      maxRounds: parsePositiveInteger(flag(parsed, "max-rounds") ?? "1", "--max-rounds"),
+      maxTries: parsePositiveInteger(flag(parsed, "max-tries") ?? String(DEFAULT_MAX_TRIES), "--max-tries"),
+      intervalMs: parseNonNegativeInteger(flag(parsed, "interval-ms") ?? "1500", "--interval-ms"),
+      idleMs: parseNonNegativeInteger(flag(parsed, "idle-ms") ?? flag(parsed, "interval-ms") ?? "1500", "--idle-ms"),
+      maxTicks,
+      integrateCompletedRuns: flag(parsed, "no-integrate") === undefined,
+      integrationTargetBranch: flag(parsed, "integration-target-branch") ?? "main",
+      integrationPush: flag(parsed, "integration-push") !== undefined,
+      onTick: maxTicks === 0 ? (tick) => console.log(JSON.stringify(tick)) : undefined,
+    });
+    printJson({
+      ...result,
+      rootRunId,
+      bootstrap: created ? { runId: created.runId, taskId: created.taskId, cycleIndex: 0 } : null,
+    });
+    break;
+  }
   case "record-attempt": {
     const taskId = required(parsed, "task-id");
     const input = parseObject(flag(parsed, "input-json") ?? "{}");
@@ -783,6 +843,9 @@ function printHelp() {
     "  run-loop             Drain ready tasks for one run",
     "  supervise-runs       Drain multiple runnable runs",
     "  supervise-daemon     Keep supervising runs until stopped",
+    "  self-iterate         Create an autonomous self-assessment root run",
+    "  self-iterate-launch  Start the self-improvement dashboard and daemon",
+    "  self-improve-daemon  Continuously derive and supervise improvement cycles",
     "  dashboard            Start the dashboard",
     "  intake               Split a requirement document into child runs",
     "  action               Apply a harness action such as integrateVerifiedRun",
@@ -801,6 +864,7 @@ function printHelp() {
     "  orbs create-run --goal 'Refactor platform admin' --project-root $(pwd)",
     "  orbs run-loop --run-id <run_id> --executor codex-resumable --cwd $(pwd)",
     "  orbs supervise-daemon --executor codex-resumable --parallel auto",
+    "  orbs self-iterate-launch --parallel auto",
     "  orbs supervise-daemon --executor codex-resumable --runs 2 --tasks 3",
     "  orbs dashboard --run-id <run_id> --port 7331",
     "  orbs run-threads --run-id <run_id>",
@@ -874,23 +938,30 @@ function usesCodexResumablePath(executorName: "noop" | "acpx-codex" | "codex-cli
 
 function selfIterationPlannerPrompt() {
   return [
-    "Create the first task for the next Ouroboros self-iteration planning cycle.",
+    "Act as Ouroboros' self-assessment planner and derive one improvement objective for Ouroboros itself.",
     "",
-    "Inspect these inputs before deciding:",
+    "The long-running mission is to make Ouroboros more reliable, autonomous, observable, and useful for real coding work. A human does not provide the objective for this cycle. Derive it from demonstrated gaps in current evidence.",
+    "",
+    "Inspect these inputs before deriving the objective:",
     "",
     "- `README.md`",
     "- `docs/protocol.md`",
+    "- `docs/control-loop-contracts.md`",
     `- \`${SELF_ITERATION_PLAN_DOC}\``,
+    "- `docs/default-runbook.md`",
     "- `packages/cli/src/dashboard.ts`",
     "- `packages/cli/src/main.ts`",
     "- `packages/runner/src/runner.ts`",
     "- recent run lessons from the harness database using `orbs list-lessons --run-id <run_id>`",
+    "- recent run graphs, attempts, verifier decisions, and integration evidence in the local harness database",
     "",
-    `Use the split-enough rule and first planning prompt in \`${SELF_ITERATION_PLAN_DOC}\`.`,
+    `Use the autonomous assessment contract in \`${SELF_ITERATION_PLAN_DOC}\`.`,
     "",
-    "Return structured JSON with a small `nextTasks` graph. Prefer two to three independent improvement areas in the same graph when the areas can be verified separately and safely run under concurrency. Use one area only when dependencies or product decisions are still unclear.",
+    "Return structured JSON with one `nextRuns` child when evidence shows a meaningful capability gap. The child goal must describe the desired result, and its planner prompt must name the evidence to inspect, constraints, verification expectations, and integration boundary.",
     "",
-    "Use planner tasks for unclear subproblems, worker tasks for concrete implementation, and verifier tasks for independent validation. Give each task concrete files or commands to inspect first, explicit dependencies when ordering matters, three to five `doneWhen` checks, and a natural failure path through verifier, repair, or another planner. The run-loop should be able to drain the graph without manual task injection.",
+    "Derive one improvement objective from the strongest current gap. Do not choose work only because it appears in a backlog. Cite the repository, run, lesson, or verifier evidence that demonstrates the gap and explain how the child run closes it.",
+    "",
+    "Return no child run when the current evidence does not justify a useful change. In that case, explain the quiescent decision in the summary so the controller can wait for repository state to change.",
   ].join("\n");
 }
 
@@ -923,12 +994,26 @@ function withSelfIterationConfigDefaults(
   config: Awaited<ReturnType<typeof loadOuroborosConfig>>,
 ) {
   const merged = withConfigDefaults(context, config);
+  const configModelDefaults = recordValue(config.modelDefaults);
+  const configModelRoles = recordValue(configModelDefaults.roles);
+  const mergedModelDefaults = recordValue(merged.modelDefaults);
+  const mergedModelRoles = recordValue(mergedModelDefaults.roles);
   const configAgentDefaults = recordValue(config.agentDefaults);
   const configRoles = recordValue(configAgentDefaults.roles);
   const mergedAgentDefaults = recordValue(merged.agentDefaults);
   const mergedRoles = recordValue(mergedAgentDefaults.roles);
   return {
     ...merged,
+    modelDefaults: {
+      ...SELF_ITERATION_MODEL_DEFAULTS,
+      ...configModelDefaults,
+      ...mergedModelDefaults,
+      roles: {
+        ...SELF_ITERATION_MODEL_DEFAULTS.roles,
+        ...configModelRoles,
+        ...mergedModelRoles,
+      },
+    },
     agentDefaults: {
       ...mergedAgentDefaults,
       roles: {
@@ -1105,13 +1190,13 @@ function attemptInputForRoute(route: ResolvedExecutionRoute, cwd: string) {
   };
 }
 
-function codexRunnerInput() {
+function codexRunnerInput(defaultStopHooks?: string) {
   return {
     harness,
     cwd: runnerCwd(),
     worktreeForTask: worktreeForTask(),
     startHooks: startHooks(),
-    stopHooksByRole: stopHooksByRole(),
+    stopHooksByRole: stopHooksByRole(defaultStopHooks),
     cliAgentBackend: flag(parsed, "agent-backend"),
     cliExecutor: "codex-resumable" as const,
     model: flag(parsed, "model"),
@@ -1207,22 +1292,207 @@ function createdTaskIdFromActionResult(result: { artifacts: Array<Record<string,
 async function createSelfIterationBootstrap() {
   harness.init();
   const config = await loadCliConfig();
+  const assessmentFingerprint = repositoryFingerprint(runnerCwd());
   const runId = harness.createRun({
     goal: SELF_ITERATION_GOAL,
     context: withSelfIterationConfigDefaults({
-      source: "self-iterate",
+      source: "self-improve",
       planDoc: SELF_ITERATION_PLAN_DOC,
       goalContract: SELF_ITERATION_GOAL_CONTRACT,
+      selfImprovement: {
+        cycleIndex: 0,
+        assessmentFingerprint,
+      },
     }, config),
   });
   const taskId = harness.createTask({
     runId,
     role: "planner",
-    goal: "Plan the next Ouroboros self-iteration increment",
+    goal: "Assess Ouroboros and derive the next improvement run",
     prompt: selfIterationPlannerPrompt(),
     doneWhen: SELF_ITERATION_PLANNER_DONE_WHEN,
   });
   return { runId, taskId };
+}
+
+type SelfImprovementDaemonInput = Omit<Parameters<typeof superviseCodexRuns>[0], "maxCycles"> & {
+  rootRunId: string;
+  tickCycles: number;
+  idleMs: number;
+  maxTicks: number;
+  onTick?: (tick: Record<string, unknown>) => void;
+};
+
+async function superviseSelfImprovementDaemon(input: SelfImprovementDaemonInput) {
+  let stopping = false;
+  const stop = () => {
+    stopping = true;
+  };
+  process.once("SIGINT", stop);
+  process.once("SIGTERM", stop);
+
+  const ticks: Array<Record<string, unknown>> = [];
+  let index = 0;
+  while (!stopping && (input.maxTicks === 0 || index < input.maxTicks)) {
+    let waitMs = input.intervalMs;
+    let tick: Record<string, unknown>;
+    try {
+      const cycle = ensureSelfImprovementCycle(input.rootRunId, input.cwd ?? process.cwd());
+      if (cycle.state === "quiescent") {
+        waitMs = input.idleMs;
+        tick = {
+          type: "self-improvement.tick",
+          index,
+          status: "quiescent",
+          createdCycle: null,
+          repositoryFingerprint: cycle.repositoryFingerprint,
+          runCounts: harness.countRunsByStatus(),
+          createdAt: new Date().toISOString(),
+        };
+      } else {
+        const result = await superviseCodexRuns({
+          ...input,
+          rootRunId: input.rootRunId,
+          maxCycles: input.tickCycles,
+        });
+        waitMs = result.status === "idle" ? input.idleMs : input.intervalMs;
+        tick = {
+          type: "self-improvement.tick",
+          index,
+          status: "ok",
+          createdCycle: cycle.createdCycle,
+          result,
+          runCounts: harness.countRunsByStatus(),
+          createdAt: new Date().toISOString(),
+        };
+      }
+    } catch (error) {
+      tick = {
+        type: "self-improvement.tick",
+        index,
+        status: "error",
+        error: cliErrorMessage(error),
+        runCounts: harness.countRunsByStatus(),
+        createdAt: new Date().toISOString(),
+      };
+    }
+    ticks.push(tick);
+    input.onTick?.(tick);
+    index += 1;
+    if (!stopping && (input.maxTicks === 0 || index < input.maxTicks)) {
+      await new Promise((resolve) => setTimeout(resolve, waitMs));
+    }
+  }
+
+  process.off("SIGINT", stop);
+  process.off("SIGTERM", stop);
+  return {
+    status: stopping ? "stopped" as const : input.maxTicks > 0 ? "tick_limit" as const : "stopped" as const,
+    ticks,
+    runCounts: harness.countRunsByStatus(),
+  };
+}
+
+function ensureSelfImprovementCycle(rootRunId: string, cwd: string) {
+  const scopedRuns = selfImprovementRuns(rootRunId);
+  const active = scopedRuns.some((run) => run.status === "todo" || run.status === "running");
+  if (active) {
+    return { state: "active" as const, createdCycle: null };
+  }
+
+  const root = harness.getRun(rootRunId);
+  if (!root) {
+    fail(`run not found: ${rootRunId}`);
+  }
+  const selfImprovement = recordValue(root.context.selfImprovement);
+  const repositoryState = repositoryFingerprint(cwd);
+  if (selfImprovement.assessmentFingerprint === repositoryState) {
+    return {
+      state: "quiescent" as const,
+      createdCycle: null,
+      repositoryFingerprint: repositoryState,
+    };
+  }
+
+  const cycleIndex = Math.max(
+    Number(selfImprovement.cycleIndex) || 0,
+    ...scopedRuns.map((run) => Number(recordValue(run.context.selfImprovement).cycleIndex) || 0),
+  ) + 1;
+  const runId = harness.createRun({
+    goal: `Assess Ouroboros and derive improvement cycle ${cycleIndex}`,
+    context: {
+      ...selfImprovementControlContext(root.context),
+      parentRunId: rootRunId,
+      source: "self-improvement-assessment",
+      planDoc: SELF_ITERATION_PLAN_DOC,
+      goalContract: SELF_ITERATION_GOAL_CONTRACT,
+      selfImprovement: {
+        cycleIndex,
+        assessmentFingerprint: repositoryState,
+      },
+    },
+  });
+  const taskId = harness.createTask({
+    runId,
+    role: "planner",
+    goal: `Assess Ouroboros and derive improvement cycle ${cycleIndex}`,
+    prompt: selfIterationPlannerPrompt(),
+    doneWhen: SELF_ITERATION_PLANNER_DONE_WHEN,
+  });
+  harness.updateRun({
+    runId: rootRunId,
+    contextPatch: {
+      selfImprovement: {
+        ...selfImprovement,
+        cycleIndex,
+        assessmentFingerprint: repositoryState,
+      },
+    },
+  });
+  return {
+    state: "created" as const,
+    createdCycle: { runId, taskId, cycleIndex },
+    repositoryFingerprint: repositoryState,
+  };
+}
+
+function selfImprovementRuns(rootRunId: string) {
+  const allRuns = harness.listRuns({ limit: 1000 });
+  const included = new Set([rootRunId]);
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const run of allRuns) {
+      const parentRunId = typeof run.context.parentRunId === "string" ? run.context.parentRunId : null;
+      if (parentRunId && included.has(parentRunId) && !included.has(run.id)) {
+        included.add(run.id);
+        changed = true;
+      }
+    }
+  }
+  return allRuns.filter((run) => included.has(run.id));
+}
+
+function selfImprovementControlContext(context: Record<string, unknown>) {
+  return Object.fromEntries(
+    ["modelDefaults", "agentDefaults", "agentBackends", "guardrails"]
+      .filter((key) => context[key] !== undefined)
+      .map((key) => [key, context[key]]),
+  );
+}
+
+function repositoryFingerprint(cwd: string) {
+  const git = (args: string[]) => {
+    try {
+      const result = Bun.spawnSync({ cmd: ["git", ...args], cwd, stdout: "pipe", stderr: "pipe" });
+      return result.exitCode === 0 ? new TextDecoder().decode(result.stdout).trim() : "";
+    } catch {
+      return "";
+    }
+  };
+  const head = git(["rev-parse", "HEAD"]);
+  const status = git(["status", "--porcelain=v1", "--untracked-files=all"]);
+  return createHash("sha256").update(`${cwd}\n${head || "no-head"}\n${status}`).digest("hex");
 }
 
 async function createIntakeRun(input: { title: string; document: string }) {
@@ -1398,6 +1668,8 @@ function createDashboardRuntime(input: {
   defaultConcurrency?: number;
   defaultWorktreeRoot?: string;
   defaultStartHook?: string;
+  supervisorCommandName?: "supervise-daemon" | "self-improve-daemon";
+  defaultRootRunId?: string;
 }) {
   let runnerProcess: ReturnType<typeof Bun.spawn> | null = null;
   let supervisorProcess: ReturnType<typeof Bun.spawn> | null = null;
@@ -1510,6 +1782,8 @@ function createDashboardRuntime(input: {
       defaultConcurrency: input.defaultConcurrency,
       defaultWorktreeRoot: input.defaultWorktreeRoot,
       defaultStartHook: input.defaultStartHook,
+      commandName: input.supervisorCommandName,
+      rootRunId: input.defaultRootRunId,
     });
     supervisorProcess = Bun.spawn({
       cmd,
@@ -1732,7 +2006,9 @@ function createDashboardRuntime(input: {
   return {
     server,
     runnerStatus,
+    supervisorStatus,
     startRunner,
+    startSupervisor,
     stopRunner,
     shutdown,
   };
@@ -1837,7 +2113,13 @@ function dashboardRunnerCommand(
 }
 
 function supervisorCommand(
-  options: { defaultConcurrency?: number; defaultWorktreeRoot?: string; defaultStartHook?: string } = {},
+  options: {
+    defaultConcurrency?: number;
+    defaultWorktreeRoot?: string;
+    defaultStartHook?: string;
+    commandName?: "supervise-daemon" | "self-improve-daemon";
+    rootRunId?: string;
+  } = {},
 ) {
   const stopHook = flag(parsed, "stop-hook") ?? DEFAULT_STOP_HOOKS;
   const cmd = [
@@ -1845,12 +2127,15 @@ function supervisorCommand(
     Bun.argv[1],
     "--db",
     parsed.db,
-    "supervise-daemon",
+    options.commandName ?? "supervise-daemon",
     "--executor",
     "codex-resumable",
     "--stop-hook",
     stopHook,
   ];
+  if (options.rootRunId) {
+    cmd.push("--root-run-id", options.rootRunId);
+  }
   for (const name of [
     "limit",
     "concurrency",
@@ -1861,8 +2146,11 @@ function supervisorCommand(
     "parallel",
     "max-rounds",
     "max-cycles",
+    "tick-cycles",
+    "max-ticks",
     "max-tries",
     "interval-ms",
+    "idle-ms",
     "codex-bin",
     "sandbox",
     "timeout-ms",
@@ -1871,6 +2159,9 @@ function supervisorCommand(
     "cwd",
     "start-hook",
     "worktree-root",
+    "integration-target-branch",
+    "integration-push",
+    "no-integrate",
   ]) {
     const value = flag(parsed, name);
     if (value !== undefined) {
@@ -2005,8 +2296,8 @@ function worktreeForTask() {
   return (task: { id: string; worktreePath?: string | null }) => task.worktreePath ?? join(root, task.id);
 }
 
-function stopHooksByRole() {
-  const raw = flag(parsed, "stop-hook");
+function stopHooksByRole(defaultRaw?: string) {
+  const raw = flag(parsed, "stop-hook") ?? defaultRaw;
   const taskCreationHook = createTasksFromOutputHook({ harness });
   const runCreationHook = createRunsFromOutputHook({ harness });
   const goalReviewDecisionHook = createGoalReviewDecisionHook({ harness });

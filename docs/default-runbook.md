@@ -10,6 +10,14 @@ Keep the route simple:
 - Use a git worktree only when the target repository is clean or the task should be isolated.
 - If Claude Code through acpx times out, run Claude Code manually and record the result back into Ouroboros.
 
+For Ouroboros improving its own repository, the default entry point is:
+
+```bash
+orbs self-iterate-launch --parallel auto
+```
+
+That command starts the dashboard and the continuous self-improvement supervisor. It derives child-run goals from repository and run evidence, integrates verified changes locally, and waits when the repository fingerprint is unchanged.
+
 ## 1. Preflight
 
 Run this inside the target repository:
@@ -40,6 +48,14 @@ RUN_ID=$(orbs create-run \
         "worker": "claude-code",
         "verifier": "codex-resumable",
         "goal-review": "codex-resumable"
+      }
+    },
+    "modelDefaults": {
+      "global": { "model": "gpt-5.6-luna", "reasoning_effort": "high" },
+      "roles": {
+        "planner": { "model": "gpt-5.6-sol", "reasoning_effort": "high" },
+        "verifier": { "model": "gpt-5.6-sol", "reasoning_effort": "high" },
+        "goal-review": { "model": "gpt-5.6-sol", "reasoning_effort": "high" }
       }
     },
     "agentBackends": {

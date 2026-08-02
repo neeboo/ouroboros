@@ -334,9 +334,15 @@ function optionalModelPreference(record: Record<string, unknown>, index: number,
   if (typeof preferenceRecord.model !== "string" || preferenceRecord.model.trim().length === 0) {
     return undefined;
   }
-  const preference: { model: string; reason?: string } = {
+  const preference: { model: string; reasoning_effort?: string; reason?: string } = {
     model: preferenceRecord.model,
   };
+  if (preferenceRecord.reasoning_effort !== undefined) {
+    if (typeof preferenceRecord.reasoning_effort !== "string") {
+      throw new Error(`${label} ${index} modelPreference reasoning_effort must be a string`);
+    }
+    preference.reasoning_effort = preferenceRecord.reasoning_effort;
+  }
   if (preferenceRecord.reason !== undefined) {
     if (typeof preferenceRecord.reason !== "string") {
       throw new Error(`${label} ${index} modelPreference reason must be a string`);
