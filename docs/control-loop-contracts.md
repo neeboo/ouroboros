@@ -48,7 +48,7 @@ Expiry rules:
 - Conflicting signals are preserved rather than overwritten.
 - A designer cycle cites the signals it used as `evidenceRefs` on every proposal.
 
-When no trigger and no evidence-backed opportunity exists, the designer returns a cited quiescent decision. Quiescence is auditable evidence — it names which signals were inspected, why no work is justified, and when the next review cadence falls.
+When no trigger and no evidence-backed opportunity exists, the designer returns a mutation-free quiescent decision. The decision lives in the durable attempt summary and the run's exit rationale — it names which signals were inspected, why no work is justified, and when the next review cadence falls. The quiescent cycle writes no new strategy signal, no new proposal, and no design decision, so a quiet repository stays quiet rather than waking itself.
 
 ## Deterministic Budget And Human Gates
 

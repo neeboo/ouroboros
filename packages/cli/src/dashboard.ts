@@ -23,6 +23,9 @@ import {
   type ChatMessagePart,
   type ChatSessionLike,
 } from "./dashboard-messages";
+import {
+  designTimelineKindForTask as designTimelineKindForTaskHelper,
+} from "./design-status";
 
 export {
   buildChatTranscript as buildChatTranscriptForTest,
@@ -172,7 +175,7 @@ export function buildDashboardDesignTimeline(
   const stamped: Array<{ entry: DashboardDesignTimelineEntry; order: number; when: number }> = [];
   let order = 0;
   for (const task of overview.tasks) {
-    const kind = designTimelineKindForTask(task);
+    const kind = designTimelineKindForTaskHelper(task);
     if (!kind) continue;
     const session = sessionsByTaskId.get(task.id);
     const createdAt = session?.finishedAt ?? session?.startedAt ?? null;
@@ -253,25 +256,7 @@ export function buildDashboardDesignTimeline(
   return stamped.slice(0, 50).map((item) => item.entry);
 }
 
-function designTimelineKindForTask(task: {
-  role: string;
-  goal: string;
-}): DashboardDesignTimelineEntry["kind"] | null {
-  const knownRoles = new Set(["designer", "planner", "worker", "verifier", "outcome-review"]);
-  if (task.role === "repair") return "worker";
-  if (knownRoles.has(task.role)) {
-    return task.role as DashboardDesignTimelineEntry["kind"];
-  }
-  const goal = task.goal || "";
-  if (/outcome review/i.test(goal)) return "outcome-review";
-  if (/design proposal|designer/i.test(goal)) return "designer";
-  if (/plan(ned|ner)?\b/i.test(goal)) return "planner";
-  if (/implement|repair|worker/i.test(goal)) return "worker";
-  if (/verif/i.test(goal)) return "verifier";
-  return null;
-}
-
-type DashboardDesignStatusProvider = () => DashboardDesignStatusSummary | null;
+type DashboardDesignStatusProvider = (routeRunId: string) => DashboardDesignStatusSummary | null;
 
 type DashboardAutoStartRunner = (overview: RunOverview, runner: DashboardRunnerStatus | null) => boolean;
 
@@ -2264,8 +2249,45 @@ export function dashboardHtml(input: { runId: string }) {
       if (proposal) {
         lines.push('<div class="design-detail-block"><div class="design-detail-title">Proposal evidence</div>');
         lines.push('<div class="design-detail-row"><span>id</span><code>' + escapeHtml(proposal.id) + '</code></div>');
+        const problemText = proposal.proposal?.problem || (proposal as { problem?: string }).problem;
+        if (problemText) {
+          lines.push('<div class="design-detail-row"><span>problem</span><span>' + escapeHtml(problemText) + '</span></div>');
+        }
         if (proposal.summary?.recommendation) {
           lines.push('<div class="design-detail-row"><span>recommendation</span><span>' + escapeHtml(proposal.summary.recommendation) + '</span></div>');
+        }
+        if (proposal.proposal?.targetOutcome) {
+          lines.push('<div class="design-detail-row"><span>target outcome</span><span>' + escapeHtml(proposal.proposal.targetOutcome) + '</span></div>');
+        }
+        const evidenceRefs = proposal.proposal?.evidenceRefs;
+        if (Array.isArray(evidenceRefs) && evidenceRefs.length) {
+          lines.push('<div class="design-detail-row"><span>evidence refs</span><span>' + escapeHtml(evidenceRefs.join("; ")) + '</span></div>');
+        }
+        const options = proposal.proposal?.options;
+        if (Array.isArray(options) && options.length) {
+          for (const option of options) {
+            const name = option && typeof option === "object" && typeof option.name === "string" ? option.name : "(option)";
+            lines.push('<div class="design-detail-row design-detail-option"><span>option</span><span>' + escapeHtml(name) + '</span></div>');
+            const metaFields: Array<readonly [string, unknown]> = [
+              ["benefits", (option as { benefits?: unknown })?.benefits],
+              ["costs", (option as { costs?: unknown })?.costs],
+              ["risks", (option as { risks?: unknown })?.risks],
+              ["lock-in", (option as { lockIn?: unknown })?.lockIn],
+            ];
+            for (const [field, values] of metaFields) {
+              if (Array.isArray(values) && values.length) {
+                lines.push('<div class="design-detail-row design-detail-option-meta"><span>' + escapeHtml(field) + '</span><span>' + escapeHtml(values.map((value) => String(value)).join("; ")) + '</span></div>');
+              }
+            }
+          }
+        }
+        const assumptions = proposal.proposal?.assumptions;
+        if (Array.isArray(assumptions) && assumptions.length) {
+          lines.push('<div class="design-detail-row"><span>assumptions</span><span>' + escapeHtml(assumptions.join("; ")) + '</span></div>');
+        }
+        const uncertainty = proposal.proposal?.uncertainty;
+        if (Array.isArray(uncertainty) && uncertainty.length) {
+          lines.push('<div class="design-detail-row"><span>uncertainty</span><span>' + escapeHtml(uncertainty.join("; ")) + '</span></div>');
         }
         const investment = proposal.proposal?.investment;
         if (investment) {
@@ -2285,8 +2307,24 @@ export function dashboardHtml(input: { runId: string }) {
             lines.push('<div class="design-detail-row"><span>time budget</span><span>' + escapeHtml(investment.timeBudget) + '</span></div>');
           }
         }
+        const experiment = proposal.proposal?.experiment;
+        if (experiment && typeof experiment === "object") {
+          lines.push('<div class="design-detail-row design-detail-experiment"><span>experiment hypothesis</span><span>' + escapeHtml(experiment.hypothesis || "(unspecified)") + '</span></div>');
+          if (experiment.smallestTest) {
+            lines.push('<div class="design-detail-row"><span>smallest test</span><span>' + escapeHtml(experiment.smallestTest) + '</span></div>');
+          }
+          if (Array.isArray(experiment.stopConditions) && experiment.stopConditions.length) {
+            lines.push('<div class="design-detail-row"><span>stop conditions</span><span>' + escapeHtml(experiment.stopConditions.join("; ")) + '</span></div>');
+          }
+          if (experiment.rollback) {
+            lines.push('<div class="design-detail-row"><span>rollback</span><span>' + escapeHtml(experiment.rollback) + '</span></div>');
+          }
+        }
         const contract = proposal.proposal?.evaluationContract;
         if (contract) {
+          if (Array.isArray(contract.baseline) && contract.baseline.length) {
+            lines.push('<div class="design-detail-row"><span>baseline</span><span>' + escapeHtml(contract.baseline.join("; ")) + '</span></div>');
+          }
           if (Array.isArray(contract.successMetrics) && contract.successMetrics.length) {
             lines.push('<div class="design-detail-row"><span>success metrics</span><span>' + escapeHtml(contract.successMetrics.join("; ")) + '</span></div>');
           }
@@ -3599,12 +3637,6 @@ export async function handleDashboardRequest(
   );
   if (request.method === "GET" && designStatusMatch) {
     const routeRunId = decodeURIComponent(designStatusMatch[1]);
-    if (routeRunId !== input.runId) {
-      return Response.json(
-        { error: `design status is only available on the primary run ${input.runId}` },
-        { status: 404 },
-      );
-    }
     if (!input.designStatus) {
       return Response.json(
         { error: "dashboard design status is not configured" },
@@ -3613,7 +3645,7 @@ export async function handleDashboardRequest(
     }
     let snapshot: DashboardDesignStatusSummary | null;
     try {
-      snapshot = input.designStatus();
+      snapshot = input.designStatus(routeRunId);
     } catch (error) {
       return Response.json(
         { error: error instanceof Error ? error.message : String(error) },

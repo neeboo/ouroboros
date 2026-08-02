@@ -8,6 +8,11 @@ import { formatRunEvidence } from "../packages/cli/src/run-evidence";
 import { formatAttemptExplanation } from "../packages/cli/src/explain-attempt";
 import { formatRunGraph } from "../packages/cli/src/run-graph";
 import { defaultDatabasePath, parseArgs } from "../packages/cli/src/args";
+import {
+  designTimelineKindForTask,
+  isDesignTimelineTaskGoal,
+  isDesignTimelineTaskRole,
+} from "../packages/cli/src/design-status";
 import { Database } from "bun:sqlite";
 
 describe("CLI", () => {
@@ -6987,4 +6992,46 @@ describe("CLI", () => {
     }
     return null;
   }
+});
+
+describe("design timeline classification", () => {
+  test("isDesignTimelineTaskRole covers designer, planner, worker, verifier, outcome-review, and repair", () => {
+    expect(isDesignTimelineTaskRole("designer")).toBe(true);
+    expect(isDesignTimelineTaskRole("planner")).toBe(true);
+    expect(isDesignTimelineTaskRole("worker")).toBe(true);
+    expect(isDesignTimelineTaskRole("verifier")).toBe(true);
+    expect(isDesignTimelineTaskRole("outcome-review")).toBe(true);
+    expect(isDesignTimelineTaskRole("repair")).toBe(true);
+    expect(isDesignTimelineTaskRole("goal-review")).toBe(false);
+    expect(isDesignTimelineTaskRole(null)).toBe(false);
+    expect(isDesignTimelineTaskRole(undefined)).toBe(false);
+  });
+
+  test("isDesignTimelineTaskGoal catches designer, outcome review, proposal, experiment, and strategy signals", () => {
+    expect(isDesignTimelineTaskGoal("Design proposal for calm dashboard")).toBe(true);
+    expect(isDesignTimelineTaskGoal("Outcome review for proposal_123")).toBe(true);
+    expect(isDesignTimelineTaskGoal("Run experiment on inspector disclosure")).toBe(true);
+    expect(isDesignTimelineTaskGoal("Strategy signal digest")).toBe(true);
+    expect(isDesignTimelineTaskGoal("Implement worker pipeline")).toBe(true);
+    expect(isDesignTimelineTaskGoal("Verify frozen contract")).toBe(true);
+    expect(isDesignTimelineTaskGoal("Random unrelated goal")).toBe(false);
+    expect(isDesignTimelineTaskGoal("")).toBe(false);
+    expect(isDesignTimelineTaskGoal(null)).toBe(false);
+  });
+
+  test("designTimelineKindForTask maps each covered role to its first-class timeline kind", () => {
+    expect(designTimelineKindForTask({ role: "designer", goal: "anything" })).toBe("designer");
+    expect(designTimelineKindForTask({ role: "outcome-review", goal: "anything" })).toBe("outcome-review");
+    expect(designTimelineKindForTask({ role: "planner", goal: "anything" })).toBe("planner");
+    expect(designTimelineKindForTask({ role: "verifier", goal: "anything" })).toBe("verifier");
+    expect(designTimelineKindForTask({ role: "worker", goal: "anything" })).toBe("worker");
+    expect(designTimelineKindForTask({ role: "repair", goal: "anything" })).toBe("worker");
+    expect(designTimelineKindForTask({ role: "employee", goal: "designer walkthrough" })).toBe("designer");
+    expect(designTimelineKindForTask({ role: "employee", goal: "outcome review session" })).toBe("outcome-review");
+    expect(designTimelineKindForTask({ role: "employee", goal: "Plan delivery" })).toBe("planner");
+    expect(designTimelineKindForTask({ role: "employee", goal: "implement worker pipeline" })).toBe("worker");
+    expect(designTimelineKindForTask({ role: "employee", goal: "verify contract" })).toBe("verifier");
+    expect(designTimelineKindForTask({ role: "employee", goal: "Experiment with calm disclosure" })).toBe("research");
+    expect(designTimelineKindForTask({ role: "employee", goal: "Random unrelated goal" })).toBeNull();
+  });
 });

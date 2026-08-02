@@ -2870,15 +2870,14 @@ describe("dashboard", () => {
     }
   });
 
-  test("GET /api/runs/:runId/design/status returns 404 when design status is unavailable", async () => {
+  test("GET /api/runs/:runId/design/status returns 404 when design status provider is unconfigured", async () => {
     const dir = await mkdtemp(join(tmpdir(), "ouroboros-dashboard-design-status-missing-"));
     const harness = new Harness(join(dir, "ouroboros.db"));
     harness.init();
     const runId = harness.createRun({ goal: "No design state" });
-    const projectId = harness.createProject({ name: "Project", rootPath: dir });
 
     try {
-      const ownRunResponse = await handleDashboardRequest(
+      const response = await handleDashboardRequest(
         new Request(`http://localhost/api/runs/${runId}/design/status`),
         {
           runId,
@@ -2886,31 +2885,50 @@ describe("dashboard", () => {
           renderTaskPrompt: () => "",
         },
       );
-      expect(ownRunResponse.status).toBe(404);
+      expect(response.status).toBe(404);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
 
-      const otherRunResponse = await handleDashboardRequest(
-        new Request(`http://localhost/api/runs/run_other/design/status`),
+  test("GET /api/runs/:runId/design/status forwards routeRunId to the provider so historical runs resolve their own project state", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "ouroboros-dashboard-design-status-historical-"));
+    const harness = new Harness(join(dir, "ouroboros.db"));
+    harness.init();
+    const runId = harness.createRun({ goal: "Primary run" });
+    const historicalRunId = "run_history_123";
+
+    try {
+      const observed: string[] = [];
+      const response = await handleDashboardRequest(
+        new Request(`http://localhost/api/runs/${historicalRunId}/design/status`),
         {
           runId,
           overview: () => harness.getRunOverview({ runId }),
           renderTaskPrompt: () => "",
-          designStatus: () => ({
-            projectId,
-            charter: null,
-            currentProposal: null,
-            latestDecision: null,
-            budget: null,
-            authority: null,
-            nextOutcomeReview: null,
-            recentOutcomes: [],
-            recentSignals: [],
-            proposalCountsByStatus: {},
-            activeSignalCount: 0,
-            timeline: [],
-          }),
+          designStatus: (routeRunId: string) => {
+            observed.push(routeRunId);
+            return {
+              projectId: "project_history",
+              charter: null,
+              currentProposal: null,
+              latestDecision: null,
+              budget: null,
+              authority: null,
+              nextOutcomeReview: null,
+              recentOutcomes: [],
+              recentSignals: [],
+              proposalCountsByStatus: {},
+              activeSignalCount: 0,
+              timeline: [],
+            };
+          },
         },
       );
-      expect(otherRunResponse.status).toBe(404);
+      expect(response.status).toBe(200);
+      expect(observed).toEqual([historicalRunId]);
+      const body = await response.json();
+      expect(body.projectId).toBe("project_history");
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
@@ -3114,6 +3132,134 @@ describe("dashboard", () => {
       const html = dashboardHtml({ runId });
       expect(html).toContain("data-design-timeline");
       expect(html).toContain('data-timeline-order="oldest-first"');
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("dashboard designer disclosure renders expanded proposal evidence fields when present", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "ouroboros-dashboard-design-evidence-"));
+    const harness = new Harness(join(dir, "ouroboros.db"));
+    harness.init();
+    const projectId = harness.createProject({ name: "Evidence Project", rootPath: dir });
+    const runId = harness.createRun({ goal: "Render full proposal evidence", projectId });
+    const charter = harness.createFounderCharter({
+      projectId,
+      mission: "Render proposal evidence",
+      activate: true,
+      charter: {
+        mission: "Render proposal evidence",
+        capitalPolicy: {
+          currency: "USD",
+          monthlyBudget: 4000,
+          experimentBudget: 1200,
+          recurringSpendApprovalAbove: 600,
+          runwayFloorMonths: 9,
+          portfolio: { core: 70, growth: 20, exploration: 10 },
+        },
+        authority: {
+          autoResearch: true,
+          autoReversibleExperiments: false,
+          autoIntegrateVerifiedCode: false,
+          requireHumanFor: ["irreversible-spend"],
+        },
+        reviewCadenceDays: 21,
+      },
+    });
+    const proposal = harness.createDesignProposal({
+      projectId,
+      runId,
+      charterId: charter.id,
+      title: "Calm disclosure with rich evidence",
+      problem: "Designer evidence is sparse.",
+      recommendation: "Render the full proposal context.",
+      status: "experimenting",
+      proposal: {
+        problem: "Designer evidence is sparse.",
+        recommendation: "Render the full proposal context.",
+        targetOutcome: "Founders can audit designer reasoning without leaving the dashboard.",
+        evidenceRefs: ["sig_1", "retro_42"],
+        options: [
+          {
+            name: "Disclosure expansion",
+            benefits: ["single calm summary", "auditable evidence"],
+            costs: ["additional html payload"],
+            risks: ["disclosure can grow long"],
+            lockIn: ["dashboard disclosure contract"],
+          },
+        ],
+        assumptions: ["dashboard remains canvas-first"],
+        uncertainty: ["long-term surface layout"],
+        investment: {
+          reversibility: "easy",
+          portfolio: "growth",
+          oneTimeCost: 600,
+          recurringCost: 0,
+          timeBudget: "1 week",
+        },
+        experiment: {
+          hypothesis: "Disclosure expansion surfaces evidence without noise.",
+          smallestTest: "Render proposal evidence on the inspector card.",
+          stopConditions: ["render time over 250ms"],
+          rollback: "Hide the disclosure details body.",
+        },
+        evaluationContract: {
+          baseline: ["no disclosure rendered"],
+          successMetrics: ["evidence visible"],
+          guardMetrics: ["render time under 200ms"],
+          requiredEvidence: ["disclosure screenshot"],
+          reviewAt: "2026-09-01",
+        },
+      },
+    });
+
+    try {
+      const designStatus = {
+        projectId,
+        charter: { ...charter, summary: { mission: charter.mission, version: charter.version, reviewCadenceDays: charter.charter.reviewCadenceDays } },
+        currentProposal: { ...proposal, summary: { title: proposal.title, status: proposal.status, recommendation: proposal.recommendation } },
+        latestDecision: null,
+        budget: charter.charter.capitalPolicy ?? null,
+        authority: charter.charter.authority ?? null,
+        nextOutcomeReview: null,
+        recentOutcomes: [],
+        recentSignals: [],
+        proposalCountsByStatus: { experimenting: 1 },
+        activeSignalCount: 0,
+        timeline: [],
+      };
+      const response = await handleDashboardRequest(
+        new Request(`http://localhost/api/runs/${runId}/design/status`),
+        {
+          runId,
+          overview: () => harness.getRunOverview({ runId }),
+          renderTaskPrompt: () => "",
+          designStatus: () => designStatus,
+        },
+      );
+      expect(response.status).toBe(200);
+      const html = dashboardHtml({ runId });
+      expect(html).toContain("data-design-details");
+      // The dashboard design details builder runs in the browser. The static HTML must
+      // carry the JS source that emits each expanded evidence field, recognized by the
+      // unique span labels and meta-field names the builder loops over.
+      expect(html).toContain('<span>problem</span>');
+      expect(html).toContain('<span>target outcome</span>');
+      expect(html).toContain('<span>evidence refs</span>');
+      expect(html).toContain('<span>option</span>');
+      expect(html).toContain('"benefits"');
+      expect(html).toContain('"costs"');
+      expect(html).toContain('"risks"');
+      expect(html).toContain('"lock-in"');
+      expect(html).toContain('<span>assumptions</span>');
+      expect(html).toContain('<span>uncertainty</span>');
+      expect(html).toContain("experiment hypothesis");
+      expect(html).toContain('<span>smallest test</span>');
+      expect(html).toContain('<span>stop conditions</span>');
+      expect(html).toContain('<span>rollback</span>');
+      expect(html).toContain('<span>baseline</span>');
+      // Verify the proposal evidence block title is present.
+      expect(html).toContain("Proposal evidence");
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

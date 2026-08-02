@@ -107,7 +107,7 @@ orbs self-iterate-launch \
   --start-hook git-worktree
 ```
 
-The root run starts with a `designer` task that reads the active founder charter, strategy signals, lessons, run evidence, and due outcome reviews. The designer emits one evidence-backed proposal (with a frozen evaluation contract) or a cited quiescent decision. Accepted low-risk proposals create a child planner run automatically; high-risk proposals block on a human `decideDesign`. Implemented proposals move into outcome review after verified integration. Ouroboros waits when the evidence does not justify another change.
+The root run starts with a `designer` task that reads the active founder charter, strategy signals, lessons, run evidence, and due outcome reviews. The designer emits one evidence-backed proposal (with a frozen evaluation contract) or a mutation-free quiescent decision whose rationale lives in the attempt summary. Accepted low-risk proposals create a child planner run automatically; high-risk proposals block on a human `decideDesign`. Implemented proposals move into outcome review after verified integration. Ouroboros waits when the evidence does not justify another change.
 
 Open:
 

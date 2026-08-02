@@ -279,7 +279,7 @@ Supported backend kinds are `acpx`, `codex-cli`, `codex-resumable`, and `noop`. 
 
 Runs may be bound to a project by `project_id`, or by a project root path that creates/reuses a matching `projects.root_path` row. Old databases keep `runs.project_id` nullable, and existing `context_json` remains compatible.
 
-The CLI exposes `self-iterate-launch` as the autonomous self-improvement entry point. It creates a root assessment run, starts the dashboard, and launches `self-improve-daemon`. The root run starts with a `designer` task. The designer reads the active founder charter, strategy signals, lessons, run evidence, and due outcome reviews, then emits one evidence-backed proposal (with a frozen evaluation contract) or a cited quiescent decision through fixed actions. Accepted low-risk proposals create a child planner run automatically; high-risk proposals block on a human `decideDesign`. Implemented proposals move into outcome review after verified integration. The daemon supervises the full run tree, integrates verified changes locally, and creates another assessment only after the repository fingerprint changes. An unchanged fingerprint leaves the controller quiescent. The launch defaults to automatic parallelism, `--worktree-root .ouroboros/worktrees`, and `--start-hook git-worktree`.
+The CLI exposes `self-iterate-launch` as the autonomous self-improvement entry point. It creates a root assessment run, starts the dashboard, and launches `self-improve-daemon`. The root run starts with a `designer` task. The designer reads the active founder charter, strategy signals, lessons, run evidence, and due outcome reviews, then emits one evidence-backed proposal (with a frozen evaluation contract) or a mutation-free quiescent decision whose rationale lives in the attempt summary. Accepted low-risk proposals create a child planner run automatically; high-risk proposals block on a human `decideDesign`. Implemented proposals move into outcome review after verified integration. The daemon supervises the full run tree, integrates verified changes locally, and creates another assessment only after the repository fingerprint changes. An unchanged fingerprint leaves the controller quiescent. The launch defaults to automatic parallelism, `--worktree-root .ouroboros/worktrees`, and `--start-hook git-worktree`.
 
 ## Designer Control Plane
 
@@ -382,7 +382,7 @@ Proposals outside automatic authority block on a human `decideDesign`. The propo
 
 ### Quiescence
 
-When no trigger and no evidence-backed opportunity exists, the designer records a cited quiescent decision through `recordSignal` (with `signalClass = "system"` and a short summary that names which signals were inspected and why no work is justified) and stops. A quiescent decision is auditable evidence — the dashboard and CLI surface it alongside active proposals, and the next cycle uses it as baseline evidence.
+When no trigger and no evidence-backed opportunity exists, the designer writes no design actions. The run exits with `decision = "exit"`, the attempt summary carries the rationale (which signals were inspected, why no work is justified, and when the next review cadence falls), and no new strategy signal, proposal, or design decision is recorded. Quiescence is therefore mutation-free durable evidence — it cannot wake the loop on its own, and the dashboard and CLI surface it through the attempt summary rather than as a fresh strategy signal.
 
 ### Outcome loop
 

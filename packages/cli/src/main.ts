@@ -2257,7 +2257,7 @@ function createDashboardRuntime(input: {
         };
       },
     },
-    designStatus: () => buildDashboardDesignStatus(input.runId),
+    designStatus: (routeRunId: string) => buildDashboardDesignStatus(routeRunId),
   });
   const shutdown = once(() => {
     stopRunner();
@@ -2378,10 +2378,7 @@ function designStatusJson(
 
 function buildDashboardDesignStatus(runId: string): DashboardDesignStatusSummary | null {
   const run = harness.getRun(runId);
-  if (!run) {
-    return null;
-  }
-  const projectId = run.projectId ?? resolveImplicitDesignProjectId();
+  const projectId = run?.projectId ?? resolveImplicitDesignProjectId();
   if (!projectId) {
     return null;
   }

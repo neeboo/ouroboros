@@ -2,7 +2,7 @@
 
 Ouroboros owns the goals in this loop. The human supplies the durable mission and safety boundaries once; each cycle derives its own concrete improvement goal from repository state, run evidence, verifier results, lessons, and operational failures.
 
-The default route is Designer-first. A root run starts with a `designer` task that reads the active founder charter, strategy signals, lessons, run evidence, and due outcome reviews. The designer emits one evidence-backed proposal (with a frozen evaluation contract) or a cited quiescent decision through fixed actions. Accepted low-risk proposals create a child planner run automatically; high-risk proposals block on a human `decideDesign`. Implemented proposals move into outcome review after verified integration. Ouroboros waits when the evidence does not justify another change.
+The default route is Designer-first. A root run starts with a `designer` task that reads the active founder charter, strategy signals, lessons, run evidence, and due outcome reviews. The designer emits one evidence-backed proposal (with a frozen evaluation contract) or a mutation-free quiescent decision whose rationale lives in the attempt summary. Accepted low-risk proposals create a child planner run automatically; high-risk proposals block on a human `decideDesign`. Implemented proposals move into outcome review after verified integration. Ouroboros waits when the evidence does not justify another change.
 
 ## Default Command
 
@@ -17,7 +17,7 @@ This starts the dashboard and `self-improve-daemon`. Use `orbs self-iterate` onl
 The loop has three levels:
 
 1. The root run is the durable history anchor and carries the self-improvement mission, role routing, model defaults, guardrails, repository fingerprint, and the active founder charter.
-2. A designer cycle inspects current evidence and emits at most one evidence-backed proposal (or a cited quiescent decision) through fixed actions. Accepted low-risk proposals spawn a child planner run via `createRunsFromDesign`.
+2. A designer cycle inspects current evidence and emits at most one evidence-backed proposal (or a mutation-free quiescent decision recorded in the attempt summary). Accepted low-risk proposals spawn a child planner run via `createRunsFromDesign`.
 3. The child run plans worker and verifier tasks, executes them in isolated worktrees when configured, repairs failures, runs goal review, integrates verified changes, and creates a bounded `outcome-review` task that records `retain`/`revise`/`retire`.
 
 After the run tree drains, the daemon compares the repository fingerprint with the fingerprint used by the last designer cycle:
@@ -45,7 +45,7 @@ It returns one of the following through fixed actions:
 
 - `recordSignal` to capture a fresh sourced observation with confidence, evidence, and expiry;
 - `proposeDesign` with options, recommendation, evaluation contract, and investment shape — the proposal is the only path to a child planner run;
-- a cited quiescent decision (recorded as a `system` strategy signal) when no evidence justifies new work.
+- a mutation-free quiescent decision (no `recordSignal`, no `proposeDesign`) when no evidence justifies new work. The rationale lives in the attempt summary so the loop stays asleep.
 
 The authority evaluator applies the active charter before any scoring. Automatic authority is limited to reversible experiments inside the experiment budget that cite current (non-expired) evidence and do not cross a mission, capital, legal, privacy, destructive, production, dependency, schema, or infrastructure-commitment checkpoint. Everything else blocks on a human `decideDesign`.
 

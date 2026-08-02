@@ -9,7 +9,7 @@ For normal project work, follow `docs/default-runbook.md` first. The default rou
 The Designer-first control plane is the default operating mode. A run starts with a `designer` task that reads the active founder charter, strategy signals, lessons, run evidence, and due outcome reviews. The designer emits one of:
 
 - an evidence-backed `proposeDesign` action with a frozen evaluation contract;
-- a cited quiescent decision when no signal justifies new work;
+- a mutation-free quiescent decision (no design actions) when no signal justifies new work — the rationale lives in the attempt summary;
 - a `recordSignal` action that captures fresh evidence for a later cycle.
 
 Planner runs only start from accepted proposals. A high-risk proposal that has not passed its authority gate cannot create delivery runs by writing prompt prose — the fixed `createRunsFromDesign` action reads the stored accepted proposal and copies the frozen contract into the child run context.
@@ -60,7 +60,7 @@ The designer may propose a charter amendment. The proposal records the diff and 
 
 Every strategy signal records its source, observation time, confidence, evidence, and expiry. Expired market, pricing, and model claims cannot authorize a new investment until refreshed. Conflicting signals are preserved rather than overwritten.
 
-When no trigger and no evidence-backed opportunity exists, the designer returns a cited quiescent decision. A quiescent decision is not silence: it is an auditable record that names which signals were inspected, why no work is justified, and when the next review cadence falls.
+When no trigger and no evidence-backed opportunity exists, the designer returns a mutation-free quiescent decision. The rationale lives in the durable attempt summary and the run's exit reason — it names which signals were inspected, why no work is justified, and when the next review cadence falls. The quiescent cycle writes no new strategy signal, proposal, or design decision, so a quiet repository stays quiet rather than waking itself.
 
 ## Outcome Review
 

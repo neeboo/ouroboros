@@ -10,6 +10,52 @@ const MAX_LINE_CHARS = 200;
 const MAX_SUMMARY_CHARS = 160;
 const SHORT_ID_LENGTH = 12;
 
+export type DesignTimelineEntryKind =
+  | "designer"
+  | "outcome-review"
+  | "research"
+  | "planner"
+  | "decision"
+  | "worker"
+  | "verifier";
+
+const DESIGN_TIMELINE_TASK_GOAL_PATTERN =
+  /designer|outcome review|design proposal|experiment|proposal|strategy signal|implement|repair|worker|verif/i;
+
+const DESIGN_TIMELINE_KNOWN_ROLES = new Set([
+  "designer",
+  "planner",
+  "worker",
+  "verifier",
+  "outcome-review",
+]);
+
+export function isDesignTimelineTaskRole(role: string | null | undefined): boolean {
+  return typeof role === "string" && (DESIGN_TIMELINE_KNOWN_ROLES.has(role) || role === "repair");
+}
+
+export function isDesignTimelineTaskGoal(goal: string | null | undefined): boolean {
+  return typeof goal === "string" && DESIGN_TIMELINE_TASK_GOAL_PATTERN.test(goal);
+}
+
+export function designTimelineKindForTask(task: {
+  role: string | null;
+  goal: string;
+}): DesignTimelineEntryKind | null {
+  if (task.role === "repair") return "worker";
+  if (typeof task.role === "string" && DESIGN_TIMELINE_KNOWN_ROLES.has(task.role)) {
+    return task.role as DesignTimelineEntryKind;
+  }
+  const goal = task.goal || "";
+  if (/outcome review/i.test(goal)) return "outcome-review";
+  if (/designer|design proposal/i.test(goal)) return "designer";
+  if (/plan(ned|ner)?\b/i.test(goal)) return "planner";
+  if (/verif/i.test(goal)) return "verifier";
+  if (/implement|repair|worker/i.test(goal)) return "worker";
+  if (DESIGN_TIMELINE_TASK_GOAL_PATTERN.test(goal)) return "research";
+  return null;
+}
+
 export interface DesignStatusSummary {
   charter: FounderCharter | null;
   currentProposal: DesignProposal | null;

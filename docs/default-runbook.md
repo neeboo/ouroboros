@@ -6,7 +6,7 @@ Keep the route Designer-first:
 
 - `designer`, `planner`, `verifier`, `outcome-review`, and `goal-review` use `codex-resumable`.
 - `worker` uses `claude-code`.
-- A root run starts with a `designer` task that reads the active founder charter, strategy signals, lessons, run evidence, and due outcome reviews. It emits one evidence-backed proposal (with a frozen evaluation contract) or a cited quiescent decision.
+- A root run starts with a `designer` task that reads the active founder charter, strategy signals, lessons, run evidence, and due outcome reviews. It emits one evidence-backed proposal (with a frozen evaluation contract) or a mutation-free quiescent decision (no signal, no proposal — the rationale lives in the attempt summary).
 - Accepted low-risk proposals create a child planner run automatically; high-risk proposals block on a human `decideDesign`.
 - Use the current worktree when the target repository already has relevant uncommitted changes.
 - Use a git worktree only when the target repository is clean or the task should be isolated.
