@@ -111,6 +111,16 @@ import { readableList, readableValue } from "./readable";
 
 const ATTEMPT_EVENT_BUSY_RETRIES = 5;
 
+// Production callers that own a transaction may pass these optional filters to
+// find prior audit rows deterministically. Public callers see no change.
+interface ListHarnessActionEventsWithDbInput extends ListHarnessActionEventsInput {
+  actionType?: string;
+  statuses?: Array<"done" | "blocked">;
+  requestType?: string;
+  requestRunId?: string;
+  requestTaskId?: string;
+}
+
 export class Harness {
   readonly dbPath: string;
 
@@ -1001,30 +1011,66 @@ export class Harness {
   }
 
   listHarnessActionEvents(input: ListHarnessActionEventsInput = {}) {
-    return withDatabase(this.dbPath, (db) => {
-      ensureHarnessActionEvents(db);
-      const rows = db
-        .query(
-          `
-          select *
-          from harness_action_events
-          order by rowid desc
-          limit $limit
-          `,
-        )
-        .all({ $limit: input.limit ?? 50 }) as HarnessActionEventRow[];
-      return rows.map(harnessActionEventFromRow);
-    });
+    return withDatabase(this.dbPath, (db) => this.listHarnessActionEventsWithDb(db, input));
+  }
+
+  listHarnessActionEventsWithDb(db: HarnessDatabase, input: ListHarnessActionEventsWithDbInput = {}) {
+    ensureHarnessActionEvents(db);
+    // Preserve the original public semantics: `input.limit ?? 50`. Callers that
+    // explicitly pass `0` receive an empty list (SQLite `LIMIT 0`), matching the
+    // behavior the public method exposed before the WithDb split. Other list
+    // helpers (`listStrategySignals`, `listDesignProposals`) keep their own
+    // positive-integer normalization unchanged.
+    const limit = input.limit ?? 50;
+    const where: string[] = [];
+    const bindings: Record<string, string | number> = { $limit: limit };
+    if (input.actionType) {
+      where.push("action_type = $actionType");
+      bindings.$actionType = input.actionType;
+    }
+    if (input.statuses && input.statuses.length > 0) {
+      where.push(`status in (${input.statuses.map((_, index) => `$status${index}`).join(", ")})`);
+      for (const [index, status] of input.statuses.entries()) {
+        bindings[`$status${index}`] = status;
+      }
+    }
+    if (input.requestType) {
+      where.push("json_extract(request_json, '$.type') = $requestType");
+      bindings.$requestType = input.requestType;
+    }
+    if (input.requestRunId) {
+      where.push("json_extract(request_json, '$.runId') = $requestRunId");
+      bindings.$requestRunId = input.requestRunId;
+    }
+    if (input.requestTaskId) {
+      where.push("json_extract(request_json, '$.taskId') = $requestTaskId");
+      bindings.$requestTaskId = input.requestTaskId;
+    }
+    const whereClause = where.length > 0 ? `where ${where.join(" and ")}` : "";
+    const rows = db
+      .query(
+        `
+        select *
+        from harness_action_events
+        ${whereClause}
+        order by rowid desc
+        limit $limit
+        `,
+      )
+      .all(bindings) as HarnessActionEventRow[];
+    return rows.map(harnessActionEventFromRow);
   }
 
   getHarnessActionEvent(input: GetHarnessActionEventInput) {
-    return withDatabase(this.dbPath, (db) => {
-      ensureHarnessActionEvents(db);
-      const row = db.query("select * from harness_action_events where id = $id").get({ $id: input.id }) as
-        | HarnessActionEventRow
-        | null;
-      return row ? harnessActionEventFromRow(row) : null;
-    });
+    return withDatabase(this.dbPath, (db) => this.getHarnessActionEventWithDb(db, input));
+  }
+
+  getHarnessActionEventWithDb(db: HarnessDatabase, input: GetHarnessActionEventInput) {
+    ensureHarnessActionEvents(db);
+    const row = db.query("select * from harness_action_events where id = $id").get({ $id: input.id }) as
+      | HarnessActionEventRow
+      | null;
+    return row ? harnessActionEventFromRow(row) : null;
   }
 
   upsertExecutionThread(input: UpsertExecutionThreadInput) {
@@ -1493,31 +1539,35 @@ export class Harness {
   }
 
   getFounderCharter(input: GetFounderCharterInput) {
-    return withDatabase(this.dbPath, (db) => {
-      ensureStrategyTables(db);
-      const row = db
-        .query("select * from founder_charters where id = $id")
-        .get({ $id: input.id }) as FounderCharterRow | null;
-      return row ? founderCharterFromRow(row) : null;
-    });
+    return withDatabase(this.dbPath, (db) => this.getFounderCharterWithDb(db, input));
+  }
+
+  getFounderCharterWithDb(db: HarnessDatabase, input: GetFounderCharterInput) {
+    ensureStrategyTables(db);
+    const row = db
+      .query("select * from founder_charters where id = $id")
+      .get({ $id: input.id }) as FounderCharterRow | null;
+    return row ? founderCharterFromRow(row) : null;
   }
 
   getActiveFounderCharter(input: GetActiveFounderCharterInput) {
-    return withDatabase(this.dbPath, (db) => {
-      ensureStrategyTables(db);
-      const row = db
-        .query(
-          `
-          select *
-          from founder_charters
-          where project_id is $projectId and is_active = 1
-          order by version desc, created_at desc
-          limit 1
-          `,
-        )
-        .get({ $projectId: input.projectId }) as FounderCharterRow | null;
-      return row ? founderCharterFromRow(row) : null;
-    });
+    return withDatabase(this.dbPath, (db) => this.getActiveFounderCharterWithDb(db, input));
+  }
+
+  getActiveFounderCharterWithDb(db: HarnessDatabase, input: GetActiveFounderCharterInput) {
+    ensureStrategyTables(db);
+    const row = db
+      .query(
+        `
+        select *
+        from founder_charters
+        where project_id is $projectId and is_active = 1
+        order by version desc, created_at desc
+        limit 1
+        `,
+      )
+      .get({ $projectId: input.projectId }) as FounderCharterRow | null;
+    return row ? founderCharterFromRow(row) : null;
   }
 
   listFounderCharters(input: ListFounderChartersInput) {
@@ -1592,49 +1642,53 @@ export class Harness {
   }
 
   getStrategySignal(input: GetStrategySignalInput) {
-    return withDatabase(this.dbPath, (db) => {
-      ensureStrategyTables(db);
-      const row = db
-        .query("select * from strategy_signals where id = $id")
-        .get({ $id: input.id }) as StrategySignalRow | null;
-      return row ? strategySignalFromRow(row) : null;
-    });
+    return withDatabase(this.dbPath, (db) => this.getStrategySignalWithDb(db, input));
+  }
+
+  getStrategySignalWithDb(db: HarnessDatabase, input: GetStrategySignalInput) {
+    ensureStrategyTables(db);
+    const row = db
+      .query("select * from strategy_signals where id = $id")
+      .get({ $id: input.id }) as StrategySignalRow | null;
+    return row ? strategySignalFromRow(row) : null;
   }
 
   listStrategySignals(input: ListStrategySignalsInput = {}) {
-    return withDatabase(this.dbPath, (db) => {
-      ensureStrategyTables(db);
-      const limit = input.limit && input.limit > 0 ? Math.floor(input.limit) : 100;
-      const where: string[] = [];
-      const bindings: Record<string, string | number> = { $limit: limit };
-      if (input.projectId) {
-        where.push("project_id is $projectId");
-        bindings.$projectId = input.projectId;
+    return withDatabase(this.dbPath, (db) => this.listStrategySignalsWithDb(db, input));
+  }
+
+  listStrategySignalsWithDb(db: HarnessDatabase, input: ListStrategySignalsInput = {}) {
+    ensureStrategyTables(db);
+    const limit = input.limit && input.limit > 0 ? Math.floor(input.limit) : 100;
+    const where: string[] = [];
+    const bindings: Record<string, string | number> = { $limit: limit };
+    if (input.projectId) {
+      where.push("project_id is $projectId");
+      bindings.$projectId = input.projectId;
+    }
+    if (input.signalClass) {
+      where.push("signal_class = $signalClass");
+      bindings.$signalClass = input.signalClass;
+    }
+    if (input.statuses && input.statuses.length > 0) {
+      where.push(`status in (${input.statuses.map((_, index) => `$status${index}`).join(", ")})`);
+      for (const [index, status] of input.statuses.entries()) {
+        bindings[`$status${index}`] = status;
       }
-      if (input.signalClass) {
-        where.push("signal_class = $signalClass");
-        bindings.$signalClass = input.signalClass;
-      }
-      if (input.statuses && input.statuses.length > 0) {
-        where.push(`status in (${input.statuses.map((_, index) => `$status${index}`).join(", ")})`);
-        for (const [index, status] of input.statuses.entries()) {
-          bindings[`$status${index}`] = status;
-        }
-      }
-      const whereClause = where.length > 0 ? `where ${where.join(" and ")}` : "";
-      const rows = db
-        .query(
-          `
-          select *
-          from strategy_signals
-          ${whereClause}
-          order by observation_time desc, created_at desc, id desc
-          limit $limit
-          `,
-        )
-        .all(bindings) as StrategySignalRow[];
-      return rows.map(strategySignalFromRow);
-    });
+    }
+    const whereClause = where.length > 0 ? `where ${where.join(" and ")}` : "";
+    const rows = db
+      .query(
+        `
+        select *
+        from strategy_signals
+        ${whereClause}
+        order by observation_time desc, created_at desc, id desc
+        limit $limit
+        `,
+      )
+      .all(bindings) as StrategySignalRow[];
+    return rows.map(strategySignalFromRow);
   }
 
   createDesignProposal(input: CreateDesignProposalInput) {
@@ -1708,35 +1762,37 @@ export class Harness {
   }
 
   listDesignProposals(input: ListDesignProposalsInput = {}) {
-    return withDatabase(this.dbPath, (db) => {
-      ensureStrategyTables(db);
-      const limit = input.limit && input.limit > 0 ? Math.floor(input.limit) : 100;
-      const where: string[] = [];
-      const bindings: Record<string, string | number> = { $limit: limit };
-      if (input.projectId) {
-        where.push("project_id is $projectId");
-        bindings.$projectId = input.projectId;
+    return withDatabase(this.dbPath, (db) => this.listDesignProposalsWithDb(db, input));
+  }
+
+  listDesignProposalsWithDb(db: HarnessDatabase, input: ListDesignProposalsInput = {}) {
+    ensureStrategyTables(db);
+    const limit = input.limit && input.limit > 0 ? Math.floor(input.limit) : 100;
+    const where: string[] = [];
+    const bindings: Record<string, string | number> = { $limit: limit };
+    if (input.projectId) {
+      where.push("project_id is $projectId");
+      bindings.$projectId = input.projectId;
+    }
+    if (input.statuses && input.statuses.length > 0) {
+      where.push(`status in (${input.statuses.map((_, index) => `$status${index}`).join(", ")})`);
+      for (const [index, status] of input.statuses.entries()) {
+        bindings[`$status${index}`] = status;
       }
-      if (input.statuses && input.statuses.length > 0) {
-        where.push(`status in (${input.statuses.map((_, index) => `$status${index}`).join(", ")})`);
-        for (const [index, status] of input.statuses.entries()) {
-          bindings[`$status${index}`] = status;
-        }
-      }
-      const whereClause = where.length > 0 ? `where ${where.join(" and ")}` : "";
-      const rows = db
-        .query(
-          `
-          select *
-          from design_proposals
-          ${whereClause}
-          order by created_at desc, id desc
-          limit $limit
-          `,
-        )
-        .all(bindings) as DesignProposalRow[];
-      return rows.map(designProposalFromRow);
-    });
+    }
+    const whereClause = where.length > 0 ? `where ${where.join(" and ")}` : "";
+    const rows = db
+      .query(
+        `
+        select *
+        from design_proposals
+        ${whereClause}
+        order by created_at desc, id desc
+        limit $limit
+        `,
+      )
+      .all(bindings) as DesignProposalRow[];
+    return rows.map(designProposalFromRow);
   }
 
   recordDesignDecision(input: RecordDesignDecisionInput) {

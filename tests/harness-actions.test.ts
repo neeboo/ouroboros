@@ -10,6 +10,8 @@ import {
   Harness,
   HARD_AUTHORITY_RULES,
   isHardAuthorityReason,
+  withDatabase,
+  type HarnessDatabase,
   type SubsessionRunner,
   type SubsessionRunnerCancelChild,
   type SubsessionRunnerCollectChild,
@@ -2312,6 +2314,405 @@ describe("Harness actions", () => {
     }));
     expect(thread?.status).toBe("interrupted");
     expect(thread?.interruptReason).toBe("parent stopping");
+  });
+});
+
+describe("Harness transition reads", () => {
+  let dir: string;
+  let harness: Harness;
+
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), "ouroboros-transition-reads-"));
+    harness = new Harness(join(dir, "ouroboros.db"));
+    harness.init();
+  });
+
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  function seedProject(): string {
+    return harness.createProject({ name: "ouroboros", rootPath: dir });
+  }
+
+  function seedCharter(projectId: string, mission: string, activate = true): string {
+    const charter = harness.createFounderCharter({
+      projectId,
+      mission,
+      charter: {
+        mission,
+        capitalPolicy: {
+          currency: "USD",
+          experimentBudget: 1000,
+          recurringSpendApprovalAbove: 100,
+          portfolio: { core: 5, growth: 3, exploration: 2 },
+        },
+        authority: {
+          autoResearch: true,
+          autoReversibleExperiments: true,
+          requireHumanFor: [],
+        },
+      },
+      activate,
+    });
+    return charter.id;
+  }
+
+  function seedSignal(projectId: string, observationTime: string, status: "active" | "expired" = "active"): string {
+    const signal = harness.createStrategySignal({
+      projectId,
+      signalClass: "delivery",
+      source: "verifier",
+      title: `Signal ${observationTime}`,
+      summary: "Cycle time observation.",
+      observationTime,
+      confidence: 0.6,
+      evidence: [],
+      status,
+      expiresAt: status === "expired" ? "2020-01-01T00:00:00.000Z" : null,
+    });
+    return signal.id;
+  }
+
+  function seedProposal(projectId: string, charterId: string, title: string, status: "draft" | "proposed" | "accepted"): string {
+    const proposal = harness.createDesignProposal({
+      projectId,
+      charterId,
+      title,
+      problem: "Problem statement.",
+      recommendation: "Recommendation.",
+      proposal: {
+        problem: "Problem statement.",
+        recommendation: "Recommendation.",
+        evaluationContract: {
+          baseline: [],
+          successMetrics: ["metric"],
+          guardMetrics: [],
+          requiredEvidence: ["evidence"],
+          reviewAt: "2026-09-01T00:00:00.000Z",
+        },
+        investment: {
+          reversibility: "easy",
+          portfolio: "core",
+          oneTimeCost: 0,
+          recurringCost: 0,
+        },
+        evidenceRefs: ["sig_a"],
+      },
+      status,
+    });
+    return proposal.id;
+  }
+
+  function seedActionEvent(
+    actionType: string,
+    request: Record<string, unknown>,
+    status: "done" | "blocked" = "done",
+  ): string {
+    return harness.recordHarnessActionEvent({
+      actionType,
+      status,
+      request,
+      result: { ok: true },
+    });
+  }
+
+  test("getActiveFounderCharter and WithDb agree on the active charter and ordering", () => {
+    const projectId = seedProject();
+    const first = seedCharter(projectId, "First charter");
+    const second = seedCharter(projectId, "Second charter");
+
+    expect(harness.getActiveFounderCharter({ projectId })?.id).toBe(second);
+
+    const viaPublic = harness.getActiveFounderCharter({ projectId });
+    const viaWithDb = withDatabase(harness.dbPath, (db) =>
+      harness.getActiveFounderCharterWithDb(db, { projectId }),
+    );
+    expect(viaWithDb).toEqual(viaPublic);
+    expect(viaWithDb?.id).toBe(second);
+    expect(first).not.toBe(second);
+  });
+
+  test("getActiveFounderCharterWithDb returns null when no charter is active", () => {
+    const projectId = seedProject();
+    seedCharter(projectId, "Dormant charter", false);
+
+    expect(harness.getActiveFounderCharter({ projectId })).toBeNull();
+    expect(
+      withDatabase(harness.dbPath, (db) => harness.getActiveFounderCharterWithDb(db, { projectId })),
+    ).toBeNull();
+  });
+
+  test("getFounderCharter and WithDb agree for a pinned charter id", () => {
+    const projectId = seedProject();
+    const charterId = seedCharter(projectId, "Pinned charter");
+
+    const viaPublic = harness.getFounderCharter({ id: charterId });
+    const viaWithDb = withDatabase(harness.dbPath, (db) =>
+      harness.getFounderCharterWithDb(db, { id: charterId }),
+    );
+    expect(viaWithDb).toEqual(viaPublic);
+    expect(viaWithDb?.id).toBe(charterId);
+  });
+
+  test("getFounderCharterWithDb returns null for an unknown id and matches public behavior", () => {
+    const viaPublic = harness.getFounderCharter({ id: "charter_missing" });
+    const viaWithDb = withDatabase(harness.dbPath, (db) =>
+      harness.getFounderCharterWithDb(db, { id: "charter_missing" }),
+    );
+    expect(viaPublic).toBeNull();
+    expect(viaWithDb).toBeNull();
+  });
+
+  test("getStrategySignal and WithDb agree on the resolved signal", () => {
+    const projectId = seedProject();
+    const signalId = seedSignal(projectId, "2026-08-01T00:00:00.000Z");
+
+    const viaPublic = harness.getStrategySignal({ id: signalId });
+    const viaWithDb = withDatabase(harness.dbPath, (db) =>
+      harness.getStrategySignalWithDb(db, { id: signalId }),
+    );
+    expect(viaWithDb).toEqual(viaPublic);
+    expect(viaWithDb?.id).toBe(signalId);
+  });
+
+  test("listStrategySignals and WithDb agree on filtering and ordering", () => {
+    const projectId = seedProject();
+    const active = seedSignal(projectId, "2026-08-01T00:00:00.000Z", "active");
+    seedSignal(projectId, "2026-07-01T00:00:00.000Z", "expired");
+
+    const viaPublic = harness.listStrategySignals({ projectId, statuses: ["active"] });
+    const viaWithDb = withDatabase(harness.dbPath, (db) =>
+      harness.listStrategySignalsWithDb(db, { projectId, statuses: ["active"] }),
+    );
+    expect(viaWithDb).toEqual(viaPublic);
+    expect(viaWithDb.map((signal) => signal.id)).toEqual([active]);
+  });
+
+  test("listDesignProposals and WithDb agree on filtering and ordering", () => {
+    const projectId = seedProject();
+    const charterId = seedCharter(projectId, "Charter for proposals");
+    const accepted = seedProposal(projectId, charterId, "Accepted proposal", "accepted");
+    const draft = seedProposal(projectId, charterId, "Draft proposal", "draft");
+
+    const viaPublic = harness.listDesignProposals({ projectId });
+    const viaWithDb = withDatabase(harness.dbPath, (db) =>
+      harness.listDesignProposalsWithDb(db, { projectId }),
+    );
+    expect(viaWithDb).toEqual(viaPublic);
+    expect(new Set(viaWithDb.map((proposal) => proposal.id))).toEqual(new Set([draft, accepted]));
+
+    const acceptedPublic = harness.listDesignProposals({ projectId, statuses: ["accepted"] });
+    const acceptedWithDb = withDatabase(harness.dbPath, (db) =>
+      harness.listDesignProposalsWithDb(db, { projectId, statuses: ["accepted"] }),
+    );
+    expect(acceptedWithDb).toEqual(acceptedPublic);
+    expect(acceptedWithDb.map((proposal) => proposal.id)).toEqual([accepted]);
+  });
+
+  test("listHarnessActionEvents and WithDb agree on rowid-desc ordering and limit", () => {
+    const first = seedActionEvent("design.recordSignal", { type: "recordSignal", runId: "run_a", taskId: "task_a" });
+    const second = seedActionEvent("design.proposeDesign", { type: "proposeDesign", runId: "run_a", taskId: "task_a" });
+    const third = seedActionEvent("design.recordSignal", { type: "recordSignal", runId: "run_b", taskId: "task_b" });
+
+    const viaPublic = harness.listHarnessActionEvents({ limit: 2 });
+    const viaWithDb = withDatabase(harness.dbPath, (db) =>
+      harness.listHarnessActionEventsWithDb(db, { limit: 2 }),
+    );
+    expect(viaWithDb).toEqual(viaPublic);
+    expect(viaWithDb.map((event) => event.id)).toEqual([third, second]);
+
+    const allPublic = harness.listHarnessActionEvents();
+    const allWithDb = withDatabase(harness.dbPath, (db) => harness.listHarnessActionEventsWithDb(db));
+    expect(allWithDb).toEqual(allPublic);
+    expect(allWithDb.map((event) => event.id)).toEqual([third, second, first]);
+  });
+
+  test("listHarnessActionEvents preserves the public limit: 0 contract", () => {
+    seedActionEvent("design.recordSignal", { type: "recordSignal", runId: "run_a", taskId: "task_a" });
+
+    // Public callers that explicitly pass `limit: 0` must receive an empty list.
+    // SQLite `LIMIT 0` returns no rows; we must not silently substitute the
+    // default. The WithDb variant shares this contract so production
+    // coordinators reading inside a transaction see the same shape.
+    expect(harness.listHarnessActionEvents({ limit: 0 })).toEqual([]);
+    expect(
+      withDatabase(harness.dbPath, (db) => harness.listHarnessActionEventsWithDb(db, { limit: 0 })),
+    ).toEqual([]);
+
+    // Default still applies when limit is omitted entirely.
+    expect(harness.listHarnessActionEvents()).toHaveLength(1);
+    expect(withDatabase(harness.dbPath, (db) => harness.listHarnessActionEventsWithDb(db))).toHaveLength(1);
+  });
+
+  test("listHarnessActionEventsWithDb resolves prior audit rows by action type and request shape", () => {
+    seedActionEvent("design.recordSignal", { type: "recordSignal", runId: "run_a", taskId: "task_a" });
+    seedActionEvent("design.recordSignal", { type: "recordSignal", runId: "run_a", taskId: "task_a" });
+    seedActionEvent("design.recordSignal", { type: "recordSignal", runId: "run_b", taskId: "task_b" });
+    seedActionEvent("design.proposeDesign", { type: "proposeDesign", runId: "run_a", taskId: "task_a" });
+    seedActionEvent("design.recordSignal", { type: "recordSignal", runId: "run_a", taskId: "task_a" }, "blocked");
+
+    const runASignalsDone = withDatabase(harness.dbPath, (db) =>
+      harness.listHarnessActionEventsWithDb(db, {
+        actionType: "design.recordSignal",
+        statuses: ["done"],
+        requestType: "recordSignal",
+        requestRunId: "run_a",
+        requestTaskId: "task_a",
+        limit: 50,
+      }),
+    );
+    expect(runASignalsDone).toHaveLength(2);
+    for (const event of runASignalsDone) {
+      expect(event.actionType).toBe("design.recordSignal");
+      expect(event.status).toBe("done");
+      expect(event.request.runId).toBe("run_a");
+      expect(event.request.taskId).toBe("task_a");
+      expect(event.request.type).toBe("recordSignal");
+    }
+
+    const runASignalsAllStatuses = withDatabase(harness.dbPath, (db) =>
+      harness.listHarnessActionEventsWithDb(db, {
+        actionType: "design.recordSignal",
+        requestRunId: "run_a",
+        requestTaskId: "task_a",
+        limit: 50,
+      }),
+    );
+    expect(runASignalsAllStatuses).toHaveLength(3);
+
+    const proposeForRunA = withDatabase(harness.dbPath, (db) =>
+      harness.listHarnessActionEventsWithDb(db, {
+        actionType: "design.proposeDesign",
+        requestRunId: "run_a",
+        limit: 50,
+      }),
+    );
+    expect(proposeForRunA).toHaveLength(1);
+    expect(proposeForRunA[0].actionType).toBe("design.proposeDesign");
+  });
+
+  test("getHarnessActionEvent and WithDb agree for a known id and a missing id", () => {
+    const eventId = seedActionEvent("design.recordSignal", { type: "recordSignal", runId: "run_a", taskId: "task_a" });
+
+    const viaPublic = harness.getHarnessActionEvent({ id: eventId });
+    const viaWithDb = withDatabase(harness.dbPath, (db) =>
+      harness.getHarnessActionEventWithDb(db, { id: eventId }),
+    );
+    expect(viaWithDb).toEqual(viaPublic);
+    expect(viaWithDb?.id).toBe(eventId);
+
+    expect(harness.getHarnessActionEvent({ id: "action_missing" })).toBeNull();
+    expect(
+      withDatabase(harness.dbPath, (db) => harness.getHarnessActionEventWithDb(db, { id: "action_missing" })),
+    ).toBeNull();
+  });
+
+  test("WithDb reads observe uncommitted writes inside one transaction and roll back with it", () => {
+    const projectId = seedProject();
+    const charterId = seedCharter(projectId, "Charter");
+    const proposalId = seedProposal(projectId, charterId, "Initial proposal", "proposed");
+
+    // Inside the transaction, mark the proposal accepted and create a fresh
+    // audit event using WithDb variants so they share the transaction
+    // connection. The WithDb reads must observe both. After the rollback, the
+    // outer world (public reads) must observe neither.
+    let seenProposalDuringTx: { status: string } | null = null;
+    let seenEventDuringTx: { actionType: string } | null = null;
+    expect(() => {
+      harness.runInTransaction((db) => {
+        harness.updateDesignProposalStatusWithDb(db, { proposalId, status: "accepted" });
+        const eventId = harness.recordHarnessActionEventWithDb(db, {
+          actionType: "design.transitionProbe",
+          status: "done",
+          request: { type: "transitionProbe", runId: "run_a", taskId: "task_a" },
+          result: { ok: true },
+        });
+        seenProposalDuringTx = harness.getDesignProposalWithDb(db, { id: proposalId });
+        seenEventDuringTx = harness.getHarnessActionEventWithDb(db, { id: eventId });
+        // Throw to force a rollback so we can assert the writes never landed.
+        throw new Error("force rollback");
+      });
+    }).toThrow("force rollback");
+
+    expect(seenProposalDuringTx).toMatchObject({ status: "accepted" });
+    expect(seenEventDuringTx).toMatchObject({ actionType: "design.transitionProbe" });
+
+    // After the rollback, the public reads must reflect the original state.
+    expect(harness.getDesignProposal({ id: proposalId })?.status).toBe("proposed");
+    expect(harness.listHarnessActionEvents({ limit: 50 }).map((event) => event.actionType)).not.toContain(
+      "design.transitionProbe",
+    );
+  });
+
+  test("WithDb signal and proposal reads observe each other within a single transaction", () => {
+    const projectId = seedProject();
+    const charterId = seedCharter(projectId, "Active charter");
+
+    expect(() => {
+      harness.runInTransaction((db) => {
+        // Create a signal and a proposal via their WithDb variants so they share
+        // the transaction connection. Public read variants on a separate
+        // connection would block on the open write transaction or miss the
+        // uncommitted rows entirely.
+        const signal = harness.createStrategySignalWithDb(db, {
+          projectId,
+          signalClass: "delivery",
+          source: "verifier",
+          title: "Transaction signal",
+          summary: "Visible inside the open transaction.",
+          observationTime: "2026-08-01T00:00:00.000Z",
+          confidence: 0.6,
+          evidence: [],
+        });
+        const proposal = harness.createDesignProposalWithDb(db, {
+          projectId,
+          charterId,
+          title: "Transaction proposal",
+          problem: "Problem statement.",
+          recommendation: "Recommendation.",
+          proposal: {
+            problem: "Problem statement.",
+            recommendation: "Recommendation.",
+            evaluationContract: {
+              baseline: [],
+              successMetrics: ["metric"],
+              guardMetrics: [],
+              requiredEvidence: ["evidence"],
+              reviewAt: "2026-09-01T00:00:00.000Z",
+            },
+            investment: {
+              reversibility: "easy",
+              portfolio: "core",
+              oneTimeCost: 0,
+              recurringCost: 0,
+            },
+            evidenceRefs: ["sig_a"],
+          },
+          status: "proposed",
+        });
+
+        const active = harness.getActiveFounderCharterWithDb(db, { projectId });
+        expect(active?.id).toBe(charterId);
+        const pinned = harness.getFounderCharterWithDb(db, { id: charterId });
+        expect(pinned?.id).toBe(charterId);
+        expect(harness.getStrategySignalWithDb(db, { id: signal.id })?.id).toBe(signal.id);
+        expect(
+          harness.listStrategySignalsWithDb(db, { projectId, statuses: ["active"] }).map((row) => row.id),
+        ).toContain(signal.id);
+        expect(
+          harness.listDesignProposalsWithDb(db, { projectId, statuses: ["proposed"] }).map((row) => row.id),
+        ).toEqual([proposal.id]);
+        // Throw to roll back so the seed data does not leak between tests.
+        throw new Error("force rollback");
+      });
+    }).toThrow("force rollback");
+
+    // After rollback the strategy_signals / design_proposals tables must be
+    // empty for this project — proving the WithDb writes shared the open
+    // transaction rather than committing on a separate connection.
+    expect(harness.listStrategySignals({ projectId })).toEqual([]);
+    expect(harness.listDesignProposals({ projectId })).toEqual([]);
   });
 });
 
