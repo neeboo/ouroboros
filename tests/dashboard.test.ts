@@ -3265,6 +3265,24 @@ describe("dashboard", () => {
     }
   });
 
+  test("dashboardHtml inline browser script parses as executable JavaScript", () => {
+    const html = dashboardHtml({ runId: "run_browser_parse_check" });
+    const startIdx = html.indexOf("<script>");
+    const endIdx = html.lastIndexOf("</script>");
+    expect(startIdx).toBeGreaterThan(-1);
+    expect(endIdx).toBeGreaterThan(startIdx);
+    const script = html.slice(startIdx + "<script>".length, endIdx);
+    // TypeScript-only syntax (type assertions, typed declarations) must not leak into the browser script.
+    expect(script).not.toMatch(/\bas \{/);
+    expect(script).not.toMatch(/:\s*Array</);
+    expect(script).not.toMatch(/:\s*Record</);
+    // The script must be parseable as plain JavaScript.
+    expect(() => {
+      // eslint-disable-next-line no-new-func
+      new Function(script);
+    }).not.toThrow();
+  });
+
   test("shouldRetryDashboardBind only retries bounded ephemeral port conflicts", () => {
     const busy = Object.assign(new Error("Address already in use"), { code: "EADDRINUSE" });
 

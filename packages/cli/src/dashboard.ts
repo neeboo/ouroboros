@@ -2249,7 +2249,7 @@ export function dashboardHtml(input: { runId: string }) {
       if (proposal) {
         lines.push('<div class="design-detail-block"><div class="design-detail-title">Proposal evidence</div>');
         lines.push('<div class="design-detail-row"><span>id</span><code>' + escapeHtml(proposal.id) + '</code></div>');
-        const problemText = proposal.proposal?.problem || (proposal as { problem?: string }).problem;
+        const problemText = proposal.proposal?.problem || proposal.problem;
         if (problemText) {
           lines.push('<div class="design-detail-row"><span>problem</span><span>' + escapeHtml(problemText) + '</span></div>');
         }
@@ -2268,11 +2268,11 @@ export function dashboardHtml(input: { runId: string }) {
           for (const option of options) {
             const name = option && typeof option === "object" && typeof option.name === "string" ? option.name : "(option)";
             lines.push('<div class="design-detail-row design-detail-option"><span>option</span><span>' + escapeHtml(name) + '</span></div>');
-            const metaFields: Array<readonly [string, unknown]> = [
-              ["benefits", (option as { benefits?: unknown })?.benefits],
-              ["costs", (option as { costs?: unknown })?.costs],
-              ["risks", (option as { risks?: unknown })?.risks],
-              ["lock-in", (option as { lockIn?: unknown })?.lockIn],
+            const metaFields = [
+              ["benefits", option && typeof option === "object" ? option.benefits : undefined],
+              ["costs", option && typeof option === "object" ? option.costs : undefined],
+              ["risks", option && typeof option === "object" ? option.risks : undefined],
+              ["lock-in", option && typeof option === "object" ? option.lockIn : undefined],
             ];
             for (const [field, values] of metaFields) {
               if (Array.isArray(values) && values.length) {
