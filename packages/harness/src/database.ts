@@ -2,6 +2,8 @@ import { Database } from "bun:sqlite";
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 
+export type HarnessDatabase = Database;
+
 export function initDatabase(dbPath: string) {
   const resolvedPath = normalizeDatabasePath(dbPath);
   const allowMissingSchema = !databaseFileExists(resolvedPath);

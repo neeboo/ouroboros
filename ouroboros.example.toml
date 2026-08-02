@@ -19,6 +19,10 @@ reasoning_effort = "high"
 model = "gpt-5.6-sol"
 reasoning_effort = "high"
 
+[models.roles.designer]
+model = "gpt-5.6-sol"
+reasoning_effort = "high"
+
 [models.roles.worker]
 model = "gpt-5.6-luna"
 reasoning_effort = "high"
@@ -36,6 +40,7 @@ global = "claude-code"
 
 [agentDefaults.roles]
 planner = "codex-resumable"
+designer = "codex-resumable"
 verifier = "codex-resumable"
 goal-review = "codex-resumable"
 
@@ -46,3 +51,26 @@ approval = "approve-all"
 
 ["agentBackends"."codex-resumable"]
 kind = "codex-resumable"
+
+# Concrete integration boundary inherited by every self-iteration child run.
+# A fresh self-iteration root without an explicit boundary falls back to this
+# shape so design-spawned planner runs never inherit a null boundary.
+[integrationBoundary]
+target_branch = "main"
+push = false
+allowed_files = [
+  "packages/harness/",
+  "packages/runner/",
+  "packages/cli/",
+  "tests/",
+  "docs/",
+  "AGENTS.md",
+  "README.md",
+  "ouroboros.example.toml",
+]
+forbidden_paths = [
+  ".git/orbs/",
+  ".ouroboros/",
+  "ouroboros.toml",
+  ".linear",
+]

@@ -5,6 +5,14 @@ export interface OuroborosConfig {
   modelDefaults?: ModelDefaultsConfig;
   agentDefaults?: AgentDefaultsConfig;
   agentBackends?: Record<string, AgentBackendConfig>;
+  integrationBoundary?: IntegrationBoundaryConfig;
+}
+
+export interface IntegrationBoundaryConfig {
+  targetBranch?: string;
+  push?: boolean;
+  allowedFiles?: string[];
+  forbiddenPaths?: string[];
 }
 
 export interface LinearConfig {
@@ -63,6 +71,7 @@ function normalizeConfig(input: Record<string, unknown>): OuroborosConfig {
   const modelDefaults = modelDefaultsValue(input.models);
   const agentDefaults = agentDefaultsValue(input.agentDefaults);
   const agentBackends = agentBackendsValue(input.agentBackends);
+  const integrationBoundary = integrationBoundaryValue(input.integrationBoundary);
   return {
     linear: linear
       ? {
@@ -77,7 +86,43 @@ function normalizeConfig(input: Record<string, unknown>): OuroborosConfig {
     modelDefaults,
     agentDefaults,
     agentBackends,
+    integrationBoundary,
   };
+}
+
+function integrationBoundaryValue(value: unknown): IntegrationBoundaryConfig | undefined {
+  const record = objectValue(value);
+  if (!record) {
+    return undefined;
+  }
+  const targetBranch = stringValue(record.targetBranch) ?? stringValue(record.target_branch);
+  const pushValue = record.push;
+  const allowedFiles = stringArrayValue(record.allowedFiles) ?? stringArrayValue(record.allowed_files);
+  const forbiddenPaths = stringArrayValue(record.forbiddenPaths) ?? stringArrayValue(record.forbidden_paths);
+  const hasAny =
+    targetBranch !== undefined ||
+    pushValue !== undefined ||
+    allowedFiles !== undefined ||
+    forbiddenPaths !== undefined;
+  if (!hasAny) {
+    return undefined;
+  }
+  return {
+    ...(targetBranch !== undefined ? { targetBranch } : {}),
+    ...(pushValue !== undefined ? { push: Boolean(pushValue) } : {}),
+    ...(allowedFiles !== undefined ? { allowedFiles } : {}),
+    ...(forbiddenPaths !== undefined ? { forbiddenPaths } : {}),
+  };
+}
+
+function stringArrayValue(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+  const items = value
+    .map((item) => (typeof item === "string" ? item.trim() : ""))
+    .filter((item) => item.length > 0);
+  return items.length > 0 ? items : undefined;
 }
 
 function modelDefaultsValue(value: unknown): ModelDefaultsConfig | undefined {

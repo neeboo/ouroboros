@@ -1,5 +1,12 @@
 import { readableList, readableValue } from "@ouroboros/harness";
 import type { AttemptOutput, PlannedRun, PlannedTask } from "@ouroboros/harness";
+import {
+  type AgentAction,
+  parseDecideDesignPayload,
+  parseProposeDesignPayload,
+  parseRecordDesignOutcomePayload,
+  parseRecordSignalPayload,
+} from "../agent-actions";
 
 export function parseAttemptOutputOrBlocked(input: {
   raw: string;
@@ -64,6 +71,7 @@ function normalizeAttemptOutput(parsed: unknown): AttemptOutput {
     problems: readableList(record.problems),
     nextTasks: [...validatePlannedTasks(record.nextTasks), ...actionOutput.nextTasks],
     nextRuns: [...validatePlannedRuns(record.nextRuns), ...actionOutput.nextRuns],
+    designActions: actionOutput.designActions,
   };
 }
 
@@ -92,9 +100,10 @@ function validateActions(actions: unknown): {
   runDecision?: AttemptOutput["runDecision"];
   nextTasks: PlannedTask[];
   nextRuns: PlannedRun[];
+  designActions: NonNullable<AttemptOutput["designActions"]>;
 } {
   if (actions === undefined) {
-    return { nextTasks: [], nextRuns: [] };
+    return { nextTasks: [], nextRuns: [], designActions: [] };
   }
   if (!Array.isArray(actions)) {
     throw new Error("agent output actions must be an array");
@@ -104,7 +113,8 @@ function validateActions(actions: unknown): {
     runDecision?: AttemptOutput["runDecision"];
     nextTasks: PlannedTask[];
     nextRuns: PlannedRun[];
-  } = { nextTasks: [], nextRuns: [] };
+    designActions: NonNullable<AttemptOutput["designActions"]>;
+  } = { nextTasks: [], nextRuns: [], designActions: [] };
 
   actions.forEach((action, index) => {
     if (!action || typeof action !== "object" || Array.isArray(action)) {
@@ -122,18 +132,106 @@ function validateActions(actions: unknown): {
       output.nextRuns.push(...validatePlannedRuns(requiredPayloadArray(payload, "runs", index, type)));
       return;
     }
-
-    const decision = validateRunDecision(payload.decision);
-    if (output.runDecision !== undefined && output.runDecision !== decision) {
-      throw new Error("agent output actions contain conflicting run decisions");
+    if (type === "setRunDecision") {
+      const decision = validateRunDecision(payload.decision);
+      if (output.runDecision !== undefined && output.runDecision !== decision) {
+        throw new Error("agent output actions contain conflicting run decisions");
+      }
+      output.runDecision = decision;
+      return;
     }
-    output.runDecision = decision;
+
+    output.designActions.push(validateDesignAction(type, payload, index, record.payload));
   });
 
   return output;
 }
 
-function normalizeActionType(type: unknown): "createTasks" | "createRuns" | "setRunDecision" {
+function validateDesignAction(
+  type: DesignActionType,
+  payload: Record<string, unknown>,
+  index: number,
+  rawPayload: unknown,
+): AttemptOutput["designActions"] extends Array<infer T> ? T : never {
+  const actionPayload = { ...payload };
+  try {
+    if (type === "recordSignal") {
+      const parsed = parseRecordSignalPayload(actionPayload);
+      return {
+        type: "recordSignal",
+        payload: stripUndefined(parsed as unknown as Record<string, unknown>),
+      } as never;
+    }
+    if (type === "proposeDesign") {
+      const parsed = parseProposeDesignPayload(actionPayload);
+      return {
+        type: "proposeDesign",
+        payload: stripUndefined(parsed as unknown as Record<string, unknown>),
+      } as never;
+    }
+    if (type === "decideDesign") {
+      const parsed = parseDecideDesignPayload(actionPayload);
+      return {
+        type: "decideDesign",
+        payload: stripUndefined(parsed as unknown as Record<string, unknown>),
+      } as never;
+    }
+    if (type === "recordDesignOutcome") {
+      const parsed = parseRecordDesignOutcomePayload(actionPayload);
+      return {
+        type: "recordDesignOutcome",
+        payload: stripUndefined(parsed as unknown as Record<string, unknown>),
+      } as never;
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`agent output action ${index} ${type}: ${message}`);
+  }
+
+  return validateCreateRunsFromDesign(type, payload, index, rawPayload) as never;
+}
+
+function validateCreateRunsFromDesign(
+  type: "createRunsFromDesign",
+  payload: Record<string, unknown>,
+  index: number,
+  rawPayload: unknown,
+) {
+  if (typeof payload.proposalId !== "string" || payload.proposalId.trim().length === 0) {
+    throw new Error(`agent output action ${index} createRunsFromDesign payload.proposalId must be a non-empty string`);
+  }
+  if (!Array.isArray(payload.runs)) {
+    throw new Error(`agent output action ${index} createRunsFromDesign payload.runs must be an array`);
+  }
+  const plannedRuns = validatePlannedRuns(rawPayload && typeof rawPayload === "object" ? (rawPayload as Record<string, unknown>).runs : payload.runs);
+  return {
+    type,
+    payload: {
+      proposalId: payload.proposalId,
+      runs: plannedRuns,
+    },
+  };
+}
+
+function stripUndefined(value: Record<string, unknown>): Record<string, unknown> {
+  const result: Record<string, unknown> = {};
+  for (const [key, val] of Object.entries(value)) {
+    if (val === undefined) {
+      continue;
+    }
+    result[key] = val;
+  }
+  return result;
+}
+
+type DesignActionType =
+  | "recordSignal"
+  | "proposeDesign"
+  | "decideDesign"
+  | "recordDesignOutcome"
+  | "createRunsFromDesign";
+
+function normalizeActionType(type: unknown): AgentAction["type"] {
   if (type === "createTasks" || type === "create_tasks") {
     return "createTasks";
   }
@@ -143,7 +241,24 @@ function normalizeActionType(type: unknown): "createTasks" | "createRuns" | "set
   if (type === "setRunDecision" || type === "set_run_decision" || type === "runDecision" || type === "run_decision") {
     return "setRunDecision";
   }
-  throw new Error("agent output action type must be createTasks, createRuns, or setRunDecision");
+  if (type === "recordSignal" || type === "record_signal") {
+    return "recordSignal";
+  }
+  if (type === "proposeDesign" || type === "propose_design") {
+    return "proposeDesign";
+  }
+  if (type === "decideDesign" || type === "decide_design") {
+    return "decideDesign";
+  }
+  if (type === "recordDesignOutcome" || type === "record_design_outcome") {
+    return "recordDesignOutcome";
+  }
+  if (type === "createRunsFromDesign" || type === "create_runs_from_design") {
+    return "createRunsFromDesign";
+  }
+  throw new Error(
+    "agent output action type must be createTasks, createRuns, setRunDecision, recordSignal, proposeDesign, decideDesign, recordDesignOutcome, or createRunsFromDesign",
+  );
 }
 
 function requiredActionPayload(payload: unknown, index: number) {

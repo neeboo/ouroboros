@@ -1,6 +1,8 @@
 import type { CommandResult, RunCommand } from "./types";
 import { childEnvForProcess } from "./proxy-env";
 
+const IDLE_STARTUP_GRACE_MS = 500;
+
 export const runLocalCommand: RunCommand = async (input) => {
   const proc = Bun.spawn({
     cmd: input.cmd,
@@ -47,21 +49,25 @@ export const runLocalCommand: RunCommand = async (input) => {
       resolve(result);
     };
 
-    const resetIdleTimeout = () => {
+    const resetIdleTimeout = (options: { withStartupGrace?: boolean } = {}) => {
       if (input.idleTimeoutMs === undefined || settled) {
         return;
       }
       if (idleTimeout) {
         clearTimeout(idleTimeout);
       }
+      const idleMs = input.idleTimeoutMs;
+      const deadlineMs = options.withStartupGrace
+        ? computeInitialIdleDeadline(idleMs, input.timeoutMs)
+        : idleMs;
       idleTimeout = setTimeout(() => {
         proc.kill();
         void finish({
           exitCode: 124,
           stdout,
-          stderr: appendProblem(stderr, `command idle timed out after ${input.idleTimeoutMs}ms`),
+          stderr: appendProblem(stderr, `command idle timed out after ${idleMs}ms`),
         }, true);
-      }, input.idleTimeoutMs);
+      }, deadlineMs);
     };
 
     if (input.timeoutMs !== undefined) {
@@ -75,7 +81,13 @@ export const runLocalCommand: RunCommand = async (input) => {
       }, input.timeoutMs);
     }
 
-    resetIdleTimeout();
+    // Arm the idle deadline at spawn with a startup-grace extension so CPU
+    // saturation cannot trip a false idle timeout before the child's first
+    // chunk lands. The first real chunk (and every chunk after) resets to
+    // the regular idle window. The grace is capped so a fully silent
+    // command still trips idle before the hard timeout.
+    resetIdleTimeout({ withStartupGrace: true });
+
     drainStream(proc.stdout, (chunk) => {
       stdout += chunk;
       input.onStdout?.(chunk);
@@ -223,6 +235,19 @@ async function drainStream(stream: ReadableStream<Uint8Array>, onChunk: (chunk: 
 
 function appendProblem(stderr: string, problem: string) {
   return stderr.trim().length > 0 ? `${stderr.trim()}\n${problem}` : problem;
+}
+
+function computeInitialIdleDeadline(idleMs: number, timeoutMs: number | undefined) {
+  if (timeoutMs === undefined) {
+    return idleMs + IDLE_STARTUP_GRACE_MS;
+  }
+  if (timeoutMs <= idleMs) {
+    return idleMs;
+  }
+  // Keep at least a 1ms margin so idle fires before the hard timeout even
+  // when the grace would otherwise push the deadline past it.
+  const maxDeadline = timeoutMs - 1;
+  return Math.min(idleMs + IDLE_STARTUP_GRACE_MS, maxDeadline);
 }
 
 export function commandProblem(result: CommandResult) {

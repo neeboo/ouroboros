@@ -2028,4 +2028,146 @@ describe("Harness strategy domain", () => {
 
     expect(outcome).toMatchObject({ runId, taskId, attemptId });
   });
+
+  test("linkProposalOutcomeReview moves an integrated design proposal into measuring and seeds a due review task", () => {
+    const projectId = createProject();
+    const charter = harness.createFounderCharter({
+      projectId,
+      mission: "Charter for outcome review",
+      charter: sampleCharterData(),
+      activate: true,
+    });
+    const proposal = harness.createDesignProposal({
+      projectId,
+      charterId: charter.id,
+      title: "Pre-warm cache",
+      problem: "Cold cache flake",
+      recommendation: "Pre-warm",
+      proposal: {
+        ...sampleProposalData(),
+        evaluationContract: {
+          baseline: ["cold-cache 12s"],
+          successMetrics: ["cold-cache under 7s"],
+          guardMetrics: ["test reliability stable"],
+          requiredEvidence: ["three runs"],
+        },
+      },
+      status: "accepted",
+    });
+    harness.recordDesignDecision({
+      proposalId: proposal.id,
+      decision: "approved",
+      actorKind: "human",
+      actorRef: "founder@example.com",
+      charterId: charter.id,
+      reasons: ["reversible"],
+    });
+    const runId = harness.createRun({
+      goal: "design child run",
+      context: { source: "design", designProposalId: proposal.id },
+    });
+
+    const result = harness.linkProposalOutcomeReview({ runId });
+    expect(result.proposalId).toBe(proposal.id);
+    expect(result.reviewDue).toBe(true);
+    expect(result.outcomeReviewTaskId).toBeString();
+    const refreshed = harness.getDesignProposal({ id: proposal.id });
+    expect(refreshed?.status).toBe("measuring");
+    const task = harness.getTask(result.outcomeReviewTaskId!);
+    expect(task?.role).toBe("outcome-review");
+    expect(task?.config).toMatchObject({
+      designProposalId: proposal.id,
+      designSuccessMetrics: ["cold-cache under 7s"],
+    });
+  });
+
+  test("linkProposalOutcomeReview stays idle when the next review is in the future", () => {
+    const projectId = createProject();
+    const charter = harness.createFounderCharter({
+      projectId,
+      mission: "Charter for future review",
+      charter: sampleCharterData(),
+      activate: true,
+    });
+    const proposal = harness.createDesignProposal({
+      projectId,
+      charterId: charter.id,
+      title: "Deferred review",
+      problem: "Cold cache",
+      recommendation: "Pre-warm",
+      proposal: sampleProposalData(),
+      status: "accepted",
+    });
+    harness.recordDesignDecision({
+      proposalId: proposal.id,
+      decision: "approved",
+      actorKind: "human",
+      actorRef: "founder@example.com",
+      charterId: charter.id,
+      reasons: ["ok"],
+    });
+    const runId = harness.createRun({
+      goal: "design child run",
+      context: { source: "design", designProposalId: proposal.id },
+    });
+    // sampleProposalData has reviewAt: 2026-09-01. Pin now to 2026-08-02 so it is in the future.
+    const result = harness.linkProposalOutcomeReview({ runId, now: Date.parse("2026-08-02T00:00:00.000Z") });
+    expect(result.proposalId).toBe(proposal.id);
+    expect(result.reviewDue).toBe(false);
+    expect(result.outcomeReviewTaskId).toBeNull();
+    const refreshed = harness.getDesignProposal({ id: proposal.id });
+    expect(refreshed?.status).toBe("measuring");
+  });
+
+  test("linkProposalOutcomeReview is idempotent across integrations for the same run", () => {
+    const projectId = createProject();
+    const charter = harness.createFounderCharter({
+      projectId,
+      mission: "Charter for idempotent link",
+      charter: sampleCharterData(),
+      activate: true,
+    });
+    const proposal = harness.createDesignProposal({
+      projectId,
+      charterId: charter.id,
+      title: "Idempotent",
+      problem: "x",
+      recommendation: "y",
+      proposal: {
+        ...sampleProposalData(),
+        evaluationContract: {
+          baseline: ["x"],
+          successMetrics: ["y"],
+          guardMetrics: ["z"],
+          requiredEvidence: ["e"],
+        },
+      },
+      status: "accepted",
+    });
+    harness.recordDesignDecision({
+      proposalId: proposal.id,
+      decision: "approved",
+      actorKind: "human",
+      actorRef: "founder@example.com",
+      charterId: charter.id,
+      reasons: ["ok"],
+    });
+    const runId = harness.createRun({
+      goal: "design run",
+      context: { source: "design", designProposalId: proposal.id },
+    });
+
+    const first = harness.linkProposalOutcomeReview({ runId });
+    const second = harness.linkProposalOutcomeReview({ runId });
+    expect(first.outcomeReviewTaskId).toBe(second.outcomeReviewTaskId);
+    expect(harness.getDesignProposal({ id: proposal.id })?.status).toBe("measuring");
+  });
+
+  test("linkProposalOutcomeReview returns null when no design proposal is linked", () => {
+    const runId = harness.createRun({ goal: "plain run" });
+    const result = harness.linkProposalOutcomeReview({ runId });
+    expect(result.proposalId).toBeNull();
+    expect(result.outcomeReviewTaskId).toBeNull();
+    expect(result.reason).toContain("no designProposalId");
+  });
 });

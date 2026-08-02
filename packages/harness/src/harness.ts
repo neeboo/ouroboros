@@ -1,4 +1,5 @@
 import { initDatabase, normalizeDatabasePath, withDatabase } from "./database";
+import type { HarnessDatabase } from "./database";
 import {
   DEFAULT_CONTEXT_SUMMARY_PROMPT_TEMPLATE,
   DEFAULT_REPAIR_TASK_PROMPT_TEMPLATE,
@@ -56,6 +57,8 @@ import type {
   CreateTaskInput,
   DependencyAttempt,
   AttemptEvent,
+  DesignProposal,
+  DesignProposalStatus,
   FinishAttemptInput,
   FounderCharterData,
   GetActiveFounderCharterInput,
@@ -66,6 +69,8 @@ import type {
   GetRunOverviewInput,
   GetStrategySignalInput,
   LeaseReadyTasksInput,
+  LinkProposalOutcomeReviewInput,
+  LinkProposalOutcomeReviewResult,
   ListDesignDecisionsInput,
   ListDesignOutcomesInput,
   ListDesignProposalsInput,
@@ -118,6 +123,15 @@ export class Harness {
     this.seedPromptTemplates();
   }
 
+  // Runs `callback` against a single database connection inside a transaction.
+  // If the callback throws, the transaction rolls back and the error
+  // propagates to the caller. Designer mutations and their audit events use
+  // this primitive so a failed audit write cannot leave a durable strategy
+  // mutation or child run behind.
+  runInTransaction<T>(callback: (db: HarnessDatabase) => T): T {
+    return withDatabase(this.dbPath, (db) => db.transaction(callback)(db));
+  }
+
   createProject(input: CreateProjectInput) {
     const id = input.id ?? makeId("project");
     const rootPath = resolve(input.rootPath);
@@ -159,21 +173,24 @@ export class Harness {
 
   createRun(input: CreateRunInput) {
     const id = input.id ?? makeId("run");
-    return withDatabase(this.dbPath, (db) => {
-      const projectId = resolveRunProjectId(db, input);
-      db.query(
-        `
-        insert into runs (id, project_id, goal, status, context_json)
-        values ($id, $projectId, $goal, 'todo', $contextJson)
-        `,
-      ).run({
-        $id: id,
-        $projectId: projectId,
-        $goal: input.goal,
-        $contextJson: toJson(input.context ?? {}),
-      });
-      return id;
+    return withDatabase(this.dbPath, (db) => this.createRunWithDb(db, { ...input, id }));
+  }
+
+  createRunWithDb(db: HarnessDatabase, input: CreateRunInput) {
+    const id = input.id ?? makeId("run");
+    const projectId = resolveRunProjectId(db, input);
+    db.query(
+      `
+      insert into runs (id, project_id, goal, status, context_json)
+      values ($id, $projectId, $goal, 'todo', $contextJson)
+      `,
+    ).run({
+      $id: id,
+      $projectId: projectId,
+      $goal: input.goal,
+      $contextJson: toJson(input.context ?? {}),
     });
+    return id;
   }
 
   updateRunStatus(input: UpdateRunStatusInput) {
@@ -230,40 +247,43 @@ export class Harness {
 
   createTask(input: CreateTaskInput) {
     const id = input.id ?? makeId("task");
-    return withDatabase(this.dbPath, (db) => {
-      const cycleId = resolveTaskCycleId(db, {
-        id,
-        role: input.role,
-        parentId: input.parentId ?? null,
-        dependsOn: input.dependsOn ?? [],
-        cycleId: input.cycleId ?? null,
-      });
-      db.query(
-        `
-        insert into tasks (
-          id, run_id, parent_id, cycle_id, status, role, goal, prompt,
-          depends_on_json, done_when_json, worktree_path, config_json
-        )
-        values (
-          $id, $runId, $parentId, $cycleId, 'todo', $role, $goal, $prompt,
-          $dependsOnJson, $doneWhenJson, $worktreePath, $configJson
-        )
-        `,
-      ).run({
-        $id: id,
-        $runId: input.runId,
-        $parentId: input.parentId ?? null,
-        $cycleId: cycleId,
-        $role: input.role,
-        $goal: input.goal,
-        $prompt: input.prompt,
-        $dependsOnJson: toJson(input.dependsOn ?? []),
-        $doneWhenJson: toJson(input.doneWhen ?? []),
-        $worktreePath: input.worktreePath ?? null,
-        $configJson: toJson(input.config ?? {}),
-      });
-      return id;
+    return withDatabase(this.dbPath, (db) => this.createTaskWithDb(db, { ...input, id }));
+  }
+
+  createTaskWithDb(db: HarnessDatabase, input: CreateTaskInput) {
+    const id = input.id ?? makeId("task");
+    const cycleId = resolveTaskCycleId(db, {
+      id,
+      role: input.role,
+      parentId: input.parentId ?? null,
+      dependsOn: input.dependsOn ?? [],
+      cycleId: input.cycleId ?? null,
     });
+    db.query(
+      `
+      insert into tasks (
+        id, run_id, parent_id, cycle_id, status, role, goal, prompt,
+        depends_on_json, done_when_json, worktree_path, config_json
+      )
+      values (
+        $id, $runId, $parentId, $cycleId, 'todo', $role, $goal, $prompt,
+        $dependsOnJson, $doneWhenJson, $worktreePath, $configJson
+      )
+      `,
+    ).run({
+      $id: id,
+      $runId: input.runId,
+      $parentId: input.parentId ?? null,
+      $cycleId: cycleId,
+      $role: input.role,
+      $goal: input.goal,
+      $prompt: input.prompt,
+      $dependsOnJson: toJson(input.dependsOn ?? []),
+      $doneWhenJson: toJson(input.doneWhen ?? []),
+      $worktreePath: input.worktreePath ?? null,
+      $configJson: toJson(input.config ?? {}),
+    });
+    return id;
   }
 
   getRun(id: string) {
@@ -955,26 +975,29 @@ export class Harness {
 
   recordHarnessActionEvent(input: RecordHarnessActionEventInput) {
     const id = input.id ?? makeId("action");
-    return withDatabase(this.dbPath, (db) => {
-      ensureHarnessActionEvents(db);
-      db.query(
-        `
-        insert into harness_action_events (
-          id, action_type, status, request_json, result_json
-        )
-        values (
-          $id, $actionType, $status, $requestJson, $resultJson
-        )
-        `,
-      ).run({
-        $id: id,
-        $actionType: input.actionType,
-        $status: input.status,
-        $requestJson: toJson(input.request),
-        $resultJson: toJson(input.result),
-      });
-      return id;
+    return withDatabase(this.dbPath, (db) => this.recordHarnessActionEventWithDb(db, { ...input, id }));
+  }
+
+  recordHarnessActionEventWithDb(db: HarnessDatabase, input: RecordHarnessActionEventInput) {
+    const id = input.id ?? makeId("action");
+    ensureHarnessActionEvents(db);
+    db.query(
+      `
+      insert into harness_action_events (
+        id, action_type, status, request_json, result_json
+      )
+      values (
+        $id, $actionType, $status, $requestJson, $resultJson
+      )
+      `,
+    ).run({
+      $id: id,
+      $actionType: input.actionType,
+      $status: input.status,
+      $requestJson: toJson(input.request),
+      $resultJson: toJson(input.result),
     });
+    return id;
   }
 
   listHarnessActionEvents(input: ListHarnessActionEventsInput = {}) {
@@ -1522,47 +1545,50 @@ export class Harness {
 
   createStrategySignal(input: CreateStrategySignalInput) {
     const id = input.id ?? makeId("signal");
-    return withDatabase(this.dbPath, (db) => {
-      ensureStrategyTables(db);
-      db.query(
-        `
-        insert into strategy_signals (
-          id, project_id, signal_class, source, title, summary,
-          observation_time, confidence, evidence_json, expires_at,
-          status, conflicting_signal_ids_json, proposal_id,
-          run_id, task_id, attempt_id, payload_json
-        )
-        values (
-          $id, $projectId, $signalClass, $source, $title, $summary,
-          $observationTime, $confidence, $evidenceJson, $expiresAt,
-          $status, $conflictingSignalIdsJson, $proposalId,
-          $runId, $taskId, $attemptId, $payloadJson
-        )
-        `,
-      ).run({
-        $id: id,
-        $projectId: input.projectId,
-        $signalClass: input.signalClass,
-        $source: input.source,
-        $title: input.title,
-        $summary: input.summary,
-        $observationTime: input.observationTime,
-        $confidence: input.confidence,
-        $evidenceJson: toJson(input.evidence ?? []),
-        $expiresAt: input.expiresAt ?? null,
-        $status: input.status ?? "active",
-        $conflictingSignalIdsJson: toJson(input.conflictingSignalIds ?? []),
-        $proposalId: input.proposalId ?? null,
-        $runId: input.runId ?? null,
-        $taskId: input.taskId ?? null,
-        $attemptId: input.attemptId ?? null,
-        $payloadJson: toJson(input.payload ?? {}),
-      });
-      const row = db
-        .query("select * from strategy_signals where id = $id")
-        .get({ $id: id }) as StrategySignalRow;
-      return strategySignalFromRow(row);
+    return withDatabase(this.dbPath, (db) => this.createStrategySignalWithDb(db, { ...input, id }));
+  }
+
+  createStrategySignalWithDb(db: HarnessDatabase, input: CreateStrategySignalInput) {
+    const id = input.id ?? makeId("signal");
+    ensureStrategyTables(db);
+    db.query(
+      `
+      insert into strategy_signals (
+        id, project_id, signal_class, source, title, summary,
+        observation_time, confidence, evidence_json, expires_at,
+        status, conflicting_signal_ids_json, proposal_id,
+        run_id, task_id, attempt_id, payload_json
+      )
+      values (
+        $id, $projectId, $signalClass, $source, $title, $summary,
+        $observationTime, $confidence, $evidenceJson, $expiresAt,
+        $status, $conflictingSignalIdsJson, $proposalId,
+        $runId, $taskId, $attemptId, $payloadJson
+      )
+      `,
+    ).run({
+      $id: id,
+      $projectId: input.projectId,
+      $signalClass: input.signalClass,
+      $source: input.source,
+      $title: input.title,
+      $summary: input.summary,
+      $observationTime: input.observationTime,
+      $confidence: input.confidence,
+      $evidenceJson: toJson(input.evidence ?? []),
+      $expiresAt: input.expiresAt ?? null,
+      $status: input.status ?? "active",
+      $conflictingSignalIdsJson: toJson(input.conflictingSignalIds ?? []),
+      $proposalId: input.proposalId ?? null,
+      $runId: input.runId ?? null,
+      $taskId: input.taskId ?? null,
+      $attemptId: input.attemptId ?? null,
+      $payloadJson: toJson(input.payload ?? {}),
     });
+    const row = db
+      .query("select * from strategy_signals where id = $id")
+      .get({ $id: id }) as StrategySignalRow;
+    return strategySignalFromRow(row);
   }
 
   getStrategySignal(input: GetStrategySignalInput) {
@@ -1613,65 +1639,72 @@ export class Harness {
 
   createDesignProposal(input: CreateDesignProposalInput) {
     const id = input.id ?? makeId("design");
+    return withDatabase(this.dbPath, (db) => this.createDesignProposalWithDb(db, { ...input, id }));
+  }
+
+  createDesignProposalWithDb(db: HarnessDatabase, input: CreateDesignProposalInput) {
+    const id = input.id ?? makeId("design");
     const status = input.status ?? "draft";
-    return withDatabase(this.dbPath, (db) => {
-      ensureStrategyTables(db);
-      db.query(
-        `
-        insert into design_proposals (
-          id, project_id, run_id, task_id, attempt_id, charter_id,
-          title, problem, recommendation, status, proposal_json
-        )
-        values (
-          $id, $projectId, $runId, $taskId, $attemptId, $charterId,
-          $title, $problem, $recommendation, $status, $proposalJson
-        )
-        `,
-      ).run({
-        $id: id,
-        $projectId: input.projectId,
-        $runId: input.runId ?? null,
-        $taskId: input.taskId ?? null,
-        $attemptId: input.attemptId ?? null,
-        $charterId: input.charterId ?? null,
-        $title: input.title,
-        $problem: input.problem,
-        $recommendation: input.recommendation,
-        $status: status,
-        $proposalJson: toJson(input.proposal),
-      });
-      const row = db
-        .query("select * from design_proposals where id = $id")
-        .get({ $id: id }) as DesignProposalRow;
-      return designProposalFromRow(row);
+    ensureStrategyTables(db);
+    db.query(
+      `
+      insert into design_proposals (
+        id, project_id, run_id, task_id, attempt_id, charter_id,
+        title, problem, recommendation, status, proposal_json
+      )
+      values (
+        $id, $projectId, $runId, $taskId, $attemptId, $charterId,
+        $title, $problem, $recommendation, $status, $proposalJson
+      )
+      `,
+    ).run({
+      $id: id,
+      $projectId: input.projectId,
+      $runId: input.runId ?? null,
+      $taskId: input.taskId ?? null,
+      $attemptId: input.attemptId ?? null,
+      $charterId: input.charterId ?? null,
+      $title: input.title,
+      $problem: input.problem,
+      $recommendation: input.recommendation,
+      $status: status,
+      $proposalJson: toJson(input.proposal),
     });
+    const row = db
+      .query("select * from design_proposals where id = $id")
+      .get({ $id: id }) as DesignProposalRow;
+    return designProposalFromRow(row);
   }
 
   updateDesignProposalStatus(input: UpdateDesignProposalStatusInput) {
-    return withDatabase(this.dbPath, (db) => {
-      ensureStrategyTables(db);
-      db.query(
-        `
-        update design_proposals
-        set status = $status, updated_at = current_timestamp
-        where id = $proposalId
-        `,
-      ).run({ $proposalId: input.proposalId, $status: input.status });
-      const row = db
-        .query("select * from design_proposals where id = $proposalId")
-        .get({ $proposalId: input.proposalId }) as DesignProposalRow | null;
-      return row ? designProposalFromRow(row) : null;
-    });
+    return withDatabase(this.dbPath, (db) => this.updateDesignProposalStatusWithDb(db, input));
+  }
+
+  updateDesignProposalStatusWithDb(db: HarnessDatabase, input: UpdateDesignProposalStatusInput) {
+    ensureStrategyTables(db);
+    db.query(
+      `
+      update design_proposals
+      set status = $status, updated_at = current_timestamp
+      where id = $proposalId
+      `,
+    ).run({ $proposalId: input.proposalId, $status: input.status });
+    const row = db
+      .query("select * from design_proposals where id = $proposalId")
+      .get({ $proposalId: input.proposalId }) as DesignProposalRow | null;
+    return row ? designProposalFromRow(row) : null;
   }
 
   getDesignProposal(input: GetDesignProposalInput) {
-    return withDatabase(this.dbPath, (db) => {
-      ensureStrategyTables(db);
-      const row = db
-        .query("select * from design_proposals where id = $id")
-        .get({ $id: input.id }) as DesignProposalRow | null;
-      return row ? designProposalFromRow(row) : null;
-    });
+    return withDatabase(this.dbPath, (db) => this.getDesignProposalWithDb(db, input));
+  }
+
+  getDesignProposalWithDb(db: HarnessDatabase, input: GetDesignProposalInput) {
+    ensureStrategyTables(db);
+    const row = db
+      .query("select * from design_proposals where id = $id")
+      .get({ $id: input.id }) as DesignProposalRow | null;
+    return row ? designProposalFromRow(row) : null;
   }
 
   listDesignProposals(input: ListDesignProposalsInput = {}) {
@@ -1708,97 +1741,103 @@ export class Harness {
 
   recordDesignDecision(input: RecordDesignDecisionInput) {
     const id = input.id ?? makeId("decision");
-    return withDatabase(this.dbPath, (db) => {
-      ensureStrategyTables(db);
-      return db.transaction(() => {
-        db.query(
-          `
-          insert into design_decisions (
-            id, proposal_id, charter_id, decision, actor_kind, actor_ref,
-            reasons_json, authority_json, payload_json
-          )
-          values (
-            $id, $proposalId, $charterId, $decision, $actorKind, $actorRef,
-            $reasonsJson, $authorityJson, $payloadJson
-          )
-          `,
-        ).run({
-          $id: id,
-          $proposalId: input.proposalId,
-          $charterId: input.charterId ?? null,
-          $decision: input.decision,
-          $actorKind: input.actorKind,
-          $actorRef: input.actorRef ?? null,
-          $reasonsJson: toJson(input.reasons ?? []),
-          $authorityJson: toJson(input.authority ?? {}),
-          $payloadJson: toJson(input.payload ?? {}),
-        });
-        const row = db
-          .query("select * from design_decisions where id = $id")
-          .get({ $id: id }) as DesignDecisionRow;
-        return designDecisionFromRow(row);
-      })();
+    return withDatabase(this.dbPath, (db) => this.recordDesignDecisionWithDb(db, { ...input, id }));
+  }
+
+  recordDesignDecisionWithDb(db: HarnessDatabase, input: RecordDesignDecisionInput) {
+    const id = input.id ?? makeId("decision");
+    ensureStrategyTables(db);
+    db.query(
+      `
+      insert into design_decisions (
+        id, proposal_id, charter_id, decision, actor_kind, actor_ref,
+        reasons_json, authority_json, payload_json
+      )
+      values (
+        $id, $proposalId, $charterId, $decision, $actorKind, $actorRef,
+        $reasonsJson, $authorityJson, $payloadJson
+      )
+      `,
+    ).run({
+      $id: id,
+      $proposalId: input.proposalId,
+      $charterId: input.charterId ?? null,
+      $decision: input.decision,
+      $actorKind: input.actorKind,
+      $actorRef: input.actorRef ?? null,
+      $reasonsJson: toJson(input.reasons ?? []),
+      $authorityJson: toJson(input.authority ?? {}),
+      $payloadJson: toJson(input.payload ?? {}),
     });
+    const row = db
+      .query("select * from design_decisions where id = $id")
+      .get({ $id: id }) as DesignDecisionRow;
+    return designDecisionFromRow(row);
   }
 
   listDesignDecisions(input: ListDesignDecisionsInput) {
-    return withDatabase(this.dbPath, (db) => {
-      ensureStrategyTables(db);
-      const limit = input.limit && input.limit > 0 ? Math.floor(input.limit) : 100;
-      const rows = db
-        .query(
-          `
-          select *
-          from design_decisions
-          where proposal_id = $proposalId
-          order by rowid, id
-          limit $limit
-          `,
-        )
-        .all({ $proposalId: input.proposalId, $limit: limit }) as DesignDecisionRow[];
-      return rows.map(designDecisionFromRow);
-    });
+    return withDatabase(this.dbPath, (db) => this.listDesignDecisionsWithDb(db, input));
+  }
+
+  listDesignDecisionsWithDb(db: HarnessDatabase, input: ListDesignDecisionsInput) {
+    ensureStrategyTables(db);
+    const limit = input.limit && input.limit > 0 ? Math.floor(input.limit) : 100;
+    const rows = db
+      .query(
+        `
+        select *
+        from design_decisions
+        where proposal_id = $proposalId
+        order by rowid, id
+        limit $limit
+        `,
+      )
+      .all({ $proposalId: input.proposalId, $limit: limit }) as DesignDecisionRow[];
+    return rows.map(designDecisionFromRow);
   }
 
   recordDesignOutcome(input: RecordDesignOutcomeInput) {
     const id = input.id ?? makeId("outcome");
-    return withDatabase(this.dbPath, (db) => {
-      ensureStrategyTables(db);
-      db.query(
-        `
-        insert into design_outcomes (
-          id, proposal_id, run_id, task_id, attempt_id,
-          stage, recommendation,
-          baseline_json, observed_json, evidence_json, unexpected_effects_json,
-          review_at, payload_json
-        )
-        values (
-          $id, $proposalId, $runId, $taskId, $attemptId,
-          $stage, $recommendation,
-          $baselineJson, $observedJson, $evidenceJson, $unexpectedEffectsJson,
-          $reviewAt, $payloadJson
-        )
-        `,
-      ).run({
-        $id: id,
-        $proposalId: input.proposalId,
-        $runId: input.runId ?? null,
-        $taskId: input.taskId ?? null,
-        $attemptId: input.attemptId ?? null,
-        $stage: input.stage,
-        $recommendation: input.recommendation,
-        $baselineJson: toJson(input.baseline ?? {}),
-        $observedJson: toJson(input.observed ?? {}),
-        $evidenceJson: toJson(input.evidence ?? []),
-        $unexpectedEffectsJson: toJson(input.unexpectedEffects ?? []),
-        $reviewAt: input.reviewAt ?? null,
-        $payloadJson: toJson(input.payload ?? {}),
-      });
-      const row = db
-        .query("select * from design_outcomes where id = $id")
-        .get({ $id: id }) as DesignOutcomeRow;
-      return designOutcomeFromRow(row);
+    return withDatabase(this.dbPath, (db) => this.recordDesignOutcomeWithDb(db, { ...input, id }));
+  }
+
+  recordDesignOutcomeWithDb(db: HarnessDatabase, input: RecordDesignOutcomeInput) {
+    const id = input.id ?? makeId("outcome");
+    ensureStrategyTables(db);
+    db.query(
+      `
+      insert into design_outcomes (
+        id, proposal_id, run_id, task_id, attempt_id,
+        stage, recommendation,
+        baseline_json, observed_json, evidence_json, unexpected_effects_json,
+        review_at, payload_json
+      )
+      values (
+        $id, $proposalId, $runId, $taskId, $attemptId,
+        $stage, $recommendation,
+        $baselineJson, $observedJson, $evidenceJson, $unexpectedEffectsJson,
+        $reviewAt, $payloadJson
+      )
+      `,
+    ).run({
+      $id: id,
+      $proposalId: input.proposalId,
+      $runId: input.runId ?? null,
+      $taskId: input.taskId ?? null,
+      $attemptId: input.attemptId ?? null,
+      $stage: input.stage,
+      $recommendation: input.recommendation,
+      $baselineJson: toJson(input.baseline ?? {}),
+      $observedJson: toJson(input.observed ?? {}),
+      $evidenceJson: toJson(input.evidence ?? []),
+      $unexpectedEffectsJson: toJson(input.unexpectedEffects ?? []),
+      $reviewAt: input.reviewAt ?? null,
+      $payloadJson: toJson(input.payload ?? {}),
     });
+    const row = db
+      .query("select * from design_outcomes where id = $id")
+      .get({ $id: id }) as DesignOutcomeRow;
+    return designOutcomeFromRow(row);
   }
 
   listDesignOutcomes(input: ListDesignOutcomesInput = {}) {
@@ -1835,6 +1874,129 @@ export class Harness {
     });
   }
 
+  linkProposalOutcomeReview(input: LinkProposalOutcomeReviewInput): LinkProposalOutcomeReviewResult {
+    return withDatabase(this.dbPath, (db) => this.linkProposalOutcomeReviewWithDb(db, input));
+  }
+
+  linkProposalOutcomeReviewWithDb(db: HarnessDatabase, input: LinkProposalOutcomeReviewInput): LinkProposalOutcomeReviewResult {
+    ensureStrategyTables(db);
+    const run = this.getRun(input.runId);
+    if (!run) {
+      return {
+        proposalId: null,
+        proposalStatus: null,
+        outcomeReviewTaskId: null,
+        reviewDue: false,
+        reviewAt: null,
+        reason: "run not found",
+      };
+    }
+    const proposalIdRaw = run.context?.designProposalId;
+    if (typeof proposalIdRaw !== "string" || proposalIdRaw.length === 0) {
+      return {
+        proposalId: null,
+        proposalStatus: null,
+        outcomeReviewTaskId: null,
+        reviewDue: false,
+        reviewAt: null,
+        reason: "no designProposalId on run context",
+      };
+    }
+    const proposal = this.getDesignProposalWithDb(db, { id: proposalIdRaw });
+    if (!proposal) {
+      return {
+        proposalId: proposalIdRaw,
+        proposalStatus: null,
+        outcomeReviewTaskId: null,
+        reviewDue: false,
+        reviewAt: null,
+        reason: "design proposal not found",
+      };
+    }
+    const reviewAtRaw = readReviewAt(proposal);
+    const now = input.now ?? Date.now();
+    const immediate = input.immediateProxyReview === true;
+    const reviewDue = immediate || reviewAtRaw === null || reviewAtRaw.length === 0 || Date.parse(reviewAtRaw) <= now;
+    const nextStatus: DesignProposalStatus = "measuring";
+    if (proposal.status !== nextStatus) {
+      this.updateDesignProposalStatusWithDb(db, { proposalId: proposal.id, status: nextStatus });
+    }
+    // Idempotent: if an outcome-review task already exists for this proposal in
+    // this run, do not create a second one. The reviewer records the formal
+    // outcome; we only need one task.
+    const existing = db
+      .query(
+        `
+        select id from tasks
+        where run_id = $runId
+          and role = 'outcome-review'
+          and config_json like $proposalMatch
+        limit 1
+        `,
+      )
+      .get({
+        $runId: input.runId,
+        $proposalMatch: `%"designProposalId":"${proposal.id}"%`,
+      }) as { id?: string } | null;
+    let outcomeReviewTaskId: string | null = existing?.id ?? null;
+    if (reviewDue && !outcomeReviewTaskId) {
+      outcomeReviewTaskId = this.createTaskWithDb(db, {
+        runId: input.runId,
+        role: "outcome-review",
+        goal: `Measure design proposal ${proposal.id}: ${proposal.title}`,
+        prompt: this.outcomeReviewPrompt(proposal),
+        doneWhen: [
+          `Proposal ${proposal.id} evaluation contract is referenced`,
+          "Observed metrics are compared against baseline and success metrics",
+          "A retain, revise, or retire recommendation is recorded through recordDesignOutcome",
+        ],
+        config: {
+          designProposalId: proposal.id,
+          designEvaluationContract: proposal.proposal.evaluationContract,
+          designBaseline: proposal.proposal.evaluationContract?.baseline ?? [],
+          designSuccessMetrics: proposal.proposal.evaluationContract?.successMetrics ?? [],
+          designGuardMetrics: proposal.proposal.evaluationContract?.guardMetrics ?? [],
+          designReviewAt: reviewAtRaw ?? null,
+        },
+      });
+    }
+    return {
+      proposalId: proposal.id,
+      proposalStatus: nextStatus,
+      outcomeReviewTaskId,
+      reviewDue,
+      reviewAt: reviewAtRaw,
+      reason: reviewDue ? "due" : "future",
+    };
+  }
+
+  private outcomeReviewPrompt(proposal: DesignProposal) {
+    const contract = proposal.proposal.evaluationContract;
+    return [
+      "Act as the Ouroboros Outcome Reviewer for an integrated design proposal.",
+      "",
+      `Proposal: ${proposal.id}`,
+      `Title: ${proposal.title}`,
+      `Problem: ${proposal.problem}`,
+      `Recommendation: ${proposal.recommendation}`,
+      "",
+      "Frozen evaluation contract:",
+      `- Baseline: ${JSON.stringify(contract?.baseline ?? [])}`,
+      `- Success metrics: ${JSON.stringify(contract?.successMetrics ?? [])}`,
+      `- Guard metrics: ${JSON.stringify(contract?.guardMetrics ?? [])}`,
+      `- Required evidence: ${JSON.stringify(contract?.requiredEvidence ?? [])}`,
+      contract?.reviewAt ? `- Scheduled review: ${contract.reviewAt}` : "- Scheduled review: immediate proxy review",
+      "",
+      "Inspect post-integration run evidence, lessons, repository changes, verifier checks, and any unexpected effects.",
+      "Compare observed metrics to baseline and the frozen success metrics.",
+      "Return one of the following outcomes through the `actions` array:",
+      "- `recordDesignOutcome` with stage `review`, a retain/revise/retire recommendation, observed metrics, evidence, and unexpected effects.",
+      "- If the proposal misread the problem or the integration regressed a guard metric, recommend `revise` or `retire` and capture the discrepancy as evidence and unexpected effects.",
+      "",
+      "Do not weaken the frozen evaluation contract. Do not reopen completed delivery tasks; if the outcome disagrees with the design, feed the discrepancy back as a strategy signal via `recordSignal`.",
+    ].join("\n");
+  }
+
   private seedPromptTemplates() {
     return withDatabase(this.dbPath, (db) => {
       const insertQuery = db.query(`
@@ -1868,6 +2030,11 @@ export class Harness {
       }
     });
   }
+}
+
+function readReviewAt(proposal: DesignProposal): string | null {
+  const raw = (proposal.proposal.evaluationContract as { reviewAt?: unknown } | undefined)?.reviewAt;
+  return typeof raw === "string" && raw.length > 0 ? raw : null;
 }
 
 function resolveRunProjectId(

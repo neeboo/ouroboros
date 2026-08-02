@@ -13,6 +13,7 @@ import {
 import type { AttemptOutput } from "@ouroboros/harness";
 import {
   buildTaskPrompt,
+  createApplyDesignActionsHook,
   createContextSummaryHook,
   createGitWorktreeHook,
   createGoalReviewDecisionHook,
@@ -64,10 +65,11 @@ const DEFAULT_GENERIC_ATTEMPT_IDLE_TIMEOUT_MS = 5 * 60 * 1000;
 const DEFAULT_GENERIC_ATTEMPT_HARD_TIMEOUT_MS = 30 * 60 * 1000;
 const SELF_ITERATION_GOAL = "Continuously improve Ouroboros from evidence-backed gaps";
 const SELF_ITERATION_PLAN_DOC = "docs/self-iteration-plan.md";
-const DEFAULT_STOP_HOOKS = "create-runs,create-tasks,create-verifier,create-repair,context-summary";
+const DEFAULT_STOP_HOOKS = "create-runs,create-tasks,create-verifier,create-repair,apply-design-actions,context-summary";
 const SELF_ITERATION_MODEL_DEFAULTS = {
   global: { model: "gpt-5.6-luna", reasoning_effort: "high" },
   roles: {
+    designer: { model: "gpt-5.6-sol", reasoning_effort: "high" },
     planner: { model: "gpt-5.6-sol", reasoning_effort: "high" },
     worker: { model: "gpt-5.6-luna", reasoning_effort: "high" },
     verifier: { model: "gpt-5.6-sol", reasoning_effort: "high" },
@@ -119,16 +121,91 @@ const SELF_ITERATION_GOAL_CONTRACT = {
   },
 };
 const SELF_ITERATION_PLANNER_DONE_WHEN = [
-  "The assessment cites current repository, run, lesson, and verification evidence",
-  "The output derives one concrete improvement objective from a demonstrated capability gap",
-  "The objective is emitted as one nextRuns child with a planning prompt and three to five doneWhen checks",
-  "If no meaningful gap exists, the output returns no child run and explains the quiescent decision",
-  "The child run can be supervised, verified, and integrated without manual task injection",
+  "The assessment cites the active charter, current signals, lessons, run evidence, repository state, and due design outcomes",
+  "The output derives one evidence-backed design proposal or records a justified quiescent decision",
+  "Durable conclusions return only through the fixed designer actions: recordSignal, proposeDesign, decideDesign, recordDesignOutcome, createRunsFromDesign",
+  "Planning begins only from an accepted proposal and preserves the frozen evaluation contract, authority context, budget, and integration boundary",
+  "No delivery run is created from an unaccepted proposal or without an approved stored decision",
 ];
-const SELF_ITERATION_ROLE_AGENT_DEFAULTS: Record<"planner" | "verifier" | "goal-review", string> = {
+const SELF_ITERATION_ROLE_AGENT_DEFAULTS: Record<"designer" | "planner" | "verifier" | "goal-review", string> = {
+  designer: "codex-resumable",
   planner: "codex-resumable",
   verifier: "codex-resumable",
   "goal-review": "codex-resumable",
+};
+const SELF_ITERATION_DESIGN_DOC = "docs/designer-control-plane.md";
+const SELF_ITERATION_DEFAULT_PROJECT_NAME = "ouroboros";
+const SELF_ITERATION_DEFAULT_CHARTER = {
+  mission:
+    "Make Ouroboros reliable, autonomous, observable, and useful for real coding work while adding measured commercial discipline without sacrificing safety.",
+  targetUsers: [
+    "Solo developers running autonomous coding loops on local repositories",
+    "Small teams using Ouroboros for evidence-backed product and infrastructure changes",
+  ],
+  valueMetrics: [
+    "time from goal to verified integrated change",
+    "unattended completion rate",
+    "human intervention and rescue rate",
+    "cost per verified change",
+  ],
+  principles: [
+    "Strategy owns product direction; the planner, worker, and verifier loop own delivery",
+    "Every durable strategy conclusion returns through validated fixed actions",
+    "Quiescence is the correct answer when evidence does not justify new work",
+    "Removals and simplifications are first-class outcomes alongside additions",
+  ],
+  nonGoals: [
+    "Automatic charter amendments without human activation",
+    "Production deployment, billing, or purchasing without a human checkpoint",
+    "Scraping competitor data or building a general finance system in this slice",
+  ],
+  constraints: [
+    "Mission, capital limits, legal or privacy obligations, destructive operations, production deployment, schema migrations, unplanned dependencies, and recurring infrastructure commitments require a human checkpoint",
+    "Recurring spend defaults to a zero threshold until a human raises it",
+  ],
+  capitalPolicy: {
+    currency: "USD",
+    experimentBudget: 100,
+    recurringSpendApprovalAbove: 0,
+    portfolio: { core: 4, growth: 2, exploration: 1 },
+  },
+  authority: {
+    autoResearch: true,
+    autoReversibleExperiments: true,
+    autoIntegrateVerifiedCode: false,
+    requireHumanFor: [
+      "mission-amendment",
+      "capital-policy-amendment",
+      "legal-or-privacy",
+      "sensitive-data",
+      "destructive-operation",
+      "production-deployment",
+      "unplanned-dependency",
+      "schema-migration",
+      "recurring-infrastructure",
+    ],
+  },
+  reviewCadenceDays: 30,
+};
+const SELF_ITERATION_INTEGRATION_BOUNDARY = {
+  targetBranch: "main",
+  push: false,
+  allowedFiles: [
+    "packages/harness/",
+    "packages/runner/",
+    "packages/cli/",
+    "tests/",
+    "docs/",
+    "AGENTS.md",
+    "README.md",
+    "ouroboros.example.toml",
+  ],
+  forbiddenPaths: [
+    ".git/orbs/",
+    ".ouroboros/",
+    "ouroboros.toml",
+    ".linear",
+  ],
 };
 
 if (parsed.command === "help" || flag(parsed, "help") !== undefined) {
@@ -936,32 +1013,32 @@ function usesCodexResumablePath(executorName: "noop" | "acpx-codex" | "codex-cli
   return executorName === "codex-resumable" || flag(parsed, "agent-backend") === "codex-resumable";
 }
 
-function selfIterationPlannerPrompt() {
+function selfIterationDesignerPrompt() {
   return [
-    "Act as Ouroboros' self-assessment planner and derive one improvement objective for Ouroboros itself.",
+    "Act as Ouroboros' Designer. Decide whether to record strategy signals, propose a design, defer an existing proposal, or stay quiescent for this cycle. Do not invent a new product direction from prompt prose: every durable conclusion must return through one of the five fixed designer actions.",
     "",
-    "The long-running mission is to make Ouroboros more reliable, autonomous, observable, and useful for real coding work. A human does not provide the objective for this cycle. Derive it from demonstrated gaps in current evidence.",
+    "Inspect these inputs before deciding:",
     "",
-    "Inspect these inputs before deriving the objective:",
+    `- the active founder charter referenced by \`founderCharterId\` in this run context (see \`${SELF_ITERATION_DESIGN_DOC}\` for the contract)`,
+    "- current strategy signals (`orbs list-signals`) and any conflicting or expired entries that need follow-up",
+    "- recent run evidence, attempts, verifier decisions, lessons, and integration outcomes in the local harness database",
+    "- repository state and recent commits (`README.md`, `docs/protocol.md`, `docs/control-loop-contracts.md`, `packages/runner/src/runner.ts`, `packages/cli/src/main.ts`)",
+    "- due design outcomes (`orbs list-design-outcomes --status due`) that may reopen accepted decisions",
+    `- the autonomous self-assessment contract in \`${SELF_ITERATION_PLAN_DOC}\``,
     "",
-    "- `README.md`",
-    "- `docs/protocol.md`",
-    "- `docs/control-loop-contracts.md`",
-    `- \`${SELF_ITERATION_PLAN_DOC}\``,
-    "- `docs/default-runbook.md`",
-    "- `packages/cli/src/dashboard.ts`",
-    "- `packages/cli/src/main.ts`",
-    "- `packages/runner/src/runner.ts`",
-    "- recent run lessons from the harness database using `orbs list-lessons --run-id <run_id>`",
-    "- recent run graphs, attempts, verifier decisions, and integration evidence in the local harness database",
+    "Use the harness-managed research subsessions when current evidence is missing. Durable conclusions still return through the fixed actions; do not mutate strategy records directly through prose.",
     "",
-    `Use the autonomous assessment contract in \`${SELF_ITERATION_PLAN_DOC}\`.`,
+    "Return one of the following outcomes through the `actions` array:",
     "",
-    "Return structured JSON with one `nextRuns` child when evidence shows a meaningful capability gap. The child goal must describe the desired result, and its planner prompt must name the evidence to inspect, constraints, verification expectations, and integration boundary.",
+    "- `recordSignal` to capture a sourced, time-bound observation from user, delivery, technology, market, economics, or system evidence",
+    "- `proposeDesign` to record a proposal with frozen evaluation contract, evidence references, options, recommendation, additions, removals, and an investment envelope; the proposal may not approve itself and may not cross mission, capital, legal, privacy, destructive, production, dependency, schema, or recurring-infrastructure checkpoints",
+    "- `decideDesign` only with `auto` actor kind for `rejected`, `deferred`, `retired`, or `revise`; approvals are recorded by the authority evaluator or human CLI path, never from this output",
+    "- `recordDesignOutcome` for `experiment`, `release`, or `review` stages with baseline, observed metrics, evidence, and unexpected effects",
+    "- `createRunsFromDesign` only when the named proposal is `accepted` and a stored approved decision exists; each planned run inherits the frozen evaluation contract, charter, proposal, decision, budget, and integration boundary",
     "",
-    "Derive one improvement objective from the strongest current gap. Do not choose work only because it appears in a backlog. Cite the repository, run, lesson, or verifier evidence that demonstrates the gap and explain how the child run closes it.",
+    "Planning begins only from an accepted proposal. Never create a delivery run for an unaccepted proposal, and never bypass the authority gate by adding `nextRuns` for a design conclusion.",
     "",
-    "Return no child run when the current evidence does not justify a useful change. In that case, explain the quiescent decision in the summary so the controller can wait for repository state to change.",
+    "Record a justified quiescent decision (no actions, summary explains the absence of evidence-backed work) when the current signals, run evidence, repository state, and due outcomes do not justify a new proposal or a delivery run. The controller will wait for repository state to change.",
   ].join("\n");
 }
 
@@ -1002,8 +1079,17 @@ function withSelfIterationConfigDefaults(
   const configRoles = recordValue(configAgentDefaults.roles);
   const mergedAgentDefaults = recordValue(merged.agentDefaults);
   const mergedRoles = recordValue(mergedAgentDefaults.roles);
+  // A fresh self-iteration root must hand its descendants a concrete
+  // integration boundary. Caller-supplied context wins, then config, then the
+  // built-in default — never undefined, so design-spawned planner runs always
+  // inherit a non-null boundary.
+  const contextBoundary = context.integrationBoundary;
+  const configBoundary = config.integrationBoundary;
+  const integrationBoundary =
+    contextBoundary ?? configBoundary ?? SELF_ITERATION_INTEGRATION_BOUNDARY;
   return {
     ...merged,
+    integrationBoundary,
     modelDefaults: {
       ...SELF_ITERATION_MODEL_DEFAULTS,
       ...configModelDefaults,
@@ -1032,7 +1118,13 @@ function recordValue(value: unknown): Record<string, unknown> {
 }
 
 function hasConfigContent(config: Awaited<ReturnType<typeof loadOuroborosConfig>>) {
-  return Boolean(config.linear || config.modelDefaults || config.agentDefaults || config.agentBackends);
+  return Boolean(
+    config.linear ||
+      config.modelDefaults ||
+      config.agentDefaults ||
+      config.agentBackends ||
+      config.integrationBoundary,
+  );
 }
 
 function compactForTitle(value: string, max: number) {
@@ -1293,12 +1385,17 @@ async function createSelfIterationBootstrap() {
   harness.init();
   const config = await loadCliConfig();
   const assessmentFingerprint = repositoryFingerprint(runnerCwd());
+  const projectId = ensureSelfIterationProject();
+  const charterId = ensureSelfIterationFounderCharter(projectId);
   const runId = harness.createRun({
     goal: SELF_ITERATION_GOAL,
     context: withSelfIterationConfigDefaults({
       source: "self-improve",
       planDoc: SELF_ITERATION_PLAN_DOC,
+      designDoc: SELF_ITERATION_DESIGN_DOC,
       goalContract: SELF_ITERATION_GOAL_CONTRACT,
+      founderCharterId: charterId,
+      designCharterId: charterId,
       selfImprovement: {
         cycleIndex: 0,
         assessmentFingerprint,
@@ -1307,12 +1404,36 @@ async function createSelfIterationBootstrap() {
   });
   const taskId = harness.createTask({
     runId,
-    role: "planner",
-    goal: "Assess Ouroboros and derive the next improvement run",
-    prompt: selfIterationPlannerPrompt(),
+    role: "designer",
+    goal: "Decide whether Ouroboros should record signals, propose a design, defer, or stay quiescent",
+    prompt: selfIterationDesignerPrompt(),
     doneWhen: SELF_ITERATION_PLANNER_DONE_WHEN,
   });
   return { runId, taskId };
+}
+
+function ensureSelfIterationProject() {
+  const projects = harness.listProjects();
+  const cwd = runnerCwd();
+  const existing = projects.find((project) => project.rootPath === cwd);
+  if (existing) {
+    return existing.id;
+  }
+  return harness.createProject({ name: SELF_ITERATION_DEFAULT_PROJECT_NAME, rootPath: cwd });
+}
+
+function ensureSelfIterationFounderCharter(projectId: string) {
+  const existing = harness.getActiveFounderCharter({ projectId });
+  if (existing) {
+    return existing.id;
+  }
+  const created = harness.createFounderCharter({
+    projectId,
+    mission: SELF_ITERATION_DEFAULT_CHARTER.mission,
+    charter: SELF_ITERATION_DEFAULT_CHARTER,
+    activate: true,
+  });
+  return created.id;
 }
 
 type SelfImprovementDaemonInput = Omit<Parameters<typeof superviseCodexRuns>[0], "maxCycles"> & {
@@ -1400,6 +1521,19 @@ function ensureSelfImprovementCycle(rootRunId: string, cwd: string) {
     return { state: "active" as const, createdCycle: null };
   }
 
+  // Before asking the designer for a new proposal, surface any measuring
+  // design proposal whose outcome review is due. Linking them reopens the
+  // measuring run with a bounded outcome-review task; the next tick observes
+  // active work and stays out of the designer path until the review drains.
+  const dueOutcomes = linkDueOutcomeReviews(scopedRuns);
+  if (dueOutcomes.length > 0) {
+    return {
+      state: "outcome-review" as const,
+      createdCycle: null,
+      dueOutcomes,
+    };
+  }
+
   const root = harness.getRun(rootRunId);
   if (!root) {
     fail(`run not found: ${rootRunId}`);
@@ -1418,14 +1552,21 @@ function ensureSelfImprovementCycle(rootRunId: string, cwd: string) {
     Number(selfImprovement.cycleIndex) || 0,
     ...scopedRuns.map((run) => Number(recordValue(run.context.selfImprovement).cycleIndex) || 0),
   ) + 1;
+  const projectId = ensureSelfIterationProject();
+  const charterId = typeof root.context.founderCharterId === "string"
+    ? root.context.founderCharterId
+    : ensureSelfIterationFounderCharter(projectId);
   const runId = harness.createRun({
-    goal: `Assess Ouroboros and derive improvement cycle ${cycleIndex}`,
+    goal: `Designer assesses Ouroboros for cycle ${cycleIndex}`,
     context: {
       ...selfImprovementControlContext(root.context),
       parentRunId: rootRunId,
       source: "self-improvement-assessment",
       planDoc: SELF_ITERATION_PLAN_DOC,
+      designDoc: SELF_ITERATION_DESIGN_DOC,
       goalContract: SELF_ITERATION_GOAL_CONTRACT,
+      founderCharterId: charterId,
+      designCharterId: charterId,
       selfImprovement: {
         cycleIndex,
         assessmentFingerprint: repositoryState,
@@ -1434,9 +1575,9 @@ function ensureSelfImprovementCycle(rootRunId: string, cwd: string) {
   });
   const taskId = harness.createTask({
     runId,
-    role: "planner",
-    goal: `Assess Ouroboros and derive improvement cycle ${cycleIndex}`,
-    prompt: selfIterationPlannerPrompt(),
+    role: "designer",
+    goal: `Decide whether Ouroboros should record signals, propose a design, defer, or stay quiescent for cycle ${cycleIndex}`,
+    prompt: selfIterationDesignerPrompt(),
     doneWhen: SELF_ITERATION_PLANNER_DONE_WHEN,
   });
   harness.updateRun({
@@ -1473,9 +1614,35 @@ function selfImprovementRuns(rootRunId: string) {
   return allRuns.filter((run) => included.has(run.id));
 }
 
+// Surfaces measuring proposals tied to scoped runs whose outcome review is now
+// due. Idempotent: runs that already have an outcome-review task return the
+// existing task id without creating a duplicate. Returns the proposals/tasks
+// that were created or already linked so the daemon can report active work.
+function linkDueOutcomeReviews(runs: ReturnType<typeof selfImprovementRuns>) {
+  const created: Array<{ runId: string; taskId: string; proposalId: string }> = [];
+  for (const run of runs) {
+    if (run.status === "todo" || run.status === "running") {
+      continue;
+    }
+    const proposalIdRaw = run.context?.designProposalId;
+    if (typeof proposalIdRaw !== "string" || proposalIdRaw.length === 0) {
+      continue;
+    }
+    const proposal = harness.getDesignProposal({ id: proposalIdRaw });
+    if (!proposal || proposal.status !== "measuring") {
+      continue;
+    }
+    const linked = harness.linkProposalOutcomeReview({ runId: run.id });
+    if (linked.outcomeReviewTaskId && linked.reviewDue) {
+      created.push({ runId: run.id, taskId: linked.outcomeReviewTaskId, proposalId: proposal.id });
+    }
+  }
+  return created;
+}
+
 function selfImprovementControlContext(context: Record<string, unknown>) {
   return Object.fromEntries(
-    ["modelDefaults", "agentDefaults", "agentBackends", "guardrails"]
+    ["modelDefaults", "agentDefaults", "agentBackends", "guardrails", "integrationBoundary"]
       .filter((key) => context[key] !== undefined)
       .map((key) => [key, context[key]]),
   );
@@ -2300,14 +2467,17 @@ function stopHooksByRole(defaultRaw?: string) {
   const raw = flag(parsed, "stop-hook") ?? defaultRaw;
   const taskCreationHook = createTasksFromOutputHook({ harness });
   const runCreationHook = createRunsFromOutputHook({ harness });
+  const applyDesignActionsHook = createApplyDesignActionsHook({ harness });
   const goalReviewDecisionHook = createGoalReviewDecisionHook({ harness });
   const refreshGuardrailProposalsHook = createRefreshGuardrailProposalsHook({ harness });
   const collectSubsessionsHook = createCollectSubsessionsHook({ harness, subsessionRunner: createAcpxSubsessionRunner() });
   const hooks = {
-    planner: [collectSubsessionsHook],
+    planner: [collectSubsessionsHook, applyDesignActionsHook],
     worker: [collectSubsessionsHook],
     verifier: [collectSubsessionsHook],
-    "goal-review": [goalReviewDecisionHook, taskCreationHook, refreshGuardrailProposalsHook, collectSubsessionsHook],
+    "goal-review": [goalReviewDecisionHook, taskCreationHook, refreshGuardrailProposalsHook, collectSubsessionsHook, applyDesignActionsHook],
+    designer: [applyDesignActionsHook, collectSubsessionsHook],
+    "outcome-review": [applyDesignActionsHook, collectSubsessionsHook],
   } as Record<string, StopHook[]>;
   if (!raw) {
     return hooks;
@@ -2329,11 +2499,14 @@ function stopHooksByRole(defaultRaw?: string) {
       hooks.verifier.splice(Math.max(0, hooks.verifier.length - 1), 0, createRepairTaskHook({ harness }));
       continue;
     }
+    if (hook === "apply-design-actions") {
+      continue;
+    }
     if (hook === "context-summary" || hook === "context-subagent") {
       hooks.verifier.splice(Math.max(0, hooks.verifier.length - 1), 0, createContextSummaryHook());
       continue;
     }
-    fail("--stop-hook must contain create-runs, create-tasks, create-verifier, create-repair, or context-summary");
+    fail("--stop-hook must contain create-runs, create-tasks, create-verifier, create-repair, apply-design-actions, or context-summary");
   }
   return hooks;
 }
