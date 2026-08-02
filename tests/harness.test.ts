@@ -1470,3 +1470,562 @@ describe("Harness", () => {
     expect(harness.nextReadyTask(runId)?.id).toBe(taskId);
   });
 });
+
+describe("Harness strategy domain", () => {
+  let dir: string;
+  let harness: Harness;
+
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), "ouroboros-"));
+    harness = new Harness(join(dir, "ouroboros.db"));
+    harness.init();
+  });
+
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  function createProject(name = "Ouroboros") {
+    return harness.createProject({ name, rootPath: dir });
+  }
+
+  function sampleCharterData(mission = "Reliable autonomous coding work") {
+    return {
+      mission,
+      targetUsers: ["developer-tools"],
+      valueMetrics: ["time-to-integrated-change"],
+      principles: ["evidence before opinion"],
+      nonGoals: ["viral growth"],
+      constraints: ["no production deployment without approval"],
+      capitalPolicy: {
+        currency: "USD",
+        monthlyBudget: 1000,
+        experimentBudget: 200,
+        recurringSpendApprovalAbove: 100,
+        runwayFloorMonths: 12,
+        portfolio: { core: 70, growth: 20, exploration: 10 },
+      },
+      authority: {
+        autoResearch: true,
+        autoReversibleExperiments: true,
+        autoIntegrateVerifiedCode: false,
+        requireHumanFor: ["mission", "production", "destructive"],
+      },
+      reviewCadenceDays: 30,
+    };
+  }
+
+  function sampleProposalData() {
+    return {
+      problem: "Workers cannot persist strategy decisions.",
+      evidenceRefs: ["signal-1"],
+      targetOutcome: "Durable strategy records",
+      options: [
+        {
+          name: "Add strategy tables",
+          benefits: ["durable"],
+          costs: ["schema work"],
+          risks: ["migration"],
+          lockIn: ["sqlite"],
+        },
+      ],
+      recommendation: "Add strategy tables now.",
+      additions: ["founder_charters"],
+      removals: [],
+      assumptions: ["migrations remain additive"],
+      uncertainty: ["schema upgrade cost"],
+      evaluationContract: {
+        baseline: ["round-trip tests"],
+        successMetrics: ["typed create/get/list"],
+        guardMetrics: ["no legacy data loss"],
+        requiredEvidence: ["migrations and round-trips pass"],
+        reviewAt: "2026-09-01T00:00:00.000Z",
+      },
+      investment: {
+        oneTimeCost: 0,
+        recurringCost: 0,
+        timeBudget: "P1D",
+        reversibility: "easy" as const,
+        portfolio: "core" as const,
+      },
+      experiment: {
+        hypothesis: "Additive schema migrations preserve legacy data.",
+        smallestTest: "Migrate a legacy test database and assert no rows are lost.",
+        stopConditions: ["typecheck or harness tests fail"],
+        rollback: "Drop the new tables; existing rows are untouched.",
+      },
+    };
+  }
+
+  test("creates and reads a founder charter and exposes active charter lookup", () => {
+    const projectId = createProject();
+
+    const draft = harness.createFounderCharter({
+      projectId,
+      mission: "Reliable autonomous coding work",
+      charter: sampleCharterData(),
+    });
+
+    expect(draft).toMatchObject({
+      projectId,
+      version: 1,
+      isActive: false,
+      activatedAt: null,
+      supersededAt: null,
+      mission: "Reliable autonomous coding work",
+    });
+    expect(draft.charter.capitalPolicy?.portfolio).toEqual({ core: 70, growth: 20, exploration: 10 });
+
+    expect(harness.getFounderCharter({ id: draft.id })?.id).toBe(draft.id);
+    expect(harness.getActiveFounderCharter({ projectId })).toBeNull();
+
+    const active = harness.activateFounderCharter({ charterId: draft.id })!;
+    expect(active).toMatchObject({ id: draft.id, isActive: true, supersededAt: null });
+    expect(active.activatedAt).not.toBeNull();
+
+    expect(harness.getActiveFounderCharter({ projectId })?.id).toBe(draft.id);
+    expect(harness.listFounderCharters({ projectId, includeInactive: false })).toEqual([
+      expect.objectContaining({ id: draft.id }),
+    ]);
+    expect(harness.listFounderCharters({ projectId, includeInactive: true })).toHaveLength(1);
+  });
+
+  test("activating a charter supersedes the prior active version without deleting history", () => {
+    const projectId = createProject();
+    const first = harness.createFounderCharter({
+      projectId,
+      mission: "First charter",
+      charter: sampleCharterData("First charter"),
+      activate: true,
+    });
+    const second = harness.createFounderCharter({
+      projectId,
+      mission: "Second charter",
+      charter: sampleCharterData("Second charter"),
+      activate: true,
+    });
+
+    expect(first.version).toBe(1);
+    expect(second.version).toBe(2);
+    expect(harness.getActiveFounderCharter({ projectId })?.id).toBe(second.id);
+
+    const firstRow = harness.getFounderCharter({ id: first.id })!;
+    expect(firstRow.isActive).toBe(false);
+    expect(firstRow.supersededAt).not.toBeNull();
+    expect(firstRow.activatedAt).not.toBeNull();
+
+    const history = harness.listFounderCharters({ projectId, includeInactive: true });
+    expect(history.map((charter) => charter.id)).toEqual([second.id, first.id]);
+    expect(history.at(-1)).toMatchObject({ id: first.id, version: 1, isActive: false });
+  });
+
+  test("rejects a second activation for the same project charter when the unique index fires", () => {
+    const projectId = createProject();
+    const first = harness.createFounderCharter({
+      projectId,
+      mission: "First",
+      charter: sampleCharterData("First"),
+      activate: true,
+    });
+    const second = harness.createFounderCharter({
+      projectId,
+      mission: "Second",
+      charter: sampleCharterData("Second"),
+      activate: true,
+    });
+
+    expect(first.isActive).toBe(true);
+    expect(second.isActive).toBe(true);
+    expect(harness.listFounderCharters({ projectId, includeInactive: true })).toHaveLength(2);
+
+    const active = harness.getActiveFounderCharter({ projectId });
+    expect(active?.id).toBe(second.id);
+  });
+
+  test("creates and lists expiring and conflicting strategy signals", () => {
+    const projectId = createProject();
+    const first = harness.createStrategySignal({
+      projectId,
+      signalClass: "delivery",
+      source: "verifier",
+      title: "Cycle time regression",
+      summary: "Median cycle time grew by 18%.",
+      observationTime: "2026-07-31T00:00:00.000Z",
+      confidence: 0.7,
+      evidence: [{ metric: "cycle-time", value: 18 }],
+      expiresAt: "2026-08-31T00:00:00.000Z",
+    });
+
+    expect(first).toMatchObject({
+      projectId,
+      signalClass: "delivery",
+      status: "active",
+      expiresAt: "2026-08-31T00:00:00.000Z",
+    });
+    expect(first.conflictingSignalIds).toEqual([]);
+    expect(first.evidence).toEqual([{ metric: "cycle-time", value: 18 }]);
+
+    const conflict = harness.createStrategySignal({
+      projectId,
+      signalClass: "delivery",
+      source: "human-review",
+      title: "Cycle time appears stable",
+      summary: "Manual sampling did not find a regression.",
+      observationTime: "2026-08-01T00:00:00.000Z",
+      confidence: 0.5,
+      evidence: [{ metric: "cycle-time", value: 2 }],
+      conflictingSignalIds: [first.id],
+      status: "active",
+    });
+
+    expect(harness.getStrategySignal({ id: conflict.id })?.conflictingSignalIds).toEqual([first.id]);
+    expect(harness.listStrategySignals({ projectId, statuses: ["active"] })).toHaveLength(2);
+    expect(harness.listStrategySignals({ projectId, signalClass: "delivery" })).toHaveLength(2);
+
+    const expired = harness.createStrategySignal({
+      projectId,
+      signalClass: "market",
+      source: "rss",
+      title: "Competitor announcement",
+      summary: "Pricing change.",
+      observationTime: "2026-06-01T00:00:00.000Z",
+      confidence: 0.6,
+      expiresAt: "2026-06-30T00:00:00.000Z",
+      status: "expired",
+    });
+
+    expect(harness.listStrategySignals({ projectId, statuses: ["active"] })).toHaveLength(2);
+    expect(harness.listStrategySignals({ projectId, statuses: ["active", "expired"] })).toHaveLength(3);
+    expect(harness.listStrategySignals({ projectId, statuses: ["expired"] })).toEqual([
+      expect.objectContaining({ id: expired.id }),
+    ]);
+  });
+
+  test("creates design proposals and updates status without losing the frozen evaluation contract", () => {
+    const projectId = createProject();
+    const charter = harness.createFounderCharter({
+      projectId,
+      mission: "Charter for proposal",
+      charter: sampleCharterData(),
+      activate: true,
+    });
+
+    const proposal = harness.createDesignProposal({
+      projectId,
+      charterId: charter.id,
+      title: "Persist strategy records",
+      problem: "Strategy state lives only in prompts.",
+      recommendation: "Add the five strategy tables.",
+      proposal: sampleProposalData(),
+    });
+
+    expect(proposal).toMatchObject({
+      status: "draft",
+      title: "Persist strategy records",
+      charterId: charter.id,
+    });
+    expect(proposal.proposal.evaluationContract.successMetrics).toEqual(["typed create/get/list"]);
+
+    const updated = harness.updateDesignProposalStatus({
+      proposalId: proposal.id,
+      status: "accepted",
+    });
+
+    expect(updated?.status).toBe("accepted");
+    expect(updated?.proposal.evaluationContract.reviewAt).toBe("2026-09-01T00:00:00.000Z");
+
+    expect(harness.getDesignProposal({ id: proposal.id })?.status).toBe("accepted");
+    expect(
+      harness.listDesignProposals({ projectId, statuses: ["accepted"] }).map((row) => row.id),
+    ).toEqual([proposal.id]);
+    expect(harness.listDesignProposals({ projectId, statuses: ["draft"] })).toEqual([]);
+  });
+
+  test("records append-only design decisions and outcomes", () => {
+    const projectId = createProject();
+    const charter = harness.createFounderCharter({
+      projectId,
+      mission: "Charter",
+      charter: sampleCharterData(),
+      activate: true,
+    });
+    const proposal = harness.createDesignProposal({
+      projectId,
+      charterId: charter.id,
+      title: "Persist strategy records",
+      problem: "x",
+      recommendation: "Add tables.",
+      proposal: sampleProposalData(),
+    });
+
+    const firstDecision = harness.recordDesignDecision({
+      proposalId: proposal.id,
+      charterId: charter.id,
+      decision: "deferred",
+      actorKind: "auto",
+      actorRef: "designer-bootstrap",
+      reasons: ["waiting for evidence"],
+      authority: { autoApproved: false },
+    });
+
+    const secondDecision = harness.recordDesignDecision({
+      proposalId: proposal.id,
+      charterId: charter.id,
+      decision: "approved",
+      actorKind: "human",
+      actorRef: "founder",
+      reasons: ["evidence is sufficient"],
+      authority: { autoApproved: false, manual: true },
+    });
+
+    const decisions = harness.listDesignDecisions({ proposalId: proposal.id });
+    expect(decisions.map((decision) => decision.id)).toEqual([firstDecision.id, secondDecision.id]);
+    expect(decisions[0]).toMatchObject({ decision: "deferred", actorKind: "auto" });
+    expect(decisions[1]).toMatchObject({ decision: "approved", actorKind: "human" });
+
+    const outcome = harness.recordDesignOutcome({
+      proposalId: proposal.id,
+      stage: "experiment",
+      recommendation: "retain",
+      baseline: { cycleTime: 100 },
+      observed: { cycleTime: 92 },
+      evidence: [{ metric: "cycleTime", value: 92 }],
+      unexpectedEffects: [],
+      reviewAt: "2026-09-15T00:00:00.000Z",
+    });
+
+    expect(outcome).toMatchObject({
+      recommendation: "retain",
+      stage: "experiment",
+      reviewAt: "2026-09-15T00:00:00.000Z",
+    });
+    expect(harness.listDesignOutcomes({ proposalId: proposal.id })).toEqual([
+      expect.objectContaining({ id: outcome.id }),
+    ]);
+    expect(
+      harness.listDesignOutcomes({ dueBefore: "2026-10-01T00:00:00.000Z" }).map((row) => row.id),
+    ).toEqual([outcome.id]);
+    expect(harness.listDesignOutcomes({ dueBefore: "2026-09-01T00:00:00.000Z" })).toEqual([]);
+  });
+
+  test("migrates a legacy database without strategy tables and preserves pre-existing records", () => {
+    const legacyDbPath = join(dir, "legacy.db");
+    withDatabase(
+      legacyDbPath,
+      (db) => {
+        db.exec(`
+          create table projects (
+            id text primary key,
+            name text not null,
+            root_path text not null unique,
+            context_json text not null default '{}',
+            created_at text not null default current_timestamp,
+            updated_at text not null default current_timestamp
+          );
+          create table runs (
+            id text primary key,
+            project_id text references projects(id) on delete set null,
+            goal text not null,
+            status text not null,
+            context_json text not null default '{}',
+            created_at text not null default current_timestamp,
+            updated_at text not null default current_timestamp
+          );
+          create table tasks (
+            id text primary key,
+            run_id text not null references runs(id) on delete cascade,
+            parent_id text references tasks(id) on delete set null,
+            cycle_id text,
+            status text not null,
+            role text not null,
+            goal text not null,
+            prompt text not null,
+            depends_on_json text not null default '[]',
+            done_when_json text not null default '[]',
+            config_json text not null default '{}',
+            worktree_path text,
+            session_ref text,
+            context_version integer not null default 1,
+            created_at text not null default current_timestamp,
+            updated_at text not null default current_timestamp
+          );
+          create table attempts (
+            id text primary key,
+            task_id text not null references tasks(id) on delete cascade,
+            status text not null,
+            input_json text not null,
+            output_json text not null default '{}',
+            checks_json text not null default '[]',
+            artifacts_json text not null default '[]',
+            error text,
+            started_at text not null default current_timestamp,
+            finished_at text
+          );
+          create table attempt_events (
+            id text primary key,
+            attempt_id text not null references attempts(id) on delete cascade,
+            sequence integer not null,
+            stream text not null,
+            text text,
+            payload_json text not null default '{}',
+            created_at text not null default current_timestamp,
+            unique (attempt_id, sequence)
+          );
+          create table execution_threads (
+            id text primary key,
+            run_id text not null references runs(id) on delete cascade,
+            task_id text references tasks(id) on delete set null,
+            attempt_id text references attempts(id) on delete set null,
+            parent_thread_id text references execution_threads(id) on delete set null,
+            owner_type text not null,
+            owner_id text,
+            role text not null,
+            status text not null,
+            pid integer,
+            session_name text,
+            agent_session_id text,
+            worktree_path text,
+            heartbeat_at text not null default current_timestamp,
+            interrupted_at text,
+            interrupt_reason text,
+            created_at text not null default current_timestamp,
+            updated_at text not null default current_timestamp
+          );
+          create table harness_action_events (
+            id text primary key,
+            action_type text not null,
+            status text not null check (status in ('done', 'blocked')),
+            request_json text not null,
+            result_json text not null,
+            created_at text not null default current_timestamp
+          );
+          create table lessons (
+            id text primary key,
+            run_id text not null references runs(id) on delete cascade,
+            task_id text not null references tasks(id) on delete cascade,
+            attempt_id text not null references attempts(id) on delete cascade,
+            kind text not null check (kind in ('experience', 'lesson')),
+            summary text not null,
+            evidence_json text not null default '{}',
+            created_at text not null default current_timestamp
+          );
+          create table prompt_templates (
+            key text primary key,
+            content_md text not null,
+            created_at text not null default current_timestamp,
+            updated_at text not null default current_timestamp
+          );
+          create table inbox_events (
+            id text primary key,
+            provider text not null,
+            event_type text not null,
+            external_id text not null,
+            payload_json text not null,
+            status text not null,
+            created_at text not null default current_timestamp,
+            processed_at text
+          );
+          create table external_refs (
+            id text primary key,
+            local_type text not null,
+            local_id text not null,
+            provider text not null,
+            external_type text not null,
+            external_id text not null,
+            external_url text,
+            created_at text not null default current_timestamp,
+            unique (local_type, local_id, provider, external_type, external_id)
+          );
+
+          insert into projects (id, name, root_path)
+          values ('project_legacy', 'Legacy', '/legacy/root');
+          insert into runs (id, project_id, goal, status)
+          values ('run_legacy', 'project_legacy', 'Legacy run', 'todo');
+          insert into tasks (id, run_id, status, role, goal, prompt)
+          values ('task_legacy', 'run_legacy', 'todo', 'worker', 'Legacy task', 'Work.');
+          insert into attempts (id, task_id, status, input_json)
+          values ('attempt_legacy', 'task_legacy', 'done', '{}');
+          insert into lessons (id, run_id, task_id, attempt_id, kind, summary)
+          values ('lesson_legacy', 'run_legacy', 'task_legacy', 'attempt_legacy', 'experience', 'Legacy experience');
+        `);
+      },
+      { allowMissingSchema: true },
+    );
+
+    initDatabase(legacyDbPath);
+    const reopened = new Harness(legacyDbPath);
+
+    expect(reopened.getRun("run_legacy")).toMatchObject({ id: "run_legacy", goal: "Legacy run" });
+    expect(reopened.getTask("task_legacy")).toMatchObject({ id: "task_legacy" });
+    expect(reopened.getAttempt("attempt_legacy")).toMatchObject({ id: "attempt_legacy", status: "done" });
+    expect(reopened.listLessons({ runId: "run_legacy" }).map((lesson) => lesson.id)).toEqual([
+      "lesson_legacy",
+    ]);
+
+    const charter = reopened.createFounderCharter({
+      projectId: "project_legacy",
+      mission: "Migrated charter",
+      charter: sampleCharterData("Migrated"),
+      activate: true,
+    });
+    expect(reopened.getActiveFounderCharter({ projectId: "project_legacy" })?.id).toBe(charter.id);
+  });
+
+  test("creates strategy records with run, task, and attempt references", () => {
+    const projectId = createProject();
+    const runId = harness.createRun({ goal: "Design run", projectId });
+    const taskId = harness.createTask({
+      runId,
+      role: "designer",
+      goal: "Propose strategy",
+      prompt: "Propose.",
+    });
+    const attemptId = harness.startAttempt({ taskId, input: {} });
+    const charter = harness.createFounderCharter({
+      projectId,
+      mission: "Charter",
+      charter: sampleCharterData(),
+      activate: true,
+    });
+    const proposal = harness.createDesignProposal({
+      projectId,
+      charterId: charter.id,
+      runId,
+      taskId,
+      attemptId,
+      title: "Persist records",
+      problem: "x",
+      recommendation: "Add tables",
+      proposal: sampleProposalData(),
+    });
+
+    expect(proposal).toMatchObject({ runId, taskId, attemptId });
+
+    const signal = harness.createStrategySignal({
+      projectId,
+      signalClass: "system",
+      source: "harness",
+      title: "Schema gaps",
+      summary: "No strategy tables existed.",
+      observationTime: "2026-08-02T00:00:00.000Z",
+      confidence: 0.9,
+      proposalId: proposal.id,
+      runId,
+      taskId,
+      attemptId,
+    });
+
+    expect(signal).toMatchObject({ proposalId: proposal.id, runId, taskId, attemptId });
+
+    const outcome = harness.recordDesignOutcome({
+      proposalId: proposal.id,
+      stage: "experiment",
+      recommendation: "retain",
+      runId,
+      taskId,
+      attemptId,
+    });
+
+    expect(outcome).toMatchObject({ runId, taskId, attemptId });
+  });
+});

@@ -3,8 +3,14 @@ import type {
   Attempt,
   AttemptEvent,
   AttemptOutput,
+  DesignDecision,
+  DesignOutcome,
+  DesignProposal,
+  DesignProposalData,
   ExecutionThread,
   ExternalRef,
+  FounderCharter,
+  FounderCharterData,
   HarnessActionEvent,
   InboxEvent,
   Lesson,
@@ -12,20 +18,26 @@ import type {
   PromptTemplate,
   Run,
   Status,
+  StrategySignal,
   Task,
   TaskConfig,
 } from "./types";
 import type {
   AttemptEventRow,
   AttemptRow,
+  DesignDecisionRow,
+  DesignOutcomeRow,
+  DesignProposalRow,
   ExecutionThreadRow,
   ExternalRefRow,
+  FounderCharterRow,
   HarnessActionEventRow,
   InboxEventRow,
   LessonRow,
   ProjectRow,
   PromptTemplateRow,
   RunRow,
+  StrategySignalRow,
   TaskRow,
 } from "./rows";
 
@@ -169,6 +181,98 @@ export function harnessActionEventFromRow(row: HarnessActionEventRow): HarnessAc
     status: row.status,
     request: parseJson<Record<string, unknown>>(row.request_json),
     result: parseJson<Record<string, unknown>>(row.result_json),
+    createdAt: row.created_at,
+  };
+}
+
+export function founderCharterFromRow(row: FounderCharterRow): FounderCharter {
+  const charter = parseJson<FounderCharterData>(row.charter_json);
+  return {
+    id: row.id,
+    projectId: row.project_id ?? null,
+    version: row.version,
+    isActive: row.is_active === 1,
+    activatedAt: row.activated_at ?? null,
+    supersededAt: row.superseded_at ?? null,
+    mission: row.mission,
+    charter,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+export function strategySignalFromRow(row: StrategySignalRow): StrategySignal {
+  return {
+    id: row.id,
+    projectId: row.project_id ?? null,
+    signalClass: row.signal_class,
+    source: row.source,
+    title: row.title,
+    summary: row.summary,
+    observationTime: row.observation_time,
+    confidence: row.confidence,
+    evidence: parseJson<unknown[]>(row.evidence_json),
+    expiresAt: row.expires_at ?? null,
+    status: row.status,
+    conflictingSignalIds: parseJson<string[]>(row.conflicting_signal_ids_json),
+    proposalId: row.proposal_id ?? null,
+    runId: row.run_id ?? null,
+    taskId: row.task_id ?? null,
+    attemptId: row.attempt_id ?? null,
+    payload: parseJson<Record<string, unknown>>(row.payload_json),
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+export function designProposalFromRow(row: DesignProposalRow): DesignProposal {
+  return {
+    id: row.id,
+    projectId: row.project_id ?? null,
+    runId: row.run_id ?? null,
+    taskId: row.task_id ?? null,
+    attemptId: row.attempt_id ?? null,
+    charterId: row.charter_id ?? null,
+    title: row.title,
+    problem: row.problem,
+    recommendation: row.recommendation,
+    status: row.status,
+    proposal: parseJson<DesignProposalData>(row.proposal_json),
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+export function designDecisionFromRow(row: DesignDecisionRow): DesignDecision {
+  return {
+    id: row.id,
+    proposalId: row.proposal_id,
+    charterId: row.charter_id ?? null,
+    decision: row.decision,
+    actorKind: row.actor_kind,
+    actorRef: row.actor_ref ?? null,
+    reasons: parseJson<string[]>(row.reasons_json),
+    authority: parseJson<Record<string, unknown>>(row.authority_json),
+    payload: parseJson<Record<string, unknown>>(row.payload_json),
+    createdAt: row.created_at,
+  };
+}
+
+export function designOutcomeFromRow(row: DesignOutcomeRow): DesignOutcome {
+  return {
+    id: row.id,
+    proposalId: row.proposal_id,
+    runId: row.run_id ?? null,
+    taskId: row.task_id ?? null,
+    attemptId: row.attempt_id ?? null,
+    stage: row.stage,
+    recommendation: row.recommendation,
+    baseline: parseJson<Record<string, unknown>>(row.baseline_json),
+    observed: parseJson<Record<string, unknown>>(row.observed_json),
+    evidence: parseJson<unknown[]>(row.evidence_json),
+    unexpectedEffects: parseJson<unknown[]>(row.unexpected_effects_json),
+    reviewAt: row.review_at ?? null,
+    payload: parseJson<Record<string, unknown>>(row.payload_json),
     createdAt: row.created_at,
   };
 }

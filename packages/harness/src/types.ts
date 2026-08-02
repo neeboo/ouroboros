@@ -440,3 +440,333 @@ export interface ListHarnessActionEventsInput {
 export interface GetHarnessActionEventInput {
   id: string;
 }
+
+export type CharterStatus = "draft" | "active" | "superseded";
+
+export interface FounderCharterCapitalPolicy {
+  currency?: string;
+  monthlyBudget?: number;
+  experimentBudget?: number;
+  recurringSpendApprovalAbove?: number;
+  runwayFloorMonths?: number;
+  portfolio?: {
+    core?: number;
+    growth?: number;
+    exploration?: number;
+  };
+  [key: string]: unknown;
+}
+
+export interface FounderCharterAuthority {
+  autoResearch?: boolean;
+  autoReversibleExperiments?: boolean;
+  autoIntegrateVerifiedCode?: boolean;
+  requireHumanFor?: string[];
+  [key: string]: unknown;
+}
+
+export interface FounderCharterData {
+  mission: string;
+  targetUsers?: string[];
+  valueMetrics?: string[];
+  principles?: string[];
+  nonGoals?: string[];
+  constraints?: string[];
+  capitalPolicy?: FounderCharterCapitalPolicy;
+  authority?: FounderCharterAuthority;
+  reviewCadenceDays?: number;
+  [key: string]: unknown;
+}
+
+export interface FounderCharter {
+  id: string;
+  projectId: string | null;
+  version: number;
+  isActive: boolean;
+  activatedAt: string | null;
+  supersededAt: string | null;
+  mission: string;
+  charter: FounderCharterData;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface CreateFounderCharterInput {
+  projectId: string;
+  mission: string;
+  charter?: FounderCharterData;
+  activate?: boolean;
+  id?: string;
+}
+
+export interface ActivateFounderCharterInput {
+  charterId: string;
+}
+
+export interface GetFounderCharterInput {
+  id: string;
+}
+
+export interface GetActiveFounderCharterInput {
+  projectId: string;
+}
+
+export interface ListFounderChartersInput {
+  projectId: string;
+  includeInactive?: boolean;
+  limit?: number;
+}
+
+export type StrategySignalClass =
+  | "user"
+  | "delivery"
+  | "technology"
+  | "market"
+  | "economics"
+  | "system";
+
+export type StrategySignalStatus = "active" | "expired" | "superseded";
+
+export interface StrategySignal {
+  id: string;
+  projectId: string | null;
+  signalClass: StrategySignalClass;
+  source: string;
+  title: string;
+  summary: string;
+  observationTime: string;
+  confidence: number;
+  evidence: unknown[];
+  expiresAt: string | null;
+  status: StrategySignalStatus;
+  conflictingSignalIds: string[];
+  proposalId: string | null;
+  runId: string | null;
+  taskId: string | null;
+  attemptId: string | null;
+  payload: Record<string, unknown>;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface CreateStrategySignalInput {
+  projectId: string;
+  signalClass: StrategySignalClass;
+  source: string;
+  title: string;
+  summary: string;
+  observationTime: string;
+  confidence: number;
+  evidence?: unknown[];
+  expiresAt?: string | null;
+  conflictingSignalIds?: string[];
+  proposalId?: string | null;
+  runId?: string | null;
+  taskId?: string | null;
+  attemptId?: string | null;
+  payload?: Record<string, unknown>;
+  status?: StrategySignalStatus;
+  id?: string;
+}
+
+export interface GetStrategySignalInput {
+  id: string;
+}
+
+export interface ListStrategySignalsInput {
+  projectId?: string;
+  signalClass?: StrategySignalClass;
+  statuses?: StrategySignalStatus[];
+  limit?: number;
+}
+
+export type DesignProposalStatus =
+  | "draft"
+  | "proposed"
+  | "experimenting"
+  | "accepted"
+  | "implemented"
+  | "measuring"
+  | "retained"
+  | "rejected"
+  | "retired"
+  | "revise";
+
+export interface DesignProposalOption {
+  name: string;
+  benefits?: string[];
+  costs?: string[];
+  risks?: string[];
+  lockIn?: string[];
+  [key: string]: unknown;
+}
+
+export interface DesignEvaluationContract {
+  baseline: string[];
+  successMetrics: string[];
+  guardMetrics: string[];
+  requiredEvidence: string[];
+  reviewAt?: string;
+  [key: string]: unknown;
+}
+
+export interface DesignInvestment {
+  oneTimeCost?: number;
+  recurringCost?: number;
+  timeBudget?: string;
+  reversibility: "easy" | "moderate" | "hard";
+  portfolio: "core" | "growth" | "exploration";
+  [key: string]: unknown;
+}
+
+export interface DesignExperiment {
+  hypothesis: string;
+  smallestTest: string;
+  stopConditions: string[];
+  rollback: string;
+  [key: string]: unknown;
+}
+
+export interface DesignProposalData {
+  problem: string;
+  evidenceRefs?: string[];
+  targetOutcome?: string;
+  options?: DesignProposalOption[];
+  recommendation: string;
+  additions?: string[];
+  removals?: string[];
+  assumptions?: string[];
+  uncertainty?: string[];
+  evaluationContract: DesignEvaluationContract;
+  investment: DesignInvestment;
+  experiment?: DesignExperiment;
+  [key: string]: unknown;
+}
+
+export interface DesignProposal {
+  id: string;
+  projectId: string | null;
+  runId: string | null;
+  taskId: string | null;
+  attemptId: string | null;
+  charterId: string | null;
+  title: string;
+  problem: string;
+  recommendation: string;
+  status: DesignProposalStatus;
+  proposal: DesignProposalData;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface CreateDesignProposalInput {
+  projectId: string;
+  title: string;
+  problem: string;
+  recommendation: string;
+  proposal: DesignProposalData;
+  charterId?: string | null;
+  runId?: string | null;
+  taskId?: string | null;
+  attemptId?: string | null;
+  status?: DesignProposalStatus;
+  id?: string;
+}
+
+export interface UpdateDesignProposalStatusInput {
+  proposalId: string;
+  status: DesignProposalStatus;
+}
+
+export interface GetDesignProposalInput {
+  id: string;
+}
+
+export interface ListDesignProposalsInput {
+  projectId?: string;
+  statuses?: DesignProposalStatus[];
+  limit?: number;
+}
+
+export type DesignDecisionKind =
+  | "approved"
+  | "rejected"
+  | "deferred"
+  | "retired"
+  | "revise";
+
+export type DesignDecisionActorKind = "auto" | "human" | "governance";
+
+export interface DesignDecision {
+  id: string;
+  proposalId: string;
+  charterId: string | null;
+  decision: DesignDecisionKind;
+  actorKind: DesignDecisionActorKind;
+  actorRef: string | null;
+  reasons: string[];
+  authority: Record<string, unknown>;
+  payload: Record<string, unknown>;
+  createdAt: string;
+}
+
+export interface RecordDesignDecisionInput {
+  proposalId: string;
+  decision: DesignDecisionKind;
+  actorKind: DesignDecisionActorKind;
+  actorRef?: string | null;
+  charterId?: string | null;
+  reasons?: string[];
+  authority?: Record<string, unknown>;
+  payload?: Record<string, unknown>;
+  id?: string;
+}
+
+export interface ListDesignDecisionsInput {
+  proposalId: string;
+  limit?: number;
+}
+
+export type DesignOutcomeStage = "experiment" | "release" | "review";
+
+export type DesignOutcomeRecommendation = "retain" | "revise" | "retire";
+
+export interface DesignOutcome {
+  id: string;
+  proposalId: string;
+  runId: string | null;
+  taskId: string | null;
+  attemptId: string | null;
+  stage: DesignOutcomeStage;
+  recommendation: DesignOutcomeRecommendation;
+  baseline: Record<string, unknown>;
+  observed: Record<string, unknown>;
+  evidence: unknown[];
+  unexpectedEffects: unknown[];
+  reviewAt: string | null;
+  payload: Record<string, unknown>;
+  createdAt: string;
+}
+
+export interface RecordDesignOutcomeInput {
+  proposalId: string;
+  stage: DesignOutcomeStage;
+  recommendation: DesignOutcomeRecommendation;
+  baseline?: Record<string, unknown>;
+  observed?: Record<string, unknown>;
+  evidence?: unknown[];
+  unexpectedEffects?: unknown[];
+  reviewAt?: string | null;
+  runId?: string | null;
+  taskId?: string | null;
+  attemptId?: string | null;
+  payload?: Record<string, unknown>;
+  id?: string;
+}
+
+export interface ListDesignOutcomesInput {
+  proposalId?: string;
+  stage?: DesignOutcomeStage;
+  dueBefore?: string;
+  limit?: number;
+}

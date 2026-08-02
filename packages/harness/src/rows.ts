@@ -1,4 +1,14 @@
-import type { ExecutionThreadStatus, Status } from "./types";
+import type {
+  DesignDecisionActorKind,
+  DesignDecisionKind,
+  DesignOutcomeRecommendation,
+  DesignOutcomeStage,
+  DesignProposalStatus,
+  ExecutionThreadStatus,
+  Status,
+  StrategySignalClass,
+  StrategySignalStatus,
+} from "./types";
 
 export interface RunRow {
   id: string;
@@ -118,5 +128,86 @@ export interface HarnessActionEventRow {
   status: "done" | "blocked";
   request_json: string;
   result_json: string;
+  created_at: string;
+}
+
+export interface FounderCharterRow {
+  id: string;
+  project_id: string | null;
+  version: number;
+  is_active: number;
+  mission: string;
+  charter_json: string;
+  activated_at: string | null;
+  superseded_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface StrategySignalRow {
+  id: string;
+  project_id: string | null;
+  signal_class: StrategySignalClass;
+  source: string;
+  title: string;
+  summary: string;
+  observation_time: string;
+  confidence: number;
+  evidence_json: string;
+  expires_at: string | null;
+  status: StrategySignalStatus;
+  conflicting_signal_ids_json: string;
+  proposal_id: string | null;
+  run_id: string | null;
+  task_id: string | null;
+  attempt_id: string | null;
+  payload_json: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface DesignProposalRow {
+  id: string;
+  project_id: string | null;
+  run_id: string | null;
+  task_id: string | null;
+  attempt_id: string | null;
+  charter_id: string | null;
+  title: string;
+  problem: string;
+  recommendation: string;
+  status: DesignProposalStatus;
+  proposal_json: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface DesignDecisionRow {
+  id: string;
+  proposal_id: string;
+  charter_id: string | null;
+  decision: DesignDecisionKind;
+  actor_kind: DesignDecisionActorKind;
+  actor_ref: string | null;
+  reasons_json: string;
+  authority_json: string;
+  payload_json: string;
+  created_at: string;
+}
+
+export interface DesignOutcomeRow {
+  id: string;
+  proposal_id: string;
+  run_id: string | null;
+  task_id: string | null;
+  attempt_id: string | null;
+  stage: DesignOutcomeStage;
+  recommendation: DesignOutcomeRecommendation;
+  baseline_json: string;
+  observed_json: string;
+  evidence_json: string;
+  unexpected_effects_json: string;
+  review_at: string | null;
+  payload_json: string;
   created_at: string;
 }

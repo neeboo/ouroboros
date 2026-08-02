@@ -171,3 +171,114 @@ create table if not exists external_refs (
 
 create index if not exists idx_external_refs_local on external_refs(local_type, local_id);
 create index if not exists idx_external_refs_external on external_refs(provider, external_type, external_id);
+
+create table if not exists founder_charters (
+  id text primary key,
+  project_id text references projects(id) on delete set null,
+  version integer not null,
+  is_active integer not null default 0,
+  mission text not null,
+  charter_json text not null default '{}',
+  activated_at text,
+  superseded_at text,
+  created_at text not null default current_timestamp,
+  updated_at text not null default current_timestamp,
+  unique (project_id, version)
+);
+
+create unique index if not exists idx_founder_charters_active_project
+  on founder_charters(project_id) where is_active = 1;
+create index if not exists idx_founder_charters_project
+  on founder_charters(project_id, version);
+
+create table if not exists strategy_signals (
+  id text primary key,
+  project_id text references projects(id) on delete cascade,
+  signal_class text not null check (signal_class in ('user','delivery','technology','market','economics','system')),
+  source text not null,
+  title text not null,
+  summary text not null,
+  observation_time text not null,
+  confidence real not null,
+  evidence_json text not null default '[]',
+  expires_at text,
+  status text not null default 'active' check (status in ('active','expired','superseded')),
+  conflicting_signal_ids_json text not null default '[]',
+  proposal_id text references design_proposals(id) on delete set null,
+  run_id text references runs(id) on delete set null,
+  task_id text references tasks(id) on delete set null,
+  attempt_id text references attempts(id) on delete set null,
+  payload_json text not null default '{}',
+  created_at text not null default current_timestamp,
+  updated_at text not null default current_timestamp
+);
+
+create index if not exists idx_strategy_signals_project_status
+  on strategy_signals(project_id, status);
+create index if not exists idx_strategy_signals_class_observed
+  on strategy_signals(signal_class, observation_time);
+create index if not exists idx_strategy_signals_expires
+  on strategy_signals(expires_at);
+
+create table if not exists design_proposals (
+  id text primary key,
+  project_id text references projects(id) on delete cascade,
+  run_id text references runs(id) on delete set null,
+  task_id text references tasks(id) on delete set null,
+  attempt_id text references attempts(id) on delete set null,
+  charter_id text references founder_charters(id) on delete set null,
+  title text not null,
+  problem text not null,
+  recommendation text not null,
+  status text not null default 'draft' check (
+    status in (
+      'draft','proposed','experimenting','accepted',
+      'implemented','measuring','retained',
+      'rejected','retired','revise'
+    )
+  ),
+  proposal_json text not null default '{}',
+  created_at text not null default current_timestamp,
+  updated_at text not null default current_timestamp
+);
+
+create index if not exists idx_design_proposals_project_status
+  on design_proposals(project_id, status);
+
+create table if not exists design_decisions (
+  id text primary key,
+  proposal_id text not null references design_proposals(id) on delete cascade,
+  charter_id text references founder_charters(id) on delete set null,
+  decision text not null check (decision in ('approved','rejected','deferred','retired','revise')),
+  actor_kind text not null check (actor_kind in ('auto','human','governance')),
+  actor_ref text,
+  reasons_json text not null default '[]',
+  authority_json text not null default '{}',
+  payload_json text not null default '{}',
+  created_at text not null default current_timestamp
+);
+
+create index if not exists idx_design_decisions_proposal
+  on design_decisions(proposal_id, created_at);
+
+create table if not exists design_outcomes (
+  id text primary key,
+  proposal_id text not null references design_proposals(id) on delete cascade,
+  run_id text references runs(id) on delete set null,
+  task_id text references tasks(id) on delete set null,
+  attempt_id text references attempts(id) on delete set null,
+  stage text not null check (stage in ('experiment','release','review')),
+  recommendation text not null check (recommendation in ('retain','revise','retire')),
+  baseline_json text not null default '{}',
+  observed_json text not null default '{}',
+  evidence_json text not null default '[]',
+  unexpected_effects_json text not null default '[]',
+  review_at text,
+  payload_json text not null default '{}',
+  created_at text not null default current_timestamp
+);
+
+create index if not exists idx_design_outcomes_proposal
+  on design_outcomes(proposal_id, created_at);
+create index if not exists idx_design_outcomes_review
+  on design_outcomes(review_at);

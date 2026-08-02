@@ -11,63 +11,90 @@ import { toJson } from "./json";
 import {
   attemptEventFromRow,
   attemptFromRow,
+  designDecisionFromRow,
+  designOutcomeFromRow,
+  designProposalFromRow,
   executionThreadFromRow,
   externalRefFromRow,
+  founderCharterFromRow,
   harnessActionEventFromRow,
   inboxEventFromRow,
   lessonFromRow,
   projectFromRow,
   promptTemplateFromRow,
   runFromRow,
+  strategySignalFromRow,
   taskFromRow,
 } from "./mappers";
 import type {
   AttemptEventRow,
   AttemptRow,
+  DesignDecisionRow,
+  DesignOutcomeRow,
+  DesignProposalRow,
   ExecutionThreadRow,
   ExternalRefRow,
+  FounderCharterRow,
   HarnessActionEventRow,
   InboxEventRow,
   LessonRow,
   ProjectRow,
   PromptTemplateRow,
   RunRow,
+  StrategySignalRow,
   TaskRow,
 } from "./rows";
 import type {
-  CreateProjectInput,
+  ActivateFounderCharterInput,
+  CreateDesignProposalInput,
   CreateExternalRefInput,
+  CreateFounderCharterInput,
   CreateInboxEventInput,
-  SetPromptTemplateInput,
+  CreateProjectInput,
   CreateRunInput,
+  CreateStrategySignalInput,
   CreateTaskInput,
   DependencyAttempt,
   AttemptEvent,
   FinishAttemptInput,
+  FounderCharterData,
+  GetActiveFounderCharterInput,
+  GetDesignProposalInput,
+  GetFounderCharterInput,
   GetHarnessActionEventInput,
   GetInboxEventInput,
   GetRunOverviewInput,
+  GetStrategySignalInput,
   LeaseReadyTasksInput,
+  ListDesignDecisionsInput,
+  ListDesignOutcomesInput,
+  ListDesignProposalsInput,
   ListExecutionThreadsInput,
+  ListFounderChartersInput,
   ListHarnessActionEventsInput,
   ListInboxEventsInput,
   ListRunningAttemptsInput,
   ListExternalRefsInput,
   ListLessonsInput,
   ListRunsInput,
+  ListStrategySignalsInput,
   BlockedDependencyTask,
   BlockTasksWithBlockedDependenciesInput,
   RecordAttemptEventInput,
   RecordAttemptInput,
+  RecordDesignDecisionInput,
+  RecordDesignOutcomeInput,
   RecordHarnessActionEventInput,
   BlockedUnfinishedTask,
   BlockUnfinishedTasksForRunInput,
   ReclaimedRunningTask,
   ReclaimRunningTasksInput,
   RetryTaskInput,
+  SetPromptTemplateInput,
   StartAttemptInput,
   Status,
   Task,
+  UpdateDesignProposalStatusInput,
   UpdateRunStatusInput,
   UpdateRunInput,
   UpdateAttemptInputInput,
@@ -1384,6 +1411,430 @@ export class Harness {
     });
   }
 
+  createFounderCharter(input: CreateFounderCharterInput) {
+    const id = input.id ?? makeId("charter");
+    const charter: FounderCharterData = {
+      mission: input.mission,
+      ...(input.charter ?? {}),
+    };
+    const mission = input.mission;
+    return withDatabase(this.dbPath, (db) => {
+      ensureStrategyTables(db);
+      return db.transaction(() => {
+        const versionRow = db
+          .query(
+            `
+            select coalesce(max(version), 0) + 1 as next_version
+            from founder_charters
+            where project_id is $projectId
+            `,
+          )
+          .get({ $projectId: input.projectId }) as { next_version: number };
+        const version = versionRow.next_version;
+        db.query(
+          `
+          insert into founder_charters (
+            id, project_id, version, is_active, mission, charter_json, activated_at
+          )
+          values (
+            $id, $projectId, $version, 0, $mission, $charterJson, null
+          )
+          `,
+        ).run({
+          $id: id,
+          $projectId: input.projectId,
+          $version: version,
+          $mission: mission,
+          $charterJson: toJson(charter),
+        });
+        if (input.activate) {
+          activateCharterInternal(db, id);
+        }
+        const row = db.query("select * from founder_charters where id = $id").get({ $id: id }) as FounderCharterRow;
+        return founderCharterFromRow(row);
+      })();
+    });
+  }
+
+  activateFounderCharter(input: ActivateFounderCharterInput) {
+    return withDatabase(this.dbPath, (db) => {
+      ensureStrategyTables(db);
+      return db.transaction(() => {
+        activateCharterInternal(db, input.charterId);
+        const row = db
+          .query("select * from founder_charters where id = $id")
+          .get({ $id: input.charterId }) as FounderCharterRow;
+        return row ? founderCharterFromRow(row) : null;
+      })();
+    });
+  }
+
+  getFounderCharter(input: GetFounderCharterInput) {
+    return withDatabase(this.dbPath, (db) => {
+      ensureStrategyTables(db);
+      const row = db
+        .query("select * from founder_charters where id = $id")
+        .get({ $id: input.id }) as FounderCharterRow | null;
+      return row ? founderCharterFromRow(row) : null;
+    });
+  }
+
+  getActiveFounderCharter(input: GetActiveFounderCharterInput) {
+    return withDatabase(this.dbPath, (db) => {
+      ensureStrategyTables(db);
+      const row = db
+        .query(
+          `
+          select *
+          from founder_charters
+          where project_id is $projectId and is_active = 1
+          order by version desc, created_at desc
+          limit 1
+          `,
+        )
+        .get({ $projectId: input.projectId }) as FounderCharterRow | null;
+      return row ? founderCharterFromRow(row) : null;
+    });
+  }
+
+  listFounderCharters(input: ListFounderChartersInput) {
+    return withDatabase(this.dbPath, (db) => {
+      ensureStrategyTables(db);
+      const limit = input.limit && input.limit > 0 ? Math.floor(input.limit) : 100;
+      const includeInactive = input.includeInactive ?? false;
+      const where = includeInactive
+        ? "where project_id is $projectId"
+        : "where project_id is $projectId and is_active = 1";
+      const rows = db
+        .query(
+          `
+          select *
+          from founder_charters
+          ${where}
+          order by version desc, created_at desc
+          limit $limit
+          `,
+        )
+        .all({ $projectId: input.projectId, $limit: limit }) as FounderCharterRow[];
+      return rows.map(founderCharterFromRow);
+    });
+  }
+
+  createStrategySignal(input: CreateStrategySignalInput) {
+    const id = input.id ?? makeId("signal");
+    return withDatabase(this.dbPath, (db) => {
+      ensureStrategyTables(db);
+      db.query(
+        `
+        insert into strategy_signals (
+          id, project_id, signal_class, source, title, summary,
+          observation_time, confidence, evidence_json, expires_at,
+          status, conflicting_signal_ids_json, proposal_id,
+          run_id, task_id, attempt_id, payload_json
+        )
+        values (
+          $id, $projectId, $signalClass, $source, $title, $summary,
+          $observationTime, $confidence, $evidenceJson, $expiresAt,
+          $status, $conflictingSignalIdsJson, $proposalId,
+          $runId, $taskId, $attemptId, $payloadJson
+        )
+        `,
+      ).run({
+        $id: id,
+        $projectId: input.projectId,
+        $signalClass: input.signalClass,
+        $source: input.source,
+        $title: input.title,
+        $summary: input.summary,
+        $observationTime: input.observationTime,
+        $confidence: input.confidence,
+        $evidenceJson: toJson(input.evidence ?? []),
+        $expiresAt: input.expiresAt ?? null,
+        $status: input.status ?? "active",
+        $conflictingSignalIdsJson: toJson(input.conflictingSignalIds ?? []),
+        $proposalId: input.proposalId ?? null,
+        $runId: input.runId ?? null,
+        $taskId: input.taskId ?? null,
+        $attemptId: input.attemptId ?? null,
+        $payloadJson: toJson(input.payload ?? {}),
+      });
+      const row = db
+        .query("select * from strategy_signals where id = $id")
+        .get({ $id: id }) as StrategySignalRow;
+      return strategySignalFromRow(row);
+    });
+  }
+
+  getStrategySignal(input: GetStrategySignalInput) {
+    return withDatabase(this.dbPath, (db) => {
+      ensureStrategyTables(db);
+      const row = db
+        .query("select * from strategy_signals where id = $id")
+        .get({ $id: input.id }) as StrategySignalRow | null;
+      return row ? strategySignalFromRow(row) : null;
+    });
+  }
+
+  listStrategySignals(input: ListStrategySignalsInput = {}) {
+    return withDatabase(this.dbPath, (db) => {
+      ensureStrategyTables(db);
+      const limit = input.limit && input.limit > 0 ? Math.floor(input.limit) : 100;
+      const where: string[] = [];
+      const bindings: Record<string, string | number> = { $limit: limit };
+      if (input.projectId) {
+        where.push("project_id is $projectId");
+        bindings.$projectId = input.projectId;
+      }
+      if (input.signalClass) {
+        where.push("signal_class = $signalClass");
+        bindings.$signalClass = input.signalClass;
+      }
+      if (input.statuses && input.statuses.length > 0) {
+        where.push(`status in (${input.statuses.map((_, index) => `$status${index}`).join(", ")})`);
+        for (const [index, status] of input.statuses.entries()) {
+          bindings[`$status${index}`] = status;
+        }
+      }
+      const whereClause = where.length > 0 ? `where ${where.join(" and ")}` : "";
+      const rows = db
+        .query(
+          `
+          select *
+          from strategy_signals
+          ${whereClause}
+          order by observation_time desc, created_at desc, id desc
+          limit $limit
+          `,
+        )
+        .all(bindings) as StrategySignalRow[];
+      return rows.map(strategySignalFromRow);
+    });
+  }
+
+  createDesignProposal(input: CreateDesignProposalInput) {
+    const id = input.id ?? makeId("design");
+    const status = input.status ?? "draft";
+    return withDatabase(this.dbPath, (db) => {
+      ensureStrategyTables(db);
+      db.query(
+        `
+        insert into design_proposals (
+          id, project_id, run_id, task_id, attempt_id, charter_id,
+          title, problem, recommendation, status, proposal_json
+        )
+        values (
+          $id, $projectId, $runId, $taskId, $attemptId, $charterId,
+          $title, $problem, $recommendation, $status, $proposalJson
+        )
+        `,
+      ).run({
+        $id: id,
+        $projectId: input.projectId,
+        $runId: input.runId ?? null,
+        $taskId: input.taskId ?? null,
+        $attemptId: input.attemptId ?? null,
+        $charterId: input.charterId ?? null,
+        $title: input.title,
+        $problem: input.problem,
+        $recommendation: input.recommendation,
+        $status: status,
+        $proposalJson: toJson(input.proposal),
+      });
+      const row = db
+        .query("select * from design_proposals where id = $id")
+        .get({ $id: id }) as DesignProposalRow;
+      return designProposalFromRow(row);
+    });
+  }
+
+  updateDesignProposalStatus(input: UpdateDesignProposalStatusInput) {
+    return withDatabase(this.dbPath, (db) => {
+      ensureStrategyTables(db);
+      db.query(
+        `
+        update design_proposals
+        set status = $status, updated_at = current_timestamp
+        where id = $proposalId
+        `,
+      ).run({ $proposalId: input.proposalId, $status: input.status });
+      const row = db
+        .query("select * from design_proposals where id = $proposalId")
+        .get({ $proposalId: input.proposalId }) as DesignProposalRow | null;
+      return row ? designProposalFromRow(row) : null;
+    });
+  }
+
+  getDesignProposal(input: GetDesignProposalInput) {
+    return withDatabase(this.dbPath, (db) => {
+      ensureStrategyTables(db);
+      const row = db
+        .query("select * from design_proposals where id = $id")
+        .get({ $id: input.id }) as DesignProposalRow | null;
+      return row ? designProposalFromRow(row) : null;
+    });
+  }
+
+  listDesignProposals(input: ListDesignProposalsInput = {}) {
+    return withDatabase(this.dbPath, (db) => {
+      ensureStrategyTables(db);
+      const limit = input.limit && input.limit > 0 ? Math.floor(input.limit) : 100;
+      const where: string[] = [];
+      const bindings: Record<string, string | number> = { $limit: limit };
+      if (input.projectId) {
+        where.push("project_id is $projectId");
+        bindings.$projectId = input.projectId;
+      }
+      if (input.statuses && input.statuses.length > 0) {
+        where.push(`status in (${input.statuses.map((_, index) => `$status${index}`).join(", ")})`);
+        for (const [index, status] of input.statuses.entries()) {
+          bindings[`$status${index}`] = status;
+        }
+      }
+      const whereClause = where.length > 0 ? `where ${where.join(" and ")}` : "";
+      const rows = db
+        .query(
+          `
+          select *
+          from design_proposals
+          ${whereClause}
+          order by created_at desc, id desc
+          limit $limit
+          `,
+        )
+        .all(bindings) as DesignProposalRow[];
+      return rows.map(designProposalFromRow);
+    });
+  }
+
+  recordDesignDecision(input: RecordDesignDecisionInput) {
+    const id = input.id ?? makeId("decision");
+    return withDatabase(this.dbPath, (db) => {
+      ensureStrategyTables(db);
+      return db.transaction(() => {
+        db.query(
+          `
+          insert into design_decisions (
+            id, proposal_id, charter_id, decision, actor_kind, actor_ref,
+            reasons_json, authority_json, payload_json
+          )
+          values (
+            $id, $proposalId, $charterId, $decision, $actorKind, $actorRef,
+            $reasonsJson, $authorityJson, $payloadJson
+          )
+          `,
+        ).run({
+          $id: id,
+          $proposalId: input.proposalId,
+          $charterId: input.charterId ?? null,
+          $decision: input.decision,
+          $actorKind: input.actorKind,
+          $actorRef: input.actorRef ?? null,
+          $reasonsJson: toJson(input.reasons ?? []),
+          $authorityJson: toJson(input.authority ?? {}),
+          $payloadJson: toJson(input.payload ?? {}),
+        });
+        const row = db
+          .query("select * from design_decisions where id = $id")
+          .get({ $id: id }) as DesignDecisionRow;
+        return designDecisionFromRow(row);
+      })();
+    });
+  }
+
+  listDesignDecisions(input: ListDesignDecisionsInput) {
+    return withDatabase(this.dbPath, (db) => {
+      ensureStrategyTables(db);
+      const limit = input.limit && input.limit > 0 ? Math.floor(input.limit) : 100;
+      const rows = db
+        .query(
+          `
+          select *
+          from design_decisions
+          where proposal_id = $proposalId
+          order by rowid, id
+          limit $limit
+          `,
+        )
+        .all({ $proposalId: input.proposalId, $limit: limit }) as DesignDecisionRow[];
+      return rows.map(designDecisionFromRow);
+    });
+  }
+
+  recordDesignOutcome(input: RecordDesignOutcomeInput) {
+    const id = input.id ?? makeId("outcome");
+    return withDatabase(this.dbPath, (db) => {
+      ensureStrategyTables(db);
+      db.query(
+        `
+        insert into design_outcomes (
+          id, proposal_id, run_id, task_id, attempt_id,
+          stage, recommendation,
+          baseline_json, observed_json, evidence_json, unexpected_effects_json,
+          review_at, payload_json
+        )
+        values (
+          $id, $proposalId, $runId, $taskId, $attemptId,
+          $stage, $recommendation,
+          $baselineJson, $observedJson, $evidenceJson, $unexpectedEffectsJson,
+          $reviewAt, $payloadJson
+        )
+        `,
+      ).run({
+        $id: id,
+        $proposalId: input.proposalId,
+        $runId: input.runId ?? null,
+        $taskId: input.taskId ?? null,
+        $attemptId: input.attemptId ?? null,
+        $stage: input.stage,
+        $recommendation: input.recommendation,
+        $baselineJson: toJson(input.baseline ?? {}),
+        $observedJson: toJson(input.observed ?? {}),
+        $evidenceJson: toJson(input.evidence ?? []),
+        $unexpectedEffectsJson: toJson(input.unexpectedEffects ?? []),
+        $reviewAt: input.reviewAt ?? null,
+        $payloadJson: toJson(input.payload ?? {}),
+      });
+      const row = db
+        .query("select * from design_outcomes where id = $id")
+        .get({ $id: id }) as DesignOutcomeRow;
+      return designOutcomeFromRow(row);
+    });
+  }
+
+  listDesignOutcomes(input: ListDesignOutcomesInput = {}) {
+    return withDatabase(this.dbPath, (db) => {
+      ensureStrategyTables(db);
+      const limit = input.limit && input.limit > 0 ? Math.floor(input.limit) : 100;
+      const where: string[] = [];
+      const bindings: Record<string, string | number> = { $limit: limit };
+      if (input.proposalId) {
+        where.push("proposal_id = $proposalId");
+        bindings.$proposalId = input.proposalId;
+      }
+      if (input.stage) {
+        where.push("stage = $stage");
+        bindings.$stage = input.stage;
+      }
+      if (input.dueBefore) {
+        where.push("(review_at is not null and review_at <= $dueBefore)");
+        bindings.$dueBefore = input.dueBefore;
+      }
+      const whereClause = where.length > 0 ? `where ${where.join(" and ")}` : "";
+      const rows = db
+        .query(
+          `
+          select *
+          from design_outcomes
+          ${whereClause}
+          order by rowid, id
+          limit $limit
+          `,
+        )
+        .all(bindings) as DesignOutcomeRow[];
+      return rows.map(designOutcomeFromRow);
+    });
+  }
+
   private seedPromptTemplates() {
     return withDatabase(this.dbPath, (db) => {
       const insertQuery = db.query(`
@@ -1555,6 +2006,154 @@ function ensureHarnessActionEvents(db: { exec: (sql: string) => void }) {
     );
     create index if not exists idx_harness_action_events_created on harness_action_events(created_at, id);
   `);
+}
+
+function ensureStrategyTables(db: { exec: (sql: string) => void }) {
+  db.exec(`
+    create table if not exists founder_charters (
+      id text primary key,
+      project_id text references projects(id) on delete set null,
+      version integer not null,
+      is_active integer not null default 0,
+      mission text not null,
+      charter_json text not null default '{}',
+      activated_at text,
+      superseded_at text,
+      created_at text not null default current_timestamp,
+      updated_at text not null default current_timestamp,
+      unique (project_id, version)
+    );
+
+    create unique index if not exists idx_founder_charters_active_project
+      on founder_charters(project_id) where is_active = 1;
+    create index if not exists idx_founder_charters_project
+      on founder_charters(project_id, version);
+
+    create table if not exists strategy_signals (
+      id text primary key,
+      project_id text references projects(id) on delete cascade,
+      signal_class text not null check (signal_class in ('user','delivery','technology','market','economics','system')),
+      source text not null,
+      title text not null,
+      summary text not null,
+      observation_time text not null,
+      confidence real not null,
+      evidence_json text not null default '[]',
+      expires_at text,
+      status text not null default 'active' check (status in ('active','expired','superseded')),
+      conflicting_signal_ids_json text not null default '[]',
+      proposal_id text references design_proposals(id) on delete set null,
+      run_id text references runs(id) on delete set null,
+      task_id text references tasks(id) on delete set null,
+      attempt_id text references attempts(id) on delete set null,
+      payload_json text not null default '{}',
+      created_at text not null default current_timestamp,
+      updated_at text not null default current_timestamp
+    );
+
+    create index if not exists idx_strategy_signals_project_status
+      on strategy_signals(project_id, status);
+    create index if not exists idx_strategy_signals_class_observed
+      on strategy_signals(signal_class, observation_time);
+    create index if not exists idx_strategy_signals_expires
+      on strategy_signals(expires_at);
+
+    create table if not exists design_proposals (
+      id text primary key,
+      project_id text references projects(id) on delete cascade,
+      run_id text references runs(id) on delete set null,
+      task_id text references tasks(id) on delete set null,
+      attempt_id text references attempts(id) on delete set null,
+      charter_id text references founder_charters(id) on delete set null,
+      title text not null,
+      problem text not null,
+      recommendation text not null,
+      status text not null default 'draft' check (
+        status in (
+          'draft','proposed','experimenting','accepted',
+          'implemented','measuring','retained',
+          'rejected','retired','revise'
+        )
+      ),
+      proposal_json text not null default '{}',
+      created_at text not null default current_timestamp,
+      updated_at text not null default current_timestamp
+    );
+
+    create index if not exists idx_design_proposals_project_status
+      on design_proposals(project_id, status);
+
+    create table if not exists design_decisions (
+      id text primary key,
+      proposal_id text not null references design_proposals(id) on delete cascade,
+      charter_id text references founder_charters(id) on delete set null,
+      decision text not null check (decision in ('approved','rejected','deferred','retired','revise')),
+      actor_kind text not null check (actor_kind in ('auto','human','governance')),
+      actor_ref text,
+      reasons_json text not null default '[]',
+      authority_json text not null default '{}',
+      payload_json text not null default '{}',
+      created_at text not null default current_timestamp
+    );
+
+    create index if not exists idx_design_decisions_proposal
+      on design_decisions(proposal_id, created_at);
+
+    create table if not exists design_outcomes (
+      id text primary key,
+      proposal_id text not null references design_proposals(id) on delete cascade,
+      run_id text references runs(id) on delete set null,
+      task_id text references tasks(id) on delete set null,
+      attempt_id text references attempts(id) on delete set null,
+      stage text not null check (stage in ('experiment','release','review')),
+      recommendation text not null check (recommendation in ('retain','revise','retire')),
+      baseline_json text not null default '{}',
+      observed_json text not null default '{}',
+      evidence_json text not null default '[]',
+      unexpected_effects_json text not null default '[]',
+      review_at text,
+      payload_json text not null default '{}',
+      created_at text not null default current_timestamp
+    );
+
+    create index if not exists idx_design_outcomes_proposal
+      on design_outcomes(proposal_id, created_at);
+    create index if not exists idx_design_outcomes_review
+      on design_outcomes(review_at);
+  `);
+}
+
+function activateCharterInternal(
+  db: Parameters<Parameters<typeof withDatabase>[1]>[0],
+  charterId: string,
+) {
+  const target = db
+    .query("select project_id, version from founder_charters where id = $id")
+    .get({ $id: charterId }) as { project_id: string | null; version: number } | null;
+  if (!target) {
+    throw new Error(`founder charter not found: ${charterId}`);
+  }
+  db.query(
+    `
+    update founder_charters
+    set is_active = 0,
+        superseded_at = coalesce(superseded_at, current_timestamp),
+        updated_at = current_timestamp
+    where project_id is $projectId
+      and is_active = 1
+      and id != $charterId
+    `,
+  ).run({ $projectId: target.project_id, $charterId: charterId });
+  db.query(
+    `
+    update founder_charters
+    set is_active = 1,
+        activated_at = coalesce(activated_at, current_timestamp),
+        superseded_at = null,
+        updated_at = current_timestamp
+    where id = $charterId
+    `,
+  ).run({ $charterId: charterId });
 }
 
 function resolveTaskCycleId(
