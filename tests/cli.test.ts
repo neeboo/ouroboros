@@ -13,6 +13,17 @@ import {
   isDesignTimelineTaskGoal,
   isDesignTimelineTaskRole,
 } from "../packages/cli/src/design-status";
+import {
+  loadOuroborosConfig,
+  resolveLinearPolling,
+  type LinearConfig,
+} from "../packages/cli/src/config";
+import {
+  deterministicLinearInboxId,
+  pollLinearIssues,
+  type LinearPollingConfig,
+  type LinearPollingState,
+} from "../packages/cli/src/linear";
 import { Database } from "bun:sqlite";
 
 describe("CLI", () => {
@@ -1548,6 +1559,1470 @@ describe("CLI", () => {
     expect(rows).toHaveLength(1);
     expect(rows[0].externalId).toBe("linear-issue-immutable-001");
   });
+
+  test("linear polling config requires positive interval plus project and team selectors", async () => {
+    await runCli("init");
+    expect(resolveLinearPolling(undefined).enabled).toBe(false);
+    expect(resolveLinearPolling({ pollIntervalMs: 1000 }).enabled).toBe(false);
+    expect(resolveLinearPolling({ pollIntervalMs: 1000, projectId: "proj" }).enabled).toBe(false);
+    expect(resolveLinearPolling({ pollIntervalMs: 1000, projectId: "proj", teamKey: "PAN" }).enabled).toBe(true);
+    const invalidInterval = resolveLinearPolling({
+      pollIntervalMs: 0,
+      projectId: "proj",
+      teamKey: "PAN",
+      pollPageSize: 0,
+    });
+    expect(invalidInterval.enabled).toBe(false);
+    expect(invalidInterval.reason).toBe("missing-interval");
+  });
+
+  test("linear polling config clamps page and cycle limits to hard caps", () => {
+    const resolved = resolveLinearPolling({
+      pollIntervalMs: 1000,
+      projectId: "proj",
+      teamKey: "PAN",
+      pollPageSize: 10_000,
+      pollMaxPagesPerCycle: 1_000,
+      pollMaxIssuesPerCycle: 100_000,
+      pollOverlapMs: 10 * 60 * 60 * 1000,
+      pollMaxRetries: 1_000,
+      pollBackoffBaseMs: 10 * 60 * 1000,
+      pollBackoffMaxMs: 10 * 24 * 60 * 60 * 1000,
+    });
+    expect(resolved.enabled).toBe(true);
+    const cfg = resolved.config!;
+    expect(cfg.pageSize).toBeLessThanOrEqual(100);
+    expect(cfg.maxPagesPerCycle).toBeLessThanOrEqual(50);
+    expect(cfg.maxIssuesPerCycle).toBeLessThanOrEqual(500);
+    expect(cfg.overlapMs).toBeLessThanOrEqual(60 * 60 * 1000);
+    expect(cfg.maxRetries).toBeLessThanOrEqual(10);
+    expect(cfg.backoffBaseMs).toBeLessThanOrEqual(60 * 1000);
+    expect(cfg.backoffMaxMs).toBeLessThanOrEqual(60 * 60 * 1000);
+  });
+
+  test("linear polling config rejects subminimum values as invalid", () => {
+    const resolved = resolveLinearPolling({
+      pollIntervalMs: 1000,
+      projectId: "proj",
+      teamKey: "PAN",
+      pollPageSize: 0,
+    });
+    expect(resolved.enabled).toBe(false);
+    expect(resolved.reason).toBe("invalid");
+    expect(resolved.error).toContain("poll_page_size");
+  });
+
+  test("linear polling config loads bounded polling fields from TOML", async () => {
+    await runCli("init");
+    const configPath = join(dir, "ouroboros.toml");
+    await writeFile(
+      configPath,
+      [
+        "[linear]",
+        'api_url = "https://example.test/graphql"',
+        'token_env = "LINEAR_API_KEY"',
+        'project_id = "proj-1"',
+        'team_key = "PAN"',
+        "poll_interval_ms = 60000",
+        "poll_page_size = 25",
+        "poll_max_pages_per_cycle = 3",
+        "poll_max_issues_per_cycle = 60",
+        "poll_overlap_ms = 120000",
+        "poll_max_retries = 5",
+        "poll_backoff_base_ms = 2500",
+        "poll_backoff_max_ms = 600000",
+      ].join("\n") + "\n",
+    );
+    const loaded = await loadOuroborosConfig(configPath);
+    expect(loaded.linear?.pollIntervalMs).toBe(60000);
+    expect(loaded.linear?.pollPageSize).toBe(25);
+    expect(loaded.linear?.pollMaxPagesPerCycle).toBe(3);
+    expect(loaded.linear?.pollMaxIssuesPerCycle).toBe(60);
+    expect(loaded.linear?.pollOverlapMs).toBe(120000);
+    expect(loaded.linear?.pollMaxRetries).toBe(5);
+    expect(loaded.linear?.pollBackoffBaseMs).toBe(2500);
+    expect(loaded.linear?.pollBackoffMaxMs).toBe(600000);
+  });
+
+  test("pollLinearIssues restricts the issues query to the resolved project and team and advances the watermark", async () => {
+    await runCli("init");
+    const harness = new Harness(dbPath);
+    const requests: Array<{ body: string }> = [];
+    const issue = {
+      id: "issue-1",
+      identifier: "PAN-1",
+      title: "First",
+      description: "body",
+      url: "https://linear.test/issue/1",
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+      project: { id: "proj-1" },
+      team: { id: "team-1", key: "PAN" },
+    };
+    const fetchImpl: (url: string | URL | Request, init?: RequestInit) => Promise<Response> = async (_url, init) => {
+      requests.push({ body: String(init?.body ?? "") });
+      return new Response(
+        JSON.stringify({
+          data: {
+            issues: {
+              nodes: [issue],
+              pageInfo: { hasNextPage: false, endCursor: "cursor-1" },
+            },
+          },
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    };
+    const result = await pollLinearIssues({
+      harness,
+      apiUrl: "https://example.test/graphql",
+      token: "tok",
+      projectId: "proj-1",
+      teamKey: "PAN",
+      config: basePollingConfig(),
+      state: { cursor: null, overlapBoundary: null },
+      fetchImpl,
+    });
+
+    expect(result.status).toBe("ok");
+    expect(result.issuesIngested).toBe(1);
+    expect(result.issuesDeduplicated).toBe(0);
+    expect(result.state.overlapBoundary).toBe("2026-01-01T00:00:00.000Z");
+    expect(requests).toHaveLength(1);
+    const variables = JSON.parse(requests[0]!.body).variables;
+    expect(variables).toMatchObject({
+      projectId: "proj-1",
+      teamKey: "PAN",
+      pageSize: basePollingConfig().pageSize,
+      after: null,
+      overlapStart: null,
+    });
+    const rows = harness.listInboxEvents({ provider: "linear" });
+    expect(rows).toHaveLength(1);
+    expect(rows[0].externalId).toBe("issue-1");
+  });
+
+  test("pollLinearIssues rejects out-of-scope nodes returned by Linear before ingestion", async () => {
+    await runCli("init");
+    const harness = new Harness(dbPath);
+    const fetchImpl: (url: string | URL | Request, init?: RequestInit) => Promise<Response> = async () => {
+      return new Response(
+        JSON.stringify({
+          data: {
+            issues: {
+              nodes: [
+                {
+                  id: "issue-good",
+                  identifier: "PAN-1",
+                  title: "In",
+                  description: null,
+                  url: "https://linear.test/issue/1",
+                  createdAt: "2026-01-01T00:00:00.000Z",
+                  updatedAt: "2026-01-01T00:00:00.000Z",
+                  project: { id: "proj-1" },
+                  team: { id: "team-1", key: "PAN" },
+                },
+                {
+                  id: "issue-stray",
+                  identifier: "OTH-1",
+                  title: "Out",
+                  description: null,
+                  url: "https://linear.test/issue/2",
+                  createdAt: "2026-01-01T00:00:00.000Z",
+                  updatedAt: "2026-01-01T00:00:00.000Z",
+                  project: { id: "proj-other" },
+                  team: { id: "team-other", key: "OTH" },
+                },
+              ],
+              pageInfo: { hasNextPage: false, endCursor: "cursor-after-good" },
+            },
+          },
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    };
+
+    const result = await pollLinearIssues({
+      harness,
+      apiUrl: "https://example.test/graphql",
+      token: "tok",
+      projectId: "proj-1",
+      teamKey: "PAN",
+      config: basePollingConfig(),
+      state: { cursor: null, overlapBoundary: null },
+      fetchImpl,
+    });
+
+    expect(result.status).toBe("ok");
+    expect(result.issuesRejected).toBe(1);
+    expect(result.issuesIngested).toBe(1);
+    expect(result.state.overlapBoundary).toBe("2026-01-01T00:00:00.000Z");
+    const rows = harness.listInboxEvents({ provider: "linear" });
+    expect(rows.map((row) => row.externalId)).toEqual(["issue-good"]);
+  });
+
+  test("pollLinearIssues paginates with after cursor and advances the watermark only after each page is durable", async () => {
+    await runCli("init");
+    const harness = new Harness(dbPath);
+    const requests: Array<{ after: string | null }> = [];
+    let call = 0;
+    const pages: LinearGraphqlPageShape[] = [
+      {
+        nodes: [
+          {
+            id: "issue-a",
+            identifier: "PAN-A",
+            title: "A",
+            description: null,
+            url: "https://linear.test/a",
+            createdAt: "2026-01-01T00:00:00.000Z",
+            updatedAt: "2026-01-01T00:00:00.000Z",
+            project: { id: "proj-1" },
+            team: { id: "team-1", key: "PAN" },
+          },
+          {
+            id: "issue-b",
+            identifier: "PAN-B",
+            title: "B",
+            description: null,
+            url: "https://linear.test/b",
+            createdAt: "2026-01-01T00:00:01.000Z",
+            updatedAt: "2026-01-01T00:00:01.000Z",
+            project: { id: "proj-1" },
+            team: { id: "team-1", key: "PAN" },
+          },
+        ],
+        pageInfo: { hasNextPage: true, endCursor: "cursor-page-1" },
+      },
+      {
+        nodes: [
+          {
+            id: "issue-c",
+            identifier: "PAN-C",
+            title: "C",
+            description: null,
+            url: "https://linear.test/c",
+            createdAt: "2026-01-01T00:00:02.000Z",
+            updatedAt: "2026-01-01T00:00:02.000Z",
+            project: { id: "proj-1" },
+            team: { id: "team-1", key: "PAN" },
+          },
+        ],
+        pageInfo: { hasNextPage: false, endCursor: "cursor-page-2" },
+      },
+    ];
+    const fetchImpl: (url: string | URL | Request, init?: RequestInit) => Promise<Response> = async (_url, init) => {
+      const body = String(init?.body ?? "");
+      const parsed = JSON.parse(body);
+      requests.push({ after: parsed.variables.after ?? null });
+      const page = pages[Math.min(call, pages.length - 1)]!;
+      call += 1;
+      return new Response(
+        JSON.stringify({ data: { issues: page } }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    };
+
+    const result = await pollLinearIssues({
+      harness,
+      apiUrl: "https://example.test/graphql",
+      token: "tok",
+      projectId: "proj-1",
+      teamKey: "PAN",
+      config: basePollingConfig(),
+      state: { cursor: null, overlapBoundary: null },
+      fetchImpl,
+    });
+
+    expect(result.status).toBe("ok");
+    expect(result.pagesProcessed).toBe(2);
+    expect(result.issuesIngested).toBe(3);
+    expect(result.state.overlapBoundary).toBe("2026-01-01T00:00:02.000Z");
+    expect(requests.map((entry) => entry.after)).toEqual([null, "cursor-page-1"]);
+  });
+
+  test("pollLinearIssues replays the overlap window and deduplicates immutable issue ids across cycles", async () => {
+    await runCli("init");
+    const harness = new Harness(dbPath);
+    const initialBoundary = "2026-01-01T00:00:00.000Z";
+    const pagesByCall = new Map<number, LinearGraphqlPageShape>([
+      [
+        0,
+        {
+          nodes: [
+            {
+              id: "issue-stable",
+              identifier: "PAN-1",
+              title: "Stable",
+              description: null,
+              url: "https://linear.test/1",
+              createdAt: "2026-01-01T00:00:00.000Z",
+              updatedAt: "2026-01-01T00:00:00.000Z",
+              project: { id: "proj-1" },
+              team: { id: "team-1", key: "PAN" },
+            },
+            {
+              id: "issue-tie",
+              identifier: "PAN-2",
+              title: "Tie",
+              description: null,
+              url: "https://linear.test/2",
+              createdAt: "2026-01-01T00:00:00.000Z",
+              updatedAt: "2026-01-01T00:00:00.000Z",
+              project: { id: "proj-1" },
+              team: { id: "team-1", key: "PAN" },
+            },
+          ],
+          pageInfo: { hasNextPage: false, endCursor: "cursor-after" },
+        },
+      ],
+      [
+        1,
+        {
+          nodes: [
+            {
+              id: "issue-stable",
+              identifier: "PAN-1",
+              title: "Stable",
+              description: null,
+              url: "https://linear.test/1",
+              createdAt: "2026-01-01T00:00:00.000Z",
+              updatedAt: "2026-01-01T00:00:00.000Z",
+              project: { id: "proj-1" },
+              team: { id: "team-1", key: "PAN" },
+            },
+            {
+              id: "issue-tie",
+              identifier: "PAN-2",
+              title: "Tie",
+              description: null,
+              url: "https://linear.test/2",
+              createdAt: "2026-01-01T00:00:00.000Z",
+              updatedAt: "2026-01-01T00:00:00.000Z",
+              project: { id: "proj-1" },
+              team: { id: "team-1", key: "PAN" },
+            },
+            {
+              id: "issue-new",
+              identifier: "PAN-3",
+              title: "New",
+              description: null,
+              url: "https://linear.test/3",
+              createdAt: "2026-01-01T00:00:00.000Z",
+              updatedAt: "2026-01-01T00:00:00.000Z",
+              project: { id: "proj-1" },
+              team: { id: "team-1", key: "PAN" },
+            },
+          ],
+          pageInfo: { hasNextPage: false, endCursor: "cursor-after-new" },
+        },
+      ],
+    ]);
+    let call = 0;
+    const seenOverlapStart: (string | null)[] = [];
+    const fetchImpl: (url: string | URL | Request, init?: RequestInit) => Promise<Response> = async (_url, init) => {
+      const parsed = JSON.parse(String(init?.body ?? ""));
+      seenOverlapStart.push(parsed.variables.overlapStart ?? null);
+      const page = pagesByCall.get(call) ?? pagesByCall.get(1)!;
+      call += 1;
+      return new Response(
+        JSON.stringify({ data: { issues: page } }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    };
+
+    const first = await pollLinearIssues({
+      harness,
+      apiUrl: "https://example.test/graphql",
+      token: "tok",
+      projectId: "proj-1",
+      teamKey: "PAN",
+      config: basePollingConfig({ overlapMs: 60_000 }),
+      state: { cursor: null, overlapBoundary: initialBoundary },
+      fetchImpl,
+    });
+    expect(first.status).toBe("ok");
+    expect(first.issuesIngested).toBe(2);
+    expect(first.issuesDeduplicated).toBe(0);
+    expect(first.state.overlapBoundary).toBe("2026-01-01T00:00:00.000Z");
+    expect(first.state.cursor).toBeNull();
+    expect(first.state.intraPageContinuation).toBeNull();
+    expect(seenOverlapStart[0]).toBeTypeOf("string");
+    expect(Date.parse(seenOverlapStart[0]!)).toBeLessThan(Date.parse(initialBoundary));
+
+    const second = await pollLinearIssues({
+      harness,
+      apiUrl: "https://example.test/graphql",
+      token: "tok",
+      projectId: "proj-1",
+      teamKey: "PAN",
+      config: basePollingConfig({ overlapMs: 60_000 }),
+      state: first.state,
+      fetchImpl,
+    });
+    expect(second.status).toBe("ok");
+    expect(second.issuesIngested).toBe(1);
+    expect(second.issuesDeduplicated).toBe(2);
+    expect(second.state.overlapBoundary).toBe("2026-01-01T00:00:00.000Z");
+    expect(second.state.cursor).toBeNull();
+    expect(harness.listInboxEvents({ provider: "linear" })).toHaveLength(3);
+  });
+
+  test("pollLinearIssues replays a terminal page across supervisor restarts without stranding new equal-timestamp issues", async () => {
+    await runCli("init");
+    const harness = new Harness(dbPath);
+    const initialBoundary = "2026-01-01T00:00:00.000Z";
+    const seenAfter: (string | null)[] = [];
+    const pagesByCall = new Map<number, LinearGraphqlPageShape>([
+      [
+        0,
+        {
+          nodes: [
+            {
+              id: "issue-old",
+              identifier: "PAN-1",
+              title: "Old",
+              description: null,
+              url: "https://linear.test/1",
+              createdAt: "2026-01-01T00:00:00.000Z",
+              updatedAt: "2026-01-01T00:00:00.000Z",
+              project: { id: "proj-1" },
+              team: { id: "team-1", key: "PAN" },
+            },
+          ],
+          pageInfo: { hasNextPage: false, endCursor: "terminal-1" },
+        },
+      ],
+      [
+        1,
+        {
+          nodes: [
+            {
+              id: "issue-old",
+              identifier: "PAN-1",
+              title: "Old",
+              description: null,
+              url: "https://linear.test/1",
+              createdAt: "2026-01-01T00:00:00.000Z",
+              updatedAt: "2026-01-01T00:00:00.000Z",
+              project: { id: "proj-1" },
+              team: { id: "team-1", key: "PAN" },
+            },
+            {
+              id: "issue-new",
+              identifier: "PAN-2",
+              title: "New",
+              description: null,
+              url: "https://linear.test/2",
+              createdAt: "2026-01-01T00:00:00.000Z",
+              updatedAt: "2026-01-01T00:00:00.000Z",
+              project: { id: "proj-1" },
+              team: { id: "team-1", key: "PAN" },
+            },
+          ],
+          pageInfo: { hasNextPage: false, endCursor: "terminal-2" },
+        },
+      ],
+    ]);
+    let call = 0;
+    const fetchImpl: (url: string | URL | Request, init?: RequestInit) => Promise<Response> = async (_url, init) => {
+      const parsed = JSON.parse(String(init?.body ?? ""));
+      seenAfter.push(parsed.variables.after ?? null);
+      const page = pagesByCall.get(call) ?? pagesByCall.get(1)!;
+      call += 1;
+      return new Response(
+        JSON.stringify({ data: { issues: page } }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    };
+
+    const first = await pollLinearIssues({
+      harness,
+      apiUrl: "https://example.test/graphql",
+      token: "tok",
+      projectId: "proj-1",
+      teamKey: "PAN",
+      config: basePollingConfig({ overlapMs: 60_000 }),
+      state: { cursor: null, overlapBoundary: initialBoundary },
+      fetchImpl,
+    });
+    expect(first.status).toBe("ok");
+    expect(first.issuesIngested).toBe(1);
+    expect(first.state.cursor).toBeNull();
+    expect(first.state.overlapBoundary).toBe("2026-01-01T00:00:00.000Z");
+
+    const second = await pollLinearIssues({
+      harness,
+      apiUrl: "https://example.test/graphql",
+      token: "tok",
+      projectId: "proj-1",
+      teamKey: "PAN",
+      config: basePollingConfig({ overlapMs: 60_000 }),
+      state: first.state,
+      fetchImpl,
+    });
+    expect(second.status).toBe("ok");
+    expect(second.issuesIngested).toBe(1);
+    expect(second.issuesDeduplicated).toBe(1);
+    expect(second.state.cursor).toBeNull();
+    expect(second.state.overlapBoundary).toBe("2026-01-01T00:00:00.000Z");
+    expect(seenAfter).toEqual([null, null]);
+    expect(harness.listInboxEvents({ provider: "linear" })).toHaveLength(2);
+  });
+
+  test("pollLinearIssues preserves the previous overlap boundary when an issue fails to ingest mid-page", async () => {
+    await runCli("init");
+    const harness = new Harness(dbPath);
+    const poisonId = deterministicLinearInboxId({ eventType: "issue.created", externalId: "issue-poison" });
+    harness.ensureInboxEvent({
+      id: deterministicLinearInboxId({ eventType: "issue.created", externalId: "issue-good" }),
+      provider: "linear",
+      eventType: "issue.created",
+      externalId: "issue-good",
+      payload: { identifier: "PAN-1" },
+    });
+    harness.createInboxEvent({
+      provider: "linear",
+      eventType: "issue.created",
+      externalId: "issue-colliding",
+      payload: { identifier: "PAN-X" },
+      status: "todo",
+      id: poisonId,
+    });
+    const fetchImpl: (url: string | URL | Request, init?: RequestInit) => Promise<Response> = async () => {
+      return new Response(
+        JSON.stringify({
+          data: {
+            issues: {
+              nodes: [
+                {
+                  id: "issue-good",
+                  identifier: "PAN-1",
+                  title: "Good",
+                  description: null,
+                  url: "https://linear.test/1",
+                  createdAt: "2026-01-01T00:00:00.000Z",
+                  updatedAt: "2026-01-01T00:00:00.000Z",
+                  project: { id: "proj-1" },
+                  team: { id: "team-1", key: "PAN" },
+                },
+                {
+                  id: "issue-poison",
+                  identifier: "PAN-2",
+                  title: "Poison",
+                  description: null,
+                  url: "https://linear.test/2",
+                  createdAt: "2026-01-01T00:00:01.000Z",
+                  updatedAt: "2026-01-01T00:00:01.000Z",
+                  project: { id: "proj-1" },
+                  team: { id: "team-1", key: "PAN" },
+                },
+              ],
+              pageInfo: { hasNextPage: false, endCursor: "cursor-end" },
+            },
+          },
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    };
+
+    const initial: LinearPollingState = { cursor: null, overlapBoundary: "2025-12-31T00:00:00.000Z" };
+    const result = await pollLinearIssues({
+      harness,
+      apiUrl: "https://example.test/graphql",
+      token: "tok",
+      projectId: "proj-1",
+      teamKey: "PAN",
+      config: basePollingConfig(),
+      state: initial,
+      fetchImpl,
+    });
+
+    expect(result.status).toBe("ingestion_failure");
+    expect(result.state.overlapBoundary).toBe("2025-12-31T00:00:00.000Z");
+    expect(result.state.intraPageContinuation).toBeNull();
+    expect(result.issuesIngested).toBe(0);
+    expect(result.issuesDeduplicated).toBe(1);
+    expect(result.error).toContain("deterministic id collision");
+  });
+
+  test("pollLinearIssues drops the relay cursor when the overlap boundary advances so the next cycle replays consistently", async () => {
+    await runCli("init");
+    const harness = new Harness(dbPath);
+    const seenAfter: (string | null)[] = [];
+    const seenOverlapStart: (string | null)[] = [];
+    const fetchImpl: (url: string | URL | Request, init?: RequestInit) => Promise<Response> = async (_url, init) => {
+      const parsed = JSON.parse(String(init?.body ?? ""));
+      const after = parsed.variables.after ?? null;
+      const overlapStart = parsed.variables.overlapStart ?? null;
+      seenAfter.push(after);
+      seenOverlapStart.push(overlapStart);
+      const issue1 = {
+        id: "issue-1",
+        identifier: "PAN-1",
+        title: "First",
+        description: null,
+        url: "https://linear.test/1",
+        createdAt: "2026-01-01T00:00:00.000Z",
+        updatedAt: "2026-01-01T00:00:00.000Z",
+        project: { id: "proj-1" },
+        team: { id: "team-1", key: "PAN" },
+      };
+      const issue2 = {
+        id: "issue-2",
+        identifier: "PAN-2",
+        title: "Second",
+        description: null,
+        url: "https://linear.test/2",
+        createdAt: "2026-01-01T00:00:01.000Z",
+        updatedAt: "2026-01-01T00:00:01.000Z",
+        project: { id: "proj-1" },
+        team: { id: "team-1", key: "PAN" },
+      };
+      const issue3 = {
+        id: "issue-3",
+        identifier: "PAN-3",
+        title: "Third",
+        description: null,
+        url: "https://linear.test/3",
+        createdAt: "2026-01-01T00:00:02.000Z",
+        updatedAt: "2026-01-01T00:00:02.000Z",
+        project: { id: "proj-1" },
+        team: { id: "team-1", key: "PAN" },
+      };
+      const visible = [issue1, issue2, issue3].filter(
+        (issue) => overlapStart === null || issue.createdAt >= overlapStart,
+      );
+      let nodes = visible;
+      let endCursor: string | null = null;
+      let hasNextPage = false;
+      if (after === null) {
+        nodes = visible.slice(0, 2);
+        endCursor = nodes.length > 0 ? "page-1-end" : null;
+        hasNextPage = visible.length > 2;
+      } else if (after === "page-1-end") {
+        nodes = visible.slice(2, 4);
+        endCursor = nodes.length > 0 ? "page-2-end" : null;
+        hasNextPage = visible.length > 4;
+      } else {
+        nodes = [];
+        endCursor = after;
+        hasNextPage = false;
+      }
+      const page: LinearGraphqlPageShape = {
+        nodes,
+        pageInfo: { hasNextPage, endCursor },
+      };
+      return new Response(
+        JSON.stringify({ data: { issues: page } }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    };
+    const config = basePollingConfig({ maxPagesPerCycle: 1, pageSize: 2, overlapMs: 0 });
+
+    const first = await pollLinearIssues({
+      harness,
+      apiUrl: "https://example.test/graphql",
+      token: "tok",
+      projectId: "proj-1",
+      teamKey: "PAN",
+      config,
+      state: { cursor: null, overlapBoundary: null },
+      fetchImpl,
+    });
+    expect(first.status).toBe("ok");
+    expect(first.pagesProcessed).toBe(1);
+    expect(first.issuesIngested).toBe(2);
+    expect(first.state.overlapBoundary).toBe("2026-01-01T00:00:01.000Z");
+    expect(first.state.cursor).toBeNull();
+    expect(first.state.intraPageContinuation).toBeNull();
+    expect(first.error).toBe("cycle limit reached");
+
+    const second = await pollLinearIssues({
+      harness,
+      apiUrl: "https://example.test/graphql",
+      token: "tok",
+      projectId: "proj-1",
+      teamKey: "PAN",
+      config,
+      state: first.state,
+      fetchImpl,
+    });
+    expect(second.status).toBe("ok");
+    expect(second.issuesIngested).toBe(1);
+    expect(second.issuesDeduplicated).toBe(1);
+    expect(second.state.overlapBoundary).toBe("2026-01-01T00:00:02.000Z");
+    expect(second.state.cursor).toBeNull();
+    expect(seenAfter).toEqual([null, null]);
+    expect(seenOverlapStart[1]).toBe("2026-01-01T00:00:01.000Z");
+  });
+
+  test("pollLinearIssues preserves the relay cursor across cycles only when the overlap boundary does not advance", async () => {
+    await runCli("init");
+    const harness = new Harness(dbPath);
+    const seenAfter: (string | null)[] = [];
+    const fetchImpl: (url: string | URL | Request, init?: RequestInit) => Promise<Response> = async (_url, init) => {
+      const parsed = JSON.parse(String(init?.body ?? ""));
+      const after = parsed.variables.after ?? null;
+      seenAfter.push(after);
+      const page: LinearGraphqlPageShape =
+        after === null
+          ? { nodes: [], pageInfo: { hasNextPage: true, endCursor: "empty-page-end" } }
+          : {
+              nodes: [
+                {
+                  id: "issue-1",
+                  identifier: "PAN-1",
+                  title: "After empty",
+                  description: null,
+                  url: "https://linear.test/1",
+                  createdAt: "2026-01-01T00:00:00.000Z",
+                  updatedAt: "2026-01-01T00:00:00.000Z",
+                  project: { id: "proj-1" },
+                  team: { id: "team-1", key: "PAN" },
+                },
+              ],
+              pageInfo: { hasNextPage: false, endCursor: "second-page-end" },
+            };
+      return new Response(
+        JSON.stringify({ data: { issues: page } }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    };
+    const config = basePollingConfig({ maxPagesPerCycle: 1, overlapMs: 0 });
+
+    const first = await pollLinearIssues({
+      harness,
+      apiUrl: "https://example.test/graphql",
+      token: "tok",
+      projectId: "proj-1",
+      teamKey: "PAN",
+      config,
+      state: { cursor: null, overlapBoundary: null },
+      fetchImpl,
+    });
+    expect(first.status).toBe("ok");
+    expect(first.pagesProcessed).toBe(1);
+    expect(first.state.overlapBoundary).toBeNull();
+    expect(first.state.cursor).toBe("empty-page-end");
+    expect(first.state.intraPageContinuation).toBeNull();
+
+    const second = await pollLinearIssues({
+      harness,
+      apiUrl: "https://example.test/graphql",
+      token: "tok",
+      projectId: "proj-1",
+      teamKey: "PAN",
+      config,
+      state: first.state,
+      fetchImpl,
+    });
+    expect(second.status).toBe("ok");
+    expect(second.issuesIngested).toBe(1);
+    expect(second.state.overlapBoundary).toBe("2026-01-01T00:00:00.000Z");
+    expect(second.state.cursor).toBeNull();
+    expect(seenAfter).toEqual([null, "empty-page-end"]);
+  });
+
+  test("pollLinearIssues bounds all processed issues per cycle, including deduplicated overlap replays", async () => {
+    await runCli("init");
+    const harness = new Harness(dbPath);
+    for (const id of ["issue-1", "issue-2", "issue-3"]) {
+      harness.ensureInboxEvent({
+        id: deterministicLinearInboxId({ eventType: "issue.created", externalId: id }),
+        provider: "linear",
+        eventType: "issue.created",
+        externalId: id,
+        payload: { identifier: id },
+      });
+    }
+    const page: LinearGraphqlPageShape = {
+      nodes: [
+        {
+          id: "issue-1",
+          identifier: "PAN-1",
+          title: "One",
+          description: null,
+          url: "https://linear.test/1",
+          createdAt: "2026-01-01T00:00:00.000Z",
+          updatedAt: "2026-01-01T00:00:00.000Z",
+          project: { id: "proj-1" },
+          team: { id: "team-1", key: "PAN" },
+        },
+        {
+          id: "issue-2",
+          identifier: "PAN-2",
+          title: "Two",
+          description: null,
+          url: "https://linear.test/2",
+          createdAt: "2026-01-01T00:00:00.000Z",
+          updatedAt: "2026-01-01T00:00:00.000Z",
+          project: { id: "proj-1" },
+          team: { id: "team-1", key: "PAN" },
+        },
+        {
+          id: "issue-3",
+          identifier: "PAN-3",
+          title: "Three",
+          description: null,
+          url: "https://linear.test/3",
+          createdAt: "2026-01-01T00:00:00.000Z",
+          updatedAt: "2026-01-01T00:00:00.000Z",
+          project: { id: "proj-1" },
+          team: { id: "team-1", key: "PAN" },
+        },
+      ],
+      pageInfo: { hasNextPage: false, endCursor: "page-end" },
+    };
+    const fetchImpl: (url: string | URL | Request, init?: RequestInit) => Promise<Response> = async () => {
+      return new Response(
+        JSON.stringify({ data: { issues: page } }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    };
+
+    const initialBoundary = "2025-12-31T00:00:00.000Z";
+    const config = basePollingConfig({ maxIssuesPerCycle: 1 });
+
+    const result = await pollLinearIssues({
+      harness,
+      apiUrl: "https://example.test/graphql",
+      token: "tok",
+      projectId: "proj-1",
+      teamKey: "PAN",
+      config,
+      state: { cursor: null, overlapBoundary: initialBoundary },
+      fetchImpl,
+    });
+
+    expect(result.status).toBe("ok");
+    expect(result.issuesDeduplicated).toBe(1);
+    expect(result.issuesIngested).toBe(0);
+    expect(result.pagesProcessed).toBe(0);
+    expect(result.state.overlapBoundary).toBe(initialBoundary);
+    expect(result.state.cursor).toBeNull();
+    expect(result.state.intraPageContinuation).toEqual({
+      createdAt: "2026-01-01T00:00:00.000Z",
+      issueId: "issue-1",
+    });
+    expect(result.error).toBe("cycle limit reached");
+  });
+
+  test("pollLinearIssues truncates an equal-timestamp page on the cap and reaches the tail across bounded cycles", async () => {
+    await runCli("init");
+    const harness = new Harness(dbPath);
+    const page: LinearGraphqlPageShape = {
+      nodes: [
+        {
+          id: "issue-1",
+          identifier: "PAN-1",
+          title: "One",
+          description: null,
+          url: "https://linear.test/1",
+          createdAt: "2026-01-01T00:00:00.000Z",
+          updatedAt: "2026-01-01T00:00:00.000Z",
+          project: { id: "proj-1" },
+          team: { id: "team-1", key: "PAN" },
+        },
+        {
+          id: "issue-2",
+          identifier: "PAN-2",
+          title: "Two",
+          description: null,
+          url: "https://linear.test/2",
+          createdAt: "2026-01-01T00:00:00.000Z",
+          updatedAt: "2026-01-01T00:00:00.000Z",
+          project: { id: "proj-1" },
+          team: { id: "team-1", key: "PAN" },
+        },
+        {
+          id: "issue-3",
+          identifier: "PAN-3",
+          title: "Three",
+          description: null,
+          url: "https://linear.test/3",
+          createdAt: "2026-01-01T00:00:00.000Z",
+          updatedAt: "2026-01-01T00:00:00.000Z",
+          project: { id: "proj-1" },
+          team: { id: "team-1", key: "PAN" },
+        },
+      ],
+      pageInfo: { hasNextPage: false, endCursor: "page-end" },
+    };
+    const fetchImpl: (url: string | URL | Request, init?: RequestInit) => Promise<Response> = async () => {
+      return new Response(
+        JSON.stringify({ data: { issues: page } }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    };
+
+    const initialBoundary = "2025-12-31T00:00:00.000Z";
+    const config = basePollingConfig({ maxIssuesPerCycle: 2 });
+
+    const first = await pollLinearIssues({
+      harness,
+      apiUrl: "https://example.test/graphql",
+      token: "tok",
+      projectId: "proj-1",
+      teamKey: "PAN",
+      config,
+      state: { cursor: null, overlapBoundary: initialBoundary },
+      fetchImpl,
+    });
+    expect(first.status).toBe("ok");
+    expect(first.issuesIngested).toBe(2);
+    expect(first.issuesDeduplicated).toBe(0);
+    expect(first.pagesProcessed).toBe(0);
+    expect(first.state.overlapBoundary).toBe(initialBoundary);
+    expect(first.state.cursor).toBeNull();
+    expect(first.state.intraPageContinuation).toEqual({
+      createdAt: "2026-01-01T00:00:00.000Z",
+      issueId: "issue-2",
+    });
+    expect(first.error).toBe("cycle limit reached");
+
+    // Critical repair: the durable intra-page continuation lets the second cycle skip the two nodes
+    // already accounted for and reach the third equal-timestamp node instead of reprocessing the
+    // first two forever.
+    const second = await pollLinearIssues({
+      harness,
+      apiUrl: "https://example.test/graphql",
+      token: "tok",
+      projectId: "proj-1",
+      teamKey: "PAN",
+      config,
+      state: first.state,
+      fetchImpl,
+    });
+    expect(second.status).toBe("ok");
+    expect(second.issuesIngested).toBe(1);
+    expect(second.issuesDeduplicated).toBe(0);
+    expect(second.pagesProcessed).toBe(1);
+    expect(second.state.overlapBoundary).toBe("2026-01-01T00:00:00.000Z");
+    expect(second.state.cursor).toBeNull();
+    expect(second.state.intraPageContinuation).toBeNull();
+    expect(second.error).toBeUndefined();
+    expect(harness.listInboxEvents({ provider: "linear" })).toHaveLength(3);
+  });
+
+  test("pollLinearIssues resumes from the durable continuation across Harness reconstruction", async () => {
+    await runCli("init");
+    const initialBoundary = "2025-12-31T00:00:00.000Z";
+    const page: LinearGraphqlPageShape = {
+      nodes: [
+        {
+          id: "issue-1",
+          identifier: "PAN-1",
+          title: "One",
+          description: null,
+          url: "https://linear.test/1",
+          createdAt: "2026-01-01T00:00:00.000Z",
+          updatedAt: "2026-01-01T00:00:00.000Z",
+          project: { id: "proj-1" },
+          team: { id: "team-1", key: "PAN" },
+        },
+        {
+          id: "issue-2",
+          identifier: "PAN-2",
+          title: "Two",
+          description: null,
+          url: "https://linear.test/2",
+          createdAt: "2026-01-01T00:00:00.000Z",
+          updatedAt: "2026-01-01T00:00:00.000Z",
+          project: { id: "proj-1" },
+          team: { id: "team-1", key: "PAN" },
+        },
+        {
+          id: "issue-3",
+          identifier: "PAN-3",
+          title: "Three",
+          description: null,
+          url: "https://linear.test/3",
+          createdAt: "2026-01-01T00:00:00.000Z",
+          updatedAt: "2026-01-01T00:00:00.000Z",
+          project: { id: "proj-1" },
+          team: { id: "team-1", key: "PAN" },
+        },
+      ],
+      pageInfo: { hasNextPage: false, endCursor: "page-end" },
+    };
+    const fetchImpl: (url: string | URL | Request, init?: RequestInit) => Promise<Response> = async () => {
+      return new Response(
+        JSON.stringify({ data: { issues: page } }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    };
+    const config = basePollingConfig({ maxIssuesPerCycle: 2 });
+
+    const firstHarness = new Harness(dbPath);
+    const first = await pollLinearIssues({
+      harness: firstHarness,
+      apiUrl: "https://example.test/graphql",
+      token: "tok",
+      projectId: "proj-1",
+      teamKey: "PAN",
+      config,
+      state: { cursor: null, overlapBoundary: initialBoundary },
+      fetchImpl,
+    });
+    expect(first.state.intraPageContinuation).toEqual({
+      createdAt: "2026-01-01T00:00:00.000Z",
+      issueId: "issue-2",
+    });
+
+    // Simulate a supervisor restart by opening a fresh Harness against the same durable database.
+    // The continuation is part of the run-context JSON the caller persists between cycles.
+    const restoredHarness = new Harness(dbPath);
+    expect(restoredHarness.listInboxEvents({ provider: "linear" })).toHaveLength(2);
+
+    const second = await pollLinearIssues({
+      harness: restoredHarness,
+      apiUrl: "https://example.test/graphql",
+      token: "tok",
+      projectId: "proj-1",
+      teamKey: "PAN",
+      config,
+      state: first.state,
+      fetchImpl,
+    });
+    expect(second.status).toBe("ok");
+    expect(second.issuesIngested).toBe(1);
+    expect(second.issuesDeduplicated).toBe(0);
+    expect(second.pagesProcessed).toBe(1);
+    expect(second.state.overlapBoundary).toBe("2026-01-01T00:00:00.000Z");
+    expect(second.state.intraPageContinuation).toBeNull();
+    expect(restoredHarness.listInboxEvents({ provider: "linear" })).toHaveLength(3);
+  });
+
+  test("pollLinearIssues counts rejected nodes against the per-cycle budget and saves a continuation", async () => {
+    await runCli("init");
+    const harness = new Harness(dbPath);
+    const page: LinearGraphqlPageShape = {
+      nodes: [
+        {
+          id: "issue-a-rejected-1",
+          identifier: "OTH-1",
+          title: "Stray 1",
+          description: null,
+          url: "https://linear.test/r1",
+          createdAt: "2026-01-01T00:00:00.000Z",
+          updatedAt: "2026-01-01T00:00:00.000Z",
+          project: { id: "proj-other" },
+          team: { id: "team-other", key: "OTH" },
+        },
+        {
+          id: "issue-b-rejected-2",
+          identifier: "OTH-2",
+          title: "Stray 2",
+          description: null,
+          url: "https://linear.test/r2",
+          createdAt: "2026-01-01T00:00:00.000Z",
+          updatedAt: "2026-01-01T00:00:00.000Z",
+          project: { id: "proj-other" },
+          team: { id: "team-other", key: "OTH" },
+        },
+        {
+          id: "issue-z-good",
+          identifier: "PAN-1",
+          title: "Good",
+          description: null,
+          url: "https://linear.test/1",
+          createdAt: "2026-01-01T00:00:00.000Z",
+          updatedAt: "2026-01-01T00:00:00.000Z",
+          project: { id: "proj-1" },
+          team: { id: "team-1", key: "PAN" },
+        },
+      ],
+      pageInfo: { hasNextPage: false, endCursor: "page-end" },
+    };
+    const fetchImpl: (url: string | URL | Request, init?: RequestInit) => Promise<Response> = async () => {
+      return new Response(
+        JSON.stringify({ data: { issues: page } }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    };
+    const config = basePollingConfig({ maxIssuesPerCycle: 2 });
+
+    const result = await pollLinearIssues({
+      harness,
+      apiUrl: "https://example.test/graphql",
+      token: "tok",
+      projectId: "proj-1",
+      teamKey: "PAN",
+      config,
+      state: { cursor: null, overlapBoundary: "2025-12-31T00:00:00.000Z" },
+      fetchImpl,
+    });
+    expect(result.status).toBe("ok");
+    // Both rejected nodes consumed the budget, so the in-scope third node never ran this cycle.
+    expect(result.issuesRejected).toBe(2);
+    expect(result.issuesIngested).toBe(0);
+    expect(result.pagesProcessed).toBe(0);
+    expect(result.state.intraPageContinuation).toEqual({
+      createdAt: "2026-01-01T00:00:00.000Z",
+      issueId: "issue-b-rejected-2",
+    });
+    expect(result.error).toBe("cycle limit reached");
+    expect(harness.listInboxEvents({ provider: "linear" })).toHaveLength(0);
+
+    const second = await pollLinearIssues({
+      harness,
+      apiUrl: "https://example.test/graphql",
+      token: "tok",
+      projectId: "proj-1",
+      teamKey: "PAN",
+      config,
+      state: result.state,
+      fetchImpl,
+    });
+    expect(second.status).toBe("ok");
+    expect(second.issuesIngested).toBe(1);
+    expect(second.issuesRejected).toBe(0);
+    expect(second.state.overlapBoundary).toBe("2026-01-01T00:00:00.000Z");
+    expect(second.state.intraPageContinuation).toBeNull();
+  });
+
+  test("pollLinearIssues counts malformed nodes against the per-cycle budget and never advances past them durably", async () => {
+    await runCli("init");
+    const harness = new Harness(dbPath);
+    const page: LinearGraphqlPageShape = {
+      nodes: [
+        {
+          // missing id and createdAt — malformed
+          identifier: "BAD-1",
+          title: "Bad 1",
+          description: null,
+          url: "https://linear.test/b1",
+          project: { id: "proj-1" },
+          team: { id: "team-1", key: "PAN" },
+        },
+        {
+          id: "issue-good",
+          identifier: "PAN-1",
+          title: "Good",
+          description: null,
+          url: "https://linear.test/1",
+          createdAt: "2026-01-01T00:00:00.000Z",
+          updatedAt: "2026-01-01T00:00:00.000Z",
+          project: { id: "proj-1" },
+          team: { id: "team-1", key: "PAN" },
+        },
+      ],
+      pageInfo: { hasNextPage: false, endCursor: "page-end" },
+    };
+    const fetchImpl: (url: string | URL | Request, init?: RequestInit) => Promise<Response> = async () => {
+      return new Response(
+        JSON.stringify({ data: { issues: page } }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    };
+    const config = basePollingConfig({ maxIssuesPerCycle: 1 });
+
+    const result = await pollLinearIssues({
+      harness,
+      apiUrl: "https://example.test/graphql",
+      token: "tok",
+      projectId: "proj-1",
+      teamKey: "PAN",
+      config,
+      state: { cursor: null, overlapBoundary: "2025-12-31T00:00:00.000Z" },
+      fetchImpl,
+    });
+    expect(result.status).toBe("ok");
+    expect(result.issuesMalformed).toBe(1);
+    expect(result.issuesIngested).toBe(0);
+    expect(result.pagesProcessed).toBe(0);
+    expect(result.error).toBe("cycle limit reached");
+    expect(harness.listInboxEvents({ provider: "linear" })).toHaveLength(0);
+
+    // The malformed node consumed the entire per-cycle budget, so the in-scope good issue waits for
+    // a later cycle. The cursor never advances because the page was not fully covered durably.
+    expect(result.state.cursor).toBeNull();
+  });
+
+  test("pollLinearIssues bounds each request by remaining per-cycle capacity", async () => {
+    await runCli("init");
+    const harness = new Harness(dbPath);
+    const seenPageSizes: number[] = [];
+    const issue = (id: string, createdAt: string) => ({
+      id,
+      identifier: `PAN-${id}`,
+      title: id,
+      description: null,
+      url: `https://linear.test/${id}`,
+      createdAt,
+      updatedAt: createdAt,
+      project: { id: "proj-1" },
+      team: { id: "team-1", key: "PAN" },
+    });
+    const fetchImpl: (url: string | URL | Request, init?: RequestInit) => Promise<Response> = async (_url, init) => {
+      const body = String(init?.body ?? "");
+      const parsed = JSON.parse(body);
+      seenPageSizes.push(parsed.variables.pageSize);
+      return new Response(
+        JSON.stringify({
+          data: {
+            issues: {
+              nodes: [issue("issue-1", "2026-01-01T00:00:00.000Z")],
+              pageInfo: { hasNextPage: false, endCursor: "cursor-end" },
+            },
+          },
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    };
+
+    const config = basePollingConfig({ pageSize: 50, maxIssuesPerCycle: 3 });
+    const result = await pollLinearIssues({
+      harness,
+      apiUrl: "https://example.test/graphql",
+      token: "tok",
+      projectId: "proj-1",
+      teamKey: "PAN",
+      config,
+      state: { cursor: null, overlapBoundary: null },
+      fetchImpl,
+    });
+    expect(result.status).toBe("ok");
+    // The configured pageSize is 50, but the per-cycle cap is 3, so the request is bounded to 3.
+    expect(seenPageSizes).toEqual([3]);
+  });
+
+  test("pollLinearIssues bounds subsequent requests in the same cycle by remaining capacity after a partial page", async () => {
+    await runCli("init");
+    const harness = new Harness(dbPath);
+    const seenPageSizes: number[] = [];
+    let call = 0;
+    const pages: LinearGraphqlPageShape[] = [
+      {
+        nodes: [
+          {
+            id: "issue-a",
+            identifier: "PAN-A",
+            title: "A",
+            description: null,
+            url: "https://linear.test/a",
+            createdAt: "2026-01-01T00:00:00.000Z",
+            updatedAt: "2026-01-01T00:00:00.000Z",
+            project: { id: "proj-1" },
+            team: { id: "team-1", key: "PAN" },
+          },
+        ],
+        pageInfo: { hasNextPage: true, endCursor: "cursor-1" },
+      },
+      {
+        nodes: [
+          {
+            id: "issue-b",
+            identifier: "PAN-B",
+            title: "B",
+            description: null,
+            url: "https://linear.test/b",
+            createdAt: "2026-01-01T00:00:01.000Z",
+            updatedAt: "2026-01-01T00:00:01.000Z",
+            project: { id: "proj-1" },
+            team: { id: "team-1", key: "PAN" },
+          },
+        ],
+        pageInfo: { hasNextPage: false, endCursor: "cursor-2" },
+      },
+    ];
+    const fetchImpl: (url: string | URL | Request, init?: RequestInit) => Promise<Response> = async (_url, init) => {
+      const parsed = JSON.parse(String(init?.body ?? ""));
+      seenPageSizes.push(parsed.variables.pageSize);
+      const page = pages[Math.min(call, pages.length - 1)]!;
+      call += 1;
+      return new Response(
+        JSON.stringify({ data: { issues: page } }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    };
+
+    const config = basePollingConfig({ pageSize: 50, maxPagesPerCycle: 5, maxIssuesPerCycle: 2 });
+    const result = await pollLinearIssues({
+      harness,
+      apiUrl: "https://example.test/graphql",
+      token: "tok",
+      projectId: "proj-1",
+      teamKey: "PAN",
+      config,
+      state: { cursor: null, overlapBoundary: null },
+      fetchImpl,
+    });
+    expect(result.status).toBe("ok");
+    expect(result.issuesIngested).toBe(2);
+    // The first request is bounded to the full per-cycle budget; the second request is bounded to
+    // the remaining capacity of one after the first durable ingestion.
+    expect(seenPageSizes).toEqual([2, 1]);
+  });
+
+  test("pollLinearIssues classifies RATELIMITED GraphQL responses and returns bounded backoff metadata", async () => {
+    await runCli("init");
+    const harness = new Harness(dbPath);
+    const fetchImpl: (url: string | URL | Request, init?: RequestInit) => Promise<Response> = async () => {
+      return new Response(
+        JSON.stringify({
+          errors: [
+            {
+              message: "Rate limit exceeded",
+              extensions: { code: "RATELIMITED" },
+            },
+          ],
+        }),
+        { status: 200, headers: { "content-type": "application/json", "retry-after": "2" } },
+      );
+    };
+    const config = basePollingConfig({ maxRetries: 3, backoffBaseMs: 100, backoffMaxMs: 5_000 });
+    const result = await pollLinearIssues({
+      harness,
+      apiUrl: "https://example.test/graphql",
+      token: "tok",
+      projectId: "proj-1",
+      teamKey: "PAN",
+      config,
+      state: { cursor: null, overlapBoundary: null },
+      retryAttempt: 0,
+      fetchImpl,
+    });
+    expect(result.status).toBe("rate_limited");
+    expect(result.retryAfterMs).toBeGreaterThan(0);
+    expect(result.retryAfterMs).toBeLessThanOrEqual(config.backoffMaxMs);
+    expect(result.exhausted).toBe(false);
+  });
+
+  test("pollLinearIssues classifies transient network failures and returns exponential backoff metadata", async () => {
+    await runCli("init");
+    const harness = new Harness(dbPath);
+    const fetchImpl: (url: string | URL | Request, init?: RequestInit) => Promise<Response> = async () => {
+      throw new Error("connection reset");
+    };
+    const config = basePollingConfig({ maxRetries: 4, backoffBaseMs: 50, backoffMaxMs: 10_000 });
+    const result = await pollLinearIssues({
+      harness,
+      apiUrl: "https://example.test/graphql",
+      token: "tok",
+      projectId: "proj-1",
+      teamKey: "PAN",
+      config,
+      state: { cursor: null, overlapBoundary: null },
+      retryAttempt: 1,
+      fetchImpl,
+    });
+    expect(result.status).toBe("transient_failure");
+    expect(result.retryAfterMs).toBeGreaterThanOrEqual(config.backoffBaseMs);
+    expect(result.retryAfterMs).toBeLessThanOrEqual(config.backoffMaxMs);
+    expect(result.exhausted).toBe(false);
+  });
+
+  test("pollLinearIssues classifies 401 responses as permanent authentication failures with no retry", async () => {
+    await runCli("init");
+    const harness = new Harness(dbPath);
+    const fetchImpl: (url: string | URL | Request, init?: RequestInit) => Promise<Response> = async () => {
+      return new Response("Unauthorized", { status: 401 });
+    };
+    const result = await pollLinearIssues({
+      harness,
+      apiUrl: "https://example.test/graphql",
+      token: "tok",
+      projectId: "proj-1",
+      teamKey: "PAN",
+      config: basePollingConfig(),
+      state: { cursor: null, overlapBoundary: null },
+      fetchImpl,
+    });
+    expect(result.status).toBe("auth_failure");
+    expect(result.retryAfterMs).toBeNull();
+    expect(result.exhausted).toBe(true);
+  });
+
+  test("pollLinearIssues reports exhaustion when the retry budget is reached on retryable failures", async () => {
+    await runCli("init");
+    const harness = new Harness(dbPath);
+    const config = basePollingConfig({ maxRetries: 2, backoffBaseMs: 10, backoffMaxMs: 100 });
+    const fetchImpl: (url: string | URL | Request, init?: RequestInit) => Promise<Response> = async () => {
+      return new Response(
+        JSON.stringify({
+          errors: [{ message: "boom", extensions: { code: "RATELIMITED" } }],
+        }),
+        { status: 429, headers: { "content-type": "application/json" } },
+      );
+    };
+    const result = await pollLinearIssues({
+      harness,
+      apiUrl: "https://example.test/graphql",
+      token: "tok",
+      projectId: "proj-1",
+      teamKey: "PAN",
+      config,
+      state: { cursor: null, overlapBoundary: null },
+      retryAttempt: config.maxRetries,
+      fetchImpl,
+    });
+    expect(result.status).toBe("rate_limited");
+    expect(result.exhausted).toBe(true);
+  });
+
+  test("pollLinearIssues rejects missing project and team selectors as config errors before any fetch", async () => {
+    await runCli("init");
+    const harness = new Harness(dbPath);
+    let fetchCalled = false;
+    const fetchImpl: (url: string | URL | Request, init?: RequestInit) => Promise<Response> = async () => {
+      fetchCalled = true;
+      return new Response("nope", { status: 200 });
+    };
+    const noProject = await pollLinearIssues({
+      harness,
+      apiUrl: "https://example.test/graphql",
+      token: "tok",
+      projectId: " ",
+      teamKey: "PAN",
+      config: basePollingConfig(),
+      state: { cursor: null, overlapBoundary: null },
+      fetchImpl,
+    });
+    expect(noProject.status).toBe("config_error");
+    expect(fetchCalled).toBe(false);
+    const noTeam = await pollLinearIssues({
+      harness,
+      apiUrl: "https://example.test/graphql",
+      token: "tok",
+      projectId: "proj-1",
+      teamKey: " ",
+      config: basePollingConfig(),
+      state: { cursor: null, overlapBoundary: null },
+      fetchImpl,
+    });
+    expect(noTeam.status).toBe("config_error");
+    expect(fetchCalled).toBe(false);
+  });
+
+  function basePollingConfig(overrides: Partial<LinearPollingConfig> = {}): LinearPollingConfig {
+    return {
+      pageSize: 10,
+      maxPagesPerCycle: 5,
+      maxIssuesPerCycle: 50,
+      overlapMs: 60_000,
+      maxRetries: 4,
+      backoffBaseMs: 1_000,
+      backoffMaxMs: 60_000,
+      ...overrides,
+    };
+  }
+
+  type LinearGraphqlPageShape = {
+    nodes: Array<{
+      id?: string;
+      identifier?: string;
+      title?: string;
+      description?: string | null;
+      url?: string | null;
+      createdAt?: string;
+      updatedAt?: string | null;
+      project?: { id: string } | null;
+      team?: { id: string; key?: string } | null;
+    }>;
+    pageInfo: { hasNextPage: boolean | null; endCursor: string | null };
+  };
 
   test("shows and updates prompt templates", async () => {
     await runCli("init");
