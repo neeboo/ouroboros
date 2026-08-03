@@ -1679,6 +1679,71 @@ describe("Harness inbox lifecycle", () => {
       }),
     ).toThrow(/inbox event not found: inbox_missing/);
   });
+
+  test("ensureInboxEvent is idempotent across harness instances for the same deterministic id", () => {
+    const id = "inbox_linear_issue_created_persistence";
+    const payload = { identifier: "PAN-1", title: "Persistent issue" };
+    const dbPath = join(dir, "ouroboros.db");
+
+    const firstHarness = new Harness(dbPath);
+    firstHarness.init();
+    const first = firstHarness.ensureInboxEvent({
+      id,
+      provider: "linear",
+      eventType: "issue.created",
+      externalId: "persist-1",
+      payload,
+    });
+    expect(first.created).toBe(true);
+
+    // A fresh harness instance simulating a daemon restart observes the
+    // durable row and reports created=false; the event is reused, not
+    // duplicated.
+    const secondHarness = new Harness(dbPath);
+    const second = secondHarness.ensureInboxEvent({
+      id,
+      provider: "linear",
+      eventType: "issue.created",
+      externalId: "persist-1",
+      payload,
+    });
+    expect(second.created).toBe(false);
+    expect(second.event.id).toBe(first.event.id);
+    expect(secondHarness.listInboxEvents({ provider: "linear" })).toHaveLength(1);
+  });
+
+  test("ensureInboxEvent and transitionInboxEvent cooperate to deduplicate concurrent claim attempts", () => {
+    // Two consumers race to claim the same todo event. The first transition
+    // succeeds; the second sees the durable state has moved and the
+    // transition throws. The idempotent ensure path keeps the inbox at one
+    // row regardless of how many consumers attempt the claim.
+    const ensured = harness.ensureInboxEvent({
+      id: "inbox_linear_issue_created_concurrent",
+      provider: "linear",
+      eventType: "issue.created",
+      externalId: "concurrent-1",
+      payload: {},
+    });
+    const first = harness.transitionInboxEvent({
+      id: ensured.event.id,
+      from: "todo",
+      to: "running",
+    });
+    expect(first.updated).toBe(true);
+    expect(first.event.status).toBe("running");
+
+    expect(() =>
+      harness.transitionInboxEvent({
+        id: ensured.event.id,
+        from: "todo",
+        to: "running",
+      }),
+    ).toThrow(/found running/);
+
+    // Only one durable row exists for the immutable id, regardless of how
+    // many claim attempts occurred.
+    expect(harness.listInboxEvents({ provider: "linear" })).toHaveLength(1);
+  });
 });
 
 describe("Harness strategy domain", () => {
