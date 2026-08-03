@@ -1,4 +1,5 @@
 import { readFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
 import { join } from "node:path";
 import type { Harness } from "@ouroboros/harness";
 
@@ -192,13 +193,18 @@ export function ingestLinearEvent(input: LinearIngestEventInput) {
   }
   const payload = parsedPayload as Record<string, unknown>;
 
-  const stored = input.harness.createInboxEvent({
+  const deterministicId = deterministicLinearInboxId({
+    eventType,
+    externalId,
+  });
+  const ensured = input.harness.ensureInboxEvent({
+    id: deterministicId,
     provider: "linear",
     eventType,
     externalId,
     payload,
-    status: "todo",
   });
+  const stored = ensured.event;
   return {
     id: stored.id,
     provider: stored.provider,
@@ -207,7 +213,22 @@ export function ingestLinearEvent(input: LinearIngestEventInput) {
     status: stored.status,
     payload: stored.payload,
     createdAt: stored.createdAt,
+    created: ensured.created,
   };
+}
+
+export function deterministicLinearInboxId(input: { eventType: string; externalId: string }) {
+  const eventType = input.eventType.trim();
+  const externalId = input.externalId.trim();
+  if (!eventType) {
+    throw new Error("eventType is required for deterministic Linear inbox id");
+  }
+  if (!externalId) {
+    throw new Error("externalId is required for deterministic Linear inbox id");
+  }
+  const material = `linear|${eventType}|${externalId}`;
+  const digest = createHash("sha256").update(material, "utf8").digest("hex");
+  return `inbox_linear_${digest}`;
 }
 
 async function readLinearToken(input: { tokenFile?: string | null; tokenEnv?: string | null }) {

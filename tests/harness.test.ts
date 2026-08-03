@@ -1471,6 +1471,216 @@ describe("Harness", () => {
   });
 });
 
+describe("Harness inbox lifecycle", () => {
+  let dir: string;
+  let harness: Harness;
+
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), "ouroboros-inbox-"));
+    harness = new Harness(join(dir, "ouroboros.db"));
+    harness.init();
+  });
+
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  test("ensureInboxEvent inserts once and treats an identical retry as the same row", () => {
+    const first = harness.ensureInboxEvent({
+      id: "inbox_linear_issue_created_abc",
+      provider: "linear",
+      eventType: "issue.created",
+      externalId: "abc",
+      payload: { title: "Linear issue" },
+    });
+    expect(first.created).toBe(true);
+    expect(first.event.id).toBe("inbox_linear_issue_created_abc");
+    expect(first.event.status).toBe("todo");
+    expect(first.event.processedAt).toBeNull();
+
+    const second = harness.ensureInboxEvent({
+      id: "inbox_linear_issue_created_abc",
+      provider: "linear",
+      eventType: "issue.created",
+      externalId: "abc",
+      payload: { title: "Linear issue" },
+    });
+    expect(second.created).toBe(false);
+    expect(second.event.id).toBe("inbox_linear_issue_created_abc");
+
+    const rows = harness.listInboxEvents({ provider: "linear" });
+    expect(rows).toHaveLength(1);
+    expect(rows[0].id).toBe("inbox_linear_issue_created_abc");
+  });
+
+  test("ensureInboxEvent fails closed when an existing id has different source fields", () => {
+    harness.ensureInboxEvent({
+      id: "inbox_linear_issue_created_abc",
+      provider: "linear",
+      eventType: "issue.created",
+      externalId: "abc",
+      payload: {},
+    });
+
+    expect(() =>
+      harness.ensureInboxEvent({
+        id: "inbox_linear_issue_created_abc",
+        provider: "linear",
+        eventType: "issue.updated",
+        externalId: "abc",
+        payload: {},
+      }),
+    ).toThrow(/deterministic id collision/);
+
+    expect(() =>
+      harness.ensureInboxEvent({
+        id: "inbox_linear_issue_created_abc",
+        provider: "github",
+        eventType: "issue.created",
+        externalId: "abc",
+        payload: {},
+      }),
+    ).toThrow(/deterministic id collision/);
+
+    expect(() =>
+      harness.ensureInboxEvent({
+        id: "inbox_linear_issue_created_abc",
+        provider: "linear",
+        eventType: "issue.created",
+        externalId: "def",
+        payload: {},
+      }),
+    ).toThrow(/deterministic id collision/);
+
+    expect(harness.listInboxEvents({})).toHaveLength(1);
+  });
+
+  test("createInboxEvent remains compatible for callers that do not supply a deterministic id", () => {
+    const event = harness.createInboxEvent({
+      provider: "linear",
+      eventType: "issue.created",
+      externalId: "LIN-100",
+      payload: { ok: true },
+    });
+    expect(event.id).toMatch(/^inbox_/);
+    expect(event.status).toBe("todo");
+    expect(event.processedAt).toBeNull();
+
+    const direct = harness.getInboxEvent({ id: event.id });
+    expect(direct?.id).toBe(event.id);
+  });
+
+  test("transitionInboxEvent claims a todo event and rejects duplicate running claims", () => {
+    const ensured = harness.ensureInboxEvent({
+      id: "inbox_linear_issue_created_claim",
+      provider: "linear",
+      eventType: "issue.created",
+      externalId: "claim-1",
+      payload: {},
+    });
+
+    const first = harness.transitionInboxEvent({
+      id: ensured.event.id,
+      from: "todo",
+      to: "running",
+    });
+    expect(first.event.status).toBe("running");
+    expect(first.event.processedAt).toBeNull();
+
+    expect(() =>
+      harness.transitionInboxEvent({
+        id: ensured.event.id,
+        from: "todo",
+        to: "running",
+      }),
+    ).toThrow(/expected inbox event .* to be todo, found running/);
+
+    expect(harness.getInboxEvent({ id: ensured.event.id })?.status).toBe("running");
+  });
+
+  test("transitionInboxEvent terminalizes running into done or blocked and stamps processedAt", () => {
+    const ensured = harness.ensureInboxEvent({
+      id: "inbox_linear_issue_created_term",
+      provider: "linear",
+      eventType: "issue.created",
+      externalId: "term-1",
+      payload: {},
+    });
+
+    harness.transitionInboxEvent({ id: ensured.event.id, from: "todo", to: "running" });
+    const done = harness.transitionInboxEvent({ id: ensured.event.id, from: "running", to: "done" });
+    expect(done.event.status).toBe("done");
+    expect(done.event.processedAt).not.toBeNull();
+    expect(done.event.processedAt).not.toBe("current_timestamp");
+    expect(Number.isNaN(Date.parse(done.event.processedAt as string))).toBe(false);
+
+    const blocked = harness.ensureInboxEvent({
+      id: "inbox_linear_issue_created_term_blocked",
+      provider: "linear",
+      eventType: "issue.created",
+      externalId: "term-blocked-1",
+      payload: {},
+    });
+    harness.transitionInboxEvent({ id: blocked.event.id, from: "todo", to: "running" });
+    const blockedResult = harness.transitionInboxEvent({
+      id: blocked.event.id,
+      from: "running",
+      to: "blocked",
+    });
+    expect(blockedResult.event.status).toBe("blocked");
+    expect(blockedResult.event.processedAt).not.toBeNull();
+    expect(blockedResult.event.processedAt).not.toBe("current_timestamp");
+    expect(Number.isNaN(Date.parse(blockedResult.event.processedAt as string))).toBe(false);
+
+    expect(() =>
+      harness.transitionInboxEvent({ id: ensured.event.id, from: "running", to: "done" }),
+    ).toThrow(/expected inbox event .* to be running, found done/);
+  });
+
+  test("transitionInboxEvent rejects invalid transitions", () => {
+    const ensured = harness.ensureInboxEvent({
+      id: "inbox_linear_issue_created_invalid",
+      provider: "linear",
+      eventType: "issue.created",
+      externalId: "invalid-1",
+      payload: {},
+    });
+
+    expect(() =>
+      harness.transitionInboxEvent({ id: ensured.event.id, from: "running", to: "done" }),
+    ).toThrow(/expected inbox event .* to be running, found todo/);
+
+    expect(() =>
+      harness.transitionInboxEvent({
+        id: ensured.event.id,
+        from: "todo",
+        to: "blocked" as never,
+      }),
+    ).toThrow(/invalid inbox transition/);
+
+    expect(() =>
+      harness.transitionInboxEvent({
+        id: ensured.event.id,
+        from: "todo",
+        to: "todo" as never,
+      }),
+    ).toThrow(/invalid inbox transition/);
+
+    expect(harness.getInboxEvent({ id: ensured.event.id })?.status).toBe("todo");
+    expect(harness.getInboxEvent({ id: ensured.event.id })?.processedAt).toBeNull();
+  });
+
+  test("transitionInboxEvent reports missing events explicitly", () => {
+    expect(() =>
+      harness.transitionInboxEvent({
+        id: "inbox_missing",
+        from: "todo",
+        to: "running",
+      }),
+    ).toThrow(/inbox event not found: inbox_missing/);
+  });
+});
+
 describe("Harness strategy domain", () => {
   let dir: string;
   let harness: Harness;

@@ -21,6 +21,7 @@ export {
   resolveRunDecision,
 } from "./goal-review";
 export { applyHarnessAction, parseHarnessAction, describeIntegrationReadiness } from "./actions";
+export { isValidInboxTransition } from "./harness";
 export {
   describeAuthorityEvaluation,
   evaluateAuthority,
@@ -75,6 +76,11 @@ export type {
   CreateExternalRefInput,
   CreateFounderCharterInput,
   CreateInboxEventInput,
+  EnsureInboxEventInput,
+  EnsureInboxEventResult,
+  InboxTransitionTarget,
+  TransitionInboxEventInput,
+  TransitionInboxEventResult,
   CreateProjectInput,
   CreateRunInput,
   CreateStrategySignalInput,
