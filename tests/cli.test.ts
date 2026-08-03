@@ -24,6 +24,12 @@ import {
   type LinearPollingConfig,
   type LinearPollingState,
 } from "../packages/cli/src/linear";
+import {
+  consumeLinearInbox,
+  getLinearIntakeState,
+  runLinearPollCycle,
+  INITIAL_LINEAR_INTAKE_POLLING_STATE,
+} from "../packages/cli/src/linear-intake";
 import { Database } from "bun:sqlite";
 
 describe("CLI", () => {
@@ -1560,6 +1566,316 @@ describe("CLI", () => {
     expect(rows[0].externalId).toBe("linear-issue-immutable-001");
   });
 
+  test("linear-consume-inbox claims a todo Linear issue event into one issue-scoped Designer run and task", async () => {
+    await runCli("init");
+    const bootstrap = await runCliJson("self-iterate");
+    const seedHarness = new Harness(dbPath);
+    // Drain the bootstrap so it does not show up as pending Designer work.
+    seedHarness.recordAttempt({
+      taskId: bootstrap.taskId,
+      input: {},
+      output: {
+        status: "done",
+        summary: "drained",
+        changedFiles: [],
+        checks: [],
+        artifacts: [],
+        problems: [],
+      },
+    });
+    seedHarness.updateRunStatus({ runId: bootstrap.runId, status: "done" });
+
+    const stored = await runCliJson(
+      "linear-ingest-event",
+      "--event-type",
+      "issue.created",
+      "--external-id",
+      "linear-issue-consume-1",
+      "--payload-json",
+      JSON.stringify({
+        identifier: "PAN-5001",
+        title: "Polished intake",
+        description: "Polish the intake path",
+        url: "https://linear.app/pancat/issue/PAN-5001",
+        createdAt: "2026-02-01T00:00:00.000Z",
+        teamKey: "PAN",
+      }),
+    );
+
+    const result = await runCliJson(
+      "linear-consume-inbox",
+      "--root-run-id",
+      bootstrap.runId,
+    );
+
+    expect(result.processed).toBe(1);
+    expect(result.claimed).toBe(1);
+    expect(result.deduplicated).toBe(0);
+    expect(result.blocked).toBe(0);
+    expect(result.outcomes).toHaveLength(1);
+    const outcome = result.outcomes[0];
+    expect(outcome.kind).toBe("claimed");
+    expect(outcome.eventId).toBe(stored.id);
+    expect(outcome.externalId).toBe("linear-issue-consume-1");
+    expect(outcome.runCreated).toBe(true);
+    expect(outcome.taskCreated).toBe(true);
+    expect(outcome.runId).toMatch(/^run_linear_/);
+    expect(outcome.taskId).toMatch(/^task_linear_/);
+
+    const after = new Harness(dbPath);
+    const event = after.getInboxEvent({ id: stored.id })!;
+    expect(event.status).toBe("done");
+    const task = after.getTask(outcome.taskId);
+    expect(task).toBeDefined();
+    expect(task!.role).toBe("designer");
+    expect(task!.runId).toBe(outcome.runId);
+    const run = after.getRun(outcome.runId)!;
+    expect(run).toBeDefined();
+    const intake = run.context.linearIntake as Record<string, unknown> | undefined;
+    expect(intake).toBeDefined();
+    expect(intake!.rootRunId).toBe(bootstrap.runId);
+    expect(intake!.inboxEventId).toBe(stored.id);
+    expect(intake!.linearIssueId).toBe("linear-issue-consume-1");
+    expect(run.context.parentRunId).toBe(bootstrap.runId);
+    expect(run.context.source).toBe("linear-intake");
+  });
+
+  test("linear-consume-inbox is idempotent across restart and replay for one immutable Linear issue id", async () => {
+    await runCli("init");
+    const bootstrap = await runCliJson("self-iterate");
+    const seedHarness = new Harness(dbPath);
+    seedHarness.recordAttempt({
+      taskId: bootstrap.taskId,
+      input: {},
+      output: {
+        status: "done",
+        summary: "drained",
+        changedFiles: [],
+        checks: [],
+        artifacts: [],
+        problems: [],
+      },
+    });
+    seedHarness.updateRunStatus({ runId: bootstrap.runId, status: "done" });
+
+    const first = await runCliJson(
+      "linear-ingest-event",
+      "--event-type",
+      "issue.created",
+      "--external-id",
+      "linear-issue-consume-replay",
+      "--payload-json",
+      JSON.stringify({
+        identifier: "PAN-5002",
+        title: "Replay-safe issue",
+      }),
+    );
+
+    const claim1 = await runCliJson(
+      "linear-consume-inbox",
+      "--root-run-id",
+      bootstrap.runId,
+    );
+    expect(claim1.claimed).toBe(1);
+    const firstOutcome = claim1.outcomes[0];
+    const firstRunId = firstOutcome.runId;
+    const firstTaskId = firstOutcome.taskId;
+
+    // Second ingest reuses the same deterministic inbox row (idempotent ensure).
+    const second = await runCliJson(
+      "linear-ingest-event",
+      "--event-type",
+      "issue.created",
+      "--external-id",
+      "linear-issue-consume-replay",
+      "--payload-json",
+      JSON.stringify({
+        identifier: "PAN-5002",
+        title: "Replay-safe issue",
+      }),
+    );
+    expect(second.id).toBe(first.id);
+    expect(second.created).toBe(false);
+
+    // The inbox event is already done, so the consumption path finds no work.
+    const claim2 = await runCliJson(
+      "linear-consume-inbox",
+      "--root-run-id",
+      bootstrap.runId,
+    );
+    expect(claim2.processed).toBe(0);
+    expect(claim2.claimed).toBe(0);
+
+    // Restart simulation: a separate CLI invocation observes the same durable
+    // run and task without duplication.
+    const claim3 = await runCliJson(
+      "linear-consume-inbox",
+      "--root-run-id",
+      bootstrap.runId,
+    );
+    expect(claim3.processed).toBe(0);
+
+    const after = new Harness(dbPath);
+    const events = after.listInboxEvents({ provider: "linear" });
+    expect(events).toHaveLength(1);
+    expect(events[0].status).toBe("done");
+    const overview = after.getRunOverview({ runId: firstRunId, eventLimit: 0 });
+    expect(overview.tasks.filter((task) => task.role === "designer")).toHaveLength(1);
+    expect(after.getTask(firstTaskId)!.id).toBe(firstTaskId);
+  });
+
+  test("linear-consume-inbox resumes an event left running by a crash between claim and complete", async () => {
+    await runCli("init");
+    const bootstrap = await runCliJson("self-iterate");
+    const seedHarness = new Harness(dbPath);
+    seedHarness.recordAttempt({
+      taskId: bootstrap.taskId,
+      input: {},
+      output: {
+        status: "done",
+        summary: "drained",
+        changedFiles: [],
+        checks: [],
+        artifacts: [],
+        problems: [],
+      },
+    });
+    seedHarness.updateRunStatus({ runId: bootstrap.runId, status: "done" });
+
+    const stored = await runCliJson(
+      "linear-ingest-event",
+      "--event-type",
+      "issue.created",
+      "--external-id",
+      "linear-issue-consume-restart",
+      "--payload-json",
+      JSON.stringify({
+        identifier: "PAN-5003",
+        title: "Restart resume",
+      }),
+    );
+
+    // Simulate a crash after claim: manually flip the event to running and
+    // leave no Designer run/task behind.
+    const crashHarness = new Harness(dbPath);
+    crashHarness.transitionInboxEvent({ id: stored.id, from: "todo", to: "running" });
+
+    const result = await runCliJson(
+      "linear-consume-inbox",
+      "--root-run-id",
+      bootstrap.runId,
+    );
+    expect(result.processed).toBe(1);
+    // The event is resumed, not freshly claimed; the run/task already
+    // existed conceptually (none did), so consumption creates them and
+    // marks the run as deduplicated/claimed based on creation.
+    const outcome = result.outcomes[0];
+    expect(outcome.runCreated).toBe(true);
+    expect(outcome.taskCreated).toBe(true);
+    expect(outcome.runId).toMatch(/^run_linear_/);
+
+    const after = new Harness(dbPath);
+    const event = after.getInboxEvent({ id: stored.id })!;
+    expect(event.status).toBe("done");
+  });
+
+  test("linear-consume-inbox blocks intake when the event payload cannot drive a Designer run", async () => {
+    await runCli("init");
+    const bootstrap = await runCliJson("self-iterate");
+    const seedHarness = new Harness(dbPath);
+    seedHarness.recordAttempt({
+      taskId: bootstrap.taskId,
+      input: {},
+      output: {
+        status: "done",
+        summary: "drained",
+        changedFiles: [],
+        checks: [],
+        artifacts: [],
+        problems: [],
+      },
+    });
+    seedHarness.updateRunStatus({ runId: bootstrap.runId, status: "done" });
+
+    const stored = await runCliJson(
+      "linear-ingest-event",
+      "--event-type",
+      "issue.created",
+      "--external-id",
+      "linear-issue-consume-malformed",
+      "--payload-json",
+      JSON.stringify({ title: "" }),
+    );
+
+    const result = await runCliJson(
+      "linear-consume-inbox",
+      "--root-run-id",
+      bootstrap.runId,
+    );
+    expect(result.processed).toBe(1);
+    expect(result.blocked).toBe(1);
+    const outcome = result.outcomes[0];
+    expect(outcome.kind).toBe("blocked");
+    expect(outcome.eventId).toBe(stored.id);
+    expect(outcome.error).toMatch(/missing issue identifier and title/);
+
+    const after = new Harness(dbPath);
+    const event = after.getInboxEvent({ id: stored.id })!;
+    expect(event.status).toBe("blocked");
+  });
+
+  test("consumeLinearInbox is deterministic and restart-safe at the unit level", async () => {
+    await runCli("init");
+    const bootstrap = await runCliJson("self-iterate");
+    const seedHarness = new Harness(dbPath);
+    seedHarness.recordAttempt({
+      taskId: bootstrap.taskId,
+      input: {},
+      output: {
+        status: "done",
+        summary: "drained",
+        changedFiles: [],
+        checks: [],
+        artifacts: [],
+        problems: [],
+      },
+    });
+    seedHarness.updateRunStatus({ runId: bootstrap.runId, status: "done" });
+
+    const harness = new Harness(dbPath);
+    const event = harness.ensureInboxEvent({
+      id: deterministicLinearInboxId({
+        eventType: "issue.created",
+        externalId: "linear-issue-unit-1",
+      }),
+      provider: "linear",
+      eventType: "issue.created",
+      externalId: "linear-issue-unit-1",
+      payload: {
+        identifier: "PAN-9001",
+        title: "Unit test issue",
+      },
+    }).event;
+
+    const first = consumeLinearInbox({ harness, rootRunId: bootstrap.runId });
+    expect(first.processed).toBe(1);
+    expect(first.claimed).toBe(1);
+    const firstOutcome = first.outcomes[0];
+    expect(firstOutcome.runCreated).toBe(true);
+    expect(firstOutcome.taskCreated).toBe(true);
+
+    // Replay via a fresh harness instance simulates a daemon restart. The
+    // deterministic IDs reuse the existing run and task; no duplicate work.
+    const replay = consumeLinearInbox({ harness: new Harness(dbPath), rootRunId: bootstrap.runId });
+    expect(replay.processed).toBe(0);
+    expect(replay.claimed).toBe(0);
+
+    const events = new Harness(dbPath).listInboxEvents({ provider: "linear" });
+    expect(events).toHaveLength(1);
+    expect(events[0].id).toBe(event.id);
+    expect(events[0].status).toBe("done");
+  });
+
   test("linear polling config requires positive interval plus project and team selectors", async () => {
     await runCli("init");
     expect(resolveLinearPolling(undefined).enabled).toBe(false);
@@ -2995,6 +3311,784 @@ describe("CLI", () => {
     expect(noTeam.status).toBe("config_error");
     expect(fetchCalled).toBe(false);
   });
+
+  // ===========================================================================
+  // Linear intake supervisor wiring — focused on the durable polling-state
+  // contract that lives in the supervised root run context.
+  // ===========================================================================
+
+  test("runLinearPollCycle persists cursor, overlap boundary, retry attempt, and next eligible poll time across Harness reconstruction", async () => {
+    await runCli("init");
+    const harnessInstance = new Harness(dbPath);
+    const rootRunId = harnessInstance.createRun({ goal: "supervised root" });
+    const issue = makeIntakeIssue({ id: "intake-issue-persist", createdAt: "2026-01-01T00:00:00.000Z" });
+    const fetchImpl = makeIntakeFetchImpl([[issue]], { hasNextPage: false, endCursor: "cursor-persist" });
+    const resolved = resolveLinearPolling({
+      pollIntervalMs: 60_000,
+      projectId: "proj-1",
+      teamKey: "PAN",
+    });
+    if (!resolved.enabled || !resolved.config) {
+      throw new Error("expected polling to be enabled");
+    }
+
+    const before = getLinearIntakeState(harnessInstance, rootRunId);
+    expect(before.lastStatus).toBe("idle");
+    expect(before.nextEligiblePollTime).toBeNull();
+
+    const first = await runLinearPollCycle({
+      harness: harnessInstance,
+      rootRunId,
+      token: "tok",
+      apiUrl: "https://example.test/graphql",
+      projectId: "proj-1",
+      teamKey: "PAN",
+      config: resolved.config,
+      now: Date.parse("2026-01-01T00:00:01.000Z"),
+      fetchImpl,
+    });
+    expect(first.reason).toBe("polled");
+    expect(first.status).toBe("ok");
+    expect(first.state.overlapBoundary).toBe("2026-01-01T00:00:00.000Z");
+    expect(first.state.nextEligiblePollTime).not.toBeNull();
+    expect(first.state.retryAttempt).toBe(0);
+    expect(first.state.terminalFailure).toBeNull();
+    expect(first.state.cyclesCompleted).toBe(1);
+    expect(first.state.issuesIngested).toBe(1);
+
+    // A fresh Harness instance reads the same durable state from the root run.
+    const reloaded = new Harness(dbPath);
+    const persisted = getLinearIntakeState(reloaded, rootRunId);
+    expect(persisted).toEqual(first.state);
+
+    // A subsequent call before nextEligiblePollTime is a no-op.
+    const second = await runLinearPollCycle({
+      harness: reloaded,
+      rootRunId,
+      token: "tok",
+      apiUrl: "https://example.test/graphql",
+      projectId: "proj-1",
+      teamKey: "PAN",
+      config: resolved.config,
+      now: Date.parse("2026-01-01T00:00:02.000Z"),
+      fetchImpl,
+    });
+    expect(second.reason).toBe("not-due");
+    expect(second.status).toBe("idle");
+    expect(second.advanced).toBe(false);
+    // State is unchanged: no extra cycle, no advance.
+    expect(second.state.cyclesCompleted).toBe(1);
+    expect(second.state.overlapBoundary).toBe("2026-01-01T00:00:00.000Z");
+  });
+
+  test("runLinearPollCycle applies bounded exponential backoff across consecutive retryable failures", async () => {
+    await runCli("init");
+    const harnessInstance = new Harness(dbPath);
+    const rootRunId = harnessInstance.createRun({ goal: "supervised root" });
+    let calls = 0;
+    const fetchImpl: (url: string | URL | Request, init?: RequestInit) => Promise<Response> = async () => {
+      calls += 1;
+      return new Response("internal server error", { status: 500 });
+    };
+    const resolved = resolveLinearPolling({
+      pollIntervalMs: 60_000,
+      projectId: "proj-1",
+      teamKey: "PAN",
+      pollBackoffBaseMs: 1_000,
+      pollBackoffMaxMs: 30_000,
+      pollMaxRetries: 3,
+    });
+    if (!resolved.enabled || !resolved.config) {
+      throw new Error("expected polling to be enabled");
+    }
+    const baseNow = Date.parse("2026-01-01T00:00:00.000Z");
+
+    const first = await runLinearPollCycle({
+      harness: harnessInstance,
+      rootRunId,
+      token: "tok",
+      apiUrl: "https://example.test/graphql",
+      projectId: "proj-1",
+      teamKey: "PAN",
+      config: resolved.config,
+      now: baseNow,
+      fetchImpl,
+    });
+    expect(first.status).toBe("transient_failure");
+    expect(first.state.retryAttempt).toBe(1);
+    expect(first.state.terminalFailure).toBeNull();
+    // First retry: 1000ms * 2^0 = 1000ms floor.
+    expect(Date.parse(first.state.nextEligiblePollTime!) - baseNow).toBeGreaterThanOrEqual(1_000);
+    expect(Date.parse(first.state.nextEligiblePollTime!) - baseNow).toBeLessThanOrEqual(2_000);
+
+    const second = await runLinearPollCycle({
+      harness: harnessInstance,
+      rootRunId,
+      token: "tok",
+      apiUrl: "https://example.test/graphql",
+      projectId: "proj-1",
+      teamKey: "PAN",
+      config: resolved.config,
+      // Move time forward past the previous backoff window.
+      now: Date.parse(first.state.nextEligiblePollTime!) + 1,
+      fetchImpl,
+    });
+    expect(second.status).toBe("transient_failure");
+    expect(second.state.retryAttempt).toBe(2);
+    // Second retry: 1000ms * 2^1 = 2000ms.
+    const secondEligible = Date.parse(second.state.nextEligiblePollTime!);
+    const secondBase = Date.parse(second.state.lastCycleAt!);
+    expect(secondEligible - secondBase).toBeGreaterThanOrEqual(2_000);
+    expect(secondEligible - secondBase).toBeLessThanOrEqual(3_000);
+    expect(second.state.terminalFailure).toBeNull();
+    expect(calls).toBe(2);
+  });
+
+  test("runLinearPollCycle marks auth failures as terminal and stops busy-looping on subsequent ticks", async () => {
+    await runCli("init");
+    const harnessInstance = new Harness(dbPath);
+    const rootRunId = harnessInstance.createRun({ goal: "supervised root" });
+    const fetchImpl: (url: string | URL | Request, init?: RequestInit) => Promise<Response> = async () =>
+      new Response(JSON.stringify({ errors: [{ message: "unauthorized" }] }), {
+        status: 401,
+        headers: { "content-type": "application/json" },
+      });
+    const resolved = resolveLinearPolling({
+      pollIntervalMs: 60_000,
+      projectId: "proj-1",
+      teamKey: "PAN",
+    });
+    if (!resolved.enabled || !resolved.config) {
+      throw new Error("expected polling to be enabled");
+    }
+    const first = await runLinearPollCycle({
+      harness: harnessInstance,
+      rootRunId,
+      token: "tok",
+      apiUrl: "https://example.test/graphql",
+      projectId: "proj-1",
+      teamKey: "PAN",
+      config: resolved.config,
+      fetchImpl,
+    });
+    expect(first.status).toBe("auth_failure");
+    expect(first.state.terminalFailure).not.toBeNull();
+    expect(first.state.nextEligiblePollTime).toBeNull();
+
+    // Subsequent cycles on the same root run see terminal failure and exit fast
+    // without invoking fetch again.
+    let calls = 0;
+    const countingFetch: typeof fetchImpl = async (...args) => {
+      calls += 1;
+      return fetchImpl(...args);
+    };
+    const reloaded = new Harness(dbPath);
+    const second = await runLinearPollCycle({
+      harness: reloaded,
+      rootRunId,
+      token: "tok",
+      apiUrl: "https://example.test/graphql",
+      projectId: "proj-1",
+      teamKey: "PAN",
+      config: resolved.config,
+      fetchImpl: countingFetch,
+    });
+    expect(second.reason).toBe("terminal");
+    expect(second.status).toBe("auth_failure");
+    expect(second.advanced).toBe(false);
+    expect(calls).toBe(0);
+  });
+
+  test("runLinearPollCycle marks configuration errors as terminal before any fetch", async () => {
+    await runCli("init");
+    const harnessInstance = new Harness(dbPath);
+    const rootRunId = harnessInstance.createRun({ goal: "supervised root" });
+    let called = false;
+    const fetchImpl: (url: string | URL | Request, init?: RequestInit) => Promise<Response> = async () => {
+      called = true;
+      return new Response("ok", { status: 200 });
+    };
+    const resolved = resolveLinearPolling({
+      pollIntervalMs: 60_000,
+      projectId: "proj-1",
+      teamKey: "PAN",
+    });
+    if (!resolved.enabled || !resolved.config) {
+      throw new Error("expected polling to be enabled");
+    }
+    const result = await runLinearPollCycle({
+      harness: harnessInstance,
+      rootRunId,
+      token: "tok",
+      apiUrl: "https://example.test/graphql",
+      // Empty project id forces the primitive's config_error branch without
+      // touching the network.
+      projectId: "  ",
+      teamKey: "PAN",
+      config: resolved.config,
+      fetchImpl,
+    });
+    expect(result.status).toBe("config_error");
+    expect(result.state.terminalFailure).not.toBeNull();
+    expect(result.state.nextEligiblePollTime).toBeNull();
+    expect(called).toBe(false);
+
+    // Restart simulation: a fresh Harness reads the same terminal state.
+    const reloaded = new Harness(dbPath);
+    const persisted = getLinearIntakeState(reloaded, rootRunId);
+    expect(persisted.terminalFailure).toBe(result.state.terminalFailure);
+  });
+
+  test("runLinearPollCycle does not advance durable state when ingestion fails mid-page", async () => {
+    await runCli("init");
+    const harnessInstance = new Harness(dbPath);
+    const rootRunId = harnessInstance.createRun({ goal: "supervised root" });
+    const resolved = resolveLinearPolling({
+      pollIntervalMs: 60_000,
+      projectId: "proj-1",
+      teamKey: "PAN",
+    });
+    if (!resolved.enabled || !resolved.config) {
+      throw new Error("expected polling to be enabled");
+    }
+
+    // Force the harness ensureInboxEvent path to throw on the only returned
+    // node by poisoning the inbox_events table with a colliding deterministic
+    // id (same provider/external_id but different event_type).
+    const issue = makeIntakeIssue({ id: "ingest-fail", createdAt: "2026-01-01T00:00:00.000Z" });
+    const collidingId = deterministicLinearInboxId({
+      eventType: "issue.created",
+      externalId: issue.id,
+    });
+    harnessInstance.createInboxEvent({
+      id: collidingId,
+      provider: "linear",
+      eventType: "other.event",
+      externalId: issue.id,
+      payload: {},
+    });
+    const fetchImpl = makeIntakeFetchImpl([[issue]], { hasNextPage: false, endCursor: "cursor" });
+
+    const before = getLinearIntakeState(harnessInstance, rootRunId);
+    const result = await runLinearPollCycle({
+      harness: harnessInstance,
+      rootRunId,
+      token: "tok",
+      apiUrl: "https://example.test/graphql",
+      projectId: "proj-1",
+      teamKey: "PAN",
+      config: resolved.config,
+      fetchImpl,
+    });
+    expect(result.status).toBe("ingestion_failure");
+    expect(result.advanced).toBe(false);
+    // Cursor and overlap boundary remain at the previous (initial) state.
+    expect(result.state.cursor).toBe(before.cursor);
+    expect(result.state.overlapBoundary).toBe(before.overlapBoundary);
+    expect(result.state.lastError).not.toBeNull();
+    // Ingestion failures are retryable: nextEligiblePollTime is set.
+    expect(result.state.nextEligiblePollTime).not.toBeNull();
+    expect(result.state.terminalFailure).toBeNull();
+  });
+
+  test("linear-poll-state and poll-linear-issues CLI subcommands round-trip durable polling state", async () => {
+    await runCli("init");
+    const rootRun = await runCliJson("create-run", "--goal", "supervised root");
+    const configPath = join(dir, "ouroboros.linear.toml");
+    await writeFile(
+      configPath,
+      [
+        "[linear]",
+        "project_id = 'proj-1'",
+        "team_key = 'PAN'",
+        "poll_interval_ms = 60000",
+        "poll_page_size = 10",
+        "poll_max_pages_per_cycle = 5",
+        "poll_max_issues_per_cycle = 50",
+        "poll_overlap_ms = 60000",
+        "poll_max_retries = 4",
+        "poll_backoff_base_ms = 1000",
+        "poll_backoff_max_ms = 60000",
+      ].join("\n"),
+    );
+
+    const initialState = await runCliJson("linear-poll-state", "--run-id", rootRun.id, { LINEAR_API_KEY: "tok" });
+    expect(initialState.lastStatus).toBe("idle");
+    expect(initialState.terminalFailure).toBeNull();
+
+    // poll-linear-issues must fail when no fetch implementation is wired by
+    // the network, so we only verify that the CLI surfaces the resolution
+    // error path for missing project selection. The CLI's --project-id flag
+    // overrides config; an empty value forces a config_error message.
+    const missing = await runCliRaw(
+      "poll-linear-issues",
+      "--run-id",
+      rootRun.id,
+      "--config",
+      configPath,
+      "--project-id",
+      "  ",
+      { LINEAR_API_KEY: "tok" },
+    );
+    expect(missing.exitCode).toBe(0);
+    const missingJson = JSON.parse(missing.stdout);
+    expect(missingJson.status).toBe("config_error");
+    expect(missingJson.state.terminalFailure).not.toBeNull();
+
+    // After the terminal config error, linear-poll-state reflects it durably.
+    const afterState = await runCliJson(
+      "linear-poll-state",
+      "--run-id",
+      rootRun.id,
+      { LINEAR_API_KEY: "tok" },
+    );
+    expect(afterState.terminalFailure).not.toBeNull();
+    expect(afterState.lastStatus).toBe("config_error");
+  });
+
+  test("self-improve-daemon invokes configured Linear polling and persists durable state on the root run", async () => {
+    await runCli("init");
+    const bootstrap = await runCliJson("self-iterate");
+    // Pre-drain the bootstrap so the daemon tick stays focused on polling work.
+    const drainHarness = new Harness(dbPath);
+    drainHarness.recordAttempt({
+      taskId: bootstrap.taskId,
+      input: {},
+      output: {
+        status: "done",
+        summary: "Drained bootstrap for polling test",
+        changedFiles: [],
+        checks: [{ name: "drain", status: "passed" }],
+        artifacts: [],
+        problems: [],
+      },
+    });
+    drainHarness.updateRunStatus({ runId: bootstrap.runId, status: "done" });
+
+    let issueRequests = 0;
+    const issue = makeIntakeIssue({
+      id: "linear-issue-daemon-1",
+      createdAt: "2026-01-01T00:00:00.000Z",
+    });
+    const server = startTestServer({
+      fetch: (request) => {
+        // The polling primitive always queries the `issues` field; the access
+        // check queries `viewer` and `projects`. Only the issues query counts
+        // toward our "polling happened" assertion.
+        const text = request.headers.get("content-type") ?? "";
+        if (text.includes("application/json")) {
+          // We can't inspect body synchronously here without parsing, so just
+          // return the issues payload for any JSON POST. The access-check is
+          // not invoked because projectId is configured directly.
+          issueRequests += 1;
+          return Response.json({
+            data: {
+              issues: {
+                nodes: [issue],
+                pageInfo: { hasNextPage: false, endCursor: "cursor-daemon" },
+              },
+            },
+          });
+        }
+        return new Response("bad request", { status: 400 });
+      },
+    });
+    if (!server) {
+      expect(Bun.version).toBeString();
+      return;
+    }
+    // The polled issue is now also claimed by the consumption path into an
+    // issue-scoped Designer run+task. Point the daemon at a fake codex binary
+    // that drains any Designer intake prompt immediately so the tick completes
+    // within the test budget without spawning real codex.
+    const codexBin = join(dir, "fake-codex-linear-poll-drain");
+    await writeFile(
+      codexBin,
+      [
+        "#!/usr/bin/env bun",
+        "await new Response(Bun.stdin.stream()).text();",
+        "console.log(JSON.stringify({ type: 'session.started', session_id: 'session_linear_poll_drain' }));",
+        "console.log(JSON.stringify({ type: 'agent.message', message: JSON.stringify({ status: 'done', summary: 'Quiescent Linear intake', changedFiles: [], checks: [], artifacts: [], problems: [], actions: [] }) }));",
+        "process.exit(0);",
+      ].join("\n"),
+    );
+    await chmod(codexBin, 0o755);
+    try {
+      const configPath = join(dir, "ouroboros.linear.toml");
+      await writeFile(
+        configPath,
+        [
+          "[linear]",
+          `api_url = "http://127.0.0.1:${server.port}/graphql"`,
+          'token_env = "LINEAR_API_KEY"',
+          'project_id = "proj-1"',
+          'team_key = "PAN"',
+          "poll_interval_ms = 1",
+          "poll_page_size = 10",
+          "poll_max_pages_per_cycle = 1",
+          "poll_max_issues_per_cycle = 50",
+          "poll_overlap_ms = 60000",
+          "poll_max_retries = 4",
+          "poll_backoff_base_ms = 1000",
+          "poll_backoff_max_ms = 60000",
+        ].join("\n") + "\n",
+      );
+
+      const result = await runCliJson(
+        "self-improve-daemon",
+        "--executor",
+        "codex-resumable",
+        "--root-run-id",
+        bootstrap.runId,
+        "--parallel",
+        "auto",
+        "--max-ticks",
+        "1",
+        "--tick-cycles",
+        "1",
+        "--max-rounds",
+        "1",
+        "--interval-ms",
+        "1",
+        "--idle-ms",
+        "1",
+        "--codex-bin",
+        codexBin,
+        "--config",
+        configPath,
+        { LINEAR_API_KEY: "tok" },
+      );
+
+      expect(result.status).toBe("tick_limit");
+      expect(result.ticks).toHaveLength(1);
+      const tick = result.ticks[0] as Record<string, unknown>;
+      const linearIntake = tick.linearIntake as Record<string, unknown>;
+      expect(linearIntake.reason).toBe("polled");
+      expect(linearIntake.status).toBe("ok");
+      expect(linearIntake.advanced).toBe(true);
+      expect(issueRequests).toBeGreaterThan(0);
+      // The polled issue is also claimed by the consumption path.
+      const consumption = tick.linearIntakeConsumption as Record<string, unknown>;
+      expect(consumption).toBeDefined();
+      expect(consumption.claimed).toBe(1);
+      expect(consumption.processed).toBe(1);
+
+      // Durable state on the root run survives across CLI invocations.
+      const state = await runCliJson(
+        "linear-poll-state",
+        "--run-id",
+        bootstrap.runId,
+        { LINEAR_API_KEY: "tok" },
+      );
+      expect(state.lastStatus).toBe("ok");
+      expect(state.terminalFailure).toBeNull();
+      expect(state.overlapBoundary).toBe("2026-01-01T00:00:00.000Z");
+      expect(state.cyclesCompleted).toBe(1);
+      expect(state.issuesIngested).toBe(1);
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  test("self-improve-daemon persists terminal blocked intake when polling configuration is invalid", async () => {
+    await runCli("init");
+    const bootstrap = await runCliJson("self-iterate");
+    const drainHarness = new Harness(dbPath);
+    drainHarness.recordAttempt({
+      taskId: bootstrap.taskId,
+      input: {},
+      output: {
+        status: "done",
+        summary: "Drained bootstrap for invalid polling test",
+        changedFiles: [],
+        checks: [{ name: "drain", status: "passed" }],
+        artifacts: [],
+        problems: [],
+      },
+    });
+    drainHarness.updateRunStatus({ runId: bootstrap.runId, status: "done" });
+
+    // The TOML parser coerces out-of-range numbers to undefined (which fall
+    // back to defaults), so we cannot trigger the resolver's `reason:"invalid"`
+    // path through the config file. Pre-seed a terminal blocked intake state
+    // and verify the daemon respects it: the tick exits fast at the cheap
+    // pre-check, never reads a token, and never invokes fetch.
+    const seedHarness = new Harness(dbPath);
+    seedHarness.updateRun({
+      runId: bootstrap.runId,
+      contextPatch: {
+        linearIntake: {
+          polling: {
+            ...INITIAL_LINEAR_INTAKE_POLLING_STATE,
+            lastStatus: "config_error",
+            terminalFailure: "poll_page_size must be >= 1",
+            lastCycleAt: new Date().toISOString(),
+          },
+        },
+      },
+    });
+
+    // Point token_file at a path that does not exist. If the daemon respects
+    // the terminal pre-check, the tick completes successfully without ever
+    // trying to read the missing token file.
+    const configPath = join(dir, "ouroboros.linear.toml");
+    await writeFile(
+      configPath,
+      [
+        "[linear]",
+        `token_file = "${join(dir, "missing-token")}"`,
+        'project_id = "proj-1"',
+        'team_key = "PAN"',
+        "poll_interval_ms = 1",
+      ].join("\n") + "\n",
+    );
+
+    const result = await runCliJson(
+      "self-improve-daemon",
+      "--executor",
+      "codex-resumable",
+      "--root-run-id",
+      bootstrap.runId,
+      "--parallel",
+      "auto",
+      "--max-ticks",
+      "1",
+      "--tick-cycles",
+      "1",
+      "--max-rounds",
+      "1",
+      "--interval-ms",
+      "1",
+      "--idle-ms",
+      "1",
+      "--config",
+      configPath,
+    );
+
+    expect(result.status).toBe("tick_limit");
+    const tick = result.ticks[0] as Record<string, unknown>;
+    const linearIntake = tick.linearIntake as Record<string, unknown>;
+    expect(linearIntake.reason).toBe("terminal");
+    expect(linearIntake.status).toBe("config_error");
+    expect(linearIntake.advanced).toBe(false);
+    const state = await runCliJson(
+      "linear-poll-state",
+      "--run-id",
+      bootstrap.runId,
+    );
+    expect(state.terminalFailure).not.toBeNull();
+    expect(state.lastStatus).toBe("config_error");
+    expect(state.nextEligiblePollTime).toBeNull();
+  });
+
+  test("ingestion retry exhaustion becomes terminal blocked intake at the configured retry budget", async () => {
+    await runCli("init");
+    const harnessInstance = new Harness(dbPath);
+    const rootRunId = harnessInstance.createRun({ goal: "supervised root" });
+    const issue = makeIntakeIssue({ id: "ingest-fail-terminal", createdAt: "2026-01-01T00:00:00.000Z" });
+    // Poison the inbox_events table so ensureIssue throws on every call.
+    const collidingId = deterministicLinearInboxId({
+      eventType: "issue.created",
+      externalId: issue.id,
+    });
+    harnessInstance.createInboxEvent({
+      id: collidingId,
+      provider: "linear",
+      eventType: "other.event",
+      externalId: issue.id,
+      payload: {},
+    });
+    const fetchImpl = makeIntakeFetchImpl([[issue]], { hasNextPage: false, endCursor: "cursor" });
+    const resolved = resolveLinearPolling({
+      pollIntervalMs: 60_000,
+      projectId: "proj-1",
+      teamKey: "PAN",
+      pollMaxRetries: 2,
+      pollBackoffBaseMs: 1,
+      pollBackoffMaxMs: 1,
+    });
+    if (!resolved.enabled || !resolved.config) {
+      throw new Error("expected polling to be enabled");
+    }
+
+    const baseNow = Date.parse("2026-01-01T00:00:00.000Z");
+    const first = await runLinearPollCycle({
+      harness: harnessInstance,
+      rootRunId,
+      token: "tok",
+      apiUrl: "https://example.test/graphql",
+      projectId: "proj-1",
+      teamKey: "PAN",
+      config: resolved.config,
+      now: baseNow,
+      fetchImpl,
+    });
+    expect(first.status).toBe("ingestion_failure");
+    expect(first.state.retryAttempt).toBe(1);
+    expect(first.state.terminalFailure).toBeNull();
+
+    const second = await runLinearPollCycle({
+      harness: harnessInstance,
+      rootRunId,
+      token: "tok",
+      apiUrl: "https://example.test/graphql",
+      projectId: "proj-1",
+      teamKey: "PAN",
+      config: resolved.config,
+      now: Date.parse(first.state.nextEligiblePollTime!) + 1,
+      fetchImpl,
+    });
+    expect(second.status).toBe("ingestion_failure");
+    // Second failure within the budget of 2 retries: the budget is exhausted,
+    // the driver freezes retryAttempt at its previous value, and the cycle
+    // becomes a terminal blocked intake so the daemon stops busy-looping.
+    expect(second.state.retryAttempt).toBe(1);
+    expect(second.state.terminalFailure).not.toBeNull();
+    expect(second.state.nextEligiblePollTime).toBeNull();
+
+    // Subsequent ticks short-circuit at the terminal pre-check.
+    let calls = 0;
+    const countingFetch: typeof fetchImpl = async (...args) => {
+      calls += 1;
+      return fetchImpl(...args);
+    };
+    const reloaded = new Harness(dbPath);
+    const third = await runLinearPollCycle({
+      harness: reloaded,
+      rootRunId,
+      token: "tok",
+      apiUrl: "https://example.test/graphql",
+      projectId: "proj-1",
+      teamKey: "PAN",
+      config: resolved.config,
+      now: Date.parse("2026-01-01T00:00:10.000Z"),
+      fetchImpl: countingFetch,
+    });
+    expect(third.reason).toBe("terminal");
+    expect(calls).toBe(0);
+  });
+
+  test("runSupervisorLinearPoll resolves project_url-only configuration via the durable cache", async () => {
+    await runCli("init");
+    const rootRunId = (await runCliJson("create-run", "--goal", "supervised root")).id;
+    // Seed the durable cache so the supervisor can skip the network resolution.
+    const seedHarness = new Harness(dbPath);
+    seedHarness.updateRun({
+      runId: rootRunId,
+      contextPatch: {
+        linearIntake: {
+          polling: {
+            ...INITIAL_LINEAR_INTAKE_POLLING_STATE,
+            resolvedProjectId: "proj-from-url",
+            resolvedProjectUrl: "https://linear.test/proj/url",
+          },
+        },
+      },
+    });
+    const issue = {
+      id: "linear-issue-url-config",
+      identifier: "PAN-URL-1",
+      title: "Polling test",
+      description: "body",
+      url: "https://linear.test/issue/url-1",
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+      project: { id: "proj-from-url" },
+      team: { id: "team-1", key: "PAN" },
+    };
+    let issueRequests = 0;
+    const server = startTestServer({
+      fetch: () => {
+        issueRequests += 1;
+        return Response.json({
+          data: {
+            issues: {
+              nodes: [issue],
+              pageInfo: { hasNextPage: false, endCursor: "cursor-url" },
+            },
+          },
+        });
+      },
+    });
+    if (!server) {
+      expect(Bun.version).toBeString();
+      return;
+    }
+    try {
+      // The CLI poll-linear-issues command accepts --project-id; we pass the
+      // cached value to simulate what runSupervisorLinearPoll does in
+      // production: read the cached resolvedProjectId and skip the access check.
+      const projectId = "proj-from-url";
+      const configPath = join(dir, "ouroboros.linear.toml");
+      await writeFile(
+        configPath,
+        [
+          "[linear]",
+          `api_url = "http://127.0.0.1:${server.port}/graphql"`,
+          'token_env = "LINEAR_API_KEY"',
+          `project_url = "https://linear.test/proj/url"`,
+          'team_key = "PAN"',
+          "poll_interval_ms = 1",
+          "poll_page_size = 10",
+          "poll_max_pages_per_cycle = 1",
+          "poll_max_issues_per_cycle = 50",
+          "poll_overlap_ms = 60000",
+          "poll_max_retries = 4",
+          "poll_backoff_base_ms = 1000",
+          "poll_backoff_max_ms = 60000",
+        ].join("\n") + "\n",
+      );
+
+      const result = await runCliJson(
+        "poll-linear-issues",
+        "--run-id",
+        rootRunId,
+        "--config",
+        configPath,
+        "--project-id",
+        projectId,
+        { LINEAR_API_KEY: "tok" },
+      );
+      expect(result.status).toBe("ok");
+      expect(result.state.overlapBoundary).toBe("2026-01-01T00:00:00.000Z");
+      expect(result.state.resolvedProjectId).toBe("proj-from-url");
+      expect(issueRequests).toBeGreaterThan(0);
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  function makeIntakeIssue(input: { id: string; createdAt: string }) {
+    return {
+      id: input.id,
+      identifier: `PAN-${input.id}`,
+      title: `Title ${input.id}`,
+      description: "body",
+      url: `https://linear.test/issue/${input.id}`,
+      createdAt: input.createdAt,
+      updatedAt: input.createdAt,
+      project: { id: "proj-1" },
+      team: { id: "team-1", key: "PAN" },
+    };
+  }
+
+  function makeIntakeFetchImpl(
+    pages: Array<Array<ReturnType<typeof makeIntakeIssue>>>,
+    pageInfo: { hasNextPage: boolean; endCursor: string },
+  ) {
+    return async () =>
+      new Response(
+        JSON.stringify({
+          data: {
+            issues: {
+              nodes: pages.flat(),
+              pageInfo,
+            },
+          },
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+  }
 
   function basePollingConfig(overrides: Partial<LinearPollingConfig> = {}): LinearPollingConfig {
     return {

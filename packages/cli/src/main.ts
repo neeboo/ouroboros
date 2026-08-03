@@ -45,9 +45,19 @@ import {
 } from "@ouroboros/runner";
 import type { CodexSandbox, ResolvedExecutionRoute, StopHook } from "@ouroboros/runner";
 import { fail, flag, parseArgs, required } from "./args";
-import { loadOuroborosConfig } from "./config";
+import { loadOuroborosConfig, resolveLinearPolling } from "./config";
 import { parseArray, parseObject, printJson } from "./json";
 import { checkLinearAccess, ingestLinearEvent, linkLinearIssue } from "./linear";
+import {
+  cacheResolvedProjectSelector,
+  consumeLinearInbox,
+  getLinearIntakeState,
+  persistLinearIntakeTerminal,
+  peekLinearPollCycle,
+  readLinearToken,
+  runLinearPollCycle,
+  type LinearIntakePollingState,
+} from "./linear-intake";
 import { serveDashboard, buildDashboardDesignTimeline } from "./dashboard";
 import type {
   DashboardDesignStatusSummary,
@@ -555,6 +565,77 @@ switch (parsed.command) {
     }
     break;
   }
+  case "linear-poll-state": {
+    harness.init();
+    const runId = required(parsed, "run-id");
+    if (!harness.getRun(runId)) {
+      fail(`run not found: ${runId}`);
+    }
+    printJson(getLinearIntakeState(harness, runId));
+    break;
+  }
+  case "linear-consume-inbox": {
+    harness.init();
+    const rootRunId = required(parsed, "root-run-id");
+    if (!harness.getRun(rootRunId)) {
+      fail(`run not found: ${rootRunId}`);
+    }
+    const batchSizeFlag = flag(parsed, "batch-size");
+    const batchSize = batchSizeFlag ? Number(batchSizeFlag) : undefined;
+    printJson(
+      consumeLinearInbox({
+        harness,
+        rootRunId,
+        batchSize: Number.isFinite(batchSize) && batchSize !== undefined ? batchSize : undefined,
+      }),
+    );
+    break;
+  }
+  case "poll-linear-issues": {
+    harness.init();
+    const runId = required(parsed, "run-id");
+    if (!harness.getRun(runId)) {
+      fail(`run not found: ${runId}`);
+    }
+    const config = await loadCliConfig();
+    const resolution = resolveLinearPolling(config.linear);
+    if (!resolution.enabled || !resolution.config) {
+      fail(
+        resolution.error
+          ? `Linear polling disabled: ${resolution.error}`
+          : `Linear polling disabled: ${resolution.reason ?? "missing configuration"}`,
+      );
+    }
+    const linear = config.linear ?? {};
+    const apiUrl = flag(parsed, "api-url") ?? linear.apiUrl ?? "https://api.linear.app/graphql";
+    const projectId = flag(parsed, "project-id") ?? linear.projectId ?? null;
+    const teamKey = flag(parsed, "team-key") ?? linear.teamKey ?? null;
+    if (!projectId || !teamKey) {
+      fail("Linear polling requires a resolved project id and team key");
+    }
+    let token: string;
+    try {
+      token = (
+        await readLinearToken({
+          tokenEnv: flag(parsed, "token-env") ?? linear.tokenEnv ?? null,
+          tokenFile: flag(parsed, "token-file") ?? linear.tokenFile ?? null,
+        })
+      ).token;
+    } catch (error) {
+      fail((error as Error).message);
+    }
+    const cycle = await runLinearPollCycle({
+      harness,
+      rootRunId: runId,
+      token: token!,
+      apiUrl,
+      projectId,
+      teamKey,
+      config: resolution.config!,
+    });
+    printJson(cycle);
+    break;
+  }
   case "list-lessons": {
     printJson(harness.listLessons({ runId: required(parsed, "run-id") }));
     break;
@@ -1019,6 +1100,9 @@ function printHelp() {
     "  dashboard            Start the dashboard",
     "  intake               Split a requirement document into child runs",
     "  action               Apply a harness action such as integrateVerifiedRun",
+    "  poll-linear-issues   Run one bounded Linear polling cycle for a supervised run",
+    "  linear-poll-state    Print the durable Linear polling state for a supervised run",
+    "  linear-consume-inbox Claim durable Linear issue events into issue-scoped Designer runs",
     "",
     "Inspection:",
     "  list-runs            List recent runs",
@@ -1548,12 +1632,51 @@ async function superviseSelfImprovementDaemon(input: SelfImprovementDaemonInput)
   process.once("SIGINT", stop);
   process.once("SIGTERM", stop);
 
+  // Resolve the Linear polling configuration once. The daemon reuses the same
+  // resolved config across every tick; per-tick it consults the durable
+  // polling state in the root run context to decide whether to actually poll.
+  const linearConfig = await loadCliConfig();
+  const linearPollingResolution = resolveLinearPolling(linearConfig.linear);
+  const linearConfigSection = linearConfig.linear ?? {};
+
+  // An invalid polling configuration (clamp failures, bad numeric fields) is a
+  // permanent operator error. Persist it once as terminal blocked intake so the
+  // dashboard surfaces the failure and the daemon stops re-reading the broken
+  // config every tick. Missing-* reasons are silent operator-configuration
+  // gaps and stay idle.
+  if (!linearPollingResolution.enabled && linearPollingResolution.reason === "invalid") {
+    persistLinearIntakeTerminal(harness, input.rootRunId, {
+      status: "config_error",
+      error: linearPollingResolution.error ?? "Linear polling configuration is invalid",
+    });
+  }
+
   const ticks: Array<Record<string, unknown>> = [];
   let index = 0;
   while (!stopping && (input.maxTicks === 0 || index < input.maxTicks)) {
     let waitMs = input.intervalMs;
     let tick: Record<string, unknown>;
     try {
+      // Poll Linear for new issues when configured and due. The polling driver
+      // persists cursor, overlap boundary, retry attempt, next eligible poll
+      // time, and blocked intake state to the root run context.
+      const pollResult = linearPollingResolution.enabled && linearPollingResolution.config
+        ? await runSupervisorLinearPoll({
+            rootRunId: input.rootRunId,
+            pollingConfig: linearPollingResolution.config,
+            linear: linearConfigSection,
+          })
+        : { reason: "disabled" as const, status: "idle" as const, advanced: false };
+
+      // Drain every durable Linear `issue.created` inbox event into one
+      // issue-scoped Designer cycle. The consumption path is idempotent and
+      // restart-safe: stable run/task IDs prevent duplicates, and events stuck
+      // in `running` after a crash resume on the next tick.
+      const intake = consumeLinearInbox({
+        harness,
+        rootRunId: input.rootRunId,
+      });
+
       const cycle = ensureSelfImprovementCycle(input.rootRunId, input.cwd ?? process.cwd());
       if (cycle.state === "quiescent") {
         waitMs = input.idleMs;
@@ -1564,6 +1687,8 @@ async function superviseSelfImprovementDaemon(input: SelfImprovementDaemonInput)
           createdCycle: null,
           repositoryFingerprint: cycle.repositoryFingerprint,
           runCounts: harness.countRunsByStatus(),
+          linearIntake: pollResult,
+          linearIntakeConsumption: intake,
           createdAt: new Date().toISOString(),
         };
       } else {
@@ -1580,6 +1705,8 @@ async function superviseSelfImprovementDaemon(input: SelfImprovementDaemonInput)
           createdCycle: cycle.createdCycle,
           result,
           runCounts: harness.countRunsByStatus(),
+          linearIntake: pollResult,
+          linearIntakeConsumption: intake,
           createdAt: new Date().toISOString(),
         };
       }
@@ -1608,6 +1735,149 @@ async function superviseSelfImprovementDaemon(input: SelfImprovementDaemonInput)
     ticks,
     runCounts: harness.countRunsByStatus(),
   };
+}
+
+async function runSupervisorLinearPoll(input: {
+  rootRunId: string;
+  pollingConfig: Exclude<ReturnType<typeof resolveLinearPolling>["config"], undefined>;
+  linear: NonNullable<Awaited<ReturnType<typeof loadCliConfig>>["linear"]>;
+}): Promise<{
+  reason: "polled" | "not-due" | "terminal" | "disabled" | "error";
+  status: string;
+  advanced: boolean;
+  error?: string;
+  state?: LinearIntakePollingState;
+}> {
+  const apiUrl = input.linear.apiUrl ?? "https://api.linear.app/graphql";
+  const configuredProjectId = input.linear.projectId ?? null;
+  const configuredProjectUrl = input.linear.projectUrl ?? null;
+  const teamKey = input.linear.teamKey ?? null;
+  if (!teamKey) {
+    return { reason: "disabled", status: "idle", advanced: false };
+  }
+  if (!configuredProjectId && !configuredProjectUrl) {
+    return { reason: "disabled", status: "idle", advanced: false };
+  }
+
+  // Cheap pre-check: do not pay for a token read or network IO when the
+  // durable polling state already says we are terminal or not due.
+  const peek = peekLinearPollCycle(harness, input.rootRunId);
+  if (peek.reason === "terminal") {
+    return {
+      reason: "terminal",
+      status: peek.state.lastStatus,
+      advanced: false,
+      state: peek.state,
+    };
+  }
+  if (peek.reason === "not-due") {
+    return {
+      reason: "not-due",
+      status: "idle",
+      advanced: false,
+      state: peek.state,
+    };
+  }
+
+  // Resolve the durable project ID. When the operator supplied a project_url
+  // only, resolve it via Linear once and cache the result so subsequent ticks
+  // reuse the ID without paying for another access check.
+  let resolvedProjectId = configuredProjectId;
+  if (!resolvedProjectId && configuredProjectUrl) {
+    const cached =
+      peek.state.resolvedProjectUrl === configuredProjectUrl
+        ? peek.state.resolvedProjectId
+        : null;
+    if (cached) {
+      resolvedProjectId = cached;
+    } else {
+      let tokenForLookup: string;
+      try {
+        tokenForLookup = (
+          await readLinearToken({
+            tokenEnv: input.linear.tokenEnv ?? null,
+            tokenFile: input.linear.tokenFile ?? null,
+          })
+        ).token;
+      } catch (error) {
+        const message = (error as Error).message;
+        const nextState = persistLinearIntakeTerminal(harness, input.rootRunId, {
+          status: "config_error",
+          error: message,
+        });
+        return {
+          reason: "error",
+          status: "config_error",
+          advanced: false,
+          error: message,
+          state: nextState,
+        };
+      }
+      try {
+        const access = await checkLinearAccess({
+          harness,
+          projectUrl: configuredProjectUrl,
+          teamKey,
+          tokenEnv: input.linear.tokenEnv ?? null,
+          tokenFile: input.linear.tokenFile ?? null,
+          apiUrl,
+        });
+        resolvedProjectId = access.project.id;
+        cacheResolvedProjectSelector(harness, input.rootRunId, {
+          projectUrl: configuredProjectUrl,
+          projectId: access.project.id,
+        });
+      } catch (error) {
+        const message = (error as Error).message;
+        const nextState = persistLinearIntakeTerminal(harness, input.rootRunId, {
+          status: "config_error",
+          error: message,
+        });
+        return {
+          reason: "error",
+          status: "config_error",
+          advanced: false,
+          error: message,
+          state: nextState,
+        };
+      }
+    }
+  }
+  if (!resolvedProjectId) {
+    return { reason: "disabled", status: "idle", advanced: false };
+  }
+
+  try {
+    const tokenSource = await readLinearToken({
+      tokenEnv: input.linear.tokenEnv ?? null,
+      tokenFile: input.linear.tokenFile ?? null,
+    });
+    const result = await runLinearPollCycle({
+      harness,
+      rootRunId: input.rootRunId,
+      token: tokenSource.token,
+      apiUrl,
+      projectId: resolvedProjectId,
+      teamKey,
+      config: input.pollingConfig,
+    });
+    return {
+      reason: result.reason,
+      status: result.status,
+      advanced: result.advanced,
+      state: result.state,
+    };
+  } catch (error) {
+    // Persistent token read failures (missing token file, etc.) become a
+    // visible blocked intake state on the root run so the daemon does not
+    // busy-loop on the same configuration error every tick.
+    const message = (error as Error).message;
+    const nextState = persistLinearIntakeTerminal(harness, input.rootRunId, {
+      status: "config_error",
+      error: message,
+    });
+    return { reason: "error", status: "config_error", advanced: false, error: message, state: nextState };
+  }
 }
 
 function ensureSelfImprovementCycle(rootRunId: string, cwd: string) {

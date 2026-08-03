@@ -520,6 +520,19 @@ export async function pollLinearIssues(input: {
     if (ingestionFailed) {
       // Never advance durable state past an ingestion failure. Counters reflect the work attempted
       // before the failure; cursor, overlap boundary, and continuation remain at the input state.
+      // Persistent ingestion failures obey the same retry budget as fetch failures so the
+      // supervisor can flip to terminal blocked intake once the budget is exhausted.
+      const exhausted = retryAttempt + 1 >= maxRetries;
+      const exponent = Math.min(retryAttempt, 16);
+      const retryAfterMs = Math.max(
+        0,
+        Math.floor(
+          Math.min(
+            input.config.backoffBaseMs * 2 ** exponent,
+            input.config.backoffMaxMs,
+          ),
+        ),
+      );
       return {
         status: "ingestion_failure",
         state: {
@@ -532,8 +545,8 @@ export async function pollLinearIssues(input: {
         issuesDeduplicated,
         issuesRejected,
         issuesMalformed,
-        exhausted: false,
-        retryAfterMs: null,
+        exhausted,
+        retryAfterMs,
         error: ingestionFailed.error,
       };
     }
