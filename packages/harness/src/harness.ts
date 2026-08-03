@@ -51,6 +51,8 @@ import type {
   CreateExternalRefInput,
   CreateFounderCharterInput,
   CreateInboxEventInput,
+  EnsureExternalRefInput,
+  EnsureExternalRefResult,
   EnsureInboxEventInput,
   EnsureInboxEventResult,
   InboxTransitionTarget,
@@ -85,6 +87,7 @@ import type {
   ListInboxEventsInput,
   ListRunningAttemptsInput,
   ListExternalRefsInput,
+  FindExternalRefsInput,
   ListLessonsInput,
   ListRunsInput,
   ListStrategySignalsInput,
@@ -315,6 +318,23 @@ export class Harness {
         .get({ $id: id }) as RunRow | null;
       return row ? runFromRow(row) : null;
     });
+  }
+
+  // Transaction-aware variant for callers that already hold a database
+  // transaction (e.g. createRunsFromDesign verifying canonical state inside
+  // the same atomic step that creates the run, task, and external reference).
+  getRunWithDb(db: HarnessDatabase, id: string) {
+    const row = db
+      .query(
+        `
+        select runs.*, projects.root_path as project_root
+        from runs
+        left join projects on projects.id = runs.project_id
+        where runs.id = $id
+        `,
+      )
+      .get({ $id: id }) as RunRow | null;
+    return row ? runFromRow(row) : null;
   }
 
   getTask(id: string) {
@@ -1359,6 +1379,73 @@ export class Harness {
     });
   }
 
+  ensureExternalRef(input: EnsureExternalRefInput): EnsureExternalRefResult {
+    if (!input.id) {
+      throw new Error("ensureExternalRef requires a deterministic id");
+    }
+    return withDatabase(this.dbPath, (db) => {
+      return this.ensureExternalRefWithDb(db, input);
+    });
+  }
+
+  // Idempotent create-or-reuse keyed on the unique constraint
+  // (local_type, local_id, provider, external_type, external_id). A prior row
+  // with the same target identity is reused without mutating its id, url, or
+  // created_at; the deterministic id supplied by the caller is used only when a
+  // new row is inserted. Used by the design-action path to link one Linear
+  // issue to one planning run inside the createRunsFromDesign transaction.
+  ensureExternalRefWithDb(db: HarnessDatabase, input: EnsureExternalRefInput): EnsureExternalRefResult {
+    if (!input.id) {
+      throw new Error("ensureExternalRef requires a deterministic id");
+    }
+    const existing = db
+      .query(
+        `
+        select *
+        from external_refs
+        where local_type = $localType
+          and local_id = $localId
+          and provider = $provider
+          and external_type = $externalType
+          and external_id = $externalId
+        `,
+      )
+      .get({
+        $localType: input.localType,
+        $localId: input.localId,
+        $provider: input.provider,
+        $externalType: input.externalType,
+        $externalId: input.externalId,
+      }) as ExternalRefRow | null;
+
+    if (existing) {
+      return { ref: externalRefFromRow(existing), created: false };
+    }
+
+    db.query(
+      `
+      insert into external_refs (
+        id, local_type, local_id, provider, external_type, external_id, external_url
+      )
+      values (
+        $id, $localType, $localId, $provider, $externalType, $externalId, $externalUrl
+      )
+      `,
+    ).run({
+      $id: input.id,
+      $localType: input.localType,
+      $localId: input.localId,
+      $provider: input.provider,
+      $externalType: input.externalType,
+      $externalId: input.externalId,
+      $externalUrl: input.externalUrl ?? null,
+    });
+    const row = db
+      .query("select * from external_refs where id = $id")
+      .get({ $id: input.id }) as ExternalRefRow;
+    return { ref: externalRefFromRow(row), created: true };
+  }
+
   listExternalRefs(input: ListExternalRefsInput) {
     return withDatabase(this.dbPath, (db) => {
       const rows = db
@@ -1376,6 +1463,42 @@ export class Harness {
         }) as ExternalRefRow[];
       return rows.map(externalRefFromRow);
     });
+  }
+
+  // Look up external_refs by their external identity (provider, external_type,
+  // external_id), optionally restricted to a local_type (e.g. "run"). Used by
+  // the design-action path to enforce one canonical run-to-issue reference per
+  // immutable Linear issue: any prior reference for the same issue must point
+  // at the same canonical planning run, regardless of which proposal or action
+  // replay produced it. The lookup is read-only and safe to call inside a
+  // caller's transaction. A copy of this helper accepts a caller-supplied
+  // database handle for use inside createRunsFromDesign's atomic step.
+  findExternalRefs(input: FindExternalRefsInput) {
+    return withDatabase(this.dbPath, (db) => {
+      return this.findExternalRefsWithDb(db, input);
+    });
+  }
+
+  findExternalRefsWithDb(db: HarnessDatabase, input: FindExternalRefsInput) {
+    const rows = db
+      .query(
+        `
+        select *
+        from external_refs
+        where provider = $provider
+          and external_type = $externalType
+          and external_id = $externalId
+          ${input.localType ? "and local_type = $localType" : ""}
+        order by created_at, id
+        `,
+      )
+      .all({
+        $provider: input.provider,
+        $externalType: input.externalType,
+        $externalId: input.externalId,
+        $localType: input.localType ?? null,
+      }) as ExternalRefRow[];
+    return rows.map(externalRefFromRow);
   }
 
   createInboxEvent(input: CreateInboxEventInput) {
@@ -1500,6 +1623,56 @@ export class Harness {
         return { event: inboxEventFromRow(refreshed), updated };
       })();
     });
+  }
+
+  // Transaction-aware variant for callers that already hold a database
+  // transaction (e.g. createRunsFromDesign finalizing an intake inbox event in
+  // the same atomic step that creates the run, task, and external reference).
+  // Performs the same compare-and-set transition as transitionInboxEvent but
+  // does not open its own transaction — the caller's commit/rollback governs
+  // the result. Returns updated:false when the row's current status does not
+  // match `from` (so the caller can treat replay-safe completion as success).
+  transitionInboxEventWithDb(
+    db: HarnessDatabase,
+    input: TransitionInboxEventInput,
+  ): TransitionInboxEventResult {
+    if (!isValidInboxTransition(input.from, input.to)) {
+      throw new Error(
+        `invalid inbox transition: ${input.from} -> ${input.to}`,
+      );
+    }
+    const row = db
+      .query("select * from inbox_events where id = $id")
+      .get({ $id: input.id }) as InboxEventRow | null;
+    if (!row) {
+      throw new Error(`inbox event not found: ${input.id}`);
+    }
+    if (row.status !== input.from) {
+      throw new Error(
+        `expected inbox event ${input.id} to be ${input.from}, found ${row.status}`,
+      );
+    }
+    const stampProcessedAt = input.to === "done" || input.to === "blocked";
+    const result = db
+      .query(
+        `
+        update inbox_events
+        set status = $to,
+            processed_at = case when $stamp = 1 then current_timestamp else null end
+        where id = $id and status = $from
+        `,
+      )
+      .run({
+        $to: input.to,
+        $stamp: stampProcessedAt ? 1 : 0,
+        $id: input.id,
+        $from: input.from,
+      });
+    const updated = result.changes > 0;
+    const refreshed = db
+      .query("select * from inbox_events where id = $id")
+      .get({ $id: input.id }) as InboxEventRow;
+    return { event: inboxEventFromRow(refreshed), updated };
   }
 
   getInboxEvent(input: GetInboxEventInput) {

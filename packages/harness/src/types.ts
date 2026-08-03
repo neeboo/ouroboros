@@ -355,9 +355,33 @@ export interface CreateExternalRefInput {
   id?: string;
 }
 
+export interface EnsureExternalRefInput {
+  /** Caller-supplied deterministic id (typically derived from local_id, provider, external_type, external_id). */
+  id: string;
+  localType: string;
+  localId: string;
+  provider: string;
+  externalType: string;
+  externalId: string;
+  externalUrl?: string | null;
+}
+
+export interface EnsureExternalRefResult {
+  ref: ExternalRef;
+  /** True when this call inserted a new row, false when an identical row already existed. */
+  created: boolean;
+}
+
 export interface ListExternalRefsInput {
   localType: string;
   localId: string;
+}
+
+export interface FindExternalRefsInput {
+  provider: string;
+  externalType: string;
+  externalId: string;
+  localType?: string;
 }
 
 export interface InboxEvent {
