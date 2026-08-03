@@ -22,7 +22,52 @@ export interface LinearConfig {
   projectUrl?: string;
   projectId?: string;
   teamKey?: string;
+  pollIntervalMs?: number;
+  pollPageSize?: number;
+  pollMaxPagesPerCycle?: number;
+  pollMaxIssuesPerCycle?: number;
+  pollOverlapMs?: number;
+  pollMaxRetries?: number;
+  pollBackoffBaseMs?: number;
+  pollBackoffMaxMs?: number;
 }
+
+export interface ResolvedLinearPollingConfig {
+  intervalMs: number;
+  pageSize: number;
+  maxPagesPerCycle: number;
+  maxIssuesPerCycle: number;
+  overlapMs: number;
+  maxRetries: number;
+  backoffBaseMs: number;
+  backoffMaxMs: number;
+}
+
+const LINEAR_POLL_INTERVAL_MS_MIN = 1;
+const LINEAR_POLL_PAGE_SIZE_MIN = 1;
+const LINEAR_POLL_PAGE_SIZE_MAX = 100;
+const LINEAR_POLL_MAX_PAGES_PER_CYCLE_MIN = 1;
+const LINEAR_POLL_MAX_PAGES_PER_CYCLE_MAX = 50;
+const LINEAR_POLL_MAX_ISSUES_PER_CYCLE_MIN = 1;
+const LINEAR_POLL_MAX_ISSUES_PER_CYCLE_MAX = 500;
+const LINEAR_POLL_OVERLAP_MS_MIN = 0;
+const LINEAR_POLL_OVERLAP_MS_MAX = 60 * 60 * 1000;
+const LINEAR_POLL_MAX_RETRIES_MIN = 0;
+const LINEAR_POLL_MAX_RETRIES_MAX = 10;
+const LINEAR_POLL_BACKOFF_BASE_MS_MIN = 0;
+const LINEAR_POLL_BACKOFF_BASE_MS_MAX = 60 * 1000;
+const LINEAR_POLL_BACKOFF_MAX_MS_MIN = 1;
+const LINEAR_POLL_BACKOFF_MAX_MS_MAX = 60 * 60 * 1000;
+
+const LINEAR_POLL_DEFAULTS = {
+  pageSize: 50,
+  maxPagesPerCycle: 5,
+  maxIssuesPerCycle: 100,
+  overlapMs: 5 * 60 * 1000,
+  maxRetries: 4,
+  backoffBaseMs: 1000,
+  backoffMaxMs: 5 * 60 * 1000,
+} as const;
 
 export interface ModelDefaultsConfig {
   global?: ModelPreferenceConfig;
@@ -66,6 +111,108 @@ export async function loadOuroborosConfig(path: string) {
   }
 }
 
+export interface LinearPollingResolution {
+  enabled: boolean;
+  config?: ResolvedLinearPollingConfig;
+  reason?: "missing-interval" | "missing-project" | "missing-team" | "invalid";
+  error?: string;
+}
+
+export function resolveLinearPolling(linear: LinearConfig | undefined): LinearPollingResolution {
+  if (!linear) {
+    return { enabled: false, reason: "missing-interval" };
+  }
+  if (!linear.pollIntervalMs || linear.pollIntervalMs < LINEAR_POLL_INTERVAL_MS_MIN) {
+    return { enabled: false, reason: "missing-interval" };
+  }
+  const projectSelector = linear.projectId ?? linear.projectUrl;
+  if (!projectSelector) {
+    return { enabled: false, reason: "missing-project" };
+  }
+  if (!linear.teamKey) {
+    return { enabled: false, reason: "missing-team" };
+  }
+  const clamp = (
+    value: number | undefined,
+    fallback: number,
+    min: number,
+    max: number,
+    field: string,
+  ): number => {
+    if (value === undefined) {
+      return fallback;
+    }
+    if (!Number.isFinite(value) || value < min) {
+      throw new Error(`[linear] ${field} must be >= ${min}`);
+    }
+    if (value > max) {
+      return max;
+    }
+    return Math.floor(value);
+  };
+  try {
+    const config: ResolvedLinearPollingConfig = {
+      intervalMs: Math.floor(linear.pollIntervalMs),
+      pageSize: clamp(
+        linear.pollPageSize,
+        LINEAR_POLL_DEFAULTS.pageSize,
+        LINEAR_POLL_PAGE_SIZE_MIN,
+        LINEAR_POLL_PAGE_SIZE_MAX,
+        "poll_page_size",
+      ),
+      maxPagesPerCycle: clamp(
+        linear.pollMaxPagesPerCycle,
+        LINEAR_POLL_DEFAULTS.maxPagesPerCycle,
+        LINEAR_POLL_MAX_PAGES_PER_CYCLE_MIN,
+        LINEAR_POLL_MAX_PAGES_PER_CYCLE_MAX,
+        "poll_max_pages_per_cycle",
+      ),
+      maxIssuesPerCycle: clamp(
+        linear.pollMaxIssuesPerCycle,
+        LINEAR_POLL_DEFAULTS.maxIssuesPerCycle,
+        LINEAR_POLL_MAX_ISSUES_PER_CYCLE_MIN,
+        LINEAR_POLL_MAX_ISSUES_PER_CYCLE_MAX,
+        "poll_max_issues_per_cycle",
+      ),
+      overlapMs: clamp(
+        linear.pollOverlapMs,
+        LINEAR_POLL_DEFAULTS.overlapMs,
+        LINEAR_POLL_OVERLAP_MS_MIN,
+        LINEAR_POLL_OVERLAP_MS_MAX,
+        "poll_overlap_ms",
+      ),
+      maxRetries: clamp(
+        linear.pollMaxRetries,
+        LINEAR_POLL_DEFAULTS.maxRetries,
+        LINEAR_POLL_MAX_RETRIES_MIN,
+        LINEAR_POLL_MAX_RETRIES_MAX,
+        "poll_max_retries",
+      ),
+      backoffBaseMs: clamp(
+        linear.pollBackoffBaseMs,
+        LINEAR_POLL_DEFAULTS.backoffBaseMs,
+        LINEAR_POLL_BACKOFF_BASE_MS_MIN,
+        LINEAR_POLL_BACKOFF_BASE_MS_MAX,
+        "poll_backoff_base_ms",
+      ),
+      backoffMaxMs: clamp(
+        linear.pollBackoffMaxMs,
+        LINEAR_POLL_DEFAULTS.backoffMaxMs,
+        LINEAR_POLL_BACKOFF_MAX_MS_MIN,
+        LINEAR_POLL_BACKOFF_MAX_MS_MAX,
+        "poll_backoff_max_ms",
+      ),
+    };
+    return { enabled: true, config };
+  } catch (error) {
+    return {
+      enabled: false,
+      reason: "invalid",
+      error: (error as Error).message,
+    };
+  }
+}
+
 function normalizeConfig(input: Record<string, unknown>): OuroborosConfig {
   const linear = objectValue(input.linear);
   const modelDefaults = modelDefaultsValue(input.models);
@@ -81,6 +228,14 @@ function normalizeConfig(input: Record<string, unknown>): OuroborosConfig {
           projectUrl: stringValue(linear.project_url),
           projectId: stringValue(linear.project_id),
           teamKey: stringValue(linear.team_key),
+          pollIntervalMs: positiveIntValue(linear.poll_interval_ms),
+          pollPageSize: positiveIntValue(linear.poll_page_size),
+          pollMaxPagesPerCycle: positiveIntValue(linear.poll_max_pages_per_cycle),
+          pollMaxIssuesPerCycle: positiveIntValue(linear.poll_max_issues_per_cycle),
+          pollOverlapMs: nonNegativeIntValue(linear.poll_overlap_ms),
+          pollMaxRetries: nonNegativeIntValue(linear.poll_max_retries),
+          pollBackoffBaseMs: nonNegativeIntValue(linear.poll_backoff_base_ms),
+          pollBackoffMaxMs: positiveIntValue(linear.poll_backoff_max_ms),
         }
       : undefined,
     modelDefaults,
@@ -239,6 +394,20 @@ function objectValue(value: unknown) {
 
 function stringValue(value: unknown) {
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function nonNegativeIntValue(value: unknown) {
+  if (typeof value === "number" && Number.isFinite(value) && value >= 0 && Number.isInteger(value)) {
+    return value;
+  }
+  return undefined;
+}
+
+function positiveIntValue(value: unknown) {
+  if (typeof value === "number" && Number.isFinite(value) && value > 0 && Number.isInteger(value)) {
+    return value;
+  }
+  return undefined;
 }
 
 function optionalStringField(record: Record<string, unknown>, key: string) {
