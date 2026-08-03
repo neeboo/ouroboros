@@ -5882,7 +5882,14 @@ describe("runner", () => {
     const approvedProposal = harness.getDesignProposal({ id: proposalId });
     expect(approvedProposal?.status).toBe("accepted");
     const decisions = harness.listDesignDecisions({ proposalId });
-    expect(decisions[0]).toMatchObject({ decision: "approved", actorKind: "human" });
+    const humanApproved = decisions.find(
+      (d) => d.decision === "approved" && d.actorKind === "human",
+    );
+    expect(humanApproved).toMatchObject({
+      decision: "approved",
+      actorKind: "human",
+      actorRef: "founder@example.com",
+    });
 
     const deliveryOutput: AttemptOutput = {
       status: "done",
@@ -6176,17 +6183,19 @@ describe("runner", () => {
       prompt: "design",
     });
     const projectId = harness.createProject({ name: "ouroboros", rootPath: dir });
-    const proposal = harness.createDesignProposal({
-      projectId,
-      title: "Pre-warm cache",
-      problem: "x",
-      recommendation: "x",
-      proposal: validProposal as never,
-      status: "measuring",
-    });
     const hook = createApplyDesignActionsHook({ harness });
 
+    let proposalIndex = 0;
     for (const recommendation of ["revise", "retire"] as const) {
+      proposalIndex += 1;
+      const proposal = harness.createDesignProposal({
+        projectId,
+        title: `Pre-warm cache (${recommendation})`,
+        problem: "x",
+        recommendation: "x",
+        proposal: validProposal as never,
+        status: "measuring",
+      });
       const output: AttemptOutput = {
         status: "done",
         summary: "outcome",
@@ -6240,9 +6249,11 @@ describe("runner", () => {
       expect(signals[0].evidence).toEqual(
         expect.arrayContaining([`design_proposal:${proposal.id}`]),
       );
-    }
 
-    expect(harness.getDesignProposal({ id: proposal.id })?.status).toBe("retired");
+      const expectedStatus = recommendation === "revise" ? "revise" : "retired";
+      expect(harness.getDesignProposal({ id: proposal.id })?.status).toBe(expectedStatus);
+      void proposalIndex;
+    }
   });
 
   test("apply-design-actions hook does not emit adverse signals for retained outcomes", async () => {
@@ -6525,6 +6536,1005 @@ describe("runner", () => {
 
     expect(result.decision).toBe("exit");
     expect(result.problems).toBeUndefined();
+  });
+
+  // -- Designer transition coordinator: bounded, idempotent, fail-closed. --
+
+  function seedActiveCharter(projectId: string): string {
+    const charter = harness.createFounderCharter({
+      projectId,
+      mission: "Build a safe autonomous strategy loop.",
+      charter: {
+        mission: "Build a safe autonomous strategy loop.",
+        capitalPolicy: {
+          currency: "USD",
+          experimentBudget: 1000,
+          recurringSpendApprovalAbove: 100,
+          portfolio: { core: 5, growth: 3, exploration: 2 },
+        },
+        authority: {
+          autoResearch: true,
+          autoReversibleExperiments: true,
+          autoIntegrateVerifiedCode: false,
+          requireHumanFor: [],
+        },
+      },
+      activate: true,
+    });
+    return charter.id;
+  }
+
+  function seedLowRiskSignal(projectId: string): string {
+    const signal = harness.createStrategySignal({
+      projectId,
+      signalClass: "delivery",
+      source: "verifier",
+      title: "Cold-cache startup over 7s",
+      summary: "Three consecutive cold-cache test runs averaged 12s.",
+      observationTime: "2026-08-01T00:00:00.000Z",
+      confidence: 0.6,
+      evidence: [],
+      status: "active",
+      expiresAt: null,
+    });
+    return signal.id;
+  }
+
+  function lowRiskProposalEnvelope(signalId: string) {
+    return {
+      problem: "Test runner flakes on cold cache",
+      recommendation: "Pre-warm the cache before running",
+      evidenceRefs: [signalId],
+      options: [
+        {
+          name: "pre-warm cache",
+          benefits: ["faster startup"],
+          costs: ["small boot cost"],
+          risks: ["none"],
+          lockIn: ["none"],
+        },
+      ],
+      evaluationContract: {
+        baseline: ["cold-cache startup 12s"],
+        successMetrics: ["cold-cache startup under 7s"],
+        guardMetrics: ["test reliability stays at 100%"],
+        requiredEvidence: ["bun test results from three runs"],
+      },
+      investment: {
+        reversibility: "easy" as const,
+        portfolio: "core" as const,
+        oneTimeCost: 0,
+        recurringCost: 0,
+        timeBudget: "1 hour",
+      },
+      riskSurface: {
+        amendsMission: false,
+        amendsCapitalPolicy: false,
+        legalOrPrivacy: false,
+        sensitiveData: false,
+        destructiveOperation: false,
+        productionDeployment: false,
+        unplannedDependency: false,
+        schemaMigration: false,
+        recurringInfrastructure: false,
+        declaredHumanCategories: [],
+      },
+    };
+  }
+
+  test("apply-design-actions hook creates bounded continuation after recordSignal carrying durable signal ID", async () => {
+    const runId = harness.createRun({ goal: "design run" });
+    const taskId = harness.createTask({
+      runId,
+      role: "designer",
+      goal: "design",
+      prompt: "design",
+    });
+    const projectId = harness.createProject({ name: "ouroboros", rootPath: dir });
+    const hook = createApplyDesignActionsHook({ harness });
+
+    const output: AttemptOutput = {
+      status: "done",
+      summary: "signal",
+      designActions: [
+        {
+          type: "recordSignal",
+          payload: {
+            projectId,
+            signalClass: "delivery",
+            source: "verifier",
+            title: "Cold-cache startup over 7s",
+            summary: "Three consecutive cold-cache test runs averaged 12s.",
+            observationTime: "2026-08-01T00:00:00.000Z",
+            confidence: 0.6,
+          },
+        },
+      ],
+    } as AttemptOutput;
+
+    const result = await hook({
+      run: harness.getRun(runId)!,
+      task: harness.getTask(taskId)!,
+      sessionName: "session",
+      prompt: "design",
+      output,
+    });
+
+    expect(result.decision).toBe("exit");
+    const signals = harness.listStrategySignals({ projectId });
+    expect(signals).toHaveLength(1);
+    const signalId = signals[0].id;
+
+    // Exactly one designer continuation exists, carrying the durable signal ID.
+    const continuationArtifacts = (result.artifacts ?? []).filter(
+      (artifact) => (artifact as { kind?: string }).kind === "design_continuation",
+    );
+    expect(continuationArtifacts).toHaveLength(1);
+    const continuation = continuationArtifacts[0] as { taskId: string; signalId: string };
+    expect(continuation.signalId).toBe(signalId);
+    const continuationTask = harness.getTask(continuation.taskId);
+    expect(continuationTask).toBeDefined();
+    expect(continuationTask?.role).toBe("designer");
+    expect(continuationTask?.prompt).toContain(signalId);
+    expect(continuationTask?.dependsOn).toEqual([taskId]);
+
+    // The audit row captures both the durable signal ID and continuation task.
+    const events = harness.listHarnessActionEvents({ limit: 5 });
+    expect(events[0]).toMatchObject({
+      actionType: "design.recordSignal",
+      status: "done",
+    });
+    expect(events[0].result).toMatchObject({
+      signalId,
+      continuationTaskId: continuation.taskId,
+    });
+  });
+
+  test("apply-design-actions hook auto-approves low-risk proposal end-to-end with frozen contract inheritance", async () => {
+    const runId = harness.createRun({ goal: "design run" });
+    const taskId = harness.createTask({
+      runId,
+      role: "designer",
+      goal: "design",
+      prompt: "design",
+    });
+    const projectId = harness.createProject({ name: "ouroboros", rootPath: dir });
+    seedActiveCharter(projectId);
+    const signalId = seedLowRiskSignal(projectId);
+    const hook = createApplyDesignActionsHook({ harness });
+
+    const proposeOutput: AttemptOutput = {
+      status: "done",
+      summary: "propose",
+      designActions: [
+        {
+          type: "proposeDesign",
+          payload: {
+            projectId,
+            title: "Pre-warm cache",
+            proposal: lowRiskProposalEnvelope(signalId),
+            status: "proposed",
+          },
+        },
+      ],
+    } as AttemptOutput;
+
+    const proposeResult = await hook({
+      run: harness.getRun(runId)!,
+      task: harness.getTask(taskId)!,
+      sessionName: "session",
+      prompt: "design",
+      output: proposeOutput,
+    });
+
+    // Auto-approved transitions do not themselves create the child run — they
+    // produce a delivery continuation that emits the createRunsFromDesign
+    // action in the next bounded step. The hook stays in exit, and the
+    // proposal status moves to accepted.
+    expect(proposeResult.decision).toBe("exit");
+    const proposals = harness.listDesignProposals({ projectId });
+    expect(proposals).toHaveLength(1);
+    const proposalId = proposals[0].id;
+    expect(proposals[0].status).toBe("accepted");
+
+    const decisions = harness.listDesignDecisions({ proposalId });
+    const autoApproval = decisions.find(
+      (d) => d.decision === "approved" && d.actorKind === "auto",
+    );
+    expect(autoApproval).toBeDefined();
+    expect(autoApproval?.authority?.disposition).toBe("automatic");
+
+    // A bounded delivery continuation is created for the next Designer pass.
+    const deliveryContinuation = (proposeResult.artifacts ?? []).find(
+      (artifact) => (artifact as { kind?: string }).kind === "design_continuation",
+    ) as { taskId: string; proposalId: string } | undefined;
+    expect(deliveryContinuation).toBeDefined();
+    expect(deliveryContinuation?.proposalId).toBe(proposalId);
+
+    // The Designer emits the bounded createRunsFromDesign action against the
+    // stored proposal. Exactly one child planner run is created within the
+    // configured budget.
+    const deliverOutput: AttemptOutput = {
+      status: "done",
+      summary: "deliver",
+      designActions: [
+        {
+          type: "createRunsFromDesign",
+          payload: {
+            proposalId,
+            runs: [
+              {
+                goal: "Plan pre-warm",
+                prompt: "Plan the change.",
+              },
+            ],
+          },
+        },
+      ],
+    } as AttemptOutput;
+
+    const deliverResult = await hook({
+      run: harness.getRun(runId)!,
+      task: harness.getTask(taskId)!,
+      sessionName: "session",
+      prompt: "design",
+      output: deliverOutput,
+    });
+
+    expect(deliverResult.decision).toBe("continue");
+    const createdRunArtifacts = (deliverResult.artifacts ?? []).filter(
+      (artifact) => (artifact as { kind?: string }).kind === "created_run",
+    );
+    expect(createdRunArtifacts).toHaveLength(1);
+    const childRunId = (createdRunArtifacts[0] as { runId: string }).runId;
+    const childRun = harness.getRun(childRunId);
+    expect(childRun).toBeDefined();
+    expect(childRun?.context).toMatchObject({
+      parentRunId: runId,
+      sourceTaskId: taskId,
+      source: "design",
+      designProposalId: proposalId,
+      designEvaluationContract: {
+        baseline: ["cold-cache startup 12s"],
+        successMetrics: ["cold-cache startup under 7s"],
+        guardMetrics: ["test reliability stays at 100%"],
+        requiredEvidence: ["bun test results from three runs"],
+      },
+      designProposal: expect.objectContaining({
+        problem: "Test runner flakes on cold cache",
+        recommendation: "Pre-warm the cache before running",
+        evidenceRefs: [signalId],
+        investment: expect.objectContaining({
+          reversibility: "easy",
+          portfolio: "core",
+          oneTimeCost: 0,
+          recurringCost: 0,
+        }),
+      }),
+      designApprovalAuthority: expect.objectContaining({
+        decision: "approved",
+        actorKind: "auto",
+      }),
+    });
+  });
+
+  test("apply-design-actions hook auto-approves production-format proposal that omits the riskSurface field", async () => {
+    // The production Designer prompt (packages/cli/src/main.ts:selfIterationDesignerPrompt)
+    // does NOT require an explicit `riskSurface` field on `proposeDesign`. The
+    // coordinator must therefore derive a conservative risk surface from the
+    // envelope text and accept low-risk proposals even when `riskSurface` is
+    // absent. This test reproduces the production envelope exactly: no
+    // `riskSurface` block, no `declaredHumanCategories`, just the documented
+    // contract fields.
+    const runId = harness.createRun({ goal: "design run" });
+    const taskId = harness.createTask({
+      runId,
+      role: "designer",
+      goal: "design",
+      prompt: "design",
+    });
+    const projectId = harness.createProject({ name: "ouroboros", rootPath: dir });
+    seedActiveCharter(projectId);
+    const signalId = seedLowRiskSignal(projectId);
+    const hook = createApplyDesignActionsHook({ harness });
+
+    // Production envelope: matches what selfIterationDesignerPrompt asks the
+    // designer to emit. Note the absence of `riskSurface`.
+    const productionEnvelope = {
+      problem: "Test runner flakes on cold cache",
+      recommendation: "Pre-warm the cache before running",
+      evidenceRefs: [signalId],
+      options: [
+        {
+          name: "pre-warm cache",
+          benefits: ["faster startup"],
+          costs: ["small boot cost"],
+          risks: ["none"],
+          lockIn: ["none"],
+        },
+      ],
+      evaluationContract: {
+        baseline: ["cold-cache startup 12s"],
+        successMetrics: ["cold-cache startup under 7s"],
+        guardMetrics: ["test reliability stays at 100%"],
+        requiredEvidence: ["bun test results from three runs"],
+      },
+      investment: {
+        reversibility: "easy" as const,
+        portfolio: "core" as const,
+        oneTimeCost: 0,
+        recurringCost: 0,
+        timeBudget: "1 hour",
+      },
+      // No `riskSurface` field — this is the production format.
+    };
+
+    const proposeOutput: AttemptOutput = {
+      status: "done",
+      summary: "propose",
+      designActions: [
+        {
+          type: "proposeDesign",
+          payload: {
+            projectId,
+            title: "Pre-warm cache",
+            proposal: productionEnvelope,
+            status: "proposed",
+          },
+        },
+      ],
+    } as AttemptOutput;
+
+    const proposeResult = await hook({
+      run: harness.getRun(runId)!,
+      task: harness.getTask(taskId)!,
+      sessionName: "session",
+      prompt: "design",
+      output: proposeOutput,
+    });
+
+    // The coordinator must auto-approve: status accepted, an approved auto
+    // decision with automatic disposition, and a delivery continuation.
+    expect(proposeResult.decision).toBe("exit");
+    const proposals = harness.listDesignProposals({ projectId });
+    expect(proposals).toHaveLength(1);
+    expect(proposals[0].status).toBe("accepted");
+
+    const decisions = harness.listDesignDecisions({ proposalId: proposals[0].id });
+    const autoApproval = decisions.find(
+      (d) => d.decision === "approved" && d.actorKind === "auto",
+    );
+    expect(autoApproval).toBeDefined();
+    expect(autoApproval?.authority?.disposition).toBe("automatic");
+
+    const deliveryContinuation = (proposeResult.artifacts ?? []).find(
+      (artifact) => (artifact as { kind?: string }).kind === "design_continuation",
+    );
+    expect(deliveryContinuation).toBeDefined();
+  });
+
+  test("apply-design-actions hook records human checkpoint for high-risk proposal and creates no delivery run", async () => {
+    const runId = harness.createRun({ goal: "design run" });
+    const taskId = harness.createTask({
+      runId,
+      role: "designer",
+      goal: "design",
+      prompt: "design",
+    });
+    const projectId = harness.createProject({ name: "ouroboros", rootPath: dir });
+    seedActiveCharter(projectId);
+    const signalId = seedLowRiskSignal(projectId);
+    const hook = createApplyDesignActionsHook({ harness });
+
+    // High-risk envelope: hard reversibility and a schema-migration flag the
+    // designer declares as true. The evaluator must route to human-required.
+    const highRiskEnvelope = {
+      ...lowRiskProposalEnvelope(signalId),
+      investment: {
+        reversibility: "hard" as const,
+        portfolio: "core" as const,
+        oneTimeCost: 0,
+        recurringCost: 0,
+        timeBudget: "1 hour",
+      },
+      riskSurface: {
+        amendsMission: false,
+        amendsCapitalPolicy: false,
+        legalOrPrivacy: false,
+        sensitiveData: false,
+        destructiveOperation: false,
+        productionDeployment: false,
+        unplannedDependency: false,
+        schemaMigration: true,
+        recurringInfrastructure: false,
+        declaredHumanCategories: [],
+      },
+    };
+
+    const output: AttemptOutput = {
+      status: "done",
+      summary: "propose",
+      designActions: [
+        {
+          type: "proposeDesign",
+          payload: {
+            projectId,
+            title: "Risk-on schema migration",
+            proposal: highRiskEnvelope,
+            status: "proposed",
+          },
+        },
+      ],
+    } as AttemptOutput;
+
+    const result = await hook({
+      run: harness.getRun(runId)!,
+      task: harness.getTask(taskId)!,
+      sessionName: "session",
+      prompt: "design",
+      output,
+    });
+
+    expect(result.decision).toBe("exit");
+    const proposals = harness.listDesignProposals({ projectId });
+    expect(proposals).toHaveLength(1);
+    const proposalId = proposals[0].id;
+
+    // Status stays in proposed — no auto-acceptance.
+    expect(proposals[0].status).toBe("proposed");
+
+    const decisions = harness.listDesignDecisions({ proposalId });
+    const checkpoint = decisions.find((d) => d.decision === "deferred" && d.actorKind === "auto");
+    expect(checkpoint).toBeDefined();
+    expect(checkpoint?.authority?.disposition).toBe("human-required");
+    expect(checkpoint?.reasons.some((r) => String(r).includes("schema-migration"))).toBe(true);
+
+    // No delivery continuation was created.
+    const continuationArtifacts = (result.artifacts ?? []).filter(
+      (artifact) => (artifact as { kind?: string }).kind === "design_continuation",
+    );
+    expect(continuationArtifacts).toHaveLength(0);
+
+    // No child run can be created because the proposal was never accepted.
+    expect(
+      harness.listRuns({ limit: 50 }).filter((r) => r.context?.parentRunId === runId),
+    ).toHaveLength(0);
+
+    // A subsequent delivery attempt against the un-accepted proposal fails closed.
+    const deliverOutput: AttemptOutput = {
+      status: "done",
+      summary: "deliver",
+      designActions: [
+        {
+          type: "createRunsFromDesign",
+          payload: {
+            proposalId,
+            runs: [{ goal: "Plan", prompt: "Plan." }],
+          },
+        },
+      ],
+    } as AttemptOutput;
+
+    const deliverResult = await hook({
+      run: harness.getRun(runId)!,
+      task: harness.getTask(taskId)!,
+      sessionName: "session",
+      prompt: "design",
+      output: deliverOutput,
+    });
+
+    expect(deliverResult.decision).toBe("exit");
+    expect(deliverResult.problems?.[0]).toContain("createRunsFromDesign requires an accepted proposal");
+  });
+
+  test("apply-design-actions hook fails closed for missing evidence references", async () => {
+    const runId = harness.createRun({ goal: "design run" });
+    const taskId = harness.createTask({
+      runId,
+      role: "designer",
+      goal: "design",
+      prompt: "design",
+    });
+    const projectId = harness.createProject({ name: "ouroboros", rootPath: dir });
+    seedActiveCharter(projectId);
+    const hook = createApplyDesignActionsHook({ harness });
+
+    const output: AttemptOutput = {
+      status: "done",
+      summary: "propose",
+      designActions: [
+        {
+          type: "proposeDesign",
+          payload: {
+            projectId,
+            title: "Cites missing signal",
+            proposal: lowRiskProposalEnvelope("signal_does_not_exist"),
+            status: "proposed",
+          },
+        },
+      ],
+    } as AttemptOutput;
+
+    const result = await hook({
+      run: harness.getRun(runId)!,
+      task: harness.getTask(taskId)!,
+      sessionName: "session",
+      prompt: "design",
+      output,
+    });
+
+    expect(result.decision).toBe("exit");
+    const proposals = harness.listDesignProposals({ projectId });
+    expect(proposals).toHaveLength(1);
+    const proposalId = proposals[0].id;
+
+    // Missing evidence cannot authorize automatic approval: status stays in
+    // proposed and a deferred checkpoint is recorded with human-required
+    // disposition.
+    expect(proposals[0].status).toBe("proposed");
+    const decisions = harness.listDesignDecisions({ proposalId });
+    const checkpoint = decisions.find((d) => d.decision === "deferred");
+    expect(checkpoint).toBeDefined();
+    expect(checkpoint?.authority?.disposition).toBe("human-required");
+    expect(
+      (checkpoint?.authority as { evidence?: { missing?: string[] } } | undefined)?.evidence?.missing,
+    ).toContain("signal_does_not_exist");
+  });
+
+  test("apply-design-actions hook fails closed for stale evidence signals", async () => {
+    const runId = harness.createRun({ goal: "design run" });
+    const taskId = harness.createTask({
+      runId,
+      role: "designer",
+      goal: "design",
+      prompt: "design",
+    });
+    const projectId = harness.createProject({ name: "ouroboros", rootPath: dir });
+    seedActiveCharter(projectId);
+
+    // Stale signal — already expired at observation time.
+    const stale = harness.createStrategySignal({
+      projectId,
+      signalClass: "delivery",
+      source: "verifier",
+      title: "stale",
+      summary: "stale observation",
+      observationTime: "2024-01-01T00:00:00.000Z",
+      confidence: 0.5,
+      evidence: [],
+      status: "active",
+      expiresAt: "2024-02-01T00:00:00.000Z",
+    });
+
+    const hook = createApplyDesignActionsHook({ harness });
+
+    const output: AttemptOutput = {
+      status: "done",
+      summary: "propose",
+      designActions: [
+        {
+          type: "proposeDesign",
+          payload: {
+            projectId,
+            title: "Cites stale signal",
+            proposal: lowRiskProposalEnvelope(stale.id),
+            status: "proposed",
+          },
+        },
+      ],
+    } as AttemptOutput;
+
+    const result = await hook({
+      run: harness.getRun(runId)!,
+      task: harness.getTask(taskId)!,
+      sessionName: "session",
+      prompt: "design",
+      output,
+    });
+
+    expect(result.decision).toBe("exit");
+    const proposals = harness.listDesignProposals({ projectId });
+    expect(proposals).toHaveLength(1);
+    const proposalId = proposals[0].id;
+    const decisions = harness.listDesignDecisions({ proposalId });
+    // Stale evidence must hard-reject.
+    const rejected = decisions.find((d) => d.decision === "rejected");
+    expect(rejected).toBeDefined();
+    expect(
+      (rejected?.authority as { evidence?: { expired?: string[] } } | undefined)?.evidence?.expired,
+    ).toContain(stale.id);
+    expect(proposals[0].status).toBe("rejected");
+  });
+
+  test("apply-design-actions hook fails closed for conflicting evidence signals", async () => {
+    const runId = harness.createRun({ goal: "design run" });
+    const taskId = harness.createTask({
+      runId,
+      role: "designer",
+      goal: "design",
+      prompt: "design",
+    });
+    const projectId = harness.createProject({ name: "ouroboros", rootPath: dir });
+    seedActiveCharter(projectId);
+    const signalA = seedLowRiskSignal(projectId);
+    const signalB = harness.createStrategySignal({
+      projectId,
+      signalClass: "delivery",
+      source: "verifier",
+      title: "conflict",
+      summary: "Conflicting observation.",
+      observationTime: "2026-08-01T00:00:00.000Z",
+      confidence: 0.5,
+      evidence: [],
+      status: "active",
+      expiresAt: null,
+      conflictingSignalIds: [signalA],
+    });
+
+    const hook = createApplyDesignActionsHook({ harness });
+
+    const output: AttemptOutput = {
+      status: "done",
+      summary: "propose",
+      designActions: [
+        {
+          type: "proposeDesign",
+          payload: {
+            projectId,
+            title: "Cites conflicting signal",
+            proposal: lowRiskProposalEnvelope(signalA),
+            status: "proposed",
+          },
+        },
+      ],
+    } as AttemptOutput;
+
+    const result = await hook({
+      run: harness.getRun(runId)!,
+      task: harness.getTask(taskId)!,
+      sessionName: "session",
+      prompt: "design",
+      output,
+    });
+
+    expect(result.decision).toBe("exit");
+    const proposals = harness.listDesignProposals({ projectId });
+    const proposalId = proposals[0].id;
+    const decisions = harness.listDesignDecisions({ proposalId });
+    const checkpoint = decisions.find((d) => d.decision === "deferred");
+    expect(checkpoint).toBeDefined();
+    expect(
+      (checkpoint?.authority as { evidence?: { conflicting?: string[] } } | undefined)?.evidence
+        ?.conflicting,
+    ).toContain(signalA);
+    void signalB;
+  });
+
+  test("apply-design-actions hook fails closed for evidence with no active charter", async () => {
+    const runId = harness.createRun({ goal: "design run" });
+    const taskId = harness.createTask({
+      runId,
+      role: "designer",
+      goal: "design",
+      prompt: "design",
+    });
+    const projectId = harness.createProject({ name: "ouroboros", rootPath: dir });
+    // No charter seeded — adapter must fail closed.
+    const signalId = seedLowRiskSignal(projectId);
+    const hook = createApplyDesignActionsHook({ harness });
+
+    const output: AttemptOutput = {
+      status: "done",
+      summary: "propose",
+      designActions: [
+        {
+          type: "proposeDesign",
+          payload: {
+            projectId,
+            title: "No charter",
+            proposal: lowRiskProposalEnvelope(signalId),
+            status: "proposed",
+          },
+        },
+      ],
+    } as AttemptOutput;
+
+    const result = await hook({
+      run: harness.getRun(runId)!,
+      task: harness.getTask(taskId)!,
+      sessionName: "session",
+      prompt: "design",
+      output,
+    });
+
+    expect(result.decision).toBe("exit");
+    const proposals = harness.listDesignProposals({ projectId });
+    const proposalId = proposals[0].id;
+    const decisions = harness.listDesignDecisions({ proposalId });
+    const checkpoint = decisions.find((d) => d.decision === "deferred");
+    expect(checkpoint).toBeDefined();
+    expect(checkpoint?.authority?.disposition).toBe("human-required");
+    expect(checkpoint?.reasons.some((r) => String(r).includes("missing-active-charter"))).toBe(true);
+  });
+
+  test("apply-design-actions hook is idempotent across Harness reconstruction", async () => {
+    const runId = harness.createRun({ goal: "design run" });
+    const taskId = harness.createTask({
+      runId,
+      role: "designer",
+      goal: "design",
+      prompt: "design",
+    });
+    const projectId = harness.createProject({ name: "ouroboros", rootPath: dir });
+    seedActiveCharter(projectId);
+    const signalId = seedLowRiskSignal(projectId);
+    const hook = createApplyDesignActionsHook({ harness });
+
+    const proposeOutput: AttemptOutput = {
+      status: "done",
+      summary: "propose",
+      designActions: [
+        {
+          type: "proposeDesign",
+          payload: {
+            projectId,
+            title: "Pre-warm cache",
+            proposal: lowRiskProposalEnvelope(signalId),
+            status: "proposed",
+          },
+        },
+      ],
+    } as AttemptOutput;
+
+    const firstResult = await hook({
+      run: harness.getRun(runId)!,
+      task: harness.getTask(taskId)!,
+      sessionName: "session",
+      prompt: "design",
+      output: proposeOutput,
+    });
+    expect(firstResult.decision).toBe("exit");
+
+    const proposalsBefore = harness.listDesignProposals({ projectId });
+    const decisionsBefore = harness.listDesignDecisions({ proposalId: proposalsBefore[0].id });
+    const eventsBefore = harness.listHarnessActionEvents({ limit: 50 })
+      .filter((e) => e.actionType.startsWith("design."));
+
+    // Simulate a process restart: drop and recreate the harness over the same
+    // SQLite database. The audit log is the source of truth.
+    const dbPath = (harness as unknown as { dbPath: string }).dbPath;
+    const replayHarness = new Harness(dbPath);
+    replayHarness.init();
+    const replayHook = createApplyDesignActionsHook({ harness: replayHarness });
+
+    const replayResult = await replayHook({
+      run: replayHarness.getRun(runId)!,
+      task: replayHarness.getTask(taskId)!,
+      sessionName: "session",
+      prompt: "design",
+      output: proposeOutput,
+    });
+
+    // Replay produces the same artifacts but does not create new entities.
+    expect(replayResult.decision).toBe("exit");
+    expect(replayResult.problems).toBeUndefined();
+
+    const proposalsAfter = replayHarness.listDesignProposals({ projectId });
+    expect(proposalsAfter).toHaveLength(proposalsBefore.length);
+    expect(proposalsAfter[0].id).toBe(proposalsBefore[0].id);
+    expect(proposalsAfter[0].status).toBe(proposalsBefore[0].status);
+
+    const decisionsAfter = replayHarness.listDesignDecisions({ proposalId: proposalsAfter[0].id });
+    expect(decisionsAfter).toHaveLength(decisionsBefore.length);
+    expect(decisionsAfter.map((d) => d.id).sort()).toEqual(
+      decisionsBefore.map((d) => d.id).sort(),
+    );
+
+    const eventsAfter = replayHarness.listHarnessActionEvents({ limit: 50 })
+      .filter((e) => e.actionType.startsWith("design."));
+    expect(eventsAfter).toHaveLength(eventsBefore.length);
+    for (const event of eventsAfter) {
+      expect(event.status).toBe("done");
+    }
+  });
+
+  test("apply-design-actions hook preserves byte-for-byte frozen evaluation contract in child run context", async () => {
+    const runId = harness.createRun({ goal: "design run" });
+    const taskId = harness.createTask({
+      runId,
+      role: "designer",
+      goal: "design",
+      prompt: "design",
+    });
+    const projectId = harness.createProject({ name: "ouroboros", rootPath: dir });
+    seedActiveCharter(projectId);
+    const signalId = seedLowRiskSignal(projectId);
+    const hook = createApplyDesignActionsHook({ harness });
+
+    const envelope = {
+      ...lowRiskProposalEnvelope(signalId),
+      // Extension fields must survive the freeze byte-for-byte so planners,
+      // workers, and verifiers inherit a single durable source of truth.
+      targetOutcome: "Cold-cache startup falls below 7s without reliability loss",
+      additions: ["packages/runner/src/prewarm.ts"],
+      removals: ["legacy cold-cache handling"],
+      assumptions: ["prewarm runs before test discovery"],
+      uncertainty: ["effect under load"],
+      experiment: {
+        hypothesis: "Pre-warming eliminates the cold-cache startup tail",
+        smallestTest: "Run three cold-cache suites with and without prewarm",
+        stopConditions: ["startup stays above 7s after prewarm"],
+        rollback: "Delete prewarm and rerun the suite",
+      },
+      customRolloutNotes: "Coordinate with release manager before merging",
+      telemetryHypothesis: {
+        metric: "cold_cache_startup_ms",
+        expectedDelta: -5000,
+      },
+    };
+
+    const proposeOutput: AttemptOutput = {
+      status: "done",
+      summary: "propose",
+      designActions: [
+        {
+          type: "proposeDesign",
+          payload: {
+            projectId,
+            title: "Pre-warm cache",
+            proposal: envelope,
+            status: "proposed",
+          },
+        },
+      ],
+    } as AttemptOutput;
+
+    await hook({
+      run: harness.getRun(runId)!,
+      task: harness.getTask(taskId)!,
+      sessionName: "session",
+      prompt: "design",
+      output: proposeOutput,
+    });
+
+    const proposalId = harness.listDesignProposals({ projectId })[0].id;
+
+    const deliverOutput: AttemptOutput = {
+      status: "done",
+      summary: "deliver",
+      designActions: [
+        {
+          type: "createRunsFromDesign",
+          payload: {
+            proposalId,
+            runs: [{ goal: "Plan", prompt: "Plan." }],
+          },
+        },
+      ],
+    } as AttemptOutput;
+
+    const deliverResult = await hook({
+      run: harness.getRun(runId)!,
+      task: harness.getTask(taskId)!,
+      sessionName: "session",
+      prompt: "design",
+      output: deliverOutput,
+    });
+
+    expect(deliverResult.decision).toBe("continue");
+    const createdRunArtifacts = (deliverResult.artifacts ?? []).filter(
+      (artifact) => (artifact as { kind?: string }).kind === "created_run",
+    );
+    expect(createdRunArtifacts).toHaveLength(1);
+    const childRunId = (createdRunArtifacts[0] as { runId: string }).runId;
+    const childRun = harness.getRun(childRunId);
+    // The frozen envelope preserves every stored field byte-for-byte.
+    expect(childRun?.context?.designEvaluationContract).toEqual(envelope.evaluationContract);
+    expect(childRun?.context?.designInvestment).toEqual(envelope.investment);
+    expect(childRun?.context?.designAdditions).toEqual(envelope.additions);
+    expect(childRun?.context?.designRemovals).toEqual(envelope.removals);
+    expect(childRun?.context?.designProposal).toMatchObject({
+      targetOutcome: envelope.targetOutcome,
+      assumptions: envelope.assumptions,
+      uncertainty: envelope.uncertainty,
+      experiment: envelope.experiment,
+      customRolloutNotes: envelope.customRolloutNotes,
+      telemetryHypothesis: envelope.telemetryHypothesis,
+    });
+  });
+
+  test("apply-design-actions hook records duplicate-action transitions idempotently within one designer cycle", async () => {
+    const runId = harness.createRun({ goal: "design run" });
+    const taskId = harness.createTask({
+      runId,
+      role: "designer",
+      goal: "design",
+      prompt: "design",
+    });
+    const projectId = harness.createProject({ name: "ouroboros", rootPath: dir });
+    seedActiveCharter(projectId);
+    const signalId = seedLowRiskSignal(projectId);
+    const hook = createApplyDesignActionsHook({ harness });
+
+    const output: AttemptOutput = {
+      status: "done",
+      summary: "propose twice",
+      designActions: [
+        {
+          type: "proposeDesign",
+          payload: {
+            projectId,
+            title: "Pre-warm cache",
+            proposal: lowRiskProposalEnvelope(signalId),
+            status: "proposed",
+          },
+        },
+        // Duplicate action replay within the same designer cycle.
+        {
+          type: "proposeDesign",
+          payload: {
+            projectId,
+            title: "Pre-warm cache (duplicate)",
+            proposal: lowRiskProposalEnvelope(signalId),
+            status: "proposed",
+          },
+        },
+      ],
+    } as AttemptOutput;
+
+    const result = await hook({
+      run: harness.getRun(runId)!,
+      task: harness.getTask(taskId)!,
+      sessionName: "session",
+      prompt: "design",
+      output,
+    });
+
+    expect(result.decision).toBe("exit");
+    // Each action index is unique, so both proposals are recorded. The
+    // idempotency guarantee is per (actionType, runId, taskId, actionIndex,
+    // entity identity), not per designer cycle.
+    const proposals = harness.listDesignProposals({ projectId });
+    expect(proposals).toHaveLength(2);
+    // Both proposals were auto-approved independently.
+    for (const proposal of proposals) {
+      expect(proposal.status).toBe("accepted");
+      const decisions = harness.listDesignDecisions({ proposalId: proposal.id });
+      expect(decisions.find((d) => d.decision === "approved" && d.actorKind === "auto")).toBeDefined();
+    }
+    const events = harness.listHarnessActionEvents({ limit: 50 })
+      .filter((e) => e.actionType === "design.proposeDesign");
+    expect(events).toHaveLength(2);
+    expect(events.every((e) => e.status === "done")).toBe(true);
+  });
+
+  test("apply-design-actions hook is mutation-free and quiescent on no-action result with no designActions", async () => {
+    const runId = harness.createRun({ goal: "design run" });
+    const taskId = harness.createTask({
+      runId,
+      role: "designer",
+      goal: "design",
+      prompt: "design",
+    });
+    const hook = createApplyDesignActionsHook({ harness });
+
+    const beforeProposals = harness.listDesignProposals({}).length;
+    const beforeSignals = harness.listStrategySignals({}).length;
+    const beforeEvents = harness.listHarnessActionEvents({ limit: 200 }).length;
+
+    const result = await hook({
+      run: harness.getRun(runId)!,
+      task: harness.getTask(taskId)!,
+      sessionName: "session",
+      prompt: "design",
+      output: { status: "done", summary: "no actions" } as AttemptOutput,
+    });
+
+    expect(result.decision).toBe("exit");
+    expect(result.problems).toBeUndefined();
+    expect(harness.listDesignProposals({})).toHaveLength(beforeProposals);
+    expect(harness.listStrategySignals({})).toHaveLength(beforeSignals);
+    expect(harness.listHarnessActionEvents({ limit: 200 })).toHaveLength(beforeEvents);
   });
 
   test("runs multiple ready tasks with separate subagent sessions", async () => {
