@@ -1379,6 +1379,102 @@ describe("Harness", () => {
     ]);
   });
 
+  test("ensureExternalRef creates one row per (local, provider, external) tuple and reuses it on replay", () => {
+    const runId = harness.createRun({ goal: "Plan intake" });
+
+    const first = harness.ensureExternalRef({
+      id: "ref_intake_deterministic",
+      localType: "run",
+      localId: runId,
+      provider: "linear",
+      externalType: "issue",
+      externalId: "linear-issue-immutable-1",
+      externalUrl: "https://linear.app/pancat/issue/PAN-1234",
+    });
+    expect(first.created).toBe(true);
+    expect(first.ref).toMatchObject({
+      id: "ref_intake_deterministic",
+      localType: "run",
+      localId: runId,
+      provider: "linear",
+      externalType: "issue",
+      externalId: "linear-issue-immutable-1",
+      externalUrl: "https://linear.app/pancat/issue/PAN-1234",
+    });
+
+    // Replaying with the same target identity reuses the existing row without
+    // mutating its id, url, or created_at. The created flag flips to false so
+    // the caller can distinguish a fresh write from an idempotent reuse.
+    const replay = harness.ensureExternalRef({
+      id: "ref_intake_deterministic_alt_id_ignored",
+      localType: "run",
+      localId: runId,
+      provider: "linear",
+      externalType: "issue",
+      externalId: "linear-issue-immutable-1",
+      externalUrl: "https://linear.app/pancat/issue/PAN-9999",
+    });
+    expect(replay.created).toBe(false);
+    expect(replay.ref.id).toBe("ref_intake_deterministic");
+    expect(replay.ref.externalUrl).toBe("https://linear.app/pancat/issue/PAN-1234");
+
+    // Exactly one row exists for the planning run after replay.
+    expect(harness.listExternalRefs({ localType: "run", localId: runId })).toEqual([
+      replay.ref,
+    ]);
+  });
+
+  test("ensureExternalRefWithDb participates in the caller's transaction", () => {
+    const runId = harness.createRun({ goal: "Plan intake" });
+
+    harness.runInTransaction((db) => {
+      harness.ensureExternalRefWithDb(db, {
+        id: "ref_txn_1",
+        localType: "run",
+        localId: runId,
+        provider: "linear",
+        externalType: "issue",
+        externalId: "linear-issue-txn-1",
+      });
+      harness.ensureExternalRefWithDb(db, {
+        id: "ref_txn_2",
+        localType: "run",
+        localId: runId,
+        provider: "linear",
+        externalType: "issue",
+        externalId: "linear-issue-txn-2",
+      });
+    });
+    const refs = harness.listExternalRefs({ localType: "run", localId: runId });
+    expect(refs.map((r) => r.externalId).sort()).toEqual([
+      "linear-issue-txn-1",
+      "linear-issue-txn-2",
+    ]);
+  });
+
+  test("transitionInboxEventWithDb transitions an event inside the caller's transaction", () => {
+    const ensured = harness.ensureInboxEvent({
+      id: "inbox_intake_txn_test",
+      provider: "linear",
+      eventType: "issue.created",
+      externalId: "linear-issue-inbox-txn",
+      payload: { identifier: "PAN-1" },
+    });
+    // Claim the event first using the standard public path, then run a
+    // transaction-aware transition from running to done.
+    harness.transitionInboxEvent({ id: ensured.event.id, from: "todo", to: "running" });
+    harness.runInTransaction((db) => {
+      const result = harness.transitionInboxEventWithDb(db, {
+        id: ensured.event.id,
+        from: "running",
+        to: "done",
+      });
+      expect(result.updated).toBe(true);
+      expect(result.event.status).toBe("done");
+    });
+    expect(harness.getInboxEvent({ id: ensured.event.id })?.status).toBe("done");
+  });
+
   test("leases ready tasks with session refs", () => {
     const runId = harness.createRun({ goal: "Build loop" });
     const first = harness.createTask({

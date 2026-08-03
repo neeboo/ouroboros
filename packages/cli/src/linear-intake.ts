@@ -521,13 +521,20 @@ export interface ConsumeInboxResult {
  * issue-scoped Designer cycle. Each event is claimed with a compare-and-set
  * todo → running transition; the claimed event then creates or reuses exactly
  * one Designer run and task keyed by (root run, immutable Linear issue id) and
- * transitions to done on success. Permanent creation failures (run/task cannot
- * be persisted) flip the event to blocked so the failure becomes visible
- * without changing schema or dependencies.
+ * leaves the event in `running`. The running → done transition is owned by
+ * the fixed design action path: `createRunsFromDesign` finalizes the
+ * lifecycle atomically after the planning run, planner task, and external
+ * reference are durable; non-delivery terminal outcomes (quiescent,
+ * rejected, or signal-only Designer cycles) are finalized by the design
+ * action hook so the intake cannot stay pending forever. Permanent creation
+ * failures (run/task cannot be persisted) flip the event to blocked so the
+ * failure becomes visible without changing schema or dependencies.
  *
  * Restart safety: events stuck in `running` after a crash between claim and
- * completion are also processed. The durable state already reflects ownership;
- * the same idempotent create/reuse run/task path completes the lifecycle.
+ * the eventual fixed-action finalization are also processed. The durable
+ * state already reflects ownership; the same idempotent create/reuse run/task
+ * path preserves the deterministic mapping regardless of which caller
+ * claimed first.
  */
 export function consumeLinearInbox(input: ConsumeInboxInput): ConsumeInboxResult {
   const batchSize = Math.max(0, Math.min(input.batchSize ?? 25, 200));
@@ -723,24 +730,13 @@ function claimAndPlan(
     return finalizeBlocked(event, harness, message, stable.runId, stable.taskId);
   }
 
-  try {
-    harness.transitionInboxEvent({ id: event.id, from: "running", to: "done" });
-  } catch (error) {
-    // The Designer run/task were durably created; the only failure here is
-    // completing the inbox lifecycle. Reuse on next tick will see the running
-    // event and the existing run, deduplicate, and try the transition again.
-    return {
-      eventId: event.id,
-      externalId: event.externalId,
-      kind: "deduplicated",
-      runId: stable.runId,
-      taskId: stable.taskId,
-      runCreated,
-      taskCreated,
-      error: (error as Error).message,
-    };
-  }
-
+  // The Designer run/task are durable and the inbox event is in `running`.
+  // Finalization (running → done) is deferred to the fixed design action path
+  // so the transition is atomic with the planning run, planner task, and
+  // external reference. Re-processing this running event on a later tick is
+  // safe: the same deterministic run/task IDs are reused, the inbox stays
+  // running, and the eventual createRunsFromDesign (or a bounded terminal
+  // decision) finalizes the lifecycle exactly once.
   return {
     eventId: event.id,
     externalId: event.externalId,

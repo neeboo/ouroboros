@@ -4,7 +4,9 @@ import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
+import { createHash } from "node:crypto";
 import { acceptGuardrailProposal, Harness, type AttemptOutput } from "../packages/harness/src";
+import { consumeLinearInbox } from "../packages/cli/src/linear-intake";
 import {
   buildTaskPrompt,
   createApplyDesignActionsHook,
@@ -7535,6 +7537,1810 @@ describe("runner", () => {
     expect(harness.listDesignProposals({})).toHaveLength(beforeProposals);
     expect(harness.listStrategySignals({})).toHaveLength(beforeSignals);
     expect(harness.listHarnessActionEvents({ limit: 200 })).toHaveLength(beforeEvents);
+  });
+
+  // -- Linear intake: durable provenance through fixed design actions. --
+  //
+  // The Linear intake path claims each `issue.created` inbox event into an
+  // issue-scoped Designer run carrying a `linearIntake` provenance block on its
+  // context. When that Designer run emits a fixed proposeDesign →
+  // createRunsFromDesign cycle, the createRunsFromDesign action must (1) stamp
+  // the child planning run with the same immutable provenance, (2) atomically
+  // create or reuse exactly one run-to-issue external reference, and (3)
+  // transition the matching inbox event running → done only after the run,
+  // task, and reference are durable. The same fixed action replayed must reuse
+  // the same run, task, reference, and done event without duplicates.
+  //
+  // The intake helpers below drive the production `consumeLinearInbox` path
+  // rather than synthesizing running inbox state directly. This exposes the
+  // contract: consume claims todo → running, creates the deterministic
+  // issue-scoped Designer run/task, and leaves the inbox in `running` for the
+  // fixed design action path to finalize. A pre-createRunsFromDesign
+  // transition to `done` would mask the atomic guarantee and is forbidden.
+
+  function seedAndConsumeTodoIntake(input: {
+    rootRunId: string;
+    inboxEventId: string;
+    externalIssueId: string;
+    identifier?: string;
+    title?: string;
+    url?: string;
+  }): { runId: string; taskId: string } {
+    harness.createInboxEvent({
+      id: input.inboxEventId,
+      provider: "linear",
+      eventType: "issue.created",
+      externalId: input.externalIssueId,
+      payload: {
+        identifier: input.identifier ?? null,
+        title: input.title ?? null,
+        url: input.url ?? null,
+      },
+    });
+    const result = consumeLinearInbox({ harness, rootRunId: input.rootRunId });
+    const outcome = result.outcomes.find((o) => o.eventId === input.inboxEventId);
+    if (!outcome) {
+      throw new Error(
+        `consumeLinearInbox did not process intake event ${input.inboxEventId}; outcomes=${JSON.stringify(result.outcomes)}`,
+      );
+    }
+    if (outcome.kind !== "claimed") {
+      throw new Error(
+        `expected first consumption of ${input.inboxEventId} to claim a fresh todo event, found ${outcome.kind}`,
+      );
+    }
+    const event = harness.getInboxEvent({ id: input.inboxEventId });
+    if (event?.status !== "running") {
+      throw new Error(
+        `expected intake event ${input.inboxEventId} to remain running after consumeLinearInbox (the fixed action path owns running → done); found status=${event?.status}`,
+      );
+    }
+    return { runId: outcome.runId, taskId: outcome.taskId };
+  }
+
+  // Compute the deterministic intake run/task IDs that `consumeLinearInbox`
+  // derives from (root run, immutable Linear issue id). Tests use this when
+  // they need the IDs before consumption, or to assert the production mapping.
+  function deterministicIntakeRunTaskIds(
+    rootRunId: string,
+    externalIssueId: string,
+  ): { runId: string; taskId: string } {
+    const material = `${rootRunId}|${externalIssueId}`;
+    const digest = createHash("sha256").update(material, "utf8").digest("hex");
+    return { runId: `run_linear_${digest}`, taskId: `task_linear_${digest}` };
+  }
+
+  function linearIntakeProposalEnvelope(signalId: string) {
+    return {
+      problem: "Linear intake issue requires a bounded designer response",
+      recommendation: "Run a single fixed-action delivery cycle for the issue",
+      evidenceRefs: [signalId],
+      options: [
+        {
+          name: "fixed-action delivery",
+          benefits: ["preserves provenance"],
+          costs: ["one planning run"],
+          risks: ["none"],
+          lockIn: ["none"],
+        },
+      ],
+      evaluationContract: {
+        baseline: ["intake was undiscovered before polling"],
+        successMetrics: ["issue produces exactly one planning run"],
+        guardMetrics: ["intake lifecycle stays atomic"],
+        requiredEvidence: ["bun test apply-design-actions intake cycle"],
+      },
+      investment: {
+        reversibility: "easy" as const,
+        portfolio: "core" as const,
+        oneTimeCost: 0,
+        recurringCost: 0,
+        timeBudget: "1 hour",
+      },
+      riskSurface: {
+        amendsMission: false,
+        amendsCapitalPolicy: false,
+        legalOrPrivacy: false,
+        sensitiveData: false,
+        destructiveOperation: false,
+        productionDeployment: false,
+        unplannedDependency: false,
+        schemaMigration: false,
+        recurringInfrastructure: false,
+        declaredHumanCategories: [],
+      },
+    };
+  }
+
+  test("apply-design-actions hook preserves Linear provenance and finalizes intake exactly once", async () => {
+    const rootRunId = harness.createRun({ goal: "supervised root run" });
+    const projectId = harness.createProject({ name: "ouroboros", rootPath: dir });
+    seedActiveCharter(projectId);
+    const signalId = seedLowRiskSignal(projectId);
+    const inboxEventId = "inbox_intake_primary";
+    const externalIssueId = "linear-intake-issue-1";
+    const intake = seedAndConsumeTodoIntake({
+      rootRunId,
+      inboxEventId,
+      externalIssueId,
+      identifier: "PAN-7001",
+      title: "Polling transport test",
+      url: "https://linear.app/pancat/issue/PAN-7001",
+    });
+
+    const hook = createApplyDesignActionsHook({ harness });
+
+    // Issue-scoped Designer emits proposeDesign. The auto-authority evaluator
+    // accepts and creates a delivery continuation on the same run; the
+    // linearIntake provenance block is preserved on the run context throughout.
+    const proposeOutput: AttemptOutput = {
+      status: "done",
+      summary: "propose",
+      designActions: [
+        {
+          type: "proposeDesign",
+          payload: {
+            projectId,
+            title: "Linear intake delivery",
+            proposal: linearIntakeProposalEnvelope(signalId),
+            status: "proposed",
+          },
+        },
+      ],
+    } as AttemptOutput;
+
+    const proposeResult = await hook({
+      run: harness.getRun(intake.runId)!,
+      task: harness.getTask(intake.taskId)!,
+      sessionName: "session",
+      prompt: "design",
+      output: proposeOutput,
+    });
+    expect(proposeResult.decision).toBe("exit");
+    const proposals = harness.listDesignProposals({ projectId });
+    expect(proposals).toHaveLength(1);
+    const proposalId = proposals[0].id;
+    expect(proposals[0].status).toBe("accepted");
+    const decisions = harness.listDesignDecisions({ proposalId });
+    const autoApproval = decisions.find((d) => d.decision === "approved" && d.actorKind === "auto");
+    expect(autoApproval).toBeDefined();
+    const decisionId = autoApproval!.id;
+
+    // Inbox event stays running after the proposal is recorded: the running
+    // → done transition is owned by createRunsFromDesign, not proposeDesign.
+    const midInbox = harness.getInboxEvent({ id: inboxEventId });
+    expect(midInbox?.status).toBe("running");
+
+    // The auto-approval produces a deterministic after-approveDesign
+    // continuation task whose ID differs from the original Designer task that
+    // ran proposeDesign. The continuation carries config.designContinuation
+    // binding it to the original cycle. Production supervision drives
+    // createRunsFromDesign from this continuation task — not the original
+    // Designer task — so the ownership guard must accept the legitimate
+    // continuation by validating every binding field.
+    const deliveryContinuation = (proposeResult.artifacts ?? []).find(
+      (artifact) => (artifact as { kind?: string }).kind === "design_continuation",
+    ) as { taskId: string; proposalId: string } | undefined;
+    expect(deliveryContinuation).toBeDefined();
+    expect(deliveryContinuation?.proposalId).toBe(proposalId);
+    const continuationTaskId = deliveryContinuation!.taskId;
+    expect(continuationTaskId).not.toBe(intake.taskId);
+    const continuationTask = harness.getTask(continuationTaskId)!;
+    expect(continuationTask).toBeDefined();
+    expect(continuationTask.config?.designContinuation).toMatchObject({
+      kind: "after-approveDesign",
+      proposalId,
+      sourceTaskId: intake.taskId,
+    });
+
+    // Delivery continuation emits createRunsFromDesign against the stored
+    // proposal. Exactly one canonical planning run, planner task, and external
+    // reference are produced and the inbox event transitions to done in the
+    // same atomic transaction.
+    const deliveryOutput: AttemptOutput = {
+      status: "done",
+      summary: "deliver",
+      designActions: [
+        {
+          type: "createRunsFromDesign",
+          payload: {
+            proposalId,
+            runs: [
+              {
+                goal: "Plan intake delivery",
+                prompt: "Plan the change.",
+              },
+            ],
+          },
+        },
+      ],
+    } as AttemptOutput;
+
+    const deliveryResult = await hook({
+      run: harness.getRun(intake.runId)!,
+      task: harness.getTask(continuationTaskId)!,
+      sessionName: "session",
+      prompt: "design",
+      output: deliveryOutput,
+    });
+
+    expect(deliveryResult.decision).toBe("continue");
+    const createdRunArtifacts = (deliveryResult.artifacts ?? []).filter(
+      (artifact) => (artifact as { kind?: string }).kind === "created_run",
+    );
+    expect(createdRunArtifacts).toHaveLength(1);
+    const childRunId = (createdRunArtifacts[0] as { runId: string }).runId;
+    const childRun = harness.getRun(childRunId)!;
+    expect(childRun).toBeDefined();
+    expect(childRun.context).toMatchObject({
+      parentRunId: intake.runId,
+      source: "design",
+      designProposalId: proposalId,
+      designDecisionId: decisionId,
+      linearIntake: {
+        rootRunId,
+        inboxEventId,
+        linearIssueId: externalIssueId,
+        issueIdentifier: "PAN-7001",
+        issueUrl: "https://linear.app/pancat/issue/PAN-7001",
+        issueTitle: "Polling transport test",
+        proposalId,
+        decisionId,
+        sourceDesignerRunId: intake.runId,
+        sourceDesignerTaskId: intake.taskId,
+      },
+    });
+
+    // Exactly one external reference links the canonical planning run to the
+    // immutable Linear issue under the contract documented in the design
+    // proposal. The reference ID is derived from the issue identity alone.
+    const refs = harness.listExternalRefs({ localType: "run", localId: childRunId });
+    expect(refs).toHaveLength(1);
+    expect(refs[0]).toMatchObject({
+      provider: "linear",
+      externalType: "issue",
+      externalId: externalIssueId,
+      externalUrl: "https://linear.app/pancat/issue/PAN-7001",
+    });
+    const externalRefId = refs[0].id;
+
+    // No second reference exists for any other combination of run or issue.
+    expect(harness.listExternalRefs({ localType: "run", localId: intake.runId })).toHaveLength(0);
+
+    // The matching inbox event transitions running → done atomically with the
+    // run, task, and reference. The done event is durable.
+    const finalInbox = harness.getInboxEvent({ id: inboxEventId });
+    expect(finalInbox?.status).toBe("done");
+
+    // The design action audit row records the intake finalization so a later
+    // replay reconstructs the same durable identities.
+    const events = harness.listHarnessActionEvents({ limit: 50 });
+    const deliveryEvent = events.find((event) => event.actionType === "design.createRunsFromDesign");
+    expect(deliveryEvent).toBeDefined();
+    expect(deliveryEvent!.result).toMatchObject({
+      proposalId,
+      decisionId,
+      intake: {
+        inboxEventId,
+        externalRefId,
+        linearIssueId: externalIssueId,
+      },
+    });
+
+    // Replay: re-running the same fixed action from the same continuation
+    // task must reuse the same canonical run, task, reference, and done
+    // event. No duplicates are produced.
+    const replayResult = await hook({
+      run: harness.getRun(intake.runId)!,
+      task: harness.getTask(continuationTaskId)!,
+      sessionName: "session",
+      prompt: "design",
+      output: deliveryOutput,
+    });
+    expect(replayResult.decision).toBe("continue");
+    const replayRunArtifacts = (replayResult.artifacts ?? []).filter(
+      (artifact) => (artifact as { kind?: string }).kind === "created_run",
+    );
+    expect(replayRunArtifacts).toHaveLength(1);
+    expect((replayRunArtifacts[0] as { runId: string }).runId).toBe(childRunId);
+
+    expect(harness.listExternalRefs({ localType: "run", localId: childRunId })).toHaveLength(1);
+    expect(harness.getInboxEvent({ id: inboxEventId })?.status).toBe("done");
+    expect(harness.getTask((createdRunArtifacts[0] as { plannerTaskId?: string }).plannerTaskId ?? "")).toBeDefined();
+
+    // A second replay driven from the original Designer task (instead of the
+    // continuation) must also reuse the same canonical state. This proves the
+    // ownership guard accepts the legitimate original-task path alongside the
+    // continuation path, and that no duplicate row is produced.
+    const replayFromOriginalTask = await hook({
+      run: harness.getRun(intake.runId)!,
+      task: harness.getTask(intake.taskId)!,
+      sessionName: "session",
+      prompt: "design",
+      output: deliveryOutput,
+    });
+    expect(replayFromOriginalTask.decision).toBe("continue");
+    const replayFromOriginalArtifacts = (replayFromOriginalTask.artifacts ?? []).filter(
+      (artifact) => (artifact as { kind?: string }).kind === "created_run",
+    );
+    expect(replayFromOriginalArtifacts).toHaveLength(1);
+    expect((replayFromOriginalArtifacts[0] as { runId: string }).runId).toBe(childRunId);
+    expect(harness.listExternalRefs({ localType: "run", localId: childRunId })).toHaveLength(1);
+    expect(harness.getInboxEvent({ id: inboxEventId })?.status).toBe("done");
+  });
+
+  test("apply-design-actions hook rejects Linear intake createRunsFromDesign that requests more than one run", async () => {
+    const rootRunId = harness.createRun({ goal: "supervised root run" });
+    const projectId = harness.createProject({ name: "ouroboros", rootPath: dir });
+    seedActiveCharter(projectId);
+    const signalId = seedLowRiskSignal(projectId);
+    const inboxEventId = "inbox_intake_too_many_runs";
+    const externalIssueId = "linear-intake-issue-too-many";
+    const intake = seedAndConsumeTodoIntake({
+      rootRunId,
+      inboxEventId,
+      externalIssueId,
+      identifier: "PAN-7002",
+      title: "Too many runs",
+    });
+    const hook = createApplyDesignActionsHook({ harness });
+
+    const proposeOutput: AttemptOutput = {
+      status: "done",
+      summary: "propose",
+      designActions: [
+        {
+          type: "proposeDesign",
+          payload: {
+            projectId,
+            title: "Multi-run intake",
+            proposal: linearIntakeProposalEnvelope(signalId),
+            status: "proposed",
+          },
+        },
+      ],
+    } as AttemptOutput;
+    const proposeResult = await hook({
+      run: harness.getRun(intake.runId)!,
+      task: harness.getTask(intake.taskId)!,
+      sessionName: "session",
+      prompt: "design",
+      output: proposeOutput,
+    });
+    expect(proposeResult.decision).toBe("exit");
+    const proposalId = harness.listDesignProposals({ projectId })[0].id;
+
+    // Requesting more than one run from a Linear intake proposal violates the
+    // one-issue-one-run contract. The createRunsFromDesign action throws, the
+    // inbox event stays running, and no child runs or external references are
+    // produced. The audit row records a blocked event.
+    const deliveryOutput: AttemptOutput = {
+      status: "done",
+      summary: "deliver",
+      designActions: [
+        {
+          type: "createRunsFromDesign",
+          payload: {
+            proposalId,
+            runs: [
+              { goal: "Plan intake A", prompt: "A." },
+              { goal: "Plan intake B", prompt: "B." },
+            ],
+          },
+        },
+      ],
+    } as AttemptOutput;
+    const deliveryResult = await hook({
+      run: harness.getRun(intake.runId)!,
+      task: harness.getTask(intake.taskId)!,
+      sessionName: "session",
+      prompt: "design",
+      output: deliveryOutput,
+    });
+    expect(deliveryResult.decision).toBe("exit");
+    expect(deliveryResult.problems).toBeDefined();
+    expect(deliveryResult.problems?.[0]).toMatch(/exactly one run/);
+    expect(harness.listDesignProposals({ projectId })).toHaveLength(1);
+    expect(harness.listExternalRefs({ localType: "run", localId: intake.runId })).toHaveLength(0);
+    expect(harness.getInboxEvent({ id: inboxEventId })?.status).toBe("running");
+  });
+
+  test("apply-design-actions hook finalizes Linear intake inbox when the Designer rejects a proposal and fails closed for later createRunsFromDesign", async () => {
+    const rootRunId = harness.createRun({ goal: "supervised root run" });
+    const projectId = harness.createProject({ name: "ouroboros", rootPath: dir });
+    seedActiveCharter(projectId);
+    const signalId = seedLowRiskSignal(projectId);
+    const inboxEventId = "inbox_intake_unaccepted";
+    const externalIssueId = "linear-intake-issue-unaccepted";
+    const intake = seedAndConsumeTodoIntake({
+      rootRunId,
+      inboxEventId,
+      externalIssueId,
+      identifier: "PAN-7003",
+      title: "Unaccepted proposal",
+    });
+    const hook = createApplyDesignActionsHook({ harness });
+
+    // Issue-scoped Designer proposes; auto-approval accepts the low-risk
+    // envelope. The test then rejects it manually via decideDesign to simulate
+    // an unaccepted path.
+    const proposeOutput: AttemptOutput = {
+      status: "done",
+      summary: "propose",
+      designActions: [
+        {
+          type: "proposeDesign",
+          payload: {
+            projectId,
+            title: "Soon-rejected intake",
+            proposal: linearIntakeProposalEnvelope(signalId),
+            status: "proposed",
+          },
+        },
+      ],
+    } as AttemptOutput;
+    await hook({
+      run: harness.getRun(intake.runId)!,
+      task: harness.getTask(intake.taskId)!,
+      sessionName: "session",
+      prompt: "design",
+      output: proposeOutput,
+    });
+    const proposalId = harness.listDesignProposals({ projectId })[0].id;
+
+    const decideOutput: AttemptOutput = {
+      status: "done",
+      summary: "decide",
+      designActions: [
+        {
+          type: "decideDesign",
+          payload: {
+            proposalId,
+            decision: "rejected",
+            reasons: ["test-only rejection"],
+          },
+        },
+      ],
+    } as AttemptOutput;
+    const decideResult = await hook({
+      run: harness.getRun(intake.runId)!,
+      task: harness.getTask(intake.taskId)!,
+      sessionName: "session",
+      prompt: "design",
+      output: decideOutput,
+    });
+
+    expect(harness.getDesignProposal({ id: proposalId })?.status).toBe("rejected");
+    // The bounded terminal path finalizes the intake inbox running → done
+    // atomically with the decideDesign transaction so a rejected Linear intake
+    // cannot stay pending forever. The hook surfaces the finalization as an
+    // audit artifact and a passed check.
+    const finalizedArtifact = (decideResult.artifacts ?? []).find(
+      (artifact) =>
+        (artifact as { kind?: string }).kind === "design_intake_finalized" &&
+        (artifact as { intakeEventId?: string }).intakeEventId === inboxEventId,
+    );
+    expect(finalizedArtifact).toBeDefined();
+    expect(harness.getInboxEvent({ id: inboxEventId })?.status).toBe("done");
+
+    // createRunsFromDesign against a rejected proposal must fail closed: no
+    // run, no task, no reference, no further inbox mutation.
+    const deliveryOutput: AttemptOutput = {
+      status: "done",
+      summary: "deliver",
+      designActions: [
+        {
+          type: "createRunsFromDesign",
+          payload: {
+            proposalId,
+            runs: [{ goal: "Plan intake", prompt: "Plan." }],
+          },
+        },
+      ],
+    } as AttemptOutput;
+    const deliveryResult = await hook({
+      run: harness.getRun(intake.runId)!,
+      task: harness.getTask(intake.taskId)!,
+      sessionName: "session",
+      prompt: "design",
+      output: deliveryOutput,
+    });
+    expect(deliveryResult.decision).toBe("exit");
+    expect(deliveryResult.problems).toBeDefined();
+    expect(deliveryResult.problems?.[0]).toMatch(/accepted/);
+    // The inbox remains done — the failed delivery cannot rewind the lifecycle.
+    expect(harness.getInboxEvent({ id: inboxEventId })?.status).toBe("done");
+    expect(harness.listExternalRefs({ localType: "run", localId: intake.runId })).toHaveLength(0);
+  });
+
+  test("apply-design-actions hook finalizes Linear intake inbox when the Designer emits a quiescent no-action result", async () => {
+    const rootRunId = harness.createRun({ goal: "supervised root run" });
+    const projectId = harness.createProject({ name: "ouroboros", rootPath: dir });
+    seedActiveCharter(projectId);
+    const inboxEventId = "inbox_intake_quiescent";
+    const externalIssueId = "linear-intake-issue-quiescent";
+    const intake = seedAndConsumeTodoIntake({
+      rootRunId,
+      inboxEventId,
+      externalIssueId,
+      identifier: "PAN-7008",
+      title: "Quiescent decision",
+    });
+    const hook = createApplyDesignActionsHook({ harness });
+
+    // The Designer considers the issue and emits no design actions: a bounded
+    // quiescent outcome. The hook's no-action path must finalize the matching
+    // intake inbox running → done so the lifecycle cannot stay pending forever.
+    const result = await hook({
+      run: harness.getRun(intake.runId)!,
+      task: harness.getTask(intake.taskId)!,
+      sessionName: "session",
+      prompt: "design",
+      output: { status: "done", summary: "nothing to do" } as AttemptOutput,
+    });
+
+    expect(result.decision).toBe("exit");
+    expect(harness.getInboxEvent({ id: inboxEventId })?.status).toBe("done");
+    expect(harness.listDesignProposals({ projectId })).toHaveLength(0);
+  });
+
+  test("apply-design-actions hook rejects createRunsFromDesign when the proposal does not belong to the issue-scoped Designer run", async () => {
+    const rootRunId = harness.createRun({ goal: "supervised root run" });
+    const projectId = harness.createProject({ name: "ouroboros", rootPath: dir });
+    seedActiveCharter(projectId);
+    const signalId = seedLowRiskSignal(projectId);
+    const inboxEventIdA = "inbox_intake_ownership_a";
+    const externalIssueIdA = "linear-intake-issue-ownership-a";
+    const intakeA = seedAndConsumeTodoIntake({
+      rootRunId,
+      inboxEventId: inboxEventIdA,
+      externalIssueId: externalIssueIdA,
+      identifier: "PAN-7010",
+      title: "Owner issue",
+    });
+    // A second intake run for a different immutable Linear issue id. The
+    // deterministic run/task IDs differ, so this is a separate Designer cycle.
+    const inboxEventIdB = "inbox_intake_ownership_b";
+    const externalIssueIdB = "linear-intake-issue-ownership-b";
+    const intakeB = seedAndConsumeTodoIntake({
+      rootRunId,
+      inboxEventId: inboxEventIdB,
+      externalIssueId: externalIssueIdB,
+      identifier: "PAN-7011",
+      title: "Non-owner issue",
+    });
+    expect(intakeB.runId).not.toBe(intakeA.runId);
+
+    const hook = createApplyDesignActionsHook({ harness });
+
+    // intakeA proposes and is auto-approved; the durable proposal is pinned to
+    // intakeA.runId / intakeA.taskId.
+    const proposeOutput: AttemptOutput = {
+      status: "done",
+      summary: "propose on A",
+      designActions: [
+        {
+          type: "proposeDesign",
+          payload: {
+            projectId,
+            title: "Owner proposal",
+            proposal: linearIntakeProposalEnvelope(signalId),
+            status: "proposed",
+          },
+        },
+      ],
+    } as AttemptOutput;
+    await hook({
+      run: harness.getRun(intakeA.runId)!,
+      task: harness.getTask(intakeA.taskId)!,
+      sessionName: "session",
+      prompt: "design",
+      output: proposeOutput,
+    });
+    const proposalId = harness.listDesignProposals({ projectId })[0].id;
+    expect(harness.getDesignProposal({ id: proposalId })?.runId).toBe(intakeA.runId);
+
+    // intakeB attempts to deliver against intakeA's accepted proposal. The
+    // ownership mismatch must fail closed inside the createRunsFromDesign
+    // transaction: no child run, no task, no external reference, and no inbox
+    // finalization for either issue.
+    const deliveryOutput: AttemptOutput = {
+      status: "done",
+      summary: "deliver on B",
+      designActions: [
+        {
+          type: "createRunsFromDesign",
+          payload: {
+            proposalId,
+            runs: [{ goal: "Hijack delivery", prompt: "Plan." }],
+          },
+        },
+      ],
+    } as AttemptOutput;
+    const deliveryResult = await hook({
+      run: harness.getRun(intakeB.runId)!,
+      task: harness.getTask(intakeB.taskId)!,
+      sessionName: "session",
+      prompt: "design",
+      output: deliveryOutput,
+    });
+
+    expect(deliveryResult.decision).toBe("exit");
+    expect(deliveryResult.problems).toBeDefined();
+    expect(deliveryResult.problems?.[0]).toMatch(/must originate from the same issue-scoped Designer/);
+    // Neither inbox event was finalized by the failed delivery.
+    expect(harness.getInboxEvent({ id: inboxEventIdA })?.status).toBe("running");
+    expect(harness.getInboxEvent({ id: inboxEventIdB })?.status).toBe("running");
+    expect(harness.listExternalRefs({ localType: "run", localId: intakeA.runId })).toHaveLength(0);
+    expect(harness.listExternalRefs({ localType: "run", localId: intakeB.runId })).toHaveLength(0);
+  });
+
+  test("apply-design-actions hook leaves Linear intake inbox running when approval is missing", async () => {
+    const rootRunId = harness.createRun({ goal: "supervised root run" });
+    const projectId = harness.createProject({ name: "ouroboros", rootPath: dir });
+    seedActiveCharter(projectId);
+    const signalId = seedLowRiskSignal(projectId);
+    const inboxEventId = "inbox_intake_missing_approval";
+    const externalIssueId = "linear-intake-issue-missing-approval";
+    const intake = seedAndConsumeTodoIntake({
+      rootRunId,
+      inboxEventId,
+      externalIssueId,
+      identifier: "PAN-7004",
+      title: "Missing approval",
+    });
+    const hook = createApplyDesignActionsHook({ harness });
+
+    // Insert a proposal directly via the harness bypassing the authority
+    // evaluator to simulate a proposal without an approved decision.
+    const proposal = harness.createDesignProposal({
+      projectId,
+      title: "No-approval intake",
+      problem: "missing approval",
+      recommendation: "should not deliver",
+      proposal: linearIntakeProposalEnvelope(signalId),
+      charterId: null,
+      runId: intake.runId,
+      taskId: intake.taskId,
+      attemptId: null,
+      status: "accepted",
+    });
+
+    const deliveryOutput: AttemptOutput = {
+      status: "done",
+      summary: "deliver",
+      designActions: [
+        {
+          type: "createRunsFromDesign",
+          payload: {
+            proposalId: proposal.id,
+            runs: [{ goal: "Plan intake", prompt: "Plan." }],
+          },
+        },
+      ],
+    } as AttemptOutput;
+    const deliveryResult = await hook({
+      run: harness.getRun(intake.runId)!,
+      task: harness.getTask(intake.taskId)!,
+      sessionName: "session",
+      prompt: "design",
+      output: deliveryOutput,
+    });
+    expect(deliveryResult.decision).toBe("exit");
+    expect(deliveryResult.problems).toBeDefined();
+    expect(deliveryResult.problems?.[0]).toMatch(/approved decision/);
+    expect(harness.getInboxEvent({ id: inboxEventId })?.status).toBe("running");
+    expect(harness.listExternalRefs({ localType: "run", localId: intake.runId })).toHaveLength(0);
+  });
+
+  test("apply-design-actions hook preserves Linear intake finalization across Harness reconstruction and replay", async () => {
+    const rootRunId = harness.createRun({ goal: "supervised root run" });
+    const projectId = harness.createProject({ name: "ouroboros", rootPath: dir });
+    seedActiveCharter(projectId);
+    const signalId = seedLowRiskSignal(projectId);
+    const inboxEventId = "inbox_intake_reconstruct";
+    const externalIssueId = "linear-intake-issue-reconstruct";
+    const intake = seedAndConsumeTodoIntake({
+      rootRunId,
+      inboxEventId,
+      externalIssueId,
+      identifier: "PAN-7005",
+      title: "Reconstruct replay",
+    });
+    const hook = createApplyDesignActionsHook({ harness });
+
+    const proposeOutput: AttemptOutput = {
+      status: "done",
+      summary: "propose",
+      designActions: [
+        {
+          type: "proposeDesign",
+          payload: {
+            projectId,
+            title: "Reconstruct replay",
+            proposal: linearIntakeProposalEnvelope(signalId),
+            status: "proposed",
+          },
+        },
+      ],
+    } as AttemptOutput;
+    await hook({
+      run: harness.getRun(intake.runId)!,
+      task: harness.getTask(intake.taskId)!,
+      sessionName: "session",
+      prompt: "design",
+      output: proposeOutput,
+    });
+    const proposalId = harness.listDesignProposals({ projectId })[0].id;
+
+    const deliveryOutput: AttemptOutput = {
+      status: "done",
+      summary: "deliver",
+      designActions: [
+        {
+          type: "createRunsFromDesign",
+          payload: {
+            proposalId,
+            runs: [{ goal: "Plan intake", prompt: "Plan." }],
+          },
+        },
+      ],
+    } as AttemptOutput;
+    const first = await hook({
+      run: harness.getRun(intake.runId)!,
+      task: harness.getTask(intake.taskId)!,
+      sessionName: "session",
+      prompt: "design",
+      output: deliveryOutput,
+    });
+    const childRunId = (first.artifacts ?? []).find(
+      (artifact) => (artifact as { kind?: string }).kind === "created_run",
+    ) as { runId: string };
+    const originalRefs = harness.listExternalRefs({ localType: "run", localId: childRunId.runId });
+    expect(originalRefs).toHaveLength(1);
+
+    // Simulate a daemon restart: rebuild the Harness over the same database
+    // file and re-run the same fixed action. Replay must reuse the same run,
+    // task, reference, and done event without producing any duplicate rows.
+    const rebuilt = new Harness(join(dir, "ouroboros.db"));
+    const rebuiltHook = createApplyDesignActionsHook({ harness: rebuilt });
+    const replay = await rebuiltHook({
+      run: rebuilt.getRun(intake.runId)!,
+      task: rebuilt.getTask(intake.taskId)!,
+      sessionName: "session",
+      prompt: "design",
+      output: deliveryOutput,
+    });
+    expect(replay.decision).toBe("continue");
+    const replayRuns = (replay.artifacts ?? []).filter(
+      (artifact) => (artifact as { kind?: string }).kind === "created_run",
+    );
+    expect(replayRuns).toHaveLength(1);
+    expect((replayRuns[0] as { runId: string }).runId).toBe(childRunId.runId);
+
+    const replayedRefs = rebuilt.listExternalRefs({ localType: "run", localId: childRunId.runId });
+    expect(replayedRefs).toHaveLength(1);
+    expect(replayedRefs[0].id).toBe(originalRefs[0].id);
+    expect(rebuilt.getInboxEvent({ id: inboxEventId })?.status).toBe("done");
+  });
+
+  test("apply-design-actions hook finalizes Linear intake idempotently when the inbox event is already done", async () => {
+    const rootRunId = harness.createRun({ goal: "supervised root run" });
+    const projectId = harness.createProject({ name: "ouroboros", rootPath: dir });
+    seedActiveCharter(projectId);
+    const signalId = seedLowRiskSignal(projectId);
+    const inboxEventId = "inbox_intake_already_done";
+    const externalIssueId = "linear-intake-issue-already-done";
+    const intake = seedAndConsumeTodoIntake({
+      rootRunId,
+      inboxEventId,
+      externalIssueId,
+      identifier: "PAN-7006",
+      title: "Already done",
+    });
+    const hook = createApplyDesignActionsHook({ harness });
+
+    const proposeOutput: AttemptOutput = {
+      status: "done",
+      summary: "propose",
+      designActions: [
+        {
+          type: "proposeDesign",
+          payload: {
+            projectId,
+            title: "Already done replay",
+            proposal: linearIntakeProposalEnvelope(signalId),
+            status: "proposed",
+          },
+        },
+      ],
+    } as AttemptOutput;
+    await hook({
+      run: harness.getRun(intake.runId)!,
+      task: harness.getTask(intake.taskId)!,
+      sessionName: "session",
+      prompt: "design",
+      output: proposeOutput,
+    });
+    const proposalId = harness.listDesignProposals({ projectId })[0].id;
+
+    const deliveryOutput: AttemptOutput = {
+      status: "done",
+      summary: "deliver",
+      designActions: [
+        {
+          type: "createRunsFromDesign",
+          payload: {
+            proposalId,
+            runs: [{ goal: "Plan intake", prompt: "Plan." }],
+          },
+        },
+      ],
+    } as AttemptOutput;
+
+    // First call finalizes the inbox event and writes the durable audit row.
+    const first = await hook({
+      run: harness.getRun(intake.runId)!,
+      task: harness.getTask(intake.taskId)!,
+      sessionName: "session",
+      prompt: "design",
+      output: deliveryOutput,
+    });
+    expect(first.decision).toBe("continue");
+    const childRunId = ((first.artifacts ?? []).find(
+      (artifact) => (artifact as { kind?: string }).kind === "created_run",
+    ) as { runId: string }).runId;
+    expect(harness.getInboxEvent({ id: inboxEventId })?.status).toBe("done");
+
+    // Replay the same fixed action. The audit row is already `done`, so the
+    // hook must reconstruct the result without re-executing any mutation: no
+    // exceptions, no duplicate runs, no duplicate references, and the inbox
+    // event remains durably done.
+    const replay = await hook({
+      run: harness.getRun(intake.runId)!,
+      task: harness.getTask(intake.taskId)!,
+      sessionName: "session",
+      prompt: "design",
+      output: deliveryOutput,
+    });
+    expect(replay.decision).toBe("continue");
+    expect(replay.problems).toBeUndefined();
+    const replayRuns = (replay.artifacts ?? []).filter(
+      (artifact) => (artifact as { kind?: string }).kind === "created_run",
+    );
+    expect(replayRuns).toHaveLength(1);
+    expect((replayRuns[0] as { runId: string }).runId).toBe(childRunId);
+    expect(harness.getInboxEvent({ id: inboxEventId })?.status).toBe("done");
+    expect(harness.listExternalRefs({ localType: "run", localId: childRunId })).toHaveLength(1);
+    expect(harness.listDesignProposals({ projectId })).toHaveLength(1);
+  });
+
+  test("apply-design-actions hook rejects Linear intake provenance block missing required fields", async () => {
+    const rootRunId = harness.createRun({ goal: "supervised root run" });
+    const projectId = harness.createProject({ name: "ouroboros", rootPath: dir });
+    seedActiveCharter(projectId);
+    const signalId = seedLowRiskSignal(projectId);
+    const inboxEventId = "inbox_intake_malformed";
+    const externalIssueId = "linear-intake-issue-malformed";
+
+    // Plant a malformed intake block on the Designer run context: missing the
+    // immutable issue id. The createRunsFromDesign action must fail closed and
+    // leave the inbox event untouched.
+    const designerRunId = "run_linear_test_malformed";
+    const designerTaskId = "task_linear_test_malformed";
+    harness.createRun({
+      id: designerRunId,
+      goal: "designer: malformed intake",
+      context: {
+        parentRunId: rootRunId,
+        source: "linear-intake",
+        linearIntake: {
+          rootRunId,
+          inboxEventId,
+          // linearIssueId intentionally omitted
+        },
+      },
+    });
+    harness.createTask({
+      id: designerTaskId,
+      runId: designerRunId,
+      role: "designer",
+      goal: "designer",
+      prompt: "designer",
+    });
+    harness.createInboxEvent({
+      id: inboxEventId,
+      provider: "linear",
+      eventType: "issue.created",
+      externalId: externalIssueId,
+      payload: { identifier: "PAN-7007", title: "Malformed" },
+      status: "running",
+    });
+    const hook = createApplyDesignActionsHook({ harness });
+
+    const proposeOutput: AttemptOutput = {
+      status: "done",
+      summary: "propose",
+      designActions: [
+        {
+          type: "proposeDesign",
+          payload: {
+            projectId,
+            title: "Malformed intake",
+            proposal: linearIntakeProposalEnvelope(signalId),
+            status: "proposed",
+          },
+        },
+      ],
+    } as AttemptOutput;
+    await hook({
+      run: harness.getRun(designerRunId)!,
+      task: harness.getTask(designerTaskId)!,
+      sessionName: "session",
+      prompt: "design",
+      output: proposeOutput,
+    });
+    const proposalId = harness.listDesignProposals({ projectId })[0].id;
+
+    const deliveryOutput: AttemptOutput = {
+      status: "done",
+      summary: "deliver",
+      designActions: [
+        {
+          type: "createRunsFromDesign",
+          payload: {
+            proposalId,
+            runs: [{ goal: "Plan intake", prompt: "Plan." }],
+          },
+        },
+      ],
+    } as AttemptOutput;
+    const deliveryResult = await hook({
+      run: harness.getRun(designerRunId)!,
+      task: harness.getTask(designerTaskId)!,
+      sessionName: "session",
+      prompt: "design",
+      output: deliveryOutput,
+    });
+    expect(deliveryResult.decision).toBe("exit");
+    expect(deliveryResult.problems).toBeDefined();
+    expect(deliveryResult.problems?.[0]).toMatch(/linearIntake\.linearIssueId/);
+    expect(harness.getInboxEvent({ id: inboxEventId })?.status).toBe("running");
+  });
+
+  test("apply-design-actions hook leaves non-Linear design actions untouched by intake finalization", async () => {
+    // Non-intake design runs (no linearIntake block on context) must continue
+    // through createRunsFromDesign with the existing behavior: no intake
+    // provenance stamped on the child run, no external reference created, and
+    // no inbox event transition attempted.
+    const rootRunId = harness.createRun({ goal: "design run" });
+    const taskId = harness.createTask({
+      runId: rootRunId,
+      role: "designer",
+      goal: "design",
+      prompt: "design",
+    });
+    const projectId = harness.createProject({ name: "ouroboros", rootPath: dir });
+    seedActiveCharter(projectId);
+    const signalId = seedLowRiskSignal(projectId);
+    const hook = createApplyDesignActionsHook({ harness });
+
+    const proposeOutput: AttemptOutput = {
+      status: "done",
+      summary: "propose",
+      designActions: [
+        {
+          type: "proposeDesign",
+          payload: {
+            projectId,
+            title: "Non-intake delivery",
+            proposal: linearIntakeProposalEnvelope(signalId),
+            status: "proposed",
+          },
+        },
+      ],
+    } as AttemptOutput;
+    await hook({
+      run: harness.getRun(rootRunId)!,
+      task: harness.getTask(taskId)!,
+      sessionName: "session",
+      prompt: "design",
+      output: proposeOutput,
+    });
+    const proposalId = harness.listDesignProposals({ projectId })[0].id;
+
+    const deliveryOutput: AttemptOutput = {
+      status: "done",
+      summary: "deliver",
+      designActions: [
+        {
+          type: "createRunsFromDesign",
+          payload: {
+            proposalId,
+            runs: [{ goal: "Plan non-intake", prompt: "Plan." }],
+          },
+        },
+      ],
+    } as AttemptOutput;
+    const deliveryResult = await hook({
+      run: harness.getRun(rootRunId)!,
+      task: harness.getTask(taskId)!,
+      sessionName: "session",
+      prompt: "design",
+      output: deliveryOutput,
+    });
+    expect(deliveryResult.decision).toBe("continue");
+    const childRunArtifact = (deliveryResult.artifacts ?? []).find(
+      (artifact) => (artifact as { kind?: string }).kind === "created_run",
+    ) as { runId: string } | undefined;
+    expect(childRunArtifact).toBeDefined();
+    const childRun = harness.getRun(childRunArtifact!.runId)!;
+    expect(childRun.context.linearIntake).toBeUndefined();
+    expect(harness.listExternalRefs({ localType: "run", localId: childRun.id })).toHaveLength(0);
+  });
+
+  test("apply-design-actions hook rejects a forged after-approveDesign continuation whose bindings target another proposal", async () => {
+    // Adversarial: an attacker (or buggy designer) forges a task whose
+    // config.designContinuation claims to be an after-approveDesign
+    // continuation for proposal P2 — but the task is run from the issue-
+    // scoped Designer cycle that proposed P1, and P2 lives on a different
+    // cycle. The ownership guard must reject the forged continuation by
+    // checking every binding field, not just the kind.
+    const rootRunId = harness.createRun({ goal: "supervised root run" });
+    const projectId = harness.createProject({ name: "ouroboros", rootPath: dir });
+    seedActiveCharter(projectId);
+    const signalId = seedLowRiskSignal(projectId);
+
+    // Two distinct immutable Linear issues → two distinct Designer cycles.
+    const intakeA = seedAndConsumeTodoIntake({
+      rootRunId,
+      inboxEventId: "inbox_intake_forge_a",
+      externalIssueId: "linear-intake-issue-forge-a",
+      identifier: "PAN-7201",
+      title: "Forged continuation owner",
+    });
+    const intakeB = seedAndConsumeTodoIntake({
+      rootRunId,
+      inboxEventId: "inbox_intake_forge_b",
+      externalIssueId: "linear-intake-issue-forge-b",
+      identifier: "PAN-7202",
+      title: "Forged continuation target",
+    });
+    expect(intakeA.runId).not.toBe(intakeB.runId);
+
+    const hook = createApplyDesignActionsHook({ harness });
+
+    // intakeA proposes and is auto-approved; the durable proposal P_A is
+    // pinned to intakeA's cycle.
+    const proposeA: AttemptOutput = {
+      status: "done",
+      summary: "propose A",
+      designActions: [
+        {
+          type: "proposeDesign",
+          payload: {
+            projectId,
+            title: "Owner proposal A",
+            proposal: linearIntakeProposalEnvelope(signalId),
+            status: "proposed",
+          },
+        },
+      ],
+    } as AttemptOutput;
+    await hook({
+      run: harness.getRun(intakeA.runId)!,
+      task: harness.getTask(intakeA.taskId)!,
+      sessionName: "session",
+      prompt: "design",
+      output: proposeA,
+    });
+    const proposalAId = harness.listDesignProposals({ projectId })[0].id;
+
+    // intakeB also proposes and is auto-approved; proposal P_B is pinned to
+    // intakeB's cycle. The deterministic proposal IDs differ.
+    const proposeB: AttemptOutput = {
+      status: "done",
+      summary: "propose B",
+      designActions: [
+        {
+          type: "proposeDesign",
+          payload: {
+            projectId,
+            title: "Target proposal B",
+            proposal: linearIntakeProposalEnvelope(signalId),
+            status: "proposed",
+          },
+        },
+      ],
+    } as AttemptOutput;
+    await hook({
+      run: harness.getRun(intakeB.runId)!,
+      task: harness.getTask(intakeB.taskId)!,
+      sessionName: "session",
+      prompt: "design",
+      output: proposeB,
+    });
+    const proposals = harness.listDesignProposals({ projectId });
+    expect(proposals).toHaveLength(2);
+    const proposalBId = proposals.find((p) => p.id !== proposalAId)!.id;
+    expect(proposalBId).not.toBe(proposalAId);
+
+    // Forge a continuation task on intakeA's run whose config claims to be
+    // the after-approveDesign continuation for proposal P_B (which belongs
+    // to intakeB's cycle). The continuation bindings are otherwise well-
+    // formed: kind=after-approveDesign, sourceTaskId=intakeA.taskId,
+    // proposalId=P_B. The ownership guard must reject this — P_B does not
+    // belong to intakeA's cycle.
+    const forgedContinuationTaskId = harness.createTask({
+      runId: intakeA.runId,
+      role: "designer",
+      goal: "forged continuation",
+      prompt: "forge",
+      config: {
+        designContinuation: {
+          kind: "after-approveDesign",
+          proposalId: proposalBId,
+          sourceTaskId: intakeA.taskId,
+          actionIndex: 0,
+        },
+      },
+    });
+
+    const forgedDelivery: AttemptOutput = {
+      status: "done",
+      summary: "forge",
+      designActions: [
+        {
+          type: "createRunsFromDesign",
+          payload: {
+            proposalId: proposalBId,
+            runs: [{ goal: "Forge delivery", prompt: "Plan." }],
+          },
+        },
+      ],
+    } as AttemptOutput;
+    const forgedResult = await hook({
+      run: harness.getRun(intakeA.runId)!,
+      task: harness.getTask(forgedContinuationTaskId)!,
+      sessionName: "session",
+      prompt: "design",
+      output: forgedDelivery,
+    });
+    expect(forgedResult.decision).toBe("exit");
+    expect(forgedResult.problems).toBeDefined();
+    // The guard rejects forged continuations through multiple layers: the
+    // deterministic task-ID check fires when the task carrying the metadata
+    // is not the canonical after-approveDesign continuation; the binding
+    // check fires when the metadata targets another proposal/run. Either
+    // rejection proves the forged continuation cannot deliver.
+    expect(forgedResult.problems?.[0]).toMatch(
+      /(does not resolve to the canonical after-approveDesign continuation|must originate from the same issue-scoped Designer cycle)/,
+    );
+    // Neither issue was delivered: no runs, no references, inbox events remain
+    // running. The canonical state for both issues is preserved.
+    expect(harness.findExternalRefs({ provider: "linear", externalType: "issue", externalId: "linear-intake-issue-forge-a" })).toHaveLength(0);
+    expect(harness.findExternalRefs({ provider: "linear", externalType: "issue", externalId: "linear-intake-issue-forge-b" })).toHaveLength(0);
+    expect(harness.getInboxEvent({ id: "inbox_intake_forge_a" })?.status).toBe("running");
+    expect(harness.getInboxEvent({ id: "inbox_intake_forge_b" })?.status).toBe("running");
+  });
+
+  test("apply-design-actions hook rejects a forged task that copies the legitimate after-approveDesign bindings but carries a non-deterministic task ID", async () => {
+    // Adversarial: the attacker (or a buggy producer) observes the legitimate
+    // after-approveDesign continuation metadata stamped onto the canonical
+    // delivery task — kind=after-approveDesign, proposalId=P_A,
+    // sourceTaskId=intakeA.taskId, actionIndex=0 — and copies ALL of those
+    // bindings onto a different task on the same issue-scoped run. The
+    // loose ownership guard (matching only kind/proposalId/sourceTaskId/
+    // runId) would accept this forgery, because every binding field is
+    // identical to the legitimate continuation. The deterministic task ID
+    // check must reject it: the canonical continuation task ID is derived
+    // from those same bindings, so only the genuine task (whose ID equals
+    // stableContinuationTaskId) can authorize createRunsFromDesign.
+    const rootRunId = harness.createRun({ goal: "supervised root run" });
+    const projectId = harness.createProject({ name: "ouroboros", rootPath: dir });
+    seedActiveCharter(projectId);
+    const signalId = seedLowRiskSignal(projectId);
+    const inboxEventId = "inbox_intake_forged_same_proposal";
+    const externalIssueId = "linear-intake-issue-forged-same-proposal";
+    const intake = seedAndConsumeTodoIntake({
+      rootRunId,
+      inboxEventId,
+      externalIssueId,
+      identifier: "PAN-7301",
+      title: "Forged same-proposal continuation",
+    });
+
+    const hook = createApplyDesignActionsHook({ harness });
+
+    // Propose + auto-approve yields the legitimate proposal P_A and the
+    // canonical after-approveDesign continuation task on intake's run.
+    const propose: AttemptOutput = {
+      status: "done",
+      summary: "propose",
+      designActions: [
+        {
+          type: "proposeDesign",
+          payload: {
+            projectId,
+            title: "Legitimate delivery",
+            proposal: linearIntakeProposalEnvelope(signalId),
+            status: "proposed",
+          },
+        },
+      ],
+    } as AttemptOutput;
+    const proposeResult = await hook({
+      run: harness.getRun(intake.runId)!,
+      task: harness.getTask(intake.taskId)!,
+      sessionName: "session",
+      prompt: "design",
+      output: propose,
+    });
+    const proposalId = harness.listDesignProposals({ projectId })[0].id;
+    const continuationArtifact = (proposeResult.artifacts ?? []).find(
+      (artifact) => (artifact as { kind?: string }).kind === "design_continuation",
+    ) as { taskId: string; proposalId: string } | undefined;
+    expect(continuationArtifact).toBeDefined();
+    const legitimateContinuationTaskId = continuationArtifact!.taskId;
+    const legitimateContinuation = harness.getTask(legitimateContinuationTaskId)!;
+    expect(legitimateContinuation.config?.designContinuation).toMatchObject({
+      kind: "after-approveDesign",
+      proposalId,
+      sourceTaskId: intake.taskId,
+    });
+
+    // Forge a SECOND task on the same run whose config copies every binding
+    // field from the legitimate continuation. The auto-generated task ID is
+    // NOT the deterministic stableContinuationTaskId — the forger cannot
+    // choose a custom task ID through harness.createTask without already
+    // knowing the SHA1-derived canonical ID, and even if they did, that ID
+    // would simply BE the legitimate continuation (ensureDesignerContinuation
+    // TaskWithDb reuses an existing task at that ID).
+    const forgedTaskId = harness.createTask({
+      runId: intake.runId,
+      role: "designer",
+      goal: "forged same-proposal continuation",
+      prompt: "forge",
+      config: {
+        designContinuation: {
+          kind: "after-approveDesign",
+          proposalId,
+          sourceTaskId: intake.taskId,
+          actionIndex:
+            (legitimateContinuation.config?.designContinuation as { actionIndex?: number } | undefined)?.actionIndex
+            ?? 0,
+        },
+      },
+    });
+    expect(forgedTaskId).not.toBe(legitimateContinuationTaskId);
+
+    // The forged task attempts createRunsFromDesign for the SAME proposal
+    // the legitimate continuation is bound to. Every binding field matches
+    // the loose contract; only the deterministic task ID check can reject.
+    const forgedDelivery: AttemptOutput = {
+      status: "done",
+      summary: "forge",
+      designActions: [
+        {
+          type: "createRunsFromDesign",
+          payload: {
+            proposalId,
+            runs: [{ goal: "Forge delivery", prompt: "Plan." }],
+          },
+        },
+      ],
+    } as AttemptOutput;
+    const forgedResult = await hook({
+      run: harness.getRun(intake.runId)!,
+      task: harness.getTask(forgedTaskId)!,
+      sessionName: "session",
+      prompt: "design",
+      output: forgedDelivery,
+    });
+    expect(forgedResult.decision).toBe("exit");
+    expect(forgedResult.problems).toBeDefined();
+    expect(forgedResult.problems?.[0]).toMatch(
+      /does not resolve to the canonical after-approveDesign continuation/,
+    );
+    // The legitimate continuation has not been driven, so no canonical
+    // state exists yet — the forged call must not produce any.
+    expect(harness.findExternalRefs({ provider: "linear", externalType: "issue", externalId: externalIssueId })).toHaveLength(0);
+    expect(harness.getInboxEvent({ id: inboxEventId })?.status).toBe("running");
+
+    // Sanity: the legitimate continuation driving the same action still
+    // succeeds after the forgery was rejected — the canonical state is
+    // intact and the ownership guard accepts the genuine task.
+    const legitDelivery: AttemptOutput = {
+      status: "done",
+      summary: "legit deliver",
+      designActions: [
+        {
+          type: "createRunsFromDesign",
+          payload: {
+            proposalId,
+            runs: [{ goal: "Legit delivery", prompt: "Plan." }],
+          },
+        },
+      ],
+    } as AttemptOutput;
+    const legitResult = await hook({
+      run: harness.getRun(intake.runId)!,
+      task: harness.getTask(legitimateContinuationTaskId)!,
+      sessionName: "session",
+      prompt: "design",
+      output: legitDelivery,
+    });
+    expect(legitResult.decision).toBe("continue");
+    expect(harness.findExternalRefs({ provider: "linear", externalType: "issue", externalId: externalIssueId })).toHaveLength(1);
+    expect(harness.getInboxEvent({ id: inboxEventId })?.status).toBe("done");
+  });
+
+  test("apply-design-actions hook rejects stray after-approveDesign metadata on the original Designer task instead of trusting it for sourceDesignerTaskId", async () => {
+    // Adversarial: the original Designer task that ran proposeDesign
+    // somehow carries config.designContinuation metadata — a producer
+    // defect or corruption attempt. The metadata is supposed to be stamped
+    // ONLY on the deterministic after-approveDesign continuation task. The
+    // previous loose ownership guard would have accepted the call via
+    // sameCycle (proposal.runId === context.run.id && proposal.taskId ===
+    // context.task.id) and then stamped continuation.sourceTaskId onto the
+    // canonical planning run's linearIntake block — silently redirecting
+    // provenance to an attacker-chosen task ID. The strict guard must
+    // reject because the metadata is present on a task whose ID is not the
+    // canonical after-approveDesign continuation.
+    const rootRunId = harness.createRun({ goal: "supervised root run" });
+    const projectId = harness.createProject({ name: "ouroboros", rootPath: dir });
+    seedActiveCharter(projectId);
+    const signalId = seedLowRiskSignal(projectId);
+    const inboxEventId = "inbox_intake_stray_metadata";
+    const externalIssueId = "linear-intake-issue-stray-metadata";
+    const intake = seedAndConsumeTodoIntake({
+      rootRunId,
+      inboxEventId,
+      externalIssueId,
+      identifier: "PAN-7302",
+      title: "Stray continuation metadata",
+    });
+
+    const hook = createApplyDesignActionsHook({ harness });
+
+    // Run proposeDesign from the original task to mint proposal P_A.
+    const propose: AttemptOutput = {
+      status: "done",
+      summary: "propose",
+      designActions: [
+        {
+          type: "proposeDesign",
+          payload: {
+            projectId,
+            title: "Original-task delivery with stray metadata",
+            proposal: linearIntakeProposalEnvelope(signalId),
+            status: "proposed",
+          },
+        },
+      ],
+    } as AttemptOutput;
+    await hook({
+      run: harness.getRun(intake.runId)!,
+      task: harness.getTask(intake.taskId)!,
+      sessionName: "session",
+      prompt: "design",
+      output: propose,
+    });
+    const proposalId = harness.listDesignProposals({ projectId })[0].id;
+
+    // Inject stray continuation metadata onto the original Designer task.
+    // sourceTaskId points at a DIFFERENT task — if the guard trusted the
+    // metadata, the stamped sourceDesignerTaskId would become
+    // task_straySourceForMetadata instead of the original Designer task.
+    const straySourceTaskId = "task_straySourceForMetadata";
+    const db = new Database(harness.dbPath);
+    const strayConfig = {
+      designContinuation: {
+        kind: "after-approveDesign",
+        proposalId,
+        sourceTaskId: straySourceTaskId,
+        actionIndex: 0,
+      },
+    };
+    db.query("update tasks set config_json = $config where id = $id").run({
+      $config: JSON.stringify(strayConfig),
+      $id: intake.taskId,
+    });
+    db.close();
+
+    // Drive createRunsFromDesign from the original Designer task. sameCycle
+    // would authorize via the durable proposal columns, but the strict
+    // guard fires first: continuation metadata is present and the task ID
+    // is not the canonical after-approveDesign continuation derived from
+    // the metadata bindings. The call must fail closed.
+    const deliver: AttemptOutput = {
+      status: "done",
+      summary: "deliver",
+      designActions: [
+        {
+          type: "createRunsFromDesign",
+          payload: {
+            proposalId,
+            runs: [{ goal: "Plan delivery", prompt: "Plan." }],
+          },
+        },
+      ],
+    } as AttemptOutput;
+    const result = await hook({
+      run: harness.getRun(intake.runId)!,
+      task: harness.getTask(intake.taskId)!,
+      sessionName: "session",
+      prompt: "design",
+      output: deliver,
+    });
+    expect(result.decision).toBe("exit");
+    expect(result.problems).toBeDefined();
+    expect(result.problems?.[0]).toMatch(
+      /does not resolve to the canonical after-approveDesign continuation/,
+    );
+    // No canonical state was mutated: no planning run, no reference, and
+    // the inbox event remains running.
+    expect(harness.findExternalRefs({ provider: "linear", externalType: "issue", externalId: externalIssueId })).toHaveLength(0);
+    expect(harness.getInboxEvent({ id: inboxEventId })?.status).toBe("running");
+  });
+
+  test("apply-design-actions hook rejects a second accepted proposal that attempts to deliver a duplicate planning run for one immutable Linear issue", async () => {
+    // Adversarial: one immutable Linear issue, one Designer cycle, but two
+    // distinct accepted proposals. The first proposal delivers a canonical
+    // planning run + run-to-issue reference. The second proposal attempts
+    // createRunsFromDesign again — the issue-level exactly-once guard must
+    // fail closed because the canonical reference already exists and binds
+    // the issue to the first planning run.
+    const rootRunId = harness.createRun({ goal: "supervised root run" });
+    const projectId = harness.createProject({ name: "ouroboros", rootPath: dir });
+    seedActiveCharter(projectId);
+    const signalId = seedLowRiskSignal(projectId);
+    const inboxEventId = "inbox_intake_duplicate_run";
+    const externalIssueId = "linear-intake-issue-duplicate-run";
+    const intake = seedAndConsumeTodoIntake({
+      rootRunId,
+      inboxEventId,
+      externalIssueId,
+      identifier: "PAN-7210",
+      title: "Duplicate run guard",
+    });
+
+    const hook = createApplyDesignActionsHook({ harness });
+
+    // First proposal on the intake cycle.
+    const proposeA: AttemptOutput = {
+      status: "done",
+      summary: "propose A",
+      designActions: [
+        {
+          type: "proposeDesign",
+          payload: {
+            projectId,
+            title: "First delivery",
+            proposal: linearIntakeProposalEnvelope(signalId),
+            status: "proposed",
+          },
+        },
+      ],
+    } as AttemptOutput;
+    const proposeAResult = await hook({
+      run: harness.getRun(intake.runId)!,
+      task: harness.getTask(intake.taskId)!,
+      sessionName: "session",
+      prompt: "design",
+      output: proposeA,
+    });
+    const proposalAId = harness.listDesignProposals({ projectId })[0].id;
+    const continuationArtifact = (proposeAResult.artifacts ?? []).find(
+      (artifact) => (artifact as { kind?: string }).kind === "design_continuation",
+    ) as { taskId: string } | undefined;
+    expect(continuationArtifact).toBeDefined();
+    const continuationAId = continuationArtifact!.taskId;
+
+    // Deliver proposal A from its legitimate continuation.
+    const deliverA: AttemptOutput = {
+      status: "done",
+      summary: "deliver A",
+      designActions: [
+        {
+          type: "createRunsFromDesign",
+          payload: {
+            proposalId: proposalAId,
+            runs: [{ goal: "Plan A", prompt: "Plan." }],
+          },
+        },
+      ],
+    } as AttemptOutput;
+    const deliverAResult = await hook({
+      run: harness.getRun(intake.runId)!,
+      task: harness.getTask(continuationAId)!,
+      sessionName: "session",
+      prompt: "design",
+      output: deliverA,
+    });
+    expect(deliverAResult.decision).toBe("continue");
+    const childRunA = (deliverAResult.artifacts ?? []).find(
+      (artifact) => (artifact as { kind?: string }).kind === "created_run",
+    ) as { runId: string };
+    expect(childRunA).toBeDefined();
+    expect(harness.listExternalRefs({ localType: "run", localId: childRunA.runId })).toHaveLength(1);
+    expect(harness.getInboxEvent({ id: inboxEventId })?.status).toBe("done");
+
+    // Simulate the Designer re-running on the same intake cycle: a fresh
+    // designer task on the intake run. proposeDesign on this task creates a
+    // second proposal (different stable action audit ID) and the authority
+    // evaluator auto-accepts again, producing a second after-approveDesign
+    // continuation. The legitimate ownership guard would accept this
+    // continuation for proposal B, but the issue-level canonical-state
+    // guard must fail closed: the canonical reference for this issue
+    // already exists, binds to childRunA, and cannot be replaced.
+    const secondDesignerTaskId = harness.createTask({
+      runId: intake.runId,
+      role: "designer",
+      goal: "second designer cycle on same intake",
+      prompt: "design",
+    });
+    const proposeB: AttemptOutput = {
+      status: "done",
+      summary: "propose B",
+      designActions: [
+        {
+          type: "proposeDesign",
+          payload: {
+            projectId,
+            title: "Second delivery",
+            proposal: linearIntakeProposalEnvelope(signalId),
+            status: "proposed",
+          },
+        },
+      ],
+    } as AttemptOutput;
+    const proposeBResult = await hook({
+      run: harness.getRun(intake.runId)!,
+      task: harness.getTask(secondDesignerTaskId)!,
+      sessionName: "session",
+      prompt: "design",
+      output: proposeB,
+    });
+    const proposals = harness.listDesignProposals({ projectId });
+    expect(proposals).toHaveLength(2);
+    const proposalBId = proposals.find((p) => p.id !== proposalAId)!.id;
+    const continuationBArtifact = (proposeBResult.artifacts ?? []).find(
+      (artifact) =>
+        (artifact as { kind?: string }).kind === "design_continuation"
+        && (artifact as { proposalId?: string }).proposalId === proposalBId,
+    ) as { taskId: string; proposalId: string } | undefined;
+    expect(continuationBArtifact).toBeDefined();
+    const continuationBId = continuationBArtifact!.taskId;
+    expect(continuationBId).not.toBe(continuationAId);
+
+    const deliverB: AttemptOutput = {
+      status: "done",
+      summary: "deliver B",
+      designActions: [
+        {
+          type: "createRunsFromDesign",
+          payload: {
+            proposalId: proposalBId,
+            runs: [{ goal: "Plan B", prompt: "Plan." }],
+          },
+        },
+      ],
+    } as AttemptOutput;
+    const deliverBResult = await hook({
+      run: harness.getRun(intake.runId)!,
+      task: harness.getTask(continuationBId)!,
+      sessionName: "session",
+      prompt: "design",
+      output: deliverB,
+    });
+    expect(deliverBResult.decision).toBe("exit");
+    expect(deliverBResult.problems).toBeDefined();
+    // The duplicate-delivery attempt must fail closed. Two layers of defense
+    // surface the failure: the canonical-run verify path catches the
+    // proposalId mismatch on the existing canonical planning run, and the
+    // canonical-reference pre-check catches any localId mismatch. Either
+    // error proves the second proposal cannot create a duplicate planning
+    // run or reference for the same immutable Linear issue.
+    expect(deliverBResult.problems?.[0]).toMatch(/(mismatched linearIntake\.proposalId|already links issue to run)/);
+
+    // The canonical state for proposal A is unchanged: still exactly one
+    // planning run, one reference, and one done inbox event. No second
+    // planning run was created.
+    const refsAfter = harness.findExternalRefs({ provider: "linear", externalType: "issue", externalId: externalIssueId });
+    expect(refsAfter).toHaveLength(1);
+    expect(refsAfter[0].localId).toBe(childRunA.runId);
+    expect(harness.getInboxEvent({ id: inboxEventId })?.status).toBe("done");
+  });
+
+  test("apply-design-actions hook leaves Linear intake running when an after-approveDesign continuation emits a no-action result", async () => {
+    // Adversarial: the legitimate after-approveDesign continuation task
+    // emits no design actions. The hook must NOT finalize the intake inbox
+    // (running → done) because the proposal is already accepted — the only
+    // legitimate finalization is createRunsFromDesign. Leaving the inbox
+    // running preserves the repair path so a later retry can deliver.
+    const rootRunId = harness.createRun({ goal: "supervised root run" });
+    const projectId = harness.createProject({ name: "ouroboros", rootPath: dir });
+    seedActiveCharter(projectId);
+    const signalId = seedLowRiskSignal(projectId);
+    const inboxEventId = "inbox_intake_noaction_continuation";
+    const externalIssueId = "linear-intake-issue-noaction-continuation";
+    const intake = seedAndConsumeTodoIntake({
+      rootRunId,
+      inboxEventId,
+      externalIssueId,
+      identifier: "PAN-7220",
+      title: "No-action continuation",
+    });
+    const hook = createApplyDesignActionsHook({ harness });
+
+    const proposeOutput: AttemptOutput = {
+      status: "done",
+      summary: "propose",
+      designActions: [
+        {
+          type: "proposeDesign",
+          payload: {
+            projectId,
+            title: "No-action continuation proposal",
+            proposal: linearIntakeProposalEnvelope(signalId),
+            status: "proposed",
+          },
+        },
+      ],
+    } as AttemptOutput;
+    const proposeResult = await hook({
+      run: harness.getRun(intake.runId)!,
+      task: harness.getTask(intake.taskId)!,
+      sessionName: "session",
+      prompt: "design",
+      output: proposeOutput,
+    });
+    const proposalId = harness.listDesignProposals({ projectId })[0].id;
+    const continuationArtifact = (proposeResult.artifacts ?? []).find(
+      (artifact) => (artifact as { kind?: string }).kind === "design_continuation",
+    ) as { taskId: string } | undefined;
+    expect(continuationArtifact).toBeDefined();
+    const continuationTaskId = continuationArtifact!.taskId;
+
+    // The continuation emits no design actions. The hook must return exit
+    // (no actions to apply), but must NOT terminalize the intake inbox —
+    // the proposal is accepted and the only legitimate finalization is a
+    // later createRunsFromDesign.
+    const noAction: AttemptOutput = {
+      status: "done",
+      summary: "no action",
+    } as AttemptOutput;
+    const noActionResult = await hook({
+      run: harness.getRun(intake.runId)!,
+      task: harness.getTask(continuationTaskId)!,
+      sessionName: "session",
+      prompt: "design",
+      output: noAction,
+    });
+    expect(noActionResult.decision).toBe("exit");
+    expect(harness.getInboxEvent({ id: inboxEventId })?.status).toBe("running");
+    expect(harness.findExternalRefs({ provider: "linear", externalType: "issue", externalId: externalIssueId })).toHaveLength(0);
+
+    // The repair path remains viable: a later createRunsFromDesign from the
+    // same continuation must still create the canonical planning run,
+    // reference, and finalize the inbox.
+    const repairDelivery: AttemptOutput = {
+      status: "done",
+      summary: "repair delivery",
+      designActions: [
+        {
+          type: "createRunsFromDesign",
+          payload: {
+            proposalId,
+            runs: [{ goal: "Plan repair", prompt: "Plan." }],
+          },
+        },
+      ],
+    } as AttemptOutput;
+    const repairResult = await hook({
+      run: harness.getRun(intake.runId)!,
+      task: harness.getTask(continuationTaskId)!,
+      sessionName: "session",
+      prompt: "design",
+      output: repairDelivery,
+    });
+    expect(repairResult.decision).toBe("continue");
+    const repairRun = (repairResult.artifacts ?? []).find(
+      (artifact) => (artifact as { kind?: string }).kind === "created_run",
+    ) as { runId: string };
+    expect(repairRun).toBeDefined();
+    expect(harness.listExternalRefs({ localType: "run", localId: repairRun.runId })).toHaveLength(1);
+    expect(harness.getInboxEvent({ id: inboxEventId })?.status).toBe("done");
+  });
+
+  test("apply-design-actions hook rejects an after-approveDesign continuation that emits decideDesign to terminalize intake", async () => {
+    // Adversarial: the legitimate after-approveDesign continuation task
+    // emits decideDesign(rejected) to terminalize the intake inbox. The
+    // hook must refuse — the proposal is already accepted and the only
+    // legitimate finalization is createRunsFromDesign. decideDesign from
+    // this continuation is a producer defect or an attempt to bypass the
+    // delivery contract; surfacing it as a hook failure preserves the
+    // repair path.
+    const rootRunId = harness.createRun({ goal: "supervised root run" });
+    const projectId = harness.createProject({ name: "ouroboros", rootPath: dir });
+    seedActiveCharter(projectId);
+    const signalId = seedLowRiskSignal(projectId);
+    const inboxEventId = "inbox_intake_continuation_decide";
+    const externalIssueId = "linear-intake-issue-continuation-decide";
+    const intake = seedAndConsumeTodoIntake({
+      rootRunId,
+      inboxEventId,
+      externalIssueId,
+      identifier: "PAN-7230",
+      title: "Continuation decideDesign",
+    });
+    const hook = createApplyDesignActionsHook({ harness });
+
+    const proposeOutput: AttemptOutput = {
+      status: "done",
+      summary: "propose",
+      designActions: [
+        {
+          type: "proposeDesign",
+          payload: {
+            projectId,
+            title: "Continuation decideDesign proposal",
+            proposal: linearIntakeProposalEnvelope(signalId),
+            status: "proposed",
+          },
+        },
+      ],
+    } as AttemptOutput;
+    const proposeResult = await hook({
+      run: harness.getRun(intake.runId)!,
+      task: harness.getTask(intake.taskId)!,
+      sessionName: "session",
+      prompt: "design",
+      output: proposeOutput,
+    });
+    const proposalId = harness.listDesignProposals({ projectId })[0].id;
+    const continuationArtifact = (proposeResult.artifacts ?? []).find(
+      (artifact) => (artifact as { kind?: string }).kind === "design_continuation",
+    ) as { taskId: string } | undefined;
+    expect(continuationArtifact).toBeDefined();
+    const continuationTaskId = continuationArtifact!.taskId;
+
+    // The continuation emits decideDesign(rejected) for the accepted
+    // proposal. The terminal-finalization helper must throw because the
+    // task is an after-approveDesign continuation, not the original intake
+    // Designer cycle. The intake inbox stays running so the repair path
+    // remains viable.
+    const decideOutput: AttemptOutput = {
+      status: "done",
+      summary: "decide",
+      designActions: [
+        {
+          type: "decideDesign",
+          payload: {
+            proposalId,
+            decision: "rejected",
+            reasons: ["adversarial continuation"],
+          },
+        },
+      ],
+    } as AttemptOutput;
+    const decideResult = await hook({
+      run: harness.getRun(intake.runId)!,
+      task: harness.getTask(continuationTaskId)!,
+      sessionName: "session",
+      prompt: "design",
+      output: decideOutput,
+    });
+    expect(decideResult.decision).toBe("exit");
+    expect(decideResult.problems).toBeDefined();
+    expect(decideResult.problems?.[0]).toMatch(/after-approveDesign continuation/);
+    expect(decideResult.problems?.[0]).toMatch(/cannot terminalize Linear intake/);
+    expect(harness.getInboxEvent({ id: inboxEventId })?.status).toBe("running");
+    expect(harness.findExternalRefs({ provider: "linear", externalType: "issue", externalId: externalIssueId })).toHaveLength(0);
+    // The proposal remains accepted — the adversarial decideDesign could not
+    // rewind the auto-approval.
+    expect(harness.getDesignProposal({ id: proposalId })?.status).toBe("accepted");
   });
 
   test("runs multiple ready tasks with separate subagent sessions", async () => {

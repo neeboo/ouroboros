@@ -1624,7 +1624,11 @@ describe("CLI", () => {
 
     const after = new Harness(dbPath);
     const event = after.getInboxEvent({ id: stored.id })!;
-    expect(event.status).toBe("done");
+    // The intake claim path owns todo → running only. Finalization
+    // (running → done) is owned by the fixed design action path so the
+    // transition is atomic with the planning run, planner task, and external
+    // reference. A premature done here would mask the atomic guarantee.
+    expect(event.status).toBe("running");
     const task = after.getTask(outcome.taskId);
     expect(task).toBeDefined();
     expect(task!.role).toBe("designer");
@@ -1697,14 +1701,21 @@ describe("CLI", () => {
     expect(second.id).toBe(first.id);
     expect(second.created).toBe(false);
 
-    // The inbox event is already done, so the consumption path finds no work.
+    // The inbox event stays `running` after the first consume: the claim path
+    // owns todo → running only, and the fixed design action path owns the
+    // eventual running → done transition. A replay consumption re-encounters
+    // the running event, reuses the same deterministic Designer run/task, and
+    // reports a deduplicated outcome without double-claiming.
     const claim2 = await runCliJson(
       "linear-consume-inbox",
       "--root-run-id",
       bootstrap.runId,
     );
-    expect(claim2.processed).toBe(0);
+    expect(claim2.processed).toBe(1);
     expect(claim2.claimed).toBe(0);
+    expect(claim2.deduplicated).toBe(1);
+    expect(claim2.outcomes[0].runId).toBe(firstRunId);
+    expect(claim2.outcomes[0].taskId).toBe(firstTaskId);
 
     // Restart simulation: a separate CLI invocation observes the same durable
     // run and task without duplication.
@@ -1713,12 +1724,15 @@ describe("CLI", () => {
       "--root-run-id",
       bootstrap.runId,
     );
-    expect(claim3.processed).toBe(0);
+    expect(claim3.processed).toBe(1);
+    expect(claim3.deduplicated).toBe(1);
 
     const after = new Harness(dbPath);
     const events = after.listInboxEvents({ provider: "linear" });
     expect(events).toHaveLength(1);
-    expect(events[0].status).toBe("done");
+    // The lifecycle remains pending until the fixed design action path
+    // finalizes it; consumeLinearInbox never marks done itself.
+    expect(events[0].status).toBe("running");
     const overview = after.getRunOverview({ runId: firstRunId, eventLimit: 0 });
     expect(overview.tasks.filter((task) => task.role === "designer")).toHaveLength(1);
     expect(after.getTask(firstTaskId)!.id).toBe(firstTaskId);
@@ -1768,7 +1782,7 @@ describe("CLI", () => {
     expect(result.processed).toBe(1);
     // The event is resumed, not freshly claimed; the run/task already
     // existed conceptually (none did), so consumption creates them and
-    // marks the run as deduplicated/claimed based on creation.
+    // reports the run as deduplicated/claimed based on creation.
     const outcome = result.outcomes[0];
     expect(outcome.runCreated).toBe(true);
     expect(outcome.taskCreated).toBe(true);
@@ -1776,7 +1790,10 @@ describe("CLI", () => {
 
     const after = new Harness(dbPath);
     const event = after.getInboxEvent({ id: stored.id })!;
-    expect(event.status).toBe("done");
+    // Resume after a crash leaves the event `running` so the fixed design
+    // action path can still finalize the lifecycle atomically; consume itself
+    // never marks done.
+    expect(event.status).toBe("running");
   });
 
   test("linear-consume-inbox blocks intake when the event payload cannot drive a Designer run", async () => {
@@ -1864,16 +1881,28 @@ describe("CLI", () => {
     expect(firstOutcome.runCreated).toBe(true);
     expect(firstOutcome.taskCreated).toBe(true);
 
+    // The intake claim path owns todo → running only; finalization is owned
+    // by the fixed design action path. A premature done here would mask the
+    // atomic guarantee required by the intake contract.
+    const afterFirst = new Harness(dbPath);
+    expect(afterFirst.getInboxEvent({ id: event.id })?.status).toBe("running");
+
     // Replay via a fresh harness instance simulates a daemon restart. The
-    // deterministic IDs reuse the existing run and task; no duplicate work.
+    // deterministic IDs reuse the existing run and task; the running event is
+    // re-encountered and reported as deduplicated, not freshly claimed.
     const replay = consumeLinearInbox({ harness: new Harness(dbPath), rootRunId: bootstrap.runId });
-    expect(replay.processed).toBe(0);
+    expect(replay.processed).toBe(1);
     expect(replay.claimed).toBe(0);
+    expect(replay.deduplicated).toBe(1);
+    expect(replay.outcomes[0].runId).toBe(firstOutcome.runId);
+    expect(replay.outcomes[0].taskId).toBe(firstOutcome.taskId);
 
     const events = new Harness(dbPath).listInboxEvents({ provider: "linear" });
     expect(events).toHaveLength(1);
     expect(events[0].id).toBe(event.id);
-    expect(events[0].status).toBe("done");
+    // The lifecycle remains pending until the fixed design action path
+    // finalizes it; consumeLinearInbox never marks done itself.
+    expect(events[0].status).toBe("running");
   });
 
   test("linear polling config requires positive interval plus project and team selectors", async () => {
