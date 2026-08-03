@@ -51,6 +51,11 @@ import type {
   CreateExternalRefInput,
   CreateFounderCharterInput,
   CreateInboxEventInput,
+  EnsureInboxEventInput,
+  EnsureInboxEventResult,
+  InboxTransitionTarget,
+  TransitionInboxEventInput,
+  TransitionInboxEventResult,
   CreateProjectInput,
   CreateRunInput,
   CreateStrategySignalInput,
@@ -1399,6 +1404,104 @@ export class Harness {
     });
   }
 
+  ensureInboxEvent(input: EnsureInboxEventInput): EnsureInboxEventResult {
+    if (!input.id) {
+      throw new Error("ensureInboxEvent requires a deterministic id");
+    }
+    return withDatabase(this.dbPath, (db) => {
+      return db.transaction(() => {
+        const existing = db
+          .query(
+            `
+            select *
+            from inbox_events
+            where id = $id
+            `,
+          )
+          .get({ $id: input.id }) as InboxEventRow | null;
+
+        if (existing) {
+          if (
+            existing.provider !== input.provider ||
+            existing.event_type !== input.eventType ||
+            existing.external_id !== input.externalId
+          ) {
+            throw new Error(
+              `deterministic id collision: inbox event ${input.id} already exists with different provider, event type, or external id`,
+            );
+          }
+          return { event: inboxEventFromRow(existing), created: false };
+        }
+
+        db.query(
+          `
+          insert into inbox_events (
+            id, provider, event_type, external_id, payload_json, status
+          )
+          values (
+            $id, $provider, $eventType, $externalId, $payloadJson, $status
+          )
+          `,
+        ).run({
+          $id: input.id,
+          $provider: input.provider,
+          $eventType: input.eventType,
+          $externalId: input.externalId,
+          $payloadJson: toJson(input.payload),
+          $status: "todo",
+        });
+        const row = db
+          .query("select * from inbox_events where id = $id")
+          .get({ $id: input.id }) as InboxEventRow;
+        return { event: inboxEventFromRow(row), created: true };
+      })();
+    });
+  }
+
+  transitionInboxEvent(input: TransitionInboxEventInput): TransitionInboxEventResult {
+    if (!isValidInboxTransition(input.from, input.to)) {
+      throw new Error(
+        `invalid inbox transition: ${input.from} -> ${input.to}`,
+      );
+    }
+    return withDatabase(this.dbPath, (db) => {
+      return db.transaction(() => {
+        const row = db
+          .query("select * from inbox_events where id = $id")
+          .get({ $id: input.id }) as InboxEventRow | null;
+        if (!row) {
+          throw new Error(`inbox event not found: ${input.id}`);
+        }
+        if (row.status !== input.from) {
+          throw new Error(
+            `expected inbox event ${input.id} to be ${input.from}, found ${row.status}`,
+          );
+        }
+        const stampProcessedAt = input.to === "done" || input.to === "blocked";
+        const result = db
+          .query(
+            `
+            update inbox_events
+            set status = $to,
+                processed_at = case when $stamp = 1 then current_timestamp else null end
+            where id = $id and status = $from
+            `,
+          )
+          .run({
+            $to: input.to,
+            $stamp: stampProcessedAt ? 1 : 0,
+            $id: input.id,
+            $from: input.from,
+          });
+        const updated = result.changes > 0;
+        const refreshed = db
+          .query("select * from inbox_events where id = $id")
+          .get({ $id: input.id }) as InboxEventRow;
+        return { event: inboxEventFromRow(refreshed), updated };
+      })();
+    });
+  }
+
   getInboxEvent(input: GetInboxEventInput) {
     return withDatabase(this.dbPath, (db) => {
       const row = db.query("select * from inbox_events where id = $id").get({ $id: input.id }) as
@@ -2456,4 +2559,16 @@ function isSqliteBusyError(error: unknown) {
 
 function sleepSync(ms: number) {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+const INBOX_TRANSITIONS: Record<"todo" | "running", readonly InboxTransitionTarget[]> = {
+  todo: ["running"],
+  running: ["done", "blocked"],
+};
+
+export function isValidInboxTransition(
+  from: "todo" | "running",
+  to: InboxTransitionTarget,
+): boolean {
+  return INBOX_TRANSITIONS[from].includes(to);
 }

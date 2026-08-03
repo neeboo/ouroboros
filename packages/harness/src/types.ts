@@ -380,6 +380,35 @@ export interface CreateInboxEventInput {
   id?: string;
 }
 
+export interface EnsureInboxEventInput {
+  /** Caller-supplied deterministic id (typically derived from provider, event type, and immutable external id). */
+  id: string;
+  provider: string;
+  eventType: string;
+  externalId: string;
+  payload: Record<string, unknown>;
+}
+
+export interface EnsureInboxEventResult {
+  event: InboxEvent;
+  /** True when this call inserted a new row, false when an identical row already existed. */
+  created: boolean;
+}
+
+export type InboxTransitionTarget = "running" | "done" | "blocked";
+
+export interface TransitionInboxEventInput {
+  id: string;
+  from: Extract<Status, "todo" | "running">;
+  to: InboxTransitionTarget;
+}
+
+export interface TransitionInboxEventResult {
+  event: InboxEvent;
+  /** True when the compare-and-set update changed the row. */
+  updated: boolean;
+}
+
 export interface GetInboxEventInput {
   id: string;
 }

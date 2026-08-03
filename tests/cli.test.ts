@@ -1470,6 +1470,85 @@ describe("CLI", () => {
     expect(new Harness(dbPath).listInboxEvents({ provider: "linear" })).toEqual([]);
   });
 
+  test("linear-ingest-event is idempotent for repeated intake of the same immutable issue id", async () => {
+    await runCli("init");
+
+    const first = await runCliJson(
+      "linear-ingest-event",
+      "--event-type",
+      "issue.created",
+      "--external-id",
+      "LIN-XYZ-9",
+      "--payload-json",
+      JSON.stringify({ action: "create", title: "First", url: "https://linear.app/example/issue/LIN-XYZ-9" }),
+    );
+    const second = await runCliJson(
+      "linear-ingest-event",
+      "--event-type",
+      "issue.created",
+      "--external-id",
+      "LIN-XYZ-9",
+      "--payload-json",
+      JSON.stringify({ action: "create", title: "Second", url: "https://linear.app/example/issue/LIN-XYZ-9" }),
+    );
+
+    expect(first.id).toBe(second.id);
+    expect(first.id).toMatch(/^inbox_/);
+    expect(first).toMatchObject({ provider: "linear", eventType: "issue.created", externalId: "LIN-XYZ-9", created: true });
+    expect(second.created).toBe(false);
+
+    const harness = new Harness(dbPath);
+    const rows = harness.listInboxEvents({ provider: "linear" });
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      id: first.id,
+      provider: "linear",
+      eventType: "issue.created",
+      externalId: "LIN-XYZ-9",
+      status: "todo",
+      payload: { action: "create", title: "First", url: "https://linear.app/example/issue/LIN-XYZ-9" },
+    });
+  });
+
+  test("linear-ingest-event uses the immutable issue id rather than url or key when present", async () => {
+    await runCli("init");
+
+    const stored = await runCliJson(
+      "linear-ingest-event",
+      "--event-type",
+      "issue.created",
+      "--external-id",
+      "linear-issue-immutable-001",
+      "--payload-json",
+      JSON.stringify({
+        identifier: "PAN-4321",
+        url: "https://linear.app/pancat/issue/PAN-4321/whatever",
+        title: "Polled issue",
+      }),
+    );
+
+    const second = await runCliJson(
+      "linear-ingest-event",
+      "--event-type",
+      "issue.created",
+      "--external-id",
+      "linear-issue-immutable-001",
+      "--payload-json",
+      JSON.stringify({
+        identifier: "PAN-4321",
+        url: "https://linear.app/other/path/PAN-4321",
+        title: "Polled again with a different URL",
+      }),
+    );
+
+    expect(second.id).toBe(stored.id);
+    expect(second.created).toBe(false);
+
+    const rows = new Harness(dbPath).listInboxEvents({ provider: "linear" });
+    expect(rows).toHaveLength(1);
+    expect(rows[0].externalId).toBe("linear-issue-immutable-001");
+  });
+
   test("shows and updates prompt templates", async () => {
     await runCli("init");
 
