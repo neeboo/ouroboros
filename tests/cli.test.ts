@@ -2036,6 +2036,7 @@ describe("CLI", () => {
     expect(requests).toHaveLength(1);
     const requestBody = JSON.parse(requests[0]!.body);
     expect(requestBody.query).toContain("$projectId: ID!");
+    expect(requestBody.query).toContain("$overlapStart: DateTimeOrDuration");
     const variables = requestBody.variables;
     expect(variables).toMatchObject({
       projectId: "proj-1",

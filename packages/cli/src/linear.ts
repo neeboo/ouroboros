@@ -320,7 +320,7 @@ const LINEAR_ISSUES_QUERY = `
     $teamKey: String!
     $pageSize: Int!
     $after: String
-    $overlapStart: DateTime
+    $overlapStart: DateTimeOrDuration
   ) {
     issues(
       first: $pageSize
