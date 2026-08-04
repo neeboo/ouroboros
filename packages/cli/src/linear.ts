@@ -347,6 +347,7 @@ const LINEAR_ISSUES_QUERY = `
     }
   }
 `;
+const LINEAR_INITIAL_OVERLAP_START = "1970-01-01T00:00:00.000Z";
 
 /**
  * Poll Linear for issues in the configured project and team. Each call performs one bounded cycle
@@ -727,7 +728,7 @@ async function fetchIssuePage(input: {
           teamKey: input.teamKey,
           pageSize: input.pageSize,
           after: input.after,
-          overlapStart: input.overlapStart,
+          overlapStart: input.overlapStart ?? LINEAR_INITIAL_OVERLAP_START,
         },
       }),
     });

@@ -2043,7 +2043,7 @@ describe("CLI", () => {
       teamKey: "PAN",
       pageSize: basePollingConfig().pageSize,
       after: null,
-      overlapStart: null,
+      overlapStart: "1970-01-01T00:00:00.000Z",
     });
     const rows = harness.listInboxEvents({ provider: "linear" });
     expect(rows).toHaveLength(1);
