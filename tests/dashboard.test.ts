@@ -736,7 +736,7 @@ describe("dashboard", () => {
     expect(html).toContain("persistDashboardState();");
     expect(html).toContain("persistFlowScrollState");
     expect(html).toContain("restoredFlowScrollState = null;");
-    expect(html).toContain("writeDashboardState({ selectedGoalId, workspaceMode, workspaceTitleExpanded, selectedChangedFilePath, secondaryEvidenceOpen, designDetailsOpen, flowScroll: captureFlowScrollState() });");
+    expect(html).toContain("writeDashboardState({ selectedGoalId, workspaceMode, workspaceTitleExpanded, selectedChangedFilePath, selectedTaskId, secondaryEvidenceOpen, designDetailsOpen, flowScroll: captureFlowScrollState() });");
     expect(html).toContain("scrollState.scrollHeight");
     expect(html).toContain("flowDelta");
     expect(html).toContain("Math.max(0, scrollState.scrollTop + flowDelta)");
@@ -4595,5 +4595,325 @@ describe("dashboard", () => {
 
     // The interrupt-mode send button gets a stronger visual treatment.
     expect(css).toContain('.inspector-composer-section[data-composer-mode="interrupt"]');
+  });
+
+  test("exposes a canonical selectedTaskId browser state path that survives incremental overview refreshes", () => {
+    const html = dashboardHtml({ runId: "run_123" });
+
+    // Storage roundtrip: read/write include selectedTaskId alongside the existing keys.
+    expect(html).toContain("selectedTaskId: typeof parsed.selectedTaskId === \"string\" ? parsed.selectedTaskId : null");
+    expect(html).toContain("selectedTaskId: typeof state.selectedTaskId === \"string\" ? state.selectedTaskId : null");
+    expect(html).toContain("let selectedTaskId = restoredDashboardState.selectedTaskId || null;");
+    expect(html).toContain("selectedTaskId = restored.selectedTaskId || null;");
+
+    // Revalidation during render: only an existing task ID is preserved.
+    expect(html).toContain("const allTaskIds = new Set((overview.tasks || []).map((task) => task.id));");
+    expect(html).toContain("if (selectedTaskId && !allTaskIds.has(selectedTaskId)) {");
+    expect(html).toContain("selectedTaskId = null;");
+
+    // Run changes restore only valid run-scoped selection (already asserted above).
+    expect(html).toContain("selectedTaskId = restored.selectedTaskId || null;");
+
+    // The persistent state lives in the same run-scoped storage key (no new keys).
+    expect(html).not.toContain("ouroboros:dashboard:selectedTask");
+    expect(html).not.toContain("ouroboros:dashboard:taskSelection");
+
+    // Both persistence writers must serialize the in-memory selectedTaskId so the
+    // run-scoped storage record preserves the selection across reloads and run switches.
+    expect(html).toContain("writeDashboardState({ selectedGoalId, workspaceMode, workspaceTitleExpanded, selectedChangedFilePath, selectedTaskId, secondaryEvidenceOpen, designDetailsOpen, flowScroll: captureFlowScrollState() });");
+    const persistFlowMatch = html.match(/const persistFlowScrollState = \(\) => \{([\s\S]*?)\n    \};/);
+    expect(persistFlowMatch).not.toBeNull();
+    expect(persistFlowMatch ? persistFlowMatch[1] : "").toContain("selectedTaskId");
+  });
+
+  test("persistDashboardState and persistFlowScrollState round-trip selectedTaskId through run-scoped storage", () => {
+    const html = dashboardHtml({ runId: "run_a" });
+
+    // Extract the canonical read/write pairs from the dashboard script so we execute
+    // the actual state transition instead of asserting against source strings.
+    const readMatch = html.match(/const readDashboardState = \(\) => \{([\s\S]*?)\n    \};/);
+    const writeMatch = html.match(/const writeDashboardState = \(state\) => \{([\s\S]*?)\n    \};/);
+    expect(readMatch).not.toBeNull();
+    expect(writeMatch).not.toBeNull();
+
+    const store = new Map<string, string>();
+    const fakeWindow = {
+      localStorage: {
+        getItem: (key: string) => (store.has(key) ? store.get(key)! : null),
+        setItem: (key: string, value: string) => { store.set(key, value); },
+        removeItem: (key: string) => { store.delete(key); },
+      },
+    };
+    const isWorkspaceMode = (value: unknown) => value === "canvas" || value === "flow";
+    const readDashboardState = (runId: string) => {
+      const dashboardStorageKey = "ouroboros:dashboard:" + runId;
+      return new Function(
+        "window",
+        "dashboardStorageKey",
+        "isWorkspaceMode",
+        `${readMatch![1]}; return readDashboardState();`,
+      )(fakeWindow, dashboardStorageKey, isWorkspaceMode) as Record<string, unknown>;
+    };
+    const writeDashboardState = (runId: string, state: Record<string, unknown>) => {
+      const dashboardStorageKey = "ouroboros:dashboard:" + runId;
+      new Function(
+        "window",
+        "dashboardStorageKey",
+        "isWorkspaceMode",
+        "state",
+        writeMatch![1],
+      )(fakeWindow, dashboardStorageKey, isWorkspaceMode, state);
+    };
+
+    // Simulate selectCanvasTask(task_a) on run_a: persistDashboardState runs and must
+    // carry selectedTaskId into the writer, which must serialize it as a string.
+    writeDashboardState("run_a", {
+      selectedGoalId: null,
+      workspaceMode: "canvas",
+      workspaceTitleExpanded: false,
+      selectedChangedFilePath: null,
+      selectedTaskId: "task_a",
+      secondaryEvidenceOpen: false,
+      designDetailsOpen: false,
+      flowScroll: null,
+    });
+    const storedRunA = JSON.parse(store.get("ouroboros:dashboard:run_a")!);
+    expect(storedRunA.selectedTaskId).toBe("task_a");
+
+    // Switch to run_b and write a different selection: run_b's record must not bleed into run_a.
+    writeDashboardState("run_b", {
+      selectedGoalId: null,
+      workspaceMode: "canvas",
+      workspaceTitleExpanded: false,
+      selectedChangedFilePath: null,
+      selectedTaskId: "task_b",
+      secondaryEvidenceOpen: false,
+      designDetailsOpen: false,
+      flowScroll: null,
+    });
+    const storedRunB = JSON.parse(store.get("ouroboros:dashboard:run_b")!);
+    expect(storedRunB.selectedTaskId).toBe("task_b");
+
+    // Return to run_a while task_a is still valid: readDashboardState must restore task_a.
+    const restoredRunA = readDashboardState("run_a");
+    expect(restoredRunA.selectedTaskId).toBe("task_a");
+
+    // Re-persist (simulating persistDashboardState after a refresh) and confirm the value stays non-null.
+    writeDashboardState("run_a", {
+      ...restoredRunA,
+      selectedTaskId: "task_a",
+    } as Record<string, unknown>);
+    const restoredRunARoundTrip = JSON.parse(store.get("ouroboros:dashboard:run_a")!);
+    expect(restoredRunARoundTrip.selectedTaskId).toBe("task_a");
+  });
+
+  test("writeDashboardState never silently nulls selectedTaskId across two refreshes", () => {
+    const html = dashboardHtml({ runId: "run_a" });
+    const writeMatch = html.match(/const writeDashboardState = \(state\) => \{([\s\S]*?)\n    \};/);
+    expect(writeMatch).not.toBeNull();
+
+    const store = new Map<string, string>();
+    const fakeWindow = {
+      localStorage: {
+        getItem: (key: string) => (store.has(key) ? store.get(key)! : null),
+        setItem: (key: string, value: string) => { store.set(key, value); },
+        removeItem: (key: string) => { store.delete(key); },
+      },
+    };
+    const isWorkspaceMode = (value: unknown) => value === "canvas" || value === "flow";
+    const dashboardStorageKey = "ouroboros:dashboard:run_a";
+    const writeDashboardState = (state: Record<string, unknown>) => {
+      new Function(
+        "window",
+        "dashboardStorageKey",
+        "isWorkspaceMode",
+        "state",
+        writeMatch![1],
+      )(fakeWindow, dashboardStorageKey, isWorkspaceMode, state);
+    };
+
+    // Two successive persistDashboardState calls with the in-memory selectedTaskId
+    // must keep the stored value as a string, mirroring two refresh cycles.
+    writeDashboardState({
+      selectedGoalId: null, workspaceMode: "canvas", workspaceTitleExpanded: false,
+      selectedChangedFilePath: null, selectedTaskId: "task_a",
+      secondaryEvidenceOpen: false, designDetailsOpen: false, flowScroll: null,
+    });
+    writeDashboardState({
+      selectedGoalId: null, workspaceMode: "canvas", workspaceTitleExpanded: false,
+      selectedChangedFilePath: null, selectedTaskId: "task_a",
+      secondaryEvidenceOpen: false, designDetailsOpen: false, flowScroll: null,
+    });
+    const stored = JSON.parse(store.get(dashboardStorageKey)!);
+    expect(stored.selectedTaskId).toBe("task_a");
+  });
+
+  test("renders pointer click, Enter, and Space task selection through one canonical selectCanvasTask path", () => {
+    const html = dashboardHtml({ runId: "run_123" });
+
+    // One canonical entry point that takes a task ID and updates selection.
+    expect(html).toContain("const selectCanvasTask = (taskId) => {");
+    expect(html).toContain("const next = typeof taskId === \"string\" && taskId ? taskId : null;");
+    expect(html).toContain("if (next === selectedTaskId) return;");
+    expect(html).toContain("selectedTaskId = next;");
+    expect(html).toContain("persistDashboardState();");
+
+    // Pointer path: the click handler delegates to selectCanvasTask.
+    expect(html).toContain("const canvasFallbackNode = event.target.closest(\".canvas-fallback-list .canvas-fallback-node[data-canvas-task-id]\");");
+    expect(html).toContain("selectCanvasTask(canvasFallbackNode.getAttribute(\"data-canvas-task-id\"));");
+
+    // Keyboard path: Enter and Space on a focusable fallback node share the same canonical path.
+    expect(html).toContain("if (event.key !== \"Enter\" && event.key !== \" \" && event.key !== \"Spacebar\") return;");
+    expect(html).toContain("selectCanvasTask(fallbackNode.getAttribute(\"data-canvas-task-id\"));");
+
+    // React Flow canvas receives the same callback when mounted.
+    expect(html).toContain("onSelectTask: selectCanvasTask");
+    expect(html).toContain("window.OuroborosCanvas?.render(mount, {");
+    expect(html).toContain("graph,");
+    expect(html).toContain("selectedTaskId: initialSelected,");
+    expect(html).toContain("onSelectTask: selectCanvasTask,");
+  });
+
+  test("passes the selected task identity to the React Flow canvas and reads it back on remount", () => {
+    const html = dashboardHtml({ runId: "run_123" });
+
+    // The canvas root carries the selected task ID on every render so the React Flow
+    // mount picks it up deterministically even after a workspace patch.
+    expect(html).toContain("data-canvas-selected-task-id=\"' + escapeHtml(effectiveSelectedTaskId || \"\") + '\"");
+    expect(html).toContain("data-canvas-fallback-task-id=\"' + escapeHtml(fallbackSelectedTaskId || \"\") + '\"");
+
+    // The mount reads the attribute and reconciles with the in-memory selectedTaskId.
+    expect(html).toContain("const selectedFromAttr = mount.getAttribute(\"data-canvas-selected-task-id\") || \"\";");
+    expect(html).toContain("const initialSelected = selectedTaskId && graph.nodes.some((node) => node.id === selectedTaskId)");
+    expect(html).toContain("? selectedTaskId");
+    expect(html).toContain(": (selectedFromAttr && graph.nodes.some((node) => node.id === selectedFromAttr) ? selectedFromAttr : null);");
+    expect(html).toContain("if (initialSelected && initialSelected !== selectedTaskId) {");
+    expect(html).toContain("selectedTaskId = initialSelected;");
+    expect(html).toContain("persistDashboardState();");
+  });
+
+  test("keeps selection stable across ordinary incremental refreshes by reusing the in-memory selectedTaskId", () => {
+    const html = dashboardHtml({ runId: "run_123" });
+
+    // The render function preserves the existing selectedTaskId when the task is still present.
+    expect(html).toContain("const allTaskIds = new Set((overview.tasks || []).map((task) => task.id));");
+    expect(html).toContain("if (selectedTaskId && !allTaskIds.has(selectedTaskId)) {");
+    expect(html).toContain("selectedTaskId = null;");
+    expect(html).toContain("persistDashboardState();");
+    expect(html).toContain("}");
+
+    // renderCanvasWorkspace uses selectedTaskId to mark both React Flow and fallback nodes.
+    expect(html).toContain("const effectiveSelectedTaskId = selectedTaskId && graph.nodes.some((node) => node.id === selectedTaskId)");
+    expect(html).toContain("? selectedTaskId");
+    expect(html).toContain(": fallbackSelectedTaskId;");
+
+    // The selectedTaskId is preserved during the patch cycle: it is read into the workspace HTML,
+    // back into the React Flow mount, and back into the inspector panel.
+    expect(html).toContain("patchWorkspace(dashboardWorkspaceHtml(selectedGroup));");
+    expect(html).toContain("mountReactFlowCanvas();");
+    expect(html).toContain("patchInspectorPanel(dashboardInspectorTimelineHtml(selectedGroup) + dashboardInspectorComposerHtml(), dashboardInspectorDesignHtml() + dashboardInspectorSecondaryHtml(overview, selectedGroup));");
+  });
+
+  test("uses deterministic fallback selection instead of clearing selection when no user choice exists", () => {
+    const html = dashboardHtml({ runId: "run_123" });
+
+    // Fallback resolver walks running -> blocked -> todo -> done so the dashboard always has a visible task.
+    expect(html).toContain("const fallbackSelectedTaskIdFor = (graph, group) => {");
+    expect(html).toContain("const orderedStatuses = [\"running\", \"blocked\", \"todo\", \"done\"];");
+    expect(html).toContain("for (const status of orderedStatuses) {");
+    expect(html).toContain("const match = taskIds.find((id) => tasksById.get(id)?.status === status);");
+    expect(html).toContain("if (match) return match;");
+
+    // selectCanvasTask falls back to the same resolver when the React Flow canvas needs to re-render.
+    expect(html).toContain("const fallback = fallbackSelectedTaskIdFor(graph, group);");
+    expect(html).toContain("const effective = next && (graph?.nodes.some((node) => node.id === next) ? next : fallback);");
+  });
+
+  test("marks the selected canvas task with a persistent non-color affordance", () => {
+    const html = dashboardHtml({ runId: "run_123" });
+    const styles = dashboardCss();
+
+    // The fallback list shows a Selected pill on the head, not only a color change.
+    expect(html).toContain("canvas-fallback-selected-marker");
+    expect(html).toContain("(isSelected ? \"Selected\" : \"\")");
+    expect(html).toContain("data-selected-task=\"' + (isSelected ? \"true\" : \"false\") + '\"");
+    expect(html).toContain("aria-pressed=\"' + (isSelected ? \"true\" : \"false\") + '\"");
+
+    // The pill has visible text styling (color alone is not enough).
+    expect(styles).toContain(".canvas-fallback-selected-marker");
+    expect(styles).toContain(".canvas-fallback-node.is-selected");
+    expect(styles).toContain(".of-node.is-selected");
+    expect(styles).toContain(".of-node-selected-marker");
+
+    // Keyboard focus is a persistent outline, not a color-only signal.
+    expect(styles).toContain(".of-node:focus-visible");
+    expect(styles).toContain("outline: 2px solid #18181b;");
+    expect(styles).toContain("outline-offset: 2px;");
+    expect(styles).toContain(".canvas-fallback-node:focus-visible");
+  });
+
+  test("makes every canvas task node keyboard-focusable and labels Enter/Space as the select action", () => {
+    const html = dashboardHtml({ runId: "run_123" });
+
+    // Default fallback list nodes are real buttons with focus and an aria-label that names the select action.
+    expect(html).toContain("tabindex=\"0\" role=\"button\"");
+    expect(html).toContain("Press Enter or Space to select.");
+    expect(html).toContain("Selected.");
+  });
+
+  test("removes raw task IDs and dense aggregate metadata from the default canvas node face", () => {
+    const styles = dashboardCss();
+
+    // The default face no longer renders "task {id}" / dense count rows; the dense meta is gone.
+    expect(styles).toContain(".of-node-meta-summary");
+    expect(styles).toContain(".of-node-meta-latest");
+
+    // The raw task ID is moved off the visible face but stays accessible to assistive tech.
+    expect(styles).toContain(".of-node-task-id-sr");
+    expect(styles).toContain("clip: rect(0, 0, 0, 0);");
+  });
+
+  test("does not change the dashboard route manifest, stored data contract, or package manifest", () => {
+    const html = dashboardHtml({ runId: "run_123" });
+
+    // Route manifest is unchanged.
+    expect(DASHBOARD_ROUTES.map((route) => route.name)).toEqual([
+      "dashboard.document",
+      "dashboard.asset.canvasScript",
+      "dashboard.asset.canvasCss",
+      "dashboard.asset.dashboardCss",
+      "dashboard.asset.tailwindCss",
+      "dashboard.api.recentRuns",
+      "dashboard.api.runOverview",
+      "dashboard.api.changedFiles",
+      "dashboard.api.diff",
+      "dashboard.api.guardrailAccept",
+      "dashboard.api.runnerStart",
+      "dashboard.api.runnerStop",
+      "dashboard.api.supervisorStart",
+      "dashboard.api.supervisorStop",
+      "dashboard.api.intake",
+      "dashboard.api.goalCreate",
+      "dashboard.api.goalInterrupt",
+      "dashboard.api.taskResume",
+      "dashboard.api.taskRerun",
+      "dashboard.api.attemptStop",
+      "dashboard.api.designStatus",
+      "dashboard.taskPrompt",
+    ]);
+
+    // No new top-level storage key was introduced; selectedTaskId lives in the run-scoped key.
+    expect(html).toContain('let dashboardStorageKey = "ouroboros:dashboard:" + runId;');
+    // No new API route name was introduced for task selection.
+    expect(DASHBOARD_ROUTES.some((route) => route.name.includes("selectedTask"))).toBe(false);
+    expect(DASHBOARD_ROUTES.some((route) => route.name.includes("taskSelect"))).toBe(false);
+    // The selection path is local-only; selectCanvasTask does not call postJson or fetch.
+    const selectMatch = html.match(/const selectCanvasTask = \(taskId\) => \{([\s\S]*?)\n    \};/);
+    expect(selectMatch).not.toBeNull();
+    const selectBody = selectMatch ? selectMatch[1] : "";
+    expect(selectBody).not.toContain("postJson(");
+    expect(selectBody).not.toContain("fetch(");
+    // No new dependency is added to the CLI package.
+    // (Existing assertions in earlier tests already cover the package manifest freeze.)
   });
 });
