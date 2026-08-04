@@ -334,6 +334,25 @@ export interface BlockTasksWithBlockedDependenciesInput {
   reason: string;
 }
 
+export interface SharedRootCauseRecord {
+  rootTaskId: string;
+  rootAttemptId?: string;
+  reason: string;
+  terminalReason?: string;
+  descendantTaskIds: string[];
+  recordedAt: string;
+}
+
+export interface BlockTasksWithSharedRootCauseInput {
+  runId: string;
+  reason: string;
+}
+
+export interface BlockTasksWithSharedRootCauseResult {
+  blocked: BlockedDependencyTask[];
+  sharedRootCauses: SharedRootCauseRecord[];
+}
+
 export interface LeaseReadyTasksInput {
   runId: string;
   limit: number;

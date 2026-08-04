@@ -9694,6 +9694,320 @@ describe("runner", () => {
     expect(result.rounds[1].tasks).toHaveLength(1);
     expect(harness.nextReadyTask(runId)).toBeNull();
   });
+
+  test("runNextReadyTask creates the persistent attempt before invoking the executor and finishes the same attempt afterwards", async () => {
+    const runId = harness.createRun({ goal: "Build loop" });
+    const taskId = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Wire attempt lifecycle",
+      prompt: "Use the persisted attempt id.",
+    });
+
+    let observedAttemptId = "";
+    let runningAttemptSeen = false;
+    const executor: (input: { attemptId?: string }) => Promise<AttemptOutput> = async (input) => {
+      const attemptId = input.attemptId ?? "";
+      observedAttemptId = attemptId;
+      const db = new Database(harness.dbPath);
+      const row = db
+        .query("select status from attempts where id = $id")
+        .get({ $id: attemptId }) as { status: string } | null;
+      db.close();
+      if (row?.status === "running") {
+        runningAttemptSeen = true;
+      }
+      return {
+        status: "done",
+        summary: `Executed ${attemptId}`,
+        artifacts: [],
+        checks: [{ name: "executor received attempt id", status: "passed" }],
+        problems: [],
+      };
+    };
+
+    const result = await runNextReadyTask({ harness, runId, executor });
+
+    expect(result?.attemptId).toBeString();
+    const attemptId = result!.attemptId;
+    expect(observedAttemptId).toBe(attemptId);
+    expect(runningAttemptSeen).toBe(true);
+    const attempt = harness.getAttempt(attemptId)!;
+    expect(attempt.id).toBe(attemptId);
+    expect(attempt.taskId).toBe(taskId);
+    expect(attempt.status).toBe("done");
+    expect(attempt.output.summary).toBe(`Executed ${attemptId}`);
+    expect(attempt.output.checks).toContainEqual({
+      name: "executor received attempt id",
+      status: "passed",
+    });
+  });
+
+  test("runReadyTasks creates the persistent attempt before invoking the factory executor and finishes the same attempt afterwards", async () => {
+    const runId = harness.createRun({ goal: "Build loop" });
+    const taskId = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Wire attempt lifecycle for leased tasks",
+      prompt: "Use the persisted attempt id.",
+    });
+
+    let observedAttemptId = "";
+    let runningAttemptSeen = false;
+    const result = await runReadyTasks({
+      harness,
+      runId,
+      limit: 1,
+      executorFactory: () => async (input) => {
+        const attemptId = input.attemptId ?? "";
+        observedAttemptId = attemptId;
+        const db = new Database(harness.dbPath);
+        const row = db
+          .query("select status from attempts where id = $id")
+          .get({ $id: attemptId }) as { status: string } | null;
+        db.close();
+        if (row?.status === "running") {
+          runningAttemptSeen = true;
+        }
+        return {
+          status: "done" as const,
+          summary: `Executed ${attemptId}`,
+          artifacts: [],
+          checks: [{ name: "factory executor received attempt id", status: "passed" as const }],
+          problems: [],
+        };
+      },
+    });
+
+    expect(result).toHaveLength(1);
+    expect(result[0].attemptId).toBeString();
+    expect(observedAttemptId).toBe(result[0].attemptId);
+    expect(runningAttemptSeen).toBe(true);
+    const attempt = harness.getAttempt(result[0].attemptId)!;
+    expect(attempt.id).toBe(result[0].attemptId);
+    expect(attempt.taskId).toBe(taskId);
+    expect(attempt.status).toBe("done");
+    expect(attempt.output.summary).toBe(`Executed ${result[0].attemptId}`);
+  });
+
+  test("runNextReadyTask finishes exactly one blocked attempt when the executor throws", async () => {
+    const runId = harness.createRun({ goal: "Build loop" });
+    const taskId = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Handle executor exceptions",
+      prompt: "Throw once.",
+    });
+
+    let observedAttemptId = "";
+    const result = await runNextReadyTask({
+      harness,
+      runId,
+      executor: async (input) => {
+        observedAttemptId = input.attemptId ?? "";
+        throw new Error("synthetic executor failure");
+      },
+    });
+
+    expect(result?.attemptId).toBeString();
+    const attemptId = result!.attemptId;
+    expect(observedAttemptId).toBe(attemptId);
+    const attempt = harness.getAttempt(attemptId)!;
+    expect(attempt.taskId).toBe(taskId);
+    expect(attempt.status).toBe("blocked");
+    expect(attempt.output.status).toBe("blocked");
+    expect(attempt.output.summary).toBe("executor threw before producing output");
+    expect(attempt.output.problems).toContain("synthetic executor failure");
+
+    const db = new Database(harness.dbPath);
+    const rows = db
+      .query("select id, status from attempts where task_id = $taskId order by rowid")
+      .all({ $taskId: taskId }) as Array<{ id: string; status: string }>;
+    db.close();
+    expect(rows).toEqual([{ id: attemptId, status: "blocked" }]);
+    expect(harness.getTask(taskId)?.status).toBe("blocked");
+  });
+
+  test("runReadyTasks finishes exactly one blocked attempt when the factory executor throws", async () => {
+    const runId = harness.createRun({ goal: "Build loop" });
+    const taskId = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Handle leased executor exceptions",
+      prompt: "Throw once.",
+    });
+
+    const result = await runReadyTasks({
+      harness,
+      runId,
+      limit: 1,
+      executorFactory: () => async () => {
+        throw new Error("synthetic factory executor failure");
+      },
+    });
+
+    expect(result).toHaveLength(1);
+    const attempt = harness.getAttempt(result[0].attemptId)!;
+    expect(attempt.taskId).toBe(taskId);
+    expect(attempt.status).toBe("blocked");
+    expect(attempt.output.problems).toContain("synthetic factory executor failure");
+
+    const db = new Database(harness.dbPath);
+    const rows = db
+      .query("select id from attempts where task_id = $taskId order by rowid")
+      .all({ $taskId: taskId }) as Array<{ id: string }>;
+    db.close();
+    expect(rows).toEqual([{ id: result[0].attemptId }]);
+  });
+
+  test("runNextReadyTask uses a new attempt id when a legal retry re-runs the task", async () => {
+    const runId = harness.createRun({ goal: "Build loop" });
+    const taskId = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Retry once with a fresh attempt",
+      prompt: "Run, then run again.",
+    });
+
+    const observedAttemptIds: string[] = [];
+    const firstResult = await runNextReadyTask({
+      harness,
+      runId,
+      executor: async (input) => {
+        observedAttemptIds.push(input.attemptId ?? "");
+        return {
+          status: "done" as const,
+          summary: "First execution done",
+          artifacts: [],
+          checks: [],
+          problems: [],
+        };
+      },
+      stopHooks: [
+        async () => ({
+          decision: "retry" as const,
+          problems: ["first attempt needs a retry"],
+        }),
+      ],
+    });
+
+    const firstAttemptId = firstResult!.attemptId;
+    expect(firstAttemptId).toBeString();
+    expect(observedAttemptIds).toEqual([firstAttemptId]);
+    const firstAttempt = harness.getAttempt(firstAttemptId)!;
+    expect(firstAttempt.status).toBe("blocked");
+    expect(firstAttempt.output.problems).toContain("first attempt needs a retry");
+    expect(harness.getTask(taskId)?.status).toBe("todo");
+
+    const secondResult = await runNextReadyTask({
+      harness,
+      runId,
+      executor: async (input) => {
+        observedAttemptIds.push(input.attemptId ?? "");
+        return {
+          status: "done" as const,
+          summary: "Second execution done",
+          artifacts: [],
+          checks: [],
+          problems: [],
+        };
+      },
+    });
+
+    const secondAttemptId = secondResult!.attemptId;
+    expect(secondAttemptId).toBeString();
+    expect(secondAttemptId).not.toBe(firstAttemptId);
+    expect(observedAttemptIds).toEqual([firstAttemptId, secondAttemptId]);
+
+    const db = new Database(harness.dbPath);
+    const rows = db
+      .query("select id, status from attempts where task_id = $taskId order by rowid")
+      .all({ $taskId: taskId }) as Array<{ id: string; status: string }>;
+    db.close();
+    expect(rows).toEqual([
+      { id: firstAttemptId, status: "blocked" },
+      { id: secondAttemptId, status: "done" },
+    ]);
+    expect(harness.getTask(taskId)?.status).toBe("done");
+  });
+
+  test("runNextReadyTask records exactly one attempt per invocation and never reuses the id on a later task", async () => {
+    const runId = harness.createRun({ goal: "Build loop" });
+    const firstTaskId = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "First task",
+      prompt: "Run once.",
+    });
+    const secondTaskId = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Second task",
+      prompt: "Run again.",
+    });
+
+    let firstExecutorCalls = 0;
+    const firstResult = await runNextReadyTask({
+      harness,
+      runId,
+      executor: async () => {
+        firstExecutorCalls += 1;
+        return {
+          status: "done" as const,
+          summary: "First task done",
+          artifacts: [],
+          checks: [],
+          problems: [],
+        };
+      },
+    });
+
+    expect(firstExecutorCalls).toBe(1);
+    const firstAttemptId = firstResult!.attemptId;
+    const firstAttempt = harness.getAttempt(firstAttemptId)!;
+    expect([firstTaskId, secondTaskId]).toContain(firstAttempt.taskId);
+    expect(harness.getTask(firstAttempt.taskId)?.status).toBe("done");
+
+    const secondResult = await runNextReadyTask({
+      harness,
+      runId,
+      executor: async () => ({
+        status: "done" as const,
+        summary: "Second task done",
+        artifacts: [],
+        checks: [],
+        problems: [],
+      }),
+    });
+
+    const secondAttemptId = secondResult!.attemptId;
+    expect(secondAttemptId).toBeString();
+    expect(secondAttemptId).not.toBe(firstAttemptId);
+    const secondAttempt = harness.getAttempt(secondAttemptId)!;
+    expect([firstTaskId, secondTaskId]).toContain(secondAttempt.taskId);
+    expect(secondAttempt.taskId).not.toBe(firstAttempt.taskId);
+
+    const db = new Database(harness.dbPath);
+    const rows = db
+      .query(
+        `
+        select attempts.id as attempt_id, attempts.task_id as task_id, attempts.status as status
+        from attempts
+        where attempts.task_id in ($firstTaskId, $secondTaskId)
+        order by attempts.rowid
+        `,
+      )
+      .all({ $firstTaskId: firstTaskId, $secondTaskId: secondTaskId }) as Array<{
+      attempt_id: string;
+      task_id: string;
+      status: string;
+    }>;
+    db.close();
+    expect(rows).toHaveLength(2);
+    expect(rows.map((row) => row.attempt_id)).toEqual([firstAttemptId, secondAttemptId]);
+    expect(rows.map((row) => row.task_id).sort()).toEqual([firstTaskId, secondTaskId].sort());
+    expect(rows.every((row) => row.status === "done")).toBe(true);
+  });
 });
 
 function git(cwd: string, args: string[]) {

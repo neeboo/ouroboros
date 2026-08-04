@@ -1,8 +1,15 @@
 import { DEFAULT_REPAIR_TASK_PROMPT_TEMPLATE, readableValue, type AttemptOutput, type Harness } from "@ouroboros/harness";
 import { prettyJson, renderPromptTemplate } from "../template";
 import type { StopHook } from "../types";
+import { chargeRepairBudget, repairBudgetExhausted, type RepairBudgetChargeDecision } from "./repair-budget";
 
-export function createRepairTaskHook(options: { harness: Harness }): StopHook {
+export const DEFAULT_REPAIR_REPLAN_BUDGET_LIMIT = 3;
+
+export function createRepairTaskHook(options: {
+  harness: Harness;
+  budgetLimit?: number;
+}): StopHook {
+  const budgetLimit = options.budgetLimit ?? DEFAULT_REPAIR_REPLAN_BUDGET_LIMIT;
   return ({ run, task, output }) => {
     if (task.role !== "verifier" || output.status !== "blocked") {
       return { decision: "exit" };
@@ -36,6 +43,40 @@ export function createRepairTaskHook(options: { harness: Harness }): StopHook {
       };
     }
 
+    const charge = chargeRepairBudget(options.harness, run.id, {
+      limit: budgetLimit,
+      taskId: task.id,
+      attemptId: (output.artifacts?.find((artifact) => (artifact as Record<string, unknown>).attemptId) as
+        | Record<string, unknown>
+        | undefined)?.attemptId as string | undefined,
+      kind: "repair",
+      summary: `Repair: ${task.goal}`,
+    });
+    if (!charge.allowed) {
+      return {
+        decision: "exit",
+        artifacts: [
+          {
+            kind: "repair_budget_exhausted",
+            verifierTaskId: task.id,
+            runId: run.id,
+            budgetLimit: charge.limit,
+            budgetUsed: charge.used,
+            remaining: 0,
+            exhaustedRootCauses: charge.exhaustedRootCauses,
+            sharedRootCause: charge.sharedRootCause ?? null,
+            reason: charge.reason,
+          },
+        ],
+        problems: [
+          `Repair budget exhausted (${charge.used}/${charge.limit}): ${charge.reason}`,
+          ...(charge.exhaustedRootCauses.length > 0
+            ? [`exhausted root causes: ${charge.exhaustedRootCauses.join(", ")}`]
+            : []),
+        ],
+      };
+    }
+
     const sourceTask = selectRepairSourceTask(options.harness, task);
     const sourceWorktreePath = sourceTask?.worktreePath ?? task.worktreePath ?? null;
     const taskId = options.harness.createTask({
@@ -58,6 +99,14 @@ export function createRepairTaskHook(options: { harness: Harness }): StopHook {
         "the repair output describes changed files and validation",
       ],
     });
+    if (charge.charged) {
+      options.harness.updateRun({
+        runId: run.id,
+        contextPatch: {
+          repairReplanBudget: charge.nextBudget,
+        },
+      });
+    }
 
     return {
       decision: "continue",
@@ -198,3 +247,23 @@ function buildRepairPrompt(
   }
   return `${rendered}\n\n${sourceSection}`;
 }
+
+export function isRepairBudgetExhausted(artifact: unknown): artifact is {
+  kind: "repair_budget_exhausted";
+  verifierTaskId: string;
+  runId: string;
+  budgetLimit: number;
+  budgetUsed: number;
+  remaining: number;
+  exhaustedRootCauses: string[];
+  sharedRootCause: string | null;
+  reason: string;
+} {
+  return (
+    typeof artifact === "object" &&
+    artifact !== null &&
+    (artifact as Record<string, unknown>).kind === "repair_budget_exhausted"
+  );
+}
+
+export { repairBudgetExhausted, type RepairBudgetChargeDecision };

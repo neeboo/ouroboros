@@ -553,12 +553,16 @@ describe("Harness actions", () => {
         dependencyIds: [workerTaskId],
       }),
     );
+    expect(result.artifacts).toContainEqual(
+      expect.objectContaining({
+        kind: "shared_root_cause",
+        rootTaskId: workerTaskId,
+        terminalReason: null,
+        descendantTaskIds: [verifierTaskId],
+      }),
+    );
     expect(verifier?.status).toBe("blocked");
-    expect(verifierAttempt).toMatchObject({
-      taskId: verifierTaskId,
-      status: "blocked",
-      summary: expect.stringContaining("dependencies are blocked"),
-    });
+    expect(verifierAttempt).toBeUndefined();
     expect(overview.tasks.find((task) => task.role === "goal-review")?.status).toBe("todo");
   });
 

@@ -17,9 +17,11 @@ import { createCodexResumableClient, sessionIdFromEvents } from "./executors/cod
 import type { CodexResumableClientOptions, CodexResumableResult } from "./executors/codex-resumable";
 import { childToolchainEnvEvidence } from "./executors/proxy-env";
 import { createRouteExecutor } from "./route-executor";
+import { createDurableAttemptReplayCache } from "./executors/replay";
 import { resolveExecutionRoute } from "./execution-routing";
 import type { ResolvedExecutionRoute } from "./execution-routing";
 import type { ExecutorEventRecorder, StartHook, StartHookResult, StopHook, TaskExecutorFactory } from "./types";
+import type { AttemptReplayCache } from "./executors/types";
 
 const DEFAULT_RUNNING_ATTEMPT_STALE_MS = 5 * 60 * 1000;
 const DEFAULT_GENERIC_ATTEMPT_IDLE_TIMEOUT_MS = 5 * 60 * 1000;
@@ -286,6 +288,7 @@ class CodexResumableOrchestrator {
   private readonly genericIdleMs: number;
   private readonly genericHardMs: number;
   private readonly genericHeartbeatMs: number;
+  private readonly replayCache: AttemptReplayCache;
 
   constructor(private readonly input: CodexResumableOrchestrationInput) {
     this.harness = input.harness;
@@ -296,6 +299,7 @@ class CodexResumableOrchestrator {
     this.genericIdleMs = input.genericAttemptIdleTimeoutMs ?? DEFAULT_GENERIC_ATTEMPT_IDLE_TIMEOUT_MS;
     this.genericHardMs = input.genericAttemptHardTimeoutMs ?? DEFAULT_GENERIC_ATTEMPT_HARD_TIMEOUT_MS;
     this.genericHeartbeatMs = input.genericAttemptHeartbeatMs ?? DEFAULT_GENERIC_ATTEMPT_HEARTBEAT_MS;
+    this.replayCache = createDurableAttemptReplayCache({ harness: this.harness });
   }
 
   async startAttempt(taskId: string) {
@@ -670,6 +674,7 @@ class CodexResumableOrchestrator {
         sandbox: "read-only",
         timeoutMs: this.genericHardMs,
         idleTimeoutMs: this.genericIdleMs,
+        replayCache: this.replayCache,
       }));
     const executor = executorFactory({
       run: input.run,
@@ -686,6 +691,7 @@ class CodexResumableOrchestrator {
         task: input.task,
         sessionName: input.sessionName,
         route: input.route,
+        attemptId,
         recorder,
       });
     } catch (error) {

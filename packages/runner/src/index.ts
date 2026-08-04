@@ -21,6 +21,7 @@ export {
   superviseCodexRuns,
 } from "./codex-resumable-runner";
 export { createAcpxAgentExecutor, createAcpxCodexExecutor } from "./executors/acpx";
+export { createDurableAttemptReplayCache, createInMemoryAttemptReplayCache } from "./executors/replay";
 export {
   acpxSubsessionBaseCommand,
   buildAcpxPromptCommand,
@@ -61,7 +62,14 @@ export type {
 export { createContextSubagentHook, createContextSummaryHook } from "./hooks/context-summary";
 export { createCollectSubsessionsHook } from "./hooks/collect-subsessions";
 export type { CollectSubsessionsHookOptions } from "./hooks/collect-subsessions";
-export { createRepairTaskHook } from "./hooks/create-repair";
+export { createRepairTaskHook, DEFAULT_REPAIR_REPLAN_BUDGET_LIMIT } from "./hooks/create-repair";
+export {
+  chargeRepairBudget,
+  readRepairBudget,
+  repairBudgetExhausted,
+  type RepairBudgetEntry,
+  type RepairBudgetState,
+} from "./hooks/repair-budget";
 export { createRunsFromOutputHook } from "./hooks/create-runs";
 export { createTasksFromOutputHook } from "./hooks/create-tasks";
 export { createVerifierTaskHook } from "./hooks/create-verifier";
@@ -111,11 +119,13 @@ export type {
   AcpxBuiltInAgent,
   AcpxCodexExecutorOptions,
   ApprovalMode,
+  AttemptReplayCache,
   CodexCliExecutorOptions,
   CodexSandbox,
   CommandResult,
   RunCommand,
   RunCommandInput,
+  WorktreeEvidenceProbe,
 } from "./executors/types";
 export type { RouteExecutorOptions } from "./route-executor";
 export type {

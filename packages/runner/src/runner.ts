@@ -1,5 +1,5 @@
 import { describeIntegrationReadiness } from "@ouroboros/harness";
-import type { Harness, Task } from "@ouroboros/harness";
+import type { AttemptOutput, Harness, Task } from "@ouroboros/harness";
 import { buildTaskPrompt } from "./prompt";
 import { resolveExecutionRoute } from "./execution-routing";
 import type {
@@ -31,20 +31,34 @@ export async function runNextReadyTask(input: RunNextReadyTaskInput) {
   });
   const sessionName = task.sessionRef ?? defaultSessionName(task.id);
   const route = resolveExecutionRoute({ run, task });
-  const rawOutput = await input.executor({ prompt, run, task, sessionName, route });
-  const { output, decision } = await applyStopHooks({
-    hooks: hooksForTask(input.stopHooks, input.stopHooksByRole, task),
-    run,
-    task,
-    sessionName,
-    prompt,
-    output: rawOutput,
-  });
-  const attemptId = input.harness.recordAttempt({
+  const attemptId = input.harness.startAttempt({
     taskId: task.id,
     input: { prompt, route, model: route.model },
-    output,
   });
+  let rawOutput: AttemptOutput;
+  try {
+    rawOutput = await input.executor({ prompt, run, task, sessionName, route, attemptId });
+  } catch (error) {
+    rawOutput = executorErrorOutput(error);
+  }
+  let decision: "continue" | "retry" | "exit";
+  let output: AttemptOutput;
+  try {
+    const stopResult = await applyStopHooks({
+      hooks: hooksForTask(input.stopHooks, input.stopHooksByRole, task),
+      run,
+      task,
+      sessionName,
+      prompt,
+      output: rawOutput,
+    });
+    output = stopResult.output;
+    decision = stopResult.decision;
+  } catch (error) {
+    output = stopHookErrorOutput(rawOutput, error);
+    decision = "exit";
+  }
+  input.harness.finishAttempt({ attemptId, output });
   applyPostAttemptRunEffects(input.harness, input.runId, task, output);
   if (decision === "retry") {
     input.harness.retryTask({ taskId: task.id });
@@ -108,22 +122,36 @@ export async function runReadyTasks(input: RunReadyTasksInput) {
       });
       const factoryInput = { run, task, sessionName, cwd, route };
       const executor = input.executorFactory(factoryInput);
-      const rawOutput = await executor({ prompt, run, task, sessionName, route });
-      const { output, decision } = await applyStopHooks({
-        hooks: hooksForTask(input.stopHooks, input.stopHooksByRole, task),
-        run,
-        task,
-        sessionName,
-        prompt,
-        output: rawOutput,
-      });
-      output.checks = [...(startResult.checks ?? []), ...(output.checks ?? [])];
-      output.artifacts = [...(startResult.artifacts ?? []), ...(output.artifacts ?? [])];
-      const attemptId = input.harness.recordAttempt({
+      const attemptId = input.harness.startAttempt({
         taskId: task.id,
         input: { prompt, sessionName, route, model: route.model, ...(input.attemptInput?.(factoryInput) ?? {}) },
-        output,
       });
+      let rawOutput: AttemptOutput;
+      try {
+        rawOutput = await executor({ prompt, run, task, sessionName, route, attemptId });
+      } catch (error) {
+        rawOutput = executorErrorOutput(error);
+      }
+      let decision: "continue" | "retry" | "exit";
+      let output: AttemptOutput;
+      try {
+        const stopResult = await applyStopHooks({
+          hooks: hooksForTask(input.stopHooks, input.stopHooksByRole, task),
+          run,
+          task,
+          sessionName,
+          prompt,
+          output: rawOutput,
+        });
+        output = stopResult.output;
+        decision = stopResult.decision;
+      } catch (error) {
+        output = stopHookErrorOutput(rawOutput, error);
+        decision = "exit";
+      }
+      output.checks = [...(startResult.checks ?? []), ...(output.checks ?? [])];
+      output.artifacts = [...(startResult.artifacts ?? []), ...(output.artifacts ?? [])];
+      input.harness.finishAttempt({ attemptId, output });
       applyPostAttemptRunEffects(input.harness, input.runId, task, output);
       if (decision === "retry") {
         input.harness.retryTask({ taskId: task.id });
@@ -169,6 +197,29 @@ export async function applyStartHooks(input: {
 
 function defaultSessionName(taskId: string) {
   return `task-${taskId}`;
+}
+
+function executorErrorOutput(error: unknown): AttemptOutput {
+  return {
+    status: "blocked",
+    summary: "executor threw before producing output",
+    changedFiles: [],
+    checks: [{ name: "executor", status: "failed" }],
+    artifacts: [],
+    problems: [error instanceof Error ? error.message : String(error)],
+  };
+}
+
+function stopHookErrorOutput(rawOutput: AttemptOutput, error: unknown): AttemptOutput {
+  const message = error instanceof Error ? error.message : String(error);
+  const rawSummary = typeof rawOutput.summary === "string" && rawOutput.summary.length > 0 ? rawOutput.summary : "executor output";
+  return {
+    ...rawOutput,
+    status: "blocked",
+    summary: `stop hook failed after ${rawSummary}`,
+    checks: [...(rawOutput.checks ?? []), { name: "stop hook", status: "failed" }],
+    problems: [...(rawOutput.problems ?? []), `stop hook threw: ${message}`],
+  };
 }
 
 function latestDependencyAttempts(harness: Pick<Harness, "listLatestAttemptsForTasks">, task: Pick<Task, "dependsOn">) {
