@@ -905,6 +905,129 @@ h1 {
   line-height: 1.45;
   overflow-wrap: anywhere;
 }
+.of-node-meta-summary,
+.of-node-meta-latest {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.of-node-selected-marker {
+  min-height: 14px;
+  display: inline-flex;
+  align-items: center;
+  align-self: start;
+  padding: 2px 6px;
+  border: 1px solid #18181b;
+  border-radius: 999px;
+  background: #ffffff;
+  color: #18181b;
+  font-family: var(--mono);
+  font-size: 9px;
+  font-weight: 760;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.of-node-selected-marker:empty {
+  display: none;
+}
+.of-node-task-id-sr {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  border: 0;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+}
+.of-node {
+  outline: 2px solid transparent;
+  outline-offset: 2px;
+  cursor: pointer;
+}
+.of-node:focus-visible {
+  outline: 2px solid #18181b;
+  outline-offset: 2px;
+}
+.of-node.is-selected {
+  border-color: #18181b;
+  box-shadow: 0 0 0 2px #18181b, 0 10px 26px rgba(0, 0, 0, 0.12);
+}
+.of-node.is-selected .of-node-selected-marker {
+  background: #18181b;
+  color: #ffffff;
+}
+.canvas-fallback-node {
+  cursor: pointer;
+  outline: 2px solid transparent;
+  outline-offset: 2px;
+}
+.canvas-fallback-node:focus-visible {
+  outline: 2px solid #18181b;
+  outline-offset: 2px;
+}
+.canvas-fallback-node.is-selected {
+  border-color: #18181b;
+  box-shadow: 0 0 0 2px #18181b;
+}
+.canvas-fallback-selected-marker {
+  margin-left: auto;
+  padding: 2px 6px;
+  border: 1px solid #18181b;
+  border-radius: 999px;
+  color: #18181b;
+  font-family: var(--mono);
+  font-size: 9px;
+  font-weight: 760;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.canvas-fallback-selected-marker:empty {
+  display: none;
+}
+.canvas-fallback-node.is-selected .canvas-fallback-selected-marker {
+  background: #18181b;
+  color: #ffffff;
+}
+.workspace-flow.is-canvas-dark .of-node:focus-visible,
+.workspace-flow.canvas-workspace.is-canvas-dark .of-node:focus-visible {
+  outline-color: #f4f4f5;
+}
+.workspace-flow.is-canvas-dark .of-node.is-selected,
+.workspace-flow.canvas-workspace.is-canvas-dark .of-node.is-selected {
+  border-color: #f4f4f5;
+  box-shadow: 0 0 0 2px #f4f4f5, 0 10px 26px rgba(0, 0, 0, 0.55);
+}
+.workspace-flow.is-canvas-dark .of-node.is-selected .of-node-selected-marker,
+.workspace-flow.canvas-workspace.is-canvas-dark .of-node.is-selected .of-node-selected-marker {
+  background: #f4f4f5;
+  color: #09090b;
+}
+.workspace-flow.is-canvas-dark .of-node-selected-marker,
+.workspace-flow.canvas-workspace.is-canvas-dark .of-node-selected-marker {
+  border-color: #f4f4f5;
+  background: #0f0f0f;
+  color: #f4f4f5;
+}
+.workspace-flow.is-canvas-dark .canvas-fallback-node:focus-visible,
+.workspace-flow.canvas-workspace.is-canvas-dark .canvas-fallback-node:focus-visible {
+  outline-color: #f4f4f5;
+}
+.workspace-flow.is-canvas-dark .canvas-fallback-node.is-selected,
+.workspace-flow.canvas-workspace.is-canvas-dark .canvas-fallback-node.is-selected {
+  border-color: #f4f4f5;
+  box-shadow: 0 0 0 2px #f4f4f5;
+}
+.workspace-flow.is-canvas-dark .canvas-fallback-selected-marker,
+.workspace-flow.canvas-workspace.is-canvas-dark .canvas-fallback-selected-marker {
+  border-color: #f4f4f5;
+  color: #f4f4f5;
+}
+.workspace-flow.is-canvas-dark .canvas-fallback-node.is-selected .canvas-fallback-selected-marker,
+.workspace-flow.canvas-workspace.is-canvas-dark .canvas-fallback-node.is-selected .canvas-fallback-selected-marker {
+  background: #f4f4f5;
+  color: #09090b;
+}
 .of-handle {
   width: 8px;
   height: 8px;

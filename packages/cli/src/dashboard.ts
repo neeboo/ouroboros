@@ -1263,12 +1263,13 @@ export function dashboardHtml(input: { runId: string }) {
           workspaceMode: isWorkspaceMode(parsed.workspaceMode) ? parsed.workspaceMode : null,
           workspaceTitleExpanded: parsed.workspaceTitleExpanded === true,
           selectedChangedFilePath: typeof parsed.selectedChangedFilePath === "string" ? parsed.selectedChangedFilePath : null,
+          selectedTaskId: typeof parsed.selectedTaskId === "string" ? parsed.selectedTaskId : null,
           secondaryEvidenceOpen: parsed.secondaryEvidenceOpen === true,
           designDetailsOpen: parsed.designDetailsOpen === true,
           flowScroll: parsed.flowScroll && typeof parsed.flowScroll === "object" ? parsed.flowScroll : null,
         };
       } catch {
-        return { selectedGoalId: null, workspaceMode: null, workspaceTitleExpanded: false, selectedChangedFilePath: null, secondaryEvidenceOpen: false, designDetailsOpen: false, flowScroll: null };
+        return { selectedGoalId: null, workspaceMode: null, workspaceTitleExpanded: false, selectedChangedFilePath: null, selectedTaskId: null, secondaryEvidenceOpen: false, designDetailsOpen: false, flowScroll: null };
       }
     };
     const writeDashboardState = (state) => {
@@ -1278,6 +1279,7 @@ export function dashboardHtml(input: { runId: string }) {
           workspaceMode: isWorkspaceMode(state.workspaceMode) ? state.workspaceMode : "canvas",
           workspaceTitleExpanded: state.workspaceTitleExpanded === true,
           selectedChangedFilePath: typeof state.selectedChangedFilePath === "string" ? state.selectedChangedFilePath : null,
+          selectedTaskId: typeof state.selectedTaskId === "string" ? state.selectedTaskId : null,
           secondaryEvidenceOpen: state.secondaryEvidenceOpen === true,
           designDetailsOpen: state.designDetailsOpen === true,
           flowScroll: state.flowScroll && typeof state.flowScroll === "object" ? state.flowScroll : null,
@@ -1291,6 +1293,7 @@ export function dashboardHtml(input: { runId: string }) {
     let workspaceTitleExpanded = restoredDashboardState.workspaceTitleExpanded === true;
     let latestOverview = null;
     let selectedChangedFilePath = restoredDashboardState.selectedChangedFilePath || null;
+    let selectedTaskId = restoredDashboardState.selectedTaskId || null;
     let secondaryEvidenceOpen = restoredDashboardState.secondaryEvidenceOpen === true;
     let designDetailsOpen = restoredDashboardState.designDetailsOpen === true;
     let latestDesignStatus = null;
@@ -1954,6 +1957,58 @@ export function dashboardHtml(input: { runId: string }) {
     };
     const graphColumn = (role) => role === "planner" || role === "goal-review" ? "planner" : role === "verifier" ? "verifier" : "worker";
     const graphColumnX = (column) => column === "planner" ? 0 : column === "verifier" ? 720 : 360;
+    const fallbackSelectedTaskIdFor = (graph, group) => {
+      if (!graph || !Array.isArray(graph.nodes) || graph.nodes.length === 0) return null;
+      const taskIds = graph.nodes.map((node) => node.id);
+      if (selectedTaskId && taskIds.includes(selectedTaskId)) return selectedTaskId;
+      const orderedStatuses = ["running", "blocked", "todo", "done"];
+      const tasksById = new Map((group?.tasks || latestOverview?.tasks || []).map((task) => [task.id, task]));
+      for (const status of orderedStatuses) {
+        const match = taskIds.find((id) => tasksById.get(id)?.status === status);
+        if (match) return match;
+      }
+      return taskIds[0];
+    };
+    const resolveFallbackSelectedTaskId = (graph, group) => {
+      const fallback = fallbackSelectedTaskIdFor(graph, group);
+      return fallback || null;
+    };
+    const selectCanvasTask = (taskId) => {
+      const next = typeof taskId === "string" && taskId ? taskId : null;
+      if (next === selectedTaskId) return;
+      selectedTaskId = next;
+      persistDashboardState();
+      const group = selectedGroupRef;
+      const graph = group ? canvasGraphFor(latestOverview || { tasks: group.tasks, sessions: group.sessions, lessons: group.lessons }, group) : null;
+      const fallback = fallbackSelectedTaskIdFor(graph, group);
+      const root = document.getElementById("dashboard-canvas-root");
+      if (root) {
+        const effective = next && (graph?.nodes.some((node) => node.id === next) ? next : fallback);
+        root.setAttribute("data-canvas-selected-task-id", effective || "");
+      }
+      const fallbackList = document.getElementById("dashboard-canvas-fallback-list");
+      if (fallbackList) {
+        for (const item of Array.from(fallbackList.querySelectorAll("[data-canvas-task-id]"))) {
+          const itemId = item.getAttribute("data-canvas-task-id");
+          const isSelected = Boolean(next && itemId === next);
+          item.classList.toggle("is-selected", isSelected);
+          item.setAttribute("aria-pressed", isSelected ? "true" : "false");
+          item.setAttribute("data-selected-task", isSelected ? "true" : "false");
+          const marker = item.querySelector(".canvas-fallback-selected-marker");
+          if (marker) marker.textContent = isSelected ? "Selected" : "";
+        }
+      }
+      if (window.OuroborosCanvas && root && latestOverview && group) {
+        const graphForRender = graph || canvasGraphFor(latestOverview, group);
+        const effective = next && graphForRender.nodes.some((node) => node.id === next) ? next : fallback;
+        window.OuroborosCanvas.render(root, {
+          graph: graphForRender,
+          selectedTaskId: effective,
+          onSelectTask: selectCanvasTask,
+        });
+      }
+      patchInspectorPanel(dashboardInspectorTimelineHtml(group) + dashboardInspectorComposerHtml(), dashboardInspectorDesignHtml() + dashboardInspectorSecondaryHtml(latestOverview, group));
+    };
     const canvasGraphFor = (overview, group) => {
       if (!group) return { nodes: [], edges: [] };
       const groupTaskIds = relatedTaskIdsFor(overview, group.id);
@@ -2047,19 +2102,27 @@ export function dashboardHtml(input: { runId: string }) {
     const renderCanvasWorkspace = (group) => {
       if (!group) return '<div class="canvas-inner"><div class="empty">No goal selected</div></div>';
       const graph = canvasGraphFor(latestOverview || { tasks: group.tasks, sessions: group.sessions, lessons: group.lessons }, group);
+      const fallbackSelectedTaskId = resolveFallbackSelectedTaskId(graph, group);
+      const effectiveSelectedTaskId = selectedTaskId && graph.nodes.some((node) => node.id === selectedTaskId)
+        ? selectedTaskId
+        : fallbackSelectedTaskId;
       return '<div class="canvas-inner" data-canvas-goal-id="' + escapeHtml(group.id) + '">' +
-        '<div id="dashboard-canvas-root" class="canvas-shell" data-canvas-graph="' + escapeHtml(JSON.stringify(graph)) + '" data-canvas-task-count="' + escapeHtml(graph.nodes.length) + '" data-canvas-edge-count="' + escapeHtml(graph.edges.length) + '">' +
+        '<div id="dashboard-canvas-root" class="canvas-shell" data-canvas-graph="' + escapeHtml(JSON.stringify(graph)) + '" data-canvas-task-count="' + escapeHtml(graph.nodes.length) + '" data-canvas-edge-count="' + escapeHtml(graph.edges.length) + '" data-canvas-selected-task-id="' + escapeHtml(effectiveSelectedTaskId || "") + '" data-canvas-fallback-task-id="' + escapeHtml(fallbackSelectedTaskId || "") + '">' +
         '<div class="canvas-fallback" aria-label="Canvas task map">' +
         '<div class="canvas-fallback-head"><div class="canvas-fallback-title">Task map</div><div class="canvas-fallback-meta">' + escapeHtml(graph.nodes.length) + ' tasks | ' + escapeHtml(graph.edges.length) + ' links</div></div>' +
-        (graph.nodes.length ? '<ul class="canvas-fallback-list">' + graph.nodes.map((node) => {
+        (graph.nodes.length ? '<ul class="canvas-fallback-list" id="dashboard-canvas-fallback-list">' + graph.nodes.map((node) => {
           const task = node.data;
           const latest = task.latestSession;
           const latestMeta = latest ? [latest.status, latest.sessionName || latest.codexSessionId || latest.attemptId].filter(Boolean).join(" | ") : "no session";
           const model = latest && latest.model ? latest.model : null;
-          return '<li class="canvas-fallback-node" data-canvas-task-id="' + escapeHtml(task.taskId) + '" data-canvas-task-status="' + escapeHtml(task.status) + '" data-canvas-task-session-count="' + escapeHtml(task.sessionCount) + '" data-canvas-task-evidence-count="' + escapeHtml(task.evidenceCount) + '" data-canvas-task-todo-count="' + escapeHtml(task.todoCount) + '" data-canvas-task-diff-count="' + escapeHtml(task.diffCount) + '">' +
-            '<div class="canvas-fallback-node-head"><span class="canvas-fallback-role">' + escapeHtml(task.role) + '</span><span class="status-text ' + escapeHtml(task.status) + '">' + escapeHtml(task.status) + '</span></div>' +
+          const isSelected = Boolean(effectiveSelectedTaskId && task.taskId === effectiveSelectedTaskId);
+          const sessionLabel = task.sessionCount === 1 ? "1 session" : task.sessionCount + " sessions";
+          const evidenceLabel = task.evidenceCount === 1 ? "1 evidence" : task.evidenceCount + " evidence";
+          const todoLabel = task.todoCount === 1 ? "1 todo" : task.todoCount + " todos";
+          return '<li class="canvas-fallback-node' + (isSelected ? " is-selected" : "") + '" data-canvas-task-id="' + escapeHtml(task.taskId) + '" data-canvas-task-status="' + escapeHtml(task.status) + '" data-canvas-task-session-count="' + escapeHtml(task.sessionCount) + '" data-canvas-task-evidence-count="' + escapeHtml(task.evidenceCount) + '" data-canvas-task-todo-count="' + escapeHtml(task.todoCount) + '" data-canvas-task-diff-count="' + escapeHtml(task.diffCount) + '" data-selected-task="' + (isSelected ? "true" : "false") + '" aria-pressed="' + (isSelected ? "true" : "false") + '" tabindex="0" role="button" aria-label="Task ' + escapeHtml(task.role) + ' ' + escapeHtml(task.status) + ': ' + escapeHtml(task.goal) + (isSelected ? ". Selected." : ". Press Enter or Space to select.") + '">' +
+            '<div class="canvas-fallback-node-head"><span class="canvas-fallback-role">' + escapeHtml(task.role) + '</span><span class="status-text ' + escapeHtml(task.status) + '">' + escapeHtml(task.status) + '</span><span class="canvas-fallback-selected-marker" aria-hidden="true">' + (isSelected ? "Selected" : "") + '</span></div>' +
             '<div class="canvas-fallback-node-goal">' + escapeHtml(task.goal) + '</div>' +
-            '<div class="canvas-fallback-node-meta">task ' + escapeHtml(task.taskId) + ' | sessions ' + escapeHtml(task.sessionCount) + ' | evidence ' + escapeHtml(task.evidenceCount) + ' | todos ' + escapeHtml(task.todoCount) + ' | diffs ' + escapeHtml(task.diffCount) + ' | ' + escapeHtml(latestMeta) + (model ? ' | model ' + escapeHtml(model.model || "") + ' | source ' + escapeHtml(model.source || "") : '') + '</div>' +
+            '<div class="canvas-fallback-node-meta">' + escapeHtml(sessionLabel) + ' | ' + escapeHtml(evidenceLabel) + ' | ' + escapeHtml(todoLabel) + ' | ' + escapeHtml(latestMeta) + (model ? ' | model ' + escapeHtml(model.model || "") + ' | source ' + escapeHtml(model.source || "") : '') + '</div>' +
           '</li>';
         }).join("") + '</ul>' : '<div class="empty">No tasks available for this goal.</div>') +
         (graph.edges.length ? '<div class="canvas-fallback-links"><div class="canvas-fallback-links-label">Links</div><div class="canvas-fallback-links-meta">' + graph.edges.slice(0, 12).map((edge) => '<span data-canvas-edge="' + escapeHtml(edge.id) + '">' + escapeHtml(edge.label) + ': ' + escapeHtml(edge.source) + ' -> ' + escapeHtml(edge.target) + '</span>').join("") + '</div></div>' : '') +
@@ -2083,7 +2146,20 @@ export function dashboardHtml(input: { runId: string }) {
       const graphJson = mount.getAttribute("data-canvas-graph") || '{"nodes":[],"edges":[]}';
       const mountGraph = () => {
         try {
-          window.OuroborosCanvas?.render(mount, JSON.parse(graphJson));
+          const graph = JSON.parse(graphJson);
+          const selectedFromAttr = mount.getAttribute("data-canvas-selected-task-id") || "";
+          const initialSelected = selectedTaskId && graph.nodes.some((node) => node.id === selectedTaskId)
+            ? selectedTaskId
+            : (selectedFromAttr && graph.nodes.some((node) => node.id === selectedFromAttr) ? selectedFromAttr : null);
+          if (initialSelected && initialSelected !== selectedTaskId) {
+            selectedTaskId = initialSelected;
+            persistDashboardState();
+          }
+          window.OuroborosCanvas?.render(mount, {
+            graph,
+            selectedTaskId: initialSelected,
+            onSelectTask: selectCanvasTask,
+          });
         } catch (error) {
           mount.innerHTML = '<div class="empty">Canvas failed to render: ' + escapeHtml(error && error.message ? error.message : String(error)) + '</div>';
         }
@@ -2708,12 +2784,12 @@ export function dashboardHtml(input: { runId: string }) {
       };
     };
     const persistDashboardState = () => {
-      writeDashboardState({ selectedGoalId, workspaceMode, workspaceTitleExpanded, selectedChangedFilePath, secondaryEvidenceOpen, designDetailsOpen, flowScroll: captureFlowScrollState() });
+      writeDashboardState({ selectedGoalId, workspaceMode, workspaceTitleExpanded, selectedChangedFilePath, selectedTaskId, secondaryEvidenceOpen, designDetailsOpen, flowScroll: captureFlowScrollState() });
     };
     const persistFlowScrollState = () => {
       const flowScroll = captureFlowScrollState();
       if (!flowScroll) return;
-      writeDashboardState({ selectedGoalId, workspaceMode, workspaceTitleExpanded, selectedChangedFilePath, secondaryEvidenceOpen, designDetailsOpen, flowScroll });
+      writeDashboardState({ selectedGoalId, workspaceMode, workspaceTitleExpanded, selectedChangedFilePath, selectedTaskId, secondaryEvidenceOpen, designDetailsOpen, flowScroll });
     };
     const restoreFlowScrollState = (scrollState) => {
       if (workspaceMode !== "flow" || !scrollState) return;
@@ -2866,6 +2942,11 @@ export function dashboardHtml(input: { runId: string }) {
         persistDashboardState();
       }
       const selectedGroup = goalGroups.find((group) => group.id === selectedGoalId);
+      const allTaskIds = new Set((overview.tasks || []).map((task) => task.id));
+      if (selectedTaskId && !allTaskIds.has(selectedTaskId)) {
+        selectedTaskId = null;
+        persistDashboardState();
+      }
       selectedGroupRef = selectedGroup || null;
       const projectName = overview.project ? overview.project.name : "Project Workspace";
       const projectRoot = overview.project ? overview.project.rootPath : "";
@@ -2994,6 +3075,7 @@ export function dashboardHtml(input: { runId: string }) {
       workspaceMode = restored.workspaceMode || "canvas";
       workspaceTitleExpanded = restored.workspaceTitleExpanded === true;
       selectedChangedFilePath = restored.selectedChangedFilePath || null;
+      selectedTaskId = restored.selectedTaskId || null;
       restoredFlowScrollState = restored.flowScroll || null;
       diffByPath.clear();
       latestDesignStatus = null;
@@ -3044,6 +3126,11 @@ export function dashboardHtml(input: { runId: string }) {
         persistDashboardState();
         if (latestOverview) render(latestOverview);
         fetchDiffForChangedFile(selectedChangedFilePath);
+        return;
+      }
+      const canvasFallbackNode = event.target.closest(".canvas-fallback-list .canvas-fallback-node[data-canvas-task-id]");
+      if (canvasFallbackNode) {
+        selectCanvasTask(canvasFallbackNode.getAttribute("data-canvas-task-id"));
         return;
       }
       const attachButton = event.target.closest("[data-attach-files]");
@@ -3203,6 +3290,15 @@ export function dashboardHtml(input: { runId: string }) {
       if (event.key !== "Enter" || (!event.metaKey && !event.ctrlKey)) return;
       event.preventDefault();
       document.getElementById("intake-composer").requestSubmit(document.querySelector("[data-send-intake]"));
+    });
+    document.addEventListener("keydown", (event) => {
+      const target = event.target;
+      if (!target || !target.closest) return;
+      const fallbackNode = target.closest(".canvas-fallback-list .canvas-fallback-node[data-canvas-task-id]");
+      if (!fallbackNode) return;
+      if (event.key !== "Enter" && event.key !== " " && event.key !== "Spacebar") return;
+      event.preventDefault();
+      selectCanvasTask(fallbackNode.getAttribute("data-canvas-task-id"));
     });
     document.getElementById("intake-composer").addEventListener("submit", (event) => {
       event.preventDefault();
