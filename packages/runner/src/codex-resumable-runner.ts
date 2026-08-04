@@ -1141,10 +1141,13 @@ function threadIdForAttempt(attemptId: string) {
 }
 
 function runnableRuns(harness: Harness, input: { limit: number; rootRunId?: string | null }) {
-  const runs = harness.listRuns({ statuses: ["todo", "running"], limit: 500 });
-  const scoped = input.rootRunId ? runsInScope(runs, input.rootRunId) : runs;
+  const allRuns = harness.listRuns({ limit: 1000 });
+  const scoped = input.rootRunId ? runsInScope(allRuns, input.rootRunId) : allRuns;
   const runnable = [];
   for (const run of scoped) {
+    if (run.status !== "todo" && run.status !== "running") {
+      continue;
+    }
     const diagnosis = diagnoseRunOverview(harness.getRunOverview({ runId: run.id, eventLimit: 0 }));
     if (diagnosis.state === "paused" || diagnosis.state === "blocked" || diagnosis.state === "complete") {
       continue;

@@ -1460,6 +1460,62 @@ describe("runner", () => {
     );
   });
 
+  test("supervisor reaches runnable descendants through terminal ancestors", async () => {
+    const rootRunId = harness.createRun({ goal: "Durable supervisor root" });
+    harness.updateRunStatus({ runId: rootRunId, status: "blocked" });
+    const assessmentRunId = harness.createRun({
+      goal: "Completed assessment",
+      context: { parentRunId: rootRunId },
+    });
+    harness.updateRunStatus({ runId: assessmentRunId, status: "done" });
+    const deliveryRunId = harness.createRun({
+      goal: "Recoverable delivery",
+      context: { parentRunId: assessmentRunId },
+    });
+    const deliveryTaskId = harness.createTask({
+      runId: deliveryRunId,
+      role: "worker",
+      goal: "Continue delivery after the assessment completes",
+      prompt: "Continue.",
+    });
+
+    const result = await superviseCodexRuns({
+      harness,
+      cwd: dir,
+      rootRunId,
+      runConcurrency: 1,
+      taskConcurrency: 1,
+      maxCycles: 1,
+      maxRounds: 1,
+      maxTries: 3,
+      intervalMs: 1,
+      clientFactory: () => ({
+        start: async () => ({
+          status: "done" as const,
+          sessionId: "session_descendant",
+          outputPath: join(dir, "descendant-output.json"),
+          stdout: "",
+          stderr: "",
+          events: [],
+          output: {
+            status: "done" as const,
+            summary: "Recovered descendant work",
+            changedFiles: [],
+            checks: [],
+            artifacts: [],
+            problems: [],
+          },
+        }),
+        resume: async () => {
+          throw new Error("resume should not be called");
+        },
+      }),
+    });
+
+    expect(result.cycles[0].runs.map((run) => run.runId)).toEqual([deliveryRunId]);
+    expect(harness.getTask(deliveryTaskId)?.status).toBe("done");
+  });
+
   test("resumable loop start clears durable human pause", async () => {
     const runId = harness.createRun({
       goal: "Start paused run explicitly",
