@@ -52,7 +52,7 @@ Ouroboros is early, but it already has the core loop needed for self-iteration:
 - acpx/Codex executor foundation
 - configurable ACP/acpx agent backend selection per role or task
 - git worktree start hook
-- dashboard with task graph, flow view, sessions, todos, changed files, and diff inspection
+- dashboard with task canvas, sessions, todos, changed files, and diff inspection
 - Linear mapping skeleton
 - self-iteration command
 

@@ -324,12 +324,17 @@ describe("dashboard", () => {
     expect(html).toContain('data-history-source="GET /api/runs"');
   });
 
-  test("renders Codex-style intake composer and goal navigation", () => {
+  test("renders Codex-style intake composer and one run navigator", () => {
     const html = dashboardHtml({ runId: "run_123" });
 
-    expect(html).toContain("Active Goals");
-    expect(html).toContain('id="active-goal-list"');
-    expect(html).toContain('id="history-goal-list"');
+    expect(html).not.toContain("Active Goals");
+    expect(html).not.toContain('id="active-goal-list"');
+    expect(html).not.toContain('id="history-goal-list"');
+    expect(html).not.toContain('aria-label="Goals and run history"');
+    expect(html).toContain('aria-label="Run navigator"');
+    expect(html).toContain('data-run-navigator');
+    expect(html).toContain('id="active-run-list"');
+    expect(html).toContain('id="recent-runs-list"');
     expect(html).toContain("todo");
     expect(html).toContain("running");
     expect(html).toContain("/prompt");
@@ -343,7 +348,6 @@ describe("dashboard", () => {
     expect(html).toContain("ui-button");
     expect(html).toContain("ui-panel");
     expect(html).toContain("ui-scroll-area");
-    expect(html).toContain("ui-tabs");
     expect(html).toContain("ui-separator");
     expect(html).toContain("attachmentMetaForFile");
     expect(html).toContain("readAttachment");
@@ -353,7 +357,6 @@ describe("dashboard", () => {
     expect(html).toContain("event.ctrlKey");
     expect(html).toContain('requestSubmit(document.querySelector("[data-send-intake]"))');
     expect(html).toContain('/api/runs/" + encodeURIComponent(runId) + "/intake"');
-    expect(html).toContain("No active tasks. Describe the next goal in the composer.");
     expect(html).not.toContain('id="goal-composer"');
     expect(html).not.toContain("Interrupt + replan");
     expect(html).not.toContain('data-goal-action="add"');
@@ -442,7 +445,7 @@ describe("dashboard", () => {
     expect(html).toContain("effectiveTaskStatus");
     expect(html).toContain("repaired block");
     expect(html).toContain("blocked verifier task was repaired and is now historical evidence");
-    expect(html).toContain('task.status === "blocked" && !group.resolvedBlockedTaskIds.has(task.id)');
+    expect(html).toContain('task.status === "blocked" && !resolvedBlockedTaskIds.has(task.id)');
   });
 
   test("does not resolve a blocked task when only the repair worker is done", () => {
@@ -572,11 +575,14 @@ describe("dashboard", () => {
     expect(html).toContain("delegates to the harness-owned acceptGuardrailProposal action");
   });
 
-  test("renders Canvas and Flow workspace modes for the selected task graph", () => {
+  test("renders the canvas workspace as the sole task graph surface", () => {
     const html = dashboardHtml({ runId: "run_123" });
 
-    expect(html).toContain('data-workspace-mode="canvas"');
-    expect(html).toContain('data-workspace-mode="flow"');
+    expect(html).not.toContain('data-workspace-mode="canvas"');
+    expect(html).not.toContain('data-workspace-mode="flow"');
+    expect(html).not.toContain("renderFlowWorkspace");
+    expect(html).not.toContain("flow-moved-card");
+    expect(html).not.toContain("flow-inner-moved");
     expect(html).toContain('id="dashboard-canvas-root"');
     expect(html).toContain('class="canvas-shell"');
     expect(html).toContain("canvas-fallback");
@@ -586,9 +592,15 @@ describe("dashboard", () => {
     expect(html).toContain("/assets/dashboard-canvas.js");
     expect(html).toContain("/assets/dashboard-canvas.css");
     expect(html).toContain("mountReactFlowCanvas");
-    expect(html).toContain("workspaceMode");
     expect(html).toContain("renderCanvasWorkspace");
-    expect(html).toContain("renderFlowWorkspace");
+    expect(html).toContain("dashboardWorkspaceHtml");
+    expect(html).toContain("dashboardOrientationHtml");
+    expect(html).toContain("data-orientation-strip");
+    expect(html).toContain("orientation-strip");
+    expect(html).toContain("Active goal");
+    expect(html).toContain("Run state");
+    expect(html).toContain("Attention");
+    expect(html).toContain("Runner");
     expect(html).toContain("data-canvas-task-id");
     expect(html).toContain("data-canvas-task-session-count");
     expect(html).toContain("data-canvas-task-evidence-count");
@@ -604,7 +616,6 @@ describe("dashboard", () => {
     expect(html).toContain("task.cycleId");
     expect(html).toContain("transcript");
     expect(html).toContain("stream-output");
-    expect(html).toContain("Conversation timeline");
     expect(html).toContain("renderConversationTimeline");
     expect(html).toContain('data-inspector-section="conversation"');
     expect(html).toContain('id="conversation-timeline"');
@@ -619,9 +630,8 @@ describe("dashboard", () => {
     expect(html).toContain('data-inspector-section="conversation"');
     expect(html).toContain('id="conversation-timeline"');
     expect(html).toContain('data-conversation-timeline');
-    expect(html).toContain("dashboardInspectorTimelineHtml(selectedGroup) + dashboardInspectorComposerHtml()");
+    expect(html).toContain("dashboardInspectorHtml(overview, selectedGroup) + dashboardInspectorTimelineHtml(selectedGroup) + dashboardInspectorComposerHtml()");
     expect(html).toContain("dashboardInspectorSecondaryHtml(overview, selectedGroup)");
-    expect(html).toContain("dashboardInspectorHtml(overview, group) +");
     expect(html).toContain("dashboardRunStatusHtml(overview) +");
     expect(html).toContain("dashboardInspectorEvidenceHtml(overview, group)");
     expect(html).toContain('id="flow-transcript"');
@@ -642,27 +652,23 @@ describe("dashboard", () => {
     expect(html).toContain('data-inspector-composer-send');
   });
 
-  test("keeps the center workspace focused on the canvas instead of the primary conversation transcript", () => {
+  test("keeps the center workspace focused on the canvas without a Flow placeholder", () => {
     const html = dashboardHtml({ runId: "run_123" });
 
-    expect(html).toContain("renderFlowWorkspace");
-    expect(html).toContain("flow-moved-card");
-    expect(html).toContain("Conversation moved to the right panel");
-    expect(html).toContain("flow-inner-moved");
+    expect(html).not.toContain("renderFlowWorkspace");
+    expect(html).not.toContain("flow-moved-card");
+    expect(html).not.toContain("Conversation moved to the right panel");
+    expect(html).not.toContain("flow-inner-moved");
 
     const dashboardInspectorTimelineStart = html.indexOf("dashboardInspectorTimelineHtml");
     expect(dashboardInspectorTimelineStart).toBeGreaterThan(-1);
     const renderConversationTimelineStart = html.indexOf("renderConversationTimeline");
     expect(renderConversationTimelineStart).toBeGreaterThan(-1);
 
-    const renderFlowWorkspaceMatch = html.match(/const renderFlowWorkspace = \(group\) => \{([\s\S]*?)\n    \};/);
-    expect(renderFlowWorkspaceMatch).not.toBeNull();
-    const flowWorkspaceBody = renderFlowWorkspaceMatch ? renderFlowWorkspaceMatch[1] : "";
-    expect(flowWorkspaceBody).toContain("flow-moved-card");
-    expect(flowWorkspaceBody).not.toContain("renderConversationTimeline(group)");
+    expect(html).not.toMatch(/const renderFlowWorkspace = \(group\) => \{/);
   });
 
-  test("persists selected goal workspace mode and title expansion in run-scoped browser storage", () => {
+  test("persists selected goal and title expansion in run-scoped browser storage", () => {
     const html = dashboardHtml({ runId: "run_123" });
 
     expect(html).toContain('let dashboardStorageKey = "ouroboros:dashboard:" + runId;');
@@ -670,32 +676,32 @@ describe("dashboard", () => {
     expect(html).toContain("writeDashboardState");
     expect(html).toContain("const restoredDashboardState = readDashboardState();");
     expect(html).toContain("let selectedGoalId = restoredDashboardState.selectedGoalId || null;");
-    expect(html).toContain('let workspaceMode = restoredDashboardState.workspaceMode || "canvas";');
     expect(html).toContain("let workspaceTitleExpanded = restoredDashboardState.workspaceTitleExpanded === true;");
     expect(html).toContain("workspaceTitleExpanded: parsed.workspaceTitleExpanded === true");
     expect(html).toContain("workspaceTitleExpanded: state.workspaceTitleExpanded === true");
     expect(html).toContain("persistDashboardState");
     expect(html).toContain("selectedGoalId = payload.runId || payload.taskId || selectedGoalId;");
     expect(html).toContain("workspaceTitleExpanded = false;");
-    expect(html).toContain('setTextIfChanged("workspace-kicker", "Conversation timeline");');
+    expect(html).not.toContain('let workspaceMode');
+    expect(html).not.toContain('restoredDashboardState.workspaceMode');
+    expect(html).not.toContain('setTextIfChanged("workspace-kicker", "Conversation timeline");');
+    expect(html).toContain('setTextIfChanged("workspace-kicker", "Task canvas");');
     expect(html).not.toContain('localStorage.setItem("selectedGoalId"');
     expect(html).not.toContain('localStorage.getItem("selectedGoalId"');
   });
 
-  test("defaults workspaceMode to canvas for fresh loads without restored state", () => {
+  test("always renders the canvas workspace without a workspace mode toggle", () => {
     const html = dashboardHtml({ runId: "run_123" });
 
-    expect(html).toContain('let workspaceMode = restoredDashboardState.workspaceMode || "canvas";');
-    expect(html).toContain('workspaceMode = restored.workspaceMode || "canvas";');
-    expect(html).toContain('workspaceMode = modeButton.getAttribute("data-workspace-mode") || "canvas";');
-    expect(html).toContain('workspaceMode: isWorkspaceMode(state.workspaceMode) ? state.workspaceMode : "canvas",');
-    expect(html).toContain('classList.toggle("canvas-workspace", workspaceMode === "canvas")');
-    expect(html).toContain('classList.toggle("is-canvas-dark", workspaceMode === "canvas")');
-    expect(html).not.toContain('restoredDashboardState.workspaceMode || "flow"');
-    expect(html).not.toContain('restored.workspaceMode || "flow"');
+    expect(html).not.toContain("let workspaceMode");
+    expect(html).not.toContain("workspaceMode =");
+    expect(html).not.toContain("data-workspace-mode");
+    expect(html).not.toContain("isWorkspaceMode");
+    expect(html).toContain('canvas-workspace');
+    expect(html).toContain('is-canvas-dark');
   });
 
-  test("renders an Excalidraw-like dark dotted-grid background scoped to the canvas workspace", () => {
+  test("renders an Excalidraw-like dark dotted-grid background for the canvas workspace", () => {
     const styles = dashboardCss();
 
     expect(styles).toContain(".workspace-flow.is-canvas-dark");
@@ -736,7 +742,7 @@ describe("dashboard", () => {
     expect(html).toContain("persistDashboardState();");
     expect(html).toContain("persistFlowScrollState");
     expect(html).toContain("restoredFlowScrollState = null;");
-    expect(html).toContain("writeDashboardState({ selectedGoalId, workspaceMode, workspaceTitleExpanded, selectedChangedFilePath, selectedTaskId, secondaryEvidenceOpen, designDetailsOpen, flowScroll: captureFlowScrollState() });");
+    expect(html).toContain("writeDashboardState({ selectedGoalId, workspaceTitleExpanded, selectedChangedFilePath, selectedTaskId, secondaryEvidenceOpen, designDetailsOpen, railExpanded, flowScroll: captureFlowScrollState() });");
     expect(html).toContain("scrollState.scrollHeight");
     expect(html).toContain("flowDelta");
     expect(html).toContain("Math.max(0, scrollState.scrollTop + flowDelta)");
@@ -746,12 +752,13 @@ describe("dashboard", () => {
     expect(html).not.toContain("ouroboros:dashboard:changedFile:");
   });
 
-  test("renders active run and database-backed history with semantic labels", () => {
+  test("renders one run navigator with active run and database-backed history", () => {
     const html = dashboardHtml({ runId: "run_123" });
 
     expect(html).toContain("Active run");
-    expect(html).toContain("Run history");
-    expect(html).toContain('aria-label="Goals and run history"');
+    expect(html).toContain("Run navigator");
+    expect(html).toContain('aria-label="Run navigator"');
+    expect(html).toContain('data-run-navigator');
     expect(html).toContain('data-sidebar-context');
     expect(html).toContain('data-history-run-group="active"');
     expect(html).toContain('data-history-run-group="recent"');
@@ -767,6 +774,9 @@ describe("dashboard", () => {
     expect(html).toContain("runHistoryRowTemplate.content.cloneNode(true)");
     expect(html).toContain("runs.map(renderReactRunHistoryRow).join(\"\")");
     expect(html).not.toContain("reactRunHistoryRow");
+    expect(html).not.toContain('aria-label="Goals and run history"');
+    expect(html).not.toContain('id="active-goal-list"');
+    expect(html).not.toContain('id="history-goal-list"');
   });
 
   test("renders run history rows through the React dashboard boundary", () => {
@@ -880,7 +890,7 @@ describe("dashboard", () => {
     expect(html).toContain('toggle.textContent = workspaceTitleExpanded ? "Collapse" : "Expand";');
     expect(html).toContain("workspaceTitleExpanded = !workspaceTitleExpanded;");
     expect(html).toContain("persistDashboardState();");
-    expect(html).toContain("selectedGoalId, workspaceMode, workspaceTitleExpanded");
+    expect(html).toContain("selectedGoalId, workspaceTitleExpanded");
   });
 
   test("provides a reusable long-text dashboard overflow fixture", () => {
@@ -1048,13 +1058,22 @@ describe("dashboard", () => {
     expect(styles).toContain(".app-shell[data-rail=\"collapsed\"] .sidebar-rail-icons");
     expect(styles).toContain(".app-shell[data-rail=\"collapsed\"] .task-sidebar");
     expect(html).toContain('class="app-shell"');
-    expect(html).toContain('data-rail="collapsed"');
+    expect(html).toContain('data-rail="expanded"');
     expect(html).toContain('data-rail-icons');
     expect(html).toContain('data-rail-action="brand"');
     expect(html).toContain('data-rail-action="status"');
     expect(html).toContain('data-rail-action="project"');
     expect(html).toContain('data-rail-action="history"');
     expect(html).toContain('data-rail-action="intake"');
+    expect(html).toContain('data-rail-toggle="collapse"');
+    expect(html).toContain('data-rail-toggle="expand"');
+    expect(html).toContain("syncRailState");
+    expect(html).toContain("setRailExpanded");
+    expect(html).toContain("railExpanded = restoredDashboardState.railExpanded !== false;");
+    expect(html).toContain("railExpanded: parsed.railExpanded === false ? false : true,");
+    expect(html).toContain("railExpanded: state.railExpanded === false ? false : true,");
+    expect(html).toContain("railExpanded, flowScroll: captureFlowScrollState()");
+    expect(html).toContain("railExpanded, flowScroll");
     expect(html).not.toContain("linear-gradient");
   });
 
@@ -4130,19 +4149,18 @@ describe("dashboard", () => {
     expect(html).toContain('data-inspector-section="changed-files"');
 
     // The runtime composes the secondary disclosure body from the existing render
-    // helpers so the verifier evidence contract is preserved even after the reshell.
+    // helpers so the verifier evidence contract is preserved even after the reshape.
     expect(html).toContain('id="workspace-flow"');
     expect(html).toContain("dashboardWorkspaceHtml(selectedGroup)");
-    expect(html).toContain("dashboardInspectorHtml(overview, group)");
+    expect(html).toContain("dashboardInspectorHtml(overview, selectedGroup)");
     expect(html).toContain("dashboardRunStatusHtml(overview)");
     expect(html).toContain("dashboardInspectorEvidenceHtml(overview, group)");
     expect(html).toContain("dashboardInspectorSecondaryHtml(overview, selectedGroup)");
-    expect(html).toContain("dashboardInspectorTimelineHtml(selectedGroup) + dashboardInspectorComposerHtml()");
-    expect(html).toContain("dashboardInspectorHtml(overview, group) +");
+    expect(html).toContain("dashboardInspectorHtml(overview, selectedGroup) + dashboardInspectorTimelineHtml(selectedGroup) + dashboardInspectorComposerHtml()");
     expect(html).toContain("dashboardRunStatusHtml(overview) +");
     expect(html).toContain("dashboardInspectorEvidenceHtml(overview, group)");
     expect(html).toContain("renderRunner(overview) + renderSupervisor(overview) + renderDiagnosis(overview) + renderGuardrailsSection(overview)");
-    expect(html).toContain("renderSubsessionThreadsSection(overview, group) + renderChangedFilesSection(group)");
+    expect(html).toContain("renderSubsessionThreadsSection(overview, scopedGroup) + renderChangedFilesSection(scopedGroup)");
 
     // The runner section explicitly flags queued work waiting for a runner so a verifier
     // can tell self-iteration is paused on the runner rather than on missing work.
@@ -4158,10 +4176,10 @@ describe("dashboard", () => {
   test("dashboard HTML keeps secondary evidence out of the primary chatbox children", () => {
     const html = dashboardHtml({ runId: "run_123" });
 
-    // The runtime call passes the conversation timeline plus composer as primary children
+    // The runtime call passes the task summary, conversation timeline, plus composer as primary children
     // of the inspector panel; the secondary evidence helpers are composed inside the
     // disclosure wrapper rather than appearing as direct inspector-panel children.
-    expect(html).toContain("patchInspectorPanel(dashboardInspectorTimelineHtml(selectedGroup) + dashboardInspectorComposerHtml(), dashboardInspectorDesignHtml() + dashboardInspectorSecondaryHtml(overview, selectedGroup))");
+    expect(html).toContain("patchInspectorPanel(dashboardInspectorHtml(overview, selectedGroup) + dashboardInspectorTimelineHtml(selectedGroup) + dashboardInspectorComposerHtml(), dashboardInspectorDesignHtml() + dashboardInspectorSecondaryHtml(overview, selectedGroup))");
     expect(html).not.toContain("patchInspectorPanel(dashboardInspectorTimelineHtml(selectedGroup) + dashboardInspectorHtml(overview, selectedGroup), dashboardRunStatusHtml(overview) + dashboardInspectorEvidenceHtml(overview, selectedGroup) + dashboardInspectorComposerHtml())");
 
     // The secondary helper renders a single disclosure section that owns the body markup.
@@ -4178,7 +4196,7 @@ describe("dashboard", () => {
     expect(html).toContain("'<details' + (secondaryEvidenceOpen ? ' open' : '') + '>'");
     expect(html).toContain("secondaryEvidenceOpen: parsed.secondaryEvidenceOpen === true,");
     expect(html).toContain("secondaryEvidenceOpen: state.secondaryEvidenceOpen === true,");
-    expect(html).toContain("secondaryEvidenceOpen, designDetailsOpen, flowScroll: captureFlowScrollState()");
+    expect(html).toContain("secondaryEvidenceOpen, designDetailsOpen, railExpanded, flowScroll: captureFlowScrollState()");
   });
 
   test("AI SDK message-part mapper covers assistant text, reasoning, tool input/output, approval, and error events", () => {
@@ -4620,7 +4638,7 @@ describe("dashboard", () => {
 
     // Both persistence writers must serialize the in-memory selectedTaskId so the
     // run-scoped storage record preserves the selection across reloads and run switches.
-    expect(html).toContain("writeDashboardState({ selectedGoalId, workspaceMode, workspaceTitleExpanded, selectedChangedFilePath, selectedTaskId, secondaryEvidenceOpen, designDetailsOpen, flowScroll: captureFlowScrollState() });");
+    expect(html).toContain("writeDashboardState({ selectedGoalId, workspaceTitleExpanded, selectedChangedFilePath, selectedTaskId, secondaryEvidenceOpen, designDetailsOpen, railExpanded, flowScroll: captureFlowScrollState() });");
     const persistFlowMatch = html.match(/const persistFlowScrollState = \(\) => \{([\s\S]*?)\n    \};/);
     expect(persistFlowMatch).not.toBeNull();
     expect(persistFlowMatch ? persistFlowMatch[1] : "").toContain("selectedTaskId");
@@ -4811,7 +4829,7 @@ describe("dashboard", () => {
     // back into the React Flow mount, and back into the inspector panel.
     expect(html).toContain("patchWorkspace(dashboardWorkspaceHtml(selectedGroup));");
     expect(html).toContain("mountReactFlowCanvas();");
-    expect(html).toContain("patchInspectorPanel(dashboardInspectorTimelineHtml(selectedGroup) + dashboardInspectorComposerHtml(), dashboardInspectorDesignHtml() + dashboardInspectorSecondaryHtml(overview, selectedGroup));");
+    expect(html).toContain("patchInspectorPanel(dashboardInspectorHtml(overview, selectedGroup) + dashboardInspectorTimelineHtml(selectedGroup) + dashboardInspectorComposerHtml(), dashboardInspectorDesignHtml() + dashboardInspectorSecondaryHtml(overview, selectedGroup));");
   });
 
   test("uses deterministic fallback selection instead of clearing selection when no user choice exists", () => {
@@ -4915,5 +4933,82 @@ describe("dashboard", () => {
     expect(selectBody).not.toContain("fetch(");
     // No new dependency is added to the CLI package.
     // (Existing assertions in earlier tests already cover the package manifest freeze.)
+  });
+
+  test("PAN-1205 desktop hierarchy removes Flow controls and keeps one run navigator", () => {
+    const html = dashboardHtml({ runId: "run_123" });
+
+    // Flow mode toggle, placeholder copy, and the Flow workspace helper are absent.
+    expect(html).not.toContain('data-workspace-mode="canvas"');
+    expect(html).not.toContain('data-workspace-mode="flow"');
+    expect(html).not.toContain("WorkspaceModeControls");
+    expect(html).not.toContain("flow-moved-card");
+    expect(html).not.toContain("flow-inner-moved");
+    expect(html).not.toContain("Conversation moved to the right panel");
+    expect(html).not.toContain("renderFlowWorkspace");
+    expect(html).not.toContain("workspaceMode");
+
+    // Exactly one run navigator section in the sidebar, replacing the old
+    // Active Goals, History, and Run history trio.
+    expect(html).toContain('aria-label="Run navigator"');
+    expect(html).toContain('data-run-navigator');
+    expect(html).not.toContain('aria-label="Goals and run history"');
+    expect(html).not.toContain('id="active-goal-list"');
+    expect(html).not.toContain('id="history-goal-list"');
+    expect(html).not.toContain('>Active Goals<');
+    expect(html).not.toContain('>History<');
+  });
+
+  test("PAN-1205 orientation strip surfaces active goal, run state, attention, and runner state", () => {
+    const html = dashboardHtml({ runId: "run_123" });
+
+    expect(html).toContain("dashboardOrientationHtml");
+    expect(html).toContain('data-orientation-strip');
+    expect(html).toContain("orientation-strip");
+    expect(html).toContain("orientation-cell");
+    expect(html).toContain("Active goal");
+    expect(html).toContain("Run state");
+    expect(html).toContain("Attention");
+    expect(html).toContain("Runner");
+  });
+
+  test("PAN-1205 inspector sections are scoped to the selected task", () => {
+    const html = dashboardHtml({ runId: "run_123" });
+
+    // A canonical selectedTaskContextFor helper derives the focused task from selectedTaskId.
+    expect(html).toContain("const selectedTaskContextFor = (overview, group, taskId) => {");
+    expect(html).toContain("selectedTaskContextFor(overview, group, selectedTaskId)");
+
+    // Conversation timeline filters sessions and lessons to the selected task.
+    expect(html).toContain("sessions: group.sessions.filter((session) => session.taskId === selectedTaskId)");
+    expect(html).toContain("lessons: (group.lessons || []).filter((lesson) => lesson.taskId === selectedTaskId)");
+
+    // Evidence helper applies the same selectedTaskId filter to subsessions and changed files.
+    expect(html).toContain("renderSubsessionThreadsSection(overview, scopedGroup) + renderChangedFilesSection(scopedGroup)");
+
+    // Task summary carries the selected task id so verifiers can confirm scoping.
+    expect(html).toContain('data-inspector-section="progress" data-task-id="');
+    expect(html).toContain("Task summary");
+    expect(html).toContain("Next action:");
+  });
+
+  test("PAN-1205 task and run actions remain distinguishable", () => {
+    const html = dashboardHtml({ runId: "run_123" });
+
+    // Task actions are scoped to the selected task and labeled as such.
+    expect(html).toContain('data-task-action="stop"');
+    expect(html).toContain('data-task-action="resume"');
+    expect(html).toContain('data-task-action="rerun"');
+    expect(html).toContain("data-task-action-help");
+    expect(html).toContain("data-task-action-buttons");
+    expect(html).toContain("These controls affect only the selected task.");
+
+    // Run-level runner and supervisor actions are clearly labeled as run-scoped.
+    expect(html).toContain("Runner actions");
+    expect(html).toContain("These controls affect the run-level runner or supervisor process.");
+    expect(html).toContain("Start background runner");
+    expect(html).toContain("Stop background runner");
+    expect(html).toContain("Start supervisor");
+    expect(html).toContain("Stop supervisor");
   });
 });

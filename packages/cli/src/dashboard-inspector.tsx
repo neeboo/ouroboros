@@ -110,6 +110,18 @@ export function RunEvidenceDisclosure({
   );
 }
 
+export function InspectorTaskSummaryPlaceholder() {
+  return (
+    <Panel
+      className="inspector-card"
+      data-inspector-section="progress"
+    >
+      <h2>Task summary</h2>
+      <div className="empty">Select a task to inspect its summary, actions, and progress.</div>
+    </Panel>
+  );
+}
+
 export function DashboardInspector({
   children,
 }: {
@@ -117,6 +129,7 @@ export function DashboardInspector({
 }) {
   return (
     <ScrollArea as="aside" className="inspector-panel" id="inspector-panel">
+      <InspectorTaskSummaryPlaceholder />
       <ConversationTimeline />
       <InspectorComposer />
       <RunEvidenceDisclosure>{children}</RunEvidenceDisclosure>

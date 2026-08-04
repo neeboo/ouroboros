@@ -1,7 +1,5 @@
 import type { RunOverview, RunStatusCounts } from "@ouroboros/harness";
 
-export type DashboardWorkspaceMode = "canvas" | "flow";
-
 export interface DashboardReactModule {
   id: "shell" | "sidebar" | "flow-view" | "inspector" | "controls";
   label: string;
@@ -55,7 +53,6 @@ export interface DashboardRunHistoryEntry {
 export interface DashboardAppState {
   runId: string;
   overview: RunOverview | null;
-  workspaceMode: DashboardWorkspaceMode;
   composer: DashboardComposerState;
   supervisor: DashboardSupervisorState;
   activeGoals: DashboardGoalSummary[];
@@ -63,4 +60,5 @@ export interface DashboardAppState {
   changedFiles: DashboardChangedFile[];
   selectedGoalId?: string | null;
   selectedChangedFilePath?: string | null;
+  selectedTaskId?: string | null;
 }

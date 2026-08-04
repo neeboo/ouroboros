@@ -1,16 +1,11 @@
-import { WorkspaceModeControls } from "./dashboard-controls";
-import type { DashboardWorkspaceMode } from "./dashboard-types";
-
 export function DashboardFlowView({
   title,
   kicker,
-  mode,
   titleExpanded,
   children,
 }: {
   title: string;
   kicker: string;
-  mode: DashboardWorkspaceMode;
   titleExpanded: boolean;
   children?: React.ReactNode;
 }) {
@@ -43,10 +38,10 @@ export function DashboardFlowView({
               </button>
             </div>
           </div>
-          <WorkspaceModeControls mode={mode} />
         </div>
+        <div className="workspace-orientation" id="workspace-orientation" data-orientation-strip aria-live="polite" />
       </header>
-      <section className={`workspace-flow ${mode === "canvas" ? "canvas-workspace" : ""}`} id="workspace-flow">
+      <section className="workspace-flow canvas-workspace is-canvas-dark" id="workspace-flow">
         {children}
       </section>
     </main>

@@ -1254,34 +1254,33 @@ export function dashboardHtml(input: { runId: string }) {
     const rawStreamDetails = (session) =>
       '<details class="raw-stream"><summary>Raw output</summary>' + streamOutput(session) + rawEventDump(session) + '</details>';
     const promptLink = (task) => '<a class="prompt-link" target="_blank" rel="noreferrer" href="/tasks/' + encodeURIComponent(task.id) + '/prompt">Prompt</a>';
-    const isWorkspaceMode = (value) => value === "canvas" || value === "flow";
     const readDashboardState = () => {
       try {
         const parsed = JSON.parse(window.localStorage?.getItem(dashboardStorageKey) || "{}");
         return {
           selectedGoalId: typeof parsed.selectedGoalId === "string" ? parsed.selectedGoalId : null,
-          workspaceMode: isWorkspaceMode(parsed.workspaceMode) ? parsed.workspaceMode : null,
           workspaceTitleExpanded: parsed.workspaceTitleExpanded === true,
           selectedChangedFilePath: typeof parsed.selectedChangedFilePath === "string" ? parsed.selectedChangedFilePath : null,
           selectedTaskId: typeof parsed.selectedTaskId === "string" ? parsed.selectedTaskId : null,
           secondaryEvidenceOpen: parsed.secondaryEvidenceOpen === true,
           designDetailsOpen: parsed.designDetailsOpen === true,
+          railExpanded: parsed.railExpanded === false ? false : true,
           flowScroll: parsed.flowScroll && typeof parsed.flowScroll === "object" ? parsed.flowScroll : null,
         };
       } catch {
-        return { selectedGoalId: null, workspaceMode: null, workspaceTitleExpanded: false, selectedChangedFilePath: null, selectedTaskId: null, secondaryEvidenceOpen: false, designDetailsOpen: false, flowScroll: null };
+        return { selectedGoalId: null, workspaceTitleExpanded: false, selectedChangedFilePath: null, selectedTaskId: null, secondaryEvidenceOpen: false, designDetailsOpen: false, railExpanded: true, flowScroll: null };
       }
     };
     const writeDashboardState = (state) => {
       try {
         window.localStorage?.setItem(dashboardStorageKey, JSON.stringify({
           selectedGoalId: typeof state.selectedGoalId === "string" ? state.selectedGoalId : null,
-          workspaceMode: isWorkspaceMode(state.workspaceMode) ? state.workspaceMode : "canvas",
           workspaceTitleExpanded: state.workspaceTitleExpanded === true,
           selectedChangedFilePath: typeof state.selectedChangedFilePath === "string" ? state.selectedChangedFilePath : null,
           selectedTaskId: typeof state.selectedTaskId === "string" ? state.selectedTaskId : null,
           secondaryEvidenceOpen: state.secondaryEvidenceOpen === true,
           designDetailsOpen: state.designDetailsOpen === true,
+          railExpanded: state.railExpanded === false ? false : true,
           flowScroll: state.flowScroll && typeof state.flowScroll === "object" ? state.flowScroll : null,
         }));
       } catch {
@@ -1289,8 +1288,8 @@ export function dashboardHtml(input: { runId: string }) {
     };
     const restoredDashboardState = readDashboardState();
     let selectedGoalId = restoredDashboardState.selectedGoalId || null;
-    let workspaceMode = restoredDashboardState.workspaceMode || "canvas";
     let workspaceTitleExpanded = restoredDashboardState.workspaceTitleExpanded === true;
+    let railExpanded = restoredDashboardState.railExpanded !== false;
     let latestOverview = null;
     let selectedChangedFilePath = restoredDashboardState.selectedChangedFilePath || null;
     let selectedTaskId = restoredDashboardState.selectedTaskId || null;
@@ -1945,16 +1944,6 @@ export function dashboardHtml(input: { runId: string }) {
         }) : '') +
         '</div>';
     };
-    const renderFlowWorkspace = (group) => {
-      if (!group) return '<div class="flow-inner"><div class="empty">No goal selected</div></div>';
-      return '<div class="flow-inner flow-inner-moved">' +
-        '<div class="flow-moved-card" data-flow-moved-card>' +
-          '<div class="flow-moved-title">Conversation moved to the right panel</div>' +
-          '<div class="flow-moved-meta">Switch to canvas for the spatial task map. The chronological chat/session timeline now lives in the inspector side panel.</div>' +
-          '<div class="flow-moved-hint">Canvas mode shows the task graph; the right panel hosts the conversation, evidence, and composer.</div>' +
-        '</div>' +
-        '</div>';
-    };
     const graphColumn = (role) => role === "planner" || role === "goal-review" ? "planner" : role === "verifier" ? "verifier" : "worker";
     const graphColumnX = (column) => column === "planner" ? 0 : column === "verifier" ? 720 : 360;
     const fallbackSelectedTaskIdFor = (graph, group) => {
@@ -2007,7 +1996,7 @@ export function dashboardHtml(input: { runId: string }) {
           onSelectTask: selectCanvasTask,
         });
       }
-      patchInspectorPanel(dashboardInspectorTimelineHtml(group) + dashboardInspectorComposerHtml(), dashboardInspectorDesignHtml() + dashboardInspectorSecondaryHtml(latestOverview, group));
+      patchInspectorPanel(dashboardInspectorHtml(latestOverview, group) + dashboardInspectorTimelineHtml(group) + dashboardInspectorComposerHtml(), dashboardInspectorDesignHtml() + dashboardInspectorSecondaryHtml(latestOverview, group));
     };
     const canvasGraphFor = (overview, group) => {
       if (!group) return { nodes: [], edges: [] };
@@ -2138,9 +2127,8 @@ export function dashboardHtml(input: { runId: string }) {
         '</div>' +
         '</div>';
     };
-    const dashboardWorkspaceHtml = (group) => workspaceMode === "canvas" ? renderCanvasWorkspace(group) : renderFlowWorkspace(group);
+    const dashboardWorkspaceHtml = (group) => renderCanvasWorkspace(group);
     const mountReactFlowCanvas = () => {
-      if (workspaceMode !== "canvas") return;
       const mount = document.getElementById("dashboard-canvas-root");
       if (!mount) return;
       const graphJson = mount.getAttribute("data-canvas-graph") || '{"nodes":[],"edges":[]}';
@@ -2170,39 +2158,14 @@ export function dashboardHtml(input: { runId: string }) {
         window.addEventListener("ouroboros-canvas-ready", mountGraph, { once: true });
       }
     };
-    const dashboardInspectorHtml = (overview, group) => {
-      if (!group) return '<section class="inspector-card" data-inspector-section="progress"><h2>Context</h2><div class="empty">Select a goal</div></section>';
-      const doneWhen = group.tasks.flatMap((task) => (Array.isArray(task.doneWhen) ? task.doneWhen : []).map((item) => ({ task, item })));
-      const runningSessions = group.sessions.filter((session) => session.status === "running");
-      const unresolvedBlockedTasks = group.tasks.filter((task) => task.status === "blocked" && !group.resolvedBlockedTaskIds.has(task.id));
-      const currentTask = group.tasks.find((task) => task.status === "running") ||
-        group.tasks.find((task) => task.status === "todo") ||
-        unresolvedBlockedTasks[unresolvedBlockedTasks.length - 1] ||
-        [...group.tasks].reverse().find((task) => task.status === "done") ||
-        [...group.tasks].reverse().find((task) => task.status === "blocked");
-      const resumableTask = runningSessions.length ? null : unresolvedBlockedTasks[unresolvedBlockedTasks.length - 1] || null;
-      const rerunnableTask = runningSessions.length ? null : [...unresolvedBlockedTasks, ...group.tasks.filter((task) => task.status === "done")].reverse()[0] || null;
-      const taskActions = [
-        runningSessions.length ? '<button class="plain-button danger" data-stop-attempt-id="' + escapeHtml(runningSessions[0].attemptId) + '">Stop current task</button>' : '',
-        resumableTask ? '<button class="plain-button" data-resume-task-id="' + escapeHtml(resumableTask.id) + '">Resume selected task</button>' : '',
-        rerunnableTask ? '<button class="plain-button" data-rerun-task-id="' + escapeHtml(rerunnableTask.id) + '">Rerun selected task</button>' : ''
-      ].filter(Boolean).join("");
-      return '<section class="inspector-card" data-inspector-section="progress"><h2>Context</h2>' +
-        (currentTask ? '<div class="current-task"><div class="current-task-title">' + escapeHtml(currentTask.goal) + '</div><div class="current-task-meta">' + escapeHtml(currentTask.role) + ' · <span class="status-text ' + escapeHtml(currentTask.status) + '">' + escapeHtml(currentTask.status) + '</span><br><span class="code-meta">' + escapeHtml(currentTask.id) + '</span></div></div>' : '') +
-        (doneWhen.length ? '<ul class="todo-list">' + doneWhen.map(({ task, item }) =>
-          '<li class="todo-item ' + (effectiveTaskStatus(task, group.resolvedBlockedTaskIds) === "done" ? "done" : "") + '"><span class="checkbox ' + (effectiveTaskStatus(task, group.resolvedBlockedTaskIds) === "done" ? "done" : "") + '" aria-hidden="true"></span><span class="todo-text">' + escapeHtml(item) + '<span class="meta">' + escapeHtml(task.role) + '</span></span></li>'
-        ).join("") + '</ul>' : '<div class="empty">No todos recorded</div>') +
-        (group.resolvedBlockedCount ? '<div class="meta">' + escapeHtml(group.resolvedBlockedCount) + ' blocked verifier task was repaired and is now historical evidence.</div>' : '') +
-        (taskActions ? '<div class="action-group"><div class="action-title">Task actions</div><div class="action-help">These controls affect only the selected task.</div><div class="action-buttons">' + taskActions + '</div></div>' : '') +
-        '</section>';
-    };
     const dashboardInspectorTimelineHtml = (group) => {
-      if (!group) return '<section class="inspector-card conversation-timeline-section chat-transcript-section" data-inspector-section="conversation" id="conversation-timeline" data-conversation-timeline data-chat-transcript><h2>Chat</h2><div class="chat-transcript-meta">Codex-style agent conversation · oldest first.</div><div class="chat-transcript-scroll conversation-timeline-scroll" data-conversation-timeline-scroll data-chat-transcript-scroll><div class="empty">Select a goal to view the chronological conversation timeline.</div></div></section>';
-      return '<section class="inspector-card conversation-timeline-section chat-transcript-section" data-inspector-section="conversation" id="conversation-timeline" data-conversation-timeline data-chat-transcript>' +
+      if (!group) return '<section class="inspector-card conversation-timeline-section chat-transcript-section" data-inspector-section="conversation" id="conversation-timeline" data-conversation-timeline data-chat-transcript><h2>Chat</h2><div class="chat-transcript-meta">Codex-style agent conversation · oldest first.</div><div class="chat-transcript-scroll conversation-timeline-scroll" data-conversation-timeline-scroll data-chat-transcript-scroll><div class="empty">Select a task to view its chronological conversation timeline.</div></div></section>';
+      const scopedGroup = selectedTaskId ? { ...group, sessions: group.sessions.filter((session) => session.taskId === selectedTaskId), lessons: (group.lessons || []).filter((lesson) => lesson.taskId === selectedTaskId), tasks: group.tasks.filter((task) => task.id === selectedTaskId) } : group;
+      return '<section class="inspector-card conversation-timeline-section chat-transcript-section" data-inspector-section="conversation" id="conversation-timeline" data-conversation-timeline data-chat-transcript' + (selectedTaskId ? ' data-task-id="' + escapeHtml(selectedTaskId) + '"' : '') + '>' +
         '<h2>Chat</h2>' +
         '<div class="chat-transcript-meta conversation-timeline-meta">Codex-style agent conversation · oldest first.</div>' +
         '<div class="chat-transcript-scroll conversation-timeline-scroll" data-conversation-timeline-scroll data-chat-transcript-scroll>' +
-        renderConversationTimeline(group) +
+        renderConversationTimeline(scopedGroup) +
         '</div>' +
         '</section>';
     };
@@ -2242,11 +2205,20 @@ export function dashboardHtml(input: { runId: string }) {
         '</form>' +
       '</section>';
     };
-    const dashboardInspectorEvidenceHtml = (overview, group) =>
-      group ? renderSubsessionThreadsSection(overview, group) + renderChangedFilesSection(group) : "";
+    const dashboardInspectorEvidenceHtml = (overview, group) => {
+      if (!group) return "";
+      const scopedGroup = selectedTaskId
+        ? {
+            ...group,
+            sessions: group.sessions.filter((session) => session.taskId === selectedTaskId),
+            lessons: (group.lessons || []).filter((lesson) => lesson.taskId === selectedTaskId),
+            tasks: group.tasks.filter((task) => task.id === selectedTaskId),
+          }
+        : group;
+      return renderSubsessionThreadsSection(overview, scopedGroup) + renderChangedFilesSection(scopedGroup);
+    };
     const dashboardInspectorSecondaryHtml = (overview, group) => {
-      const body = dashboardInspectorHtml(overview, group) +
-        dashboardRunStatusHtml(overview) +
+      const body = dashboardRunStatusHtml(overview) +
         dashboardInspectorEvidenceHtml(overview, group);
       return '<section class="inspector-card inspector-evidence-disclosure" data-inspector-section="run-evidence" data-secondary-evidence>' +
         '<details' + (secondaryEvidenceOpen ? ' open' : '') + '>' +
@@ -2617,6 +2589,74 @@ export function dashboardHtml(input: { runId: string }) {
         '</section>';
     };
     const dashboardRunStatusHtml = (overview) => renderRunner(overview) + renderSupervisor(overview) + renderDiagnosis(overview) + renderGuardrailsSection(overview);
+    const dashboardOrientationHtml = (overview, group) => {
+      const runStatus = overview?.run?.status || "unknown";
+      const runnerStatus = overview?.runner?.status || "idle";
+      const supervisorStatus = overview?.supervisor?.status || "idle";
+      const activeGoal = group?.titleTask?.goal || overview?.run?.goal || "No active goal";
+      const resolvedBlockedTaskIds = group?.resolvedBlockedTaskIds || new Set();
+      const runningSession = (overview?.sessions || []).find((session) => session.status === "running");
+      const blockedTask = (overview?.tasks || []).find((task) => task.status === "blocked" && !resolvedBlockedTaskIds.has(task.id));
+      const todoTask = (overview?.tasks || []).find((task) => task.status === "todo");
+      const doneRun = runStatus === "done";
+      const attention = runningSession
+        ? "Running: " + compact(runningSession.taskGoal || activeGoal, 120)
+        : blockedTask
+          ? "Blocked: " + compact(blockedTask.goal || activeGoal, 120)
+          : todoTask
+            ? "Next: " + compact(todoTask.goal || activeGoal, 120)
+            : doneRun
+              ? "Goal complete"
+              : "Waiting for work";
+      return '<div class="orientation-strip" data-orientation-strip>' +
+        '<div class="orientation-cell"><div class="orientation-label">Active goal</div><div class="orientation-value" title="' + escapeHtml(activeGoal) + '">' + escapeHtml(compact(activeGoal, 140)) + '</div></div>' +
+        '<div class="orientation-cell"><div class="orientation-label">Run state</div><div class="orientation-value"><span class="status-text ' + escapeHtml(runStatus) + '">' + escapeHtml(runStatus) + '</span></div></div>' +
+        '<div class="orientation-cell"><div class="orientation-label">Attention</div><div class="orientation-value" title="' + escapeHtml(attention) + '">' + escapeHtml(attention) + '</div></div>' +
+        '<div class="orientation-cell"><div class="orientation-label">Runner</div><div class="orientation-value"><span class="status-text ' + escapeHtml(runnerStatus) + '">' + escapeHtml(runnerStatus) + '</span>' + (supervisorStatus === "running" ? ' · <span class="status-text ' + escapeHtml(supervisorStatus) + '">supervisor ' + escapeHtml(supervisorStatus) + '</span>' : "") + '</div></div>' +
+      '</div>';
+    };
+    const selectedTaskContextFor = (overview, group, taskId) => {
+      const tasks = overview && Array.isArray(overview.tasks) ? overview.tasks : (group?.tasks || []);
+      const task = taskId ? tasks.find((candidate) => candidate.id === taskId) : null;
+      if (!task) return null;
+      const sessions = (overview && Array.isArray(overview.sessions) ? overview.sessions : (group?.sessions || [])).filter((session) => session.taskId === task.id);
+      const lessons = (overview && Array.isArray(overview.lessons) ? overview.lessons : (group?.lessons || [])).filter((lesson) => lesson.taskId === task.id);
+      const changedFiles = changedFilesForGroup({ sessions, tasks: [task], lessons, resolvedBlockedTaskIds: group?.resolvedBlockedTaskIds || new Set(), resolvedBlockedCount: 0 });
+      return { task, sessions, lessons, changedFiles };
+    };
+    const dashboardInspectorHtml = (overview, group) => {
+      const context = selectedTaskContextFor(overview, group, selectedTaskId);
+      if (!context) return '<section class="inspector-card" data-inspector-section="progress"><h2>Task summary</h2><div class="empty">Select a task to inspect its summary, actions, and progress.</div></section>';
+      const { task, sessions } = context;
+      const runningSessions = sessions.filter((session) => session.status === "running");
+      const resolvedBlockedTaskIds = group?.resolvedBlockedTaskIds || new Set();
+      const isResolved = task.status === "blocked" && resolvedBlockedTaskIds.has(task.id);
+      const effectiveStatus = isResolved ? "done" : task.status;
+      const taskDoneWhen = Array.isArray(task.doneWhen) ? task.doneWhen : [];
+      const nextAction = runningSessions.length
+        ? "Stop the active attempt or wait for verifier evidence."
+        : task.status === "blocked"
+          ? isResolved ? "Verifier repaired this task; review the latest evidence." : "Repair the failing verifier evidence under the retry budget."
+          : task.status === "todo"
+            ? "Wait for the runner to lease this task."
+            : task.status === "done"
+              ? "Review the verifier decisions and changed files below."
+              : "No task-specific action right now.";
+      const taskActions = [
+        runningSessions.length ? '<button class="plain-button danger" data-stop-attempt-id="' + escapeHtml(runningSessions[0].attemptId) + '" data-task-action="stop">Stop current task</button>' : '',
+        (task.status === "blocked" && !isResolved) ? '<button class="plain-button" data-resume-task-id="' + escapeHtml(task.id) + '" data-task-action="resume">Resume selected task</button>' : '',
+        (task.status === "blocked" || task.status === "done") ? '<button class="plain-button" data-rerun-task-id="' + escapeHtml(task.id) + '" data-task-action="rerun">Rerun selected task</button>' : ''
+      ].filter(Boolean).join("");
+      return '<section class="inspector-card" data-inspector-section="progress" data-task-id="' + escapeHtml(task.id) + '"><h2>Task summary</h2>' +
+        '<div class="current-task"><div class="current-task-title">' + escapeHtml(task.goal) + '</div><div class="current-task-meta">' + escapeHtml(task.role) + ' · <span class="status-text ' + escapeHtml(effectiveStatus) + '">' + escapeHtml(effectiveStatus) + '</span><br><span class="code-meta">task ' + escapeHtml(task.id) + '</span></div></div>' +
+        '<div class="meta">Next action: ' + escapeHtml(nextAction) + '</div>' +
+        (taskDoneWhen.length ? '<ul class="todo-list">' + taskDoneWhen.map((item) =>
+          '<li class="todo-item ' + (effectiveStatus === "done" ? "done" : "") + '"><span class="checkbox ' + (effectiveStatus === "done" ? "done" : "") + '" aria-hidden="true"></span><span class="todo-text">' + escapeHtml(item) + '<span class="meta">' + escapeHtml(task.role) + '</span></span></li>'
+        ).join("") + '</ul>' : '<div class="empty">No todos recorded for this task.</div>') +
+        (isResolved ? '<div class="meta">' + escapeHtml(task.status === "blocked" ? "1 blocked verifier task was repaired and is now historical evidence." : "Repaired block") + '</div>' : '') +
+        (taskActions ? '<div class="action-group"><div class="action-title">Task actions</div><div class="action-help" data-task-action-help>These controls affect only the selected task.</div><div class="action-buttons" data-task-action-buttons>' + taskActions + '</div></div>' : '') +
+        '</section>';
+    };
     const postJson = async (path, body) => {
       const response = await fetch(path, {
         method: "POST",
@@ -2740,13 +2780,6 @@ export function dashboardHtml(input: { runId: string }) {
         nextScroll.scrollTop = distanceFromBottom <= 48 ? nextScroll.scrollHeight : scrollTop;
       }
     };
-    const syncWorkspaceToggle = () => {
-      for (const button of document.querySelectorAll("[data-workspace-mode]")) {
-        const active = button.getAttribute("data-workspace-mode") === workspaceMode;
-        button.classList.toggle("active", active);
-        button.setAttribute("aria-pressed", active ? "true" : "false");
-      }
-    };
     const syncWorkspaceTitle = (title) => {
       const titleNode = document.getElementById("workspace-title");
       const toggle = document.getElementById("workspace-title-toggle");
@@ -2764,7 +2797,6 @@ export function dashboardHtml(input: { runId: string }) {
       }
     };
     const captureFlowScrollState = () => {
-      if (workspaceMode !== "flow") return;
       const node = document.getElementById("workspace-flow");
       if (!node) return;
       const distanceFromBottom = node.scrollHeight - node.scrollTop - node.clientHeight;
@@ -2783,16 +2815,41 @@ export function dashboardHtml(input: { runId: string }) {
         }),
       };
     };
+    const syncRailState = () => {
+      const shell = document.querySelector(".app-shell");
+      if (!shell) return;
+      const next = railExpanded ? "expanded" : "collapsed";
+      const current = shell.getAttribute("data-rail") || next;
+      if (current !== next) shell.setAttribute("data-rail", next);
+      const collapseButton = document.querySelector('[data-rail-toggle="collapse"]');
+      if (collapseButton instanceof HTMLElement) {
+        collapseButton.setAttribute("aria-expanded", railExpanded ? "true" : "false");
+        collapseButton.setAttribute("aria-label", railExpanded ? "Collapse run navigator" : "Run navigator collapsed");
+        collapseButton.title = railExpanded ? "Collapse run navigator" : "Run navigator collapsed";
+        collapseButton.disabled = !railExpanded;
+      }
+      const expandButton = document.querySelector('[data-rail-toggle="expand"]');
+      if (expandButton instanceof HTMLElement) {
+        expandButton.setAttribute("aria-expanded", railExpanded ? "true" : "false");
+      }
+    };
+    const setRailExpanded = (next) => {
+      const value = next === true;
+      if (value === railExpanded) return;
+      railExpanded = value;
+      syncRailState();
+      persistDashboardState();
+    };
     const persistDashboardState = () => {
-      writeDashboardState({ selectedGoalId, workspaceMode, workspaceTitleExpanded, selectedChangedFilePath, selectedTaskId, secondaryEvidenceOpen, designDetailsOpen, flowScroll: captureFlowScrollState() });
+      writeDashboardState({ selectedGoalId, workspaceTitleExpanded, selectedChangedFilePath, selectedTaskId, secondaryEvidenceOpen, designDetailsOpen, railExpanded, flowScroll: captureFlowScrollState() });
     };
     const persistFlowScrollState = () => {
       const flowScroll = captureFlowScrollState();
       if (!flowScroll) return;
-      writeDashboardState({ selectedGoalId, workspaceMode, workspaceTitleExpanded, selectedChangedFilePath, selectedTaskId, secondaryEvidenceOpen, designDetailsOpen, flowScroll });
+      writeDashboardState({ selectedGoalId, workspaceTitleExpanded, selectedChangedFilePath, selectedTaskId, secondaryEvidenceOpen, designDetailsOpen, railExpanded, flowScroll });
     };
     const restoreFlowScrollState = (scrollState) => {
-      if (workspaceMode !== "flow" || !scrollState) return;
+      if (!scrollState) return;
       const node = document.getElementById("workspace-flow");
       if (!node) return;
       requestAnimationFrame(() => {
@@ -2953,30 +3010,19 @@ export function dashboardHtml(input: { runId: string }) {
       const projectTitle = projectRoot ? projectName + " · " + projectRoot : projectName;
       setTextIfChanged("run-status", overview.run?.status || "unknown");
       setTextIfChanged("run-title", overview.run ? overview.run.goal : runId);
+      syncRailState();
       const projectHeader = document.querySelector("[data-project-header]");
       if (projectHeader) projectHeader.setAttribute("title", projectTitle);
       const projectNameNode = document.querySelector("[data-project-name]");
       if (projectNameNode && projectNameNode.textContent !== projectName) projectNameNode.textContent = projectName;
       const projectRootNode = document.querySelector("[data-project-root]");
       if (projectRootNode && projectRootNode.textContent !== projectRoot) projectRootNode.textContent = projectRoot;
-      setTextIfChanged("workspace-kicker", "Conversation timeline");
+      setTextIfChanged("workspace-kicker", "Task canvas");
       syncWorkspaceTitle(selectedGroup ? selectedGroup.titleTask.goal : "No goal selected");
-      syncWorkspaceToggle();
-      document.getElementById("workspace-flow")?.classList.toggle("canvas-workspace", workspaceMode === "canvas");
-      document.getElementById("workspace-flow")?.classList.toggle("is-canvas-dark", workspaceMode === "canvas");
-      patchStaticHtml("sidebar-stats", [
-        ["Goals", goalGroups.length],
-        ["Active goals", activeGroups.length],
-        ["Global todo runs", globalRuns.todo || 0],
-        ["Global running runs", globalRuns.running || 0],
-        ["Queued tasks", (taskCounts.todo || 0) + (taskCounts.running || 0)],
-        ["Running sessions", sessionCounts.running || 0]
-      ].map(([label, value]) => '<div class="stat"><b>' + value + '</b><span>' + label + '</span></div>').join(""));
-      patchStaticHtml("active-goal-list", activeGroups.length ? activeGroups.map(goalRow).join("") : '<div class="empty"><strong>Idle</strong>No active tasks. Describe the next goal in the composer.</div>');
-      patchStaticHtml("history-goal-list", [...goalGroups].reverse().filter((group) => group.activeTasks.length === 0).map(goalRow).join(""));
+      patchStaticHtml("workspace-orientation", dashboardOrientationHtml(overview, selectedGroup));
       patchWorkspace(dashboardWorkspaceHtml(selectedGroup));
       mountReactFlowCanvas();
-      patchInspectorPanel(dashboardInspectorTimelineHtml(selectedGroup) + dashboardInspectorComposerHtml(), dashboardInspectorDesignHtml() + dashboardInspectorSecondaryHtml(overview, selectedGroup));
+      patchInspectorPanel(dashboardInspectorHtml(overview, selectedGroup) + dashboardInspectorTimelineHtml(selectedGroup) + dashboardInspectorComposerHtml(), dashboardInspectorDesignHtml() + dashboardInspectorSecondaryHtml(overview, selectedGroup));
     }
     let recentRunsCache = [];
     const RECENT_RUNS_LIMIT = 10;
@@ -3072,10 +3118,10 @@ export function dashboardHtml(input: { runId: string }) {
       try { window.history.replaceState(null, "", "#run=" + encodeURIComponent(runId)); } catch {}
       const restored = readDashboardState();
       selectedGoalId = restored.selectedGoalId;
-      workspaceMode = restored.workspaceMode || "canvas";
       workspaceTitleExpanded = restored.workspaceTitleExpanded === true;
       selectedChangedFilePath = restored.selectedChangedFilePath || null;
       selectedTaskId = restored.selectedTaskId || null;
+      railExpanded = restored.railExpanded !== false;
       restoredFlowScrollState = restored.flowScroll || null;
       diffByPath.clear();
       latestDesignStatus = null;
@@ -3106,18 +3152,23 @@ export function dashboardHtml(input: { runId: string }) {
     }, { capture: true });
     document.addEventListener("click", (event) => {
       if (!event.target || !event.target.closest) return;
+      const railToggle = event.target.closest("[data-rail-toggle]");
+      if (railToggle) {
+        const action = railToggle.getAttribute("data-rail-toggle");
+        if (action === "collapse") {
+          setRailExpanded(false);
+        } else if (action === "expand") {
+          setRailExpanded(true);
+        } else {
+          setRailExpanded(!railExpanded);
+        }
+        return;
+      }
       const titleToggle = event.target.closest("[data-workspace-title-toggle]");
       if (titleToggle) {
         workspaceTitleExpanded = !workspaceTitleExpanded;
         persistDashboardState();
         syncWorkspaceTitle(document.getElementById("workspace-title")?.textContent || "");
-        return;
-      }
-      const modeButton = event.target.closest("[data-workspace-mode]");
-      if (modeButton) {
-        workspaceMode = modeButton.getAttribute("data-workspace-mode") || "canvas";
-        persistDashboardState();
-        if (latestOverview) render(latestOverview);
         return;
       }
       const changedFileButton = event.target.closest("[data-changed-file-node='file'][data-changed-file-path]");

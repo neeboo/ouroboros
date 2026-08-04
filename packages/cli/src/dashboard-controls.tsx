@@ -1,5 +1,5 @@
-import { Button, Panel, Separator, Tabs, TabsTrigger } from "./dashboard-ui/primitives";
-import type { DashboardComposerState, DashboardSupervisorState, DashboardWorkspaceMode } from "./dashboard-types";
+import { Button, Panel, Separator } from "./dashboard-ui/primitives";
+import type { DashboardComposerState, DashboardSupervisorState } from "./dashboard-types";
 
 export function IntakeComposerControls({ composer }: { composer: DashboardComposerState }) {
   return (
@@ -40,19 +40,6 @@ export function IntakeComposerControls({ composer }: { composer: DashboardCompos
         </Button>
       </div>
     </form>
-  );
-}
-
-export function WorkspaceModeControls({ mode }: { mode: DashboardWorkspaceMode }) {
-  return (
-    <Tabs className="workspace-toggle" aria-label="Workspace view">
-      <TabsTrigger type="button" data-workspace-mode="canvas" active={mode === "canvas"}>
-        Canvas
-      </TabsTrigger>
-      <TabsTrigger type="button" data-workspace-mode="flow" active={mode === "flow"}>
-        Flow
-      </TabsTrigger>
-    </Tabs>
   );
 }
 
