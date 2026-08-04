@@ -52,8 +52,12 @@ export {
   proxyEnvForChildProcess,
   proxyEnvFromScutilOutput,
 } from "./executors/proxy-env";
-export { createApplyDesignActionsHook } from "./hooks/apply-design-actions";
-export type { ApplyDesignActionsHookOptions } from "./hooks/apply-design-actions";
+export { createApplyDesignActionsHook, reconcileDeferredDesignAuthority } from "./hooks/apply-design-actions";
+export type {
+  ApplyDesignActionsHookOptions,
+  ReconcileDeferredDesignAuthorityInput,
+  ReconcileDeferredDesignAuthorityResult,
+} from "./hooks/apply-design-actions";
 export { createContextSubagentHook, createContextSummaryHook } from "./hooks/context-summary";
 export { createCollectSubsessionsHook } from "./hooks/collect-subsessions";
 export type { CollectSubsessionsHookOptions } from "./hooks/collect-subsessions";

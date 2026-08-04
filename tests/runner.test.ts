@@ -28,6 +28,7 @@ import {
   proposeDesignAction,
   recordDesignOutcomeAction,
   recordSignalAction,
+  reconcileDeferredDesignAuthority,
   resolveAgentBackend,
   resolveExecutionRoute,
   resolveModelPreference,
@@ -7083,6 +7084,88 @@ describe("runner", () => {
 
     expect(deliverResult.decision).toBe("exit");
     expect(deliverResult.problems?.[0]).toContain("createRunsFromDesign requires an accepted proposal");
+  });
+
+  test("authority reconciliation reopens a blocked zero-cost proposal under cost-only policy", async () => {
+    const runId = harness.createRun({ goal: "design run" });
+    const taskId = harness.createTask({
+      runId,
+      role: "designer",
+      goal: "design",
+      prompt: "design",
+    });
+    const projectId = harness.createProject({ name: "ouroboros", rootPath: dir });
+    seedActiveCharter(projectId);
+    const signalId = seedLowRiskSignal(projectId);
+    const hook = createApplyDesignActionsHook({ harness });
+    const envelope = {
+      ...lowRiskProposalEnvelope(signalId),
+      investment: {
+        reversibility: "hard" as const,
+        portfolio: "core" as const,
+        oneTimeCost: 0,
+        recurringCost: 0,
+        timeBudget: "1 hour",
+      },
+      riskSurface: {
+        ...lowRiskProposalEnvelope(signalId).riskSurface,
+        schemaMigration: true,
+      },
+    };
+
+    await hook({
+      run: harness.getRun(runId)!,
+      task: harness.getTask(taskId)!,
+      sessionName: "session",
+      prompt: "design",
+      output: {
+        status: "done",
+        summary: "propose",
+        designActions: [{
+          type: "proposeDesign",
+          payload: { projectId, title: "Repair authority", proposal: envelope, status: "proposed" },
+        }],
+      } as AttemptOutput,
+    });
+    const proposal = harness.listDesignProposals({ projectId })[0];
+    expect(proposal.status).toBe("proposed");
+    harness.updateRunStatus({ runId, status: "blocked" });
+    harness.createFounderCharter({
+      projectId,
+      mission: "Build a safe autonomous strategy loop.",
+      charter: {
+        mission: "Build a safe autonomous strategy loop.",
+        capitalPolicy: {
+          currency: "USD",
+          experimentBudget: 1000,
+          recurringSpendApprovalAbove: 0,
+          portfolio: { core: 5, growth: 3, exploration: 2 },
+        },
+        authority: {
+          autoResearch: true,
+          autoReversibleExperiments: true,
+          humanApprovalPolicy: "cost-only",
+          requireHumanFor: ["cost"],
+        },
+      },
+      activate: true,
+    });
+
+    const result = reconcileDeferredDesignAuthority({ harness, projectId });
+
+    expect(result.approved).toBe(1);
+    expect(harness.getDesignProposal({ id: proposal.id })?.status).toBe("accepted");
+    expect(harness.getRun(runId)?.status).toBe("todo");
+    expect(
+      harness.listDesignDecisions({ proposalId: proposal.id }).some(
+        (decision) => decision.decision === "approved" && decision.actorKind === "auto",
+      ),
+    ).toBe(true);
+    expect(
+      harness.getRunOverview({ runId }).tasks.some(
+        (task) => task.role === "designer" && task.config?.designContinuation !== undefined,
+      ),
+    ).toBe(true);
   });
 
   test("apply-design-actions hook fails closed for missing evidence references", async () => {

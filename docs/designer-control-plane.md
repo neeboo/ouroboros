@@ -53,13 +53,14 @@ type FounderCharter = {
     autoResearch: boolean;
     autoReversibleExperiments: boolean;
     autoIntegrateVerifiedCode: boolean;
+    humanApprovalPolicy: "risk-and-cost" | "cost-only";
     requireHumanFor: string[];
   };
   reviewCadenceDays: number;
 };
 ```
 
-The designer may propose a charter amendment. Only a human or an explicitly configured governance actor may activate it. Mission, spending limits, legal or privacy boundaries, destructive operations, production deployment, and irreversible infrastructure commitments are human checkpoints by default.
+The default Ouroboros charter uses `humanApprovalPolicy: "cost-only"`. The Designer and verifier loop decide technical, architecture, protocol, product, and repository changes. Invalid or stale evidence is rejected autonomously and returned for revision. A human checkpoint is created only for monetary spend, capital-policy changes, purchasing, or recurring infrastructure commitments. Custom projects may retain the legacy `risk-and-cost` policy.
 
 ## Evidence Model
 
@@ -145,7 +146,7 @@ Decision order:
 5. Require stronger evidence as cost and irreversibility increase.
 6. Revisit accepted decisions when their evidence expires or outcome metrics disagree.
 
-Automatic authority is limited to changes that are reversible, inside the experiment budget, free of new sensitive-data or legal obligations, and below recurring-spend thresholds. Everything else becomes an explicit human decision.
+Under `cost-only`, automatic authority covers evidence-backed zero-spend proposals even when they touch technical risk surfaces. Invalid evidence or malformed contracts are rejected rather than deferred. Any real spending commitment becomes an explicit human decision. Under the compatible `risk-and-cost` policy, reversibility and configured risk categories continue to create human checkpoints.
 
 Infrastructure follows a rent-before-buy policy. Cloud services are suitable while demand and workload shape are uncertain. Local execution is justified by measured offline, privacy, or latency value. Dedicated GPU capacity is justified only after representative workload tests show stable utilization and a favorable full-cost comparison that includes engineering and operational burden.
 

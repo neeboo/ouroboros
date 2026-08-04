@@ -433,6 +433,88 @@ interface AuthorityTransitionResult {
   checks: unknown[];
 }
 
+export interface ReconcileDeferredDesignAuthorityInput {
+  harness: Harness;
+  projectId?: string;
+  now?: number;
+}
+
+export interface ReconcileDeferredDesignAuthorityResult {
+  inspected: number;
+  approved: number;
+  rejected: number;
+  deferredForCost: number;
+  skipped: number;
+  proposalIds: string[];
+}
+
+export function reconcileDeferredDesignAuthority(
+  input: ReconcileDeferredDesignAuthorityInput,
+): ReconcileDeferredDesignAuthorityResult {
+  const proposals = input.harness.listDesignProposals({
+    projectId: input.projectId,
+    statuses: ["proposed"],
+    limit: 200,
+  });
+  const result: ReconcileDeferredDesignAuthorityResult = {
+    inspected: 0,
+    approved: 0,
+    rejected: 0,
+    deferredForCost: 0,
+    skipped: 0,
+    proposalIds: [],
+  };
+
+  for (const proposal of proposals) {
+    const decisions = input.harness.listDesignDecisions({ proposalId: proposal.id, limit: 200 });
+    const latest = decisions.at(-1);
+    if (latest?.decision !== "deferred" || latest.authority?.disposition !== "human-required") {
+      result.skipped += 1;
+      continue;
+    }
+    const run = proposal.runId ? input.harness.getRun(proposal.runId) : null;
+    const task = proposal.taskId ? input.harness.getTask(proposal.taskId) : null;
+    if (!run || !task) {
+      result.skipped += 1;
+      continue;
+    }
+    const rawActionIndex = latest.payload?.actionIndex;
+    const actionIndex = typeof rawActionIndex === "number" && Number.isInteger(rawActionIndex) && rawActionIndex >= 0
+      ? rawActionIndex
+      : 0;
+    const transition = input.harness.runInTransaction((db) => {
+      const current = input.harness.getDesignProposalWithDb(db, { id: proposal.id });
+      if (!current || current.status !== "proposed") {
+        return null;
+      }
+      const next = runAuthorityTransitionWithDb(input.harness, db, current, {
+        run,
+        task,
+        now: input.now ?? NOW_EPOCH(),
+        actionIndex,
+      });
+      if (next.evaluation.disposition === "automatic" && run.status === "blocked") {
+        input.harness.updateRunStatusWithDb(db, { runId: run.id, status: "todo" });
+      }
+      return next;
+    });
+    if (!transition) {
+      result.skipped += 1;
+      continue;
+    }
+    result.inspected += 1;
+    result.proposalIds.push(proposal.id);
+    if (transition.evaluation.disposition === "automatic") {
+      result.approved += 1;
+    } else if (transition.evaluation.disposition === "rejected") {
+      result.rejected += 1;
+    } else {
+      result.deferredForCost += 1;
+    }
+  }
+  return result;
+}
+
 function runAuthorityTransitionWithDb(
   harness: Harness,
   db: HarnessDatabase,

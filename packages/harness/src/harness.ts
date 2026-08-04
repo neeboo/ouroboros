@@ -212,17 +212,19 @@ export class Harness {
   }
 
   updateRunStatus(input: UpdateRunStatusInput) {
-    return withDatabase(this.dbPath, (db) => {
-      db.query(
-        `
-        update runs
-        set status = $status, updated_at = current_timestamp
-        where id = $runId
-        `,
-      ).run({
-        $status: input.status,
-        $runId: input.runId,
-      });
+    return withDatabase(this.dbPath, (db) => this.updateRunStatusWithDb(db, input));
+  }
+
+  updateRunStatusWithDb(db: HarnessDatabase, input: UpdateRunStatusInput) {
+    db.query(
+      `
+      update runs
+      set status = $status, updated_at = current_timestamp
+      where id = $runId
+      `,
+    ).run({
+      $status: input.status,
+      $runId: input.runId,
     });
   }
 

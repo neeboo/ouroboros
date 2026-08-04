@@ -2810,6 +2810,64 @@ describe("Founder charter authority evaluator", () => {
     expect(result.portfolio.withinShare).toBe(true);
   });
 
+  test("cost-only policy authorizes zero-spend technical risk without a human checkpoint", () => {
+    const charter = makeCharter({
+      authority: {
+        autoResearch: true,
+        autoReversibleExperiments: true,
+        humanApprovalPolicy: "cost-only",
+        requireHumanFor: [],
+      },
+    });
+    const proposal = makeProposal({
+      oneTimeCost: 0,
+      recurringCost: 0,
+      reversibility: "hard",
+      productionDeployment: true,
+      schemaMigration: true,
+    });
+
+    const result = evaluate({ charter, proposal });
+
+    expect(result.disposition).toBe("automatic");
+    expect(result.reasons.some((reason) => reason.kind === "cost-requires-human-decision")).toBe(false);
+  });
+
+  test("cost-only policy defers any real spend to a human decision", () => {
+    const charter = makeCharter({
+      authority: {
+        autoResearch: true,
+        autoReversibleExperiments: true,
+        humanApprovalPolicy: "cost-only",
+        requireHumanFor: [],
+      },
+    });
+
+    const result = evaluate({
+      charter,
+      proposal: makeProposal({ oneTimeCost: 1, recurringCost: 0 }),
+    });
+
+    expect(result.disposition).toBe("human-required");
+    expect(result.reasons.some((reason) => reason.kind === "cost-requires-human-decision")).toBe(true);
+  });
+
+  test("cost-only policy rejects malformed evidence autonomously instead of asking a human", () => {
+    const charter = makeCharter({
+      authority: {
+        autoResearch: true,
+        autoReversibleExperiments: true,
+        humanApprovalPolicy: "cost-only",
+        requireHumanFor: [],
+      },
+    });
+
+    const result = evaluate({ charter, evidence: [] });
+
+    expect(result.disposition).toBe("rejected");
+    expect(result.reasons.some((reason) => reason.kind === "missing-evidence")).toBe(true);
+  });
+
   test("autoReversibleExperiments absent fails closed to human-required", () => {
     const charter = makeCharter({ authority: { autoResearch: true } });
     const result = evaluate({ charter });

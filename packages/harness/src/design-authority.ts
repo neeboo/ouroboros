@@ -42,6 +42,29 @@ const KNOWN_PORTFOLIO_CATEGORIES: ReadonlyArray<AuthorityProposalRiskSurface["po
   "exploration",
 ];
 
+const COST_HUMAN_CATEGORIES = new Set([
+  "budget",
+  "capital",
+  "capital-policy-amendment",
+  "cost",
+  "purchase",
+  "purchasing",
+  "recurring-infrastructure",
+  "spend",
+]);
+
+const COST_ONLY_AUTONOMOUS_REJECT_REASONS = new Set<AuthorityReasonKind>([
+  "charter-inactive",
+  "conflicting-evidence",
+  "expired-evidence",
+  "invalid-conflict-metadata",
+  "invalid-cost-shape",
+  "invalid-evidence-expiry",
+  "malformed-evidence-item",
+  "missing-evidence",
+  "unknown-risk-data",
+]);
+
 function isKnownPortfolioCategory(value: unknown): value is AuthorityProposalRiskSurface["portfolio"] {
   return typeof value === "string" && (KNOWN_PORTFOLIO_CATEGORIES as ReadonlyArray<string>).includes(value);
 }
@@ -496,6 +519,53 @@ function proposalRequiresHumanReview(
   return false;
 }
 
+function usesCostOnlyHumanApproval(charter: AuthorityCharterContext): boolean {
+  return charter.authority?.humanApprovalPolicy === "cost-only";
+}
+
+function proposalHasCostImpact(proposal: AuthorityProposalRiskSurface): boolean {
+  if (!isFiniteNonNegative(proposal.oneTimeCost) || !isFiniteNonNegative(proposal.recurringCost)) {
+    return false;
+  }
+  if (proposal.oneTimeCost > 0 || proposal.recurringCost > 0) {
+    return true;
+  }
+  if (proposal.amendsCapitalPolicy === true || proposal.recurringInfrastructure === true) {
+    return true;
+  }
+  return Array.isArray(proposal.declaredHumanCategories)
+    && proposal.declaredHumanCategories.some(
+      (category) => typeof category === "string" && COST_HUMAN_CATEGORIES.has(category.toLowerCase()),
+    );
+}
+
+function collectCostOnlyShapeReasons(
+  proposal: AuthorityProposalRiskSurface,
+  charter: AuthorityCharterContext,
+): AuthorityReason[] {
+  const reasons: AuthorityReason[] = [];
+  for (const flag of HIGH_RISK_FLAG_FIELDS) {
+    if (typeof proposal[flag.field] !== "boolean") {
+      reasons.push({
+        kind: "unknown-risk-data",
+        message: `Risk flag ${String(flag.field)} is not a strict boolean; cannot make an autonomous decision.`,
+      });
+    }
+  }
+  if (proposal.reversibility !== "easy" && proposal.reversibility !== "moderate" && proposal.reversibility !== "hard") {
+    reasons.push({
+      kind: "unknown-risk-data",
+      message: `Proposal declares unknown reversibility ${JSON.stringify(proposal.reversibility)}; cannot make an autonomous decision.`,
+    });
+  }
+  for (const reason of collectRequireHumanReasons(proposal, charter)) {
+    if (reason.kind === "unknown-risk-data") {
+      reasons.push(reason);
+    }
+  }
+  return reasons;
+}
+
 function summarizeReasons(reasons: AuthorityReason[]): string {
   return reasons.map((reason) => `${reason.kind}: ${reason.message}`).join(" | ");
 }
@@ -529,6 +599,8 @@ export function evaluateAuthority(input: AuthorityEvaluationInput): AuthorityEva
   const proposal = input.proposal;
   const now = input.evaluatedAt;
   const actor = input.actor;
+  const costOnlyHumanApproval = usesCostOnlyHumanApproval(charter);
+  const hasCostImpact = proposalHasCostImpact(proposal);
 
   const reasons: AuthorityReason[] = [];
   let disposition: AuthorityDisposition = "automatic";
@@ -602,32 +674,36 @@ export function evaluateAuthority(input: AuthorityEvaluationInput): AuthorityEva
 
   // 3. Budget — hard experiment-budget cap rejects; missing policies fail closed for everyone.
   const budgetEvaluation = evaluateBudget(charter, proposal);
-  for (const reason of budgetEvaluation.reasons) {
-    reasons.push(reason);
-    if (reason.kind === "budget-experiment-exceeded") {
-      disposition = "rejected";
-      hardBlocked = true;
-    } else if (disposition !== "rejected") {
-      disposition = "human-required";
+  if (!costOnlyHumanApproval || hasCostImpact) {
+    for (const reason of budgetEvaluation.reasons) {
+      reasons.push(reason);
+      if (reason.kind === "budget-experiment-exceeded") {
+        disposition = "rejected";
+        hardBlocked = true;
+      } else if (disposition !== "rejected") {
+        disposition = "human-required";
+      }
     }
   }
 
   // 4. Portfolio — allocation must be configured; over-allocation routes to human review.
   const portfolioEvaluation = evaluatePortfolio(charter, proposal, input.portfolioUsage);
-  for (const reason of portfolioEvaluation.reasons) {
-    reasons.push(reason);
-    if (
-      reason.kind === "portfolio-not-configured" ||
-      reason.kind === "portfolio-allocation-missing" ||
-      reason.kind === "portfolio-allocation-exceeded" ||
-      reason.kind === "unknown-risk-data"
-    ) {
-      if (disposition !== "rejected") {
+  if (!costOnlyHumanApproval || hasCostImpact) {
+    for (const reason of portfolioEvaluation.reasons) {
+      reasons.push(reason);
+      if (
+        reason.kind === "portfolio-not-configured" ||
+        reason.kind === "portfolio-allocation-missing" ||
+        reason.kind === "portfolio-allocation-exceeded" ||
+        reason.kind === "unknown-risk-data"
+      ) {
+        if (disposition !== "rejected") {
+          disposition = "human-required";
+        }
+        hardBlocked = true;
+      } else if (disposition !== "rejected") {
         disposition = "human-required";
       }
-      hardBlocked = true;
-    } else if (disposition !== "rejected") {
-      disposition = "human-required";
     }
   }
 
@@ -651,63 +727,88 @@ export function evaluateAuthority(input: AuthorityEvaluationInput): AuthorityEva
   // cannot override the fail-closed disposition.
 
   // 6. Risk flags — recorded for audit; disposition always flips to human-required.
-  const riskFlagReasons = collectRiskFlagReasons(proposal);
-  for (const reason of riskFlagReasons) {
-    reasons.push(reason);
-    if (disposition !== "rejected") {
-      disposition = "human-required";
+  if (costOnlyHumanApproval) {
+    for (const reason of collectCostOnlyShapeReasons(proposal, charter)) {
+      reasons.push(reason);
+      disposition = "rejected";
+      hardBlocked = true;
     }
-  }
-
-  // 7. Reversibility — easy is the only auto-eligible reversibility.
-  for (const reason of collectReversibilityReasons(proposal)) {
-    reasons.push(reason);
-    if (disposition !== "rejected") {
-      disposition = "human-required";
+  } else {
+    const riskFlagReasons = collectRiskFlagReasons(proposal);
+    for (const reason of riskFlagReasons) {
+      reasons.push(reason);
+      if (disposition !== "rejected") {
+        disposition = "human-required";
+      }
     }
-  }
 
-  // 8. Charter requireHumanFor category matches.
-  for (const reason of collectRequireHumanReasons(proposal, charter)) {
-    reasons.push(reason);
-    if (disposition !== "rejected") {
-      disposition = "human-required";
+    // 7. Reversibility — easy is the only auto-eligible reversibility.
+    for (const reason of collectReversibilityReasons(proposal)) {
+      reasons.push(reason);
+      if (disposition !== "rejected") {
+        disposition = "human-required";
+      }
     }
-  }
 
-  // 9. Charter authority flag — fail closed unless autoReversibleExperiments is
-  // explicitly true. Absent, false, or non-boolean values cannot grant any
-  // automatic authority; the proposal must go to human review.
-  if (charter.authority?.autoReversibleExperiments !== true) {
-    reasons.push({
-      kind: "auto-reversible-experiments-disabled",
-      message:
-        "Charter does not explicitly enable automatic reversible experiments; all proposals require human review.",
-    });
-    if (disposition !== "rejected") {
-      disposition = "human-required";
+    // 8. Charter requireHumanFor category matches.
+    for (const reason of collectRequireHumanReasons(proposal, charter)) {
+      reasons.push(reason);
+      if (disposition !== "rejected") {
+        disposition = "human-required";
+      }
     }
-  }
 
-  // 10. Actor provenance audit — recorded so the trail explains which kind of
-  // channel is required next. The evaluator never authorizes high-risk work
-  // automatically, so a non-proposer actor that would previously have been
-  // trusted now receives actor-not-allowed-for-high-risk.
-  if (!hardBlocked && proposalRequiresHumanReview(proposal, charter)) {
-    if (actor.isProposer) {
+    // 9. Charter authority flag — fail closed unless autoReversibleExperiments is
+    // explicitly true. Absent, false, or non-boolean values cannot grant any
+    // automatic authority; the proposal must go to human review.
+    if (charter.authority?.autoReversibleExperiments !== true) {
       reasons.push({
-        kind: "proposer-cannot-self-authorize",
-        message: "The proposing Designer cannot act as the human approver for its own high-risk work.",
-      });
-    } else {
-      reasons.push({
-        kind: "actor-not-allowed-for-high-risk",
+        kind: "auto-reversible-experiments-disabled",
         message:
-          "Automatic authorization is unavailable for high-risk work; a separately verified human-approval channel is required.",
+          "Charter does not explicitly enable automatic reversible experiments; all proposals require human review.",
       });
+      if (disposition !== "rejected") {
+        disposition = "human-required";
+      }
     }
-    if (disposition !== "rejected") {
+
+    // 10. Actor provenance audit — recorded so the trail explains which kind of
+    // channel is required next. The evaluator never authorizes high-risk work
+    // automatically, so a non-proposer actor that would previously have been
+    // trusted now receives actor-not-allowed-for-high-risk.
+    if (!hardBlocked && proposalRequiresHumanReview(proposal, charter)) {
+      if (actor.isProposer) {
+        reasons.push({
+          kind: "proposer-cannot-self-authorize",
+          message: "The proposing Designer cannot act as the human approver for its own high-risk work.",
+        });
+      } else {
+        reasons.push({
+          kind: "actor-not-allowed-for-high-risk",
+          message:
+            "Automatic authorization is unavailable for high-risk work; a separately verified human-approval channel is required.",
+        });
+      }
+      if (disposition !== "rejected") {
+        disposition = "human-required";
+      }
+    }
+  }
+
+  if (costOnlyHumanApproval) {
+    const mustRejectAutonomously = reasons.some((reason) =>
+      COST_ONLY_AUTONOMOUS_REJECT_REASONS.has(reason.kind),
+    );
+    if (mustRejectAutonomously) {
+      disposition = "rejected";
+    } else if (hasCostImpact) {
+      reasons.push({
+        kind: "cost-requires-human-decision",
+        message: `Proposal has a cost impact (one-time ${budgetEvaluation.evaluation.oneTimeCost}, recurring ${budgetEvaluation.evaluation.recurringCost}) and requires a human spending decision.`,
+      });
       disposition = "human-required";
+    } else {
+      disposition = "automatic";
     }
   }
 

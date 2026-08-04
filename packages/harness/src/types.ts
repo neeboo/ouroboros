@@ -522,6 +522,7 @@ export interface FounderCharterAuthority {
   autoResearch?: boolean;
   autoReversibleExperiments?: boolean;
   autoIntegrateVerifiedCode?: boolean;
+  humanApprovalPolicy?: "risk-and-cost" | "cost-only";
   requireHumanFor?: string[];
   [key: string]: unknown;
 }
@@ -883,6 +884,7 @@ export type AuthorityReasonKind =
   | "portfolio-usage-category-mismatch"
   | "invalid-portfolio-usage"
   | "invalid-cost-shape"
+  | "cost-requires-human-decision"
   | "proposer-cannot-self-authorize"
   | "actor-not-allowed-for-high-risk"
   | "charter-inactive"

@@ -37,22 +37,20 @@ Hard boundaries:
 
 - The designer cannot amend the founder charter. Only a human or explicitly configured governance actor can activate a new charter version.
 - The designer cannot represent a high-risk proposal as human-approved through its own output payload. Decisions are recorded as `design_decisions` rows by the authority gate or by an explicit `decideDesign` action.
-- The designer cannot bypass budget, reversibility, evidence expiry, or human checkpoints. The authority evaluator rejects proposals that violate the charter before any scoring.
+- The designer cannot bypass evidence validity or spending checkpoints. The authority evaluator rejects malformed or stale proposals and independently decides evidence-backed technical changes.
 - The designer cannot mutate strategy records through prose. Durable conclusions return through fixed actions: `recordSignal`, `proposeDesign`, `decideDesign`, `recordDesignOutcome`, `createRunsFromDesign`.
 - The designer must consider removal. A proposal that adds complexity without naming its maintenance cost is incomplete.
 
 ## Authority And Human Checkpoints
 
-The authority evaluator is a pure function over the active charter and a proposal. Automatic authority is limited to changes that are reversible, inside the experiment budget, free of new sensitive-data or legal obligations, and below recurring-spend thresholds.
+The authority evaluator is a pure function over the active charter and a proposal. Ouroboros' managed charter uses `humanApprovalPolicy: "cost-only"`: evidence-backed zero-spend technical and product proposals are decided automatically, while malformed or stale proposals are rejected and returned for revision.
 
-Always-human checkpoints:
+Human checkpoints are reserved for monetary decisions:
 
-- mission, capital limits, or charter principles;
-- new legal, privacy, or security obligations;
-- destructive operations and production deployment;
-- new runtime dependencies, schema migrations, or infrastructure commitments;
-- prompt or verifier contract amendments;
-- ambiguous product behavior that evidence cannot resolve.
+- one-time or recurring spend;
+- capital-policy changes;
+- purchasing commitments;
+- recurring infrastructure commitments.
 
 The designer may propose a charter amendment. The proposal records the diff and rationale; only the configured governance actor can activate it.
 

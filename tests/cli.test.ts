@@ -616,7 +616,47 @@ describe("CLI", () => {
       autoResearch: true,
       autoReversibleExperiments: true,
       autoIntegrateVerifiedCode: false,
+      humanApprovalPolicy: "cost-only",
     });
+    expect(charter?.charter.policyVersion).toBe(2);
+  });
+
+  test("self-iteration upgrades the managed legacy charter to cost-only approval", async () => {
+    await runCli("init");
+    const harness = new Harness(dbPath);
+    const projectId = harness.createProject({ name: "ouroboros", rootPath: process.cwd() });
+    const legacy = harness.createFounderCharter({
+      projectId,
+      mission:
+        "Make Ouroboros reliable, autonomous, observable, and useful for real coding work while adding measured commercial discipline without sacrificing safety.",
+      charter: {
+        mission:
+          "Make Ouroboros reliable, autonomous, observable, and useful for real coding work while adding measured commercial discipline without sacrificing safety.",
+        capitalPolicy: {
+          currency: "USD",
+          experimentBudget: 100,
+          recurringSpendApprovalAbove: 0,
+          portfolio: { core: 4, growth: 2, exploration: 1 },
+        },
+        authority: {
+          autoResearch: true,
+          autoReversibleExperiments: true,
+          autoIntegrateVerifiedCode: false,
+          requireHumanFor: ["production-deployment", "schema-migration"],
+        },
+      },
+      activate: true,
+    });
+
+    const result = await runCliJson("self-iterate");
+    const overview = await runCliJson("run-overview", "--run-id", result.runId);
+    const active = harness.getActiveFounderCharter({ projectId });
+
+    expect(active?.id).not.toBe(legacy.id);
+    expect(active?.version).toBe(2);
+    expect(active?.charter.policyVersion).toBe(2);
+    expect(active?.charter.authority?.humanApprovalPolicy).toBe("cost-only");
+    expect(overview.run.context.founderCharterId).toBe(active?.id);
   });
 
   test("self-iteration bootstrap never overrides an explicit founder charter", async () => {

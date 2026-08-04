@@ -226,6 +226,8 @@ The first time `orbs self-iterate` or `orbs self-iterate-launch` runs in a new d
 
 ```json
 {
+  "managedBy": "ouroboros",
+  "policyVersion": 2,
   "mission": "Make Ouroboros reliable, autonomous, observable, and useful for real coding work while adding measured commercial discipline without sacrificing safety.",
   "targetUsers": [
     "Solo developers running autonomous coding loops on local repositories",
@@ -244,13 +246,12 @@ The first time `orbs self-iterate` or `orbs self-iterate-launch` runs in a new d
     "Removals and simplifications are first-class outcomes alongside additions"
   ],
   "nonGoals": [
-    "Automatic charter amendments without human activation",
-    "Production deployment, billing, or purchasing without a human checkpoint",
+    "Incurring one-time or recurring monetary cost without a human spending decision",
     "Scraping competitor data or building a general finance system in this slice"
   ],
   "constraints": [
-    "Mission, capital limits, legal or privacy obligations, destructive operations, production deployment, schema migrations, unplanned dependencies, and recurring infrastructure commitments require a human checkpoint",
-    "Recurring spend defaults to a zero threshold until a human raises it"
+    "Technical, architecture, protocol, product, and repository decisions are delegated to the Designer and deterministic verifier loop",
+    "Any monetary spend, capital-policy change, purchasing action, or recurring infrastructure commitment requires a human spending decision"
   ],
   "capitalPolicy": {
     "currency": "USD",
@@ -262,15 +263,11 @@ The first time `orbs self-iterate` or `orbs self-iterate-launch` runs in a new d
     "autoResearch": true,
     "autoReversibleExperiments": true,
     "autoIntegrateVerifiedCode": false,
+    "humanApprovalPolicy": "cost-only",
     "requireHumanFor": [
-      "mission-amendment",
       "capital-policy-amendment",
-      "legal-or-privacy",
-      "sensitive-data",
-      "destructive-operation",
-      "production-deployment",
-      "unplanned-dependency",
-      "schema-migration",
+      "cost",
+      "purchase",
       "recurring-infrastructure"
     ]
   },
@@ -367,6 +364,6 @@ Why this proposal passes automatic authority:
 - `investment.reversibility = "easy"` — pure runner code change reverted by `git revert`.
 - One-time and recurring costs are zero — inside the `$100` experiment budget.
 - Evidence is current — all three `evidenceRefs` are recent and not expired.
-- No charter checkpoint crossed — no schema migration, no new dependency, no production deployment, no recurring spend, no legal or privacy obligation.
+- It has zero monetary spend and does not alter capital policy, purchase services, or create recurring infrastructure commitments.
 
 The authority evaluator would record an `approved` decision with the matched rules and write a `design_decisions` row. `createRunsFromDesign` would then read the accepted proposal, copy the frozen evaluation contract into a child planner run, and the planner would sharpen the task graph and verifier contract before any worker attempt.

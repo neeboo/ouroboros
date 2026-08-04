@@ -15,6 +15,7 @@ import type {
   DesignDecision,
   DesignOutcome,
   ExecutionThread,
+  FounderCharter,
   RunOverview,
 } from "@ouroboros/harness";
 import {
@@ -32,6 +33,7 @@ import {
   createAcpxSubsessionRunner,
   createCollectSubsessionsHook,
   createRouteExecutor,
+  reconcileDeferredDesignAuthority,
   resolveExecutionRoute,
   resumeCodexResumableAttempt,
   runCodexAutopilot,
@@ -138,11 +140,9 @@ const SELF_ITERATION_GOAL_CONTRACT = {
       "the generated graph cannot be drained by run-loop",
     ],
     askHumanWhen: [
-      "a task wants to change repository structure",
-      "a task wants to introduce a new dependency",
-      "a task wants to alter the prompt contract or database schema",
-      "a verifier finds ambiguous product behavior",
-      "a proposed change crosses a configured human checkpoint",
+      "a proposal incurs one-time or recurring monetary cost",
+      "a proposal changes capital policy or creates a purchasing commitment",
+      "a proposal creates a recurring infrastructure commitment",
     ],
   },
 };
@@ -161,7 +161,10 @@ const SELF_ITERATION_ROLE_AGENT_DEFAULTS: Record<"designer" | "planner" | "verif
 };
 const SELF_ITERATION_DESIGN_DOC = "docs/designer-control-plane.md";
 const SELF_ITERATION_DEFAULT_PROJECT_NAME = "ouroboros";
+const SELF_ITERATION_CHARTER_POLICY_VERSION = 2;
 const SELF_ITERATION_DEFAULT_CHARTER = {
+  managedBy: "ouroboros",
+  policyVersion: SELF_ITERATION_CHARTER_POLICY_VERSION,
   mission:
     "Make Ouroboros reliable, autonomous, observable, and useful for real coding work while adding measured commercial discipline without sacrificing safety.",
   targetUsers: [
@@ -181,13 +184,12 @@ const SELF_ITERATION_DEFAULT_CHARTER = {
     "Removals and simplifications are first-class outcomes alongside additions",
   ],
   nonGoals: [
-    "Automatic charter amendments without human activation",
-    "Production deployment, billing, or purchasing without a human checkpoint",
+    "Incurring one-time or recurring monetary cost without a human spending decision",
     "Scraping competitor data or building a general finance system in this slice",
   ],
   constraints: [
-    "Mission, capital limits, legal or privacy obligations, destructive operations, production deployment, schema migrations, unplanned dependencies, and recurring infrastructure commitments require a human checkpoint",
-    "Recurring spend defaults to a zero threshold until a human raises it",
+    "Technical, architecture, protocol, product, and repository decisions are delegated to the Designer and deterministic verifier loop",
+    "Any monetary spend, capital-policy change, purchasing action, or recurring infrastructure commitment requires a human spending decision",
   ],
   capitalPolicy: {
     currency: "USD",
@@ -199,17 +201,8 @@ const SELF_ITERATION_DEFAULT_CHARTER = {
     autoResearch: true,
     autoReversibleExperiments: true,
     autoIntegrateVerifiedCode: false,
-    requireHumanFor: [
-      "mission-amendment",
-      "capital-policy-amendment",
-      "legal-or-privacy",
-      "sensitive-data",
-      "destructive-operation",
-      "production-deployment",
-      "unplanned-dependency",
-      "schema-migration",
-      "recurring-infrastructure",
-    ],
+    humanApprovalPolicy: "cost-only" as const,
+    requireHumanFor: ["cost", "capital-policy-amendment", "purchase", "recurring-infrastructure"],
   },
   reviewCadenceDays: 30,
 };
@@ -1211,7 +1204,7 @@ function selfIterationDesignerPrompt() {
     "Return one of the following outcomes through the `actions` array:",
     "",
     "- `recordSignal` to capture a sourced, time-bound observation from user, delivery, technology, market, economics, or system evidence",
-    "- `proposeDesign` to record a proposal with frozen evaluation contract, evidence references, options, recommendation, additions, removals, and an investment envelope; the proposal may not approve itself and may not cross mission, capital, legal, privacy, destructive, production, dependency, schema, or recurring-infrastructure checkpoints",
+    "- `proposeDesign` to record a proposal with frozen evaluation contract, evidence references, options, recommendation, additions, removals, and an investment envelope; the deterministic authority gate decides technical risk autonomously and reserves human checkpoints for monetary spend, capital-policy changes, purchasing, and recurring infrastructure commitments",
     "- `decideDesign` only with `auto` actor kind for `rejected`, `deferred`, `retired`, or `revise`; approvals are recorded by the authority evaluator or human CLI path, never from this output",
     "- `recordDesignOutcome` for `experiment`, `release`, or `review` stages with baseline, observed metrics, evidence, and unexpected effects",
     "- `createRunsFromDesign` only when the named proposal is `accepted` and a stored approved decision exists; each planned run inherits the frozen evaluation contract, charter, proposal, decision, budget, and integration boundary",
@@ -1604,7 +1597,7 @@ function ensureSelfIterationProject() {
 
 function ensureSelfIterationFounderCharter(projectId: string) {
   const existing = harness.getActiveFounderCharter({ projectId });
-  if (existing) {
+  if (existing && !shouldUpgradeManagedSelfIterationCharter(existing)) {
     return existing.id;
   }
   const created = harness.createFounderCharter({
@@ -1614,6 +1607,21 @@ function ensureSelfIterationFounderCharter(projectId: string) {
     activate: true,
   });
   return created.id;
+}
+
+function shouldUpgradeManagedSelfIterationCharter(charter: FounderCharter): boolean {
+  if (charter.charter.managedBy === "ouroboros") {
+    return charter.charter.policyVersion !== SELF_ITERATION_CHARTER_POLICY_VERSION;
+  }
+  const authority = charter.charter.authority;
+  const legacyHumanCategories = authority?.requireHumanFor;
+  return charter.mission === SELF_ITERATION_DEFAULT_CHARTER.mission
+    && authority?.humanApprovalPolicy === undefined
+    && Array.isArray(legacyHumanCategories)
+    && legacyHumanCategories.includes("schema-migration")
+    && legacyHumanCategories.includes("production-deployment")
+    && charter.charter.capitalPolicy?.experimentBudget === 100
+    && charter.charter.capitalPolicy?.recurringSpendApprovalAbove === 0;
 }
 
 type SelfImprovementDaemonInput = Omit<Parameters<typeof superviseCodexRuns>[0], "maxCycles"> & {
@@ -1668,6 +1676,22 @@ async function superviseSelfImprovementDaemon(input: SelfImprovementDaemonInput)
       let tick: Record<string, unknown>;
       try {
         await linearIntakePump.run();
+        const projectId = ensureSelfIterationProject();
+        const activeCharterId = ensureSelfIterationFounderCharter(projectId);
+        const rootRun = harness.getRun(input.rootRunId);
+        if (rootRun && rootRun.context.founderCharterId !== activeCharterId) {
+          harness.updateRun({
+            runId: input.rootRunId,
+            contextPatch: {
+              founderCharterId: activeCharterId,
+              designCharterId: activeCharterId,
+            },
+          });
+        }
+        const authorityReconciliation = reconcileDeferredDesignAuthority({
+          harness,
+          projectId,
+        });
         const cycle = ensureSelfImprovementCycle(input.rootRunId, input.cwd ?? process.cwd());
         if (cycle.state === "quiescent") {
           waitMs = input.idleMs;
@@ -1676,6 +1700,7 @@ async function superviseSelfImprovementDaemon(input: SelfImprovementDaemonInput)
             index,
             status: "quiescent",
             createdCycle: null,
+            authorityReconciliation,
             repositoryFingerprint: cycle.repositoryFingerprint,
             runCounts: harness.countRunsByStatus(),
             ...linearIntakePump.tickFields(),
@@ -1693,6 +1718,7 @@ async function superviseSelfImprovementDaemon(input: SelfImprovementDaemonInput)
             index,
             status: "ok",
             createdCycle: cycle.createdCycle,
+            authorityReconciliation,
             result,
             runCounts: harness.countRunsByStatus(),
             ...linearIntakePump.tickFields(),
@@ -1999,9 +2025,16 @@ function ensureSelfImprovementCycle(rootRunId: string, cwd: string) {
     ...scopedRuns.map((run) => Number(recordValue(run.context.selfImprovement).cycleIndex) || 0),
   ) + 1;
   const projectId = ensureSelfIterationProject();
-  const charterId = typeof root.context.founderCharterId === "string"
-    ? root.context.founderCharterId
-    : ensureSelfIterationFounderCharter(projectId);
+  const charterId = ensureSelfIterationFounderCharter(projectId);
+  if (root.context.founderCharterId !== charterId) {
+    harness.updateRun({
+      runId: rootRunId,
+      contextPatch: {
+        founderCharterId: charterId,
+        designCharterId: charterId,
+      },
+    });
+  }
   const runId = harness.createRun({
     goal: `Designer assesses Ouroboros for cycle ${cycleIndex}`,
     context: {
