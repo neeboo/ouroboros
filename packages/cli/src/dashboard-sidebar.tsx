@@ -1,22 +1,7 @@
 import { IntakeComposerControls } from "./dashboard-controls";
 import { Panel, ScrollArea } from "./dashboard-ui/primitives";
 import { renderStaticNode } from "./dashboard-static-render";
-import type { DashboardComposerState, DashboardGoalSummary, DashboardRunHistoryEntry } from "./dashboard-types";
-
-function GoalRow({ goal }: { goal: DashboardGoalSummary }) {
-  return (
-    <button className={`task-row ${goal.selected ? "selected" : ""}`} data-goal-id={goal.id}>
-      <span className={`status-dot ${goal.status}`} />
-      <span className="task-row-text">
-        <strong>{goal.title}</strong>
-        <span className="row-meta">
-          {goal.taskCount} tasks - {goal.roleSummary}
-        </span>
-      </span>
-      <span className={`status-text ${goal.status}`}>{goal.status}</span>
-    </button>
-  );
-}
+import type { DashboardComposerState, DashboardRunHistoryEntry } from "./dashboard-types";
 
 export function DashboardSidebar({
   runTitle,
@@ -24,16 +9,12 @@ export function DashboardSidebar({
   projectName,
   projectRoot,
   composer,
-  activeGoals,
-  historyGoals,
 }: {
   runTitle: string;
   runStatus: string;
   projectName: string;
   projectRoot?: string;
   composer: DashboardComposerState;
-  activeGoals: DashboardGoalSummary[];
-  historyGoals: DashboardGoalSummary[];
 }) {
   const brandInitial = "O";
   const statusInitial = runStatus ? runStatus.charAt(0).toUpperCase() : "·";
@@ -43,8 +24,19 @@ export function DashboardSidebar({
       <div className="sidebar-head">
         <div className="brand-row">
           <h1>Ouroboros</h1>
-          <div className="run-status" id="run-status">
-            {runStatus}
+          <div className="brand-row-actions">
+            <div className="run-status" id="run-status">
+              {runStatus}
+            </div>
+            <button
+              type="button"
+              className="rail-toggle-button"
+              data-rail-toggle="collapse"
+              aria-label="Collapse run navigator"
+              title="Collapse run navigator"
+            >
+              <span aria-hidden="true">«</span>
+            </button>
           </div>
         </div>
         <section className="sidebar-context" data-sidebar-context aria-label="Run context">
@@ -93,8 +85,9 @@ export function DashboardSidebar({
           type="button"
           className="rail-icon-button"
           data-rail-action="history"
-          title="Run history"
-          aria-label="Run history"
+          data-rail-toggle="expand"
+          title="Expand run navigator"
+          aria-label="Expand run navigator"
         >
           H
         </button>
@@ -108,27 +101,11 @@ export function DashboardSidebar({
           +
         </button>
       </div>
-      <ScrollArea as="nav" className="task-nav" aria-label="Goals and run history">
-        <section className="nav-section">
-          <h2 className="section-label">Active Goals</h2>
-          <div className="task-list" id="active-goal-list">
-            {activeGoals.map((goal) => (
-              <GoalRow goal={goal} key={goal.id} />
-            ))}
-          </div>
-        </section>
-        <section className="nav-section">
-          <h2 className="section-label">History</h2>
-          <div className="task-list" id="history-goal-list">
-            {historyGoals.map((goal) => (
-              <GoalRow goal={goal} key={goal.id} />
-            ))}
-          </div>
-        </section>
+      <ScrollArea as="nav" className="task-nav" aria-label="Run navigator" data-run-navigator>
         <section className="nav-section history-rail" data-history-runs aria-label="Run history">
           <div className="history-rail-head">
             <div>
-              <h2 className="section-label">Run history</h2>
+              <h2 className="section-label">Run navigator</h2>
               <div className="section-note">Active run pinned above recent runs.</div>
             </div>
           </div>

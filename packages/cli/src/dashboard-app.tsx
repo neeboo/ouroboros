@@ -12,19 +12,19 @@ export const DASHBOARD_REACT_MODULES: DashboardReactModule[] = [
   },
   {
     id: "sidebar",
-    label: "Goal sidebar",
+    label: "Run navigator sidebar",
     status: "active",
-    owns: ["active-goal-list", "history-goal-list", "intake-composer"],
+    owns: ["run-navigator", "active-run-list", "recent-runs-list", "intake-composer"],
   },
   {
     id: "flow-view",
-    label: "Flow and canvas workspace",
+    label: "Canvas workspace",
     status: "active",
-    owns: ["workspace-flow", "dashboard-canvas-root", "flow-transcript"],
+    owns: ["workspace-flow", "dashboard-canvas-root", "workspace-orientation"],
   },
   {
     id: "inspector",
-    label: "Codex-like chat inspector",
+    label: "Task inspector",
     status: "active",
     owns: [
       "inspector-panel",
@@ -40,7 +40,7 @@ export const DASHBOARD_REACT_MODULES: DashboardReactModule[] = [
     id: "controls",
     label: "Dashboard controls",
     status: "active",
-    owns: ["supervisor-controls", "runner-controls", "workspace-mode-controls"],
+    owns: ["supervisor-controls", "runner-controls"],
   },
 ];
 
@@ -55,7 +55,7 @@ export function DashboardApp({ state }: { state: DashboardAppState }) {
   return (
     <div
       className="app-shell"
-      data-rail="collapsed"
+      data-rail="expanded"
       data-react-dashboard-modules={DASHBOARD_REACT_MODULES.map((module) => module.id).join(",")}
     >
       <DashboardSidebar
@@ -64,10 +64,8 @@ export function DashboardApp({ state }: { state: DashboardAppState }) {
         projectName={projectName}
         projectRoot={projectRoot}
         composer={state.composer}
-        activeGoals={state.activeGoals}
-        historyGoals={state.historyGoals}
       />
-      <DashboardFlowView title={title} kicker="Conversation timeline" mode={state.workspaceMode} titleExpanded={false} />
+      <DashboardFlowView title={title} kicker="Conversation timeline" titleExpanded={false} />
       <DashboardInspector />
     </div>
   );

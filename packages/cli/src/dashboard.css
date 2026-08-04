@@ -168,6 +168,40 @@ body {
   justify-content: space-between;
   gap: 12px;
 }
+.brand-row-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.rail-toggle-button {
+  width: 28px;
+  height: 28px;
+  display: inline-grid;
+  place-items: center;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 720;
+  cursor: pointer;
+}
+.rail-toggle-button:hover {
+  border-color: var(--line-strong);
+  background: var(--panel-soft, #f4f4f5);
+}
+.rail-toggle-button:focus-visible {
+  outline: 2px solid #71717a;
+  outline-offset: 2px;
+}
+.app-shell[data-rail="collapsed"] .rail-toggle-button[data-rail-toggle="collapse"] {
+  display: none;
+}
+.app-shell[data-rail="expanded"] .rail-toggle-button[data-rail-toggle="collapse"] {
+  display: inline-grid;
+}
 h1 {
   margin: 0;
   font-size: 18px;
@@ -561,6 +595,42 @@ h1 {
   align-items: flex-start;
   justify-content: space-between;
   gap: 18px;
+}
+.workspace-orientation {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 12px;
+  margin-top: 14px;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: #ffffff;
+  color: var(--ink);
+}
+.orientation-strip {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 12px;
+  min-width: 0;
+}
+.orientation-cell {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+.orientation-label {
+  color: var(--muted-2);
+  font-size: 10.5px;
+  font-weight: 720;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.orientation-value {
+  min-width: 0;
+  color: var(--ink);
+  font-size: 12.5px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
 }
 .workspace-title-block {
   flex: 1 1 auto;
@@ -2193,15 +2263,15 @@ button.changed-file-node.selected .changed-file-type {
   .workspace-head-row {
     display: grid;
   }
-  .workspace-toggle {
-    width: 100%;
-  }
   .workspace-flow { padding: 18px 16px 32px; }
   .workspace-flow.canvas-workspace { min-height: 560px; padding: 0; }
   .workspace-head { padding: 16px; }
   .canvas-inner {
     height: 560px;
     min-height: 560px;
+  }
+  .workspace-orientation {
+    grid-template-columns: minmax(0, 1fr);
   }
 }
 }
