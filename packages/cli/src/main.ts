@@ -22,6 +22,7 @@ import {
   buildTaskPrompt,
   createApplyDesignActionsHook,
   createContextSummaryHook,
+  createDurableAttemptReplayCache,
   createGitWorktreeHook,
   createGoalReviewDecisionHook,
   createRefreshGuardrailProposalsHook,
@@ -1406,6 +1407,7 @@ function acceptGuardrailProposal(input: { runId: string; proposalId: string; acc
 }
 
 function executorFactory(_executorName: "noop" | "acpx-codex" | "codex-cli" | "codex-resumable") {
+  const replayCache = createDurableAttemptReplayCache({ harness });
   return (input: {
     run: NonNullable<ReturnType<Harness["getRun"]>>;
     task: NonNullable<ReturnType<Harness["getTask"]>>;
@@ -1420,6 +1422,7 @@ function executorFactory(_executorName: "noop" | "acpx-codex" | "codex-cli" | "c
       codexBin: flag(parsed, "codex-bin"),
       timeoutMs: genericHardTimeoutMs(),
       idleTimeoutMs: genericIdleTimeoutMs(),
+      replayCache,
     });
 }
 

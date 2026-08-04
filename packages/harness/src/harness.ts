@@ -47,6 +47,7 @@ import type {
 } from "./rows";
 import type {
   ActivateFounderCharterInput,
+  AttemptOutput,
   CreateDesignProposalInput,
   CreateExternalRefInput,
   CreateFounderCharterInput,
@@ -93,6 +94,9 @@ import type {
   ListStrategySignalsInput,
   BlockedDependencyTask,
   BlockTasksWithBlockedDependenciesInput,
+  BlockTasksWithSharedRootCauseInput,
+  BlockTasksWithSharedRootCauseResult,
+  SharedRootCauseRecord,
   RecordAttemptEventInput,
   RecordAttemptInput,
   RecordDesignDecisionInput,
@@ -661,6 +665,147 @@ export class Harness {
       })();
     });
   }
+
+  blockTasksWithSharedRootCause(input: BlockTasksWithSharedRootCauseInput): BlockTasksWithSharedRootCauseResult {
+    return withDatabase(this.dbPath, (db) => {
+      const rows = db
+        .query(
+          `
+          select *
+          from tasks
+          where run_id = $runId
+          order by created_at, id
+          `,
+        )
+        .all({ $runId: input.runId }) as TaskRow[];
+      const tasks = rows.map(taskFromRow);
+      const tasksById = new Map(tasks.map((task) => [task.id, task]));
+      const dependencyIsSatisfied = createDependencyReadiness(tasks);
+      const blockedRoots = new Map<string, { task: Task; reason: string; rootCauseAttempt: AttemptRow | null }>();
+      const descendants = tasks
+        .filter((task) => task.status === "todo")
+        .flatMap((task) => {
+          const dependencyIds = task.dependsOn.filter((dependencyId) => {
+            const dependency = tasksById.get(dependencyId);
+            return dependency?.status === "blocked" && !dependencyIsSatisfied(dependencyId, task);
+          });
+          if (dependencyIds.length === 0) {
+            return [];
+          }
+          for (const dependencyId of dependencyIds) {
+            if (!blockedRoots.has(dependencyId)) {
+              const root = tasksById.get(dependencyId);
+              if (root) {
+                const rootAttempt = db
+                  .query(
+                    `
+                    select *
+                    from attempts
+                    where task_id = $taskId
+                    order by finished_at desc, rowid desc
+                    limit 1
+                    `,
+                  )
+                  .get({ $taskId: root.id }) as AttemptRow | null;
+                blockedRoots.set(dependencyId, {
+                  task: root,
+                  reason: input.reason,
+                  rootCauseAttempt: rootAttempt,
+                });
+              }
+            }
+          }
+          return [
+            {
+              taskId: task.id,
+              role: task.role,
+              previousStatus: task.status as Extract<Status, "todo">,
+              dependencyIds,
+              reason: input.reason,
+            },
+          ];
+        });
+
+      if (descendants.length === 0) {
+        return { blocked: descendants, sharedRootCauses: [] };
+      }
+
+      const sharedRootCauses: SharedRootCauseRecord[] = [];
+      const now = new Date().toISOString();
+      for (const [rootTaskId, info] of blockedRoots) {
+        const descendantTaskIds = descendants
+          .filter((descendant) => descendant.dependencyIds.includes(rootTaskId))
+          .map((descendant) => descendant.taskId);
+        const rootOutput = info.rootCauseAttempt
+          ? (attemptFromRow(info.rootCauseAttempt).output as AttemptOutput | null)
+          : null;
+        const terminalReason =
+          (rootOutput?.artifacts?.find(
+            (artifact): artifact is Record<string, unknown> =>
+              artifact != null &&
+              typeof artifact === "object" &&
+              (artifact as Record<string, unknown>).kind === "acpx_terminal_evidence" &&
+              typeof (artifact as Record<string, unknown>).terminalReason === "string",
+          ))?.terminalReason as string | undefined;
+        sharedRootCauses.push({
+          rootTaskId,
+          rootAttemptId: info.rootCauseAttempt?.id ?? undefined,
+          reason: info.reason,
+          terminalReason,
+          descendantTaskIds,
+          recordedAt: now,
+        });
+      }
+
+      return db.transaction(() => {
+        for (const task of descendants) {
+          const sharedCauseForTask = sharedRootCauses.filter((cause) =>
+            task.dependencyIds.includes(cause.rootTaskId),
+          );
+          const causesList = sharedCauseForTask
+            .map((cause) => `${cause.rootTaskId}${cause.terminalReason ? `(${cause.terminalReason})` : ""}`)
+            .join(",");
+          db.query(
+            `
+            update tasks
+            set status = 'blocked', updated_at = current_timestamp
+            where id = $taskId and status = 'todo'
+            `,
+          ).run({ $taskId: task.taskId });
+          db.query(
+            `
+            insert into lessons (
+              id, run_id, task_id, attempt_id, kind, summary, evidence_json
+            )
+            values (
+              $id, $runId, $taskId, $attemptId, $kind, $summary, $evidenceJson
+            )
+            `,
+          ).run({
+            $id: makeId("lesson"),
+            $runId: input.runId,
+            $taskId: task.taskId,
+            $attemptId: sharedCauseForTask[0]?.rootAttemptId ?? "",
+            $kind: "lesson",
+            $summary: `Task blocked by shared root cause: ${causesList}`,
+            $evidenceJson: toJson({
+              sharedRootCauses: sharedCauseForTask.map((cause) => ({
+                rootTaskId: cause.rootTaskId,
+                rootAttemptId: cause.rootAttemptId,
+                terminalReason: cause.terminalReason,
+                reason: cause.reason,
+              })),
+              dependencyIds: task.dependencyIds,
+              reason: task.reason,
+              syntheticAttempt: false,
+            }),
+          });
+        }
+        return { blocked: descendants, sharedRootCauses };
+      })();
+    });
+  }
+
 
   leaseReadyTasks(input: LeaseReadyTasksInput) {
     return withDatabase(this.dbPath, (db) => {

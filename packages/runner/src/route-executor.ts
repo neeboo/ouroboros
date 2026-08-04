@@ -1,6 +1,6 @@
 import { createAcpxAgentExecutor } from "./executors/acpx";
 import { createCodexCliExecutor } from "./executors/codex-cli";
-import type { ApprovalMode, CodexSandbox, RunCommand } from "./executors/types";
+import type { ApprovalMode, AttemptReplayCache, CodexSandbox, RunCommand, WorktreeEvidenceProbe } from "./executors/types";
 import type { ResolvedAgentBackend } from "./agent-backends";
 import type { ResolvedExecutionRoute } from "./execution-routing";
 import type { TaskExecutor } from "./types";
@@ -15,6 +15,8 @@ export interface RouteExecutorOptions {
   timeoutMs?: number;
   idleTimeoutMs?: number;
   runCommand?: RunCommand;
+  replayCache?: AttemptReplayCache;
+  worktreeEvidence?: WorktreeEvidenceProbe;
 }
 
 export function createRouteExecutor(options: RouteExecutorOptions): TaskExecutor {
@@ -34,11 +36,14 @@ export function createRouteExecutor(options: RouteExecutorOptions): TaskExecutor
       cwd: options.cwd,
       ...acpxAgentConfig(backend),
       approval: backend.approval ?? options.approval ?? "approve-reads",
+      format: backend.format,
       model: options.route.model?.model,
       env: backend.env,
       timeoutMs: options.timeoutMs,
       idleTimeoutMs: options.idleTimeoutMs,
       runCommand: options.runCommand,
+      replayCache: options.replayCache,
+      worktreeEvidence: options.worktreeEvidence,
     });
   }
   if (backend.kind === "codex-resumable") {

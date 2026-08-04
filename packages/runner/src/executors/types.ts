@@ -1,3 +1,4 @@
+import type { AttemptOutput } from "@ouroboros/harness";
 import type { TaskExecutor } from "../types";
 
 export type ApprovalMode = "approve-all" | "approve-reads" | "deny-all";
@@ -22,14 +23,31 @@ export interface RunCommandInput {
 
 export type RunCommand = (input: RunCommandInput) => Promise<CommandResult>;
 
+export interface AttemptReplayCache {
+  reserveInitialRequest(attemptId: string): boolean;
+  reserveRecoveryRequest(attemptId: string): boolean;
+  getTerminalResult(attemptId: string): AttemptOutput | undefined;
+  recordTerminalResult(attemptId: string, output: AttemptOutput): void;
+}
+
+export interface WorktreeEvidenceProbe {
+  (input: { cwd: string; worktreePath?: string | null }): Promise<{
+    changedFiles: string[];
+    summary: string;
+  }>;
+}
+
 export interface AcpxCodexExecutorOptions {
   cwd: string;
   approval?: ApprovalMode;
   model?: string;
+  format?: string;
   env?: Record<string, string | undefined>;
   timeoutMs?: number;
   idleTimeoutMs?: number;
   runCommand?: RunCommand;
+  replayCache?: AttemptReplayCache;
+  worktreeEvidence?: WorktreeEvidenceProbe;
 }
 
 export interface AcpxCodexExecutorFactory {

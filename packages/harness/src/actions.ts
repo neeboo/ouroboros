@@ -1931,10 +1931,54 @@ function prepareRunDrain(harness: Harness, action: Extract<HarnessAction, { type
   const reclaimed = harness.reclaimRunningTasksWithoutAttempts({ runId: action.runId });
   harness.clearRunPause(action.runId);
   harness.updateRunStatus({ runId: action.runId, status: "todo" });
-  const blockedDependencies = harness.blockTasksWithBlockedDependencies({
+  const sharedRootBlock = harness.blockTasksWithSharedRootCause({
     runId: action.runId,
     reason: "task dependencies are blocked",
   });
+  const blockedDependencies = sharedRootBlock.blocked;
+  const sharedRootCauses = sharedRootBlock.sharedRootCauses;
+  if (sharedRootCauses.length > 0) {
+    const existingSharedRootCauses = Array.isArray(run.context.sharedRootCauses)
+      ? (run.context.sharedRootCauses as unknown[])
+          .filter((value): value is Record<string, unknown> =>
+            value != null && typeof value === "object" && !Array.isArray(value),
+          )
+          .map((value) => ({
+            rootTaskId: typeof value.rootTaskId === "string" ? value.rootTaskId : "",
+            rootAttemptId: typeof value.rootAttemptId === "string" ? value.rootAttemptId : undefined,
+            reason: typeof value.reason === "string" ? value.reason : "",
+            terminalReason: typeof value.terminalReason === "string" ? value.terminalReason : undefined,
+            descendantTaskIds: Array.isArray(value.descendantTaskIds)
+              ? value.descendantTaskIds.filter((item): item is string => typeof item === "string")
+              : [],
+            recordedAt: typeof value.recordedAt === "string" ? value.recordedAt : "",
+          }))
+          .filter((value) => value.rootTaskId.length > 0)
+      : [];
+    const keyedExisting = new Map(existingSharedRootCauses.map((cause) => [`${cause.rootTaskId}:${cause.recordedAt}`, cause]));
+    for (const cause of sharedRootCauses) {
+      const normalized: {
+        rootTaskId: string;
+        rootAttemptId: string | undefined;
+        reason: string;
+        terminalReason: string | undefined;
+        descendantTaskIds: string[];
+        recordedAt: string;
+      } = {
+        rootTaskId: cause.rootTaskId,
+        rootAttemptId: cause.rootAttemptId,
+        reason: cause.reason,
+        terminalReason: cause.terminalReason,
+        descendantTaskIds: cause.descendantTaskIds,
+        recordedAt: cause.recordedAt,
+      };
+      keyedExisting.set(`${cause.rootTaskId}:${cause.recordedAt}`, normalized);
+    }
+    harness.updateRun({
+      runId: action.runId,
+      contextPatch: { sharedRootCauses: [...keyedExisting.values()] },
+    });
+  }
   const overview = harness.getRunOverview({ runId: action.runId, eventLimit: 0 });
   const active = overview.tasks.filter((task) => task.status === "todo" || task.status === "running");
   const checks: HarnessActionResult["checks"] = [
@@ -1943,6 +1987,20 @@ function prepareRunDrain(harness: Harness, action: Extract<HarnessAction, { type
     { name: "run marked todo", status: "passed", evidence: "todo" },
   ];
   const artifacts: HarnessActionResult["artifacts"] = reclaimedArtifacts(reclaimed);
+  if (sharedRootCauses.length > 0) {
+    checks.push({ name: "shared root causes", status: "passed", evidence: String(sharedRootCauses.length) });
+    artifacts.push(
+      ...sharedRootCauses.map((cause) => ({
+        kind: "shared_root_cause",
+        rootTaskId: cause.rootTaskId,
+        rootAttemptId: cause.rootAttemptId ?? null,
+        terminalReason: cause.terminalReason ?? null,
+        descendantTaskIds: cause.descendantTaskIds,
+        reason: cause.reason,
+        recordedAt: cause.recordedAt,
+      })),
+    );
+  }
   if (blockedDependencies.length > 0) {
     checks.push({ name: "blocked dependency tasks", status: "passed", evidence: String(blockedDependencies.length) });
     artifacts.push(...blockedDependencies.map((task) => ({

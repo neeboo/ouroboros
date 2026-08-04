@@ -817,14 +817,12 @@ describe("acpx executor", () => {
       },
     });
 
-    expect(output).toEqual({
-      status: "blocked",
-      summary: "acpx codex executor produced invalid output",
-      changedFiles: [],
-      checks: [{ name: "acpx output parse", status: "failed" }],
-      artifacts: [],
-      problems: ["agent output did not contain a JSON object\n\nOutput:\n[client] initialize (running)"],
-    });
+    expect(output.status).toBe("blocked");
+    expect(output.summary).toBe("acpx codex executor produced invalid output");
+    expect(output.problems).toContain("agent output did not contain a JSON object\n\nOutput:\n[client] initialize (running)");
+    expect(output.problems?.some((problem) => problem.startsWith("terminal reason:"))).toBe(true);
+    expect(output.artifacts?.some((artifact) => (artifact as Record<string, unknown>).kind === "acpx_terminal_evidence")).toBe(true);
+    expect(output.checks?.some((check) => (check as Record<string, unknown>).name === "acpx output parse")).toBe(true);
   });
 
   test("includes exit code stdout and stderr when acpx prompt fails", async () => {
@@ -859,9 +857,12 @@ describe("acpx executor", () => {
       },
     });
 
-    expect(output.problems).toEqual([
-      "exit code: 1\n\nstdout:\nagent connected\n\nstderr:\nruntime internal error",
-    ]);
+    expect(output.problems?.[0]).toContain("agent connected");
+    expect(output.problems?.[0]).toContain("runtime internal error");
+    expect(output.artifacts?.some((artifact) => (artifact as Record<string, unknown>).kind === "acpx_terminal_evidence")).toBe(true);
+    const terminalArtifact = output.artifacts?.find((artifact) => (artifact as Record<string, unknown>).kind === "acpx_terminal_evidence") as Record<string, unknown> | undefined;
+    expect(terminalArtifact?.lastStdout).toContain("agent connected");
+    expect(terminalArtifact?.lastStderr).toContain("runtime internal error");
   });
 
   test("records start and idle timeout evidence via the executor recorder when the agent is silent", async () => {

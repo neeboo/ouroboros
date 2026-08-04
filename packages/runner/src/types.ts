@@ -21,6 +21,7 @@ export interface ExecutorInput {
   task: Task;
   sessionName: string;
   route: ResolvedExecutionRoute;
+  attemptId?: string;
   recorder?: ExecutorEventRecorder;
 }
 
