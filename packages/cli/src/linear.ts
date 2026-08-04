@@ -316,7 +316,7 @@ interface LinearFetchOutcome {
 
 const LINEAR_ISSUES_QUERY = `
   query OuroborosLinearPollIssues(
-    $projectId: String!
+    $projectId: ID!
     $teamKey: String!
     $pageSize: Int!
     $after: String

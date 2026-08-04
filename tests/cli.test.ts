@@ -2034,7 +2034,9 @@ describe("CLI", () => {
     expect(result.issuesDeduplicated).toBe(0);
     expect(result.state.overlapBoundary).toBe("2026-01-01T00:00:00.000Z");
     expect(requests).toHaveLength(1);
-    const variables = JSON.parse(requests[0]!.body).variables;
+    const requestBody = JSON.parse(requests[0]!.body);
+    expect(requestBody.query).toContain("$projectId: ID!");
+    const variables = requestBody.variables;
     expect(variables).toMatchObject({
       projectId: "proj-1",
       teamKey: "PAN",
