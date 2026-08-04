@@ -3736,6 +3736,7 @@ describe("CLI", () => {
       [
         "#!/usr/bin/env bun",
         "await new Response(Bun.stdin.stream()).text();",
+        "await Bun.sleep(180);",
         "console.log(JSON.stringify({ type: 'session.started', session_id: 'session_linear_poll_drain' }));",
         "console.log(JSON.stringify({ type: 'agent.message', message: JSON.stringify({ status: 'done', summary: 'Quiescent Linear intake', changedFiles: [], checks: [], artifacts: [], problems: [], actions: [] }) }));",
         "process.exit(0);",
@@ -3795,7 +3796,7 @@ describe("CLI", () => {
       expect(linearIntake.reason).toBe("polled");
       expect(linearIntake.status).toBe("ok");
       expect(linearIntake.advanced).toBe(true);
-      expect(issueRequests).toBeGreaterThan(0);
+      expect(issueRequests).toBeGreaterThan(1);
       // The polled issue is also claimed by the consumption path.
       const consumption = tick.linearIntakeConsumption as Record<string, unknown>;
       expect(consumption).toBeDefined();
@@ -3812,7 +3813,7 @@ describe("CLI", () => {
       expect(state.lastStatus).toBe("ok");
       expect(state.terminalFailure).toBeNull();
       expect(state.overlapBoundary).toBe("2026-01-01T00:00:00.000Z");
-      expect(state.cyclesCompleted).toBe(1);
+      expect(state.cyclesCompleted).toBeGreaterThan(1);
       expect(state.issuesIngested).toBe(1);
     } finally {
       server.stop(true);

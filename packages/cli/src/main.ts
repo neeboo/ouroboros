@@ -1651,89 +1651,169 @@ async function superviseSelfImprovementDaemon(input: SelfImprovementDaemonInput)
     });
   }
 
+  const linearIntakePump = createLinearIntakePump({
+    rootRunId: input.rootRunId,
+    pollingResolution: linearPollingResolution,
+    linear: linearConfigSection,
+    intervalMs: input.idleMs,
+  });
+  await linearIntakePump.run();
+  linearIntakePump.start();
+
   const ticks: Array<Record<string, unknown>> = [];
   let index = 0;
-  while (!stopping && (input.maxTicks === 0 || index < input.maxTicks)) {
-    let waitMs = input.intervalMs;
-    let tick: Record<string, unknown>;
-    try {
-      // Poll Linear for new issues when configured and due. The polling driver
-      // persists cursor, overlap boundary, retry attempt, next eligible poll
-      // time, and blocked intake state to the root run context.
-      const pollResult = linearPollingResolution.enabled && linearPollingResolution.config
-        ? await runSupervisorLinearPoll({
+  try {
+    while (!stopping && (input.maxTicks === 0 || index < input.maxTicks)) {
+      let waitMs = input.intervalMs;
+      let tick: Record<string, unknown>;
+      try {
+        await linearIntakePump.run();
+        const cycle = ensureSelfImprovementCycle(input.rootRunId, input.cwd ?? process.cwd());
+        if (cycle.state === "quiescent") {
+          waitMs = input.idleMs;
+          tick = {
+            type: "self-improvement.tick",
+            index,
+            status: "quiescent",
+            createdCycle: null,
+            repositoryFingerprint: cycle.repositoryFingerprint,
+            runCounts: harness.countRunsByStatus(),
+            ...linearIntakePump.tickFields(),
+            createdAt: new Date().toISOString(),
+          };
+        } else {
+          const result = await superviseCodexRuns({
+            ...input,
             rootRunId: input.rootRunId,
-            pollingConfig: linearPollingResolution.config,
-            linear: linearConfigSection,
-          })
-        : { reason: "disabled" as const, status: "idle" as const, advanced: false };
-
-      // Drain every durable Linear `issue.created` inbox event into one
-      // issue-scoped Designer cycle. The consumption path is idempotent and
-      // restart-safe: stable run/task IDs prevent duplicates, and events stuck
-      // in `running` after a crash resume on the next tick.
-      const intake = consumeLinearInbox({
-        harness,
-        rootRunId: input.rootRunId,
-      });
-
-      const cycle = ensureSelfImprovementCycle(input.rootRunId, input.cwd ?? process.cwd());
-      if (cycle.state === "quiescent") {
-        waitMs = input.idleMs;
+            maxCycles: input.tickCycles,
+          });
+          waitMs = result.status === "idle" ? input.idleMs : input.intervalMs;
+          tick = {
+            type: "self-improvement.tick",
+            index,
+            status: "ok",
+            createdCycle: cycle.createdCycle,
+            result,
+            runCounts: harness.countRunsByStatus(),
+            ...linearIntakePump.tickFields(),
+            createdAt: new Date().toISOString(),
+          };
+        }
+      } catch (error) {
         tick = {
           type: "self-improvement.tick",
           index,
-          status: "quiescent",
-          createdCycle: null,
-          repositoryFingerprint: cycle.repositoryFingerprint,
+          status: "error",
+          error: cliErrorMessage(error),
           runCounts: harness.countRunsByStatus(),
-          linearIntake: pollResult,
-          linearIntakeConsumption: intake,
-          createdAt: new Date().toISOString(),
-        };
-      } else {
-        const result = await superviseCodexRuns({
-          ...input,
-          rootRunId: input.rootRunId,
-          maxCycles: input.tickCycles,
-        });
-        waitMs = result.status === "idle" ? input.idleMs : input.intervalMs;
-        tick = {
-          type: "self-improvement.tick",
-          index,
-          status: "ok",
-          createdCycle: cycle.createdCycle,
-          result,
-          runCounts: harness.countRunsByStatus(),
-          linearIntake: pollResult,
-          linearIntakeConsumption: intake,
+          ...linearIntakePump.tickFields(),
           createdAt: new Date().toISOString(),
         };
       }
-    } catch (error) {
-      tick = {
-        type: "self-improvement.tick",
-        index,
-        status: "error",
-        error: cliErrorMessage(error),
-        runCounts: harness.countRunsByStatus(),
-        createdAt: new Date().toISOString(),
-      };
+      ticks.push(tick);
+      input.onTick?.(tick);
+      index += 1;
+      if (!stopping && (input.maxTicks === 0 || index < input.maxTicks)) {
+        await new Promise((resolve) => setTimeout(resolve, waitMs));
+      }
     }
-    ticks.push(tick);
-    input.onTick?.(tick);
-    index += 1;
-    if (!stopping && (input.maxTicks === 0 || index < input.maxTicks)) {
-      await new Promise((resolve) => setTimeout(resolve, waitMs));
-    }
+  } finally {
+    linearIntakePump.stop();
+    process.off("SIGINT", stop);
+    process.off("SIGTERM", stop);
   }
 
-  process.off("SIGINT", stop);
-  process.off("SIGTERM", stop);
   return {
     status: stopping ? "stopped" as const : input.maxTicks > 0 ? "tick_limit" as const : "stopped" as const,
     ticks,
     runCounts: harness.countRunsByStatus(),
+  };
+}
+
+function createLinearIntakePump(input: {
+  rootRunId: string;
+  pollingResolution: ReturnType<typeof resolveLinearPolling>;
+  linear: NonNullable<Awaited<ReturnType<typeof loadCliConfig>>["linear"]>;
+  intervalMs: number;
+}) {
+  let timer: ReturnType<typeof setInterval> | null = null;
+  let inFlight: Promise<void> | null = null;
+  let pollResult: Awaited<ReturnType<typeof runSupervisorLinearPoll>> = {
+    reason: "disabled",
+    status: "idle",
+    advanced: false,
+  };
+  let intake: ReturnType<typeof consumeLinearInbox> | null = null;
+  let intakeOutcomesSinceRead = new Map<
+    string,
+    ReturnType<typeof consumeLinearInbox>["outcomes"][number]
+  >();
+  let error: string | null = null;
+  let advancedSinceRead = false;
+
+  const run = () => {
+    if (inFlight) {
+      return inFlight;
+    }
+    inFlight = (async () => {
+      pollResult = input.pollingResolution.enabled && input.pollingResolution.config
+        ? await runSupervisorLinearPoll({
+            rootRunId: input.rootRunId,
+            pollingConfig: input.pollingResolution.config,
+            linear: input.linear,
+          })
+        : { reason: "disabled" as const, status: "idle", advanced: false };
+      advancedSinceRead ||= pollResult.advanced;
+      intake = consumeLinearInbox({ harness, rootRunId: input.rootRunId });
+      for (const outcome of intake.outcomes) {
+        if (!intakeOutcomesSinceRead.has(outcome.eventId)) {
+          intakeOutcomesSinceRead.set(outcome.eventId, outcome);
+        }
+      }
+      error = null;
+    })()
+      .catch((cause) => {
+        error = cliErrorMessage(cause);
+      })
+      .finally(() => {
+        inFlight = null;
+      });
+    return inFlight;
+  };
+
+  return {
+    run,
+    start() {
+      if (timer) return;
+      const configuredInterval = input.pollingResolution.config?.intervalMs ?? input.intervalMs;
+      timer = setInterval(() => void run(), Math.max(25, Math.min(configuredInterval, input.intervalMs)));
+      timer.unref?.();
+    },
+    stop() {
+      if (timer) clearInterval(timer);
+      timer = null;
+    },
+    tickFields() {
+      const outcomes = [...intakeOutcomesSinceRead.values()];
+      const aggregateIntake = outcomes.length > 0
+        ? {
+            processed: outcomes.length,
+            claimed: outcomes.filter((outcome) => outcome.kind === "claimed").length,
+            deduplicated: outcomes.filter((outcome) => outcome.kind === "deduplicated").length,
+            skipped: outcomes.filter((outcome) => outcome.kind === "skipped").length,
+            blocked: outcomes.filter((outcome) => outcome.kind === "blocked").length,
+            outcomes,
+          }
+        : intake;
+      const fields = {
+        linearIntake: { ...pollResult, advanced: advancedSinceRead || pollResult.advanced },
+        linearIntakeConsumption: aggregateIntake,
+        ...(error ? { linearIntakeError: error } : {}),
+      };
+      advancedSinceRead = false;
+      intakeOutcomesSinceRead = new Map();
+      return fields;
+    },
   };
 }
 
