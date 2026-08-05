@@ -847,6 +847,7 @@ export interface RecordDesignOutcomeInput {
 
 export interface ListDesignOutcomesInput {
   proposalId?: string;
+  projectId?: string;
   stage?: DesignOutcomeStage;
   dueBefore?: string;
   limit?: number;

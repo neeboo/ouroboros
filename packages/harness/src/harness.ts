@@ -1,4 +1,4 @@
-import { initDatabase, normalizeDatabasePath, withDatabase } from "./database";
+import { initDatabase, normalizeDatabasePath, withDatabase, withReadOnlyDatabase } from "./database";
 import type { HarnessDatabase } from "./database";
 import {
   DEFAULT_CONTEXT_SUMMARY_PROMPT_TEMPLATE,
@@ -180,14 +180,14 @@ export class Harness {
   }
 
   getProject(id: string) {
-    return withDatabase(this.dbPath, (db) => {
+    return withReadOnlyDatabase(this.dbPath, (db) => {
       const row = db.query("select * from projects where id = $id").get({ $id: id }) as ProjectRow | null;
       return row ? projectFromRow(row) : null;
     });
   }
 
   listProjects() {
-    return withDatabase(this.dbPath, (db) => {
+    return withReadOnlyDatabase(this.dbPath, (db) => {
       const rows = db.query("select * from projects order by created_at, id").all() as ProjectRow[];
       return rows.map(projectFromRow);
     });
@@ -1993,11 +1993,10 @@ export class Harness {
   }
 
   getFounderCharter(input: GetFounderCharterInput) {
-    return withDatabase(this.dbPath, (db) => this.getFounderCharterWithDb(db, input));
+    return withReadOnlyDatabase(this.dbPath, (db) => this.getFounderCharterWithDb(db, input));
   }
 
   getFounderCharterWithDb(db: HarnessDatabase, input: GetFounderCharterInput) {
-    ensureStrategyTables(db);
     const row = db
       .query("select * from founder_charters where id = $id")
       .get({ $id: input.id }) as FounderCharterRow | null;
@@ -2005,11 +2004,10 @@ export class Harness {
   }
 
   getActiveFounderCharter(input: GetActiveFounderCharterInput) {
-    return withDatabase(this.dbPath, (db) => this.getActiveFounderCharterWithDb(db, input));
+    return withReadOnlyDatabase(this.dbPath, (db) => this.getActiveFounderCharterWithDb(db, input));
   }
 
   getActiveFounderCharterWithDb(db: HarnessDatabase, input: GetActiveFounderCharterInput) {
-    ensureStrategyTables(db);
     const row = db
       .query(
         `
@@ -2025,8 +2023,7 @@ export class Harness {
   }
 
   listFounderCharters(input: ListFounderChartersInput) {
-    return withDatabase(this.dbPath, (db) => {
-      ensureStrategyTables(db);
+    return withReadOnlyDatabase(this.dbPath, (db) => {
       const limit = input.limit && input.limit > 0 ? Math.floor(input.limit) : 100;
       const includeInactive = input.includeInactive ?? false;
       const where = includeInactive
@@ -2096,11 +2093,10 @@ export class Harness {
   }
 
   getStrategySignal(input: GetStrategySignalInput) {
-    return withDatabase(this.dbPath, (db) => this.getStrategySignalWithDb(db, input));
+    return withReadOnlyDatabase(this.dbPath, (db) => this.getStrategySignalWithDb(db, input));
   }
 
   getStrategySignalWithDb(db: HarnessDatabase, input: GetStrategySignalInput) {
-    ensureStrategyTables(db);
     const row = db
       .query("select * from strategy_signals where id = $id")
       .get({ $id: input.id }) as StrategySignalRow | null;
@@ -2108,11 +2104,10 @@ export class Harness {
   }
 
   listStrategySignals(input: ListStrategySignalsInput = {}) {
-    return withDatabase(this.dbPath, (db) => this.listStrategySignalsWithDb(db, input));
+    return withReadOnlyDatabase(this.dbPath, (db) => this.listStrategySignalsWithDb(db, input));
   }
 
   listStrategySignalsWithDb(db: HarnessDatabase, input: ListStrategySignalsInput = {}) {
-    ensureStrategyTables(db);
     const limit = input.limit && input.limit > 0 ? Math.floor(input.limit) : 100;
     const where: string[] = [];
     const bindings: Record<string, string | number> = { $limit: limit };
@@ -2204,11 +2199,10 @@ export class Harness {
   }
 
   getDesignProposal(input: GetDesignProposalInput) {
-    return withDatabase(this.dbPath, (db) => this.getDesignProposalWithDb(db, input));
+    return withReadOnlyDatabase(this.dbPath, (db) => this.getDesignProposalWithDb(db, input));
   }
 
   getDesignProposalWithDb(db: HarnessDatabase, input: GetDesignProposalInput) {
-    ensureStrategyTables(db);
     const row = db
       .query("select * from design_proposals where id = $id")
       .get({ $id: input.id }) as DesignProposalRow | null;
@@ -2216,11 +2210,10 @@ export class Harness {
   }
 
   listDesignProposals(input: ListDesignProposalsInput = {}) {
-    return withDatabase(this.dbPath, (db) => this.listDesignProposalsWithDb(db, input));
+    return withReadOnlyDatabase(this.dbPath, (db) => this.listDesignProposalsWithDb(db, input));
   }
 
   listDesignProposalsWithDb(db: HarnessDatabase, input: ListDesignProposalsInput = {}) {
-    ensureStrategyTables(db);
     const limit = input.limit && input.limit > 0 ? Math.floor(input.limit) : 100;
     const where: string[] = [];
     const bindings: Record<string, string | number> = { $limit: limit };
@@ -2286,11 +2279,10 @@ export class Harness {
   }
 
   listDesignDecisions(input: ListDesignDecisionsInput) {
-    return withDatabase(this.dbPath, (db) => this.listDesignDecisionsWithDb(db, input));
+    return withReadOnlyDatabase(this.dbPath, (db) => this.listDesignDecisionsWithDb(db, input));
   }
 
   listDesignDecisionsWithDb(db: HarnessDatabase, input: ListDesignDecisionsInput) {
-    ensureStrategyTables(db);
     const limit = input.limit && input.limit > 0 ? Math.floor(input.limit) : 100;
     const rows = db
       .query(
@@ -2351,37 +2343,43 @@ export class Harness {
   }
 
   listDesignOutcomes(input: ListDesignOutcomesInput = {}) {
-    return withDatabase(this.dbPath, (db) => {
-      ensureStrategyTables(db);
-      const limit = input.limit && input.limit > 0 ? Math.floor(input.limit) : 100;
-      const where: string[] = [];
-      const bindings: Record<string, string | number> = { $limit: limit };
-      if (input.proposalId) {
-        where.push("proposal_id = $proposalId");
-        bindings.$proposalId = input.proposalId;
-      }
-      if (input.stage) {
-        where.push("stage = $stage");
-        bindings.$stage = input.stage;
-      }
-      if (input.dueBefore) {
-        where.push("(review_at is not null and review_at <= $dueBefore)");
-        bindings.$dueBefore = input.dueBefore;
-      }
-      const whereClause = where.length > 0 ? `where ${where.join(" and ")}` : "";
-      const rows = db
-        .query(
-          `
-          select *
-          from design_outcomes
-          ${whereClause}
-          order by rowid, id
-          limit $limit
-          `,
-        )
-        .all(bindings) as DesignOutcomeRow[];
-      return rows.map(designOutcomeFromRow);
-    });
+    return withReadOnlyDatabase(this.dbPath, (db) => this.listDesignOutcomesWithDb(db, input));
+  }
+
+  listDesignOutcomesWithDb(db: HarnessDatabase, input: ListDesignOutcomesInput = {}) {
+    const limit = input.limit && input.limit > 0 ? Math.floor(input.limit) : 100;
+    const where: string[] = [];
+    const bindings: Record<string, string | number> = { $limit: limit };
+    if (input.proposalId) {
+      where.push("design_outcomes.proposal_id = $proposalId");
+      bindings.$proposalId = input.proposalId;
+    }
+    if (input.projectId) {
+      where.push("design_proposals.project_id is $projectId");
+      bindings.$projectId = input.projectId;
+    }
+    if (input.stage) {
+      where.push("design_outcomes.stage = $stage");
+      bindings.$stage = input.stage;
+    }
+    if (input.dueBefore) {
+      where.push("(design_outcomes.review_at is not null and design_outcomes.review_at <= $dueBefore)");
+      bindings.$dueBefore = input.dueBefore;
+    }
+    const whereClause = where.length > 0 ? `where ${where.join(" and ")}` : "";
+    const rows = db
+      .query(
+        `
+        select design_outcomes.*
+        from design_outcomes
+        left join design_proposals on design_proposals.id = design_outcomes.proposal_id
+        ${whereClause}
+        order by design_outcomes.rowid, design_outcomes.id
+        limit $limit
+        `,
+      )
+      .all(bindings) as DesignOutcomeRow[];
+    return rows.map(designOutcomeFromRow);
   }
 
   linkProposalOutcomeReview(input: LinkProposalOutcomeReviewInput): LinkProposalOutcomeReviewResult {

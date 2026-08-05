@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { homedir, tmpdir } from "node:os";
@@ -31,6 +31,24 @@ import {
   INITIAL_LINEAR_INTAKE_POLLING_STATE,
 } from "../packages/cli/src/linear-intake";
 import { Database } from "bun:sqlite";
+
+async function snapshotDatabaseFilesystem(dbPath: string, dir: string) {
+  const dbStat = await stat(dbPath);
+  const parentStat = await stat(dir);
+  const dirEntries = await readdir(dir);
+  return {
+    size: dbStat.size,
+    mtimeMs: dbStat.mtimeMs,
+    ctimeMs: dbStat.ctimeMs,
+    parentMode: parentStat.mode & 0o777,
+    sidecars: {
+      wal: existsSync(`${dbPath}-wal`),
+      shm: existsSync(`${dbPath}-shm`),
+      journal: existsSync(`${dbPath}-journal`),
+    },
+    dirEntries: new Set(dirEntries.sort()),
+  };
+}
 
 describe("CLI", () => {
   let dir: string;
@@ -9569,6 +9587,265 @@ describe("CLI", () => {
     const result = await runCliRaw("show-design", "--proposal-id", "design_missing");
     expect(result.exitCode).not.toBe(0);
     expect(result.stderr).toContain("design proposal not found: design_missing");
+  });
+
+  test("Designer inspection commands work against an initialized read-only database without mutating filesystem state", async () => {
+    await runCli("init");
+    const project = await runCliJson(
+      "create-project",
+      "--name",
+      "Readonly Project",
+      "--root-path",
+      dir,
+    );
+    const harness = new Harness(dbPath);
+    const charter = harness.createFounderCharter({
+      projectId: project.id,
+      mission: "Read-only inspection",
+      charter: {
+        mission: "Read-only inspection",
+        capitalPolicy: { currency: "USD", experimentBudget: 100 },
+      },
+      activate: true,
+    });
+    harness.createStrategySignal({
+      projectId: project.id,
+      signalClass: "system",
+      source: "test",
+      title: "Active signal",
+      summary: "Read-only seed",
+      observationTime: "2026-08-01T00:00:00Z",
+      confidence: 0.5,
+    });
+    const proposal = harness.createDesignProposal({
+      projectId: project.id,
+      charterId: charter.id,
+      title: "Read-only proposal",
+      problem: "Read-only inspection",
+      recommendation: "Inspect without writes",
+      status: "accepted",
+      proposal: {
+        problem: "Read-only inspection",
+        recommendation: "Inspect without writes",
+        evaluationContract: {
+          baseline: [],
+          successMetrics: [],
+          guardMetrics: [],
+          requiredEvidence: [],
+          reviewAt: "2026-09-01T00:00:00Z",
+        },
+        investment: { reversibility: "easy", portfolio: "core" },
+      },
+    });
+    harness.recordDesignDecision({
+      proposalId: proposal.id,
+      charterId: charter.id,
+      decision: "approved",
+      actorKind: "auto",
+      authority: { disposition: "automatic" },
+    });
+    harness.recordDesignOutcome({
+      proposalId: proposal.id,
+      stage: "review",
+      recommendation: "retain",
+      reviewAt: "2026-08-01T00:00:00Z",
+    });
+    harness.recordDesignOutcome({
+      proposalId: proposal.id,
+      stage: "review",
+      recommendation: "retain",
+      reviewAt: "2026-12-01T00:00:00Z",
+    });
+    harness.recordDesignOutcome({
+      proposalId: proposal.id,
+      stage: "experiment",
+      recommendation: "retain",
+    });
+
+    // Make the database and parent directory read-only. From here on, any
+    // write attempt (init, pragma, sidecar creation) must either fail loudly
+    // or be absent from the inspection code path entirely.
+    await chmod(dir, 0o555);
+    await chmod(dbPath, 0o444);
+    // Drop write permission from WAL/SHM if present so any write attempt fails.
+    await chmod(`${dbPath}-wal`, 0o444).catch(() => undefined);
+    await chmod(`${dbPath}-shm`, 0o444).catch(() => undefined);
+
+    // Snapshot filesystem state in the read-only state immediately before any
+    // inspection command runs. chmod is part of the test setup, not inspection,
+    // so the diff isolates mutations caused by the inspection commands.
+    const before = await snapshotDatabaseFilesystem(dbPath, dir);
+
+    const designStatusJson = await runCliJson(
+      "design-status",
+      "--project-id",
+      project.id,
+      "--json",
+      "true",
+    );
+    expect(designStatusJson).toMatchObject({
+      projectId: project.id,
+      charter: expect.objectContaining({ id: charter.id }),
+      currentProposal: expect.objectContaining({ id: proposal.id }),
+    });
+
+    const listSignalsJson = await runCliJson(
+      "list-signals",
+      "--project-id",
+      project.id,
+      "--json",
+      "true",
+    );
+    expect(listSignalsJson.totalCount).toBe(1);
+    expect(listSignalsJson.signals[0]).toMatchObject({ title: "Active signal" });
+
+    const showDesignJson = await runCliJson(
+      "show-design",
+      "--proposal-id",
+      proposal.id,
+      "--json",
+      "true",
+    );
+    expect(showDesignJson).toMatchObject({
+      proposal: expect.objectContaining({ id: proposal.id }),
+    });
+    expect(showDesignJson.outcomes.length).toBe(3);
+
+    const outcomesJson = await runCliJson(
+      "list-design-outcomes",
+      "--project-id",
+      project.id,
+      "--status",
+      "due",
+      "--due-before",
+      "2026-08-11T00:00:00Z",
+      "--json",
+      "true",
+    );
+    expect(outcomesJson).toMatchObject({
+      projectId: project.id,
+      status: "due",
+      evaluatedAt: "2026-08-11T00:00:00Z",
+      totalCount: 1,
+    });
+    expect(outcomesJson.outcomes[0]).toMatchObject({
+      stage: "review",
+      recommendation: "retain",
+      reviewAt: "2026-08-01T00:00:00Z",
+      due: true,
+    });
+
+    // Concise output should also work and surface stable identifiers.
+    const concise = await runCli(
+      "list-design-outcomes",
+      "--project-id",
+      project.id,
+      "--status",
+      "due",
+      "--due-before",
+      "2026-08-11T00:00:00Z",
+    );
+    expect(concise).toContain("Design outcome reviews");
+    expect(concise).toContain("Evaluated at: 2026-08-11T00:00:00Z");
+    expect(concise).toContain("due");
+    expect(concise).toContain(proposal.id.slice(0, 12));
+
+    const futureOnly = await runCliJson(
+      "list-design-outcomes",
+      "--project-id",
+      project.id,
+      "--status",
+      "due",
+      "--due-before",
+      "2026-07-01T00:00:00Z",
+      "--json",
+      "true",
+    );
+    expect(futureOnly.totalCount).toBe(0);
+    expect(futureOnly.outcomes).toEqual([]);
+
+    // Filtering only future outcomes via no --status should include all three.
+    const allOutcomes = await runCliJson(
+      "list-design-outcomes",
+      "--project-id",
+      project.id,
+      "--json",
+      "true",
+    );
+    expect(allOutcomes.totalCount).toBe(3);
+    expect(allOutcomes.evaluatedAt).toBeNull();
+
+    // Snapshot filesystem state again without restoring write permission so
+    // the only deltas that can appear are mutations caused by inspection.
+    const after = await snapshotDatabaseFilesystem(dbPath, dir);
+
+    expect(after.size).toBe(before.size);
+    expect(after.mtimeMs).toBe(before.mtimeMs);
+    expect(after.ctimeMs).toBe(before.ctimeMs);
+    expect(after.parentMode).toBe(before.parentMode);
+    expect(after.sidecars).toEqual(before.sidecars);
+    expect(after.dirEntries).toEqual(before.dirEntries);
+
+    // Restore write permission so afterEach can delete the temp directory.
+    await chmod(dir, 0o755).catch(() => undefined);
+    await chmod(dbPath, 0o644).catch(() => undefined);
+    await chmod(`${dbPath}-wal`, 0o644).catch(() => undefined);
+    await chmod(`${dbPath}-shm`, 0o644).catch(() => undefined);
+  });
+
+  test("list-design-outcomes rejects incompatible combinations and bad timestamps", async () => {
+    await runCli("init");
+    const project = await runCliJson(
+      "create-project",
+      "--name",
+      "Validation Project",
+      "--root-path",
+      dir,
+    );
+
+    const stageWithStatus = await runCliRaw(
+      "list-design-outcomes",
+      "--project-id",
+      project.id,
+      "--status",
+      "due",
+      "--stage",
+      "review",
+    );
+    expect(stageWithStatus.exitCode).not.toBe(0);
+    expect(stageWithStatus.stderr).toContain("--status due cannot be combined with --stage");
+
+    const badStatus = await runCliRaw(
+      "list-design-outcomes",
+      "--project-id",
+      project.id,
+      "--status",
+      "ready",
+    );
+    expect(badStatus.exitCode).not.toBe(0);
+    expect(badStatus.stderr).toContain("--status must be 'due'");
+
+    const badTimestamp = await runCliRaw(
+      "list-design-outcomes",
+      "--project-id",
+      project.id,
+      "--status",
+      "due",
+      "--due-before",
+      "2026/08/11 00:00:00",
+    );
+    expect(badTimestamp.exitCode).not.toBe(0);
+    expect(badTimestamp.stderr).toContain("--due-before must be an ISO 8601 UTC timestamp");
+
+    const badStage = await runCliRaw(
+      "list-design-outcomes",
+      "--project-id",
+      project.id,
+      "--stage",
+      "scheduled",
+    );
+    expect(badStage.exitCode).not.toBe(0);
+    expect(badStage.stderr).toContain("--stage must be one of");
   });
 
   async function runCli(...rawArgs: Array<string | Record<string, string>>) {

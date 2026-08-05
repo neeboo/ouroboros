@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { existsSync } from "node:fs";
-import { mkdtemp, rm } from "node:fs/promises";
+import { chmod, mkdtemp, rm, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
@@ -10,6 +10,7 @@ import {
   diagnoseRunOverview,
   initDatabase,
   withDatabase,
+  withReadOnlyDatabase,
 } from "../packages/harness/src";
 
 describe("Harness", () => {
@@ -2542,3 +2543,285 @@ describe("Harness strategy domain", () => {
     expect(result.reason).toContain("no designProposalId");
   });
 });
+
+describe("Harness read-only Designer inspection", () => {
+  let dir: string;
+  let harness: Harness;
+  let projectId: string;
+  let charterId: string;
+  let proposalId: string;
+  let decisionId: string;
+  let outcomeDueId: string;
+  let outcomeFutureId: string;
+  let outcomeMissingReviewAtId: string;
+  let signalId: string;
+  let dbPath: string;
+
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), "ouroboros-readonly-"));
+    dbPath = join(dir, "ouroboros.db");
+    harness = new Harness(dbPath);
+    harness.init();
+
+    projectId = harness.createProject({ name: "Readonly", rootPath: dir });
+    charterId = harness.createFounderCharter({
+      projectId,
+      mission: "Inspection",
+      charter: {
+        mission: "Inspection",
+        capitalPolicy: { currency: "USD", experimentBudget: 100 },
+      },
+      activate: true,
+    }).id;
+    signalId = harness.createStrategySignal({
+      projectId,
+      signalClass: "system",
+      source: "test",
+      title: "Active signal",
+      summary: "Inspection seed",
+      observationTime: "2026-08-01T00:00:00.000Z",
+      confidence: 0.5,
+    }).id;
+    const proposal = harness.createDesignProposal({
+      projectId,
+      charterId,
+      title: "Inspection proposal",
+      problem: "Read-only",
+      recommendation: "Inspect",
+      proposal: {
+        problem: "Read-only",
+        recommendation: "Inspect",
+        evaluationContract: {
+          baseline: [],
+          successMetrics: [],
+          guardMetrics: [],
+          requiredEvidence: [],
+          reviewAt: "2026-09-01T00:00:00.000Z",
+        },
+        investment: { reversibility: "easy", portfolio: "core" },
+      },
+      status: "accepted",
+    });
+    proposalId = proposal.id;
+    decisionId = harness.recordDesignDecision({
+      proposalId,
+      charterId,
+      decision: "approved",
+      actorKind: "auto",
+      authority: { disposition: "automatic" },
+    }).id;
+
+    outcomeDueId = harness.recordDesignOutcome({
+      proposalId,
+      stage: "review",
+      recommendation: "retain",
+      reviewAt: "2026-08-01T00:00:00.000Z",
+    }).id;
+    outcomeFutureId = harness.recordDesignOutcome({
+      proposalId,
+      stage: "review",
+      recommendation: "retain",
+      reviewAt: "2026-12-01T00:00:00.000Z",
+    }).id;
+    outcomeMissingReviewAtId = harness.recordDesignOutcome({
+      proposalId,
+      stage: "experiment",
+      recommendation: "retain",
+    }).id;
+  });
+
+  afterEach(async () => {
+    // Restore permissions before cleanup so rm can delete the tree.
+    await chmod(dir, 0o755).catch(() => undefined);
+    await chmod(dbPath, 0o644).catch(() => undefined);
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  async function snapshotFilesystem() {
+    const dbStat = await stat(dbPath);
+    const parentStat = await stat(dir);
+    const sidecars = {
+      wal: existsSync(`${dbPath}-wal`),
+      shm: existsSync(`${dbPath}-shm`),
+      journal: existsSync(`${dbPath}-journal`),
+    };
+    const dirEntries = new Set(await readDirEntries(dir));
+    return {
+      mode: dbStat.mode & 0o777,
+      size: dbStat.size,
+      mtimeMs: dbStat.mtimeMs,
+      ctimeMs: dbStat.ctimeMs,
+      parentMode: parentStat.mode & 0o777,
+      sidecars,
+      dirEntries,
+    };
+  }
+
+  async function readDirEntries(path: string): Promise<string[]> {
+    const { readdir } = await import("node:fs/promises");
+    return (await readdir(path)).sort();
+  }
+
+  test("inspection methods work against an initialized read-only database without mutating filesystem state", async () => {
+    // Make the database and its parent directory read-only.
+    await chmod(dbPath, 0o444);
+    await chmod(dir, 0o555);
+
+    const before = await snapshotFilesystem();
+
+    // Each Designer inspection command path should succeed without write.
+    expect(harness.listProjects().map((project) => project.id)).toContain(projectId);
+    expect(harness.getProject(projectId)?.id).toBe(projectId);
+    expect(harness.getActiveFounderCharter({ projectId })?.id).toBe(charterId);
+    expect(harness.getFounderCharter({ id: charterId })?.id).toBe(charterId);
+    expect(harness.listFounderCharters({ projectId }).map((row) => row.id)).toContain(charterId);
+    expect(harness.listStrategySignals({ projectId }).map((row) => row.id)).toContain(signalId);
+    expect(harness.getStrategySignal({ id: signalId })?.id).toBe(signalId);
+    expect(harness.getDesignProposal({ id: proposalId })?.id).toBe(proposalId);
+    expect(harness.listDesignProposals({ projectId }).map((row) => row.id)).toContain(proposalId);
+    expect(harness.listDesignDecisions({ proposalId }).map((row) => row.id)).toContain(decisionId);
+    expect(harness.listDesignOutcomes({ proposalId }).map((row) => row.id)).toEqual([
+      outcomeDueId,
+      outcomeFutureId,
+      outcomeMissingReviewAtId,
+    ]);
+
+    const after = await snapshotFilesystem();
+    expect(after.mode).toBe(before.mode);
+    expect(after.size).toBe(before.size);
+    expect(after.mtimeMs).toBe(before.mtimeMs);
+    expect(after.ctimeMs).toBe(before.ctimeMs);
+    expect(after.parentMode).toBe(before.parentMode);
+    expect(after.sidecars).toEqual(before.sidecars);
+    expect(after.dirEntries).toEqual(before.dirEntries);
+  });
+
+  test("dueBefore filtering is inclusive and excludes null review_at outcomes", () => {
+    // dueBefore matches outcomeDueId exactly (inclusive <=), excludes future and null.
+    expect(
+      harness
+        .listDesignOutcomes({ dueBefore: "2026-08-01T00:00:00.000Z" })
+        .map((row) => row.id),
+    ).toEqual([outcomeDueId]);
+    expect(harness.listDesignOutcomes({ dueBefore: "2026-07-01T00:00:00.000Z" })).toEqual([]);
+  });
+
+  test("projectId scoping filters outcomes via design_proposals", () => {
+    const otherProject = harness.createProject({ name: "Other", rootPath: `${dir}-other` });
+    const otherProposal = harness.createDesignProposal({
+      projectId: otherProject,
+      charterId,
+      title: "Other proposal",
+      problem: "x",
+      recommendation: "y",
+      proposal: {
+        problem: "x",
+        recommendation: "y",
+        evaluationContract: {
+          baseline: [],
+          successMetrics: [],
+          guardMetrics: [],
+          requiredEvidence: [],
+        },
+        investment: { reversibility: "easy", portfolio: "core" },
+      },
+    });
+    const otherOutcome = harness.recordDesignOutcome({
+      proposalId: otherProposal.id,
+      stage: "review",
+      recommendation: "retain",
+      reviewAt: "2026-08-01T00:00:00.000Z",
+    });
+
+    const scoped = harness.listDesignOutcomes({ projectId });
+    expect(scoped.map((row) => row.id)).not.toContain(otherOutcome.id);
+    expect(scoped.map((row) => row.id)).toContain(outcomeDueId);
+
+    const otherScoped = harness.listDesignOutcomes({ projectId: otherProject });
+    expect(otherScoped.map((row) => row.id)).toEqual([otherOutcome.id]);
+  });
+
+  test("withReadOnlyDatabase throws clearly when the database file is missing and does not create any file", async () => {
+    const missingPath = join(dir, "does-not-exist.db");
+    expect(existsSync(missingPath)).toBe(false);
+    expect(() => withReadOnlyDatabase(missingPath, () => null)).toThrow(/database not found/i);
+    expect(existsSync(missingPath)).toBe(false);
+    expect(existsSync(`${missingPath}-wal`)).toBe(false);
+    expect(existsSync(`${missingPath}-shm`)).toBe(false);
+    expect(existsSync(`${missingPath}-journal`)).toBe(false);
+  });
+
+  test("withReadOnlyDatabase rejects incompatible schemas via SELECT without creating sidecars", async () => {
+    const bogusPath = join(dir, "not-ouroboros.db");
+    await writeFile(bogusPath, Buffer.from("not a sqlite database", "utf8"));
+    expect(() => withReadOnlyDatabase(bogusPath, () => null)).toThrow();
+    expect(existsSync(`${bogusPath}-wal`)).toBe(false);
+    expect(existsSync(`${bogusPath}-shm`)).toBe(false);
+    expect(existsSync(`${bogusPath}-journal`)).toBe(false);
+  });
+
+  test("withReadOnlyDatabase rejects an empty sqlite file with no schema and leaves no sidecar", async () => {
+    // Create a valid SQLite database file with no Ouroboros schema.
+    const emptyPath = join(dir, "empty.db");
+    {
+      const { Database } = await import("bun:sqlite");
+      const db = new Database(emptyPath);
+      db.exec("create table other (id integer primary key)");
+      db.close();
+    }
+    expect(() => withReadOnlyDatabase(emptyPath, () => null)).toThrow(/missing schema|incompatible/i);
+    expect(existsSync(`${emptyPath}-wal`)).toBe(false);
+    expect(existsSync(`${emptyPath}-shm`)).toBe(false);
+    expect(existsSync(`${emptyPath}-journal`)).toBe(false);
+  });
+
+  test("writable initialization still migrates legacy databases and supports strategy mutations", () => {
+    // initDatabase should still create strategy tables so subsequent writes work.
+    const freshPath = join(dir, "writable-init.db");
+    initDatabase(freshPath);
+    const writableHarness = new Harness(freshPath);
+    const pid = writableHarness.createProject({ name: "Writable", rootPath: `${dir}-writable` });
+    const cid = writableHarness.createFounderCharter({
+      projectId: pid,
+      mission: "Writable",
+      charter: { mission: "Writable" },
+      activate: true,
+    }).id;
+    expect(writableHarness.getActiveFounderCharter({ projectId: pid })?.id).toBe(cid);
+  });
+
+  test("missing strategy table on read-only inspection fails clearly via SELECT without filesystem mutation", async () => {
+    // Simulate a database initialized before strategy tables existed by dropping them.
+    const legacyPath = join(dir, "legacy.db");
+    initDatabase(legacyPath);
+    withDatabase(legacyPath, (db) => {
+      db.exec("drop table if exists design_outcomes");
+      db.exec("drop table if exists design_decisions");
+      db.exec("drop table if exists design_proposals");
+      db.exec("drop table if exists strategy_signals");
+      db.exec("drop table if exists founder_charters");
+    });
+    await chmod(legacyPath, 0o444);
+    const before = await snapshot(legacyPath);
+    const legacyHarness = new Harness(legacyPath);
+    expect(() => legacyHarness.listDesignOutcomes()).toThrow();
+    expect(() => legacyHarness.listStrategySignals()).toThrow();
+    expect(() => legacyHarness.listFounderCharters({ projectId: "missing" })).toThrow();
+    const after = await snapshot(legacyPath);
+    expect(after.sidecars).toEqual(before.sidecars);
+    expect(after.size).toBe(before.size);
+  });
+});
+
+async function snapshot(path: string) {
+  const s = await stat(path);
+  return {
+    size: s.size,
+    mtimeMs: s.mtimeMs,
+    sidecars: {
+      wal: existsSync(`${path}-wal`),
+      shm: existsSync(`${path}-shm`),
+      journal: existsSync(`${path}-journal`),
+    },
+  };
+}

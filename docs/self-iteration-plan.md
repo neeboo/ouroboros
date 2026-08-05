@@ -36,6 +36,7 @@ The designer task at the root of each cycle must inspect:
 - `README.md`, `AGENTS.md`, and the control-loop documentation;
 - the active founder charter (`orbs design-status`);
 - current strategy signals (`orbs list-signals`) and any conflicting or expired entries that need follow-up;
+- due design outcome reviews (`orbs list-design-outcomes --status due --due-before <ISO UTC>`) that may reopen accepted decisions;
 - current source, tests, and dashboard behavior;
 - recent run graphs, attempts, verifier decisions, integrations, and outcome reviews;
 - lessons, repeated failure patterns, and active guardrails;
@@ -117,13 +118,16 @@ Adverse outcomes (revise, retire) become new `strategy_signal` records without s
 ## Inspection
 
 ```bash
-orbs design-status                     # active charter, current proposal, latest decision, next review
-orbs list-signals                      # expiring evidence by class and status
-orbs show-design --proposal-id <id>    # frozen contract, options, decisions, outcomes
+orbs design-status                                       # active charter, current proposal, latest decision, next review
+orbs list-signals                                        # expiring evidence by class and status
+orbs show-design --proposal-id <id>                      # frozen contract, options, decisions, outcomes
+orbs list-design-outcomes --status due --due-before <ISO UTC> # due outcome reviews only, deterministically filtered
 orbs run-overview --run-id <root_run_id>
 orbs run-graph --run-id <root_run_id>
 orbs run-evidence --run-id <root_run_id>
 orbs list-lessons --run-id <root_run_id>
 ```
+
+All four Designer inspection commands (`design-status`, `list-signals`, `show-design`, `list-design-outcomes`) are read-only: they open an existing database in non-mutating mode and never create or alter schema, sidecar, or filesystem state, so the cycle can run inside a restricted Designer worktree that cannot write to the database.
 
 The dashboard should show the root mission, designer cycle, accepted proposal, generated child goals, worker/verifier sessions, current todos, evidence, outcome review, and supervisor state as one continuous history.

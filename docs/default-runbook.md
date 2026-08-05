@@ -277,6 +277,18 @@ The first time `orbs self-iterate` or `orbs self-iterate-launch` runs in a new d
 
 Inspect the active charter with `orbs design-status`. The charter serves as the durable objective function the designer is bounded by.
 
+The Designer inspection commands are read-only and safe to run inside a restricted worktree that cannot write to the database:
+
+```bash
+orbs design-status                                  # active charter, current proposal, latest decision, next review
+orbs list-signals                                   # active, expired, or superseded evidence by class and status
+orbs show-design --proposal-id <proposal-id>        # frozen proposal, options, decisions, and recorded outcomes
+orbs list-design-outcomes --status due \
+  --due-before 2026-08-11T00:00:00Z                 # only outcome reviews due at or before a deterministic UTC timestamp
+```
+
+`--due-before` is required for deterministic `--status due` output and accepts only an ISO 8601 UTC timestamp. Without `--status`, `list-design-outcomes` lists all outcomes for optional `--project-id`, `--proposal-id`, `--stage`, or `--limit` filters; `--status due` cannot be combined with `--stage` because due outcomes are review-stage records selected by `reviewAt`.
+
 ## 10. Real Reliability Proposal Example
 
 This is an example of a real reliability proposal that fits the default charter and automatic authority. It is the kind of proposal a designer cycle would emit after observing repeated `exit 124` codes during self-iteration.
