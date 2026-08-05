@@ -9,11 +9,14 @@ import {
   refreshGuardrailProposalsForRun,
   readableList,
   readableValue,
+  requireStrictIsoTimestamp,
 } from "@ouroboros/harness";
 import type {
   AttemptOutput,
   DesignDecision,
   DesignOutcome,
+  DesignOutcomeRecommendation,
+  DesignOutcomeStage,
   ExecutionThread,
   FounderCharter,
   RunOverview,
@@ -991,7 +994,6 @@ switch (parsed.command) {
     break;
   }
   case "design-status": {
-    harness.init();
     const projectId = resolveDesignProjectId(parsed);
     const asJson = flag(parsed, "json") !== undefined;
     const summary = buildDesignStatus({
@@ -1014,7 +1016,6 @@ switch (parsed.command) {
     break;
   }
   case "list-signals": {
-    harness.init();
     const projectId = resolveDesignProjectId(parsed);
     const signalClassRaw = flag(parsed, "class");
     const signalClass = signalClassRaw
@@ -1052,7 +1053,6 @@ switch (parsed.command) {
     break;
   }
   case "show-design": {
-    harness.init();
     const proposalId = required(parsed, "proposal-id");
     const proposal = harness.getDesignProposal({ id: proposalId });
     if (!proposal) {
@@ -1065,6 +1065,54 @@ switch (parsed.command) {
       break;
     }
     console.log(formatShowDesign({ proposal, decisions, outcomes }));
+    break;
+  }
+  case "list-design-outcomes": {
+    const projectIdRaw = flag(parsed, "project-id") ?? flag(parsed, "project-root");
+    const projectId = projectIdRaw ? resolveDesignProjectId(parsed) : resolveImplicitDesignProjectId();
+    const proposalId = flag(parsed, "proposal-id");
+    const stageRaw = flag(parsed, "stage");
+    const stage = stageRaw ? parseDesignOutcomeStage(stageRaw) : undefined;
+    const statusRaw = flag(parsed, "status");
+    const dueBeforeRaw = flag(parsed, "due-before");
+    const asJson = flag(parsed, "json") !== undefined;
+    if (statusRaw !== undefined && statusRaw !== "due") {
+      fail("--status must be 'due' when set");
+    }
+    if (statusRaw === "due" && stageRaw !== undefined) {
+      fail("--status due cannot be combined with --stage; due outcomes are review-stage records");
+    }
+    const evaluatedAt = resolveDesignOutcomeEvaluatedAt(dueBeforeRaw, statusRaw);
+    const limit = parsePositiveInteger(flag(parsed, "limit") ?? "100", "--limit");
+    const outcomes = harness.listDesignOutcomes({
+      projectId: projectId ?? undefined,
+      proposalId,
+      stage,
+      dueBefore: evaluatedAt ?? undefined,
+      limit,
+    });
+    const rows = outcomes.map((outcome) => ({
+      id: outcome.id,
+      proposalId: outcome.proposalId,
+      stage: outcome.stage,
+      recommendation: outcome.recommendation,
+      reviewAt: outcome.reviewAt,
+      due: outcome.reviewAt !== null && evaluatedAt !== null && outcome.reviewAt <= evaluatedAt,
+      createdAt: outcome.createdAt,
+    }));
+    if (asJson) {
+      printJson({
+        projectId: projectId ?? null,
+        proposalId: proposalId ?? null,
+        stage: stage ?? null,
+        status: statusRaw ?? null,
+        evaluatedAt: evaluatedAt ?? null,
+        totalCount: rows.length,
+        outcomes: rows,
+      });
+      break;
+    }
+    console.log(formatListDesignOutcomes({ rows, evaluatedAt: evaluatedAt ?? null }));
     break;
   }
   default:
@@ -1109,6 +1157,7 @@ function printHelp() {
     "  design-status        Print active charter, current proposal, and outcome review state",
     "  list-signals         List strategy signals filtered by class and status",
     "  show-design          Print a design proposal with decisions and outcomes",
+    "  list-design-outcomes List design outcomes filtered by proposal, stage, or due status",
     "",
     "Examples:",
     "  orbs init",
@@ -2724,6 +2773,73 @@ function parseStrategySignalClass(raw: string) {
     fail(`--class must be one of ${allowed.join(", ")}`);
   }
   return raw as (typeof allowed)[number];
+}
+
+function parseDesignOutcomeStage(raw: string) {
+  const allowed = ["experiment", "release", "review"] as const;
+  if (!allowed.includes(raw as (typeof allowed)[number])) {
+    fail(`--stage must be one of ${allowed.join(", ")}`);
+  }
+  return raw as (typeof allowed)[number];
+}
+
+// Resolves the deterministic evaluation timestamp for list-design-outcomes.
+// --due-before wins when provided. --status due falls back to the current UTC
+// instant so the command can be used in operational automation without
+// requiring the caller to format a timestamp. Returns null when neither input
+// is set so the command lists every matching outcome without due filtering.
+function resolveDesignOutcomeEvaluatedAt(
+  dueBefore: string | undefined,
+  status: string | undefined,
+): string | null {
+  if (dueBefore) {
+    return requireStrictIsoTimestamp(dueBefore, "--due-before");
+  }
+  if (status === "due") {
+    return new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
+  }
+  return null;
+}
+
+interface ListDesignOutcomesRow {
+  id: string;
+  proposalId: string;
+  stage: DesignOutcomeStage;
+  recommendation: DesignOutcomeRecommendation;
+  reviewAt: string | null;
+  due: boolean;
+  createdAt: string;
+}
+
+function formatListDesignOutcomes(input: {
+  rows: ListDesignOutcomesRow[];
+  evaluatedAt: string | null;
+}): string {
+  const lines: string[] = [];
+  lines.push("Design outcome reviews");
+  if (input.evaluatedAt) {
+    lines.push(`Evaluated at: ${input.evaluatedAt}`);
+  } else {
+    lines.push("Evaluated at: not filtered (showing all matching outcomes)");
+  }
+  lines.push(`Total: ${input.rows.length}`);
+  lines.push("");
+  if (input.rows.length === 0) {
+    lines.push("No matching design outcomes.");
+    return lines.join("\n");
+  }
+  for (const row of input.rows) {
+    const dueLabel = row.due ? "due" : "not-due";
+    const reviewLabel = row.reviewAt ?? "no-review-time";
+    lines.push(
+      `${shortId(row.id)}  proposal=${shortId(row.proposalId)}  stage=${row.stage}  recommendation=${row.recommendation}  review_at=${reviewLabel}  ${dueLabel}`,
+    );
+  }
+  return lines.join("\n");
+}
+
+function shortId(id: string) {
+  return id.length > 12 ? id.slice(0, 12) : id;
 }
 
 function resolveDesignProjectId(args: ReturnType<typeof parseArgs>) {

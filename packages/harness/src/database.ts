@@ -40,6 +40,51 @@ export function withDatabase<T>(
   }
 }
 
+// Read-only inspection boundary. Opens an existing Ouroboros database without
+// creating directories, database files, or SQLite sidecars and without issuing
+// any write-capable pragma. Designer inspection commands (design-status,
+// list-signals, show-design, list-design-outcomes) use this path so they
+// succeed in restricted worktrees where the database file and parent
+// directory are read-only.
+//
+// The connection is opened with Bun SQLite's `readonly: true, create: false`
+// flags, which fails cleanly when the database file is absent. Only
+// connection-local pragmas (`foreign_keys`, `busy_timeout`) are applied; the
+// writable `journal_mode` and `synchronous` pragmas are skipped because they
+// would require writing to the database file.
+export function withReadOnlyDatabase<T>(
+  dbPath: string,
+  callback: (db: Database) => T,
+): T {
+  const resolvedPath = normalizeDatabasePath(dbPath);
+  if (resolvedPath === ":memory:" || resolvedPath.startsWith("file:")) {
+    throw new Error(
+      `read-only inspection requires a file path: ${resolvedPath}`,
+    );
+  }
+  if (!existsSync(resolvedPath)) {
+    throw new Error(
+      `Ouroboros database not found: ${resolvedPath}. Inspection requires an existing initialized database.`,
+    );
+  }
+  let db: Database;
+  try {
+    db = new Database(resolvedPath, { readonly: true, create: false });
+  } catch (error) {
+    throw new Error(
+      `Unable to open Ouroboros database read-only: ${resolvedPath} (${(error as Error).message}).`,
+    );
+  }
+  db.exec("pragma foreign_keys = on");
+  db.exec("pragma busy_timeout = 30000");
+  try {
+    ensureOuroborosSchema(db, resolvedPath);
+    return callback(db);
+  } finally {
+    db.close();
+  }
+}
+
 export function normalizeDatabasePath(dbPath: string) {
   if (dbPath === ":memory:" || dbPath.startsWith("file:")) {
     return dbPath;

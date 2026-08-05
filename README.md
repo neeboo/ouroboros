@@ -307,10 +307,14 @@ The founder charter is the durable, versioned, human-owned contract that bounds 
 The Ouroboros default charter is seeded automatically on first use. It is also reproduced in `docs/default-runbook.md` so operators can copy, edit, and activate a project-specific variant.
 
 ```bash
-orbs show-design                       # active charter, current proposal, latest decision, next review
-orbs list-signals                      # expiring evidence by class and status
-orbs show-design --proposal-id <id>    # frozen contract, options, decisions, outcomes
+orbs design-status                              # active charter, current proposal, latest decision, next review
+orbs list-signals                               # expiring evidence by class and status
+orbs show-design --proposal-id <id>             # frozen contract, options, decisions, outcomes
+orbs list-design-outcomes --status due \
+  --due-before 2026-08-11T00:00:00Z             # only outcome reviews due at or before the given time
 ```
+
+All four commands are read-only: they open an existing database in non-mutating mode and never create or alter schema, sidecar, or filesystem state, so they are safe to run inside restricted Designer worktrees.
 
 ## Designer Operating Contract
 
