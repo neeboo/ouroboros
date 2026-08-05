@@ -242,7 +242,14 @@ function sessionIdFromValue(value: unknown, depth = 0): string | null {
     return null;
   }
   const record = value as Record<string, unknown>;
-  for (const key of ["session_id", "sessionId", "conversation_id", "conversationId"]) {
+  for (const key of [
+    "thread_id",
+    "threadId",
+    "session_id",
+    "sessionId",
+    "conversation_id",
+    "conversationId",
+  ]) {
     const candidate = record[key];
     if (typeof candidate === "string" && candidate.trim().length > 0) {
       return candidate.trim();

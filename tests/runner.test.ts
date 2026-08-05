@@ -722,8 +722,8 @@ describe("runner", () => {
       cwd: dir,
       clientFactory: () => ({
         start: async ({ onEvent, onStdout }) => {
-          onEvent?.({ type: "session.created", payload: { session: { session_id: "streamed_session" } } });
-          onStdout?.(`${JSON.stringify({ type: "session.created", payload: { session: { session_id: "streamed_session" } } })}\n`);
+          onEvent?.({ type: "thread.started", thread_id: "streamed_session" });
+          onStdout?.(`${JSON.stringify({ type: "thread.started", thread_id: "streamed_session" })}\n`);
           return {
             status: "running" as const,
             sessionId: null,

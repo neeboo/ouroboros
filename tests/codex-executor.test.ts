@@ -313,7 +313,7 @@ describe("codex cli executor", () => {
         return {
           exitCode: 124,
           stdout: [
-            JSON.stringify({ type: "session.started", session_id: "session_123" }),
+            JSON.stringify({ type: "thread.started", thread_id: "session_123" }),
             JSON.stringify({ type: "agent.message.delta", delta: "thinking" }),
           ].join("\n"),
           stderr: "command idle timed out after 300000ms",
@@ -330,10 +330,10 @@ describe("codex cli executor", () => {
       status: "running",
       sessionId: "session_123",
       outputPath: expect.any(String),
-      stdout: expect.stringContaining("session.started"),
+      stdout: expect.stringContaining("thread.started"),
       stderr: "command idle timed out after 300000ms",
       events: [
-        { type: "session.started", session_id: "session_123" },
+        { type: "thread.started", thread_id: "session_123" },
         { type: "agent.message.delta", delta: "thinking" },
       ],
     });
