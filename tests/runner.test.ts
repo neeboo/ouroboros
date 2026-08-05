@@ -1376,7 +1376,7 @@ describe("runner", () => {
     expect(systemEvents.some((event) => event.type === "generic.attempt.executor_threw")).toBe(true);
   });
 
-  test("supervisor skips paused blocked and complete diagnoses while draining runnable orphaned work", async () => {
+  test("supervisor skips paused and complete runs while draining blocked and orphaned work", async () => {
     const pausedRunId = harness.createRun({
       goal: "Paused run",
       context: {
@@ -1430,7 +1430,7 @@ describe("runner", () => {
       maxRounds: 1,
       maxTries: 3,
       intervalMs: 1,
-      clientFactory: () => ({
+      clientFactory: ({ task }) => ({
         start: async () => ({
           status: "done" as const,
           sessionId: "session_runnable",
@@ -1440,7 +1440,8 @@ describe("runner", () => {
           events: [],
           output: {
             status: "done" as const,
-            summary: "Ran runnable work",
+            ...(task?.role === "goal-review" ? { runDecision: "complete" as const } : {}),
+            summary: task?.role === "goal-review" ? "Reviewed blocked work." : "Ran runnable work",
             changedFiles: [],
             checks: [],
             artifacts: [],
@@ -1453,8 +1454,11 @@ describe("runner", () => {
       }),
     });
 
-    expect(result.cycles[0].runs.map((run) => run.runId)).toEqual([runnableRunId]);
+    expect(result.cycles[0].runs.map((run) => run.runId).sort()).toEqual(
+      [runnableRunId, blockedRunId].sort(),
+    );
     expect(harness.getTask(runnableTaskId)?.status).toBe("done");
+    expect(harness.getRun(blockedRunId)?.status).toBe("done");
     expect(harness.getTask(pausedTaskId)?.status).toBe("todo");
     expect(harness.getRun(pausedRunId)?.context.runPause).toEqual(
       expect.objectContaining({ reason: "human requested pause" }),
@@ -2374,6 +2378,71 @@ describe("runner", () => {
     expect(result.cycles[0].runs[0]).toMatchObject({ runId, status: "done", activeTasks: 0 });
     expect(harness.getTask(verifierTaskId)?.status).toBe("blocked");
     expect(overview.tasks.find((task) => task.role === "goal-review")?.status).toBe("done");
+    expect(harness.getRun(runId)?.status).toBe("done");
+  });
+
+  test("supervisor drains a todo run when every remaining task is blocked", async () => {
+    const runId = harness.createRun({ goal: "Recover a fully blocked run" });
+    const partialWorktree = join(dir, "partial-worktree");
+    await mkdir(partialWorktree, { recursive: true });
+    const blockedWorkerId = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Blocked worker with partial progress",
+      prompt: "The prior attempt timed out after changing its worktree.",
+      worktreePath: partialWorktree,
+    });
+    harness.recordAttempt({
+      taskId: blockedWorkerId,
+      input: { executor: "test" },
+      output: {
+        status: "blocked",
+        summary: "Worker timed out after making partial progress",
+        changedFiles: ["src/partial.ts"],
+        checks: [{ name: "worker", status: "failed", evidence: "idle timeout" }],
+        artifacts: [{ kind: "worktree", path: "/tmp/partial-worktree" }],
+        problems: ["idle timeout"],
+      },
+    });
+
+    const result = await superviseCodexRuns({
+      harness,
+      cwd: dir,
+      rootRunId: runId,
+      runConcurrency: 1,
+      taskConcurrency: 1,
+      maxCycles: 1,
+      maxRounds: 2,
+      maxTries: 3,
+      intervalMs: 1,
+      clientFactory: () => ({
+        start: async () => ({
+          status: "done" as const,
+          sessionId: "session_fully_blocked_goal_review",
+          outputPath: join(dir, "fully-blocked-goal-review.json"),
+          stdout: "",
+          stderr: "",
+          events: [],
+          output: {
+            status: "done" as const,
+            runDecision: "complete" as const,
+            summary: "The blocked attempt preserved enough evidence to close the run.",
+            changedFiles: [],
+            checks: [{ name: "goal review", status: "passed", evidence: "blocked evidence reviewed" }],
+            artifacts: [],
+            problems: [],
+          },
+        }),
+        resume: async () => {
+          throw new Error("resume should not be called");
+        },
+      }),
+    });
+
+    expect(result.status).toBe("cycle_limit");
+    expect(result.cycles[0].runs[0]).toMatchObject({ runId, status: "done", activeTasks: 0 });
+    const goalReview = harness.getRunOverview({ runId }).tasks.find((task) => task.role === "goal-review");
+    expect(goalReview).toMatchObject({ status: "done", worktreePath: partialWorktree, dependsOn: [] });
     expect(harness.getRun(runId)?.status).toBe("done");
   });
 
@@ -8647,12 +8716,23 @@ describe("runner", () => {
     expect(harness.getInboxEvent({ id: inboxEventId })?.status).toBe("running");
   });
 
-  test("apply-design-actions hook leaves non-Linear design actions untouched by intake finalization", async () => {
-    // Non-intake design runs (no linearIntake block on context) must continue
-    // through createRunsFromDesign with the existing behavior: no intake
-    // provenance stamped on the child run, no external reference created, and
-    // no inbox event transition attempted.
-    const rootRunId = harness.createRun({ goal: "design run" });
+  test("apply-design-actions hook ignores polling-only Linear state on non-intake design runs", async () => {
+    // The self-improvement root stores the Linear polling cursor under the
+    // linearIntake key. That control-plane state is not issue provenance and
+    // must not trigger issue-scoped delivery validation.
+    const rootRunId = harness.createRun({
+      goal: "design run",
+      context: {
+        source: "self-improve",
+        linearIntake: {
+          polling: {
+            cursor: null,
+            lastStatus: "ok",
+            cyclesCompleted: 12,
+          },
+        },
+      },
+    });
     const taskId = harness.createTask({
       runId: rootRunId,
       role: "designer",

@@ -1534,6 +1534,12 @@ function readLinearIntakeProvenance(
     );
   }
   const rec = raw as Record<string, unknown>;
+  const hasIssueProvenance = ["rootRunId", "inboxEventId", "linearIssueId"].some(
+    (key) => rec[key] !== undefined,
+  );
+  if (context.source !== "linear-intake" && !hasIssueProvenance) {
+    return null;
+  }
   const rootRunId = readNullableString(rec.rootRunId);
   const inboxEventId = readNullableString(rec.inboxEventId);
   const linearIssueId = readNullableString(rec.linearIssueId);

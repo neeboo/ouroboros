@@ -2015,11 +2015,13 @@ function ensureSelfImprovementCycle(rootRunId: string, cwd: string) {
   }
   const selfImprovement = recordValue(root.context.selfImprovement);
   const repositoryState = repositoryFingerprint(cwd);
-  if (selfImprovement.assessmentFingerprint === repositoryState) {
+  const assessmentState = selfImprovementAssessmentFingerprint(repositoryState, scopedRuns);
+  if (selfImprovement.assessmentFingerprint === assessmentState) {
     return {
       state: "quiescent" as const,
       createdCycle: null,
       repositoryFingerprint: repositoryState,
+      assessmentFingerprint: assessmentState,
     };
   }
 
@@ -2051,7 +2053,7 @@ function ensureSelfImprovementCycle(rootRunId: string, cwd: string) {
       designCharterId: charterId,
       selfImprovement: {
         cycleIndex,
-        assessmentFingerprint: repositoryState,
+        assessmentFingerprint: assessmentState,
       },
     },
   });
@@ -2068,7 +2070,7 @@ function ensureSelfImprovementCycle(rootRunId: string, cwd: string) {
       selfImprovement: {
         ...selfImprovement,
         cycleIndex,
-        assessmentFingerprint: repositoryState,
+        assessmentFingerprint: assessmentState,
       },
     },
   });
@@ -2076,7 +2078,42 @@ function ensureSelfImprovementCycle(rootRunId: string, cwd: string) {
     state: "created" as const,
     createdCycle: { runId, taskId, cycleIndex },
     repositoryFingerprint: repositoryState,
+    assessmentFingerprint: assessmentState,
   };
+}
+
+function selfImprovementAssessmentFingerprint(
+  repositoryState: string,
+  scopedRuns: ReturnType<typeof selfImprovementRuns>,
+) {
+  const blockers = scopedRuns
+    .filter((run) => {
+      if (run.status !== "blocked") return false;
+      const source = typeof run.context.source === "string" ? run.context.source : null;
+      return source !== "self-improve" && source !== "self-improvement-assessment";
+    })
+    .map((run) => {
+      const overview = harness.getRunOverview({ runId: run.id, eventLimit: 0 });
+      const blockedTasks = overview.tasks
+        .filter((task) => task.status === "blocked")
+        .map((task) => {
+          const session = [...overview.sessions].reverse().find((candidate) => candidate.taskId === task.id);
+          return {
+            taskId: task.id,
+            attemptId: session?.attemptId ?? null,
+            summary: session?.output.summary ?? null,
+          };
+        })
+        .sort((left, right) => left.taskId.localeCompare(right.taskId));
+      return { runId: run.id, blockedTasks };
+    })
+    .sort((left, right) => left.runId.localeCompare(right.runId));
+  if (blockers.length === 0) {
+    return repositoryState;
+  }
+  return createHash("sha256")
+    .update(`${repositoryState}\nblocked:${JSON.stringify(blockers)}`)
+    .digest("hex");
 }
 
 function selfImprovementRuns(rootRunId: string) {

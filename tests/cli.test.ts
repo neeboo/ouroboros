@@ -6987,6 +6987,128 @@ describe("CLI", () => {
     expect(runs).toHaveLength(1);
   });
 
+  test("self-improve-daemon reassesses a newly blocked delivery even when the repository is unchanged", async () => {
+    const bootstrap = await runCliJson("self-iterate");
+    const setupHarness = new Harness(dbPath);
+    setupHarness.recordAttempt({
+      taskId: bootstrap.taskId,
+      input: {},
+      output: {
+        status: "done",
+        summary: "Initial assessment drained",
+        changedFiles: [],
+        checks: [{ name: "assessment", status: "passed" }],
+        artifacts: [],
+        problems: [],
+      },
+    });
+    setupHarness.updateRunStatus({ runId: bootstrap.runId, status: "done" });
+    const blockedRunId = setupHarness.createRun({
+      goal: "Blocked delivery requiring a higher-level decision",
+      context: { parentRunId: bootstrap.runId, source: "design" },
+    });
+    const blockedTaskId = setupHarness.createTask({
+      runId: blockedRunId,
+      role: "worker",
+      goal: "Exhausted delivery task",
+      prompt: "Preserve the blocker as evidence.",
+    });
+    setupHarness.recordAttempt({
+      taskId: blockedTaskId,
+      input: {},
+      output: {
+        status: "blocked",
+        summary: "Local repair budget exhausted",
+        changedFiles: [],
+        checks: [{ name: "repair budget", status: "failed" }],
+        artifacts: [{ kind: "repair_budget_exhausted", budgetUsed: 3, budgetLimit: 3 }],
+        problems: ["repair budget exhausted"],
+      },
+    });
+    setupHarness.updateRunStatus({ runId: blockedRunId, status: "blocked" });
+
+    const codexBin = join(dir, "fake-codex-blocked-reassessment");
+    const payload = {
+      status: "done",
+      summary: "Inspected the new blocked delivery evidence and recorded a bounded quiescent assessment.",
+      changedFiles: [],
+      checks: [{ name: "blocked evidence", status: "passed" }],
+      artifacts: [],
+      problems: [],
+    };
+    await writeFile(
+      codexBin,
+      [
+        "#!/usr/bin/env bun",
+        "import { writeFileSync } from 'node:fs';",
+        "const outputFlag = Bun.argv.indexOf('--output-last-message');",
+        "const outputPath = outputFlag >= 0 ? Bun.argv[outputFlag + 1] : '';",
+        `const payload = ${JSON.stringify(payload)};`,
+        "if (outputPath) writeFileSync(outputPath, JSON.stringify(payload));",
+        "console.log(JSON.stringify({ type: 'session.started', session_id: 'session_blocked_reassessment' }));",
+        "console.log(JSON.stringify({ type: 'agent.message', message: JSON.stringify(payload) }));",
+      ].join("\n"),
+    );
+    await chmod(codexBin, 0o755);
+
+    const result = await runCliJson(
+      "self-improve-daemon",
+      "--executor",
+      "codex-resumable",
+      "--root-run-id",
+      bootstrap.runId,
+      "--codex-bin",
+      codexBin,
+      "--parallel",
+      "auto",
+      "--max-ticks",
+      "1",
+      "--tick-cycles",
+      "1",
+      "--max-rounds",
+      "1",
+      "--interval-ms",
+      "1",
+      "--idle-ms",
+      "1",
+    );
+
+    expect(result.ticks[0]).toMatchObject({
+      type: "self-improvement.tick",
+      status: "ok",
+      createdCycle: expect.objectContaining({ cycleIndex: 1 }),
+    });
+    const runs = await runCliJson("list-runs");
+    const assessment = runs.find(
+      (run: { context: Record<string, unknown> }) => run.context.source === "self-improvement-assessment",
+    );
+    expect(assessment).toBeDefined();
+    setupHarness.updateRunStatus({ runId: assessment.id, status: "done" });
+
+    const repeated = await runCliJson(
+      "self-improve-daemon",
+      "--executor",
+      "codex-resumable",
+      "--root-run-id",
+      bootstrap.runId,
+      "--codex-bin",
+      codexBin,
+      "--parallel",
+      "auto",
+      "--max-ticks",
+      "1",
+      "--tick-cycles",
+      "1",
+      "--max-rounds",
+      "1",
+      "--interval-ms",
+      "1",
+      "--idle-ms",
+      "1",
+    );
+    expect(repeated.ticks[0]).toMatchObject({ status: "quiescent", createdCycle: null });
+  });
+
   test("self-improve-daemon surfaces a measuring proposal as an outcome-review tick before asking the designer for new work", async () => {
     const bootstrap = await runCliJson("self-iterate");
     const bootstrapOverview = await runCliJson("run-overview", "--run-id", bootstrap.runId);

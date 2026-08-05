@@ -2327,7 +2327,7 @@ function createGoalReviewTask(
     role: "goal-review",
     goal: GOAL_REVIEW_TASK_GOAL,
     prompt: GOAL_REVIEW_TASK_PROMPT,
-    dependsOn: sourceTask ? [sourceTask.id] : [],
+    dependsOn: sourceTask?.status === "done" ? [sourceTask.id] : [],
     worktreePath: sourceTask?.worktreePath ?? null,
     doneWhen: GOAL_REVIEW_TASK_DONE_WHEN,
   });
@@ -2341,10 +2341,10 @@ function selectGoalReviewSourceTask(
 ) {
   const integratedWorkerTaskIds = collectIntegratedWorkerTaskIds(harness, runId);
   return [...overview.tasks].reverse().find((task) =>
-    task.status === "done" &&
+    (task.status === "done" || task.status === "blocked") &&
     task.worktreePath !== null &&
     !["planner", "verifier", "goal-review"].includes(task.role) &&
-    !integratedWorkerTaskIds.has(task.id)
+    (task.status === "blocked" || !integratedWorkerTaskIds.has(task.id))
   ) ?? null;
 }
 

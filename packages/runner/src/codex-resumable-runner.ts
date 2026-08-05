@@ -1155,7 +1155,7 @@ function runnableRuns(harness: Harness, input: { limit: number; rootRunId?: stri
       continue;
     }
     const diagnosis = diagnoseRunOverview(harness.getRunOverview({ runId: run.id, eventLimit: 0 }));
-    if (diagnosis.state === "paused" || diagnosis.state === "blocked" || diagnosis.state === "complete") {
+    if (diagnosis.state === "paused" || diagnosis.state === "complete") {
       continue;
     }
     runnable.push(run);
