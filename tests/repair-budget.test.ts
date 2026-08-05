@@ -179,6 +179,68 @@ describe("prepareRunDrain shared root cause", () => {
     expect(sharedRoots[0]?.terminalReason).toBe("terminal_no_envelope");
   });
 
+  test("multi-level blocked dependencies retain the original root attempt without foreign-key failures", () => {
+    const runId = harness.createRun({ goal: "Drain a multi-level dependency chain" });
+    const rootTaskId = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Root worker",
+      prompt: "Fail once.",
+    });
+    harness.recordAttempt({
+      taskId: rootTaskId,
+      input: { executor: "test" },
+      output: {
+        status: "blocked",
+        summary: "Root failed permanently",
+        changedFiles: [],
+        checks: [{ name: "root", status: "failed" }],
+        artifacts: [{ kind: "acpx_terminal_evidence", terminalReason: "hard_timeout" }],
+        problems: ["root unrecoverable"],
+      },
+    });
+    const verifierTaskId = harness.createTask({
+      runId,
+      role: "verifier",
+      goal: "Verify root",
+      prompt: "Verify the root worker.",
+      dependsOn: [rootTaskId],
+    });
+    const downstreamTaskId = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Use verified output",
+      prompt: "Continue after verification.",
+      dependsOn: [verifierTaskId],
+    });
+
+    const firstDrain = applyHarnessAction(harness, {
+      type: "prepareRunDrain",
+      runId,
+      maxTries: 3,
+    });
+    expect(firstDrain.status).toBe("done");
+    expect(harness.getTask(verifierTaskId)?.status).toBe("blocked");
+
+    const secondDrain = applyHarnessAction(harness, {
+      type: "prepareRunDrain",
+      runId,
+      maxTries: 3,
+    });
+
+    expect(secondDrain.status).toBe("done");
+    expect(secondDrain.artifacts).toContainEqual(
+      expect.objectContaining({
+        kind: "shared_root_cause",
+        rootTaskId,
+        terminalReason: "hard_timeout",
+        descendantTaskIds: [downstreamTaskId],
+      }),
+    );
+    expect(harness.getTask(downstreamTaskId)?.status).toBe("blocked");
+    expect(harness.listLatestAttemptsForTasks([verifierTaskId, downstreamTaskId])).toHaveLength(0);
+  });
+
   test("budget exhaustion produces one blocked decision with exhausted root causes", () => {
     const runId = harness.createRun({
       goal: "Bound repair growth",

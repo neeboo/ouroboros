@@ -682,6 +682,50 @@ export class Harness {
       const tasksById = new Map(tasks.map((task) => [task.id, task]));
       const dependencyIsSatisfied = createDependencyReadiness(tasks);
       const blockedRoots = new Map<string, { task: Task; reason: string; rootCauseAttempt: AttemptRow | null }>();
+      const resolvedRoots = new Map<string, string[]>();
+      const latestAttemptForTask = (taskId: string) =>
+        db
+          .query(
+            `
+            select *
+            from attempts
+            where task_id = $taskId
+            order by finished_at desc, rowid desc
+            limit 1
+            `,
+          )
+          .get({ $taskId: taskId }) as AttemptRow | null;
+      const resolveBlockedRootIds = (taskId: string, visiting = new Set<string>()): string[] => {
+        const cached = resolvedRoots.get(taskId);
+        if (cached) {
+          return cached;
+        }
+        const task = tasksById.get(taskId);
+        if (!task || visiting.has(taskId)) {
+          return [taskId];
+        }
+        const rootCauseAttempt = latestAttemptForTask(taskId);
+        if (rootCauseAttempt) {
+          blockedRoots.set(taskId, { task, reason: input.reason, rootCauseAttempt });
+          resolvedRoots.set(taskId, [taskId]);
+          return [taskId];
+        }
+        const nextVisiting = new Set(visiting).add(taskId);
+        const upstreamBlockedIds = task.dependsOn.filter((dependencyId) => {
+          const dependency = tasksById.get(dependencyId);
+          return dependency?.status === "blocked" && !dependencyIsSatisfied(dependencyId, task);
+        });
+        if (upstreamBlockedIds.length === 0) {
+          blockedRoots.set(taskId, { task, reason: input.reason, rootCauseAttempt: null });
+          resolvedRoots.set(taskId, [taskId]);
+          return [taskId];
+        }
+        const rootIds = [...new Set(upstreamBlockedIds.flatMap((dependencyId) =>
+          resolveBlockedRootIds(dependencyId, nextVisiting),
+        ))];
+        resolvedRoots.set(taskId, rootIds);
+        return rootIds;
+      };
       const descendants = tasks
         .filter((task) => task.status === "todo")
         .flatMap((task) => {
@@ -692,35 +736,16 @@ export class Harness {
           if (dependencyIds.length === 0) {
             return [];
           }
-          for (const dependencyId of dependencyIds) {
-            if (!blockedRoots.has(dependencyId)) {
-              const root = tasksById.get(dependencyId);
-              if (root) {
-                const rootAttempt = db
-                  .query(
-                    `
-                    select *
-                    from attempts
-                    where task_id = $taskId
-                    order by finished_at desc, rowid desc
-                    limit 1
-                    `,
-                  )
-                  .get({ $taskId: root.id }) as AttemptRow | null;
-                blockedRoots.set(dependencyId, {
-                  task: root,
-                  reason: input.reason,
-                  rootCauseAttempt: rootAttempt,
-                });
-              }
-            }
-          }
+          const rootTaskIds = [...new Set(dependencyIds.flatMap((dependencyId) =>
+            resolveBlockedRootIds(dependencyId),
+          ))];
           return [
             {
               taskId: task.id,
               role: task.role,
               previousStatus: task.status as Extract<Status, "todo">,
               dependencyIds,
+              rootTaskIds,
               reason: input.reason,
             },
           ];
@@ -734,7 +759,7 @@ export class Harness {
       const now = new Date().toISOString();
       for (const [rootTaskId, info] of blockedRoots) {
         const descendantTaskIds = descendants
-          .filter((descendant) => descendant.dependencyIds.includes(rootTaskId))
+          .filter((descendant) => descendant.rootTaskIds.includes(rootTaskId))
           .map((descendant) => descendant.taskId);
         const rootOutput = info.rootCauseAttempt
           ? (attemptFromRow(info.rootCauseAttempt).output as AttemptOutput | null)
@@ -760,7 +785,7 @@ export class Harness {
       return db.transaction(() => {
         for (const task of descendants) {
           const sharedCauseForTask = sharedRootCauses.filter((cause) =>
-            task.dependencyIds.includes(cause.rootTaskId),
+            task.rootTaskIds.includes(cause.rootTaskId),
           );
           const causesList = sharedCauseForTask
             .map((cause) => `${cause.rootTaskId}${cause.terminalReason ? `(${cause.terminalReason})` : ""}`)
@@ -772,36 +797,42 @@ export class Harness {
             where id = $taskId and status = 'todo'
             `,
           ).run({ $taskId: task.taskId });
-          db.query(
-            `
-            insert into lessons (
-              id, run_id, task_id, attempt_id, kind, summary, evidence_json
-            )
-            values (
-              $id, $runId, $taskId, $attemptId, $kind, $summary, $evidenceJson
-            )
-            `,
-          ).run({
-            $id: makeId("lesson"),
-            $runId: input.runId,
-            $taskId: task.taskId,
-            $attemptId: sharedCauseForTask[0]?.rootAttemptId ?? "",
-            $kind: "lesson",
-            $summary: `Task blocked by shared root cause: ${causesList}`,
-            $evidenceJson: toJson({
-              sharedRootCauses: sharedCauseForTask.map((cause) => ({
-                rootTaskId: cause.rootTaskId,
-                rootAttemptId: cause.rootAttemptId,
-                terminalReason: cause.terminalReason,
-                reason: cause.reason,
-              })),
-              dependencyIds: task.dependencyIds,
-              reason: task.reason,
-              syntheticAttempt: false,
-            }),
-          });
+          const evidenceAttemptId = sharedCauseForTask.find((cause) => cause.rootAttemptId)?.rootAttemptId;
+          if (evidenceAttemptId) {
+            db.query(
+              `
+              insert into lessons (
+                id, run_id, task_id, attempt_id, kind, summary, evidence_json
+              )
+              values (
+                $id, $runId, $taskId, $attemptId, $kind, $summary, $evidenceJson
+              )
+              `,
+            ).run({
+              $id: makeId("lesson"),
+              $runId: input.runId,
+              $taskId: task.taskId,
+              $attemptId: evidenceAttemptId,
+              $kind: "lesson",
+              $summary: `Task blocked by shared root cause: ${causesList}`,
+              $evidenceJson: toJson({
+                sharedRootCauses: sharedCauseForTask.map((cause) => ({
+                  rootTaskId: cause.rootTaskId,
+                  rootAttemptId: cause.rootAttemptId,
+                  terminalReason: cause.terminalReason,
+                  reason: cause.reason,
+                })),
+                dependencyIds: task.dependencyIds,
+                reason: task.reason,
+                syntheticAttempt: false,
+              }),
+            });
+          }
         }
-        return { blocked: descendants, sharedRootCauses };
+        return {
+          blocked: descendants.map(({ rootTaskIds: _rootTaskIds, ...task }) => task),
+          sharedRootCauses,
+        };
       })();
     });
   }
