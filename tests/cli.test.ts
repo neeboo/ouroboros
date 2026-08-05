@@ -6351,6 +6351,7 @@ describe("CLI", () => {
       status: "blocked",
       cycleId: review.id,
     });
+    expect(overview.run.status).toBe("blocked");
     expect(overview.sessions.filter((session: { taskId: string }) => session.taskId === review.id)).toHaveLength(3);
   });
 

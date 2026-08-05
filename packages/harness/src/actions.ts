@@ -2288,6 +2288,7 @@ function ensureGoalReviewTask(
       };
     }
     if (blockedTries >= maxTries) {
+      harness.updateRunStatus({ runId, status: "blocked" });
       return {
         status: "blocked" as const,
         summary: `Goal-review task ${blockedReview.id} already reached max tries.`,
