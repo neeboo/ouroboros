@@ -745,7 +745,40 @@ If the start hook fails, the runner records a blocked attempt and skips the exec
 
 ## Linear Bridge Rule
 
-The current Linear bridge implementation is split into two separate paths: anchor mapping and event intake.
+The Linear bridge has three cooperating paths: bounded supervisor polling (primary transport), anchor mapping, and event intake (manual fallback).
+
+### Bounded supervisor polling
+
+While `orbs self-improve-daemon` (or `orbs self-iterate-launch`, which runs the dashboard and the daemon together) is active and `[linear]` polling is configured, the supervisor runs at most one bounded polling cycle per `poll_interval_ms` when due. Each cycle:
+
+- uses either `project_id` or a one-time `project_url` resolution, plus `team_key`, and reuses the configured Linear token source (`LINEAR_API_KEY`, `token_env`, or `token_file`) without persisting the token;
+- queries issues from exactly one Linear project and team using fixed page and per-cycle limits (`poll_page_size`, `poll_max_pages_per_cycle`, `poll_max_issues_per_cycle`);
+- applies an equal-timestamp overlap window (`poll_overlap_ms`) so issues with identical `createdAt` timestamps are not skipped;
+- advances the durable relay cursor only after every issue in the completed page is durably ingested into `inbox_events`;
+- applies bounded exponential backoff for rate-limit and transient failures using `poll_max_retries`, `poll_backoff_base_ms`, and `poll_backoff_max_ms`;
+- terminalizes permanent authentication, scope, or configuration failures into a `terminalFailure` blocked state so the dashboard surfaces the failure and the supervisor stops busy-looping.
+
+Polling state (`cursor`, `overlapBoundary`, `intraPageContinuation`, `retryAttempt`, `nextEligiblePollTime`, `lastStatus`, `lastError`, `terminalFailure`, `lastCycleAt`, and informational counters) is persisted under `context.linearIntake.polling` on the supervised root run, so it survives Harness reconstruction and daemon restarts. Tokens are read from `LINEAR_API_KEY` (or `[linear] token_env` / `token_file`) but never persisted to run context.
+
+Each Linear `issue.created` inbox event derives a deterministic issue-scoped Designer run and task keyed by the supervised root run and the immutable Linear issue ID (`run_linear_<sha256(rootRunId|issueId)>`, `task_linear_<sha256(rootRunId|issueId)>`). Repeated polling, overlap-window replay, or supervisor restarts reuse the same durable identities. The Designer's durable conclusions return only through the fixed designer actions; when an accepted proposal creates its delivery run, the deterministic `createRunsFromDesign` action hook:
+
+- stamps the child planning run with the full `linearIntake` provenance block;
+- creates or reuses exactly one `external_refs` row (`local_type=run`, `local_id=planning_run_id`, `provider=linear`, `external_type=issue`, `external_id=immutable_issue_id`);
+- transitions the matching inbox event from `running` to `done`.
+
+All three steps run inside the existing `createRunsFromDesign` transaction so a failure on any side rolls back the entire action. Multi-run requests, unaccepted proposals, missing approval, or malformed provenance fail closed and leave the inbox event in `running`.
+
+### Manual fallback
+
+`orbs linear-ingest-event` remains the supported manual fallback and feeds the same idempotent intake path:
+
+```bash
+orbs linear-ingest-event --event-type issue.created --external-id LIN-123 --payload-json '{"action":"create"}'
+```
+
+The command requires `--event-type`, `--external-id`, and `--payload-json`. It validates the payload as a JSON object, stores a row with `provider linear` and `status todo`, and returns the stored event including the parsed payload. Invalid JSON, non-object payloads, or missing required fields fail with a CLI error and do not create an `inbox_events` row. The command is intake only: it does not call the Linear API, does not verify webhook signatures, does not create or update runs, tasks, or `external_refs` rows, and does not interpret the event.
+
+### Anchor mapping
 
 Anchor mappings live in `external_refs` and give future sync code stable local-to-external anchors. The implemented commands are:
 
@@ -754,23 +787,18 @@ Anchor mappings live in `external_refs` and give future sync code stable local-t
 
 These mappings are not inbox events. They do not change task status, create issues, create comments, or post progress.
 
-Event intake lives in `inbox_events` and is implemented for explicit local intake only through `linear-ingest-event`:
+### Dashboard lifecycle visibility
 
-```bash
-orbs linear-ingest-event --event-type issue.created --external-id LIN-123 --payload-json '{"action":"create"}'
-```
+The dashboard's inspector surfaces the complete Linear intake lifecycle through `GET /api/runs/:runId/linear-intake`:
 
-The command requires `--event-type`, `--external-id`, and `--payload-json`. It validates the payload as a JSON object, stores a row with `provider linear` and `status todo`, and returns the stored event including the parsed payload. Invalid JSON, non-object payloads, or missing required fields fail with a CLI error and do not create an `inbox_events` row. The command is intake only: it does not call the Linear API, does not verify webhook signatures, does not create or update runs, tasks, or `external_refs` rows, and does not interpret the event.
+- polling state, including `retryAttempt`, `nextEligiblePollAt`, `terminalFailure`, `lastError`, and ingestion counters;
+- supervisor and runner state (`supervisorRunning`, `supervisorStatus`, `runnerRunning`, `runnerStatus`);
+- per-issue rows joining the inbox event (`status`, `createdAt`, `processedAt`) with the source Linear issue (`identifier`, `title`, `url`, `teamKey`), the issue-scoped Designer run/task (`designerRunId`, `designerTaskId`, `designerTaskStatus`), the recorded proposal and decision (`proposalId`, `proposalStatus`, `decisionId`, `decision`, `decisionActorKind`), the linked planning run (`planningRunId`, `planningRunStatus`), and the run-to-issue external reference (`externalRefId`);
+- a blocked flag with a short reason when an inbox event reaches a terminal blocked state.
 
-Linear events recorded through `linear-ingest-event` never mutate task state directly. The harness consumes `inbox_events` through a separate decision step and decides whether to:
+The lifecycle snapshot is read-only and never includes Linear tokens, the durable cursor, or raw authentication material. The dashboard renders missing or partial provenance without crashing so an operator can see intake state even before the full lifecycle completes.
 
-- create a run
-- create a task
-- add context
-- create a repair task
-- ignore the event
-
-Webhook HTTP listener and signature verification are still out of scope. When implemented, the listener is expected to feed payloads through this same intake path so the rest of the control loop sees one consistent shape.
+Webhook HTTP listener and signature verification remain out of scope; bounded polling is the primary transport. When a webhook listener is added later, it is expected to feed payloads through this same intake path so the rest of the control loop sees one consistent shape.
 
 Progress back to Linear is derived from accepted harness state.
 

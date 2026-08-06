@@ -5,6 +5,14 @@ export interface DashboardWorkspaceSelection {
   selectedGroupId?: string | null;
   selectedRunId?: string | null;
   runHistory?: DashboardWorkspaceRunHistoryInput[];
+  /**
+   * Optional Linear intake lifecycle snapshot. The dashboard model itself is a
+   * pure view over overview plus intake; the dashboard server builds the intake
+   * snapshot separately (reading durable root-run context plus harness inbox
+   * events and external references) and passes it through here so tests can
+   * assert on the typed shape without depending on dashboard transport details.
+   */
+  linearIntake?: DashboardLinearIntakeLifecycle | null;
 }
 
 export interface DashboardWorkspaceRunHistoryInput {
@@ -164,6 +172,7 @@ export type DashboardWorkspaceInspectorContext =
     todos: DashboardWorkspaceTodoSummary[];
     changedFiles: DashboardWorkspaceChangedFileSummary[];
     diffs: DashboardWorkspaceDiffSummary[];
+    linearIntake?: DashboardLinearIntakeLifecycle | null;
   }
   | {
     kind: "run";
@@ -171,7 +180,91 @@ export type DashboardWorkspaceInspectorContext =
     title: string;
     status: Status | "unknown";
     taskCount: number;
+    linearIntake?: DashboardLinearIntakeLifecycle | null;
   };
+
+// ---------------------------------------------------------------------------
+// Linear intake lifecycle
+// ---------------------------------------------------------------------------
+
+/**
+ * Read-only view over the durable Linear intake lifecycle: polling state from
+ * the supervised root run context, plus each provider=linear inbox event with
+ * its derived designer run/proposal/decision and any linked external
+ * reference. The browser model renders these without exposing tokens.
+ */
+export interface DashboardLinearIntakeLifecycle {
+  polling: DashboardLinearIntakePollingSummary;
+  runner: DashboardLinearIntakeRunnerSummary;
+  events: DashboardLinearIntakeEventSummary[];
+}
+
+export interface DashboardLinearIntakePollingSummary {
+  /** True when polling is configured and the durable state has been initialized. */
+  configured: boolean;
+  /** Most recent cycle status (`idle` before any cycle has run). */
+  lastStatus: string;
+  /** Set when polling hit a permanent failure and must not retry without operator action. */
+  terminalFailure: string | null;
+  /** Error message from the most recent failure, when any. */
+  lastError: string | null;
+  /** ISO timestamp of the most recent cycle. */
+  lastCycleAt: string | null;
+  /** ISO timestamp; the next poll is suppressed while now() < nextEligiblePollTime. */
+  nextEligiblePollAt: string | null;
+  /** Number of retry attempts on the current retryable failure. Reset to 0 on success. */
+  retryAttempt: number;
+  /** Informational counters accumulated since the supervisor started polling. */
+  cyclesCompleted: number;
+  issuesIngested: number;
+  issuesDeduplicated: number;
+  issuesRejected: number;
+  issuesMalformed: number;
+}
+
+export interface DashboardLinearIntakeRunnerSummary {
+  /** Whether the self-improvement supervisor process is currently running. */
+  supervisorRunning: boolean;
+  /** Supervisor status string (`idle|running|exited`). */
+  supervisorStatus: string;
+  /** Whether the run-level runner is currently active. */
+  runnerRunning: boolean;
+  /** Runner status string (`idle|running|exited`). */
+  runnerStatus: string;
+}
+
+export interface DashboardLinearIntakeEventSummary {
+  eventId: string;
+  externalId: string;
+  status: Status;
+  createdAt: string | null;
+  processedAt: string | null;
+  issue: {
+    identifier: string | null;
+    title: string | null;
+    url: string | null;
+    teamKey: string | null;
+  };
+  /** Linked issue-scoped Designer run/task IDs derived from the immutable Linear issue ID. */
+  designerRunId: string | null;
+  designerTaskId: string | null;
+  designerTaskStatus: Status | "unknown";
+  /** Recorded design proposal and authority decision, when any. */
+  proposalId: string | null;
+  proposalStatus: string | null;
+  decisionId: string | null;
+  decision: string | null;
+  decisionActorKind: string | null;
+  /** Linked planning run created by the fixed design action, when any. */
+  planningRunId: string | null;
+  planningRunStatus: Status | "unknown";
+  /** Run-to-Linear-issue external_refs row id, when any. */
+  externalRefId: string | null;
+  /** True when the lifecycle reaches a terminal blocked state and needs operator attention. */
+  blocked: boolean;
+  /** Short reason string when the event is blocked. */
+  blockedReason: string | null;
+}
 
 export function buildDashboardWorkspaceModel(
   overview: RunOverview,
@@ -257,6 +350,7 @@ export function buildDashboardWorkspaceModel(
         todos: todosByTask.get(selectedTask.id) ?? [],
         changedFiles: changedFilesByTask.get(selectedTask.id) ?? [],
         diffs: diffsByTask.get(selectedTask.id) ?? [],
+        linearIntake: selection.linearIntake ?? null,
       }
       : {
         kind: "run",
@@ -264,6 +358,7 @@ export function buildDashboardWorkspaceModel(
         title: overview.run?.goal || "No run selected",
         status: overview.run?.status ?? "unknown",
         taskCount: overview.tasks.length,
+        linearIntake: selection.linearIntake ?? null,
       },
   };
 }

@@ -6,9 +6,34 @@ token_env = "LINEAR_API_KEY"
 # token_file = ".linear"
 
 api_url = "https://api.linear.app/graphql"
+
+# Bounded polling configuration. The self-improvement supervisor reads Linear
+# issues from exactly one project + team on each eligible tick. Provide either
+# project_url (resolved once and cached on the supervised root run) or
+# project_id alongside team_key. Polling is the primary transport for
+# autonomous intake; `orbs linear-ingest-event` remains the supported manual
+# fallback and feeds the same idempotent intake path.
 project_url = "https://linear.app/<workspace>/project/<project-slug>/overview"
 project_id = "<project-slug-or-id>"
 team_key = "<team-key>"
+
+# Bounded polling controls. The supervisor runs at most one cycle per
+# poll_interval_ms when due, advances the durable cursor only after every
+# ingested issue in a page is durably persisted, and applies bounded
+# exponential backoff for rate-limit and transient failures. Permanent
+# authentication, scope, or configuration failures become terminal blocked
+# intake state and surface on the dashboard.
+poll_interval_ms = 60000
+poll_page_size = 50
+poll_max_pages_per_cycle = 5
+poll_max_issues_per_cycle = 100
+# Equal-timestamp overlap: re-read issues updated within this window so
+# issues with identical createdAt timestamps are not skipped.
+poll_overlap_ms = 300000
+poll_max_retries = 4
+poll_backoff_base_ms = 2000
+poll_backoff_max_ms = 300000
+
 
 # Codex defaults. Claude Code workers do not inherit these values.
 [models]

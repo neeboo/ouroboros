@@ -37,6 +37,19 @@ export type { ChatMessage, ChatMessagePart, ChatGroupLike, ChatSessionLike };
 import { renderDashboardRunHistoryRows as renderDashboardRunHistoryRowsReact } from "./dashboard-sidebar";
 import { renderDashboardShell } from "./dashboard-shell";
 import type { DashboardRunHistoryEntry } from "./dashboard-types";
+import type {
+  DashboardLinearIntakeLifecycle,
+  DashboardLinearIntakePollingSummary,
+  DashboardLinearIntakeEventSummary,
+  DashboardLinearIntakeRunnerSummary,
+} from "./dashboard-workspace-model";
+
+export type {
+  DashboardLinearIntakeLifecycle,
+  DashboardLinearIntakePollingSummary,
+  DashboardLinearIntakeEventSummary,
+  DashboardLinearIntakeRunnerSummary,
+} from "./dashboard-workspace-model";
 import { summarizeOverseerDiagnosis } from "./run-evidence";
 
 interface DashboardActionResult {
@@ -258,6 +271,8 @@ export function buildDashboardDesignTimeline(
 
 type DashboardDesignStatusProvider = (routeRunId: string) => DashboardDesignStatusSummary | null;
 
+type DashboardLinearIntakeProvider = (routeRunId: string) => DashboardLinearIntakeLifecycle | Promise<DashboardLinearIntakeLifecycle | null> | null;
+
 type DashboardAutoStartRunner = (overview: RunOverview, runner: DashboardRunnerStatus | null) => boolean;
 
 interface DashboardRunnerStatus {
@@ -325,6 +340,7 @@ export const DASHBOARD_ROUTE_PATHS = {
   taskRerunApi: "/api/tasks/:taskId/rerun",
   attemptStopApi: "/api/attempts/:attemptId/stop",
   designStatusApi: "/api/runs/:runId/design/status",
+  linearIntakeApi: "/api/runs/:runId/linear-intake",
   taskPrompt: "/tasks/:taskId/prompt",
 } as const;
 
@@ -350,6 +366,7 @@ export const DASHBOARD_ROUTES: DashboardRouteDefinition[] = [
   { name: "dashboard.api.taskRerun", method: "POST", path: DASHBOARD_ROUTE_PATHS.taskRerunApi, kind: "api" },
   { name: "dashboard.api.attemptStop", method: "POST", path: DASHBOARD_ROUTE_PATHS.attemptStopApi, kind: "api" },
   { name: "dashboard.api.designStatus", method: "GET", path: DASHBOARD_ROUTE_PATHS.designStatusApi, kind: "api" },
+  { name: "dashboard.api.linearIntake", method: "GET", path: DASHBOARD_ROUTE_PATHS.linearIntakeApi, kind: "api" },
   { name: "dashboard.taskPrompt", method: "GET", path: DASHBOARD_ROUTE_PATHS.taskPrompt, kind: "prompt" },
 ];
 
@@ -1296,6 +1313,7 @@ export function dashboardHtml(input: { runId: string }) {
     let secondaryEvidenceOpen = restoredDashboardState.secondaryEvidenceOpen === true;
     let designDetailsOpen = restoredDashboardState.designDetailsOpen === true;
     let latestDesignStatus = null;
+    let latestLinearIntake = null;
     let restoredFlowScrollState = restoredDashboardState.flowScroll || null;
     const diffByPath = new Map();
     let selectedGroupRef = null;
@@ -1996,7 +2014,7 @@ export function dashboardHtml(input: { runId: string }) {
           onSelectTask: selectCanvasTask,
         });
       }
-      patchInspectorPanel(dashboardInspectorHtml(latestOverview, group) + dashboardInspectorTimelineHtml(group) + dashboardInspectorComposerHtml(), dashboardInspectorDesignHtml() + dashboardInspectorSecondaryHtml(latestOverview, group));
+      patchInspectorPanel(dashboardInspectorTimelineHtml(group) + dashboardInspectorComposerHtml(), dashboardInspectorDesignHtml() + dashboardInspectorLinearIntakeHtml() + dashboardInspectorSecondaryHtml(latestOverview, group));
     };
     const canvasGraphFor = (overview, group) => {
       if (!group) return { nodes: [], edges: [] };
@@ -2471,6 +2489,157 @@ export function dashboardHtml(input: { runId: string }) {
       '</section>';
     };
     const dashboardInspectorDesignHtml = () => dashboardInspectorDesignSummaryHtml(latestDesignStatus);
+    const dashboardInspectorLinearIntakeHtml = () => {
+      const intake = latestLinearIntake;
+      if (!intake) {
+        return '<section class="inspector-card inspector-linear-intake-section" data-inspector-section="linear-intake" data-linear-intake-section><h2>Linear intake</h2><div class="empty">Loading intake lifecycle…</div></section>';
+      }
+      const polling = intake.polling || null;
+      const runner = intake.runner || null;
+      const events = Array.isArray(intake.events) ? intake.events : [];
+      const configured = polling && polling.configured;
+      const terminalFailure = polling && polling.terminalFailure ? String(polling.terminalFailure) : "";
+      const lastError = polling && polling.lastError ? String(polling.lastError) : "";
+      const retryAttempt = polling ? Number(polling.retryAttempt || 0) : 0;
+      const nextEligiblePollAt = polling && polling.nextEligiblePollAt ? String(polling.nextEligiblePollAt) : "";
+      const lastCycleAt = polling && polling.lastCycleAt ? String(polling.lastCycleAt) : "";
+      const lastStatus = polling && polling.lastStatus ? String(polling.lastStatus) : "idle";
+      const cyclesCompleted = polling ? Number(polling.cyclesCompleted || 0) : 0;
+      const issuesIngested = polling ? Number(polling.issuesIngested || 0) : 0;
+      const issuesDeduplicated = polling ? Number(polling.issuesDeduplicated || 0) : 0;
+      const issuesRejected = polling ? Number(polling.issuesRejected || 0) : 0;
+      const issuesMalformed = polling ? Number(polling.issuesMalformed || 0) : 0;
+      const supervisorStatus = runner && runner.supervisorStatus ? String(runner.supervisorStatus) : "idle";
+      const runnerStatus = runner && runner.runnerStatus ? String(runner.runnerStatus) : "idle";
+      const headerBits = [];
+      if (configured) {
+        headerBits.push('<span class="status-text ' + escapeHtml(lastStatus) + '">' + escapeHtml(lastStatus) + '</span>');
+      } else {
+        headerBits.push('<span class="status-text idle">unconfigured</span>');
+      }
+      if (runner && runner.supervisorRunning) headerBits.push("supervisor " + escapeHtml(supervisorStatus));
+      if (runner && runner.runnerRunning) headerBits.push("runner " + escapeHtml(runnerStatus));
+      const summaryText = configured
+        ? (terminalFailure ? "terminal failure" : retryAttempt > 0 ? "retry in progress" : nextEligiblePollAt ? "scheduled" : lastStatus === "idle" ? "idle" : "polling")
+        : (terminalFailure ? "terminal failure (unconfigured)" : "no project or team configured");
+      const summaryClass = terminalFailure ? "blocked" : retryAttempt > 0 ? "running" : configured ? "running" : "todo";
+      const parts = [];
+      parts.push('<section class="inspector-card inspector-linear-intake-section" data-inspector-section="linear-intake" data-linear-intake-section>');
+      parts.push('<h2>Linear intake</h2>');
+      parts.push('<div class="linear-intake-summary" data-linear-intake-summary>');
+      parts.push('<div class="linear-intake-summary-title">Autonomous bounded polling</div>');
+      parts.push('<div class="linear-intake-summary-meta">');
+      parts.push('<span class="status-text ' + escapeHtml(summaryClass) + '">' + escapeHtml(summaryText) + '</span>');
+      if (headerBits.length) parts.push(' · ' + headerBits.join(" · "));
+      parts.push('</div>');
+      if (terminalFailure) {
+        parts.push('<div class="linear-intake-blocked" data-linear-intake-terminal>' + escapeHtml(terminalFailure) + '</div>');
+      }
+      parts.push('<div class="linear-intake-rows">');
+      parts.push('<div class="linear-intake-row"><span>supervisor state</span><span>' + escapeHtml(supervisorStatus) + '</span></div>');
+      parts.push('<div class="linear-intake-row"><span>runner state</span><span>' + escapeHtml(runnerStatus) + '</span></div>');
+      if (configured) {
+        parts.push('<div class="linear-intake-row"><span>last cycle</span><span>' + escapeHtml(lastCycleAt || "—") + '</span></div>');
+        parts.push('<div class="linear-intake-row"><span>last status</span><span>' + escapeHtml(lastStatus) + '</span></div>');
+        parts.push('<div class="linear-intake-row" data-linear-intake-retry-attempt><span>retry attempt</span><span>' + escapeHtml(String(retryAttempt)) + '</span></div>');
+        parts.push('<div class="linear-intake-row" data-linear-intake-next-eligible><span>next eligible poll</span><span>' + escapeHtml(nextEligiblePollAt || "—") + '</span></div>');
+        if (lastError) {
+          parts.push('<div class="linear-intake-row linear-intake-row-error"><span>last error</span><span>' + escapeHtml(compact(lastError, 220)) + '</span></div>');
+        }
+        parts.push('<div class="linear-intake-row"><span>cycles</span><span>' + escapeHtml(String(cyclesCompleted)) + '</span></div>');
+        parts.push('<div class="linear-intake-row"><span>ingested</span><span>' + escapeHtml(String(issuesIngested)) + '</span></div>');
+        parts.push('<div class="linear-intake-row"><span>deduplicated</span><span>' + escapeHtml(String(issuesDeduplicated)) + '</span></div>');
+        parts.push('<div class="linear-intake-row"><span>rejected</span><span>' + escapeHtml(String(issuesRejected)) + '</span></div>');
+        parts.push('<div class="linear-intake-row"><span>malformed</span><span>' + escapeHtml(String(issuesMalformed)) + '</span></div>');
+      } else {
+        if (lastCycleAt) {
+          parts.push('<div class="linear-intake-row"><span>last cycle</span><span>' + escapeHtml(lastCycleAt) + '</span></div>');
+        }
+        if (lastStatus && lastStatus !== "idle") {
+          parts.push('<div class="linear-intake-row"><span>last status</span><span>' + escapeHtml(lastStatus) + '</span></div>');
+        }
+        if (lastError) {
+          parts.push('<div class="linear-intake-row linear-intake-row-error"><span>last error</span><span>' + escapeHtml(compact(lastError, 220)) + '</span></div>');
+        }
+        parts.push('<div class="linear-intake-row"><span>transport</span><span>linear-ingest-event fallback only</span></div>');
+      }
+      parts.push('</div>');
+      parts.push('</div>');
+      if (events.length > 0) {
+        parts.push('<details class="linear-intake-events" data-linear-intake-events>');
+        parts.push('<summary class="inspector-evidence-summary">Issues discovered · ' + escapeHtml(String(events.length)) + '</summary>');
+        parts.push('<div class="linear-intake-events-body" data-linear-intake-events-body>');
+        for (const event of events) {
+          parts.push('<div class="linear-intake-event" data-linear-intake-event="' + escapeHtml(event.eventId) + '" data-linear-intake-event-status="' + escapeHtml(event.status) + '">');
+          const identifier = event.issue && event.issue.identifier ? event.issue.identifier : event.externalId;
+          const title = event.issue && event.issue.title ? compact(event.issue.title, 160) : "(no title)";
+          const url = event.issue && event.issue.url ? event.issue.url : "";
+          const teamKey = event.issue && event.issue.teamKey ? event.issue.teamKey : "";
+          parts.push('<div class="linear-intake-event-head">');
+          parts.push('<span class="linear-intake-event-identifier">' + escapeHtml(identifier) + '</span>');
+          parts.push('<span class="status-text ' + escapeHtml(event.status) + '">' + escapeHtml(event.status) + '</span>');
+          parts.push('</div>');
+          parts.push('<div class="linear-intake-event-title">' + escapeHtml(title) + '</div>');
+          parts.push('<div class="linear-intake-event-meta">');
+          if (url) {
+            parts.push('<a class="linear-intake-event-url" href="' + escapeHtml(url) + '" target="_blank" rel="noreferrer noopener" data-linear-intake-issue-url>' + escapeHtml(url) + '</a>');
+          }
+          if (teamKey) {
+            parts.push('<span class="code-meta">team ' + escapeHtml(teamKey) + '</span>');
+          }
+          parts.push('<span class="code-meta">inbox ' + escapeHtml(event.eventId) + '</span>');
+          if (event.createdAt) {
+            parts.push('<span class="code-meta">created ' + escapeHtml(event.createdAt) + '</span>');
+          }
+          if (event.processedAt) {
+            parts.push('<span class="code-meta">processed ' + escapeHtml(event.processedAt) + '</span>');
+          }
+          parts.push('</div>');
+          parts.push('<div class="linear-intake-event-rows">');
+          if (event.designerRunId) {
+            parts.push('<div class="linear-intake-row" data-linear-intake-designer-run><span>designer run</span><code>' + escapeHtml(event.designerRunId) + '</code></div>');
+          }
+          if (event.designerTaskId) {
+            parts.push('<div class="linear-intake-row"><span>designer task</span><code>' + escapeHtml(event.designerTaskId) + '</code></div>');
+          }
+          if (event.designerTaskStatus && event.designerTaskStatus !== "unknown") {
+            parts.push('<div class="linear-intake-row"><span>designer task status</span><span class="status-text ' + escapeHtml(event.designerTaskStatus) + '">' + escapeHtml(event.designerTaskStatus) + '</span></div>');
+          }
+          if (event.proposalId) {
+            parts.push('<div class="linear-intake-row" data-linear-intake-proposal-id><span>proposal</span><code>' + escapeHtml(event.proposalId) + '</code></div>');
+          }
+          if (event.proposalStatus) {
+            parts.push('<div class="linear-intake-row"><span>proposal status</span><span>' + escapeHtml(event.proposalStatus) + '</span></div>');
+          }
+          if (event.decisionId) {
+            parts.push('<div class="linear-intake-row" data-linear-intake-decision-id><span>decision</span><code>' + escapeHtml(event.decisionId) + '</code></div>');
+          }
+          if (event.decision) {
+            parts.push('<div class="linear-intake-row"><span>decision outcome</span><span>' + escapeHtml(event.decision) + (event.decisionActorKind ? ' by ' + escapeHtml(event.decisionActorKind) : '') + '</span></div>');
+          }
+          if (event.planningRunId) {
+            parts.push('<div class="linear-intake-row" data-linear-intake-planning-run><span>planning run</span><code>' + escapeHtml(event.planningRunId) + '</code></div>');
+          }
+          if (event.planningRunStatus && event.planningRunStatus !== "unknown") {
+            parts.push('<div class="linear-intake-row"><span>planning run status</span><span class="status-text ' + escapeHtml(event.planningRunStatus) + '">' + escapeHtml(event.planningRunStatus) + '</span></div>');
+          }
+          if (event.externalRefId) {
+            parts.push('<div class="linear-intake-row" data-linear-intake-external-ref><span>external reference</span><code>' + escapeHtml(event.externalRefId) + '</code></div>');
+          }
+          if (event.blocked) {
+            parts.push('<div class="linear-intake-row linear-intake-row-error" data-linear-intake-blocked><span>blocked</span><span>' + escapeHtml(event.blockedReason || "blocked") + '</span></div>');
+          }
+          parts.push('</div>');
+          parts.push('</div>');
+        }
+        parts.push('</div>');
+        parts.push('</details>');
+      } else if (configured) {
+        parts.push('<div class="linear-intake-events-empty" data-linear-intake-events-empty>No Linear issues ingested yet.</div>');
+      }
+      parts.push('</section>');
+      return parts.join("");
+    };
     const latestRunnerSignal = (overview) => {
       const session = [...(overview.sessions || [])].reverse()[0];
       const text = session ? latestText(session) : "";
@@ -2973,6 +3142,7 @@ export function dashboardHtml(input: { runId: string }) {
       if (!force && now - lastDesignStatusFetchAt < DESIGN_STATUS_REFRESH_INTERVAL_MS) return;
       lastDesignStatusFetchAt = now;
       refreshDesignStatus();
+      refreshLinearIntake();
     };
     overviewWorker.onmessage = (event) => {
       if (event.data?.type === "refreshing") {
@@ -3022,7 +3192,7 @@ export function dashboardHtml(input: { runId: string }) {
       patchStaticHtml("workspace-orientation", dashboardOrientationHtml(overview, selectedGroup));
       patchWorkspace(dashboardWorkspaceHtml(selectedGroup));
       mountReactFlowCanvas();
-      patchInspectorPanel(dashboardInspectorHtml(overview, selectedGroup) + dashboardInspectorTimelineHtml(selectedGroup) + dashboardInspectorComposerHtml(), dashboardInspectorDesignHtml() + dashboardInspectorSecondaryHtml(overview, selectedGroup));
+      patchInspectorPanel(dashboardInspectorTimelineHtml(selectedGroup) + dashboardInspectorComposerHtml(), dashboardInspectorDesignHtml() + dashboardInspectorLinearIntakeHtml() + dashboardInspectorSecondaryHtml(overview, selectedGroup));
     }
     let recentRunsCache = [];
     const RECENT_RUNS_LIMIT = 10;
@@ -3107,6 +3277,22 @@ export function dashboardHtml(input: { runId: string }) {
           if (latestOverview) render(latestOverview);
         });
     };
+    const refreshLinearIntake = () => {
+      fetch("/api/runs/" + encodeURIComponent(runId) + "/linear-intake")
+        .then((response) => {
+          if (response.status === 404) return null;
+          if (!response.ok) throw new Error("linear intake request failed: " + response.status);
+          return response.json();
+        })
+        .then((snapshot) => {
+          latestLinearIntake = snapshot && typeof snapshot === "object" ? snapshot : null;
+          if (latestOverview) render(latestOverview);
+        })
+        .catch(() => {
+          latestLinearIntake = null;
+          if (latestOverview) render(latestOverview);
+        });
+    };
     const setSelectedRun = (nextRunId) => {
       if (typeof nextRunId !== "string" || !nextRunId || nextRunId === runId) {
         renderRecentRunsList(recentRunsCache);
@@ -3125,6 +3311,7 @@ export function dashboardHtml(input: { runId: string }) {
       restoredFlowScrollState = restored.flowScroll || null;
       diffByPath.clear();
       latestDesignStatus = null;
+      latestLinearIntake = null;
       overviewWorker.postMessage({ type: "start", runId, apiBase: window.location.origin });
       refreshRecentRuns();
       maybeRefreshDesignStatus(true);
@@ -3479,6 +3666,7 @@ export function serveDashboard(input: {
   actions?: DashboardActions;
   recentRuns?: (limit: number) => DashboardRunSummary[];
   designStatus?: DashboardDesignStatusProvider;
+  linearIntake?: DashboardLinearIntakeProvider;
 }) {
   const fetchHandler = (request: Request) =>
     withDashboardErrors(request, () => handleDashboardRequest(request, input));
@@ -3580,6 +3768,7 @@ export async function handleDashboardRequest(
     actions?: DashboardActions;
     recentRuns?: (limit: number) => DashboardRunSummary[];
     designStatus?: DashboardDesignStatusProvider;
+    linearIntake?: DashboardLinearIntakeProvider;
   },
 ) {
   const url = new URL(request.url);
@@ -3802,6 +3991,34 @@ export async function handleDashboardRequest(
     if (!snapshot) {
       return Response.json(
         { error: "no active project charter configured for this run" },
+        { status: 404 },
+      );
+    }
+    return Response.json(snapshot);
+  }
+  const linearIntakeMatch = url.pathname.match(
+    /^\/api\/runs\/([^/]+)\/linear-intake$/,
+  );
+  if (request.method === "GET" && linearIntakeMatch) {
+    const routeRunId = decodeURIComponent(linearIntakeMatch[1]);
+    if (!input.linearIntake) {
+      return Response.json(
+        { error: "dashboard linear intake is not configured" },
+        { status: 404 },
+      );
+    }
+    let snapshot: DashboardLinearIntakeLifecycle | null;
+    try {
+      snapshot = await input.linearIntake(routeRunId);
+    } catch (error) {
+      return Response.json(
+        { error: error instanceof Error ? error.message : String(error) },
+        { status: 500 },
+      );
+    }
+    if (!snapshot) {
+      return Response.json(
+        { error: "linear intake is not configured for this run" },
         { status: 404 },
       );
     }
