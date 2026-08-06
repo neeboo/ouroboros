@@ -3,7 +3,7 @@ import { chmod, mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "n
 import { existsSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { homedir, tmpdir } from "node:os";
-import { Harness } from "../packages/harness/src";
+import { checkpointDatabase, Harness } from "../packages/harness/src";
 import { formatRunEvidence } from "../packages/cli/src/run-evidence";
 import { formatAttemptExplanation } from "../packages/cli/src/explain-attempt";
 import { formatRunGraph } from "../packages/cli/src/run-graph";
@@ -10343,6 +10343,15 @@ describe("CLI", () => {
       recommendation: "retain",
     });
 
+    // Checkpoint the WAL into the main database file so inspection can run
+    // through the immutable read-only path against the file's durable state.
+    // The inspection contract targets a quiescent database; checkpointing here
+    // mirrors how the harness leaves a database once write transactions have
+    // committed and prevents a subprocess close from triggering a checkpoint
+    // that would write into the main database file under read-only filesystem
+    // permissions.
+    checkpointDatabase(dbPath);
+
     // Make the database and parent directory read-only. From here on, any
     // write attempt (init, pragma, sidecar creation) must either fail loudly
     // or be absent from the inspection code path entirely.
@@ -10352,11 +10361,222 @@ describe("CLI", () => {
     await chmod(`${dbPath}-wal`, 0o444).catch(() => undefined);
     await chmod(`${dbPath}-shm`, 0o444).catch(() => undefined);
 
-    // Snapshot filesystem state in the read-only state immediately before any
-    // inspection command runs. chmod is part of the test setup, not inspection,
-    // so the diff isolates mutations caused by the inspection commands.
-    const before = await snapshotDatabaseFilesystem(dbPath, dir);
+    try {
+      // Snapshot filesystem state in the read-only state immediately before any
+      // inspection command runs. chmod is part of the test setup, not inspection,
+      // so the diff isolates mutations caused by the inspection commands.
+      const before = await snapshotDatabaseFilesystem(dbPath, dir);
 
+      const designStatusJson = await runCliJson(
+        "design-status",
+        "--project-id",
+        project.id,
+        "--json",
+        "true",
+      );
+      expect(designStatusJson).toMatchObject({
+        projectId: project.id,
+        charter: expect.objectContaining({ id: charter.id }),
+        currentProposal: expect.objectContaining({ id: proposal.id }),
+      });
+
+      const listSignalsJson = await runCliJson(
+        "list-signals",
+        "--project-id",
+        project.id,
+        "--json",
+        "true",
+      );
+      expect(listSignalsJson.totalCount).toBe(1);
+      expect(listSignalsJson.signals[0]).toMatchObject({ title: "Active signal" });
+
+      const showDesignJson = await runCliJson(
+        "show-design",
+        "--proposal-id",
+        proposal.id,
+        "--json",
+        "true",
+      );
+      expect(showDesignJson).toMatchObject({
+        proposal: expect.objectContaining({ id: proposal.id }),
+      });
+      expect(showDesignJson.outcomes.length).toBe(3);
+
+      const outcomesJson = await runCliJson(
+        "list-design-outcomes",
+        "--project-id",
+        project.id,
+        "--status",
+        "due",
+        "--due-before",
+        "2026-08-11T00:00:00Z",
+        "--json",
+        "true",
+      );
+      expect(outcomesJson).toMatchObject({
+        projectId: project.id,
+        status: "due",
+        evaluatedAt: "2026-08-11T00:00:00Z",
+        totalCount: 1,
+      });
+      expect(outcomesJson.outcomes[0]).toMatchObject({
+        stage: "review",
+        recommendation: "retain",
+        reviewAt: "2026-08-01T00:00:00Z",
+        due: true,
+      });
+
+      // Concise output should also work and surface stable identifiers.
+      const concise = await runCli(
+        "list-design-outcomes",
+        "--project-id",
+        project.id,
+        "--status",
+        "due",
+        "--due-before",
+        "2026-08-11T00:00:00Z",
+      );
+      expect(concise).toContain("Design outcome reviews");
+      expect(concise).toContain("Evaluated at: 2026-08-11T00:00:00Z");
+      expect(concise).toContain("due");
+      expect(concise).toContain(proposal.id.slice(0, 12));
+
+      const futureOnly = await runCliJson(
+        "list-design-outcomes",
+        "--project-id",
+        project.id,
+        "--status",
+        "due",
+        "--due-before",
+        "2026-07-01T00:00:00Z",
+        "--json",
+        "true",
+      );
+      expect(futureOnly.totalCount).toBe(0);
+      expect(futureOnly.outcomes).toEqual([]);
+
+      // Filtering only future outcomes via no --status should include all three.
+      const allOutcomes = await runCliJson(
+        "list-design-outcomes",
+        "--project-id",
+        project.id,
+        "--json",
+        "true",
+      );
+      expect(allOutcomes.totalCount).toBe(3);
+      expect(allOutcomes.evaluatedAt).toBeNull();
+
+      // Snapshot filesystem state again without restoring write permission so
+      // the only deltas that can appear are mutations caused by inspection.
+      const after = await snapshotDatabaseFilesystem(dbPath, dir);
+
+      expect(after.size).toBe(before.size);
+      expect(after.mtimeMs).toBe(before.mtimeMs);
+      expect(after.ctimeMs).toBe(before.ctimeMs);
+      expect(after.parentMode).toBe(before.parentMode);
+      expect(after.sidecars).toEqual(before.sidecars);
+      expect(after.dirEntries).toEqual(before.dirEntries);
+    } finally {
+      // Restore write permission so afterEach can delete the temp directory,
+      // even if an assertion fails inside the read-only window.
+      await chmod(dir, 0o755).catch(() => undefined);
+      await chmod(dbPath, 0o644).catch(() => undefined);
+      await chmod(`${dbPath}-wal`, 0o644).catch(() => undefined);
+      await chmod(`${dbPath}-shm`, 0o644).catch(() => undefined);
+    }
+  });
+
+  test("Designer inspection commands work against a sidecar-free checkpointed WAL database under read-only filesystem", async () => {
+    await runCli("init");
+    const project = await runCliJson(
+      "create-project",
+      "--name",
+      "Sidecar Free Project",
+      "--root-path",
+      dir,
+    );
+    const harness = new Harness(dbPath);
+    const charter = harness.createFounderCharter({
+      projectId: project.id,
+      mission: "Sidecar-free inspection",
+      charter: {
+        mission: "Sidecar-free inspection",
+        capitalPolicy: { currency: "USD", experimentBudget: 100 },
+      },
+      activate: true,
+    });
+    harness.createStrategySignal({
+      projectId: project.id,
+      signalClass: "system",
+      source: "test",
+      title: "Active signal",
+      summary: "Sidecar-free seed",
+      observationTime: "2026-08-01T00:00:00Z",
+      confidence: 0.5,
+    });
+    const proposal = harness.createDesignProposal({
+      projectId: project.id,
+      charterId: charter.id,
+      title: "Sidecar-free proposal",
+      problem: "Inspection without sidecars",
+      recommendation: "Inspect via immutable open",
+      status: "accepted",
+      proposal: {
+        problem: "Inspection without sidecars",
+        recommendation: "Inspect via immutable open",
+        evaluationContract: {
+          baseline: [],
+          successMetrics: [],
+          guardMetrics: [],
+          requiredEvidence: [],
+          reviewAt: "2026-09-01T00:00:00Z",
+        },
+        investment: { reversibility: "easy", portfolio: "core" },
+      },
+    });
+    harness.recordDesignDecision({
+      proposalId: proposal.id,
+      charterId: charter.id,
+      decision: "approved",
+      actorKind: "auto",
+      authority: { disposition: "automatic" },
+    });
+    harness.recordDesignOutcome({
+      proposalId: proposal.id,
+      stage: "review",
+      recommendation: "retain",
+      reviewAt: "2026-08-01T00:00:00Z",
+    });
+    harness.recordDesignOutcome({
+      proposalId: proposal.id,
+      stage: "review",
+      recommendation: "retain",
+      reviewAt: "2026-12-01T00:00:00Z",
+    });
+    harness.recordDesignOutcome({
+      proposalId: proposal.id,
+      stage: "experiment",
+      recommendation: "retain",
+    });
+
+    // Force a TRUNCATE checkpoint and remove WAL/SHM sidecars. The database
+    // is now exactly one file. Inspection must succeed without recreating
+    // sidecars or touching file metadata.
+    checkpointDatabase(dbPath);
+    await rm(`${dbPath}-wal`).catch(() => undefined);
+    await rm(`${dbPath}-shm`).catch(() => undefined);
+    await rm(`${dbPath}-journal`).catch(() => undefined);
+
+    // Lock down filesystem.
+    await chmod(dir, 0o555);
+    await chmod(dbPath, 0o444);
+
+    const before = await snapshotDatabaseFilesystem(dbPath, dir);
+    expect(before.sidecars.wal).toBe(false);
+    expect(before.sidecars.shm).toBe(false);
+    expect(before.sidecars.journal).toBe(false);
+
+    // Run all four inspection commands in concise and JSON modes.
     const designStatusJson = await runCliJson(
       "design-status",
       "--project-id",
@@ -10409,14 +10629,8 @@ describe("CLI", () => {
       evaluatedAt: "2026-08-11T00:00:00Z",
       totalCount: 1,
     });
-    expect(outcomesJson.outcomes[0]).toMatchObject({
-      stage: "review",
-      recommendation: "retain",
-      reviewAt: "2026-08-01T00:00:00Z",
-      due: true,
-    });
 
-    // Concise output should also work and surface stable identifiers.
+    // Concise output mode also exercises the read path.
     const concise = await runCli(
       "list-design-outcomes",
       "--project-id",
@@ -10427,39 +10641,9 @@ describe("CLI", () => {
       "2026-08-11T00:00:00Z",
     );
     expect(concise).toContain("Design outcome reviews");
-    expect(concise).toContain("Evaluated at: 2026-08-11T00:00:00Z");
     expect(concise).toContain("due");
-    expect(concise).toContain(proposal.id.slice(0, 12));
 
-    const futureOnly = await runCliJson(
-      "list-design-outcomes",
-      "--project-id",
-      project.id,
-      "--status",
-      "due",
-      "--due-before",
-      "2026-07-01T00:00:00Z",
-      "--json",
-      "true",
-    );
-    expect(futureOnly.totalCount).toBe(0);
-    expect(futureOnly.outcomes).toEqual([]);
-
-    // Filtering only future outcomes via no --status should include all three.
-    const allOutcomes = await runCliJson(
-      "list-design-outcomes",
-      "--project-id",
-      project.id,
-      "--json",
-      "true",
-    );
-    expect(allOutcomes.totalCount).toBe(3);
-    expect(allOutcomes.evaluatedAt).toBeNull();
-
-    // Snapshot filesystem state again without restoring write permission so
-    // the only deltas that can appear are mutations caused by inspection.
     const after = await snapshotDatabaseFilesystem(dbPath, dir);
-
     expect(after.size).toBe(before.size);
     expect(after.mtimeMs).toBe(before.mtimeMs);
     expect(after.ctimeMs).toBe(before.ctimeMs);
@@ -10470,8 +10654,6 @@ describe("CLI", () => {
     // Restore write permission so afterEach can delete the temp directory.
     await chmod(dir, 0o755).catch(() => undefined);
     await chmod(dbPath, 0o644).catch(() => undefined);
-    await chmod(`${dbPath}-wal`, 0o644).catch(() => undefined);
-    await chmod(`${dbPath}-shm`, 0o644).catch(() => undefined);
   });
 
   test("list-design-outcomes rejects incompatible combinations and bad timestamps", async () => {

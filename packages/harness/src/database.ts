@@ -1,6 +1,7 @@
 import { Database } from "bun:sqlite";
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 
 export type HarnessDatabase = Database;
 
@@ -16,6 +17,24 @@ export function initDatabase(dbPath: string) {
     ensureRunLifecycleGuards(db);
     ensureStrategyTables(db);
   }, { allowMissingSchema });
+}
+
+// Force WAL frames into the main database file and truncate the WAL so the
+// database can be inspected through `withReadOnlyDatabase` after WAL/SHM
+// sidecars are removed or the filesystem is restricted. Inspection uses
+// SQLite's immutable open form, which reads only the main database file;
+// tests and operational flows that need to inspect a freshly seeded WAL-mode
+// database must checkpoint (and optionally drop sidecars) before locking the
+// filesystem down. The TRUNCATE checkpoint guarantees the WAL is empty after
+// the call so subsequent reads cannot observe a stale pending frame set.
+export function checkpointDatabase(dbPath: string) {
+  const resolvedPath = normalizeDatabasePath(dbPath);
+  if (resolvedPath === ":memory:" || resolvedPath.startsWith("file:")) {
+    return;
+  }
+  withDatabase(resolvedPath, (db) => {
+    db.exec("pragma wal_checkpoint(TRUNCATE)");
+  });
 }
 
 export function withDatabase<T>(
@@ -36,6 +55,24 @@ export function withDatabase<T>(
   try {
     return callback(db);
   } finally {
+    // Checkpoint pending WAL frames into the main database file before close
+    // so the durable state is queryable through `withReadOnlyDatabase`. The
+    // read-only inspection boundary opens the database with `immutable=1`,
+    // which serves reads directly from the main file and bypasses WAL/SHM
+    // coordination; without a checkpoint here, recently committed writes
+    // would sit unseen in the WAL until a future writer or explicit
+    // `checkpointDatabase` call flushed them. PASSIVE checkpoints cooperate
+    // with concurrent readers and writers instead of blocking them, and the
+    // accompanying auto-checkpoint on the next writer empties the WAL so
+    // subprocess-driven read-only inspections cannot trigger an on-close
+    // checkpoint that would mutate the main database file under read-only
+    // filesystem permissions.
+    try {
+      db.exec("pragma wal_checkpoint(PASSIVE)");
+    } catch {
+      // Checkpoint failures (e.g. transient lock contention) must not mask
+      // the original callback result or impede close.
+    }
     db.close();
   }
 }
@@ -47,11 +84,24 @@ export function withDatabase<T>(
 // succeed in restricted worktrees where the database file and parent
 // directory are read-only.
 //
-// The connection is opened with Bun SQLite's `readonly: true, create: false`
-// flags, which fails cleanly when the database file is absent. Only
-// connection-local pragmas (`foreign_keys`, `busy_timeout`) are applied; the
-// writable `journal_mode` and `synchronous` pragmas are skipped because they
-// would require writing to the database file.
+// The connection is opened with SQLite's `immutable=1` URI flag. Immutable
+// mode tells SQLite to treat the file as a frozen snapshot: it skips WAL/SHM
+// sidecar access, lock-byte negotiation, and on-close checkpoints, so a
+// checkpointed WAL-mode database can be inspected whether WAL/SHM files are
+// present or absent and even when the database file and parent directory are
+// read-only. The previous `readonly: true, create: false` flags relied on
+// WAL-mode coordination that still attempted to recreate `-shm` on sidecar-
+// free databases (SQLITE_CANTOPEN) and triggered a checkpoint-on-last-close
+// that wrote into the main database file when subprocess-driven inspection
+// ran against a WAL with pending frames. Inspection therefore targets the
+// already-checkpointed state that the harness leaves behind once write
+// transactions have committed.
+//
+// Missing files still surface through the explicit existence check below, and
+// corrupt or incompatible databases are rejected via a SELECT against
+// `sqlite_master`. Only connection-local pragmas (`foreign_keys`,
+// `busy_timeout`) are applied; the writable `journal_mode` and `synchronous`
+// pragmas are skipped because they would require writing to the database.
 export function withReadOnlyDatabase<T>(
   dbPath: string,
   callback: (db: Database) => T,
@@ -69,7 +119,7 @@ export function withReadOnlyDatabase<T>(
   }
   let db: Database;
   try {
-    db = new Database(resolvedPath, { readonly: true, create: false });
+    db = new Database(toImmutableFileUri(resolvedPath), { readonly: true });
   } catch (error) {
     throw new Error(
       `Unable to open Ouroboros database read-only: ${resolvedPath} (${(error as Error).message}).`,
@@ -78,10 +128,35 @@ export function withReadOnlyDatabase<T>(
   db.exec("pragma foreign_keys = on");
   db.exec("pragma busy_timeout = 30000");
   try {
-    ensureOuroborosSchema(db, resolvedPath);
+    ensureOuroborosSchemaForInspection(db, resolvedPath);
     return callback(db);
   } finally {
     db.close();
+  }
+}
+
+// Build a SQLite file URI that opens the database as an immutable snapshot.
+// `pathToFileURL` percent-encodes reserved characters (spaces, etc.) so the
+// URI remains valid for any filesystem path. We re-emit `file:` plus the
+// pathname so SQLite accepts it (SQLite accepts both `file:/abs/path` and
+// `file:///abs/path` forms on Unix).
+function toImmutableFileUri(resolvedPath: string): string {
+  const url = pathToFileURL(resolvedPath);
+  return `file:${url.pathname}?immutable=1`;
+}
+
+function ensureOuroborosSchemaForInspection(db: Database, dbPath: string) {
+  // Validate schema directly with a SELECT. The shared `ensureOuroborosSchema`
+  // helper skips `file:` URIs because writable paths use them for in-memory
+  // and explicit URI opens; inspection always points at a real file and must
+  // detect corrupt or non-Ouroboros databases.
+  const row = db
+    .query("select name from sqlite_master where type = 'table' and name = 'runs'")
+    .get() as { name: string } | null;
+  if (!row) {
+    throw new Error(
+      `Ouroboros database is missing schema: ${dbPath}. The run database may be corrupted or this command is pointing at the wrong DB. Run init only for a new database, or restore/recreate the run DB.`,
+    );
   }
 }
 
