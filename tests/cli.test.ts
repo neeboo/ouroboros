@@ -7281,6 +7281,7 @@ describe("CLI", () => {
     expect(recoveryTask).toMatchObject({
       role: "worker",
       status: "done",
+      worktreePath: sourceWorktreePath,
       doneWhen: ["focused checks pass"],
       config: expect.objectContaining({
         agentBackend: "codex-resumable",

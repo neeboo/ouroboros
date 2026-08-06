@@ -2205,10 +2205,14 @@ function recoverBlockedSelfImprovementRun(
       };
     }
 
-    const sourceWorktreePath = sourceSession
-      ? worktreePathForSession(sourceSession) ?? sourceTask.worktreePath
-      : sourceTask.worktreePath;
     const previousRecovery = recordValue(sourceTask.config?.automaticRecovery);
+    const inheritedSourceWorktreePath = typeof sourceTask.config?.sourceWorktreePath === "string"
+      && typeof previousRecovery.sourceTaskId === "string"
+      ? sourceTask.config.sourceWorktreePath
+      : null;
+    const sourceWorktreePath = inheritedSourceWorktreePath ?? (sourceSession
+      ? worktreePathForSession(sourceSession) ?? sourceTask.worktreePath
+      : sourceTask.worktreePath);
     const generation = Math.max(0, Number(previousRecovery.generation) || 0) + 1;
     const { modelPreference: _modelPreference, automaticRecovery: _automaticRecovery, ...sourceConfig } = sourceTask.config ?? {};
     const recoveryTaskId = harness.createTask({
@@ -2240,6 +2244,7 @@ function recoverBlockedSelfImprovementRun(
       doneWhen: sourceTask.doneWhen.length > 0
         ? sourceTask.doneWhen
         : ["the blocking root cause is resolved", "the original goal has passing evidence"],
+      worktreePath: sourceWorktreePath,
       config: {
         ...sourceConfig,
         agentBackend: toBackend,
