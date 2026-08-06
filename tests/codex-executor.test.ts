@@ -459,17 +459,27 @@ describe("codex cli executor", () => {
       status: "done",
       summary: "planned",
     });
-    expect(calls[0].cmd.slice(0, 10)).toEqual([
+    expect(calls[0].cmd).toEqual([
       "/custom/codex",
       "exec",
-      "resume",
-      "session_123",
       "-m",
       "gpt-5.6-sol",
       "-c",
       'model_reasoning_effort="high"',
       "--json",
       "--skip-git-repo-check",
+      "--ignore-user-config",
+      "-c",
+      'approval_policy="never"',
+      "--output-last-message",
+      expect.any(String),
+      "-C",
+      "/repo",
+      "--sandbox",
+      "read-only",
+      "resume",
+      "session_123",
+      "-",
     ]);
     expect(calls[0].stdin).toBe("continue");
   });

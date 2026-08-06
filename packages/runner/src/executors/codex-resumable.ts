@@ -91,8 +91,6 @@ export function createCodexResumableClient(options: CodexResumableClientOptions)
         cmd: [
           codexBin,
           "exec",
-          "resume",
-          input.sessionId,
           ...modelArgs,
           ...reasoningArgs,
           "--json",
@@ -106,6 +104,8 @@ export function createCodexResumableClient(options: CodexResumableClientOptions)
           options.cwd,
           "--sandbox",
           sandbox,
+          "resume",
+          input.sessionId,
           "-",
         ],
         stdin: input.prompt ?? "",

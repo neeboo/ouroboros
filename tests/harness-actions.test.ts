@@ -445,8 +445,39 @@ describe("Harness actions", () => {
       expect.objectContaining({ name: "goal review invalidated", status: "passed", evidence: "integration" }),
     );
     expect(overview.run?.status).toBe("todo");
+    expect(overview.run?.context.goalReviewInvalidatedByIntegration).toBe(false);
     expect(goalReviews).toHaveLength(2);
     expect(goalReviews.find((task) => task.id !== oldReviewTaskId)?.status).toBe("todo");
+
+    const refreshedReview = goalReviews.find((task) => task.id !== oldReviewTaskId);
+    if (!refreshedReview) {
+      throw new Error("expected refreshed goal review");
+    }
+    harness.recordAttempt({
+      taskId: refreshedReview.id,
+      input: { executor: "test" },
+      output: {
+        status: "done",
+        runDecision: "defer",
+        summary: "A cost decision is required",
+        changedFiles: [],
+        checks: [{ name: "goal review", status: "failed", evidence: "cost approval" }],
+        artifacts: [],
+        problems: ["recurring infrastructure spend requires approval"],
+      },
+    });
+
+    const repeated = applyHarnessAction(harness, {
+      type: "prepareRunDrain",
+      runId,
+      maxTries: 2,
+    });
+    expect(repeated).toMatchObject({
+      status: "blocked",
+      actionType: "prepareRunDrain",
+      summary: expect.stringContaining("blocked by deferred goal-review"),
+    });
+    expect(harness.getRunOverview({ runId }).tasks.filter((task) => task.role === "goal-review")).toHaveLength(2);
   });
 
   test("prepares a drained run by ignoring invalidated non-terminal goal-review decisions", () => {

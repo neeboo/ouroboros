@@ -2169,6 +2169,23 @@ function prepareRunDrain(harness: Harness, action: Extract<HarnessAction, { type
   }
 
   const review = ensureGoalReviewTask(harness, action.runId, maxTries, overview, goalReviewInvalidated);
+  if (goalReviewInvalidated) {
+    const existingInvalidated = invalidatedGoalReviewTaskIds(overview);
+    for (const task of overview.tasks) {
+      if (task.role === "goal-review") {
+        existingInvalidated.add(task.id);
+      }
+    }
+    harness.updateRun({
+      runId: action.runId,
+      contextPatch: {
+        goalReviewInvalidatedByIntegration: false,
+        invalidatedGoalReviewTaskIds: [...existingInvalidated],
+        goalReviewRefreshedAt: new Date().toISOString(),
+      },
+    });
+    checks.push({ name: "goal review invalidation consumed", status: "passed", evidence: "integration" });
+  }
   checks.push(...review.checks);
   artifacts.push(...review.artifacts);
   if (review.status === "blocked") {
@@ -2297,13 +2314,18 @@ function ensureGoalReviewTask(
   overview: ReturnType<Harness["getRunOverview"]>,
   goalReviewInvalidated = false,
 ) {
+  const invalidatedTaskIds = invalidatedGoalReviewTaskIds(overview);
   const latestProgressIndex = overview.sessions.reduce((latest, session, index) => {
     return session.role !== "goal-review" && session.status === "done" ? index : latest;
   }, -1);
   const currentReviewSessions = goalReviewInvalidated
     ? []
     : overview.sessions.filter(
-      (session, index) => index > latestProgressIndex && session.role === "goal-review" && session.status === "done",
+      (session, index) =>
+        index > latestProgressIndex &&
+        session.role === "goal-review" &&
+        session.status === "done" &&
+        !invalidatedTaskIds.has(session.taskId),
     );
 
   const latestReview = currentReviewSessions[currentReviewSessions.length - 1];
@@ -2336,7 +2358,7 @@ function ensureGoalReviewTask(
   const blockedReview = goalReviewInvalidated
     ? undefined
     : [...overview.tasks].reverse().find(
-      (task) => task.role === "goal-review" && task.status === "blocked",
+      (task) => task.role === "goal-review" && task.status === "blocked" && !invalidatedTaskIds.has(task.id),
     );
   if (blockedReview) {
     const lastTask = overview.tasks[overview.tasks.length - 1];
@@ -2635,8 +2657,9 @@ function selectVerifierForWorker(overview: RunOverview, workerTaskId: string): T
 }
 
 function selectCompletedGoalReview(overview: RunOverview): Task | null {
+  const invalidatedTaskIds = invalidatedGoalReviewTaskIds(overview);
   return [...overview.tasks].reverse().find((task) => {
-    if (task.role !== "goal-review" || task.status !== "done") {
+    if (task.role !== "goal-review" || task.status !== "done" || invalidatedTaskIds.has(task.id)) {
       return false;
     }
     const session = latestSessionForTask(overview, task.id);
@@ -2646,6 +2669,11 @@ function selectCompletedGoalReview(overview: RunOverview): Task | null {
     const decision = resolveRunDecision(session.output);
     return decision === "complete" && (session.output.nextTasks ?? []).length === 0;
   }) ?? null;
+}
+
+function invalidatedGoalReviewTaskIds(overview: RunOverview): Set<string> {
+  const raw = overview.run?.context.invalidatedGoalReviewTaskIds;
+  return new Set(Array.isArray(raw) ? raw.filter((value): value is string => typeof value === "string") : []);
 }
 
 function isFailedCheck(check: unknown) {
