@@ -1282,10 +1282,11 @@ export function dashboardHtml(input: { runId: string }) {
           secondaryEvidenceOpen: parsed.secondaryEvidenceOpen === true,
           designDetailsOpen: parsed.designDetailsOpen === true,
           railExpanded: parsed.railExpanded === false ? false : true,
+          compactSurface: parsed.compactSurface === "details" ? "details" : "canvas",
           flowScroll: parsed.flowScroll && typeof parsed.flowScroll === "object" ? parsed.flowScroll : null,
         };
       } catch {
-        return { selectedGoalId: null, workspaceTitleExpanded: false, selectedChangedFilePath: null, selectedTaskId: null, secondaryEvidenceOpen: false, designDetailsOpen: false, railExpanded: true, flowScroll: null };
+        return { selectedGoalId: null, workspaceTitleExpanded: false, selectedChangedFilePath: null, selectedTaskId: null, secondaryEvidenceOpen: false, designDetailsOpen: false, railExpanded: true, compactSurface: "canvas", flowScroll: null };
       }
     };
     const writeDashboardState = (state) => {
@@ -1298,6 +1299,7 @@ export function dashboardHtml(input: { runId: string }) {
           secondaryEvidenceOpen: state.secondaryEvidenceOpen === true,
           designDetailsOpen: state.designDetailsOpen === true,
           railExpanded: state.railExpanded === false ? false : true,
+          compactSurface: state.compactSurface === "details" ? "details" : "canvas",
           flowScroll: state.flowScroll && typeof state.flowScroll === "object" ? state.flowScroll : null,
         }));
       } catch {
@@ -1311,6 +1313,7 @@ export function dashboardHtml(input: { runId: string }) {
     let selectedChangedFilePath = restoredDashboardState.selectedChangedFilePath || null;
     let selectedTaskId = restoredDashboardState.selectedTaskId || null;
     let secondaryEvidenceOpen = restoredDashboardState.secondaryEvidenceOpen === true;
+    let compactSurface = restoredDashboardState.compactSurface === "details" ? "details" : "canvas";
     let designDetailsOpen = restoredDashboardState.designDetailsOpen === true;
     let latestDesignStatus = null;
     let latestLinearIntake = null;
@@ -3009,13 +3012,62 @@ export function dashboardHtml(input: { runId: string }) {
       syncRailState();
       persistDashboardState();
     };
+    const normalizeCompactSurface = (value) => value === "details" ? "details" : "canvas";
+    const compactSurfaceSwitchHtml = () => {
+      const next = normalizeCompactSurface(compactSurface);
+      const canvasActive = next === "canvas";
+      const detailsActive = next === "details";
+      return '<div class="compact-surface-switch" data-compact-surface-switch role="group" aria-label="Workspace surface" data-compact-surface="' + escapeHtml(next) + '">' +
+        '<button type="button" class="compact-surface-switch-button" data-compact-surface-toggle="canvas" aria-pressed="' + (canvasActive ? "true" : "false") + '"' + (canvasActive ? ' aria-current="true"' : '') + '>Canvas</button>' +
+        '<button type="button" class="compact-surface-switch-button" data-compact-surface-toggle="details" aria-pressed="' + (detailsActive ? "true" : "false") + '"' + (detailsActive ? ' aria-current="true"' : '') + '>Task details</button>' +
+        '</div>';
+    };
+    const syncCompactSurface = () => {
+      const next = normalizeCompactSurface(compactSurface);
+      const shell = document.querySelector(".app-shell");
+      if (shell instanceof HTMLElement) {
+        shell.setAttribute("data-compact-surface", next);
+      }
+      const host = document.querySelector("[data-compact-surface-switch]");
+      if (host instanceof HTMLElement) {
+        host.setAttribute("data-compact-surface", next);
+        for (const button of Array.from(host.querySelectorAll("[data-compact-surface-toggle]"))) {
+          const value = button.getAttribute("data-compact-surface-toggle") === "details" ? "details" : "canvas";
+          const isActive = value === next;
+          button.setAttribute("aria-pressed", isActive ? "true" : "false");
+          if (isActive) button.setAttribute("aria-current", "true"); else button.removeAttribute("aria-current");
+          button.classList.toggle("is-active", isActive);
+        }
+      }
+    };
+    const mountCompactSurfaceSwitch = () => {
+      const headRow = document.querySelector(".workspace-head-row");
+      if (!headRow) return;
+      if (headRow.querySelector("[data-compact-surface-switch]")) {
+        syncCompactSurface();
+        return;
+      }
+      const mount = document.createElement("div");
+      mount.setAttribute("class", "workspace-head-actions");
+      mount.setAttribute("data-workspace-head-actions", "");
+      mount.innerHTML = compactSurfaceSwitchHtml();
+      headRow.appendChild(mount);
+      syncCompactSurface();
+    };
+    const setCompactSurface = (next) => {
+      const value = normalizeCompactSurface(next);
+      if (value === compactSurface) return;
+      compactSurface = value;
+      syncCompactSurface();
+      persistDashboardState();
+    };
     const persistDashboardState = () => {
-      writeDashboardState({ selectedGoalId, workspaceTitleExpanded, selectedChangedFilePath, selectedTaskId, secondaryEvidenceOpen, designDetailsOpen, railExpanded, flowScroll: captureFlowScrollState() });
+      writeDashboardState({ selectedGoalId, workspaceTitleExpanded, selectedChangedFilePath, selectedTaskId, secondaryEvidenceOpen, designDetailsOpen, railExpanded, compactSurface, flowScroll: captureFlowScrollState() });
     };
     const persistFlowScrollState = () => {
       const flowScroll = captureFlowScrollState();
       if (!flowScroll) return;
-      writeDashboardState({ selectedGoalId, workspaceTitleExpanded, selectedChangedFilePath, selectedTaskId, secondaryEvidenceOpen, designDetailsOpen, railExpanded, flowScroll });
+      writeDashboardState({ selectedGoalId, workspaceTitleExpanded, selectedChangedFilePath, selectedTaskId, secondaryEvidenceOpen, designDetailsOpen, railExpanded, compactSurface, flowScroll });
     };
     const restoreFlowScrollState = (scrollState) => {
       if (!scrollState) return;
@@ -3189,6 +3241,7 @@ export function dashboardHtml(input: { runId: string }) {
       if (projectRootNode && projectRootNode.textContent !== projectRoot) projectRootNode.textContent = projectRoot;
       setTextIfChanged("workspace-kicker", "Task canvas");
       syncWorkspaceTitle(selectedGroup ? selectedGroup.titleTask.goal : "No goal selected");
+      mountCompactSurfaceSwitch();
       patchStaticHtml("workspace-orientation", dashboardOrientationHtml(overview, selectedGroup));
       patchWorkspace(dashboardWorkspaceHtml(selectedGroup));
       mountReactFlowCanvas();
@@ -3308,6 +3361,8 @@ export function dashboardHtml(input: { runId: string }) {
       selectedChangedFilePath = restored.selectedChangedFilePath || null;
       selectedTaskId = restored.selectedTaskId || null;
       railExpanded = restored.railExpanded !== false;
+      compactSurface = restored.compactSurface === "details" ? "details" : "canvas";
+      syncCompactSurface();
       restoredFlowScrollState = restored.flowScroll || null;
       diffByPath.clear();
       latestDesignStatus = null;
@@ -3356,6 +3411,12 @@ export function dashboardHtml(input: { runId: string }) {
         workspaceTitleExpanded = !workspaceTitleExpanded;
         persistDashboardState();
         syncWorkspaceTitle(document.getElementById("workspace-title")?.textContent || "");
+        return;
+      }
+      const compactToggle = event.target.closest("[data-compact-surface-toggle]");
+      if (compactToggle) {
+        const next = compactToggle.getAttribute("data-compact-surface-toggle") === "details" ? "details" : "canvas";
+        setCompactSurface(next);
         return;
       }
       const changedFileButton = event.target.closest("[data-changed-file-node='file'][data-changed-file-path]");
@@ -3626,6 +3687,7 @@ export function dashboardHtml(input: { runId: string }) {
     overviewWorker.postMessage({ type: "start", runId, apiBase: window.location.origin });
     refreshRecentRuns();
     maybeRefreshDesignStatus(true);
+    syncCompactSurface();
   </script>
 </body>
 </html>`;
