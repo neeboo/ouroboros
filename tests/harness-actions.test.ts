@@ -1049,6 +1049,18 @@ describe("Harness actions", () => {
       summary: expect.stringContaining("outside the verified worker output"),
       problems: [expect.stringContaining("NOTES.md")],
     });
+    const replay = applyHarnessAction(harness, {
+      type: "integrateVerifiedRun",
+      runId,
+      workerTaskId,
+      commitMessage: "Should remain suppressed",
+    });
+    const integrationEvents = harness
+      .listHarnessActionEvents({ limit: 10 })
+      .filter((event) => event.actionType === "integrateVerifiedRun");
+
+    expect(replay.eventId).toBe(result.eventId);
+    expect(integrationEvents).toHaveLength(1);
     expect(git(repoPath, ["log", "--oneline", "-1"]).stdout).toContain("Initial commit");
   });
 
@@ -1426,6 +1438,88 @@ describe("Harness actions", () => {
       actionType: "integrateVerifiedRun",
       status: "blocked",
     });
+  });
+
+  test("aborts a failed integration merge and suppresses an unchanged retry", async () => {
+    const repoPath = join(dir, "repo-merge-conflict");
+    const worktreePath = join(dir, "worker-tree-merge-conflict");
+    await mkdir(repoPath, { recursive: true });
+    await writeFile(join(repoPath, "README.md"), "initial\n");
+    git(repoPath, ["init", "-b", "main"]);
+    git(repoPath, ["config", "user.name", "Ouroboros Test"]);
+    git(repoPath, ["config", "user.email", "test@example.com"]);
+    git(repoPath, ["config", "commit.gpgSign", "false"]);
+    git(repoPath, ["add", "README.md"]);
+    git(repoPath, ["commit", "-m", "Initial commit"]);
+    git(repoPath, ["worktree", "add", "-b", "task-worker-conflict", worktreePath, "main"]);
+    await writeFile(join(worktreePath, "README.md"), "worker change\n");
+    git(worktreePath, ["add", "README.md"]);
+    git(worktreePath, ["commit", "-m", "Worker change"]);
+    await writeFile(join(repoPath, "README.md"), "main change\n");
+    git(repoPath, ["add", "README.md"]);
+    git(repoPath, ["commit", "-m", "Main change"]);
+
+    const runId = harness.createRun({ goal: "Bound conflicting integration", projectRoot: repoPath });
+    const workerTaskId = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Change README",
+      prompt: "Change README.md.",
+      worktreePath,
+    });
+    harness.recordAttempt({
+      taskId: workerTaskId,
+      input: { executor: "test" },
+      output: {
+        status: "done",
+        summary: "Changed README",
+        changedFiles: ["README.md"],
+        checks: [{ name: "worker", status: "passed" }],
+        artifacts: [],
+        problems: [],
+      },
+    });
+    const verifierTaskId = harness.createTask({
+      runId,
+      role: "verifier",
+      goal: "Verify README",
+      prompt: "Verify README.md.",
+      dependsOn: [workerTaskId],
+    });
+    harness.recordAttempt({
+      taskId: verifierTaskId,
+      input: { executor: "test" },
+      output: {
+        status: "done",
+        summary: "Verified README",
+        changedFiles: [],
+        checks: [{ name: "verify", status: "passed" }],
+        artifacts: [],
+        problems: [],
+      },
+    });
+
+    const first = applyHarnessAction(harness, {
+      type: "integrateVerifiedRun",
+      runId,
+      workerTaskId,
+      commitMessage: "Conflicting integration",
+    });
+    const second = applyHarnessAction(harness, {
+      type: "integrateVerifiedRun",
+      runId,
+      workerTaskId,
+      commitMessage: "Conflicting integration",
+    });
+    const integrationEvents = harness
+      .listHarnessActionEvents({ limit: 10 })
+      .filter((event) => event.actionType === "integrateVerifiedRun");
+
+    expect(first.status).toBe("blocked");
+    expect(second.eventId).toBe(first.eventId);
+    expect(integrationEvents).toHaveLength(1);
+    expect(git(repoPath, ["status", "--short"]).stdout.trim()).toBe("");
+    expect((await readFile(join(repoPath, "README.md"), "utf8")).trim()).toBe("main change");
   });
 
   test("refuses to mark a run done while verified worker changes remain unintegrated", async () => {

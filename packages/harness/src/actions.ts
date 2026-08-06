@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import { acceptGuardrailProposal, proposeGuardrailsFromLessons } from "./guardrails";
@@ -381,6 +382,13 @@ export function applyHarnessAction(
     return { ...result, eventId };
   }
 
+  if (action.type === "integrateVerifiedRun") {
+    const replay = findBlockedIntegrationReplay(harness, action, options);
+    if (replay) {
+      return replay;
+    }
+  }
+
   const result = applyParsedHarnessAction(harness, action, options);
   const eventId = harness.recordHarnessActionEvent({
     actionType: action.type,
@@ -388,7 +396,71 @@ export function applyHarnessAction(
     request: action,
     result: resultToRecord(result),
   });
+  if (action.type === "integrateVerifiedRun" && result.status === "blocked") {
+    recordBlockedIntegration(harness, action, options, eventId);
+  }
   return { ...result, eventId };
+}
+
+type IntegrationConvergenceRecord = {
+  operationKey: string;
+  actionEventId: string;
+  recordedAt: string;
+};
+
+function findBlockedIntegrationReplay(
+  harness: Harness,
+  action: Extract<HarnessAction, { type: "integrateVerifiedRun" }>,
+  options: HarnessActionOptions,
+): (HarnessActionResult & { eventId: string }) | null {
+  const operation = integrationOperationKey(harness, action, options.runGit ?? defaultGitRunner);
+  if (!operation) {
+    return null;
+  }
+  const records = integrationConvergenceRecords(harness, action.runId);
+  const record = records[operation.slot];
+  if (!record || record.operationKey !== operation.key) {
+    return null;
+  }
+  const event = harness.getHarnessActionEvent({ id: record.actionEventId });
+  if (!event || event.status !== "blocked" || event.actionType !== "integrateVerifiedRun") {
+    return null;
+  }
+  return { ...(event.result as unknown as HarnessActionResult), eventId: event.id };
+}
+
+function recordBlockedIntegration(
+  harness: Harness,
+  action: Extract<HarnessAction, { type: "integrateVerifiedRun" }>,
+  options: HarnessActionOptions,
+  actionEventId: string,
+) {
+  const operation = integrationOperationKey(harness, action, options.runGit ?? defaultGitRunner);
+  if (!operation) {
+    return;
+  }
+  const records = integrationConvergenceRecords(harness, action.runId);
+  harness.updateRun({
+    runId: action.runId,
+    contextPatch: {
+      integrationConvergence: {
+        ...records,
+        [operation.slot]: {
+          operationKey: operation.key,
+          actionEventId,
+          recordedAt: new Date().toISOString(),
+        },
+      },
+    },
+  });
+}
+
+function integrationConvergenceRecords(harness: Harness, runId: string) {
+  const raw = harness.getRun(runId)?.context.integrationConvergence;
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    return {} as Record<string, IntegrationConvergenceRecord>;
+  }
+  return raw as Record<string, IntegrationConvergenceRecord>;
 }
 
 function applyParsedHarnessAction(harness: Harness, action: Exclude<HarnessAction, SubsessionAction>, options: HarnessActionOptions): HarnessActionResult {
@@ -1489,6 +1561,18 @@ function integrateVerifiedRun(
 
   const merge = runGitStep(git, repoPath, ["merge", "--no-ff", sourceBranch, "-m", commitMessage]);
   if (!merge.ok) {
+    const mergeHead = runGitStep(git, repoPath, ["rev-parse", "--verify", "-q", "MERGE_HEAD"]);
+    if (mergeHead.exitCode === 0) {
+      const abort = runGitStep(git, repoPath, ["merge", "--abort"]);
+      if (!abort.ok) {
+        return blockedCommand(action.type, "Merge failed and the target repository could not be restored.", checks, abort);
+      }
+      checks.push({
+        name: "failed merge cleanup",
+        status: "passed",
+        evidence: `aborted conflicted merge on ${targetBranch}`,
+      });
+    }
     return blockedCommand(action.type, "Could not merge verified worker branch.", checks, merge);
   }
   const mergeCommit = readGitStdout(git, repoPath, ["rev-parse", "--short", "HEAD"]);
@@ -2648,6 +2732,92 @@ function sameMaterializedFile(repoPath: string, worktreePath: string, file: stri
 function readGitStdout(git: GitRunner, cwd: string, args: string[]) {
   const result = runGitStep(git, cwd, args);
   return result.ok ? result.stdout.trim() : null;
+}
+
+function integrationOperationKey(
+  harness: Harness,
+  action: Extract<HarnessAction, { type: "integrateVerifiedRun" }>,
+  git: GitRunner,
+) {
+  const overview = harness.getRunOverview({ runId: action.runId, eventLimit: 0 });
+  if (!overview.run) {
+    return null;
+  }
+  const worker = selectIntegrationWorker(overview, action.workerTaskId);
+  const repoPath = action.repoPath ?? overview.run.projectRoot ?? overview.project?.rootPath ?? null;
+  const workerPath = worker?.worktreePath && repoPath
+    ? resolveWorktreePath(repoPath, worker.worktreePath)
+    : worker?.worktreePath ?? null;
+  const slot = worker?.id ?? action.workerTaskId ?? "automatic";
+  return {
+    slot,
+    key: stableFingerprint({
+      action: {
+        runId: action.runId,
+        workerTaskId: action.workerTaskId ?? null,
+        repoPath,
+        targetBranch: action.targetBranch ?? "main",
+        push: action.push ?? false,
+      },
+      tasks: overview.tasks.map((task) => ({
+        id: task.id,
+        role: task.role,
+        status: task.status,
+        dependsOn: [...task.dependsOn].sort(),
+        worktreePath: task.worktreePath,
+      })),
+      attempts: overview.sessions.map((session) => ({
+        taskId: session.taskId,
+        attemptId: session.attemptId,
+        status: session.status,
+      })),
+      targetRepository: gitRepositoryState(git, repoPath),
+      workerRepository: gitRepositoryState(git, workerPath),
+    }),
+  };
+}
+
+function gitRepositoryState(git: GitRunner, cwd: string | null) {
+  if (!cwd || !existsSync(cwd)) {
+    return { exists: false, cwd };
+  }
+  const read = (args: string[]) => {
+    try {
+      const result = runGitStep(git, cwd, args);
+      return { exitCode: result.exitCode, stdout: result.stdout, stderr: result.stderr };
+    } catch (error) {
+      return { exitCode: -1, stdout: "", stderr: errorMessage(error) };
+    }
+  };
+  return {
+    exists: true,
+    branch: read(["branch", "--show-current"]),
+    status: read(["status", "--short"]),
+    head: read(["rev-parse", "HEAD"]),
+    mergeHead: read(["rev-parse", "--verify", "-q", "MERGE_HEAD"]),
+  };
+}
+
+function stableFingerprint(value: unknown) {
+  return createHash("sha256").update(JSON.stringify(canonicalize(value)), "utf8").digest("hex");
+}
+
+function canonicalize(value: unknown): unknown {
+  if (value === undefined) {
+    return null;
+  }
+  if (value === null || typeof value !== "object") {
+    return value;
+  }
+  if (Array.isArray(value)) {
+    return value.map(canonicalize);
+  }
+  const record = value as Record<string, unknown>;
+  return Object.fromEntries(
+    Object.keys(record)
+      .sort()
+      .map((key) => [key, canonicalize(record[key])]),
+  );
 }
 
 function blockedCommand(

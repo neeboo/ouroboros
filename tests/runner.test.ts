@@ -1773,6 +1773,105 @@ describe("runner", () => {
     });
   });
 
+  test("supervisor exits a blocked integration pass instead of replaying forever", async () => {
+    const repoPath = join(dir, "repo-blocked-integration");
+    const worktreePath = join(dir, "verified-worker-blocked-integration");
+    await mkdir(repoPath, { recursive: true });
+    await writeFile(join(repoPath, "README.md"), "initial\n");
+    git(repoPath, ["init", "-b", "main"]);
+    git(repoPath, ["config", "user.name", "Ouroboros Test"]);
+    git(repoPath, ["config", "user.email", "test@example.com"]);
+    git(repoPath, ["config", "commit.gpgSign", "false"]);
+    git(repoPath, ["add", "README.md"]);
+    git(repoPath, ["commit", "-m", "Initial commit"]);
+    git(repoPath, ["worktree", "add", "-b", "task-blocked-integration", worktreePath, "main"]);
+    await mkdir(join(worktreePath, "src"), { recursive: true });
+    await writeFile(join(worktreePath, "src", "blocked.ts"), "export const blocked = true;\n");
+    await writeFile(join(repoPath, "NOTES.md"), "unrelated target change\n");
+
+    const runId = harness.createRun({ goal: "Bound blocked integration", projectRoot: repoPath });
+    const workerTaskId = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Implement blocked file",
+      prompt: "Create src/blocked.ts.",
+      worktreePath,
+    });
+    harness.recordAttempt({
+      taskId: workerTaskId,
+      input: { executor: "test" },
+      output: {
+        status: "done",
+        summary: "Created blocked file",
+        changedFiles: ["src/blocked.ts"],
+        checks: [{ name: "worker", status: "passed" }],
+        artifacts: [],
+        problems: [],
+      },
+    });
+    const verifierTaskId = harness.createTask({
+      runId,
+      role: "verifier",
+      goal: "Verify blocked file",
+      prompt: "Verify worker output.",
+      dependsOn: [workerTaskId],
+    });
+    harness.recordAttempt({
+      taskId: verifierTaskId,
+      input: { executor: "test" },
+      output: {
+        status: "done",
+        summary: "Verified blocked file",
+        changedFiles: [],
+        checks: [{ name: "verify", status: "passed" }],
+        artifacts: [],
+        problems: [],
+      },
+    });
+
+    const result = await superviseCodexRuns({
+      harness,
+      cwd: repoPath,
+      rootRunId: runId,
+      runConcurrency: 1,
+      taskConcurrency: 1,
+      maxCycles: 1,
+      maxRounds: 1,
+      maxTries: 1,
+      intervalMs: 1,
+      integrateCompletedRuns: true,
+      clientFactory: () => ({
+        start: async () => ({
+          status: "done" as const,
+          sessionId: "session_blocked_integration_review",
+          outputPath: join(dir, "blocked-integration-review.json"),
+          stdout: "",
+          stderr: "",
+          events: [],
+          output: {
+            status: "done" as const,
+            runDecision: "continue" as const,
+            summary: "Integration remains blocked.",
+            changedFiles: [],
+            checks: [{ name: "integration", status: "failed" }],
+            artifacts: [],
+            problems: ["target repository contains unrelated changes"],
+          },
+        }),
+        resume: async () => {
+          throw new Error("resume should not be called");
+        },
+      }),
+    });
+    const integrationEvents = harness
+      .listHarnessActionEvents({ limit: 10 })
+      .filter((event) => event.actionType === "integrateVerifiedRun");
+
+    expect(result.cycles).toHaveLength(1);
+    expect(integrationEvents).toHaveLength(2);
+    expect(integrationEvents.every((event) => event.status === "blocked")).toBe(true);
+  }, 2_000);
+
   test("supervisor integrates verified worker work before goal review when run is still todo", async () => {
     const repoPath = join(dir, "repo-pre-review");
     const worktreePath = join(dir, "verified-worker-pre-review");

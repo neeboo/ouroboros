@@ -1193,6 +1193,9 @@ function maybeIntegrateCompletedRun(
         : "supervisor integrated a completed verified run",
     });
     results.push(result);
+    if (result.status !== "done") {
+      break;
+    }
     integrated = successfulIntegrationState(input.harness, overview.run.id);
   }
   if (results.some((result) => result.status === "done")) {
