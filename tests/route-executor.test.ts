@@ -71,6 +71,48 @@ describe("route executor", () => {
     ]);
   });
 
+  test("forwards the browser process policy to generic Claude routes", async () => {
+    const calls: Array<{ cmd: string[]; env?: Record<string, string | undefined> }> = [];
+    const route: ResolvedExecutionRoute = {
+      role: "worker",
+      backend: {
+        id: "claude-code",
+        kind: "acpx",
+        source: "role-default",
+        agent: "claude",
+        approval: "approve-all",
+      },
+      model: null,
+      executionMode: "generic",
+    };
+    const executor = createRouteExecutor({
+      cwd: "/repo",
+      route,
+      browserProcessPolicy: "deny",
+      runCommand: async ({ cmd, env }) => {
+        calls.push({ cmd, env });
+        return {
+          exitCode: 0,
+          stdout: '{"status":"done","summary":"claude route ok","changedFiles":[],"checks":[],"artifacts":[],"problems":[]}',
+          stderr: "",
+        };
+      },
+    });
+
+    await executor({
+      prompt: "Use APIs only",
+      sessionName: "task_1",
+      run: runFixture,
+      task: taskFixture,
+      route,
+    });
+
+    expect(calls[0]?.env?.ORBS_BROWSER_PROCESS_POLICY).toBe("deny");
+    if (process.platform === "darwin") {
+      expect(calls[0]?.cmd.slice(0, 2)).toEqual(["/usr/bin/sandbox-exec", "-p"]);
+    }
+  });
+
   test("creates codex cli executors from resolved routes", async () => {
     const calls: Array<{ cmd: string[]; stdin: string }> = [];
     const route: ResolvedExecutionRoute = {

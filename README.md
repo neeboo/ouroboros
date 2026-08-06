@@ -192,6 +192,8 @@ orbs linear-create-issue \
   --description "Zero-cost API verification for poll -> inbox -> Designer -> planning run -> external ref."
 ```
 
+Autonomous self-improvement disables browser process launches across Codex and Claude Code by default. Use API, CLI, component-test, and SQLite evidence first. Pass `--browser-process-policy allow` only for a user-started run whose verification contract explicitly requires checking a rendered interface.
+
 Model preference can live on the run or on a single task:
 
 ```bash

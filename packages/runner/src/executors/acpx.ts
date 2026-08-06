@@ -1,6 +1,7 @@
 import { parseAttemptOutput, parseAttemptOutputOrBlocked } from "./output";
 import { commandProblem, runLocalCommand } from "./command";
 import { createInMemoryAttemptReplayCache } from "./replay";
+import { withBrowserProcessPolicy } from "./browser-process-policy";
 import type {
   AcpxAgentExecutorFactory,
   AcpxCodexExecutorFactory,
@@ -26,7 +27,7 @@ export const createAcpxCodexExecutor: AcpxCodexExecutorFactory = (options) => {
 
 export const createAcpxAgentExecutor: AcpxAgentExecutorFactory = (options) => {
   const approval = options.approval ?? "approve-reads";
-  const runCommand = options.runCommand ?? runLocalCommand;
+  const runCommand = withBrowserProcessPolicy(options.runCommand ?? runLocalCommand, options.browserProcessPolicy);
   const label = agentLabel(options);
   const oneShotExec = options.agent === "claude" && !options.format;
   const replayCache: AttemptReplayCache = options.replayCache ?? createInMemoryAttemptReplayCache();

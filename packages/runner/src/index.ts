@@ -120,6 +120,7 @@ export type {
   AcpxCodexExecutorOptions,
   ApprovalMode,
   AttemptReplayCache,
+  BrowserProcessPolicy,
   CodexCliExecutorOptions,
   CodexSandbox,
   CommandResult,

@@ -1,6 +1,6 @@
 import { createAcpxAgentExecutor } from "./executors/acpx";
 import { createCodexCliExecutor } from "./executors/codex-cli";
-import type { ApprovalMode, AttemptReplayCache, CodexSandbox, RunCommand, WorktreeEvidenceProbe } from "./executors/types";
+import type { ApprovalMode, AttemptReplayCache, BrowserProcessPolicy, CodexSandbox, RunCommand, WorktreeEvidenceProbe } from "./executors/types";
 import type { ResolvedAgentBackend } from "./agent-backends";
 import type { ResolvedExecutionRoute } from "./execution-routing";
 import type { TaskExecutor } from "./types";
@@ -9,6 +9,7 @@ export interface RouteExecutorOptions {
   cwd: string;
   route: ResolvedExecutionRoute;
   approval?: ApprovalMode;
+  browserProcessPolicy?: BrowserProcessPolicy;
   sandbox?: CodexSandbox;
   codexBin?: string;
   outputDir?: string;
@@ -36,6 +37,7 @@ export function createRouteExecutor(options: RouteExecutorOptions): TaskExecutor
       cwd: options.cwd,
       ...acpxAgentConfig(backend),
       approval: backend.approval ?? options.approval ?? "approve-reads",
+      browserProcessPolicy: options.browserProcessPolicy,
       format: backend.format,
       model: options.route.model?.model,
       env: backend.env,
@@ -52,6 +54,7 @@ export function createRouteExecutor(options: RouteExecutorOptions): TaskExecutor
   return createCodexCliExecutor({
     cwd: options.cwd,
     sandbox: options.sandbox ?? "read-only",
+    browserProcessPolicy: options.browserProcessPolicy,
     codexBin: options.codexBin,
     model: options.route.model?.model,
     reasoningEffort: options.route.model?.reasoning_effort,

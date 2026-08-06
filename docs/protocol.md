@@ -791,6 +791,8 @@ These mappings are not inbox events. They do not change task status, create issu
 
 `orbs linear-create-issue` creates one issue in the configured project and team through the same `LINEAR_API_KEY`, `token_env`, or `token_file` used by polling. It requires `--title` and accepts `--description`. The intended verification path is `issueCreate -> bounded poll -> inbox_events -> issue-scoped Designer -> planning run -> external_refs`. API responses and SQLite state are the canonical evidence. Goal review must not launch a browser for this transport proof; browser evidence is reserved for a user-facing dashboard change that deterministic API or component tests cannot verify.
 
+`self-improve-daemon` defaults `browserProcessPolicy` to `deny` for every backend and role. On macOS the runner applies one inherited process sandbox around Codex, Codex resume, Claude Code through ACPX, and generic Codex CLI execution. The sandbox denies browser executables plus `/usr/bin/open` and `/usr/bin/osascript`, including calls made by nested test commands. A normal user-started run may opt into browser execution with `--browser-process-policy allow` when its frozen verification contract explicitly requires user-interface evidence. API, CLI, component-test, and SQLite evidence remain the default.
+
 ### Dashboard lifecycle visibility
 
 The dashboard's inspector surfaces the complete Linear intake lifecycle through `GET /api/runs/:runId/linear-intake`:

@@ -1496,6 +1496,7 @@ function executorFactory(_executorName: "noop" | "acpx-codex" | "codex-cli" | "c
       cwd: input.cwd,
       route: input.route,
       approval: parseApproval(flag(parsed, "approval") ?? "approve-reads"),
+      browserProcessPolicy: input.task.role === "goal-review" ? "deny" : parseBrowserProcessPolicy(),
       sandbox: parseSandbox(flag(parsed, "sandbox") ?? "read-only"),
       codexBin: flag(parsed, "codex-bin"),
       timeoutMs: genericHardTimeoutMs(),

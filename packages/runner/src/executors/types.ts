@@ -2,6 +2,7 @@ import type { AttemptOutput } from "@ouroboros/harness";
 import type { TaskExecutor } from "../types";
 
 export type ApprovalMode = "approve-all" | "approve-reads" | "deny-all";
+export type BrowserProcessPolicy = "allow" | "deny";
 
 export interface CommandResult {
   exitCode: number;
@@ -40,6 +41,7 @@ export interface WorktreeEvidenceProbe {
 export interface AcpxCodexExecutorOptions {
   cwd: string;
   approval?: ApprovalMode;
+  browserProcessPolicy?: BrowserProcessPolicy;
   model?: string;
   format?: string;
   env?: Record<string, string | undefined>;
@@ -77,7 +79,7 @@ export type CodexSandbox = "read-only" | "workspace-write" | "danger-full-access
 export interface CodexCliExecutorOptions {
   cwd: string;
   sandbox?: CodexSandbox;
-  browserProcessPolicy?: "allow" | "deny";
+  browserProcessPolicy?: BrowserProcessPolicy;
   codexBin?: string;
   model?: string;
   reasoningEffort?: string;

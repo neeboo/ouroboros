@@ -1,4 +1,5 @@
 import { commandProblem, runLocalCommand } from "./command";
+import { withBrowserProcessPolicy } from "./browser-process-policy";
 import { defaultCodexBin } from "./codex-bin";
 import { parseAttemptOutputOrBlocked } from "./output";
 import type { CodexCliExecutorOptions } from "./types";
@@ -9,7 +10,7 @@ import { tmpdir } from "node:os";
 
 export function createCodexCliExecutor(options: CodexCliExecutorOptions): TaskExecutor {
   const sandbox = options.sandbox ?? "read-only";
-  const runCommand = options.runCommand ?? runLocalCommand;
+  const runCommand = withBrowserProcessPolicy(options.runCommand ?? runLocalCommand, options.browserProcessPolicy);
   const codexBin = options.codexBin ?? defaultCodexBin();
 
   return async ({ prompt, sessionName }) => {

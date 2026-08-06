@@ -5337,6 +5337,7 @@ describe("CLI", () => {
     );
     const binDir = join(dir, "bin-resumable-agent-backend");
     const logPath = join(dir, "acpx-resumable-args.jsonl");
+    const browserPolicyPath = join(dir, "acpx-resumable-browser-policy.txt");
     await mkdir(binDir);
     await writeFile(
       join(binDir, "acpx"),
@@ -5345,6 +5346,7 @@ describe("CLI", () => {
         "const { appendFileSync } = await import('node:fs');",
         "const args = Bun.argv.slice(2);",
         `appendFileSync(${JSON.stringify(logPath)}, JSON.stringify(args) + '\\n');`,
+        `await Bun.write(${JSON.stringify(browserPolicyPath)}, process.env.ORBS_BROWSER_PROCESS_POLICY ?? 'unset');`,
         "await new Response(Bun.stdin.stream()).text();",
         "console.log(JSON.stringify({ status: 'done', summary: 'claude selected', changedFiles: [], checks: [], artifacts: [], problems: [] }));",
       ].join("\n"),
@@ -5359,6 +5361,8 @@ describe("CLI", () => {
       "codex-resumable",
       "--cwd",
       "/repo",
+      "--browser-process-policy",
+      "deny",
       "--max-rounds",
       "1",
       { PATH: `${binDir}:${process.env.PATH}` },
@@ -5377,6 +5381,7 @@ describe("CLI", () => {
     expect(promptCall).toContain("-");
     expect(promptCall).not.toContain("--model");
     expect(promptCall).not.toContain("gpt-5.4-mini");
+    expect(await Bun.file(browserPolicyPath).text()).toBe("deny");
     expect(attempt.input.backend).toMatchObject({
       id: "claude-code",
       kind: "acpx",

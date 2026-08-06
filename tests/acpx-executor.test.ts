@@ -215,6 +215,56 @@ describe("acpx executor", () => {
     expect(output.summary).toBe("claude ok");
   });
 
+  test("applies the browser process deny policy to Claude Code commands", async () => {
+    const calls: Array<{ cmd: string[]; env?: Record<string, string | undefined> }> = [];
+    const executor = createAcpxAgentExecutor({
+      agent: "claude",
+      cwd: "/repo",
+      approval: "approve-all",
+      browserProcessPolicy: "deny",
+      runCommand: async ({ cmd, env }) => {
+        calls.push({ cmd, env });
+        return {
+          exitCode: 0,
+          stdout: '{"status":"done","summary":"claude ok","changedFiles":[],"checks":[],"artifacts":[],"problems":[]}',
+          stderr: "",
+        };
+      },
+    });
+
+    await executor({
+      prompt: "Use APIs only",
+      sessionName: "task_browser_policy",
+      run: runFixture,
+      route: routeFixture,
+      task: {
+        id: "task_browser_policy",
+        runId: "run_1",
+        parentId: null,
+        cycleId: "task_browser_policy",
+        status: "todo",
+        role: "worker",
+        goal: "Verify through APIs",
+        prompt: "Use APIs only",
+        dependsOn: [],
+        doneWhen: [],
+        worktreePath: null,
+        sessionRef: null,
+        contextVersion: 1,
+      },
+    });
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.env?.ORBS_BROWSER_PROCESS_POLICY).toBe("deny");
+    if (process.platform === "darwin") {
+      expect(calls[0]?.cmd.slice(0, 2)).toEqual(["/usr/bin/sandbox-exec", "-p"]);
+      expect(calls[0]?.cmd[2]).toContain("Google Chrome");
+      expect(calls[0]?.cmd).toContain("acpx");
+    } else {
+      expect(calls[0]?.cmd[0]).toBe("acpx");
+    }
+  });
+
   test("parses claude exec final JSON even when tool output contains Error text", async () => {
     const executor = createAcpxAgentExecutor({
       agent: "claude",
