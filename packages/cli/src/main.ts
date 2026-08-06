@@ -45,7 +45,7 @@ import {
 } from "@ouroboros/runner";
 import type { CodexSandbox, ResolvedExecutionRoute, StopHook } from "@ouroboros/runner";
 import { fail, flag, parseArgs, required } from "./args";
-import { loadOuroborosConfig, resolveLinearPolling } from "./config";
+import { loadOuroborosConfig, resolveLinearPolling, type LinearConfig } from "./config";
 import { parseArray, parseObject, printJson } from "./json";
 import { checkLinearAccess, ingestLinearEvent, linkLinearIssue } from "./linear";
 import {
@@ -62,7 +62,9 @@ import { serveDashboard, buildDashboardDesignTimeline } from "./dashboard";
 import type {
   DashboardDesignStatusSummary,
   DashboardDesignTimelineEntry,
+  DashboardLinearIntakeLifecycle,
 } from "./dashboard";
+import { buildDashboardLinearIntakeLifecycle } from "./dashboard-linear-intake";
 import { requestHarnessAction, serveHarnessActions } from "./action-server";
 import { formatRunEvidence } from "./run-evidence";
 import { formatAttemptExplanation } from "./explain-attempt";
@@ -2528,7 +2530,47 @@ function createDashboardRuntime(input: {
       },
     },
     designStatus: (routeRunId: string) => buildDashboardDesignStatus(routeRunId),
+    linearIntake: (routeRunId: string) => buildDashboardLinearIntakeLifecycleForRoute(routeRunId),
   });
+  async function buildDashboardLinearIntakeLifecycleForRoute(routeRunId: string): Promise<DashboardLinearIntakeLifecycle | null> {
+    if (!routeRunId) return null;
+    let configured = false;
+    try {
+      const configSnapshot = await loadDashboardLinearConfig();
+      const linearSection = readLinearConfigSection(configSnapshot);
+      const resolution = resolveLinearPolling(linearSection);
+      configured = resolution.enabled && Boolean(resolution.config);
+    } catch {
+      configured = false;
+    }
+    return buildDashboardLinearIntakeLifecycle({
+      harness,
+      rootRunId: routeRunId,
+      configured,
+      runner: runnerStatus(),
+      supervisor: supervisorStatus(),
+    });
+  }
+  let cachedDashboardLinearConfig: Record<string, unknown> | null = null;
+  let cachedDashboardLinearConfigLoaded = false;
+  async function loadDashboardLinearConfig(): Promise<Record<string, unknown>> {
+    if (cachedDashboardLinearConfigLoaded) return cachedDashboardLinearConfig ?? {};
+    cachedDashboardLinearConfigLoaded = true;
+    try {
+      const loaded = await loadCliConfig();
+      cachedDashboardLinearConfig = loaded as Record<string, unknown>;
+      return loaded as Record<string, unknown>;
+    } catch {
+      cachedDashboardLinearConfig = {};
+      return {};
+    }
+  }
+  function readLinearConfigSection(config: Record<string, unknown>): LinearConfig | undefined {
+    const value = config.linear;
+    return value && typeof value === "object" && !Array.isArray(value)
+      ? (value as LinearConfig)
+      : undefined;
+  }
   const shutdown = once(() => {
     stopRunner();
     stopSupervisor();

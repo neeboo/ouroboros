@@ -164,7 +164,19 @@ Linear example:
 project_url = "https://linear.app/<workspace>/project/<project>/overview"
 team_key = "<team-key>"
 token_file = ".linear"
+
+# Bounded supervisor polling is the primary transport when orbs self-improve-daemon runs.
+poll_interval_ms = 60000
+poll_page_size = 50
+poll_max_pages_per_cycle = 5
+poll_max_issues_per_cycle = 100
+poll_overlap_ms = 300000
+poll_max_retries = 4
+poll_backoff_base_ms = 2000
+poll_backoff_max_ms = 300000
 ```
+
+Polling reads issues from exactly one Linear project and team. Configure `project_id` directly or provide `project_url` for one-time project resolution, together with `team_key`; the existing Linear token source (`LINEAR_API_KEY`, `token_env`, or `token_file`) is reused and never stored in run context. Polling advances the durable cursor only after durable ingestion, applies equal-timestamp overlap and bounded exponential backoff, and routes each issue through an issue-scoped Designer cycle. `orbs linear-ingest-event` remains the supported manual fallback.
 
 Environment override:
 
@@ -357,14 +369,17 @@ Current bridge scope:
 
 - `linear-check` validates Linear access and records the run-to-project reference.
 - `linear-link-issue` maps a local run or task to an external Linear issue.
-- `linear-ingest-event` records a Linear event payload into `inbox_events` with `provider linear` and `status todo`. This is intake only: it stores the raw event and does not interpret it, does not create or update runs or tasks, and does not write to `external_refs`.
+- Bounded supervisor polling is the primary transport. While `orbs self-improve-daemon` (or `orbs self-iterate-launch`, which runs the dashboard and the daemon together) is active and `[linear]` polling is configured, the supervisor reads new issues from exactly one Linear project and team on each eligible tick, durably deduplicates them, and routes each issue through an issue-scoped Designer cycle. Polling uses bounded page and per-cycle limits, advances the durable cursor only after every issue in a page is durably ingested, applies bounded exponential backoff for rate-limit and transient failures, and surfaces permanent authentication, scope, or configuration failures as terminal blocked intake state on the dashboard.
+- `linear-ingest-event` remains the supported manual fallback and feeds the same idempotent intake path. It records a Linear event payload into `inbox_events` with `provider linear` and `status todo`. This is intake only: it stores the raw event and does not interpret it, does not create or update runs or tasks, and does not write to `external_refs`.
 
-Inbox intake and external refs are separate paths. `external_refs` records stable local-to-external anchors. `inbox_events` records incoming raw events. Linear events recorded through `linear-ingest-event` do not mutate task state directly; the harness consumes them later through a separate decision step.
+Inbox intake and external refs are separate paths. `external_refs` records stable local-to-external anchors. `inbox_events` records incoming raw events. Each Linear `issue.created` inbox event derives a deterministic issue-scoped Designer run and task keyed by the supervised root run and the immutable Linear issue ID. Repeated polling, overlap-window replay, or supervisor restarts reuse the same durable identities instead of duplicating them. The Designer's durable conclusions return only through fixed actions; when an accepted proposal creates its delivery run, the deterministic action hook creates or reuses exactly one `external_refs` row linking that planning run to the Linear issue and transitions the matching inbox event to `done`.
+
+The dashboard surfaces the full lifecycle on the inspector's "Linear intake" section: polling state (`retryAttempt`, `nextEligiblePollAt`, terminal failure, ingestion counters), the source Linear issue identifier and URL, inbox event state, the issue-scoped Designer task, recorded proposal and decision IDs, the linked planning run ID and status, and the current runner/supervisor state — without ever exposing tokens.
 
 Not implemented yet:
 
 - automatic issue creation
-- webhook/event listening (the listener that would feed `linear-ingest-event`)
+- webhook listener (bounded polling is the primary transport)
 - comment sync
 - PR status sync
 

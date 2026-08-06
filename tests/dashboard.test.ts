@@ -2,7 +2,9 @@ import { describe, expect, test } from "bun:test";
 import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createHash } from "node:crypto";
 import { applyHarnessAction, Harness } from "../packages/harness/src";
+import type { RunOverview } from "../packages/harness/src";
 import { buildTaskPrompt } from "../packages/runner/src";
 import {
   buildChatTranscriptForTest,
@@ -26,6 +28,8 @@ import {
 } from "../packages/cli/src/dashboard";
 import { DASHBOARD_REACT_MODULES } from "../packages/cli/src/dashboard-app";
 import { buildDashboardWorkspaceModel } from "../packages/cli/src/dashboard-workspace-model";
+import type { DashboardLinearIntakeLifecycle } from "../packages/cli/src/dashboard-workspace-model";
+import { buildDashboardLinearIntakeLifecycle } from "../packages/cli/src/dashboard-linear-intake";
 
 const pathologicalText = {
   token: "SupercalifragilisticDashboardOverflowRegressionToken".repeat(6),
@@ -260,6 +264,7 @@ describe("dashboard", () => {
       "dashboard.api.taskRerun",
       "dashboard.api.attemptStop",
       "dashboard.api.designStatus",
+      "dashboard.api.linearIntake",
       "dashboard.taskPrompt",
     ]);
     expect(dashboardRoutePaths()).toEqual([
@@ -284,6 +289,7 @@ describe("dashboard", () => {
       "/api/tasks/:taskId/rerun",
       "/api/attempts/:attemptId/stop",
       "/api/runs/:runId/design/status",
+      "/api/runs/:runId/linear-intake",
       "/tasks/:taskId/prompt",
     ]);
   });
@@ -1081,6 +1087,7 @@ describe("dashboard", () => {
       "dashboard.api.taskRerun",
       "dashboard.api.attemptStop",
       "dashboard.api.designStatus",
+      "dashboard.api.linearIntake",
       "dashboard.taskPrompt",
     ]);
     expect(dashboardRoutePaths()).toEqual([
@@ -1105,6 +1112,7 @@ describe("dashboard", () => {
       "/api/tasks/:taskId/rerun",
       "/api/attempts/:attemptId/stop",
       "/api/runs/:runId/design/status",
+      "/api/runs/:runId/linear-intake",
       "/tasks/:taskId/prompt",
     ]);
   });
@@ -4161,7 +4169,7 @@ describe("dashboard", () => {
     // The runtime call passes the conversation timeline plus composer as primary children
     // of the inspector panel; the secondary evidence helpers are composed inside the
     // disclosure wrapper rather than appearing as direct inspector-panel children.
-    expect(html).toContain("patchInspectorPanel(dashboardInspectorTimelineHtml(selectedGroup) + dashboardInspectorComposerHtml(), dashboardInspectorDesignHtml() + dashboardInspectorSecondaryHtml(overview, selectedGroup))");
+    expect(html).toContain("patchInspectorPanel(dashboardInspectorTimelineHtml(selectedGroup) + dashboardInspectorComposerHtml(), dashboardInspectorDesignHtml() + dashboardInspectorLinearIntakeHtml() + dashboardInspectorSecondaryHtml(overview, selectedGroup))");
     expect(html).not.toContain("patchInspectorPanel(dashboardInspectorTimelineHtml(selectedGroup) + dashboardInspectorHtml(overview, selectedGroup), dashboardRunStatusHtml(overview) + dashboardInspectorEvidenceHtml(overview, selectedGroup) + dashboardInspectorComposerHtml())");
 
     // The secondary helper renders a single disclosure section that owns the body markup.
@@ -4595,5 +4603,634 @@ describe("dashboard", () => {
 
     // The interrupt-mode send button gets a stronger visual treatment.
     expect(css).toContain('.inspector-composer-section[data-composer-mode="interrupt"]');
+  });
+
+  test("workspace model inspector exposes Linear intake lifecycle fields when provided", () => {
+    const dir = "/tmp/ouroboros-dashboard-linear-intake-workspace";
+    const overview: RunOverview = {
+      run: {
+        id: "run_linear_root",
+        projectId: "project_linear",
+        projectRoot: dir,
+        goal: "Poll Linear issues into the Designer control plane",
+        status: "running",
+        context: {},
+        createdAt: "2026-08-03T01:00:00.000Z",
+      },
+      project: { id: "project_linear", name: "Linear Project", rootPath: dir, context: {} },
+      tasks: [],
+      sessions: [],
+      threads: [],
+      lessons: [],
+    };
+    const lifecycle: DashboardLinearIntakeLifecycle = {
+      polling: {
+        configured: true,
+        lastStatus: "ok",
+        terminalFailure: null,
+        lastError: null,
+        lastCycleAt: "2026-08-03T01:05:00.000Z",
+        nextEligiblePollAt: "2026-08-03T01:06:00.000Z",
+        retryAttempt: 0,
+        cyclesCompleted: 4,
+        issuesIngested: 3,
+        issuesDeduplicated: 1,
+        issuesRejected: 0,
+        issuesMalformed: 0,
+      },
+      runner: {
+        supervisorRunning: true,
+        supervisorStatus: "running",
+        runnerRunning: true,
+        runnerStatus: "running",
+      },
+      events: [
+        {
+          eventId: "inbox_event_1",
+          externalId: "linear-issue-immutable-1",
+          status: "done",
+          createdAt: "2026-08-03T01:00:01.000Z",
+          processedAt: "2026-08-03T01:00:10.000Z",
+          issue: {
+            identifier: "PAN-1205",
+            title: "Issue one",
+            url: "https://linear.app/issue/PAN-1205",
+            teamKey: "PAN",
+          },
+          designerRunId: "run_linear_design_1",
+          designerTaskId: "task_linear_design_1",
+          designerTaskStatus: "done",
+          proposalId: "design_proposal_1",
+          proposalStatus: "accepted",
+          decisionId: "decision_1",
+          decision: "approved",
+          decisionActorKind: "auto",
+          planningRunId: "run_planning_1",
+          planningRunStatus: "running",
+          externalRefId: "ref_1",
+          blocked: false,
+          blockedReason: null,
+        },
+      ],
+    };
+
+    const workspace = buildDashboardWorkspaceModel(overview, {
+      selectedRunId: "run_linear_root",
+      linearIntake: lifecycle,
+    });
+
+    expect(workspace.inspector.kind).toBe("run");
+    if (workspace.inspector.kind !== "run") return;
+    expect(workspace.inspector.linearIntake).toBe(lifecycle);
+    expect(workspace.inspector.linearIntake?.polling.nextEligiblePollAt).toBe("2026-08-03T01:06:00.000Z");
+    expect(workspace.inspector.linearIntake?.runner.supervisorRunning).toBe(true);
+    expect(workspace.inspector.linearIntake?.events[0]?.proposalId).toBe("design_proposal_1");
+  });
+
+  test("workspace model inspector renders without crashing when Linear intake is missing or partial", () => {
+    const overview: RunOverview = {
+      run: {
+        id: "run_no_intake",
+        projectId: null,
+        projectRoot: null,
+        goal: "Run without intake",
+        status: "todo",
+        context: {},
+        createdAt: null,
+      },
+      project: null,
+      tasks: [],
+      sessions: [],
+      threads: [],
+      lessons: [],
+    };
+
+    const withoutIntake = buildDashboardWorkspaceModel(overview, { selectedRunId: "run_no_intake" });
+    expect(withoutIntake.inspector.kind).toBe("run");
+    if (withoutIntake.inspector.kind !== "run") return;
+    expect(withoutIntake.inspector.linearIntake).toBeNull();
+
+    const partialIntake: DashboardLinearIntakeLifecycle = {
+      polling: {
+        configured: true,
+        lastStatus: "idle",
+        terminalFailure: null,
+        lastError: null,
+        lastCycleAt: null,
+        nextEligiblePollAt: null,
+        retryAttempt: 0,
+        cyclesCompleted: 0,
+        issuesIngested: 0,
+        issuesDeduplicated: 0,
+        issuesRejected: 0,
+        issuesMalformed: 0,
+      },
+      runner: {
+        supervisorRunning: false,
+        supervisorStatus: "idle",
+        runnerRunning: false,
+        runnerStatus: "idle",
+      },
+      events: [],
+    };
+    const withEmpty = buildDashboardWorkspaceModel(overview, {
+      selectedRunId: "run_no_intake",
+      linearIntake: partialIntake,
+    });
+    if (withEmpty.inspector.kind !== "run") return;
+    expect(withEmpty.inspector.linearIntake?.events).toEqual([]);
+    expect(withEmpty.inspector.linearIntake?.polling.configured).toBe(true);
+  });
+
+  test("workspace model inspector surfaces blocked, retrying, and terminal Linear intake states", () => {
+    const overview: RunOverview = {
+      run: {
+        id: "run_intake_states",
+        projectId: null,
+        projectRoot: null,
+        goal: "Audit intake states",
+        status: "running",
+        context: {},
+        createdAt: "2026-08-03T02:00:00.000Z",
+      },
+      project: null,
+      tasks: [],
+      sessions: [],
+      threads: [],
+      lessons: [],
+    };
+    const lifecycle: DashboardLinearIntakeLifecycle = {
+      polling: {
+        configured: true,
+        lastStatus: "rate_limited",
+        terminalFailure: "Linear authentication failed",
+        lastError: "401",
+        lastCycleAt: "2026-08-03T02:01:00.000Z",
+        nextEligiblePollAt: null,
+        retryAttempt: 3,
+        cyclesCompleted: 12,
+        issuesIngested: 5,
+        issuesDeduplicated: 0,
+        issuesRejected: 2,
+        issuesMalformed: 1,
+      },
+      runner: {
+        supervisorRunning: true,
+        supervisorStatus: "running",
+        runnerRunning: false,
+        runnerStatus: "idle",
+      },
+      events: [
+        {
+          eventId: "event_blocked",
+          externalId: "issue_blocked",
+          status: "blocked",
+          createdAt: "2026-08-03T02:00:30.000Z",
+          processedAt: null,
+          issue: {
+            identifier: "PAN-9999",
+            title: "Blocked issue",
+            url: "https://linear.app/issue/PAN-9999",
+            teamKey: "PAN",
+          },
+          designerRunId: null,
+          designerTaskId: null,
+          designerTaskStatus: "unknown",
+          proposalId: null,
+          proposalStatus: null,
+          decisionId: null,
+          decision: null,
+          decisionActorKind: null,
+          planningRunId: null,
+          planningRunStatus: "unknown",
+          externalRefId: null,
+          blocked: true,
+          blockedReason: "designer intake payload missing required fields",
+        },
+        {
+          eventId: "event_retrying",
+          externalId: "issue_retry",
+          status: "running",
+          createdAt: "2026-08-03T02:00:45.000Z",
+          processedAt: null,
+          issue: {
+            identifier: "PAN-8888",
+            title: "In-flight issue",
+            url: null,
+            teamKey: "PAN",
+          },
+          designerRunId: "run_linear_design_retry",
+          designerTaskId: "task_linear_design_retry",
+          designerTaskStatus: "running",
+          proposalId: null,
+          proposalStatus: null,
+          decisionId: null,
+          decision: null,
+          decisionActorKind: null,
+          planningRunId: null,
+          planningRunStatus: "unknown",
+          externalRefId: null,
+          blocked: false,
+          blockedReason: null,
+        },
+      ],
+    };
+    const workspace = buildDashboardWorkspaceModel(overview, {
+      selectedRunId: "run_intake_states",
+      linearIntake: lifecycle,
+    });
+    if (workspace.inspector.kind !== "run") return;
+    const intake = workspace.inspector.linearIntake;
+    expect(intake?.polling.terminalFailure).toBe("Linear authentication failed");
+    expect(intake?.polling.retryAttempt).toBe(3);
+    expect(intake?.polling.nextEligiblePollAt).toBeNull();
+    const blocked = intake?.events.find((event) => event.eventId === "event_blocked");
+    const retrying = intake?.events.find((event) => event.eventId === "event_retrying");
+    expect(blocked?.blocked).toBe(true);
+    expect(blocked?.blockedReason).toContain("missing required fields");
+    expect(retrying?.status).toBe("running");
+    expect(retrying?.designerTaskStatus).toBe("running");
+  });
+
+  test("dashboard lifecycle joins durable proposal and planning-run records when optional provenance context is absent", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "ouroboros-dashboard-linear-intake-durable-join-"));
+    const harness = new Harness(join(dir, "ouroboros.db"));
+    harness.init();
+    const projectId = harness.createProject({ name: "Durable Linear Project", rootPath: dir });
+    const rootRunId = harness.createRun({ goal: "Durable Linear root", projectId });
+    const issueId = "linear-immutable-durable-join";
+    const digest = createHash("sha256").update(`${rootRunId}|${issueId}`, "utf8").digest("hex");
+    const designerRunId = `run_linear_${digest}`;
+    const designerTaskId = `task_linear_${digest}`;
+    harness.createRun({
+      id: designerRunId,
+      goal: "Assess durable Linear issue",
+      projectId,
+      context: { source: "linear-intake" },
+    });
+    harness.createTask({
+      id: designerTaskId,
+      runId: designerRunId,
+      role: "designer",
+      goal: "Assess durable Linear issue",
+      prompt: "Assess the issue",
+    });
+    const proposal = harness.createDesignProposal({
+      id: "design_durable_join",
+      projectId,
+      runId: designerRunId,
+      taskId: designerTaskId,
+      title: "Durable Linear proposal",
+      problem: "The issue needs assessment.",
+      recommendation: "Assess it through the control plane.",
+      status: "accepted",
+      proposal: {
+        problem: "The issue needs assessment.",
+        recommendation: "Assess it through the control plane.",
+        investment: { reversibility: "easy", portfolio: "core", oneTimeCost: 0, recurringCost: 0, timeBudget: "one day" },
+        evaluationContract: {
+          baseline: ["proposal is not visible"],
+          successMetrics: ["proposal is visible"],
+          guardMetrics: ["dashboard remains read-only"],
+          requiredEvidence: ["dashboard snapshot"],
+        },
+      },
+    });
+    const decision = harness.recordDesignDecision({
+      id: "decision_durable_join",
+      proposalId: proposal.id,
+      decision: "approved",
+      actorKind: "auto",
+      reasons: ["bounded"],
+    });
+    const planningRunId = "run_planning_durable_join";
+    harness.createRun({
+      id: planningRunId,
+      goal: "Plan durable Linear proposal",
+      projectId,
+      context: { parentRunId: designerRunId, designProposalId: proposal.id },
+    });
+    harness.updateRunStatus({ runId: planningRunId, status: "running" });
+    const externalRefId = harness.createExternalRef({
+      id: "ref_durable_join",
+      localType: "run",
+      localId: planningRunId,
+      provider: "linear",
+      externalType: "issue",
+      externalId: issueId,
+      externalUrl: "https://linear.app/issue/PAN-2000",
+    });
+    harness.createInboxEvent({
+      id: "inbox_durable_join",
+      provider: "linear",
+      eventType: "issue.created",
+      externalId: issueId,
+      status: "done",
+      payload: {
+        identifier: "PAN-2000",
+        title: "Durable join issue",
+        url: "https://linear.app/issue/PAN-2000",
+        teamKey: "PAN",
+      },
+    });
+
+    try {
+      const snapshot = buildDashboardLinearIntakeLifecycle({
+        harness,
+        rootRunId,
+        configured: true,
+      });
+      expect(snapshot.events[0]).toMatchObject({
+        proposalId: proposal.id,
+        decisionId: decision.id,
+        planningRunId,
+        planningRunStatus: "running",
+        externalRefId,
+      });
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("dashboard HTML ships Linear intake disclosure scaffolding that fetches lifecycle data", () => {
+    const html = dashboardHtml({ runId: "run_linear_intake_html" });
+    expect(html).toContain('data-inspector-section="linear-intake"');
+    expect(html).toContain("data-linear-intake-section");
+    expect(html).toContain("/linear-intake");
+    expect(html).toContain("dashboardInspectorLinearIntakeHtml");
+    expect(html).toContain("refreshLinearIntake");
+  });
+
+  test("GET /api/runs/:runId/linear-intake returns 404 when the linear intake provider returns null", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "ouroboros-dashboard-linear-intake-null-"));
+    const harness = new Harness(join(dir, "ouroboros.db"));
+    harness.init();
+    const runId = harness.createRun({ goal: "Null intake" });
+
+    try {
+      const response = await handleDashboardRequest(
+        new Request(`http://localhost/api/runs/${runId}/linear-intake`),
+        {
+          runId,
+          overview: () => harness.getRunOverview({ runId }),
+          renderTaskPrompt: () => "",
+          linearIntake: () => null,
+        },
+      );
+      expect(response.status).toBe(404);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("GET /api/runs/:runId/linear-intake returns 404 when the provider is not configured", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "ouroboros-dashboard-linear-intake-unconfigured-"));
+    const harness = new Harness(join(dir, "ouroboros.db"));
+    harness.init();
+    const runId = harness.createRun({ goal: "No intake provider" });
+
+    try {
+      const response = await handleDashboardRequest(
+        new Request(`http://localhost/api/runs/${runId}/linear-intake`),
+        {
+          runId,
+          overview: () => harness.getRunOverview({ runId }),
+          renderTaskPrompt: () => "",
+        },
+      );
+      expect(response.status).toBe(404);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("GET /api/runs/:runId/linear-intake returns the lifecycle snapshot and never exposes tokens", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "ouroboros-dashboard-linear-intake-snapshot-"));
+    const harness = new Harness(join(dir, "ouroboros.db"));
+    harness.init();
+    const projectId = harness.createProject({ name: "Linear Intake Project", rootPath: dir });
+    const runId = harness.createRun({ goal: "Surface Linear intake lifecycle", projectId });
+    // Set the durable polling state on the root run context.
+    harness.updateRun({
+      runId,
+      contextPatch: {
+        linearIntake: {
+          polling: {
+            cursor: "linear-cursor",
+            overlapBoundary: "2026-08-03T00:00:00.000Z",
+            intraPageContinuation: null,
+            retryAttempt: 1,
+            nextEligiblePollTime: "2026-08-03T01:30:00.000Z",
+            lastStatus: "rate_limited",
+            lastError: "linear rate limited",
+            terminalFailure: null,
+            lastCycleAt: "2026-08-03T01:00:00.000Z",
+            resolvedProjectId: "project_linear_uuid",
+            resolvedProjectUrl: "https://linear.app/project/pan",
+            cyclesCompleted: 7,
+            issuesIngested: 2,
+            issuesDeduplicated: 1,
+            issuesRejected: 0,
+            issuesMalformed: 0,
+          },
+        },
+      },
+    });
+    // Seed a durable inbox event covering the full lifecycle.
+    harness.createInboxEvent({
+      id: "inbox_linear_done",
+      provider: "linear",
+      eventType: "issue.created",
+      externalId: "issue-immutable-1",
+      status: "done",
+      payload: {
+        identifier: "PAN-1205",
+        title: "Dogfood intake issue",
+        url: "https://linear.app/issue/PAN-1205",
+        teamKey: "PAN",
+      },
+    });
+
+    try {
+      const snapshot = buildDashboardLinearIntakeLifecycle({
+        harness,
+        rootRunId: runId,
+        configured: true,
+        runner: { status: "running", pid: 1111, lastOutput: "runner alive" },
+        supervisor: { status: "running", pid: 2222, lastOutput: "supervisor alive" },
+      });
+      const response = await handleDashboardRequest(
+        new Request(`http://localhost/api/runs/${runId}/linear-intake`),
+        {
+          runId,
+          overview: () => harness.getRunOverview({ runId }),
+          renderTaskPrompt: () => "",
+          linearIntake: () => snapshot,
+        },
+      );
+      expect(response.status).toBe(200);
+      const body = await response.json();
+      // Polling lifecycle state surfaces exactly the fields the dashboard renders.
+      expect(body.polling).toMatchObject({
+        configured: true,
+        lastStatus: "rate_limited",
+        retryAttempt: 1,
+        nextEligiblePollAt: "2026-08-03T01:30:00.000Z",
+        lastError: "linear rate limited",
+        terminalFailure: null,
+        cyclesCompleted: 7,
+        issuesIngested: 2,
+        issuesDeduplicated: 1,
+      });
+      expect(body.runner).toMatchObject({
+        supervisorRunning: true,
+        supervisorStatus: "running",
+        runnerRunning: true,
+        runnerStatus: "running",
+      });
+      expect(body.events).toHaveLength(1);
+      const event = body.events[0];
+      expect(event).toMatchObject({
+        eventId: "inbox_linear_done",
+        externalId: "issue-immutable-1",
+        status: "done",
+        issue: {
+          identifier: "PAN-1205",
+          title: "Dogfood intake issue",
+          url: "https://linear.app/issue/PAN-1205",
+          teamKey: "PAN",
+        },
+      });
+      // Tokens never appear in the response.
+      const serialized = JSON.stringify(body);
+      expect(serialized).not.toMatch(/lin_api_[A-Za-z0-9_]+/);
+      expect(serialized).not.toMatch(/Bearer\s+/i);
+      // The durable cursor stays internal; it is not a public field on the snapshot.
+      expect(serialized).not.toContain("linear-cursor");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("buildDashboardLinearIntakeLifecycle redacts credentials embedded in polling and blocked-event state", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "ouroboros-dashboard-linear-intake-redact-"));
+    const harness = new Harness(join(dir, "ouroboros.db"));
+    harness.init();
+    const projectId = harness.createProject({ name: "Linear Intake Redact Project", rootPath: dir });
+    const runId = harness.createRun({ goal: "Redact Linear intake secrets", projectId });
+    harness.updateRun({
+      runId,
+      contextPatch: {
+        linearIntake: {
+          polling: {
+            cursor: "linear-cursor",
+            overlapBoundary: "2026-08-03T00:00:00.000Z",
+            intraPageContinuation: null,
+            retryAttempt: 0,
+            nextEligiblePollTime: null,
+            lastStatus: "config_error",
+            lastError: "Authorization: Bearer lin_api_verifier_secret",
+            terminalFailure: "request failed: Bearer lin_api_verifier_secret returned 401",
+            lastCycleAt: "2026-08-03T02:00:00.000Z",
+            resolvedProjectId: null,
+            resolvedProjectUrl: null,
+            cyclesCompleted: 1,
+            issuesIngested: 0,
+            issuesDeduplicated: 0,
+            issuesRejected: 0,
+            issuesMalformed: 0,
+          },
+        },
+      },
+    });
+    harness.createInboxEvent({
+      id: "inbox_linear_blocked_secret",
+      provider: "linear",
+      eventType: "issue.created",
+      externalId: "issue-secret-1",
+      status: "blocked",
+      payload: {
+        identifier: "PAN-SECRET",
+        title: "Blocked with secret",
+        url: "https://linear.app/issue/PAN-SECRET",
+        teamKey: "PAN",
+        error: "ingestion failed: Bearer lin_api_verifier_secret not authorized",
+      },
+    });
+
+    try {
+      const snapshot = buildDashboardLinearIntakeLifecycle({
+        harness,
+        rootRunId: runId,
+        configured: true,
+      });
+      const serialized = JSON.stringify(snapshot);
+      expect(serialized).not.toMatch(/lin_api_[A-Za-z0-9_]+/);
+      expect(serialized).not.toMatch(/Bearer\s+/i);
+      expect(snapshot.polling.terminalFailure).toContain("[REDACTED]");
+      expect(snapshot.polling.lastError).toContain("[REDACTED]");
+      const blocked = snapshot.events.find((event) => event.eventId === "inbox_linear_blocked_secret");
+      expect(blocked?.blocked).toBe(true);
+      expect(blocked?.blockedReason).toContain("[REDACTED]");
+      expect(blocked?.blockedReason).not.toContain("lin_api_");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("buildDashboardLinearIntakeLifecycle surfaces persisted terminal state when configuration is currently disabled", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "ouroboros-dashboard-linear-intake-terminal-"));
+    const harness = new Harness(join(dir, "ouroboros.db"));
+    harness.init();
+    const projectId = harness.createProject({ name: "Linear Intake Terminal Project", rootPath: dir });
+    const runId = harness.createRun({ goal: "Surface terminal intake state", projectId });
+    // Simulate a supervisor that previously ran with valid configuration,
+    // persisted a config_error terminal state, and is now reading the dashboard
+    // while the live configuration is unreadable (e.g. token env unset, project
+    // selector removed). The dashboard route passes configured=false in this
+    // case; the lifecycle must still surface the durable terminal state.
+    harness.updateRun({
+      runId,
+      contextPatch: {
+        linearIntake: {
+          polling: {
+            cursor: "linear-cursor",
+            overlapBoundary: "2026-08-03T00:00:00.000Z",
+            intraPageContinuation: null,
+            retryAttempt: 2,
+            nextEligiblePollTime: null,
+            lastStatus: "config_error",
+            lastError: "linear project selector missing",
+            terminalFailure: "linear configuration error: project selector missing",
+            lastCycleAt: "2026-08-03T02:30:00.000Z",
+            resolvedProjectId: null,
+            resolvedProjectUrl: null,
+            cyclesCompleted: 3,
+            issuesIngested: 0,
+            issuesDeduplicated: 0,
+            issuesRejected: 0,
+            issuesMalformed: 0,
+          },
+        },
+      },
+    });
+
+    try {
+      const snapshot = buildDashboardLinearIntakeLifecycle({
+        harness,
+        rootRunId: runId,
+        configured: false,
+      });
+      expect(snapshot.polling.configured).toBe(false);
+      // The persisted terminal state remains visible to operators instead of
+      // being silently replaced by the initial idle state.
+      expect(snapshot.polling.terminalFailure).toBe("linear configuration error: project selector missing");
+      expect(snapshot.polling.lastError).toBe("linear project selector missing");
+      expect(snapshot.polling.lastStatus).toBe("config_error");
+      expect(snapshot.polling.lastCycleAt).toBe("2026-08-03T02:30:00.000Z");
+      expect(snapshot.polling.retryAttempt).toBe(2);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 });
