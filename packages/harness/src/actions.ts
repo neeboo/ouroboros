@@ -2316,7 +2316,7 @@ function ensureGoalReviewTask(
 ) {
   const invalidatedTaskIds = invalidatedGoalReviewTaskIds(overview);
   const latestProgressIndex = overview.sessions.reduce((latest, session, index) => {
-    return session.role !== "goal-review" && session.status === "done" ? index : latest;
+    return session.role !== "goal-review" && session.role !== "verifier" && session.status === "done" ? index : latest;
   }, -1);
   const currentReviewSessions = goalReviewInvalidated
     ? []

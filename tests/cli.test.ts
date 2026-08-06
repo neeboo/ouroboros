@@ -6640,25 +6640,25 @@ describe("CLI", () => {
         }),
       );
     }
-    const newerVerifier = await runCliJson(
+    const newerWorker = await runCliJson(
       "create-task",
       "--run-id",
       run.id,
       "--role",
-      "verifier",
+      "worker",
       "--goal",
-      "Verify repaired supervisor pause handling",
+      "Repair supervisor pause handling",
       "--prompt",
-      "Verify.",
+      "Implement the repair.",
     );
     await runCliJson(
       "record-attempt",
       "--task-id",
-      newerVerifier.id,
+      newerWorker.id,
       "--input-json",
       "{}",
       "--output-json",
-      '{"status":"done","summary":"newer verifier passed","changedFiles":[],"checks":[],"artifacts":[],"problems":[]}',
+      '{"status":"done","summary":"newer worker completed","changedFiles":["src/supervisor.ts"],"checks":[],"artifacts":[],"problems":[]}',
     );
     const codexBin = join(dir, "fake-codex-fresh-review-after-non-terminal");
     await writeFile(

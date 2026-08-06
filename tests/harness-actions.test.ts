@@ -533,6 +533,67 @@ describe("Harness actions", () => {
     expect(goalReviews.filter((task) => task.status === "todo")).toHaveLength(1);
   });
 
+  test("verifier-only work does not reset the non-terminal goal-review budget", () => {
+    const runId = harness.createRun({ goal: "Bound repeated verification" });
+    const reviewTaskIds: string[] = [];
+    for (let index = 0; index < 3; index += 1) {
+      const reviewTaskId = harness.createTask({
+        runId,
+        role: "goal-review",
+        goal: `Review ${index + 1}`,
+        prompt: "Request another verification pass.",
+      });
+      reviewTaskIds.push(reviewTaskId);
+      harness.recordAttempt({
+        taskId: reviewTaskId,
+        input: { executor: "test" },
+        output: {
+          status: "done",
+          runDecision: "verify",
+          summary: "Verify again",
+          changedFiles: [],
+          checks: [],
+          artifacts: [],
+          problems: [],
+        },
+      });
+      const verifierTaskId = harness.createTask({
+        runId,
+        role: "verifier",
+        goal: `Verifier ${index + 1}`,
+        prompt: "Check existing evidence.",
+      });
+      harness.recordAttempt({
+        taskId: verifierTaskId,
+        input: { executor: "test" },
+        output: {
+          status: "done",
+          summary: "Verification completed",
+          changedFiles: [],
+          checks: [],
+          artifacts: [],
+          problems: [],
+        },
+      });
+    }
+
+    const result = applyHarnessAction(harness, {
+      type: "prepareRunDrain",
+      runId,
+      maxTries: 3,
+    });
+
+    expect(result).toMatchObject({
+      status: "blocked",
+      actionType: "prepareRunDrain",
+      summary: expect.stringContaining("3/3 non-terminal goal-review decisions"),
+    });
+    expect(result.checks).toContainEqual(
+      expect.objectContaining({ name: "goal review continue limit", status: "failed", evidence: "3/3" }),
+    );
+    expect(harness.getRunOverview({ runId }).tasks.filter((task) => task.role === "goal-review").map((task) => task.id)).toEqual(reviewTaskIds);
+  });
+
   test("prepares a drained run by blocking todo tasks whose dependencies are blocked", () => {
     const runId = harness.createRun({ goal: "Drain impossible dependency chain" });
     const workerTaskId = harness.createTask({
