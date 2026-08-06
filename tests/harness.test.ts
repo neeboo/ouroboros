@@ -7,6 +7,7 @@ import {
   DEFAULT_TASK_PROMPT_TEMPLATE,
   Harness,
   applyHarnessAction,
+  checkpointDatabase,
   diagnoseRunOverview,
   initDatabase,
   withDatabase,
@@ -2663,6 +2664,12 @@ describe("Harness read-only Designer inspection", () => {
   }
 
   test("inspection methods work against an initialized read-only database without mutating filesystem state", async () => {
+    // Checkpoint the WAL into the main database file before restricting the
+    // filesystem so inspection sees the durable committed state through the
+    // immutable read-only path. This mirrors how the harness leaves a
+    // database once write transactions have committed.
+    checkpointDatabase(dbPath);
+
     // Make the database and its parent directory read-only.
     await chmod(dbPath, 0o444);
     await chmod(dir, 0o555);
@@ -2810,6 +2817,62 @@ describe("Harness read-only Designer inspection", () => {
     const after = await snapshot(legacyPath);
     expect(after.sidecars).toEqual(before.sidecars);
     expect(after.size).toBe(before.size);
+  });
+
+  test("inspection methods work against a sidecar-free checkpointed WAL database under read-only filesystem", async () => {
+    // Force a TRUNCATE checkpoint and remove WAL/SHM sidecars so the
+    // database is exactly: one db file, no sidecars. This is the state
+    // Ouroboros leaves behind after `git worktree` packing or any tool that
+    // cleans sidecar files. Inspection must still succeed without recreating
+    // sidecars or mutating the file.
+    checkpointDatabase(dbPath);
+    const fs = await import("node:fs/promises");
+    await fs.rm(`${dbPath}-wal`).catch(() => undefined);
+    await fs.rm(`${dbPath}-shm`).catch(() => undefined);
+    await fs.rm(`${dbPath}-journal`).catch(() => undefined);
+
+    // Sanity check the seed is intact and accessible through a fresh
+    // immutable read-only open before locking the filesystem down.
+    const valid = withReadOnlyDatabase(dbPath, (db) =>
+      db.query("select count(*) as c from strategy_signals").get() as { c: number },
+    );
+    expect(valid.c).toBe(1);
+
+    // Lock down: database file 0444, parent directory 0555. Any write attempt
+    // from this point must fail loudly or never happen.
+    await chmod(dbPath, 0o444);
+    await chmod(dir, 0o555);
+
+    const before = await snapshotFilesystem();
+    expect(before.sidecars.wal).toBe(false);
+    expect(before.sidecars.shm).toBe(false);
+    expect(before.sidecars.journal).toBe(false);
+
+    // Run every inspection method in sequence to exercise all read paths.
+    expect(harness.listProjects().map((project) => project.id)).toContain(projectId);
+    expect(harness.getProject(projectId)?.id).toBe(projectId);
+    expect(harness.getActiveFounderCharter({ projectId })?.id).toBe(charterId);
+    expect(harness.getFounderCharter({ id: charterId })?.id).toBe(charterId);
+    expect(harness.listFounderCharters({ projectId }).map((row) => row.id)).toContain(charterId);
+    expect(harness.listStrategySignals({ projectId }).map((row) => row.id)).toContain(signalId);
+    expect(harness.getStrategySignal({ id: signalId })?.id).toBe(signalId);
+    expect(harness.getDesignProposal({ id: proposalId })?.id).toBe(proposalId);
+    expect(harness.listDesignProposals({ projectId }).map((row) => row.id)).toContain(proposalId);
+    expect(harness.listDesignDecisions({ proposalId }).map((row) => row.id)).toContain(decisionId);
+    expect(harness.listDesignOutcomes({ proposalId }).map((row) => row.id)).toEqual([
+      outcomeDueId,
+      outcomeFutureId,
+      outcomeMissingReviewAtId,
+    ]);
+
+    const after = await snapshotFilesystem();
+    expect(after.mode).toBe(before.mode);
+    expect(after.size).toBe(before.size);
+    expect(after.mtimeMs).toBe(before.mtimeMs);
+    expect(after.ctimeMs).toBe(before.ctimeMs);
+    expect(after.parentMode).toBe(before.parentMode);
+    expect(after.sidecars).toEqual(before.sidecars);
+    expect(after.dirEntries).toEqual(before.dirEntries);
   });
 });
 
