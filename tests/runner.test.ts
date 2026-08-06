@@ -658,6 +658,47 @@ describe("runner", () => {
     expect(attempt.output.artifacts).toContainEqual({ kind: "codex_session", sessionId: "session_runner" });
   });
 
+  test("runner-owned goal review applies the browser process deny policy", async () => {
+    const runId = harness.createRun({ goal: "Review without browser side effects" });
+    harness.createTask({
+      runId,
+      role: "goal-review",
+      goal: "Review whether the run goal is complete",
+      prompt: "Use existing evidence only.",
+    });
+    const commands: string[][] = [];
+
+    await runCodexResumableLoop({
+      harness,
+      runId,
+      limit: 1,
+      maxRounds: 1,
+      maxTries: 3,
+      cwd: dir,
+      codexOptions: {
+        codexBin: "/custom/codex",
+        runCommand: async ({ cmd }) => {
+          commands.push(cmd);
+          return {
+            exitCode: 0,
+            stdout: JSON.stringify({
+              type: "agent.message",
+              message: '{"status":"done","runDecision":"defer","summary":"cost approval required","changedFiles":[],"checks":[],"artifacts":[],"problems":[]}',
+            }),
+            stderr: "",
+          };
+        },
+      },
+    });
+
+    if (process.platform === "darwin") {
+      expect(commands[0]?.slice(0, 2)).toEqual(["/usr/bin/sandbox-exec", "-p"]);
+      expect(commands[0]?.[2]).toContain("Google Chrome");
+    } else {
+      expect(commands[0]?.[0]).toBe("/custom/codex");
+    }
+  });
+
   test("runner-owned codex loop blocks running starts that have no resumable session id", async () => {
     const runId = harness.createRun({ goal: "Build loop" });
     const taskId = harness.createTask({

@@ -814,6 +814,7 @@ class CodexResumableOrchestrator {
       cwd: input.cwd,
       sandbox: "workspace-write",
       ...this.input.codexOptions,
+      browserProcessPolicy: input.task?.role === "goal-review" ? "deny" : this.input.codexOptions?.browserProcessPolicy,
       model: input.model,
       reasoningEffort: input.reasoningEffort,
     });

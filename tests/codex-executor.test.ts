@@ -421,6 +421,38 @@ describe("codex cli executor", () => {
     ]);
   });
 
+  test("resumable client enforces a browser process deny policy", async () => {
+    const calls: string[][] = [];
+    const client = createCodexResumableClient({
+      cwd: "/repo",
+      codexBin: "/custom/codex",
+      browserProcessPolicy: "deny",
+      runCommand: async ({ cmd }) => {
+        calls.push(cmd);
+        return {
+          exitCode: 0,
+          stdout: JSON.stringify({
+            type: "agent.message",
+            message: '{"status":"done","summary":"reviewed","changedFiles":[],"checks":[],"artifacts":[],"problems":[]}',
+          }),
+          stderr: "",
+        };
+      },
+    });
+
+    await client.start({ prompt: "Review without a browser", sessionName: "goal-review" });
+
+    if (process.platform === "darwin") {
+      expect(calls[0]?.slice(0, 2)).toEqual(["/usr/bin/sandbox-exec", "-p"]);
+      expect(calls[0]?.[2]).toContain("deny process-exec");
+      expect(calls[0]?.[2]).toContain("Google Chrome");
+      expect(calls[0]?.[2]).toContain('/usr/bin/open');
+      expect(calls[0]).toContain("/custom/codex");
+    } else {
+      expect(calls[0]?.[0]).toBe("/custom/codex");
+    }
+  });
+
   test("resumable client resumes a session and parses the final attempt output", async () => {
     const calls: Array<{ cmd: string[]; stdin: string }> = [];
     const client = createCodexResumableClient({

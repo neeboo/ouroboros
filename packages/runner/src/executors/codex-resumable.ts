@@ -56,7 +56,7 @@ export function createCodexResumableClient(options: CodexResumableClientOptions)
       const reasoningArgs = options.reasoningEffort ? ["-c", `model_reasoning_effort=${JSON.stringify(options.reasoningEffort)}`] : [];
       const stdoutObserver = createStdoutObserver(input);
       const result = await runCommand({
-        cmd: [
+        cmd: applyBrowserProcessPolicy([
           codexBin,
           "exec",
           ...modelArgs,
@@ -73,7 +73,8 @@ export function createCodexResumableClient(options: CodexResumableClientOptions)
           "--sandbox",
           sandbox,
           "-",
-        ],
+        ], options.browserProcessPolicy),
+        env: { ORBS_BROWSER_PROCESS_POLICY: options.browserProcessPolicy },
         stdin: input.prompt,
         timeoutMs: options.timeoutMs,
         idleTimeoutMs: options.idleTimeoutMs,
@@ -88,7 +89,7 @@ export function createCodexResumableClient(options: CodexResumableClientOptions)
       const reasoningArgs = options.reasoningEffort ? ["-c", `model_reasoning_effort=${JSON.stringify(options.reasoningEffort)}`] : [];
       const stdoutObserver = createStdoutObserver(input);
       const result = await runCommand({
-        cmd: [
+        cmd: applyBrowserProcessPolicy([
           codexBin,
           "exec",
           ...modelArgs,
@@ -107,7 +108,8 @@ export function createCodexResumableClient(options: CodexResumableClientOptions)
           "resume",
           input.sessionId,
           "-",
-        ],
+        ], options.browserProcessPolicy),
+        env: { ORBS_BROWSER_PROCESS_POLICY: options.browserProcessPolicy },
         stdin: input.prompt ?? "",
         timeoutMs: options.timeoutMs,
         idleTimeoutMs: options.idleTimeoutMs,
@@ -117,6 +119,21 @@ export function createCodexResumableClient(options: CodexResumableClientOptions)
       return resumableResult({ result, outputPath, commandName: "codex exec resume" });
     },
   };
+}
+
+const DARWIN_BROWSER_DENY_PROFILE = [
+  "(version 1)",
+  "(allow default)",
+  '(deny process-exec (literal "/usr/bin/open"))',
+  '(deny process-exec (literal "/usr/bin/osascript"))',
+  '(deny process-exec (regex #".*/(Google Chrome|Google Chrome Canary|Chromium|chrome|chromium|chrome-headless-shell|Safari|Microsoft Edge|Arc|Firefox|firefox|agent-browser[^/]*)$"))',
+].join(" ");
+
+function applyBrowserProcessPolicy(cmd: string[], policy: CodexResumableClientOptions["browserProcessPolicy"]): string[] {
+  if (policy !== "deny" || process.platform !== "darwin") {
+    return cmd;
+  }
+  return ["/usr/bin/sandbox-exec", "-p", DARWIN_BROWSER_DENY_PROFILE, ...cmd];
 }
 
 function createStdoutObserver(input: {

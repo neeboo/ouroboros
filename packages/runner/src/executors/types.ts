@@ -77,6 +77,7 @@ export type CodexSandbox = "read-only" | "workspace-write" | "danger-full-access
 export interface CodexCliExecutorOptions {
   cwd: string;
   sandbox?: CodexSandbox;
+  browserProcessPolicy?: "allow" | "deny";
   codexBin?: string;
   model?: string;
   reasoningEffort?: string;
