@@ -7338,6 +7338,16 @@ describe("CLI", () => {
       },
     });
     setupHarness.updateRunStatus({ runId: assessmentRunId, status: "blocked" });
+    const activeRunId = setupHarness.createRun({
+      goal: "Independent active delivery",
+      context: { parentRunId: bootstrap.runId, source: "design" },
+    });
+    setupHarness.createTask({
+      runId: activeRunId,
+      role: "worker",
+      goal: "Continue independent delivery",
+      prompt: "Complete the independent delivery while recovery proceeds in parallel.",
+    });
 
     const codexBin = join(dir, "fake-codex-assessment-recovery");
     const payload = {

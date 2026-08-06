@@ -2048,11 +2048,6 @@ async function runSupervisorLinearPoll(input: {
 
 function ensureSelfImprovementCycle(rootRunId: string, cwd: string) {
   const scopedRuns = selfImprovementRuns(rootRunId);
-  const active = scopedRuns.some((run) => run.status === "todo" || run.status === "running");
-  if (active) {
-    return { state: "active" as const, createdCycle: null };
-  }
-
   const recovery = recoverBlockedSelfImprovementRun(rootRunId, scopedRuns);
   if (recovery) {
     return {
@@ -2060,6 +2055,11 @@ function ensureSelfImprovementCycle(rootRunId: string, cwd: string) {
       createdCycle: null,
       recovery,
     };
+  }
+
+  const active = scopedRuns.some((run) => run.status === "todo" || run.status === "running");
+  if (active) {
+    return { state: "active" as const, createdCycle: null };
   }
 
   // Before asking the designer for a new proposal, surface any measuring
