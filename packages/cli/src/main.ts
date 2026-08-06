@@ -2157,7 +2157,7 @@ function recoverBlockedSelfImprovementRun(
     .filter((run) => {
       if (run.id === rootRunId || run.status !== "blocked") return false;
       const source = typeof run.context.source === "string" ? run.context.source : null;
-      return source !== "self-improve" && source !== "self-improvement-assessment";
+      return source !== "self-improve";
     });
 
   for (const run of blockedRuns) {

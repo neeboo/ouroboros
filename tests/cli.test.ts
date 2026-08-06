@@ -7295,6 +7295,113 @@ describe("CLI", () => {
     ).toBe(false);
   });
 
+  test("self-improve-daemon recovers a blocked assessment before creating another cycle", async () => {
+    const bootstrap = await runCliJson("self-iterate");
+    const setupHarness = new Harness(dbPath);
+    setupHarness.recordAttempt({
+      taskId: bootstrap.taskId,
+      input: {},
+      output: {
+        status: "done",
+        summary: "Bootstrap assessment drained",
+        changedFiles: [],
+        checks: [{ name: "assessment", status: "passed" }],
+        artifacts: [],
+        problems: [],
+      },
+    });
+    setupHarness.updateRunStatus({ runId: bootstrap.runId, status: "done" });
+    const assessmentRunId = setupHarness.createRun({
+      goal: "Designer assesses Ouroboros for cycle 1",
+      context: {
+        parentRunId: bootstrap.runId,
+        source: "self-improvement-assessment",
+        selfImprovement: { cycleIndex: 1 },
+      },
+    });
+    const designerTaskId = setupHarness.createTask({
+      runId: assessmentRunId,
+      role: "designer",
+      goal: "Assess current improvement evidence",
+      prompt: "Inspect the current evidence and make the next decision.",
+    });
+    setupHarness.recordAttempt({
+      taskId: designerTaskId,
+      input: { backend: { id: "codex-resumable", kind: "codex-resumable" } },
+      output: {
+        status: "blocked",
+        summary: "codex exec resume failed",
+        changedFiles: [],
+        checks: [{ name: "codex resume", status: "failed" }],
+        artifacts: [],
+        problems: ["unexpected resume argument"],
+      },
+    });
+    setupHarness.updateRunStatus({ runId: assessmentRunId, status: "blocked" });
+
+    const codexBin = join(dir, "fake-codex-assessment-recovery");
+    const payload = {
+      status: "done",
+      summary: "Recovered the blocked assessment and produced actionable evidence",
+      changedFiles: [],
+      checks: [{ name: "assessment recovery", status: "passed" }],
+      artifacts: [],
+      problems: [],
+    };
+    await writeFile(
+      codexBin,
+      [
+        "#!/usr/bin/env bun",
+        "import { writeFileSync } from 'node:fs';",
+        "const outputFlag = Bun.argv.indexOf('--output-last-message');",
+        "const outputPath = outputFlag >= 0 ? Bun.argv[outputFlag + 1] : '';",
+        `const payload = ${JSON.stringify(payload)};`,
+        "if (outputPath) writeFileSync(outputPath, JSON.stringify(payload));",
+        "console.log(JSON.stringify({ type: 'session.started', session_id: 'session_assessment_recovery' }));",
+        "console.log(JSON.stringify({ type: 'agent.message', message: JSON.stringify(payload) }));",
+      ].join("\n"),
+    );
+    await chmod(codexBin, 0o755);
+
+    const result = await runCliJson(
+      "self-improve-daemon",
+      "--executor",
+      "codex-resumable",
+      "--root-run-id",
+      bootstrap.runId,
+      "--codex-bin",
+      codexBin,
+      "--parallel",
+      "auto",
+      "--max-ticks",
+      "1",
+      "--tick-cycles",
+      "1",
+      "--max-rounds",
+      "1",
+      "--stop-hook",
+      "create-tasks",
+      "--no-integrate",
+      "true",
+      "--interval-ms",
+      "1",
+      "--idle-ms",
+      "1",
+    );
+    const runs = await runCliJson("list-runs");
+
+    expect(result.ticks[0]).toMatchObject({
+      status: "ok",
+      createdCycle: null,
+      recovery: expect.objectContaining({ runId: assessmentRunId, sourceTaskId: designerTaskId }),
+    });
+    expect(
+      runs.filter(
+        (run: { context: Record<string, unknown> }) => run.context.source === "self-improvement-assessment",
+      ),
+    ).toHaveLength(1);
+  });
+
   test("self-improve-daemon surfaces a measuring proposal as an outcome-review tick before asking the designer for new work", async () => {
     const bootstrap = await runCliJson("self-iterate");
     const bootstrapOverview = await runCliJson("run-overview", "--run-id", bootstrap.runId);
