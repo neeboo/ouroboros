@@ -2169,11 +2169,7 @@ function recoverBlockedSelfImprovementRun(
         const rightFinished = right.finishedAt ?? right.startedAt ?? "";
         return rightFinished.localeCompare(leftFinished) || right.attemptId.localeCompare(left.attemptId);
       });
-    const executorFailure = blockedSessions.find((session) => {
-      const reason = terminalReasonForSession(session);
-      return reason != null && EXECUTOR_FAILURE_TERMINAL_REASONS.has(reason);
-    });
-    const sourceSession = executorFailure ?? blockedSessions[0] ?? null;
+    const sourceSession = blockedSessions.find((session) => session.backend != null) ?? blockedSessions[0] ?? null;
     const sourceTask = sourceSession
       ? overview.tasks.find((task) => task.id === sourceSession.taskId)
       : [...overview.tasks].reverse().find((task) => task.status === "blocked");

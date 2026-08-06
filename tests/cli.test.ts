@@ -7296,6 +7296,146 @@ describe("CLI", () => {
     ).toBe(false);
   });
 
+  test("self-improve-daemon advances from the latest direct recovery failure", async () => {
+    const bootstrap = await runCliJson("self-iterate");
+    const setupHarness = new Harness(dbPath);
+    setupHarness.recordAttempt({
+      taskId: bootstrap.taskId,
+      input: {},
+      output: {
+        status: "done",
+        summary: "Initial assessment drained",
+        changedFiles: [],
+        checks: [],
+        artifacts: [],
+        problems: [],
+      },
+    });
+    setupHarness.updateRunStatus({ runId: bootstrap.runId, status: "done" });
+    const runId = setupHarness.createRun({
+      goal: "Recover through multiple backends",
+      context: { parentRunId: bootstrap.runId, source: "design" },
+    });
+    const originalTaskId = setupHarness.createTask({
+      runId,
+      role: "worker",
+      goal: "Implement recovery target",
+      prompt: "Implement the target.",
+    });
+    const originalAttemptId = setupHarness.recordAttempt({
+      taskId: originalTaskId,
+      input: { backend: { id: "claude-code", kind: "acpx", agent: "claude" } },
+      output: {
+        status: "blocked",
+        summary: "Claude hard timeout",
+        changedFiles: [],
+        checks: [],
+        artifacts: [{ kind: "acpx_terminal_evidence", terminalReason: "hard_timeout" }],
+        problems: ["hard timeout"],
+      },
+    });
+    const originalWorktreePath = `.ouroboros/worktrees/${originalTaskId}`;
+    const staleRecoveryTaskId = setupHarness.createTask({
+      runId,
+      parentId: originalTaskId,
+      role: "worker",
+      goal: "First recovery attempt",
+      prompt: "Continue the target.",
+      worktreePath: `.ouroboros/worktrees/stale-${originalTaskId}`,
+      config: {
+        agentBackend: "codex-resumable",
+        sourceWorktreePath: originalWorktreePath,
+        automaticRecovery: {
+          generation: 1,
+          sourceTaskId: originalTaskId,
+          sourceAttemptId: originalAttemptId,
+          fromBackend: "claude-code",
+          toBackend: "codex-resumable",
+          strategy: "switch-backend",
+        },
+      },
+    });
+    setupHarness.recordAttempt({
+      taskId: staleRecoveryTaskId,
+      input: { backend: { id: "codex-resumable", kind: "codex-resumable" } },
+      output: {
+        status: "blocked",
+        summary: "Recovery used the wrong clean worktree",
+        changedFiles: [],
+        checks: [{ name: "source worktree", status: "failed" }],
+        artifacts: [],
+        problems: ["source worktree was not reused"],
+      },
+    });
+    setupHarness.updateRunStatus({ runId, status: "blocked" });
+
+    const codexBin = join(dir, "fake-codex-latest-recovery");
+    const payload = {
+      status: "done",
+      summary: "Advanced the latest recovery from the original source worktree",
+      changedFiles: [],
+      checks: [{ name: "source worktree", status: "passed" }],
+      artifacts: [],
+      problems: [],
+    };
+    await writeFile(
+      codexBin,
+      [
+        "#!/usr/bin/env bun",
+        "import { writeFileSync } from 'node:fs';",
+        "const outputFlag = Bun.argv.indexOf('--output-last-message');",
+        "const outputPath = outputFlag >= 0 ? Bun.argv[outputFlag + 1] : '';",
+        `const payload = ${JSON.stringify(payload)};`,
+        "if (outputPath) writeFileSync(outputPath, JSON.stringify(payload));",
+        "console.log(JSON.stringify({ type: 'session.started', session_id: 'session_latest_recovery' }));",
+        "console.log(JSON.stringify({ type: 'agent.message', message: JSON.stringify(payload) }));",
+      ].join("\n"),
+    );
+    await chmod(codexBin, 0o755);
+
+    const result = await runCliJson(
+      "self-improve-daemon",
+      "--executor",
+      "codex-resumable",
+      "--root-run-id",
+      bootstrap.runId,
+      "--codex-bin",
+      codexBin,
+      "--parallel",
+      "auto",
+      "--max-ticks",
+      "1",
+      "--tick-cycles",
+      "1",
+      "--max-rounds",
+      "1",
+      "--stop-hook",
+      "create-tasks",
+      "--no-integrate",
+      "true",
+      "--interval-ms",
+      "1",
+      "--idle-ms",
+      "1",
+    );
+    const overview = await runCliJson("run-overview", "--run-id", runId);
+    const latestRecovery = overview.tasks.find(
+      (task: { config?: Record<string, unknown> }) =>
+        (task.config?.automaticRecovery as { sourceTaskId?: string } | undefined)?.sourceTaskId === staleRecoveryTaskId,
+    );
+
+    expect(result.ticks[0].recovery).toMatchObject({
+      sourceTaskId: staleRecoveryTaskId,
+      fromBackend: "codex-resumable",
+      toBackend: "codex-resumable",
+    });
+    expect(latestRecovery).toMatchObject({
+      status: "done",
+      worktreePath: originalWorktreePath,
+      config: expect.objectContaining({ sourceWorktreePath: originalWorktreePath }),
+    });
+  });
+
   test("self-improve-daemon recovers a blocked assessment before creating another cycle", async () => {
     const bootstrap = await runCliJson("self-iterate");
     const setupHarness = new Harness(dbPath);
