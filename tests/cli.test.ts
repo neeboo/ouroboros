@@ -6970,6 +6970,7 @@ describe("CLI", () => {
     setupHarness.updateDesignProposalStatus({ proposalId: proposal.id, status: "accepted" });
 
     const codexBin = join(dir, "fake-codex-self-improve");
+    const browserPolicyPath = join(dir, "self-improve-browser-policy.txt");
     const payload = {
       status: "done",
       summary: "Derived an evidence-backed controller objective through a fixed design action",
@@ -7007,6 +7008,7 @@ describe("CLI", () => {
         "const outputFlag = Bun.argv.indexOf('--output-last-message');",
         "const outputPath = outputFlag >= 0 ? Bun.argv[outputFlag + 1] : '';",
         `const payload = ${JSON.stringify(payload)};`,
+        `writeFileSync(${JSON.stringify(browserPolicyPath)}, process.env.ORBS_BROWSER_PROCESS_POLICY ?? 'unset');`,
         "if (outputPath) writeFileSync(outputPath, JSON.stringify(payload));",
         "console.log(JSON.stringify({ type: 'session.started', session_id: 'session_self_improve' }));",
         "console.log(JSON.stringify({ type: 'agent.message', message: JSON.stringify(payload) }));",
@@ -7042,6 +7044,7 @@ describe("CLI", () => {
     const child = runs.find((run: { goal: string }) => run.goal === "Make autonomous cycle recovery observable");
 
     expect(result.status).toBe("tick_limit");
+    expect(await readFile(browserPolicyPath, "utf8")).toBe("deny");
     expect(result.rootRunId).toBe(bootstrap.runId);
     expect(result.bootstrap).toBeNull();
     expect(result.ticks[0]).toMatchObject({

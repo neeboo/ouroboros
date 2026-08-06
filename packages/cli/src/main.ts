@@ -1549,11 +1549,23 @@ function codexRunnerInput(defaultStopHooks?: string) {
     genericExecutorFactory: executorFactory("codex-resumable"),
     codexOptions: {
       sandbox: parseCodexResumableSandbox(),
+      browserProcessPolicy: parseBrowserProcessPolicy(),
       codexBin: flag(parsed, "codex-bin"),
       timeoutMs: parseTimeoutMs(flag(parsed, "timeout-ms")),
       idleTimeoutMs: parseTimeoutMs(flag(parsed, "idle-timeout-ms"), "--idle-timeout-ms"),
     },
   };
+}
+
+function parseBrowserProcessPolicy(): "allow" | "deny" | undefined {
+  const raw = flag(parsed, "browser-process-policy");
+  if (raw === undefined) {
+    return parsed.command === "self-improve-daemon" ? "deny" : undefined;
+  }
+  if (raw === "allow" || raw === "deny") {
+    return raw;
+  }
+  fail("--browser-process-policy must be allow or deny");
 }
 
 function createPlannerFromUserGoal(input: { runId: string; goal: string; interrupted: boolean }) {
