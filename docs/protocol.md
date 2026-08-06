@@ -787,6 +787,10 @@ Anchor mappings live in `external_refs` and give future sync code stable local-t
 
 These mappings are not inbox events. They do not change task status, create issues, create comments, or post progress.
 
+### Bounded dogfood issue creation
+
+`orbs linear-create-issue` creates one issue in the configured project and team through the same `LINEAR_API_KEY`, `token_env`, or `token_file` used by polling. It requires `--title` and accepts `--description`. The intended verification path is `issueCreate -> bounded poll -> inbox_events -> issue-scoped Designer -> planning run -> external_refs`. API responses and SQLite state are the canonical evidence. Goal review must not launch a browser for this transport proof; browser evidence is reserved for a user-facing dashboard change that deterministic API or component tests cannot verify.
+
 ### Dashboard lifecycle visibility
 
 The dashboard's inspector surfaces the complete Linear intake lifecycle through `GET /api/runs/:runId/linear-intake`:

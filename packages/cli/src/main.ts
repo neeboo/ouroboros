@@ -33,6 +33,7 @@ import {
   createRunsFromOutputHook,
   createTasksFromOutputHook,
   createVerifierTaskHook,
+  chargeRepairBudget,
   childEnvForProcess,
   createAcpxSubsessionRunner,
   createCollectSubsessionsHook,
@@ -48,12 +49,13 @@ import {
   superviseCodexDaemon,
   superviseCodexRuns,
   terminateProcessTreeSync,
+  DEFAULT_REPAIR_REPLAN_BUDGET_LIMIT,
 } from "@ouroboros/runner";
 import type { CodexSandbox, ResolvedExecutionRoute, StopHook } from "@ouroboros/runner";
 import { fail, flag, parseArgs, required } from "./args";
 import { loadOuroborosConfig, resolveLinearPolling, type LinearConfig } from "./config";
 import { parseArray, parseObject, printJson } from "./json";
-import { checkLinearAccess, ingestLinearEvent, linkLinearIssue } from "./linear";
+import { checkLinearAccess, createLinearIssue, ingestLinearEvent, linkLinearIssue } from "./linear";
 import {
   cacheResolvedProjectSelector,
   consumeLinearInbox,
@@ -529,6 +531,23 @@ switch (parsed.command) {
     const result = await checkLinearAccess({
       harness,
       runId: flag(parsed, "run-id") ?? null,
+      projectUrl: flag(parsed, "project-url") ?? linear.projectUrl ?? null,
+      projectId: flag(parsed, "project-id") ?? linear.projectId ?? null,
+      teamKey: flag(parsed, "team-key") ?? linear.teamKey ?? null,
+      tokenFile: flag(parsed, "token-file") ?? linear.tokenFile ?? null,
+      tokenEnv: flag(parsed, "token-env") ?? linear.tokenEnv ?? null,
+      apiUrl: flag(parsed, "api-url") ?? linear.apiUrl ?? null,
+    });
+    printJson(result);
+    break;
+  }
+  case "linear-create-issue": {
+    const config = await loadCliConfig();
+    const linear = config.linear ?? {};
+    const result = await createLinearIssue({
+      harness,
+      title: required(parsed, "title"),
+      description: flag(parsed, "description") ?? null,
       projectUrl: flag(parsed, "project-url") ?? linear.projectUrl ?? null,
       projectId: flag(parsed, "project-id") ?? linear.projectId ?? null,
       teamKey: flag(parsed, "team-key") ?? linear.teamKey ?? null,
@@ -1152,6 +1171,7 @@ function printHelp() {
     "  intake               Split a requirement document into child runs",
     "  action               Apply a harness action such as integrateVerifiedRun",
     "  poll-linear-issues   Run one bounded Linear polling cycle for a supervised run",
+    "  linear-create-issue  Create a scoped Linear issue through the configured API token",
     "  linear-poll-state    Print the durable Linear polling state for a supervised run",
     "  linear-consume-inbox Claim durable Linear issue events into issue-scoped Designer runs",
     "",
@@ -2051,7 +2071,7 @@ async function runSupervisorLinearPoll(input: {
 }
 
 function ensureSelfImprovementCycle(rootRunId: string, cwd: string) {
-  const scopedRuns = selfImprovementRuns(rootRunId);
+  let scopedRuns = selfImprovementRuns(rootRunId);
   const recoveries = recoverBlockedSelfImprovementRuns(rootRunId, scopedRuns);
   if (recoveries.length > 0) {
     return {
@@ -2061,6 +2081,7 @@ function ensureSelfImprovementCycle(rootRunId: string, cwd: string) {
       recoveries,
     };
   }
+  scopedRuns = selfImprovementRuns(rootRunId);
 
   const active = scopedRuns.some((run) => run.status === "todo" || run.status === "running");
   if (active) {
@@ -2223,6 +2244,41 @@ function recoverBlockedSelfImprovementRuns(
       : sourceTask.worktreePath);
     const generation = Math.max(0, Number(previousRecovery.generation) || 0) + 1;
     const { modelPreference: _modelPreference, automaticRecovery: _automaticRecovery, ...sourceConfig } = sourceTask.config ?? {};
+    const budget = chargeRepairBudget(harness, run.id, {
+      limit: DEFAULT_REPAIR_REPLAN_BUDGET_LIMIT,
+      taskId: sourceTask.id,
+      ...(sourceAttemptId ? { attemptId: sourceAttemptId } : {}),
+      kind: "repair",
+      summary: sourceSession?.output.summary ?? `Automatic recovery for blocked ${sourceTask.role} task`,
+      rootTaskId: typeof previousRecovery.sourceTaskId === "string" ? previousRecovery.sourceTaskId : sourceTask.id,
+      rootCause: terminalReason ?? `${sourceTask.role}:blocked`,
+    });
+    if (!budget.allowed) {
+      const currentExhaustion = recordValue(run.context.automaticRecoveryExhausted);
+      const nextExhaustion = {
+        sourceTaskId: sourceTask.id,
+        sourceAttemptId,
+        used: budget.nextBudget.used,
+        limit: budget.nextBudget.limit,
+        reason: budget.reason,
+      };
+      const exhaustionChanged =
+        currentExhaustion.sourceTaskId !== nextExhaustion.sourceTaskId ||
+        currentExhaustion.sourceAttemptId !== nextExhaustion.sourceAttemptId ||
+        currentExhaustion.used !== nextExhaustion.used ||
+        currentExhaustion.limit !== nextExhaustion.limit;
+      if (exhaustionChanged) {
+        harness.updateRun({
+          runId: run.id,
+          status: "blocked",
+          contextPatch: {
+            repairReplanBudget: budget.nextBudget,
+            automaticRecoveryExhausted: nextExhaustion,
+          },
+        });
+      }
+      continue;
+    }
     const recoveryTaskId = harness.createTask({
       runId: run.id,
       parentId: sourceTask.id,
@@ -2274,6 +2330,8 @@ function recoverBlockedSelfImprovementRuns(
       runId: run.id,
       status: "todo",
       contextPatch: {
+        repairReplanBudget: budget.nextBudget,
+        automaticRecoveryExhausted: null,
         automaticRecovery: {
           taskId: recoveryTaskId,
           sourceTaskId: sourceTask.id,

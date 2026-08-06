@@ -1252,6 +1252,105 @@ describe("CLI", () => {
     }
   });
 
+  test("creates a scoped Linear issue with the configured API token", async () => {
+    await runCli("init");
+    const tokenPath = join(dir, "linear-token");
+    const configPath = join(dir, "ouroboros.toml");
+    const projectUrl = "https://linear.app/pancat/project/ouroboros-acd5df2ef1da/overview";
+    const requests: Array<{ authorization: string; query: string; variables: Record<string, unknown> }> = [];
+    const server = startTestServer({
+      async fetch(request) {
+        const body = (await request.json()) as { query: string; variables?: Record<string, unknown> };
+        requests.push({
+          authorization: request.headers.get("authorization") ?? "",
+          query: body.query,
+          variables: body.variables ?? {},
+        });
+        if (body.query.includes("OuroborosLinearAccess")) {
+          return Response.json({
+            data: {
+              viewer: { id: "viewer_1", name: "Ouroboros Bot", email: "bot@example.com" },
+              projects: {
+                nodes: [{
+                  id: "project_1",
+                  name: "Ouroboros",
+                  slugId: "ouroboros-acd5df2ef1da",
+                  url: projectUrl,
+                  teams: { nodes: [{ id: "team_1", key: "PAN", name: "PanCat" }] },
+                }],
+              },
+            },
+          });
+        }
+        return Response.json({
+          data: {
+            issueCreate: {
+              success: true,
+              issue: {
+                id: "issue_dogfood_1",
+                identifier: "PAN-1300",
+                title: "[orbs-dogfood] Verify autonomous Linear intake",
+                url: "https://linear.app/pancat/issue/PAN-1300/orbs-dogfood",
+                createdAt: "2026-08-06T00:00:00.000Z",
+                project: { id: "project_1" },
+                team: { id: "team_1", key: "PAN" },
+              },
+            },
+          },
+        });
+      },
+    });
+    if (!server) {
+      expect(Bun.version).toBeString();
+      return;
+    }
+    try {
+      await writeFile(tokenPath, "lin_api_test_token");
+      await writeFile(
+        configPath,
+        [
+          "[linear]",
+          `api_url = "http://127.0.0.1:${server.port}/graphql"`,
+          `token_file = "${tokenPath}"`,
+          `project_url = "${projectUrl}"`,
+          'project_id = "ouroboros-acd5df2ef1da"',
+          'team_key = "PAN"',
+          "",
+        ].join("\n"),
+      );
+
+      const result = await runCliJson(
+        "linear-create-issue",
+        "--config",
+        configPath,
+        "--title",
+        "[orbs-dogfood] Verify autonomous Linear intake",
+        "--description",
+        "A bounded zero-cost API verification issue.",
+      );
+
+      expect(requests).toHaveLength(2);
+      expect(requests.every((request) => request.authorization === "lin_api_test_token")).toBe(true);
+      expect(requests[1].query).toContain("CreateOuroborosDogfoodIssue");
+      expect(requests[1].variables).toEqual({
+        input: {
+          title: "[orbs-dogfood] Verify autonomous Linear intake",
+          description: "A bounded zero-cost API verification issue.",
+          teamId: "team_1",
+          projectId: "project_1",
+        },
+      });
+      expect(result).toMatchObject({
+        status: "created",
+        project: { id: "project_1" },
+        team: { id: "team_1", key: "PAN" },
+        issue: { id: "issue_dogfood_1", identifier: "PAN-1300" },
+      });
+    } finally {
+      server.stop(true);
+    }
+  });
+
   test("rejects Linear project ref for a missing local run", async () => {
     await runCli("init");
     const tokenPath = join(dir, "linear-token");
@@ -5941,7 +6040,7 @@ describe("CLI", () => {
     });
   });
 
-  test("run-loop defers a run when goal-review is waiting on external recovery", async () => {
+  test("run-loop defers a run only when goal-review needs spending approval", async () => {
     await runCli("init");
     const run = await runCliJson("create-run", "--goal", "Prove Claude Code provider readiness");
     const codexBin = join(dir, "fake-codex-goal-defer");
@@ -5950,8 +6049,8 @@ describe("CLI", () => {
       [
         "#!/usr/bin/env bun",
         "const prompt = await new Response(Bun.stdin.stream()).text();",
-        "if (!prompt.includes('runDecision defer:')) process.exit(2);",
-        "console.log(JSON.stringify({ status: 'done', runDecision: 'defer', summary: 'Provider connectivity is down; pause until external recovery.', changedFiles: [], checks: [{ name: 'provider smoke', status: 'failed' }], artifacts: [], problems: ['API call failed after 3 retries.'] }));",
+        "if (!prompt.includes('Only use defer for spending')) process.exit(2);",
+        "console.log(JSON.stringify({ status: 'done', runDecision: 'defer', summary: 'A recurring GPU lease requires spending approval.', changedFiles: [], checks: [{ name: 'cost authority', status: 'failed' }], artifacts: [{ kind: 'cost_gate', recurringCost: 900 }], problems: ['Recurring infrastructure spend is not authorized.'] }));",
       ].join("\n"),
     );
     await chmod(codexBin, 0o755);
@@ -6198,6 +6297,8 @@ describe("CLI", () => {
         "if (!prompt.includes('runDecision verify:')) process.exit(4);",
         "if (!prompt.includes('include one to five verifier nextTasks items')) process.exit(5);",
         "if (!prompt.includes('runDecision defer:')) process.exit(6);",
+        "if (!prompt.includes('Only use defer for spending')) process.exit(7);",
+        "if (!prompt.includes('Do not launch a browser')) process.exit(8);",
         "console.log(JSON.stringify({ status: 'done', runDecision: 'verify', summary: 'needs independent checks', changedFiles: [], checks: [], artifacts: [], problems: [], nextTasks: [{ role: 'verifier', goal: 'Verify goal completion evidence', prompt: 'Inspect the evidence.', doneWhen: ['evidence checked'] }, { role: 'verifier', goal: 'Verify dashboard evidence', prompt: 'Inspect dashboard evidence.', doneWhen: ['dashboard checked'] }] }));",
       ].join("\n"),
     );
@@ -7138,6 +7239,127 @@ describe("CLI", () => {
       "1",
     );
     expect(repeated.ticks[0].status).not.toBe("quiescent");
+  });
+
+  test("self-improve-daemon stops cloning recovery tasks when the run repair budget is exhausted", async () => {
+    const bootstrap = await runCliJson("self-iterate");
+    const setupHarness = new Harness(dbPath);
+    setupHarness.recordAttempt({
+      taskId: bootstrap.taskId,
+      input: {},
+      output: {
+        status: "done",
+        summary: "Initial assessment drained",
+        changedFiles: [],
+        checks: [{ name: "assessment", status: "passed" }],
+        artifacts: [],
+        problems: [],
+      },
+    });
+    setupHarness.updateRunStatus({ runId: bootstrap.runId, status: "done" });
+    const blockedRunId = setupHarness.createRun({
+      goal: "A blocked delivery needs a different design",
+      context: {
+        parentRunId: bootstrap.runId,
+        source: "design",
+        repairReplanBudget: {
+          limit: 1,
+          used: 1,
+          entries: [{
+            taskId: "task_previous_repair",
+            attemptId: "attempt_previous_repair",
+            kind: "repair",
+            summary: "The bounded repair attempt did not resolve the root cause",
+            chargedAt: "2026-08-06T00:00:00.000Z",
+          }],
+        },
+      },
+    });
+    const blockedTaskId = setupHarness.createTask({
+      runId: blockedRunId,
+      role: "worker",
+      goal: "Perform the bounded dogfood API proof",
+      prompt: "Create and observe one bounded dogfood event.",
+    });
+    const blockedAttemptId = setupHarness.recordAttempt({
+      taskId: blockedTaskId,
+      input: {},
+      output: {
+        status: "blocked",
+        summary: "The same zero-cost verification action is still missing",
+        changedFiles: [],
+        checks: [{ name: "dogfood API proof", status: "failed" }],
+        artifacts: [],
+        problems: ["Create and observe one bounded dogfood event"],
+      },
+    });
+    setupHarness.updateRunStatus({ runId: blockedRunId, status: "blocked" });
+
+    const codexBin = join(dir, "fake-codex-budget-redesign");
+    const payload = {
+      status: "done",
+      summary: "Reassessed the exhausted recovery path without cloning it.",
+      changedFiles: [],
+      checks: [{ name: "assessment", status: "passed" }],
+      artifacts: [],
+      problems: [],
+    };
+    await writeFile(
+      codexBin,
+      [
+        "#!/usr/bin/env bun",
+        "import { writeFileSync } from 'node:fs';",
+        "const outputFlag = Bun.argv.indexOf('--output-last-message');",
+        "const outputPath = outputFlag >= 0 ? Bun.argv[outputFlag + 1] : '';",
+        `const payload = ${JSON.stringify(payload)};`,
+        "if (outputPath) writeFileSync(outputPath, JSON.stringify(payload));",
+        "console.log(JSON.stringify({ type: 'session.started', session_id: 'session_budget_redesign' }));",
+        "console.log(JSON.stringify({ type: 'agent.message', message: JSON.stringify(payload) }));",
+      ].join("\n"),
+    );
+    await chmod(codexBin, 0o755);
+
+    const result = await runCliJson(
+      "self-improve-daemon",
+      "--executor",
+      "codex-resumable",
+      "--root-run-id",
+      bootstrap.runId,
+      "--codex-bin",
+      codexBin,
+      "--parallel",
+      "auto",
+      "--max-ticks",
+      "1",
+      "--tick-cycles",
+      "1",
+      "--max-rounds",
+      "1",
+      "--stop-hook",
+      "create-tasks",
+      "--no-integrate",
+      "true",
+      "--interval-ms",
+      "1",
+      "--idle-ms",
+      "1",
+    );
+    const overview = await runCliJson("run-overview", "--run-id", blockedRunId);
+    const recoveryTasks = overview.tasks.filter(
+      (task: { config?: Record<string, unknown> }) =>
+        (task.config?.automaticRecovery as { sourceAttemptId?: string } | undefined)?.sourceAttemptId === blockedAttemptId,
+    );
+
+    expect(result.ticks[0].recovery).toBeUndefined();
+    expect(result.ticks[0].createdCycle).toBeDefined();
+    expect(recoveryTasks).toHaveLength(0);
+    expect(overview.run.status).toBe("blocked");
+    expect(overview.run.context.automaticRecoveryExhausted).toMatchObject({
+      sourceTaskId: blockedTaskId,
+      sourceAttemptId: blockedAttemptId,
+      used: 1,
+      limit: 1,
+    });
   });
 
   test("self-improve-daemon switches worker backend after an executor-level block", async () => {

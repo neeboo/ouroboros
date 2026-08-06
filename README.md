@@ -184,6 +184,14 @@ Environment override:
 LINEAR_API_KEY=lin_api_... orbs linear-check --run-id <run_id>
 ```
 
+For a bounded end-to-end intake check, create one uniquely named issue through the same configured token, then let supervisor polling consume it. This proof uses the API and SQLite control state; it does not require a browser:
+
+```bash
+orbs linear-create-issue \
+  --title "[orbs-dogfood] Verify autonomous Linear intake $(date +%s)" \
+  --description "Zero-cost API verification for poll -> inbox -> Designer -> planning run -> external ref."
+```
+
 Model preference can live on the run or on a single task:
 
 ```bash

@@ -30,6 +30,11 @@ export interface LinearIngestEventInput {
   payloadJson: string;
 }
 
+export interface LinearCreateIssueInput extends LinearCheckInput {
+  title: string;
+  description?: string | null;
+}
+
 interface LinearProject {
   id: string;
   name: string;
@@ -116,6 +121,67 @@ export async function checkLinearAccess(input: LinearCheckInput) {
       name: team.name,
     },
     externalRef,
+  };
+}
+
+export async function createLinearIssue(input: LinearCreateIssueInput) {
+  const title = input.title.trim();
+  if (!title) {
+    throw new Error("Linear issue title is required");
+  }
+  const scope = await checkLinearAccess({ ...input, runId: null });
+  const tokenSource = await readLinearToken({ tokenFile: input.tokenFile, tokenEnv: input.tokenEnv });
+  const apiUrl = input.apiUrl ?? "https://api.linear.app/graphql";
+  const data = await linearGraphql<{
+    issueCreate: {
+      success: boolean;
+      issue: {
+        id: string;
+        identifier: string;
+        title: string;
+        url: string | null;
+        createdAt: string;
+        project: { id: string } | null;
+        team: { id: string; key: string };
+      } | null;
+    };
+  }>({
+    apiUrl,
+    token: tokenSource.token,
+    query: `
+      mutation CreateOuroborosDogfoodIssue($input: IssueCreateInput!) {
+        issueCreate(input: $input) {
+          success
+          issue {
+            id
+            identifier
+            title
+            url
+            createdAt
+            project { id }
+            team { id key }
+          }
+        }
+      }
+    `,
+    variables: {
+      input: {
+        title,
+        description: input.description?.trim() || null,
+        teamId: scope.team.id,
+        projectId: scope.project.id,
+      },
+    },
+  });
+  if (!data.issueCreate.success || !data.issueCreate.issue) {
+    throw new Error("Linear issue creation returned no issue");
+  }
+  return {
+    status: "created" as const,
+    tokenSource: tokenSource.source,
+    project: scope.project,
+    team: scope.team,
+    issue: data.issueCreate.issue,
   };
 }
 

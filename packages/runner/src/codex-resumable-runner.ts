@@ -2,6 +2,9 @@ import {
   applyHarnessAction,
   describeIntegrationReadiness,
   diagnoseRunOverview,
+  GOAL_REVIEW_TASK_DONE_WHEN,
+  GOAL_REVIEW_TASK_GOAL,
+  GOAL_REVIEW_TASK_PROMPT,
   type Attempt,
   type AttemptOutput,
   type ExecutionThread,
@@ -758,26 +761,9 @@ class CodexResumableOrchestrator {
     const taskId = this.harness.createTask({
       runId,
       role: "goal-review",
-      goal: "Review whether the run goal is complete",
-      prompt: [
-        "Answer this before creating more work: are we sure the original run goal has been reached?",
-        "",
-        "Inspect the repository, README, tests, dashboard state, recent attempts, and run lessons.",
-        "Before choosing a runDecision, cite concrete evidence from repository files or docs, tests or commands, dashboard or run overview state, and recent lessons.",
-        "Do not declare runDecision complete unless the summary, checks, artifacts, or problems cite that evidence before declaring complete.",
-        "Return structured JSON with one of these decisions:",
-        "- runDecision complete: the run goal is satisfied; do not include nextTasks.",
-        "- runDecision continue: the run goal is not satisfied; include one to five nextTasks items, usually planners or workers with verifiers.",
-        "- runDecision verify: completion is uncertain; include one to five verifier nextTasks items.",
-        "- runDecision defer: the run goal is not satisfied, but progress is blocked by an external dependency or missing user/system action; do not include nextTasks.",
-      ].join("\n"),
-      doneWhen: [
-        "runDecision is complete, continue, verify, or defer",
-        "completion decision cites concrete evidence from repository files or docs, tests or commands, dashboard or run overview state, and recent lessons",
-        "complete does not create nextTasks",
-        "defer does not create nextTasks and cites the external dependency or missing action",
-        "continue or verify includes one to five nextTasks items",
-      ],
+      goal: GOAL_REVIEW_TASK_GOAL,
+      prompt: GOAL_REVIEW_TASK_PROMPT,
+      doneWhen: GOAL_REVIEW_TASK_DONE_WHEN,
     });
     return { created: true as const, taskId };
   }

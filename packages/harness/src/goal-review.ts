@@ -8,18 +8,21 @@ export const GOAL_REVIEW_TASK_PROMPT = [
   "Inspect the repository, README, tests, dashboard state, recent attempts, and run lessons.",
   "Before choosing a runDecision, cite concrete evidence from repository files or docs, tests or commands, dashboard or run overview state, and recent lessons.",
   "Do not declare runDecision complete unless the summary, checks, artifacts, or problems cite that evidence before declaring complete.",
+  "Use API, CLI, database, and deterministic test evidence first. Do not launch a browser unless the run changed user-facing UI and deterministic UI evidence cannot verify the change. Never open or reuse the operator's browser profile.",
+  "A zero-cost reversible external verification action is normal work: choose continue or verify and include a task that performs it through an existing authenticated API or CLI.",
   "Return structured JSON with one of these decisions:",
   "- runDecision complete: the run goal is satisfied; do not include nextTasks.",
   "- runDecision continue: the run goal is not satisfied; include one to five nextTasks items, usually planners or workers with verifiers.",
   "- runDecision verify: completion is uncertain; include one to five verifier nextTasks items.",
-  "- runDecision defer: the run goal is not satisfied, but progress is blocked by an external dependency or missing user/system action; do not include nextTasks.",
+  "- runDecision defer: the run goal requires spending, purchasing, recurring infrastructure, or a capital-policy decision outside the approved authority; do not include nextTasks.",
+  "Only use defer for spending or capital authority. Provider failures, missing test data, API verification, and worker failures must use continue or verify with concrete nextTasks.",
 ].join("\n");
 
 export const GOAL_REVIEW_TASK_DONE_WHEN = [
   "runDecision is complete, continue, verify, or defer",
   "completion decision cites concrete evidence from repository files or docs, tests or commands, dashboard or run overview state, and recent lessons",
   "complete does not create nextTasks",
-  "defer does not create nextTasks and cites the external dependency or missing action",
+  "defer does not create nextTasks and cites the spending or capital authority gate",
   "continue or verify includes one to five nextTasks items",
 ];
 
