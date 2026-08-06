@@ -748,7 +748,7 @@ describe("dashboard", () => {
     expect(html).toContain("persistDashboardState();");
     expect(html).toContain("persistFlowScrollState");
     expect(html).toContain("restoredFlowScrollState = null;");
-    expect(html).toContain("writeDashboardState({ selectedGoalId, workspaceTitleExpanded, selectedChangedFilePath, selectedTaskId, secondaryEvidenceOpen, designDetailsOpen, railExpanded, flowScroll: captureFlowScrollState() });");
+    expect(html).toContain("writeDashboardState({ selectedGoalId, workspaceTitleExpanded, selectedChangedFilePath, selectedTaskId, secondaryEvidenceOpen, designDetailsOpen, railExpanded, compactSurface, flowScroll: captureFlowScrollState() });");
     expect(html).toContain("scrollState.scrollHeight");
     expect(html).toContain("flowDelta");
     expect(html).toContain("Math.max(0, scrollState.scrollTop + flowDelta)");
@@ -1019,7 +1019,9 @@ describe("dashboard", () => {
     expectCssRule(styles, ".diff-row.context", ["background: transparent;"]);
     expect(styles).toContain("grid-template-columns: minmax(0, 1fr);");
     expect(styles).toContain(".inspector-panel { width: auto; min-width: 0; max-width: none; }");
-    expect(styles).toContain(".task-sidebar { min-width: 0; overflow-x: hidden; overflow-y: visible; }");
+    expect(styles).toContain("max-height: min(32dvh, 260px);");
+    expect(styles).toContain("overflow-x: hidden;");
+    expect(styles).toContain("overflow-y: auto;");
   });
 
   test("defines reusable static overflow contracts for canvas node surfaces", () => {
@@ -1078,8 +1080,8 @@ describe("dashboard", () => {
     expect(html).toContain("railExpanded = restoredDashboardState.railExpanded !== false;");
     expect(html).toContain("railExpanded: parsed.railExpanded === false ? false : true,");
     expect(html).toContain("railExpanded: state.railExpanded === false ? false : true,");
-    expect(html).toContain("railExpanded, flowScroll: captureFlowScrollState()");
-    expect(html).toContain("railExpanded, flowScroll");
+    expect(html).toContain("railExpanded, compactSurface, flowScroll: captureFlowScrollState()");
+    expect(html).toContain("railExpanded, compactSurface, flowScroll");
     expect(html).not.toContain("linear-gradient");
   });
 
@@ -4205,7 +4207,7 @@ describe("dashboard", () => {
     expect(html).toContain("'<details' + (secondaryEvidenceOpen ? ' open' : '') + '>'");
     expect(html).toContain("secondaryEvidenceOpen: parsed.secondaryEvidenceOpen === true,");
     expect(html).toContain("secondaryEvidenceOpen: state.secondaryEvidenceOpen === true,");
-    expect(html).toContain("secondaryEvidenceOpen, designDetailsOpen, railExpanded, flowScroll: captureFlowScrollState()");
+    expect(html).toContain("secondaryEvidenceOpen, designDetailsOpen, railExpanded, compactSurface, flowScroll: captureFlowScrollState()");
   });
 
   test("AI SDK message-part mapper covers assistant text, reasoning, tool input/output, approval, and error events", () => {
@@ -4647,7 +4649,7 @@ describe("dashboard", () => {
 
     // Both persistence writers must serialize the in-memory selectedTaskId so the
     // run-scoped storage record preserves the selection across reloads and run switches.
-    expect(html).toContain("writeDashboardState({ selectedGoalId, workspaceTitleExpanded, selectedChangedFilePath, selectedTaskId, secondaryEvidenceOpen, designDetailsOpen, railExpanded, flowScroll: captureFlowScrollState() });");
+    expect(html).toContain("writeDashboardState({ selectedGoalId, workspaceTitleExpanded, selectedChangedFilePath, selectedTaskId, secondaryEvidenceOpen, designDetailsOpen, railExpanded, compactSurface, flowScroll: captureFlowScrollState() });");
     const persistFlowMatch = html.match(/const persistFlowScrollState = \(\) => \{([\s\S]*?)\n    \};/);
     expect(persistFlowMatch).not.toBeNull();
     expect(persistFlowMatch ? persistFlowMatch[1] : "").toContain("selectedTaskId");
@@ -4799,6 +4801,14 @@ describe("dashboard", () => {
     expect(html).toContain("graph,");
     expect(html).toContain("selectedTaskId: initialSelected,");
     expect(html).toContain("onSelectTask: selectCanvasTask,");
+  });
+
+  test("selects a React Flow task on primary pointer down before canvas drag handling", async () => {
+    const source = await readFile(join(import.meta.dir, "../packages/cli/src/dashboard-canvas.tsx"), "utf8");
+
+    expect(source).toContain("onPointerDown={(event) => {");
+    expect(source).toContain("if (event.button !== 0) return;");
+    expect(source).toContain("selectTask(mount, id);");
   });
 
   test("passes the selected task identity to the React Flow canvas and reads it back on remount", () => {
@@ -5020,6 +5030,296 @@ describe("dashboard", () => {
     expect(html).toContain("Stop background runner");
     expect(html).toContain("Start supervisor");
     expect(html).toContain("Stop supervisor");
+  });
+
+  test("PAN-1205 compact workspace exposes one explicit Canvas/Task details switch", () => {
+    const html = dashboardHtml({ runId: "run_123" });
+
+    // One canonical compactSurface state lives in the run-scoped dashboard state.
+    expect(html).toContain("compactSurface: parsed.compactSurface === \"details\" ? \"details\" : \"canvas\"");
+    expect(html).toContain("compactSurface: state.compactSurface === \"details\" ? \"details\" : \"canvas\"");
+    expect(html).toContain("let compactSurface = restoredDashboardState.compactSurface === \"details\" ? \"details\" : \"canvas\";");
+
+    // The render cycle mounts the switch on every overview refresh.
+    expect(html).toContain("mountCompactSurfaceSwitch()");
+
+    // The switch is rendered with explicit Canvas and Task details buttons.
+    expect(html).toContain("data-compact-surface-switch");
+    expect(html).toContain("data-compact-surface-toggle=\"canvas\"");
+    expect(html).toContain("data-compact-surface-toggle=\"details\"");
+    expect(html).toContain(">Canvas<");
+    expect(html).toContain(">Task details<");
+
+    // The switch carries the active surface as a data attribute on the host and shell.
+    expect(html).toContain("host.setAttribute(\"data-compact-surface\", next);");
+    expect(html).toContain("shell.setAttribute(\"data-compact-surface\", next);");
+
+    // aria-pressed communicates the active control without color alone.
+    expect(html).toContain("compact-surface-switch-button");
+    expect(html).toContain("button.setAttribute(\"aria-pressed\", isActive ? \"true\" : \"false\");");
+
+    // Pointer click on either switch button delegates through one canonical handler.
+    expect(html).toContain("const compactToggle = event.target.closest(\"[data-compact-surface-toggle]\");");
+    expect(html).toContain("const next = compactToggle.getAttribute(\"data-compact-surface-toggle\") === \"details\" ? \"details\" : \"canvas\";");
+    expect(html).toContain("setCompactSurface(next);");
+
+    // setCompactSurface persists and re-syncs the shell attribute in one path.
+    expect(html).toContain("const setCompactSurface = (next) => {");
+    expect(html).toContain("compactSurface = value;");
+    expect(html).toContain("syncCompactSurface();");
+    expect(html).toContain("persistDashboardState();");
+
+    // No new top-level storage key was introduced; compactSurface lives in the run-scoped key.
+    expect(html).not.toContain("ouroboros:dashboard:compactSurface");
+    expect(html).not.toContain("ouroboros:dashboard:surface");
+  });
+
+  test("PAN-1205 compact switch persists selectedTaskId across surface changes and refreshes", () => {
+    const html = dashboardHtml({ runId: "run_123" });
+
+    // setCompactSurface writes through persistDashboardState, which preserves selectedTaskId.
+    const setCompactMatch = html.match(/const setCompactSurface = \(next\) => \{([\s\S]*?)\n    \};/);
+    expect(setCompactMatch).not.toBeNull();
+    const setCompactBody = setCompactMatch ? setCompactMatch[1] : "";
+    expect(setCompactBody).toContain("persistDashboardState()");
+    expect(setCompactBody).not.toContain("selectedTaskId = null");
+    expect(setCompactBody).not.toContain("selectedTaskId = ''");
+
+    // persistDashboardState and persistFlowScrollState carry compactSurface alongside selectedTaskId.
+    expect(html).toContain("writeDashboardState({ selectedGoalId, workspaceTitleExpanded, selectedChangedFilePath, selectedTaskId, secondaryEvidenceOpen, designDetailsOpen, railExpanded, compactSurface, flowScroll: captureFlowScrollState() });");
+
+    // Compact surface is restored on run changes through the canonical readDashboardState path.
+    expect(html).toContain("compactSurface = restored.compactSurface === \"details\" ? \"details\" : \"canvas\";");
+
+    // selectCanvasTask does NOT change the compact surface; selection is independent of surface.
+    const selectMatch = html.match(/const selectCanvasTask = \(taskId\) => \{([\s\S]*?)\n    \};/);
+    expect(selectMatch).not.toBeNull();
+    const selectBody = selectMatch ? selectMatch[1] : "";
+    expect(selectBody).not.toContain("setCompactSurface");
+    expect(selectBody).not.toContain("compactSurface =");
+
+    // The render path does not overwrite compactSurface with a hardcoded value.
+    expect(html).not.toContain("compactSurface = \"canvas\";");
+    expect(html).not.toContain("compactSurface = \"details\";");
+  });
+
+  test("PAN-1205 compact surface state round-trips through run-scoped storage", () => {
+    const html = dashboardHtml({ runId: "run_compact" });
+
+    const readMatch = html.match(/const readDashboardState = \(\) => \{([\s\S]*?)\n    \};/);
+    const writeMatch = html.match(/const writeDashboardState = \(state\) => \{([\s\S]*?)\n    \};/);
+    expect(readMatch).not.toBeNull();
+    expect(writeMatch).not.toBeNull();
+
+    const store = new Map<string, string>();
+    const fakeWindow = {
+      localStorage: {
+        getItem: (key: string) => (store.has(key) ? store.get(key)! : null),
+        setItem: (key: string, value: string) => { store.set(key, value); },
+        removeItem: (key: string) => { store.delete(key); },
+      },
+    };
+    const dashboardStorageKey = "ouroboros:dashboard:run_compact";
+    const readDashboardState = () => {
+      return new Function(
+        "window",
+        "dashboardStorageKey",
+        `${readMatch![1]}; return readDashboardState();`,
+      )(fakeWindow, dashboardStorageKey) as Record<string, unknown>;
+    };
+    const writeDashboardState = (state: Record<string, unknown>) => {
+      new Function(
+        "window",
+        "dashboardStorageKey",
+        "state",
+        writeMatch![1],
+      )(fakeWindow, dashboardStorageKey, state);
+    };
+
+    // Persist details surface with a selected task; both must survive the round trip.
+    writeDashboardState({
+      selectedGoalId: null,
+      workspaceTitleExpanded: false,
+      selectedChangedFilePath: null,
+      selectedTaskId: "task_compact_select",
+      secondaryEvidenceOpen: false,
+      designDetailsOpen: false,
+      railExpanded: true,
+      compactSurface: "details",
+      flowScroll: null,
+    });
+    const stored = JSON.parse(store.get(dashboardStorageKey)!);
+    expect(stored.compactSurface).toBe("details");
+    expect(stored.selectedTaskId).toBe("task_compact_select");
+
+    // Reading back preserves both values.
+    const restored = readDashboardState();
+    expect(restored.compactSurface).toBe("details");
+    expect(restored.selectedTaskId).toBe("task_compact_select");
+
+    // Switching back to canvas persists canvas without dropping the selection.
+    writeDashboardState({
+      ...restored,
+      compactSurface: "canvas",
+    } as Record<string, unknown>);
+    const restoredCanvas = JSON.parse(store.get(dashboardStorageKey)!);
+    expect(restoredCanvas.compactSurface).toBe("canvas");
+    expect(restoredCanvas.selectedTaskId).toBe("task_compact_select");
+
+    // An invalid surface value normalizes to canvas (the default), not null.
+    writeDashboardState({
+      selectedGoalId: null,
+      workspaceTitleExpanded: false,
+      selectedChangedFilePath: null,
+      selectedTaskId: null,
+      secondaryEvidenceOpen: false,
+      designDetailsOpen: false,
+      railExpanded: true,
+      compactSurface: "nonsense",
+      flowScroll: null,
+    });
+    const restoredInvalid = readDashboardState();
+    expect(restoredInvalid.compactSurface).toBe("canvas");
+  });
+
+  test("PAN-1205 compact layout shows one primary surface and removes the 560px stack", () => {
+    const styles = dashboardCss();
+    const normalizedStyles = styles.replace(/\r\n/g, "\n");
+
+    // The app shell carries the active surface and shows only one of workspace/inspector at compact width.
+    expect(styles).toContain(".app-shell[data-compact-surface=\"canvas\"] .workspace");
+    expect(styles).toContain(".app-shell[data-compact-surface=\"details\"] .inspector-panel");
+    expect(styles).toContain(".app-shell[data-compact-surface=\"details\"] .workspace");
+    expect(styles).toContain(".app-shell[data-compact-surface=\"canvas\"] .inspector-panel");
+    expect(normalizedStyles).toContain('.app-shell[data-rail="collapsed"],\n  .app-shell[data-rail="expanded"]');
+
+    // The compact block shows the inactive surface via display:none, not visibility:hidden or opacity:0.
+    expect(styles).toContain("display: none;");
+
+    // The fixed 560px canvas height has been removed: no 560px literal survives in the CSS.
+    expect(styles).not.toContain("560px");
+
+    // The minimap is hidden at compact width so it does not compete with the task graph.
+    expect(styles).toContain(".react-flow__minimap { display: none; }");
+
+    // The compact surface switch has visible focus styling, not color alone.
+    expect(styles).toContain(".compact-surface-switch-button:focus-visible");
+    expect(styles).toContain("outline: 2px solid");
+
+    // The compact surface switch button has an active affordance with text styling.
+    expect(styles).toContain(".compact-surface-switch-button.is-active");
+    expect(styles).toContain(".compact-surface-switch-button[aria-pressed=\"true\"]");
+
+    // The compact .canvas-inner rule keeps the graph responsive without re-introducing a fixed height.
+    const compactCanvasInnerMatch = normalizedStyles.match(/@media \(max-width: 900px\) \{[\s\S]*?\.canvas-inner \{([^}]*)\}/);
+    expect(compactCanvasInnerMatch).not.toBeNull();
+    const compactCanvasInnerBody = compactCanvasInnerMatch ? compactCanvasInnerMatch[1] : "";
+    expect(compactCanvasInnerBody).toContain("height: 100%;");
+    expect(compactCanvasInnerBody).toContain("min-height: 320px;");
+    expect(compactCanvasInnerBody).not.toContain("560px");
+
+    const compactSidebarMatch = normalizedStyles.match(/@media \(max-width: 900px\) \{[\s\S]*?\.task-sidebar \{([^}]*)\}/);
+    expect(compactSidebarMatch).not.toBeNull();
+    const compactSidebarBody = compactSidebarMatch ? compactSidebarMatch[1] : "";
+    expect(compactSidebarBody).toContain("max-height: min(32dvh, 260px);");
+    expect(compactSidebarBody).toContain("overflow-y: auto;");
+  });
+
+  test("PAN-1205 compact CSS contains long text and prevents horizontal overflow at 390px", () => {
+    const styles = dashboardCss();
+    const normalizedStyles = styles.replace(/\r\n/g, "\n");
+
+    // Find the @media (max-width: 900px) block and verify its rules.
+    const compactBlockMatch = normalizedStyles.match(/@media \(max-width: 900px\) \{([\s\S]*?)\n\}/);
+    expect(compactBlockMatch).not.toBeNull();
+    const compactBlock = compactBlockMatch ? compactBlockMatch[1] : "";
+    expect(compactBlock).toContain("grid-template-columns: minmax(0, 1fr);");
+    expect(compactBlock).not.toContain("560px");
+
+    // html, body, and app-shell clamp document width so 390px viewports do not overflow.
+    expect(compactBlock).toContain("html, body { max-width: 100%; }");
+
+    // Workspace at compact width uses min-width: 0 and overflow: hidden so pathological text cannot push out.
+    expect(compactBlock).toContain(".workspace {");
+    expect(compactBlock).toContain("min-width: 0;");
+    expect(compactBlock).toContain("overflow: hidden;");
+
+    // The workspace head row uses flex with min-width:0 so the switch can shrink with the title.
+    expect(compactBlock).toContain(".workspace-head-row {");
+    expect(compactBlock).toContain("min-width: 0;");
+
+    // Long-text containment on the existing desktop rules is still in place.
+    expectCssRule(styles, ".workspace-title", ["overflow-wrap: anywhere;"]);
+    expectCssRule(styles, ".workspace-title.is-collapsed", ["-webkit-line-clamp: 2;", "overflow: hidden;"]);
+    expectCssRule(styles, ".of-node-goal", ["overflow-wrap: anywhere;"]);
+    expectCssRule(styles, ".of-node-meta", ["overflow-wrap: anywhere;"]);
+    expectCssRule(styles, ".canvas-inner", ["overflow: hidden;"]);
+
+    // The 480px breakpoint further clamps the switch so it cannot push past 390px.
+    const narrowBlockMatch = normalizedStyles.match(/@media \(max-width: 480px\) \{([\s\S]*?)\n\}/);
+    expect(narrowBlockMatch).not.toBeNull();
+    const narrowBlock = narrowBlockMatch ? narrowBlockMatch[1] : "";
+    expect(narrowBlock).toContain(".compact-surface-switch");
+    expect(narrowBlock).toContain("minmax(60px, 1fr)");
+    expect(narrowBlock).toContain(".canvas-inner { min-height: 280px; }");
+  });
+
+  test("PAN-1205 compact composer and selected-task summary are reachable without traversing the canvas", () => {
+    const html = dashboardHtml({ runId: "run_123" });
+    const styles = dashboardCss();
+
+    // At compact width, the inspector panel scrolls independently (not the full page).
+    const compactBlockMatch = styles.match(/@media \(max-width: 900px\) \{([\s\S]*?)\n\}/);
+    expect(compactBlockMatch).not.toBeNull();
+    const compactBlock = compactBlockMatch ? compactBlockMatch[1] : "";
+    expect(compactBlock).toContain(".inspector-panel {");
+    expect(compactBlock).toContain("overflow-y: auto;");
+    // The inspector is no longer height-constrained to viewport at compact width.
+    expect(compactBlock).toContain("height: auto;");
+    expect(compactBlock).not.toContain("height: 560px;");
+
+    // The composer is rendered as the second primary child of the inspector panel so it
+    // remains reachable once the user switches to Task details.
+    expect(html).toContain('data-inspector-section="composer"');
+    expect(html).toContain('id="inspector-composer-section"');
+    expect(html).toContain("inspector-composer-form");
+    expect(html).toContain("inspector-composer-input");
+
+    // The Task summary section is the canonical entry point of the inspector panel
+    // when a task is selected, and it appears before the conversation and composer.
+    expect(html).toContain('data-inspector-section="progress"');
+    expect(html).toContain("Task summary");
+
+    // The Task details surface is wired so that switching to it does not change selection;
+    // selectCanvasTask's body does not touch compactSurface (asserted elsewhere).
+    const switchMatch = html.match(/const setCompactSurface = \(next\) => \{([\s\S]*?)\n    \};/);
+    expect(switchMatch).not.toBeNull();
+    const switchBody = switchMatch ? switchMatch[1] : "";
+    expect(switchBody).toContain("syncCompactSurface();");
+    expect(switchBody).toContain("persistDashboardState();");
+    expect(switchBody).not.toContain("selectedTaskId");
+  });
+
+  test("PAN-1205 compact switch keeps keyboard focus and aria-pressed in sync", () => {
+    const html = dashboardHtml({ runId: "run_123" });
+
+    // syncCompactSurface updates both the data attribute and aria-pressed for every button.
+    expect(html).toContain("const syncCompactSurface = () => {");
+    expect(html).toContain("shell.setAttribute(\"data-compact-surface\", next);");
+    expect(html).toContain("host.setAttribute(\"data-compact-surface\", next);");
+    expect(html).toContain("button.setAttribute(\"aria-pressed\", isActive ? \"true\" : \"false\");");
+    expect(html).toContain("if (isActive) button.setAttribute(\"aria-current\", \"true\"); else button.removeAttribute(\"aria-current\");");
+    expect(html).toContain("button.classList.toggle(\"is-active\", isActive);");
+
+    // The init path runs syncCompactSurface after the worker boots so the shell attribute is set
+    // before any user interaction.
+    expect(html).toContain("maybeRefreshDesignStatus(true);\n    syncCompactSurface();");
+
+    // The compact switch is mounted as a focusable group of real buttons so keyboard users
+    // can tab to it and activate either option with Enter/Space (default button behavior).
+    expect(html).toContain('role="group"');
+    expect(html).toContain('aria-label="Workspace surface"');
+    expect(html).toContain('<button type="button" class="compact-surface-switch-button"');
   });
 
   test("workspace model inspector exposes Linear intake lifecycle fields when provided", () => {

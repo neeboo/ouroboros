@@ -96,7 +96,8 @@ function CanvasNode({
       role="button"
       aria-pressed={selected ? "true" : "false"}
       aria-label={`Task ${data.role} ${data.status}: ${data.goal}. ${selected ? "Selected." : "Press Enter or Space to select."}`}
-      onClick={(event) => {
+      onPointerDown={(event) => {
+        if (event.button !== 0) return;
         event.stopPropagation();
         selectTask(mount, id);
       }}
