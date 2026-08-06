@@ -7489,6 +7489,29 @@ describe("CLI", () => {
       goal: "Continue independent delivery",
       prompt: "Complete the independent delivery while recovery proceeds in parallel.",
     });
+    const secondBlockedRunId = setupHarness.createRun({
+      goal: "Second blocked delivery",
+      context: { parentRunId: bootstrap.runId, source: "design" },
+    });
+    const secondBlockedTaskId = setupHarness.createTask({
+      runId: secondBlockedRunId,
+      role: "worker",
+      goal: "Repair the second blocked delivery",
+      prompt: "Inspect and repair the second blocked delivery.",
+    });
+    setupHarness.recordAttempt({
+      taskId: secondBlockedTaskId,
+      input: { backend: { id: "codex-resumable", kind: "codex-resumable" } },
+      output: {
+        status: "blocked",
+        summary: "Second delivery needs repair",
+        changedFiles: [],
+        checks: [],
+        artifacts: [],
+        problems: ["repair required"],
+      },
+    });
+    setupHarness.updateRunStatus({ runId: secondBlockedRunId, status: "blocked" });
 
     const codexBin = join(dir, "fake-codex-assessment-recovery");
     const payload = {
@@ -7544,7 +7567,10 @@ describe("CLI", () => {
     expect(result.ticks[0]).toMatchObject({
       status: "ok",
       createdCycle: null,
-      recovery: expect.objectContaining({ runId: assessmentRunId, sourceTaskId: designerTaskId }),
+      recoveries: expect.arrayContaining([
+        expect.objectContaining({ runId: assessmentRunId, sourceTaskId: designerTaskId }),
+        expect.objectContaining({ runId: secondBlockedRunId, sourceTaskId: secondBlockedTaskId }),
+      ]),
     });
     expect(
       runs.filter(

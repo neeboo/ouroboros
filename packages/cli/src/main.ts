@@ -1777,7 +1777,9 @@ async function superviseSelfImprovementDaemon(input: SelfImprovementDaemonInput)
             index,
             status: "ok",
             createdCycle: cycle.createdCycle,
-            ...(cycle.state === "recovery" ? { recovery: cycle.recovery } : {}),
+            ...(cycle.state === "recovery"
+              ? { recovery: cycle.recovery, recoveries: cycle.recoveries }
+              : {}),
             authorityReconciliation,
             result,
             runCounts: harness.countRunsByStatus(),
@@ -2048,12 +2050,13 @@ async function runSupervisorLinearPoll(input: {
 
 function ensureSelfImprovementCycle(rootRunId: string, cwd: string) {
   const scopedRuns = selfImprovementRuns(rootRunId);
-  const recovery = recoverBlockedSelfImprovementRun(rootRunId, scopedRuns);
-  if (recovery) {
+  const recoveries = recoverBlockedSelfImprovementRuns(rootRunId, scopedRuns);
+  if (recoveries.length > 0) {
     return {
       state: "recovery" as const,
       createdCycle: null,
-      recovery,
+      recovery: recoveries[0],
+      recoveries,
     };
   }
 
@@ -2148,10 +2151,20 @@ function ensureSelfImprovementCycle(rootRunId: string, cwd: string) {
   };
 }
 
-function recoverBlockedSelfImprovementRun(
+function recoverBlockedSelfImprovementRuns(
   rootRunId: string,
   scopedRuns: ReturnType<typeof selfImprovementRuns>,
 ) {
+  const recoveries: Array<{
+    runId: string;
+    taskId: string;
+    sourceTaskId: string;
+    sourceAttemptId: string | null;
+    terminalReason: string | null;
+    fromBackend: string;
+    toBackend: string;
+    resumed: boolean;
+  }> = [];
   const blockedRuns = [...scopedRuns]
     .reverse()
     .filter((run) => {
@@ -2164,11 +2177,7 @@ function recoverBlockedSelfImprovementRun(
     const overview = harness.getRunOverview({ runId: run.id, eventLimit: 0 });
     const blockedSessions = [...overview.sessions]
       .filter((session) => session.status === "blocked")
-      .sort((left, right) => {
-        const leftFinished = left.finishedAt ?? left.startedAt ?? "";
-        const rightFinished = right.finishedAt ?? right.startedAt ?? "";
-        return rightFinished.localeCompare(leftFinished) || right.attemptId.localeCompare(left.attemptId);
-      });
+      .reverse();
     const sourceSession = blockedSessions.find((session) => session.backend != null) ?? blockedSessions[0] ?? null;
     const sourceTask = sourceSession
       ? overview.tasks.find((task) => task.id === sourceSession.taskId)
@@ -2189,7 +2198,7 @@ function recoverBlockedSelfImprovementRun(
 
     if (existingRecovery) {
       harness.updateRunStatus({ runId: run.id, status: "todo" });
-      return {
+      recoveries.push({
         runId: run.id,
         taskId: existingRecovery.id,
         sourceTaskId: sourceTask.id,
@@ -2198,7 +2207,8 @@ function recoverBlockedSelfImprovementRun(
         fromBackend,
         toBackend,
         resumed: true,
-      };
+      });
+      continue;
     }
 
     const previousRecovery = recordValue(sourceTask.config?.automaticRecovery);
@@ -2273,7 +2283,7 @@ function recoverBlockedSelfImprovementRun(
         },
       },
     });
-    return {
+    recoveries.push({
       runId: run.id,
       taskId: recoveryTaskId,
       sourceTaskId: sourceTask.id,
@@ -2282,10 +2292,10 @@ function recoverBlockedSelfImprovementRun(
       fromBackend,
       toBackend,
       resumed: false,
-    };
+    });
   }
 
-  return null;
+  return recoveries;
 }
 
 function terminalReasonForSession(session: RunOverview["sessions"][number]) {
