@@ -55,7 +55,14 @@ import type { CodexSandbox, ResolvedExecutionRoute, StopHook } from "@ouroboros/
 import { fail, flag, parseArgs, required } from "./args";
 import { loadOuroborosConfig, resolveLinearPolling, type LinearConfig } from "./config";
 import { parseArray, parseObject, printJson } from "./json";
-import { checkLinearAccess, createLinearIssue, ingestLinearEvent, linkLinearIssue } from "./linear";
+import {
+  checkLinearAccess,
+  createLinearIssue,
+  ingestLinearEvent,
+  linkLinearIssue,
+  updateLinearIssueStatus,
+  writeLinearEvidenceComment,
+} from "./linear";
 import {
   cacheResolvedProjectSelector,
   consumeLinearInbox,
@@ -556,6 +563,41 @@ switch (parsed.command) {
       apiUrl: flag(parsed, "api-url") ?? linear.apiUrl ?? null,
     });
     printJson(result);
+    break;
+  }
+  case "linear-update-status": {
+    const config = await loadCliConfig();
+    const linear = config.linear ?? {};
+    const result = await updateLinearIssueStatus({
+      issueId: flag(parsed, "issue-id") ?? "",
+      stateId: flag(parsed, "state-id") ?? "",
+      teamKey: flag(parsed, "team-key") ?? linear.teamKey ?? null,
+      tokenFile: flag(parsed, "token-file") ?? linear.tokenFile ?? null,
+      tokenEnv: flag(parsed, "token-env") ?? linear.tokenEnv ?? null,
+      apiUrl: flag(parsed, "api-url") ?? linear.apiUrl ?? null,
+    });
+    printJson(result);
+    if (result.outcome !== "verified") {
+      process.exitCode = 1;
+    }
+    break;
+  }
+  case "linear-write-evidence-comment": {
+    const config = await loadCliConfig();
+    const linear = config.linear ?? {};
+    const result = await writeLinearEvidenceComment({
+      issueId: flag(parsed, "issue-id") ?? "",
+      idempotencyKey: flag(parsed, "idempotency-key") ?? "",
+      evidenceSummary: flag(parsed, "evidence-summary") ?? "",
+      idempotencySecretFile: flag(parsed, "idempotency-secret-file") ?? null,
+      tokenFile: flag(parsed, "token-file") ?? linear.tokenFile ?? null,
+      tokenEnv: flag(parsed, "token-env") ?? linear.tokenEnv ?? null,
+      apiUrl: flag(parsed, "api-url") ?? linear.apiUrl ?? null,
+    });
+    printJson(result);
+    if (result.outcome !== "verified") {
+      process.exitCode = 1;
+    }
     break;
   }
   case "linear-link-issue": {
@@ -1172,6 +1214,8 @@ function printHelp() {
     "  action               Apply a harness action such as integrateVerifiedRun",
     "  poll-linear-issues   Run one bounded Linear polling cycle for a supervised run",
     "  linear-create-issue  Create a scoped Linear issue through the configured API token",
+    "  linear-update-status Update one issue to an exact state UUID and verify via independent readback",
+    "  linear-write-evidence-comment Create or sequentially reuse one bounded evidence comment and verify readback (requires --idempotency-secret-file)",
     "  linear-poll-state    Print the durable Linear polling state for a supervised run",
     "  linear-consume-inbox Claim durable Linear issue events into issue-scoped Designer runs",
     "",

@@ -1351,6 +1351,667 @@ describe("CLI", () => {
     }
   });
 
+  test("linear-check redacts GraphQL credential echoes from stderr", async () => {
+    const token = "lin_api_graphql_echo_value_456";
+    const tokenPath = join(dir, "linear-credential");
+    const configPath = join(dir, "linear-redaction.toml");
+    const server = startTestServer({
+      fetch() {
+        return Response.json({
+          errors: [{
+            message: `upstream echoed ${token}`,
+            extensions: {
+              Authorization: `Bearer ${token}`,
+              secret: "OTHER_SECRET_789",
+            },
+          }],
+        });
+      },
+    });
+    if (!server) {
+      expect(Bun.version).toBeString();
+      return;
+    }
+    try {
+      await writeFile(tokenPath, token);
+      await writeFile(
+        configPath,
+        [
+          "[linear]",
+          `api_url = "http://127.0.0.1:${server.port}/graphql"`,
+          `token_file = "${tokenPath}"`,
+          'project_id = "project_1"',
+          'team_key = "PAN"',
+          "",
+        ].join("\n"),
+      );
+
+      const result = await runCliRaw("linear-check", "--config", configPath);
+      const output = `${result.stdout}\n${result.stderr}`;
+      expect(result.exitCode).not.toBe(0);
+      for (const forbidden of [token, "OTHER_SECRET_789", "Authorization", "Bearer", '"secret"']) {
+        expect(output).not.toContain(forbidden);
+      }
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  test("linear-update-status requires exact issue and state UUIDs and verifies a separate readback", async () => {
+    const fixture = await createLinearWritebackFixture();
+    if (!fixture) {
+      expect(Bun.version).toBeString();
+      return;
+    }
+    try {
+      const result = await runCliJson(
+        "linear-update-status",
+        "--config",
+        fixture.configPath,
+        "--issue-id",
+        fixture.issueId,
+        "--state-id",
+        fixture.targetStateId,
+      );
+
+      expect(result).toMatchObject({
+        outcome: "verified",
+        status: "verified",
+        issue: {
+          id: fixture.issueId,
+          team: { id: fixture.teamId, key: "PAN" },
+          state: { id: fixture.targetStateId, name: "In Progress", type: "started" },
+        },
+        state: { id: fixture.targetStateId, name: "In Progress" },
+        readback: {
+          issue: {
+            id: fixture.issueId,
+            team: { id: fixture.teamId, key: "PAN" },
+            state: { id: fixture.targetStateId, name: "In Progress" },
+          },
+        },
+      });
+      expect(fixture.issueUpdateCalls()).toBe(1);
+      expect(fixture.operationNames()).toEqual([
+        "OuroborosLinearStatusScope",
+        "OuroborosLinearStatusUpdate",
+        "OuroborosLinearStatusReadback",
+      ]);
+      expect(fixture.requests[1]?.variables).toEqual({
+        issueId: fixture.issueId,
+        input: { stateId: fixture.targetStateId },
+      });
+      for (const request of fixture.requests) {
+        expect(request.query).not.toContain("$issueId: ID!");
+        expect(request.query).not.toContain("$stateId: ID!");
+        expect(request.query).not.toContain("$commentId: ID!");
+      }
+    } finally {
+      fixture.server.stop(true);
+    }
+  });
+
+  test("linear-update-status rejects mismatched immutable issue readback and redacts echoed credentials", async () => {
+    const mismatch = await createLinearWritebackFixture({ readbackIssueId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" });
+    if (!mismatch) {
+      expect(Bun.version).toBeString();
+      return;
+    }
+    try {
+      const result = await runCliRaw(
+        "linear-update-status",
+        "--config",
+        mismatch.configPath,
+        "--issue-id",
+        mismatch.issueId,
+        "--state-id",
+        mismatch.targetStateId,
+      );
+      expect(result.exitCode).not.toBe(0);
+      expect(JSON.parse(result.stdout)).toMatchObject({ outcome: "failed", status: "readback_mismatch" });
+    } finally {
+      mismatch.server.stop(true);
+    }
+
+    const reflected = await createLinearWritebackFixture({ echoCredentialError: true });
+    if (!reflected) {
+      expect(Bun.version).toBeString();
+      return;
+    }
+    try {
+      const result = await runCliRaw(
+        "linear-update-status",
+        "--config",
+        reflected.configPath,
+        "--issue-id",
+        reflected.issueId,
+        "--state-id",
+        reflected.targetStateId,
+      );
+      expect(result.exitCode).not.toBe(0);
+      expect(JSON.parse(result.stdout)).toMatchObject({ outcome: "failed", status: "graphql_error" });
+      expect(`${result.stdout}\n${result.stderr}`).not.toContain(reflected.token);
+      expect(`${result.stdout}\n${result.stderr}`).not.toContain("Authorization");
+      expect(`${result.stdout}\n${result.stderr}`).not.toContain("Bearer");
+    } finally {
+      reflected.server.stop(true);
+    }
+  });
+
+  test("linear-update-status whitelists readback fields before writing structured output", async () => {
+    const fixture = await createLinearWritebackFixture({ injectSensitiveExtraFields: true });
+    if (!fixture) {
+      expect(Bun.version).toBeString();
+      return;
+    }
+    try {
+      const result = await runCliRaw(
+        "linear-update-status",
+        "--config",
+        fixture.configPath,
+        "--issue-id",
+        fixture.issueId,
+        "--state-id",
+        fixture.targetStateId,
+      );
+      expect(result.exitCode).toBe(0);
+      expect(JSON.parse(result.stdout)).toMatchObject({ outcome: "verified", status: "verified" });
+      expect(result.stdout).not.toContain("OTHER_SECRET_456");
+      expect(result.stdout).not.toContain("Authorization");
+      expect(result.stdout).not.toContain("Bearer");
+    } finally {
+      fixture.server.stop(true);
+    }
+  });
+
+  test("linear-update-status rejects sensitive state names and malformed nested GraphQL data", async () => {
+    for (const options of [{ sensitiveStateName: true }, { malformedStatusScope: true }]) {
+      const fixture = await createLinearWritebackFixture(options);
+      if (!fixture) {
+        expect(Bun.version).toBeString();
+        return;
+      }
+      try {
+        const result = await runCliRaw(
+          "linear-update-status",
+          "--config",
+          fixture.configPath,
+          "--issue-id",
+          fixture.issueId,
+          "--state-id",
+          fixture.targetStateId,
+        );
+        const output = `${result.stdout}\n${result.stderr}`;
+        expect(result.exitCode).not.toBe(0);
+        expect(JSON.parse(result.stdout)).toMatchObject({ outcome: "failed" });
+        for (const forbidden of ["OTHER_SECRET_999", "access_token", "Authorization", "Bearer"]) {
+          expect(output).not.toContain(forbidden);
+        }
+      } finally {
+        fixture.server.stop(true);
+      }
+    }
+  });
+
+  test("Linear writeback commands return structured config errors and reject mutable issue identifiers", async () => {
+    const missingStatus = await runCliRaw("linear-update-status");
+    const missingComment = await runCliRaw("linear-write-evidence-comment");
+    expect(missingStatus.exitCode).not.toBe(0);
+    expect(missingComment.exitCode).not.toBe(0);
+    expect(JSON.parse(missingStatus.stdout)).toMatchObject({ outcome: "failed", status: "config_error" });
+    expect(JSON.parse(missingComment.stdout)).toMatchObject({ outcome: "failed", status: "config_error" });
+
+    const fixture = await createLinearWritebackFixture();
+    if (!fixture) {
+      expect(Bun.version).toBeString();
+      return;
+    }
+    try {
+      const mutableIdentifier = await runCliRaw(
+        "linear-update-status",
+        "--config",
+        fixture.configPath,
+        "--issue-id",
+        "PAN-1232",
+        "--state-id",
+        fixture.targetStateId,
+      );
+      expect(JSON.parse(mutableIdentifier.stdout)).toMatchObject({ outcome: "failed", status: "config_error" });
+      expect(fixture.issueUpdateCalls()).toBe(0);
+
+      const missingSecret = await runCliRaw(
+        "linear-write-evidence-comment",
+        "--config",
+        fixture.configPath,
+        "--issue-id",
+        fixture.issueId,
+        "--idempotency-key",
+        "missing-secret-v1",
+        "--evidence-summary",
+        "evidence",
+      );
+      expect(missingSecret.exitCode).not.toBe(0);
+      expect(JSON.parse(missingSecret.stdout)).toMatchObject({ outcome: "failed", status: "config_error" });
+      expect(fixture.commentCreateCalls()).toBe(0);
+
+      const invalidCommentId = await runCliRaw(
+        "linear-write-evidence-comment",
+        "--config",
+        fixture.configPath,
+        "--issue-id",
+        "Authorization=Bearer OTHER_SECRET_456",
+        "--idempotency-key",
+        "invalid-issue-v1",
+        "--evidence-summary",
+        "evidence",
+      );
+      const invalidOutput = `${invalidCommentId.stdout}\n${invalidCommentId.stderr}`;
+      expect(invalidCommentId.exitCode).not.toBe(0);
+      expect(JSON.parse(invalidCommentId.stdout)).toMatchObject({ outcome: "failed", status: "config_error" });
+      for (const forbidden of ["OTHER_SECRET_456", "Authorization", "Bearer"]) {
+        expect(invalidOutput).not.toContain(forbidden);
+      }
+    } finally {
+      fixture.server.stop(true);
+    }
+
+    const mismatchedScope = await createLinearWritebackFixture({
+      scopeIssueId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+    });
+    if (!mismatchedScope) {
+      expect(Bun.version).toBeString();
+      return;
+    }
+    try {
+      const result = await runCliRaw(
+        "linear-update-status",
+        "--config",
+        mismatchedScope.configPath,
+        "--issue-id",
+        mismatchedScope.issueId,
+        "--state-id",
+        mismatchedScope.targetStateId,
+      );
+      expect(JSON.parse(result.stdout)).toMatchObject({ outcome: "failed", status: "scope_mismatch" });
+      expect(mismatchedScope.issueUpdateCalls()).toBe(0);
+    } finally {
+      mismatchedScope.server.stop(true);
+    }
+  });
+
+  test("linear-write-evidence-comment creates once, independently reads back, then reuses sequentially", async () => {
+    const fixture = await createLinearWritebackFixture();
+    if (!fixture) {
+      expect(Bun.version).toBeString();
+      return;
+    }
+    try {
+      const args = [
+        "linear-write-evidence-comment",
+        "--config",
+        fixture.configPath,
+        "--idempotency-secret-file",
+        fixture.writebackSecretPath,
+        "--issue-id",
+        fixture.issueId,
+        "--idempotency-key",
+        "pan-1236-verifier-v1",
+        "--evidence-summary",
+        "  focused tests: pass\r\nfull suite: pass  ",
+      ];
+      const created = await runCliJson(...args);
+      await fixture.rotateToken();
+      const reused = await runCliJson(...args);
+
+      expect(created).toMatchObject({
+        outcome: "verified",
+        status: "created",
+        issueId: fixture.issueId,
+        comment: { id: "comment_1" },
+        verifiedBy: "independent_readback",
+      });
+      expect(reused).toMatchObject({
+        outcome: "verified",
+        status: "reused",
+        issueId: fixture.issueId,
+        comment: { id: "comment_1" },
+        verifiedBy: "independent_readback",
+      });
+      expect(created.marker).toBe(reused.marker);
+      expect(created.summaryDigest).toBe(reused.summaryDigest);
+      expect(fixture.commentCreateCalls()).toBe(1);
+      expect(fixture.comments).toHaveLength(1);
+      expect(fixture.comments[0]?.body).toContain(created.marker);
+      expect(fixture.comments[0]?.body).toContain(created.summaryDigest);
+    } finally {
+      fixture.server.stop(true);
+    }
+  });
+
+  test("linear-write-evidence-comment recovers a lost mutation response without adding a second comment", async () => {
+    const fixture = await createLinearWritebackFixture({ loseCommentCreateResponseOnce: true });
+    if (!fixture) {
+      expect(Bun.version).toBeString();
+      return;
+    }
+    try {
+      const result = await runCliJson(
+        "linear-write-evidence-comment",
+        "--config",
+        fixture.configPath,
+        "--idempotency-secret-file",
+        fixture.writebackSecretPath,
+        "--issue-id",
+        fixture.issueId,
+        "--idempotency-key",
+        "lost-response-v1",
+        "--evidence-summary",
+        "status verified; comment response lost",
+      );
+
+      expect(result).toMatchObject({
+        outcome: "verified",
+        status: "reused",
+        issueId: fixture.issueId,
+        comment: { id: "comment_1" },
+        recovery: { mutationResponseLost: true },
+      });
+      expect(fixture.commentCreateCalls()).toBe(1);
+      expect(fixture.comments).toHaveLength(1);
+    } finally {
+      fixture.server.stop(true);
+    }
+  });
+
+  test("linear-write-evidence-comment redacts sensitive summaries without collapsing conflict identity", async () => {
+    const fixture = await createLinearWritebackFixture();
+    if (!fixture) {
+      expect(Bun.version).toBeString();
+      return;
+    }
+    try {
+      const args = [
+        "linear-write-evidence-comment",
+        "--config",
+        fixture.configPath,
+        "--idempotency-secret-file",
+        fixture.writebackSecretPath,
+        "--issue-id",
+        fixture.issueId,
+        "--idempotency-key",
+        "sensitive-evidence-v1",
+      ];
+      const first = await runCliJson(
+        ...args,
+        "--evidence-summary",
+        '{"access_token":"OTHER_SECRET_456","token":["masked-first","OTHER_SECRET_789"]}\npassword = 0420\nAuthorization: Bearer abc.def',
+      );
+      const changed = await runCliRaw(
+        ...args,
+        "--evidence-summary",
+        '{"access_token":"DIFFERENT_SECRET_456","token":["masked-second","DIFFERENT_SECRET_789"]}\npassword = 0421\nAuthorization: Bearer xyz.def',
+      );
+      const multiline = await runCliJson(
+        "linear-write-evidence-comment",
+        "--config",
+        fixture.configPath,
+        "--idempotency-secret-file",
+        fixture.writebackSecretPath,
+        "--issue-id",
+        fixture.issueId,
+        "--idempotency-key",
+        "sensitive-multiline-v1",
+        "--evidence-summary",
+        '{\n  "token": [\n    "OTHER_SECRET_MULTILINE_789"\n  ]\n}',
+      );
+      const nestedFragment = await runCliJson(
+        "linear-write-evidence-comment",
+        "--config",
+        fixture.configPath,
+        "--idempotency-secret-file",
+        fixture.writebackSecretPath,
+        "--issue-id",
+        fixture.issueId,
+        "--idempotency-key",
+        "sensitive-nested-fragment-v1",
+        "--evidence-summary",
+        'log fragment:\n"token": [["MASKED_FIRST"], "OTHER_SECRET_NESTED_789"]',
+      );
+      const leakedHmacSecret = await runCliJson(
+        "linear-write-evidence-comment",
+        "--config",
+        fixture.configPath,
+        "--idempotency-secret-file",
+        fixture.writebackSecretPath,
+        "--issue-id",
+        fixture.issueId,
+        "--idempotency-key",
+        "hmac-secret-redaction-v1",
+        "--evidence-summary",
+        fixture.writebackSecret,
+      );
+      const storedBody = fixture.comments[0]?.body ?? "";
+      const multilineBody = fixture.comments[1]?.body ?? "";
+      const nestedFragmentBody = fixture.comments[2]?.body ?? "";
+      const hmacSecretBody = fixture.comments[3]?.body ?? "";
+      const rawDigest = new Bun.CryptoHasher("sha256")
+        .update('{"access_token":"OTHER_SECRET_456","token":["masked-first","OTHER_SECRET_789"]}\npassword = 0420\nAuthorization: Bearer abc.def')
+        .digest("hex");
+
+      expect(first).toMatchObject({ outcome: "verified", status: "created" });
+      expect(changed.exitCode).not.toBe(0);
+      expect(JSON.parse(changed.stdout)).toMatchObject({ outcome: "failed", status: "idempotency_conflict" });
+      for (const forbidden of [
+        "OTHER_SECRET_456",
+        "OTHER_SECRET_789",
+        "DIFFERENT_SECRET_789",
+        "masked-first",
+        "masked-second",
+        "0420",
+        "0421",
+        "access_token",
+        "Authorization",
+        "Bearer",
+        '"token"',
+        "password",
+      ]) {
+        expect(storedBody).not.toContain(forbidden);
+        expect(`${first.summaryDigest}\n${changed.stdout}\n${changed.stderr}`).not.toContain(forbidden);
+      }
+      expect(first.summaryDigest).not.toBe(rawDigest);
+      expect(multiline).toMatchObject({ outcome: "verified", status: "created" });
+      expect(multilineBody).not.toContain("OTHER_SECRET_MULTILINE_789");
+      expect(multilineBody).not.toContain('"token"');
+      expect(nestedFragment).toMatchObject({ outcome: "verified", status: "created" });
+      expect(nestedFragmentBody).not.toContain("OTHER_SECRET_NESTED_789");
+      expect(nestedFragmentBody).not.toContain("MASKED_FIRST");
+      expect(nestedFragmentBody).not.toContain('"token"');
+      expect(leakedHmacSecret).toMatchObject({ outcome: "verified", status: "created" });
+      expect(hmacSecretBody).not.toContain(fixture.writebackSecret);
+      expect(fixture.commentCreateCalls()).toBe(4);
+    } finally {
+      fixture.server.stop(true);
+    }
+  });
+
+  test("linear-write-evidence-comment fails closed on changed evidence, duplicate markers, and readback mismatch", async () => {
+    const fixture = await createLinearWritebackFixture();
+    if (!fixture) {
+      expect(Bun.version).toBeString();
+      return;
+    }
+    try {
+      const baseArgs = [
+        "linear-write-evidence-comment",
+        "--config",
+        fixture.configPath,
+        "--idempotency-secret-file",
+        fixture.writebackSecretPath,
+        "--issue-id",
+        fixture.issueId,
+        "--idempotency-key",
+        "conflict-v1",
+      ];
+      const first = await runCliJson(...baseArgs, "--evidence-summary", "first evidence");
+      const changed = await runCliRaw(...baseArgs, "--evidence-summary", "changed evidence");
+      expect(JSON.parse(changed.stdout)).toMatchObject({ outcome: "failed", status: "idempotency_conflict" });
+      expect(changed.exitCode).not.toBe(0);
+      expect(fixture.commentCreateCalls()).toBe(1);
+
+      fixture.comments.push({ id: "comment_duplicate", body: fixture.comments[0]!.body });
+      const duplicate = await runCliRaw(...baseArgs, "--evidence-summary", "first evidence");
+      expect(JSON.parse(duplicate.stdout)).toMatchObject({ outcome: "failed", status: "idempotency_conflict" });
+      expect(duplicate.exitCode).not.toBe(0);
+      expect(fixture.commentCreateCalls()).toBe(1);
+      expect(first.marker).toBeString();
+    } finally {
+      fixture.server.stop(true);
+    }
+
+    const mismatch = await createLinearWritebackFixture({ alterCommentReadback: true });
+    if (!mismatch) {
+      expect(Bun.version).toBeString();
+      return;
+    }
+    try {
+      const result = await runCliRaw(
+        "linear-write-evidence-comment",
+        "--config",
+        mismatch.configPath,
+        "--idempotency-secret-file",
+        mismatch.writebackSecretPath,
+        "--issue-id",
+        mismatch.issueId,
+        "--idempotency-key",
+        "readback-mismatch-v1",
+        "--evidence-summary",
+        "readback must match exact canonical body",
+      );
+      expect(result.exitCode).not.toBe(0);
+      expect(JSON.parse(result.stdout)).toMatchObject({ outcome: "failed", status: "readback_mismatch" });
+    } finally {
+      mismatch.server.stop(true);
+    }
+  });
+
+  test("linear-write-evidence-comment fails closed when the bounded comment scan is exhausted", async () => {
+    const fixture = await createLinearWritebackFixture({ exhaustCommentPagination: true });
+    if (!fixture) {
+      expect(Bun.version).toBeString();
+      return;
+    }
+    try {
+      const result = await runCliRaw(
+        "linear-write-evidence-comment",
+        "--config",
+        fixture.configPath,
+        "--idempotency-secret-file",
+        fixture.writebackSecretPath,
+        "--issue-id",
+        fixture.issueId,
+        "--idempotency-key",
+        "pagination-cap-v1",
+        "--evidence-summary",
+        "do not create when older comments remain unscanned",
+      );
+      expect(result.exitCode).not.toBe(0);
+      expect(JSON.parse(result.stdout)).toMatchObject({ outcome: "failed", status: "pagination_limit" });
+      expect(fixture.commentCreateCalls()).toBe(0);
+      expect(fixture.commentListCalls()).toBe(10);
+    } finally {
+      fixture.server.stop(true);
+    }
+  });
+
+  test("linear-write-evidence-comment returns a structured failure for malformed nested GraphQL data", async () => {
+    const fixture = await createLinearWritebackFixture({ malformedCommentPage: true });
+    if (!fixture) {
+      expect(Bun.version).toBeString();
+      return;
+    }
+    try {
+      const result = await runCliRaw(
+        "linear-write-evidence-comment",
+        "--config",
+        fixture.configPath,
+        "--idempotency-secret-file",
+        fixture.writebackSecretPath,
+        "--issue-id",
+        fixture.issueId,
+        "--idempotency-key",
+        "malformed-page-v1",
+        "--evidence-summary",
+        "fail closed",
+      );
+      expect(result.exitCode).not.toBe(0);
+      expect(JSON.parse(result.stdout)).toMatchObject({ outcome: "failed" });
+      expect(result.stderr).not.toContain("TypeError");
+    } finally {
+      fixture.server.stop(true);
+    }
+  });
+
+  test("a verified status survives comment failure and recovery retries only the comment primitive", async () => {
+    const fixture = await createLinearWritebackFixture({ failCommentCreate: true });
+    if (!fixture) {
+      expect(Bun.version).toBeString();
+      return;
+    }
+    try {
+      const status = await runCliJson(
+        "linear-update-status",
+        "--config",
+        fixture.configPath,
+        "--issue-id",
+        fixture.issueId,
+        "--state-id",
+        fixture.targetStateId,
+      );
+      const failedComment = await runCliRaw(
+        "linear-write-evidence-comment",
+        "--config",
+        fixture.configPath,
+        "--idempotency-secret-file",
+        fixture.writebackSecretPath,
+        "--issue-id",
+        fixture.issueId,
+        "--idempotency-key",
+        "partial-recovery-v1",
+        "--evidence-summary",
+        "status is already verified",
+      );
+      const failed = JSON.parse(failedComment.stdout);
+
+      expect(status).toMatchObject({ outcome: "verified", status: "verified" });
+      expect(failed).toMatchObject({
+        outcome: "failed",
+        recovery: { retry: "comment-only", rollbackStatus: false },
+      });
+      expect(fixture.issueUpdateCalls()).toBe(1);
+
+      fixture.setFailCommentCreate(false);
+      const recovered = await runCliJson(
+        "linear-write-evidence-comment",
+        "--config",
+        fixture.configPath,
+        "--idempotency-secret-file",
+        fixture.writebackSecretPath,
+        "--issue-id",
+        fixture.issueId,
+        "--idempotency-key",
+        "partial-recovery-v1",
+        "--evidence-summary",
+        "status is already verified",
+      );
+      expect(recovered).toMatchObject({ outcome: "verified", status: "created" });
+      expect(fixture.issueUpdateCalls()).toBe(1);
+      expect(fixture.commentCreateCalls()).toBe(2);
+      expect(fixture.comments).toHaveLength(1);
+    } finally {
+      fixture.server.stop(true);
+    }
+  });
+
   test("rejects Linear project ref for a missing local run", async () => {
     await runCli("init");
     const tokenPath = join(dir, "linear-token");
@@ -10717,6 +11378,174 @@ describe("CLI", () => {
       throw new Error(`CLI failed with ${result.exitCode}\n${result.stdout}\n${result.stderr}`);
     }
     return result.stdout.trim();
+  }
+
+  async function createLinearWritebackFixture(input: {
+    readbackIssueId?: string;
+    scopeIssueId?: string;
+    echoCredentialError?: boolean;
+    loseCommentCreateResponseOnce?: boolean;
+    alterCommentReadback?: boolean;
+    failCommentCreate?: boolean;
+    exhaustCommentPagination?: boolean;
+    injectSensitiveExtraFields?: boolean;
+    sensitiveStateName?: boolean;
+    malformedStatusScope?: boolean;
+    malformedCommentPage?: boolean;
+  } = {}) {
+    const issueId = "0ad49c7d-9f2b-4f2e-8743-ee017d841171";
+    const teamId = "8ec14dab-a05d-4d78-95fa-e59301005499";
+    const targetStateId = "77777777-7777-4777-8777-777777777777";
+    const backlogStateId = "66666666-6666-4666-8666-666666666666";
+    const token = "lin_api_fixture_secret_123";
+    const tokenPath = join(dir, "linear-writeback-token");
+    const writebackSecretPath = join(dir, "linear-writeback-secret");
+    const writebackSecret = "fixture_writeback_hmac_key_0123456789abcdef";
+    const configPath = join(dir, "linear-writeback.toml");
+    const requests: Array<{ query: string; variables: Record<string, unknown> }> = [];
+    const comments: Array<{ id: string; body: string }> = [];
+    let currentStateId = backlogStateId;
+    let issueUpdateCount = 0;
+    let commentCreateCount = 0;
+    let commentListCount = 0;
+    let loseResponse = input.loseCommentCreateResponseOnce === true;
+    let failCommentCreate = input.failCommentCreate === true;
+
+    const state = (id: string) => ({
+      id,
+      name: input.sensitiveStateName && id === targetStateId
+        ? "access_token=OTHER_SECRET_999"
+        : id === targetStateId ? "In Progress" : "Backlog",
+      type: id === targetStateId ? "started" : "backlog",
+      team: { id: teamId, key: "PAN" },
+    });
+    const issue = (id = issueId) => ({
+      id,
+      identifier: "PAN-1232",
+      team: { id: teamId, key: "PAN" },
+      state: state(currentStateId),
+      ...(input.injectSensitiveExtraFields
+        ? { Authorization: "Bearer OTHER_SECRET_456", token: "OTHER_SECRET_456" }
+        : {}),
+    });
+    const server = startTestServer({
+      async fetch(request) {
+        const body = (await request.json()) as { query: string; variables?: Record<string, unknown> };
+        const variables = body.variables ?? {};
+        requests.push({ query: body.query, variables });
+        if (input.echoCredentialError && body.query.includes("OuroborosLinearStatusScope")) {
+          return Response.json({
+            errors: [{
+              message: `upstream echoed ${token}`,
+              extensions: { Authorization: `Bearer ${token}`, token },
+            }],
+          });
+        }
+        if (body.query.includes("OuroborosLinearStatusScope")) {
+          if (input.malformedStatusScope) {
+            return Response.json({ data: { issue: issue(), workflowState: { ...state(targetStateId), team: null } } });
+          }
+          return Response.json({ data: { issue: issue(input.scopeIssueId ?? issueId), workflowState: state(targetStateId) } });
+        }
+        if (body.query.includes("OuroborosLinearStatusUpdate")) {
+          issueUpdateCount += 1;
+          currentStateId = targetStateId;
+          return Response.json({ data: { issueUpdate: { success: true, issue: issue() } } });
+        }
+        if (body.query.includes("OuroborosLinearStatusReadback")) {
+          return Response.json({ data: { issue: issue(input.readbackIssueId ?? issueId) } });
+        }
+        if (body.query.includes("OuroborosLinearEvidenceCommentList")) {
+          commentListCount += 1;
+          if (input.malformedCommentPage) {
+            return Response.json({ data: { issue: { id: issueId, comments: { nodes: null, pageInfo: null } } } });
+          }
+          return Response.json({
+            data: {
+              issue: {
+                id: issueId,
+                comments: {
+                  nodes: comments.map((comment) => ({ ...comment, issue: { id: issueId } })),
+                  pageInfo: input.exhaustCommentPagination
+                    ? { hasNextPage: true, endCursor: `cursor_${commentListCount}` }
+                    : { hasNextPage: false, endCursor: null },
+                },
+              },
+            },
+          });
+        }
+        if (body.query.includes("OuroborosLinearEvidenceCommentCreate")) {
+          commentCreateCount += 1;
+          if (failCommentCreate) {
+            return Response.json({ errors: [{ message: "temporary comment failure" }] });
+          }
+          const comment = {
+            id: `comment_${comments.length + 1}`,
+            body: String((variables.input as { body?: unknown } | undefined)?.body ?? ""),
+          };
+          comments.push(comment);
+          if (loseResponse) {
+            loseResponse = false;
+            return new Response("upstream connection reset", { status: 502 });
+          }
+          return Response.json({
+            data: { commentCreate: { success: true, comment: { ...comment, issue: { id: issueId } } } },
+          });
+        }
+        if (body.query.includes("OuroborosLinearEvidenceCommentReadback")) {
+          const commentId = String(variables.commentId ?? "");
+          const stored = comments.find((comment) => comment.id === commentId) ?? null;
+          const comment = stored
+            ? {
+                ...stored,
+                body: input.alterCommentReadback ? `${stored.body}\nchanged` : stored.body,
+                issue: { id: issueId },
+              }
+            : null;
+          return Response.json({ data: { comment } });
+        }
+        return Response.json({ errors: [{ message: "unexpected operation" }] }, { status: 400 });
+      },
+    });
+    if (!server) {
+      return null;
+    }
+    await writeFile(tokenPath, token);
+    await writeFile(writebackSecretPath, writebackSecret);
+    await writeFile(
+      configPath,
+      [
+        "[linear]",
+        `api_url = "http://127.0.0.1:${server.port}/graphql"`,
+        `token_file = "${tokenPath}"`,
+        'team_key = "PAN"',
+        "",
+      ].join("\n"),
+    );
+    return {
+      server,
+      configPath,
+      token,
+      tokenPath,
+      writebackSecretPath,
+      writebackSecret,
+      issueId,
+      teamId,
+      targetStateId,
+      requests,
+      comments,
+      issueUpdateCalls: () => issueUpdateCount,
+      commentCreateCalls: () => commentCreateCount,
+      commentListCalls: () => commentListCount,
+      setFailCommentCreate: (value: boolean) => {
+        failCommentCreate = value;
+      },
+      rotateToken: async () => {
+        await writeFile(tokenPath, "lin_api_rotated_fixture_secret_456");
+      },
+      operationNames: () => requests.map((entry) =>
+        /(?:query|mutation)\s+(OuroborosLinear\w+)/.exec(entry.query)?.[1] ?? "unknown"),
+    };
   }
 
   async function runCliRaw(...rawArgs: Array<string | Record<string, string>>) {
