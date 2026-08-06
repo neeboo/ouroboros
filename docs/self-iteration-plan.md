@@ -23,9 +23,10 @@ The loop has three levels:
 After the run tree drains, the daemon compares the repository fingerprint with the fingerprint used by the last designer cycle:
 
 - changed repository: create another designer cycle;
-- unchanged repository: enter `quiescent` and wait;
+- unchanged repository with no unresolved blocked delivery: enter `quiescent` and wait;
+- blocked delivery: reopen the same run and create an automatic recovery task; switch Claude Code to Codex or Codex to Claude Code for executor failures, and use Codex to diagnose logical or verification blocks;
 - active or repairable work: continue supervising the same run tree;
-- exhausted retry budget or a human checkpoint: leave auditable blocked evidence.
+- exhausted local retry budget: preserve auditable evidence and continue through automatic recovery; only a monetary or capital-policy checkpoint may wait for human authority.
 
 This prevents both “say next before it moves” and repeated no-op planning.
 

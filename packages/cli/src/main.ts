@@ -95,6 +95,13 @@ const AUTO_MAX_TASK_CONCURRENCY = 4;
 const DEFAULT_SELF_ITERATION_WORKTREE_ROOT = ".ouroboros/worktrees";
 const DEFAULT_GENERIC_ATTEMPT_IDLE_TIMEOUT_MS = 5 * 60 * 1000;
 const DEFAULT_GENERIC_ATTEMPT_HARD_TIMEOUT_MS = 30 * 60 * 1000;
+const EXECUTOR_FAILURE_TERMINAL_REASONS = new Set([
+  "command_failed",
+  "hard_timeout",
+  "idle_timeout",
+  "recovery_failed",
+  "terminal_no_envelope",
+]);
 const SELF_ITERATION_GOAL = "Continuously improve Ouroboros from evidence-backed gaps";
 const SELF_ITERATION_PLAN_DOC = "docs/self-iteration-plan.md";
 const DEFAULT_STOP_HOOKS = "create-runs,create-tasks,create-verifier,create-repair,apply-design-actions,context-summary";
@@ -1770,6 +1777,7 @@ async function superviseSelfImprovementDaemon(input: SelfImprovementDaemonInput)
             index,
             status: "ok",
             createdCycle: cycle.createdCycle,
+            ...(cycle.state === "recovery" ? { recovery: cycle.recovery } : {}),
             authorityReconciliation,
             result,
             runCounts: harness.countRunsByStatus(),
@@ -2045,6 +2053,15 @@ function ensureSelfImprovementCycle(rootRunId: string, cwd: string) {
     return { state: "active" as const, createdCycle: null };
   }
 
+  const recovery = recoverBlockedSelfImprovementRun(rootRunId, scopedRuns);
+  if (recovery) {
+    return {
+      state: "recovery" as const,
+      createdCycle: null,
+      recovery,
+    };
+  }
+
   // Before asking the designer for a new proposal, surface any measuring
   // design proposal whose outcome review is due. Linking them reopens the
   // measuring run with a bounded outcome-review task; the next tick observes
@@ -2129,6 +2146,193 @@ function ensureSelfImprovementCycle(rootRunId: string, cwd: string) {
     repositoryFingerprint: repositoryState,
     assessmentFingerprint: assessmentState,
   };
+}
+
+function recoverBlockedSelfImprovementRun(
+  rootRunId: string,
+  scopedRuns: ReturnType<typeof selfImprovementRuns>,
+) {
+  const blockedRuns = [...scopedRuns]
+    .reverse()
+    .filter((run) => {
+      if (run.id === rootRunId || run.status !== "blocked") return false;
+      const source = typeof run.context.source === "string" ? run.context.source : null;
+      return source !== "self-improve" && source !== "self-improvement-assessment";
+    });
+
+  for (const run of blockedRuns) {
+    const overview = harness.getRunOverview({ runId: run.id, eventLimit: 0 });
+    const blockedSessions = [...overview.sessions]
+      .filter((session) => session.status === "blocked")
+      .sort((left, right) => {
+        const leftFinished = left.finishedAt ?? left.startedAt ?? "";
+        const rightFinished = right.finishedAt ?? right.startedAt ?? "";
+        return rightFinished.localeCompare(leftFinished) || right.attemptId.localeCompare(left.attemptId);
+      });
+    const executorFailure = blockedSessions.find((session) => {
+      const reason = terminalReasonForSession(session);
+      return reason != null && EXECUTOR_FAILURE_TERMINAL_REASONS.has(reason);
+    });
+    const sourceSession = executorFailure ?? blockedSessions[0] ?? null;
+    const sourceTask = sourceSession
+      ? overview.tasks.find((task) => task.id === sourceSession.taskId)
+      : [...overview.tasks].reverse().find((task) => task.status === "blocked");
+    if (!sourceTask) {
+      continue;
+    }
+
+    const sourceAttemptId = sourceSession?.attemptId ?? null;
+    const existingRecovery = overview.tasks.find((task) => {
+      const recovery = recordValue(task.config?.automaticRecovery);
+      return sourceAttemptId != null && recovery.sourceAttemptId === sourceAttemptId;
+    });
+    const terminalReason = sourceSession ? terminalReasonForSession(sourceSession) : null;
+    const isExecutorFailure = terminalReason != null && EXECUTOR_FAILURE_TERMINAL_REASONS.has(terminalReason);
+    const fromBackend = sourceSession ? backendIdForSession(sourceSession) : configuredBackendForTask(run.context, sourceTask);
+    const toBackend = isExecutorFailure ? alternateRecoveryBackend(fromBackend) : "codex-resumable";
+
+    if (existingRecovery) {
+      harness.updateRunStatus({ runId: run.id, status: "todo" });
+      return {
+        runId: run.id,
+        taskId: existingRecovery.id,
+        sourceTaskId: sourceTask.id,
+        sourceAttemptId,
+        terminalReason,
+        fromBackend,
+        toBackend,
+        resumed: true,
+      };
+    }
+
+    const sourceWorktreePath = sourceSession
+      ? worktreePathForSession(sourceSession) ?? sourceTask.worktreePath
+      : sourceTask.worktreePath;
+    const previousRecovery = recordValue(sourceTask.config?.automaticRecovery);
+    const generation = Math.max(0, Number(previousRecovery.generation) || 0) + 1;
+    const { modelPreference: _modelPreference, automaticRecovery: _automaticRecovery, ...sourceConfig } = sourceTask.config ?? {};
+    const recoveryTaskId = harness.createTask({
+      runId: run.id,
+      parentId: sourceTask.id,
+      role: "worker",
+      goal: isExecutorFailure
+        ? `Continue ${sourceTask.goal} with ${toBackend} after ${fromBackend} failed`
+        : `Diagnose and repair blocked work: ${sourceTask.goal}`,
+      prompt: [
+        "This task is an automatic recovery of blocked work in the same run.",
+        "Do not defer, close, or replace the original goal. Diagnose the recorded failure and continue until the original acceptance evidence passes.",
+        "Preserve useful uncommitted changes in the source worktree. Do not restart the implementation from an empty checkout.",
+        "",
+        `Blocked task: ${sourceTask.id}`,
+        `Blocked goal: ${sourceTask.goal}`,
+        `Blocked attempt: ${sourceAttemptId ?? "none recorded"}`,
+        `Failure: ${sourceSession?.output.summary ?? "blocked without a terminal attempt summary"}`,
+        `Executor route: ${fromBackend} -> ${toBackend}`,
+        terminalReason ? `Terminal reason: ${terminalReason}` : "Terminal reason: logical or verification block",
+        sourceWorktreePath ? `Source worktree: ${sourceWorktreePath}` : "Source worktree: inspect the current task and run evidence",
+        "",
+        "Original prompt:",
+        sourceTask.prompt,
+        "",
+        "Inspect the run overview, recent lessons, repository diff, and failing checks before editing.",
+        "Resolve the root cause, run the original deterministic checks, and return normal structured attempt output.",
+      ].join("\n"),
+      doneWhen: sourceTask.doneWhen.length > 0
+        ? sourceTask.doneWhen
+        : ["the blocking root cause is resolved", "the original goal has passing evidence"],
+      config: {
+        ...sourceConfig,
+        agentBackend: toBackend,
+        ...(sourceWorktreePath ? { sourceWorktreePath } : {}),
+        automaticRecovery: {
+          generation,
+          sourceTaskId: sourceTask.id,
+          sourceAttemptId,
+          terminalReason,
+          fromBackend,
+          toBackend,
+          strategy: isExecutorFailure
+            ? "switch-backend"
+            : "diagnose-and-repair",
+        },
+      },
+    });
+    harness.updateRun({
+      runId: run.id,
+      status: "todo",
+      contextPatch: {
+        automaticRecovery: {
+          taskId: recoveryTaskId,
+          sourceTaskId: sourceTask.id,
+          sourceAttemptId,
+          terminalReason,
+          fromBackend,
+          toBackend,
+          generation,
+        },
+      },
+    });
+    return {
+      runId: run.id,
+      taskId: recoveryTaskId,
+      sourceTaskId: sourceTask.id,
+      sourceAttemptId,
+      terminalReason,
+      fromBackend,
+      toBackend,
+      resumed: false,
+    };
+  }
+
+  return null;
+}
+
+function terminalReasonForSession(session: RunOverview["sessions"][number]) {
+  const artifact = session.output.artifacts?.find((candidate) => {
+    const value = recordValue(candidate);
+    return value.kind === "acpx_terminal_evidence" && typeof value.terminalReason === "string";
+  });
+  const terminalReason = recordValue(artifact).terminalReason;
+  return typeof terminalReason === "string" ? terminalReason : null;
+}
+
+function backendIdForSession(session: RunOverview["sessions"][number]) {
+  const id = session.backend?.id;
+  if (typeof id === "string" && id.length > 0) {
+    return id;
+  }
+  if (session.backend?.agent === "claude") {
+    return "claude-code";
+  }
+  return session.backend?.kind === "codex-resumable" ? "codex-resumable" : "codex-resumable";
+}
+
+function configuredBackendForTask(context: Record<string, unknown>, task: Task) {
+  if (typeof task.config?.agentBackend === "string" && task.config.agentBackend.length > 0) {
+    return task.config.agentBackend;
+  }
+  const defaults = recordValue(context.agentDefaults);
+  const roles = recordValue(defaults.roles);
+  const roleBackend = roles[task.role];
+  if (typeof roleBackend === "string" && roleBackend.length > 0) {
+    return roleBackend;
+  }
+  return typeof defaults.global === "string" && defaults.global.length > 0
+    ? defaults.global
+    : "codex-resumable";
+}
+
+function alternateRecoveryBackend(fromBackend: string) {
+  return fromBackend === "claude-code" ? "codex-resumable" : "claude-code";
+}
+
+function worktreePathForSession(session: RunOverview["sessions"][number]) {
+  const worktreeArtifact = session.output.artifacts?.find((candidate) => recordValue(candidate).kind === "worktree");
+  const artifactPath = recordValue(worktreeArtifact).path;
+  if (typeof artifactPath === "string" && artifactPath.length > 0) {
+    return artifactPath;
+  }
+  return session.worktreePath ?? null;
 }
 
 function selfImprovementAssessmentFingerprint(

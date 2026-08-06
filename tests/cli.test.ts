@@ -7006,7 +7006,7 @@ describe("CLI", () => {
     expect(runs).toHaveLength(1);
   });
 
-  test("self-improve-daemon reassesses a newly blocked delivery even when the repository is unchanged", async () => {
+  test("self-improve-daemon keeps recovering a blocked delivery instead of accepting quiescence", async () => {
     const bootstrap = await runCliJson("self-iterate");
     const setupHarness = new Harness(dbPath);
     setupHarness.recordAttempt({
@@ -7049,7 +7049,7 @@ describe("CLI", () => {
     const codexBin = join(dir, "fake-codex-blocked-reassessment");
     const payload = {
       status: "done",
-      summary: "Inspected the new blocked delivery evidence and recorded a bounded quiescent assessment.",
+      summary: "Diagnosed and repaired the blocked delivery.",
       changedFiles: [],
       checks: [{ name: "blocked evidence", status: "passed" }],
       artifacts: [],
@@ -7086,6 +7086,10 @@ describe("CLI", () => {
       "1",
       "--max-rounds",
       "1",
+      "--stop-hook",
+      "create-tasks",
+      "--no-integrate",
+      "true",
       "--interval-ms",
       "1",
       "--idle-ms",
@@ -7095,14 +7099,18 @@ describe("CLI", () => {
     expect(result.ticks[0]).toMatchObject({
       type: "self-improvement.tick",
       status: "ok",
-      createdCycle: expect.objectContaining({ cycleIndex: 1 }),
+      createdCycle: null,
+      recovery: expect.objectContaining({
+        runId: blockedRunId,
+        sourceTaskId: blockedTaskId,
+        toBackend: "codex-resumable",
+      }),
     });
     const runs = await runCliJson("list-runs");
     const assessment = runs.find(
       (run: { context: Record<string, unknown> }) => run.context.source === "self-improvement-assessment",
     );
-    expect(assessment).toBeDefined();
-    setupHarness.updateRunStatus({ runId: assessment.id, status: "done" });
+    expect(assessment).toBeUndefined();
 
     const repeated = await runCliJson(
       "self-improve-daemon",
@@ -7120,12 +7128,171 @@ describe("CLI", () => {
       "1",
       "--max-rounds",
       "1",
+      "--stop-hook",
+      "create-tasks",
+      "--no-integrate",
+      "true",
       "--interval-ms",
       "1",
       "--idle-ms",
       "1",
     );
-    expect(repeated.ticks[0]).toMatchObject({ status: "quiescent", createdCycle: null });
+    expect(repeated.ticks[0].status).not.toBe("quiescent");
+  });
+
+  test("self-improve-daemon switches worker backend after an executor-level block", async () => {
+    const bootstrap = await runCliJson("self-iterate");
+    const setupHarness = new Harness(dbPath);
+    setupHarness.recordAttempt({
+      taskId: bootstrap.taskId,
+      input: {},
+      output: {
+        status: "done",
+        summary: "Initial assessment drained",
+        changedFiles: [],
+        checks: [{ name: "assessment", status: "passed" }],
+        artifacts: [],
+        problems: [],
+      },
+    });
+    setupHarness.updateRunStatus({ runId: bootstrap.runId, status: "done" });
+    const blockedRunId = setupHarness.createRun({
+      goal: "Delivery must recover from a failed worker backend",
+      context: {
+        parentRunId: bootstrap.runId,
+        source: "design",
+        agentDefaults: {
+          global: "claude-code",
+          roles: { worker: "claude-code", verifier: "codex-resumable" },
+        },
+        agentBackends: {
+          "claude-code": { kind: "acpx", agent: "claude", approval: "approve-all" },
+          "codex-resumable": { kind: "codex-resumable" },
+        },
+      },
+    });
+    const blockedTaskId = setupHarness.createTask({
+      runId: blockedRunId,
+      role: "worker",
+      goal: "Implement the delivery increment",
+      prompt: "Implement the delivery increment and preserve existing work.",
+      doneWhen: ["focused checks pass"],
+      config: {
+        agentBackend: "claude-code",
+        verifierContract: { deterministicChecks: ["bun test tests/cli.test.ts"] },
+      },
+    });
+    const sourceWorktreePath = `.ouroboros/worktrees/${blockedTaskId}`;
+    setupHarness.recordAttempt({
+      taskId: blockedTaskId,
+      input: {
+        backend: { id: "claude-code", kind: "acpx", agent: "claude" },
+        route: {
+          backend: { id: "claude-code", kind: "acpx", agent: "claude" },
+          executionMode: "generic",
+        },
+      },
+      output: {
+        status: "blocked",
+        summary: "acpx claude executor hit the hard ceiling",
+        changedFiles: [],
+        checks: [{ name: "acpx claude hard_timeout", status: "failed" }],
+        artifacts: [
+          {
+            kind: "acpx_terminal_evidence",
+            terminalReason: "hard_timeout",
+            worktreeSnapshot: `worktree:${sourceWorktreePath}`,
+          },
+          { kind: "worktree", path: sourceWorktreePath },
+        ],
+        problems: ["hard timeout"],
+      },
+    });
+    setupHarness.updateRunStatus({ runId: blockedRunId, status: "blocked" });
+
+    const codexBin = join(dir, "fake-codex-backend-recovery");
+    const payload = {
+      status: "done",
+      summary: "Recovered the delivery with the alternate backend",
+      changedFiles: [],
+      checks: [{ name: "focused checks", status: "passed" }],
+      artifacts: [],
+      problems: [],
+    };
+    await writeFile(
+      codexBin,
+      [
+        "#!/usr/bin/env bun",
+        "import { writeFileSync } from 'node:fs';",
+        "const outputFlag = Bun.argv.indexOf('--output-last-message');",
+        "const outputPath = outputFlag >= 0 ? Bun.argv[outputFlag + 1] : '';",
+        `const payload = ${JSON.stringify(payload)};`,
+        "if (outputPath) writeFileSync(outputPath, JSON.stringify(payload));",
+        "console.log(JSON.stringify({ type: 'session.started', session_id: 'session_backend_recovery' }));",
+        "console.log(JSON.stringify({ type: 'agent.message', message: JSON.stringify(payload) }));",
+      ].join("\n"),
+    );
+    await chmod(codexBin, 0o755);
+
+    const result = await runCliJson(
+      "self-improve-daemon",
+      "--executor",
+      "codex-resumable",
+      "--root-run-id",
+      bootstrap.runId,
+      "--codex-bin",
+      codexBin,
+      "--parallel",
+      "auto",
+      "--max-ticks",
+      "1",
+      "--tick-cycles",
+      "1",
+      "--max-rounds",
+      "1",
+      "--stop-hook",
+      "create-tasks",
+      "--no-integrate",
+      "true",
+      "--interval-ms",
+      "1",
+      "--idle-ms",
+      "1",
+    );
+
+    const overview = await runCliJson("run-overview", "--run-id", blockedRunId);
+    const recoveryTask = overview.tasks.find(
+      (task: { config?: Record<string, unknown> }) =>
+        (task.config?.automaticRecovery as { sourceTaskId?: string } | undefined)?.sourceTaskId === blockedTaskId,
+    );
+    const runs = await runCliJson("list-runs");
+
+    expect(result.ticks[0]).toMatchObject({
+      type: "self-improvement.tick",
+      status: "ok",
+      recovery: expect.objectContaining({
+        runId: blockedRunId,
+        sourceTaskId: blockedTaskId,
+        fromBackend: "claude-code",
+        toBackend: "codex-resumable",
+        terminalReason: "hard_timeout",
+      }),
+    });
+    expect(recoveryTask).toMatchObject({
+      role: "worker",
+      status: "done",
+      doneWhen: ["focused checks pass"],
+      config: expect.objectContaining({
+        agentBackend: "codex-resumable",
+        sourceWorktreePath,
+        verifierContract: { deterministicChecks: ["bun test tests/cli.test.ts"] },
+      }),
+    });
+    expect(
+      runs.some(
+        (run: { context: Record<string, unknown> }) => run.context.source === "self-improvement-assessment",
+      ),
+    ).toBe(false);
   });
 
   test("self-improve-daemon surfaces a measuring proposal as an outcome-review tick before asking the designer for new work", async () => {
