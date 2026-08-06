@@ -7,10 +7,10 @@ Keep the route Designer-first:
 - `designer`, `planner`, `verifier`, `outcome-review`, and `goal-review` use `codex-resumable`.
 - `worker` uses `claude-code`.
 - A root run starts with a `designer` task that reads the active founder charter, strategy signals, lessons, run evidence, and due outcome reviews. It emits one evidence-backed proposal (with a frozen evaluation contract) or a mutation-free quiescent decision (no signal, no proposal — the rationale lives in the attempt summary).
-- Accepted low-risk proposals create a child planner run automatically; high-risk proposals block on a human `decideDesign`.
+- Accepted low-risk proposals create a child planner run automatically; only monetary or capital-policy decisions wait on human authority.
 - Use the current worktree when the target repository already has relevant uncommitted changes.
 - Use a git worktree only when the target repository is clean or the task should be isolated.
-- If Claude Code through acpx times out, run Claude Code manually and record the result back into Ouroboros.
+- If Claude Code through acpx fails or times out, the continuous supervisor creates a Codex recovery worker in the same run and reuses the source worktree.
 
 ## Shared default database
 
@@ -142,67 +142,16 @@ orbs run-evidence --run-id "$RUN_ID"
 orbs dashboard --run-id "$RUN_ID" --port 7331
 ```
 
-## 7. Manual Claude Code Fallback
+## 7. Automatic Recovery
 
-Use this when `claude-code` through acpx times out, stays silent, or the local adapter is not ready.
+`self-improve-daemon` does not treat a blocked run as quiescent. It scans all blocked runs before ordinary scheduling and creates auditable recovery tasks in the same runs:
 
-First render the exact worker prompt:
-
-```bash
-orbs show-task-prompt --task-id "$TASK_ID"
-```
-
-Then run Claude Code directly in the target repository:
-
-```bash
-cd /path/to/target-repo
-claude
-```
-
-Paste the rendered task prompt into Claude Code. Let it edit files and run validation commands.
-
-When Claude Code finishes, record the result:
-
-```bash
-orbs record-attempt \
-  --task-id "$TASK_ID" \
-  --input-json '{
-    "mode": "manual-claude-code",
-    "cwd": "REPLACE_WITH_TARGET_REPO",
-    "reason": "acpx timeout or manual fallback"
-  }' \
-  --output-json '{
-    "status": "done",
-    "summary": "REPLACE_WITH_HUMAN_READABLE_RESULT",
-    "changedFiles": [
-      "REPLACE_WITH_CHANGED_FILE"
-    ],
-    "checks": [
-      {
-        "name": "REPLACE_WITH_COMMAND_NAME",
-        "status": "passed",
-        "summary": "REPLACE_WITH_EXACT_COMMAND_AND_RESULT"
-      }
-    ],
-    "artifacts": [],
-    "problems": []
-  }'
-```
-
-Then resume verifier and goal review:
-
-```bash
-orbs run-loop \
-  --run-id "$RUN_ID" \
-  --executor codex-resumable \
-  --cwd "$(pwd)" \
-  --sandbox workspace-write \
-  --stop-hook create-runs,create-tasks,create-verifier,create-repair,context-summary \
-  --start-hook none \
-  --tasks 1 \
-  --max-rounds 20 \
-  --max-tries 3
-```
+- Claude Code executor failures switch to `codex-resumable`.
+- Codex executor failures switch to `claude-code`.
+- Logical and verification blocks use a Codex repair worker.
+- Recovery reuses the source task's actual worktree, completion criteria, and verifier contract.
+- Multiple blocked runs receive recovery tasks in one tick; `--parallel auto` controls how many execute together.
+- Only monetary or capital-policy authority may wait for a human decision.
 
 ## 8. Defaults For Agents
 
@@ -210,12 +159,12 @@ When an agent is asked how to run Ouroboros, prefer this answer:
 
 1. Use `orbs self-iterate-launch --parallel auto` for Ouroboros improving itself. The root run starts with a `designer` task.
 2. Create a run with Codex for `designer`, `planner`, `verifier`, `outcome-review`, and `goal-review`, and Claude Code for `worker`.
-3. Designer tasks return through fixed actions: `recordSignal`, `proposeDesign`, `decideDesign`, `recordDesignOutcome`, `createRunsFromDesign`. High-risk proposals block on a human `decideDesign`.
+3. Designer tasks return through fixed actions: `recordSignal`, `proposeDesign`, `decideDesign`, `recordDesignOutcome`, `createRunsFromDesign`. Only monetary or capital-policy decisions wait for human authority.
 4. Create a small worker task with `--config-json '{"agentBackend":"claude-code"}'`.
 5. Use `--start-hook none` if current uncommitted changes are part of the task.
 6. Use `--start-hook git-worktree --worktree-root .orbs/worktrees` only for clean or isolated work.
-7. If acpx fails or times out, use `orbs show-task-prompt`, run `claude` manually, then write evidence with `orbs record-attempt`.
-8. Continue `orbs run-loop` so Codex verifier and goal-review can finish the run.
+7. Keep `self-improve-daemon` running; it switches failed executor backends and preserves the source worktree automatically.
+8. Let Codex verifier and goal-review finish each recovered run.
 9. After verified integration, run `outcome-review` against the frozen evaluation contract.
 
 Do not recommend Hermes, OpenCode, OpenClaw, or Reasonix. They are not supported backends.
