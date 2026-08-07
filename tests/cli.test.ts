@@ -1639,6 +1639,100 @@ describe("CLI", () => {
     }
   });
 
+  test("Linear writeback commands classify HTTP 403 as permission denied without leaking credentials", async () => {
+    const fixture = await createLinearWritebackFixture({ permissionDenied: true });
+    if (!fixture) {
+      expect(Bun.version).toBeString();
+      return;
+    }
+    try {
+      const status = await runCliRaw(
+        "linear-update-status",
+        "--config",
+        fixture.configPath,
+        "--issue-id",
+        fixture.issueId,
+        "--state-id",
+        fixture.targetStateId,
+      );
+      const comment = await runCliRaw(
+        "linear-write-evidence-comment",
+        "--config",
+        fixture.configPath,
+        "--idempotency-secret-file",
+        fixture.writebackSecretPath,
+        "--issue-id",
+        fixture.issueId,
+        "--idempotency-key",
+        "permission-denied-v1",
+        "--evidence-summary",
+        "permission denied evidence",
+      );
+
+      for (const result of [status, comment]) {
+        expect(result.exitCode).not.toBe(0);
+        expect(JSON.parse(result.stdout)).toMatchObject({
+          outcome: "failed",
+          status: "permission_denied",
+          error: "Linear permission denied",
+        });
+        for (const forbidden of [fixture.token, "Authorization", "Bearer"]) {
+          expect(`${result.stdout}\n${result.stderr}`).not.toContain(forbidden);
+        }
+      }
+      expect(fixture.issueUpdateCalls()).toBe(0);
+      expect(fixture.commentCreateCalls()).toBe(0);
+      expect(fixture.comments).toHaveLength(0);
+    } finally {
+      fixture.server.stop(true);
+    }
+  });
+
+  test("Linear writeback commands fail deterministically when the immutable issue is not found", async () => {
+    const fixture = await createLinearWritebackFixture({ missingIssue: true });
+    if (!fixture) {
+      expect(Bun.version).toBeString();
+      return;
+    }
+    try {
+      const status = await runCliRaw(
+        "linear-update-status",
+        "--config",
+        fixture.configPath,
+        "--issue-id",
+        fixture.issueId,
+        "--state-id",
+        fixture.targetStateId,
+      );
+      const comment = await runCliRaw(
+        "linear-write-evidence-comment",
+        "--config",
+        fixture.configPath,
+        "--idempotency-secret-file",
+        fixture.writebackSecretPath,
+        "--issue-id",
+        fixture.issueId,
+        "--idempotency-key",
+        "missing-issue-v1",
+        "--evidence-summary",
+        "missing issue evidence",
+      );
+
+      for (const result of [status, comment]) {
+        expect(result.exitCode).not.toBe(0);
+        expect(JSON.parse(result.stdout)).toMatchObject({
+          outcome: "failed",
+          status: "issue_not_found",
+        });
+      }
+      expect(fixture.issueUpdateCalls()).toBe(0);
+      expect(fixture.commentCreateCalls()).toBe(0);
+      expect(fixture.comments).toHaveLength(0);
+    } finally {
+      fixture.server.stop(true);
+    }
+  });
+
   test("linear-write-evidence-comment creates once, independently reads back, then reuses sequentially", async () => {
     const fixture = await createLinearWritebackFixture();
     if (!fixture) {
@@ -11393,6 +11487,8 @@ describe("CLI", () => {
     sensitiveStateName?: boolean;
     malformedStatusScope?: boolean;
     malformedCommentPage?: boolean;
+    permissionDenied?: boolean;
+    missingIssue?: boolean;
   } = {}) {
     const issueId = "0ad49c7d-9f2b-4f2e-8743-ee017d841171";
     const teamId = "8ec14dab-a05d-4d78-95fa-e59301005499";
@@ -11434,6 +11530,11 @@ describe("CLI", () => {
         const body = (await request.json()) as { query: string; variables?: Record<string, unknown> };
         const variables = body.variables ?? {};
         requests.push({ query: body.query, variables });
+        if (input.permissionDenied) {
+          return Response.json({
+            errors: [{ message: `Authorization: Bearer ${token}` }],
+          }, { status: 403 });
+        }
         if (input.echoCredentialError && body.query.includes("OuroborosLinearStatusScope")) {
           return Response.json({
             errors: [{
@@ -11446,7 +11547,12 @@ describe("CLI", () => {
           if (input.malformedStatusScope) {
             return Response.json({ data: { issue: issue(), workflowState: { ...state(targetStateId), team: null } } });
           }
-          return Response.json({ data: { issue: issue(input.scopeIssueId ?? issueId), workflowState: state(targetStateId) } });
+          return Response.json({
+            data: {
+              issue: input.missingIssue ? null : issue(input.scopeIssueId ?? issueId),
+              workflowState: state(targetStateId),
+            },
+          });
         }
         if (body.query.includes("OuroborosLinearStatusUpdate")) {
           issueUpdateCount += 1;
@@ -11458,6 +11564,9 @@ describe("CLI", () => {
         }
         if (body.query.includes("OuroborosLinearEvidenceCommentList")) {
           commentListCount += 1;
+          if (input.missingIssue) {
+            return Response.json({ data: { issue: null } });
+          }
           if (input.malformedCommentPage) {
             return Response.json({ data: { issue: { id: issueId, comments: { nodes: null, pageInfo: null } } } });
           }
