@@ -896,6 +896,276 @@ describe("Harness actions", () => {
     expect(headAfterSecond).toBe(headAfterFirst);
   });
 
+  describe("same-branch contained worker commit bookkeeping", () => {
+    async function createScenario(input: {
+      artifactFactory?: (commits: { workerCommit: string; unrelatedCommit: string }) => unknown[];
+      changedFiles?: string[];
+      dirty?: boolean;
+      foreignWorktree?: boolean;
+      verifierFailed?: boolean;
+    } = {}) {
+      const repoPath = join(dir, `repo-contained-${crypto.randomUUID()}`);
+      await mkdir(repoPath, { recursive: true });
+      await writeFile(join(repoPath, "README.md"), "initial\n");
+      git(repoPath, ["init", "-b", "main"]);
+      git(repoPath, ["config", "user.name", "Ouroboros Test"]);
+      git(repoPath, ["config", "user.email", "test@example.com"]);
+      git(repoPath, ["config", "commit.gpgSign", "false"]);
+      git(repoPath, ["add", "README.md"]);
+      git(repoPath, ["commit", "-m", "Initial commit"]);
+
+      git(repoPath, ["checkout", "-b", "unrelated-artifact"]);
+      await writeFile(join(repoPath, "unrelated.txt"), "unrelated\n");
+      git(repoPath, ["add", "unrelated.txt"]);
+      git(repoPath, ["commit", "-m", "Unrelated artifact commit"]);
+      const unrelatedCommit = git(repoPath, ["rev-parse", "HEAD"]).stdout.trim();
+      git(repoPath, ["checkout", "main"]);
+
+      await mkdir(join(repoPath, "src"), { recursive: true });
+      await writeFile(join(repoPath, "src", "contained.ts"), "export const contained = true;\n");
+      git(repoPath, ["add", "src/contained.ts"]);
+      git(repoPath, ["commit", "-m", "Worker artifact commit"]);
+      const workerCommit = git(repoPath, ["rev-parse", "HEAD"]).stdout.trim();
+      await writeFile(join(repoPath, "later.txt"), "later delivery\n");
+      git(repoPath, ["add", "later.txt"]);
+      git(repoPath, ["commit", "-m", "Later delivery contains worker"]);
+      const targetHead = git(repoPath, ["rev-parse", "HEAD"]).stdout.trim();
+
+      let worktreePath = repoPath;
+      if (input.foreignWorktree) {
+        worktreePath = join(dir, `repo-contained-foreign-${crypto.randomUUID()}`);
+        await mkdir(worktreePath, { recursive: true });
+        await writeFile(join(worktreePath, "README.md"), "foreign repository\n");
+        git(worktreePath, ["init", "-b", "main"]);
+        git(worktreePath, ["config", "user.name", "Ouroboros Test"]);
+        git(worktreePath, ["config", "user.email", "test@example.com"]);
+        git(worktreePath, ["config", "commit.gpgSign", "false"]);
+        git(worktreePath, ["add", "README.md"]);
+        git(worktreePath, ["commit", "-m", "Foreign repository commit"]);
+      }
+
+      const runId = harness.createRun({ goal: "Record contained worker integration", projectRoot: repoPath });
+      const workerTaskId = harness.createTask({
+        runId,
+        role: "worker",
+        goal: "Commit directly on the delivery branch",
+        prompt: "Commit src/contained.ts on main.",
+        worktreePath,
+      });
+      const artifacts = input.artifactFactory?.({ workerCommit, unrelatedCommit }) ?? [{
+        kind: "git_commit",
+        sha: workerCommit,
+        branch: "main",
+      }];
+      harness.recordAttempt({
+        taskId: workerTaskId,
+        input: { executor: "test" },
+        output: {
+          status: "done",
+          summary: "Committed verified work directly on main",
+          changedFiles: input.changedFiles ?? ["src/contained.ts"],
+          checks: [{ name: "worker", status: "passed" }],
+          artifacts,
+          problems: [],
+        },
+      });
+      const verifierTaskId = harness.createTask({
+        runId,
+        role: "verifier",
+        goal: "Verify contained worker commit",
+        prompt: "Verify src/contained.ts.",
+        dependsOn: [workerTaskId],
+      });
+      harness.recordAttempt({
+        taskId: verifierTaskId,
+        input: { executor: "test" },
+        output: {
+          status: "done",
+          summary: input.verifierFailed ? "Verification failed" : "Contained commit verified",
+          changedFiles: [],
+          checks: [{ name: "verify", status: input.verifierFailed ? "failed" : "passed" }],
+          artifacts: [],
+          problems: input.verifierFailed ? ["verification failed"] : [],
+        },
+      });
+      harness.updateRunStatus({ runId, status: "blocked" });
+      if (input.dirty) {
+        await writeFile(join(repoPath, "src", "contained.ts"), "export const contained = 'dirty';\n");
+      }
+      return { repoPath, worktreePath, runId, workerTaskId, verifierTaskId, workerCommit, unrelatedCommit, targetHead };
+    }
+
+    test("records an already-contained same-branch worker commit and replays idempotently", async () => {
+      const scenario = await createScenario();
+
+      const first = applyHarnessAction(harness, {
+        type: "integrateVerifiedRun",
+        runId: scenario.runId,
+        workerTaskId: scenario.workerTaskId,
+        repoPath: scenario.repoPath,
+        targetBranch: "main",
+      });
+      const second = applyHarnessAction(harness, {
+        type: "integrateVerifiedRun",
+        runId: scenario.runId,
+        workerTaskId: scenario.workerTaskId,
+        repoPath: scenario.repoPath,
+        targetBranch: "main",
+      });
+      const readiness = describeIntegrationReadiness(harness, scenario.runId);
+
+      expect(first).toMatchObject({ status: "done", actionType: "integrateVerifiedRun" });
+      expect(second).toMatchObject({ status: "done", actionType: "integrateVerifiedRun" });
+      expect(first.artifacts).toContainEqual(expect.objectContaining({
+        kind: "integration",
+        mode: "contained_worker_commit",
+        workerTaskId: scenario.workerTaskId,
+        verifierTaskId: scenario.verifierTaskId,
+        workerCommit: scenario.workerCommit,
+        mergeCommit: scenario.targetHead,
+        targetBranch: "main",
+        sourceBranch: "main",
+        alreadyMerged: true,
+      }));
+      expect(git(scenario.repoPath, ["rev-parse", "HEAD"]).stdout.trim()).toBe(scenario.targetHead);
+      expect(readiness.unintegrated).toHaveLength(0);
+      expect(readiness.integratedWorkerTaskIds.has(scenario.workerTaskId)).toBe(true);
+    });
+
+    test("blocks missing and ambiguous git_commit artifacts", async () => {
+      const cases = [
+        await createScenario({ artifactFactory: () => [] }),
+        await createScenario({
+          artifactFactory: ({ workerCommit }) => [
+            { kind: "git_commit", sha: workerCommit, branch: "main" },
+            { kind: "git_commit", sha: workerCommit, branch: "main" },
+          ],
+        }),
+      ];
+
+      for (const scenario of cases) {
+        const result = applyHarnessAction(harness, {
+          type: "integrateVerifiedRun",
+          runId: scenario.runId,
+          workerTaskId: scenario.workerTaskId,
+          repoPath: scenario.repoPath,
+          targetBranch: "main",
+        });
+        expect(result).toMatchObject({ status: "blocked", actionType: "integrateVerifiedRun" });
+        expect(result.problems.join(" ")).toContain("exactly one git_commit artifact");
+      }
+    });
+
+    test("blocks malformed and branch-mismatched git_commit artifacts", async () => {
+      const cases = [
+        await createScenario({
+          artifactFactory: () => [{ kind: "git_commit", sha: "0000000000000000000000000000000000000000", branch: "main" }],
+        }),
+        await createScenario({
+          artifactFactory: ({ workerCommit }) => [{ kind: "git_commit", sha: workerCommit, branch: "release" }],
+        }),
+      ];
+
+      const malformed = applyHarnessAction(harness, {
+        type: "integrateVerifiedRun",
+        runId: cases[0].runId,
+        workerTaskId: cases[0].workerTaskId,
+        repoPath: cases[0].repoPath,
+        targetBranch: "main",
+      });
+      const branchMismatch = applyHarnessAction(harness, {
+        type: "integrateVerifiedRun",
+        runId: cases[1].runId,
+        workerTaskId: cases[1].workerTaskId,
+        repoPath: cases[1].repoPath,
+        targetBranch: "main",
+      });
+
+      expect(malformed.problems.join(" ")).toContain("non-zero full 40-character SHA");
+      expect(branchMismatch.problems.join(" ")).toContain("does not match target branch main");
+    });
+
+    test("blocks a commit from another repository or a non-ancestor commit", async () => {
+      const missingFromRepo = await createScenario({
+        artifactFactory: () => [{ kind: "git_commit", sha: "3333333333333333333333333333333333333333", branch: "main" }],
+      });
+      const nonAncestor = await createScenario({
+        artifactFactory: ({ unrelatedCommit }) => [{ kind: "git_commit", sha: unrelatedCommit, branch: "main" }],
+      });
+
+      const missingResult = applyHarnessAction(harness, {
+        type: "integrateVerifiedRun",
+        runId: missingFromRepo.runId,
+        workerTaskId: missingFromRepo.workerTaskId,
+        repoPath: missingFromRepo.repoPath,
+        targetBranch: "main",
+      });
+      const nonAncestorResult = applyHarnessAction(harness, {
+        type: "integrateVerifiedRun",
+        runId: nonAncestor.runId,
+        workerTaskId: nonAncestor.workerTaskId,
+        repoPath: nonAncestor.repoPath,
+        targetBranch: "main",
+      });
+
+      expect(missingResult.problems.join(" ")).toContain("does not belong to the target repository");
+      expect(nonAncestorResult.problems.join(" ")).toContain("is not an ancestor of target HEAD");
+    });
+
+    test("blocks a same-named branch from a foreign worker repository", async () => {
+      const scenario = await createScenario({ foreignWorktree: true });
+
+      const result = applyHarnessAction(harness, {
+        type: "integrateVerifiedRun",
+        runId: scenario.runId,
+        workerTaskId: scenario.workerTaskId,
+        repoPath: scenario.repoPath,
+        targetBranch: "main",
+      });
+
+      expect(result).toMatchObject({ status: "blocked", actionType: "integrateVerifiedRun" });
+      expect(result.problems.join(" ")).toContain("does not belong to the target repository");
+    });
+
+    test("blocks when attempt changedFiles do not match the contained commit", async () => {
+      const scenario = await createScenario({ changedFiles: ["src/not-in-commit.ts"] });
+
+      const result = applyHarnessAction(harness, {
+        type: "integrateVerifiedRun",
+        runId: scenario.runId,
+        workerTaskId: scenario.workerTaskId,
+        repoPath: scenario.repoPath,
+        targetBranch: "main",
+      });
+
+      expect(result).toMatchObject({ status: "blocked", actionType: "integrateVerifiedRun" });
+      expect(result.problems.join(" ")).toContain("changedFiles do not match git_commit");
+    });
+
+    test("blocks dirty same-branch worktrees and failed verifier evidence", async () => {
+      const dirty = await createScenario({ dirty: true });
+      const failedVerifier = await createScenario({ verifierFailed: true });
+
+      const dirtyResult = applyHarnessAction(harness, {
+        type: "integrateVerifiedRun",
+        runId: dirty.runId,
+        workerTaskId: dirty.workerTaskId,
+        repoPath: dirty.repoPath,
+        targetBranch: "main",
+      });
+      const verifierResult = applyHarnessAction(harness, {
+        type: "integrateVerifiedRun",
+        runId: failedVerifier.runId,
+        workerTaskId: failedVerifier.workerTaskId,
+        repoPath: failedVerifier.repoPath,
+        targetBranch: "main",
+      });
+
+      expect(dirtyResult.problems.join(" ")).toContain("target repository must be clean for same-branch integration");
+      expect(verifierResult.problems.join(" ")).toContain("no completed verifier evidence");
+    });
+  });
+
   test("integrates an explicitly verified worker before the whole run is complete", async () => {
     const repoPath = join(dir, "repo-precomplete");
     const worktreePath = join(dir, "worker-tree-precomplete");

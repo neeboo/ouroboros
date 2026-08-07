@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import { acceptGuardrailProposal, proposeGuardrailsFromLessons } from "./guardrails";
 import {
@@ -244,6 +244,10 @@ interface GitCommandResult {
 }
 
 type GitRunner = (input: GitCommandInput) => GitCommandResult;
+
+// Bump when integration preflight semantics change so a previously converged
+// blocked action is re-evaluated under the new contract.
+const INTEGRATION_CONTRACT_VERSION = 2;
 
 export function parseHarnessAction(value: unknown): HarnessAction {
   const record = objectRecord(value, "harness action");
@@ -1514,7 +1518,49 @@ function integrateVerifiedRun(
   }
   checks.push({ name: "no concurrent merge", status: "passed", evidence: "no MERGE_HEAD" });
 
+  const sourceBranchResult = runGitStep(git, worktreePath, ["branch", "--show-current"]);
+  if (!sourceBranchResult.ok) {
+    return blockedCommand(action.type, "Could not read worker worktree branch.", checks, sourceBranchResult);
+  }
+  const sourceBranch = sourceBranchResult.stdout.trim();
+  if (!sourceBranch) {
+    return blockedIntegration(action.type, "Worker worktree is not on an integration branch.", checks, [
+      "source branch is detached HEAD",
+    ]);
+  }
+
+  const targetCommonDirResult = runGitStep(git, repoPath, ["rev-parse", "--path-format=absolute", "--git-common-dir"]);
+  if (!targetCommonDirResult.ok) {
+    return blockedCommand(action.type, "Could not identify the target Git repository.", checks, targetCommonDirResult);
+  }
+  const workerCommonDirResult = runGitStep(git, worktreePath, ["rev-parse", "--path-format=absolute", "--git-common-dir"]);
+  if (!workerCommonDirResult.ok) {
+    return blockedCommand(action.type, "Could not identify the worker Git repository.", checks, workerCommonDirResult);
+  }
+  let targetCommonDir: string;
+  let workerCommonDir: string;
+  try {
+    targetCommonDir = realpathSync(targetCommonDirResult.stdout.trim());
+    workerCommonDir = realpathSync(workerCommonDirResult.stdout.trim());
+  } catch {
+    return blockedIntegration(action.type, "Could not resolve Git repository identity.", checks, [
+      "target and worker Git common directories must both resolve to existing directories",
+    ]);
+  }
+  if (workerCommonDir !== targetCommonDir) {
+    return blockedIntegration(action.type, "Worker worktree does not belong to the target repository.", checks, [
+      "worker worktree does not belong to the target repository",
+    ]);
+  }
+  checks.push({ name: "worker repository identity", status: "passed", evidence: targetCommonDir });
+  const isContainedSameBranch = sourceBranch === targetBranch;
+
   if (targetStatus.stdout.trim().length > 0) {
+    if (isContainedSameBranch) {
+      return blockedIntegration(action.type, "Target repository is dirty during same-branch integration.", checks, [
+        "target repository must be clean for same-branch integration",
+      ]);
+    }
     return integrateMaterializedTargetChanges({
       action,
       checks,
@@ -1531,22 +1577,34 @@ function integrateVerifiedRun(
     });
   }
   checks.push({ name: "target repository clean", status: "passed", evidence: "clean" });
-
-  const sourceBranchResult = runGitStep(git, worktreePath, ["branch", "--show-current"]);
-  if (!sourceBranchResult.ok) {
-    return blockedCommand(action.type, "Could not read worker worktree branch.", checks, sourceBranchResult);
-  }
-  const sourceBranch = sourceBranchResult.stdout.trim();
-  if (!sourceBranch || sourceBranch === targetBranch) {
-    return blockedIntegration(action.type, "Worker worktree is not on an integration branch.", checks, [
-      `source branch is ${sourceBranch || "detached HEAD"}`,
-    ]);
-  }
   checks.push({ name: "source branch", status: "passed", evidence: sourceBranch });
 
   const workerStatus = runGitStep(git, worktreePath, ["status", "--short"]);
   if (!workerStatus.ok) {
     return blockedCommand(action.type, "Could not inspect worker worktree status.", checks, workerStatus);
+  }
+  if (isContainedSameBranch) {
+    if (workerStatus.stdout.trim().length > 0) {
+      return blockedIntegration(action.type, "Same-branch worker worktree is dirty.", checks, [
+        "same-branch worker worktree must be clean",
+      ]);
+    }
+    checks.push({ name: "worker worktree clean", status: "passed", evidence: "no uncommitted changes" });
+    return recordContainedWorkerCommitIntegration({
+      action,
+      checks,
+      git,
+      goalReview,
+      isPreCompletionIntegration,
+      overview,
+      repoPath,
+      sourceBranch,
+      targetBranch,
+      verifier,
+      worker,
+      worktreePath,
+      changedFiles,
+    });
   }
   let workerCommit: string | null = null;
   if (workerStatus.stdout.trim().length > 0) {
@@ -1653,6 +1711,148 @@ function integrateVerifiedRun(
       reason: action.reason ?? null,
     },
   ]);
+}
+
+function recordContainedWorkerCommitIntegration(input: {
+  action: Extract<HarnessAction, { type: "integrateVerifiedRun" }>;
+  checks: HarnessActionResult["checks"];
+  changedFiles: string[];
+  git: GitRunner;
+  goalReview: Task | null;
+  isPreCompletionIntegration: boolean;
+  overview: RunOverview;
+  repoPath: string;
+  sourceBranch: string;
+  targetBranch: string;
+  verifier: Task;
+  worker: Task;
+  worktreePath: string;
+}): HarnessActionResult {
+  const workerSession = latestSessionForTask(input.overview, input.worker.id);
+  const artifacts = Array.isArray(workerSession?.output.artifacts) ? workerSession.output.artifacts : [];
+  const commitArtifacts = artifacts.filter((artifact) =>
+    artifact !== null &&
+    typeof artifact === "object" &&
+    !Array.isArray(artifact) &&
+    (artifact as Record<string, unknown>).kind === "git_commit"
+  ) as Array<Record<string, unknown>>;
+  if (commitArtifacts.length !== 1) {
+    return blockedIntegration(
+      input.action.type,
+      `Worker task ${input.worker.id} must provide exactly one git_commit artifact.`,
+      input.checks,
+      [`latest done attempt has ${commitArtifacts.length} git_commit artifacts; expected exactly one git_commit artifact`],
+    );
+  }
+
+  const artifact = commitArtifacts[0];
+  const rawSha = artifact.sha;
+  if (typeof rawSha !== "string" || !isGitCommitSha(rawSha) || /^0+$/.test(rawSha)) {
+    return blockedIntegration(input.action.type, "Worker git_commit artifact has an invalid SHA.", input.checks, [
+      "git_commit artifact sha must be a non-zero full 40-character SHA",
+    ]);
+  }
+  const workerCommit = rawSha.toLowerCase();
+  if (artifact.branch !== input.targetBranch) {
+    return blockedIntegration(input.action.type, "Worker git_commit artifact branch does not match the target branch.", input.checks, [
+      `git_commit artifact branch ${String(artifact.branch)} does not match target branch ${input.targetBranch}`,
+    ]);
+  }
+  input.checks.push({ name: "worker commit artifact", status: "passed", evidence: workerCommit });
+
+  const commitExists = runGitStep(input.git, input.repoPath, ["cat-file", "-e", `${workerCommit}^{commit}`]);
+  if (!commitExists.ok) {
+    return blockedIntegration(input.action.type, "Worker commit does not belong to the target repository.", input.checks, [
+      `git_commit ${workerCommit} does not belong to the target repository`,
+    ]);
+  }
+  input.checks.push({ name: "worker commit belongs to repository", status: "passed", evidence: workerCommit });
+
+  const targetHeadResult = runGitStep(input.git, input.repoPath, ["rev-parse", "HEAD"]);
+  if (!targetHeadResult.ok) {
+    return blockedCommand(input.action.type, "Could not read target repository HEAD.", input.checks, targetHeadResult);
+  }
+  const targetHead = targetHeadResult.stdout.trim().toLowerCase();
+  if (!isGitCommitSha(targetHead) || /^0+$/.test(targetHead)) {
+    return blockedIntegration(input.action.type, "Target repository HEAD is not a full commit SHA.", input.checks, [
+      "target HEAD must be a non-zero full 40-character SHA",
+    ]);
+  }
+  const ancestor = runGitStep(input.git, input.repoPath, [
+    "merge-base",
+    "--is-ancestor",
+    workerCommit,
+    targetHead,
+  ]);
+  if (!ancestor.ok) {
+    return blockedIntegration(input.action.type, "Worker commit is not contained by the target branch.", input.checks, [
+      `git_commit ${workerCommit} is not an ancestor of target HEAD ${targetHead}`,
+    ]);
+  }
+  input.checks.push({
+    name: "worker commit contained by target HEAD",
+    status: "passed",
+    evidence: `${workerCommit}..${targetHead}`,
+  });
+
+  const commitFilesResult = runGitStep(input.git, input.repoPath, [
+    "diff-tree",
+    "--root",
+    "--no-commit-id",
+    "--name-only",
+    "-r",
+    "-z",
+    workerCommit,
+  ]);
+  if (!commitFilesResult.ok) {
+    return blockedCommand(input.action.type, "Could not read worker commit changed files.", input.checks, commitFilesResult);
+  }
+  const rawCommitFiles = commitFilesResult.stdout.split("\0").filter(Boolean);
+  const evidenceFiles = normalizeRelativeFiles(input.changedFiles);
+  const commitFiles = normalizeRelativeFiles(rawCommitFiles);
+  const sortedEvidenceFiles = [...new Set(evidenceFiles)].sort();
+  const sortedCommitFiles = [...new Set(commitFiles)].sort();
+  if (
+    evidenceFiles.length !== input.changedFiles.length ||
+    commitFiles.length !== rawCommitFiles.length ||
+    sortedEvidenceFiles.length !== input.changedFiles.length ||
+    sortedCommitFiles.length !== rawCommitFiles.length ||
+    sortedEvidenceFiles.join("\0") !== sortedCommitFiles.join("\0")
+  ) {
+    return blockedIntegration(input.action.type, "Worker changedFiles do not match the git_commit artifact.", input.checks, [
+      `attempt changedFiles do not match git_commit ${workerCommit}`,
+    ]);
+  }
+  input.checks.push({
+    name: "worker changed files match commit",
+    status: "passed",
+    evidence: sortedCommitFiles.join(","),
+  });
+
+  return doneResult(
+    input.action.type,
+    `Verified task ${input.worker.id} commit is already integrated into ${input.targetBranch}.`,
+    input.checks,
+    [{
+      kind: "integration",
+      mode: "contained_worker_commit",
+      runId: input.action.runId,
+      workerTaskId: input.worker.id,
+      verifierTaskId: input.verifier.id,
+      goalReviewTaskId: input.goalReview?.id ?? null,
+      preCompletion: input.isPreCompletionIntegration,
+      repoPath: input.repoPath,
+      worktreePath: input.worktreePath,
+      targetBranch: input.targetBranch,
+      sourceBranch: input.sourceBranch,
+      workerCommit,
+      mergeCommit: targetHead,
+      pushed: false,
+      changedFiles: input.changedFiles,
+      reason: input.action.reason ?? null,
+      alreadyMerged: true,
+    }],
+  );
 }
 
 function integrateMaterializedTargetChanges(input: {
@@ -3160,6 +3360,7 @@ function integrationOperationKey(
     slot,
     key: stableFingerprint({
       action: {
+        integrationContractVersion: INTEGRATION_CONTRACT_VERSION,
         runId: action.runId,
         workerTaskId: action.workerTaskId ?? null,
         repoPath,
