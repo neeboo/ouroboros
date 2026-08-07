@@ -24,10 +24,10 @@ ACP/acpx events, tool calls, diffs, and stream chunks are observability only. Th
 
 | Backend | Kind | Use |
 | --- | --- | --- |
-| `codex-resumable` | `codex-resumable` | Default designer, planner, verifier, outcome-review, goal-review, and durable Codex work. Records native Codex session ids. |
+| `codex-resumable` | `codex-resumable` | Default for every self-iteration role and durable Codex work. Records native Codex session ids. |
 | `codex` / `acpx-codex` | `acpx` | Codex through acpx named sessions. Useful for ACP smoke and subsessions. |
 | `codex-cli` | `codex-cli` | One-shot Codex CLI compatibility path. |
-| `claude-code` | `acpx` agent `claude` | Worker trials and explicitly routed Claude Code tasks. |
+| `claude-code` | `acpx` agent `claude` | Explicitly routed Claude Code tasks; not the self-iteration default. |
 | `noop` | `noop` | Tests and dry plumbing. |
 
 Built-in acpx agent ids are limited to `codex` and `claude`. `claude-code` is the Orbs alias for acpx `claude`.
@@ -39,10 +39,11 @@ Backend selection lives in `run.context` and `task.config`.
 ```json
 {
   "agentDefaults": {
-    "global": "claude-code",
+    "global": "codex-resumable",
     "roles": {
       "designer": "codex-resumable",
       "planner": "codex-resumable",
+      "worker": "codex-resumable",
       "verifier": "codex-resumable",
       "outcome-review": "codex-resumable",
       "goal-review": "codex-resumable"
@@ -145,17 +146,20 @@ A passed smoke proves only read-only ACP execution in the temporary cwd. Write w
 
 ## Recommended Role Routing
 
-Self-iteration runs should keep `designer`, `planner`, `verifier`, `outcome-review`, and `goal-review` on `codex-resumable` by default. Use Claude Code mainly for worker tasks until long-run designer/planner/verifier behavior is proven.
+Self-iteration runs keep `designer`, `planner`, `worker`, `verifier`, `outcome-review`, and `goal-review` on `codex-resumable` by default. Claude Code is supported only for a task with an explicit `config.agentBackend = "claude-code"`.
+
+Recovery is finite and Codex-first: Claude Code executor failures return to Codex, while Codex executor failures continue as bounded Codex repair tasks. The recovery record preserves the source worktree and task contract and includes `fromBackend`, `toBackend`, `sourceAttemptId`, `terminalReason`, and `generation`. It never means automatic backend rotation or unlimited retry.
 
 For the shortest operational recipe, start with `docs/default-runbook.md`.
 
 ```toml
 [agentDefaults]
-global = "claude-code"
+global = "codex-resumable"
 
 [agentDefaults.roles]
 designer = "codex-resumable"
 planner = "codex-resumable"
+worker = "codex-resumable"
 verifier = "codex-resumable"
 "outcome-review" = "codex-resumable"
 "goal-review" = "codex-resumable"

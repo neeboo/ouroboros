@@ -4,8 +4,8 @@ This is the default way to use Ouroboros from another repository.
 
 Keep the route Designer-first:
 
-- `designer`, `planner`, `verifier`, `outcome-review`, and `goal-review` use `codex-resumable`.
-- `worker` uses `claude-code`.
+- `designer`, `planner`, `worker`, `verifier`, `outcome-review`, and `goal-review` use `codex-resumable`.
+- Claude Code is available only when a task explicitly sets `config.agentBackend` to `claude-code`.
 - A root run starts with a `designer` task that reads the active founder charter, strategy signals, lessons, run evidence, and due outcome reviews. It emits one evidence-backed proposal (with a frozen evaluation contract) or a mutation-free quiescent decision (no signal, no proposal — the rationale lives in the attempt summary).
 - Accepted low-risk proposals create a child planner run automatically; only monetary or capital-policy decisions wait on human authority.
 - Use the current worktree when the target repository already has relevant uncommitted changes.
@@ -51,7 +51,7 @@ RUN_ID=$(orbs create-run \
       "global": "codex-resumable",
       "roles": {
         "planner": "codex-resumable",
-        "worker": "claude-code",
+        "worker": "codex-resumable",
         "verifier": "codex-resumable",
         "goal-review": "codex-resumable"
       }
@@ -146,10 +146,11 @@ orbs dashboard --run-id "$RUN_ID" --port 7331
 
 `self-improve-daemon` does not treat a blocked run as quiescent. It scans all blocked runs before ordinary scheduling and creates auditable recovery tasks in the same runs:
 
-- Claude Code executor failures switch to `codex-resumable`.
-- Codex executor failures switch to `claude-code`.
+- Claude Code executor failures create a Codex recovery task.
+- Codex executor failures continue as a bounded Codex repair task.
 - Logical and verification blocks use a Codex repair worker.
 - Recovery reuses the source task's actual worktree, completion criteria, and verifier contract.
+- Recovery preserves the repair budget, permissions, timeout evidence, and generation metadata. It does not rotate backends automatically or retry forever.
 - Multiple blocked runs receive recovery tasks in one tick; `--parallel auto` controls how many execute together.
 - Only monetary or capital-policy authority may wait for a human decision.
 
@@ -158,12 +159,12 @@ orbs dashboard --run-id "$RUN_ID" --port 7331
 When an agent is asked how to run Ouroboros, prefer this answer:
 
 1. Use `orbs self-iterate-launch --parallel auto` for Ouroboros improving itself. The root run starts with a `designer` task.
-2. Create a run with Codex for `designer`, `planner`, `verifier`, `outcome-review`, and `goal-review`, and Claude Code for `worker`.
+2. Create a run with Codex for `designer`, `planner`, `worker`, `verifier`, `outcome-review`, and `goal-review`.
 3. Designer tasks return through fixed actions: `recordSignal`, `proposeDesign`, `decideDesign`, `recordDesignOutcome`, `createRunsFromDesign`. Only monetary or capital-policy decisions wait for human authority.
 4. Create a small worker task with `--config-json '{"agentBackend":"claude-code"}'`.
 5. Use `--start-hook none` if current uncommitted changes are part of the task.
 6. Use `--start-hook git-worktree --worktree-root .orbs/worktrees` only for clean or isolated work.
-7. Keep `self-improve-daemon` running; it switches failed executor backends and preserves the source worktree automatically.
+7. Keep `self-improve-daemon` running; it creates finite Codex recovery tasks and preserves the source worktree automatically.
 8. Let Codex verifier and goal-review finish each recovered run.
 9. After verified integration, run `outcome-review` against the frozen evaluation contract.
 

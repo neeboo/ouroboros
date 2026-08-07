@@ -244,8 +244,9 @@ Agent backend resolution is also protocol-level state. A run can define named ba
 ```json
 {
   "agentDefaults": {
-    "global": "claude-code",
+    "global": "codex-resumable",
     "roles": {
+      "worker": "codex-resumable",
       "verifier": "codex-resumable"
     }
   },
@@ -281,7 +282,7 @@ Within an ACPX backend definition, `agent` identifies the semantic agent/provide
 
 Runs may be bound to a project by `project_id`, or by a project root path that creates/reuses a matching `projects.root_path` row. Old databases keep `runs.project_id` nullable, and existing `context_json` remains compatible.
 
-The CLI exposes `self-iterate-launch` as the autonomous self-improvement entry point. It creates a root assessment run, starts the dashboard, and launches `self-improve-daemon`. The root run starts with a `designer` task. The designer reads the active founder charter, strategy signals, lessons, run evidence, and due outcome reviews, then emits one evidence-backed proposal (with a frozen evaluation contract) or a mutation-free quiescent decision whose rationale lives in the attempt summary. Accepted low-risk proposals create a child planner run automatically; high-risk proposals block only for monetary cost or capital-policy authority. Implemented proposals move into outcome review after verified integration. The daemon supervises the full run tree, integrates verified changes locally, and creates another assessment only after the repository fingerprint changes. An unchanged fingerprint leaves the controller quiescent only when the scoped tree has no unresolved blocked delivery. A blocked delivery is recovered in the same run: executor-level failures clone the blocked task onto the alternate supported backend, while logical or verification blocks create a Codex repair worker. Recovery inherits the source worktree, completion criteria, and verifier contract, and reopens the run as `todo`. The launch defaults to automatic parallelism, `--worktree-root .ouroboros/worktrees`, and `--start-hook git-worktree`.
+The CLI exposes `self-iterate-launch` as the autonomous self-improvement entry point. It creates a root assessment run, starts the dashboard, and launches `self-improve-daemon`. The root run starts with a `designer` task. The designer reads the active founder charter, strategy signals, lessons, run evidence, and due outcome reviews, then emits one evidence-backed proposal (with a frozen evaluation contract) or a mutation-free quiescent decision whose rationale lives in the attempt summary. Accepted low-risk proposals create a child planner run automatically; high-risk proposals block only for monetary cost or capital-policy authority. Implemented proposals move into outcome review after verified integration. The daemon supervises the full run tree, integrates verified changes locally, and creates another assessment only after the repository fingerprint changes. An unchanged fingerprint leaves the controller quiescent only when the scoped tree has no unresolved blocked delivery. Self-iteration defaults every role, including `worker`, to `codex-resumable`; Claude Code is selected only by an explicit task-level `config.agentBackend`. A blocked delivery is recovered in the same run: Claude executor failures create a Codex recovery task, and Codex executor failures continue as bounded Codex repair tasks. Recovery inherits the source worktree, completion criteria, verifier contract, permissions, and repair budget, records the failure evidence, and reopens the run as `todo`. This recovery is finite and does not rotate backends automatically. The launch defaults to automatic parallelism, `--worktree-root .ouroboros/worktrees`, and `--start-hook git-worktree`.
 
 ## Designer Control Plane
 
@@ -794,6 +795,26 @@ These mappings are not inbox events. They do not change task status, create issu
 `orbs linear-create-issue` creates one issue in the configured project and team through the same `LINEAR_API_KEY`, `token_env`, or `token_file` used by polling. It requires `--title` and accepts `--description`. The intended verification path is `issueCreate -> bounded poll -> inbox_events -> issue-scoped Designer -> planning run -> external_refs`. API responses and SQLite state are the canonical evidence. Goal review must not launch a browser for this transport proof; browser evidence is reserved for a user-facing dashboard change that deterministic API or component tests cannot verify.
 
 `self-improve-daemon` defaults `browserProcessPolicy` to `deny` for every backend and role. On macOS the runner applies one inherited process sandbox around Codex, Codex resume, Claude Code through ACPX, and generic Codex CLI execution. The sandbox denies browser executables plus `/usr/bin/open` and `/usr/bin/osascript`, including calls made by nested test commands. A normal user-started run may opt into browser execution with `--browser-process-policy allow` when its frozen verification contract explicitly requires user-interface evidence. API, CLI, component-test, and SQLite evidence remain the default.
+
+### Linear status and evidence writeback
+
+`orbs linear-update-status` and `orbs linear-write-evidence-comment` are two narrow, independently retried primitives that close the delivery loop without exposing arbitrary GraphQL. Both reuse the configured Linear token source (`LINEAR_API_KEY`, `token_env`, or `token_file`) and the `[linear] api_url`, and neither command persists tokens to the run database. The two commands are intentionally separate requests: a status update followed by an evidence comment is not a Linear-side transaction, and partial success is reported explicitly rather than rolled back.
+
+`linear-update-status` accepts exactly one of `--state-id` (an immutable workflow state UUID) or `--state-name` (a precise name resolved against the issue's team). The two flags are strictly mutually exclusive. The `--state-name` path queries the issue's team workflow states and matches the requested name exactly; zero matches return `state_name_unknown` and more than one match returns `state_name_ambiguous`, both before any `issueUpdate` call. The `--state-id` path validates that the workflow state's team matches the issue's team. After resolution, the resolved state UUID is passed to `issueUpdate` and the result is verified through a separate `issue` readback query that confirms the immutable issue UUID, team, state UUID, state name, and state type. The command exits non-zero with a structured `failed` payload whenever any of these checks fail.
+
+```bash
+orbs linear-update-status \
+  --issue-id 0ad49c7d-9f2b-4f2e-8743-ee017d841171 \
+  --state-name "In Progress"
+```
+
+`linear-write-evidence-comment` writes one bounded evidence comment per `(issue id, idempotency key, normalized evidence)` tuple and never silently overwrites or appends a second comment for the same key. The idempotency marker is derived from the issue UUID plus the caller's `--idempotency-key`; the summary HMAC is derived from the normalized evidence plus a local `--idempotency-secret-file` that never leaves the host. Before each `commentCreate`, the command scans existing issue comments for the marker; a matching body and summary returns `reused`, a matching marker with different body or issue returns `idempotency_conflict`, and multiple matching markers return `idempotency_conflict` without deleting the remote duplicates. After `commentCreate`, the command verifies the result through an independent `comment(id:)` readback that confirms the comment UUID, parent issue UUID, marker, and summary HMAC. If the mutation response is lost, the same retry discovers the persisted marker and returns `reused` with `recovery.mutationResponseLost=true`.
+
+Both commands return structured JSON with a stable `outcome` (`verified` or `failed`), a `status` discriminator, and an `error` message when failed. Statuses include `config_error`, `auth_failure`, `permission_denied`, `transient_failure`, `graphql_error`, `issue_not_found`, `scope_mismatch`, `mutation_failed`, `readback_mismatch`, `idempotency_conflict`, `pagination_limit`, `state_name_unknown`, and `state_name_ambiguous`. The CLI exits non-zero on any non-`verified` outcome. Mutation success alone is never accepted as evidence; independent readback is required.
+
+Idempotency covers sequential retries with the same `(issue id, idempotency key, normalized evidence)` tuple, including retries after mutation-response loss. It does not claim concurrent strict-once behavior. When status succeeds and comment creation fails, callers retain the verified status and retry only the comment with the same idempotency key; status is never rolled back automatically.
+
+Inputs and remote reads remain bounded: the state name and idempotency key are limited to 200 characters, the evidence summary to 4000 characters, the comment body to 6000 characters, comment scans to 10 pages of 50 nodes, responses to 1 MB, and each request to 30 seconds. Sensitive credential fields are redacted from structured output and errors.
 
 ### Dashboard lifecycle visibility
 

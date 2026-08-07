@@ -398,6 +398,7 @@ describe("CLI", () => {
     expect(overview.run.context.agentDefaults.roles).toMatchObject({
       designer: "codex-resumable",
       planner: "codex-resumable",
+      worker: "codex-resumable",
       verifier: "codex-resumable",
       "goal-review": "codex-resumable",
     });
@@ -484,6 +485,7 @@ describe("CLI", () => {
       roles: {
         designer: "codex-resumable",
         planner: "codex-resumable",
+        worker: "codex-resumable",
         verifier: "codex-resumable",
         "goal-review": "codex-resumable",
       },
@@ -513,6 +515,7 @@ describe("CLI", () => {
         "[agentDefaults.roles]",
         'planner = "claude-code"',
         'designer = "claude-code"',
+        'worker = "claude-code"',
         "",
         "[agentBackends.claude-code]",
         'kind = "acpx"',
@@ -529,6 +532,7 @@ describe("CLI", () => {
       roles: {
         designer: "claude-code",
         planner: "claude-code",
+        worker: "codex-resumable",
         verifier: "codex-resumable",
         "goal-review": "codex-resumable",
       },
@@ -1448,6 +1452,238 @@ describe("CLI", () => {
       }
     } finally {
       fixture.server.stop(true);
+    }
+  });
+
+  test("linear-update-status resolves --state-name within the issue team and verifies via independent readback", async () => {
+    const fixture = await createLinearWritebackFixture();
+    if (!fixture) {
+      expect(Bun.version).toBeString();
+      return;
+    }
+    try {
+      const result = await runCliJson(
+        "linear-update-status",
+        "--config",
+        fixture.configPath,
+        "--issue-id",
+        fixture.issueId,
+        "--state-name",
+        "In Progress",
+      );
+
+      expect(result).toMatchObject({
+        outcome: "verified",
+        status: "verified",
+        issue: {
+          id: fixture.issueId,
+          team: { id: fixture.teamId, key: "PAN" },
+          state: { id: fixture.targetStateId, name: "In Progress", type: "started" },
+        },
+        state: { id: fixture.targetStateId, name: "In Progress" },
+        readback: {
+          issue: {
+            id: fixture.issueId,
+            team: { id: fixture.teamId, key: "PAN" },
+            state: { id: fixture.targetStateId, name: "In Progress" },
+          },
+        },
+      });
+      expect(fixture.issueUpdateCalls()).toBe(1);
+      expect(fixture.operationNames()).toEqual([
+        "OuroborosLinearStatusNameResolve",
+        "OuroborosLinearStatusUpdate",
+        "OuroborosLinearStatusReadback",
+      ]);
+      expect(fixture.requests[1]?.variables).toEqual({
+        issueId: fixture.issueId,
+        input: { stateId: fixture.targetStateId },
+      });
+      for (const request of fixture.requests) {
+        expect(request.query).not.toContain("$issueId: ID!");
+        expect(request.query).not.toContain("$stateId: ID!");
+      }
+    } finally {
+      fixture.server.stop(true);
+    }
+  });
+
+  test("linear-update-status --state-name and --state-id are mutually exclusive and reject empty selectors", async () => {
+    const fixture = await createLinearWritebackFixture();
+    if (!fixture) {
+      expect(Bun.version).toBeString();
+      return;
+    }
+    try {
+      const both = await runCliRaw(
+        "linear-update-status",
+        "--config",
+        fixture.configPath,
+        "--issue-id",
+        fixture.issueId,
+        "--state-id",
+        fixture.targetStateId,
+        "--state-name",
+        "In Progress",
+      );
+      expect(both.exitCode).not.toBe(0);
+      expect(JSON.parse(both.stdout)).toMatchObject({ outcome: "failed", status: "config_error" });
+      expect(fixture.issueUpdateCalls()).toBe(0);
+
+      const neither = await runCliRaw(
+        "linear-update-status",
+        "--config",
+        fixture.configPath,
+        "--issue-id",
+        fixture.issueId,
+      );
+      expect(neither.exitCode).not.toBe(0);
+      expect(JSON.parse(neither.stdout)).toMatchObject({ outcome: "failed", status: "config_error" });
+      expect(fixture.issueUpdateCalls()).toBe(0);
+    } finally {
+      fixture.server.stop(true);
+    }
+  });
+
+  test("linear-update-status --state-name returns state_name_unknown without calling issueUpdate", async () => {
+    const fixture = await createLinearWritebackFixture();
+    if (!fixture) {
+      expect(Bun.version).toBeString();
+      return;
+    }
+    try {
+      const result = await runCliRaw(
+        "linear-update-status",
+        "--config",
+        fixture.configPath,
+        "--issue-id",
+        fixture.issueId,
+        "--state-name",
+        "Nonexistent State",
+      );
+      expect(result.exitCode).not.toBe(0);
+      expect(JSON.parse(result.stdout)).toMatchObject({
+        outcome: "failed",
+        status: "state_name_unknown",
+        issue: { id: fixture.issueId, team: { key: "PAN" } },
+      });
+      expect(fixture.issueUpdateCalls()).toBe(0);
+      expect(fixture.operationNames()).toEqual(["OuroborosLinearStatusNameResolve"]);
+    } finally {
+      fixture.server.stop(true);
+    }
+  });
+
+  test("linear-update-status --state-name returns state_name_ambiguous when the team has duplicate names", async () => {
+    const targetState = "77777777-7777-4777-8777-777777777777";
+    const duplicateStateId = "88888888-8888-4888-8888-888888888888";
+    const fixture = await createLinearWritebackFixture({
+      teamStatesOverride: [
+        { id: targetState, name: "In Progress", type: "started" },
+        { id: duplicateStateId, name: "In Progress", type: "started" },
+      ],
+    });
+    if (!fixture) {
+      expect(Bun.version).toBeString();
+      return;
+    }
+    try {
+      const result = await runCliRaw(
+        "linear-update-status",
+        "--config",
+        fixture.configPath,
+        "--issue-id",
+        fixture.issueId,
+        "--state-name",
+        "In Progress",
+      );
+      expect(result.exitCode).not.toBe(0);
+      expect(JSON.parse(result.stdout)).toMatchObject({
+        outcome: "failed",
+        status: "state_name_ambiguous",
+        issue: { id: fixture.issueId, team: { key: "PAN" } },
+      });
+      expect(fixture.issueUpdateCalls()).toBe(0);
+      expect(fixture.operationNames()).toEqual(["OuroborosLinearStatusNameResolve"]);
+    } finally {
+      fixture.server.stop(true);
+    }
+  });
+
+  test("linear-update-status --state-name preserves scope_mismatch, permission_denied, and issue_not_found semantics", async () => {
+    const missing = await createLinearWritebackFixture({ missingIssue: true });
+    if (!missing) {
+      expect(Bun.version).toBeString();
+      return;
+    }
+    try {
+      const result = await runCliRaw(
+        "linear-update-status",
+        "--config",
+        missing.configPath,
+        "--issue-id",
+        missing.issueId,
+        "--state-name",
+        "In Progress",
+      );
+      expect(result.exitCode).not.toBe(0);
+      expect(JSON.parse(result.stdout)).toMatchObject({ outcome: "failed", status: "issue_not_found" });
+      expect(missing.issueUpdateCalls()).toBe(0);
+    } finally {
+      missing.server.stop(true);
+    }
+
+    const forbidden = await createLinearWritebackFixture({ permissionDenied: true });
+    if (!forbidden) {
+      expect(Bun.version).toBeString();
+      return;
+    }
+    try {
+      const result = await runCliRaw(
+        "linear-update-status",
+        "--config",
+        forbidden.configPath,
+        "--issue-id",
+        forbidden.issueId,
+        "--state-name",
+        "In Progress",
+      );
+      expect(result.exitCode).not.toBe(0);
+      expect(JSON.parse(result.stdout)).toMatchObject({
+        outcome: "failed",
+        status: "permission_denied",
+        error: "Linear permission denied",
+      });
+      expect(forbidden.issueUpdateCalls()).toBe(0);
+      for (const forbiddenToken of [forbidden.token, "Authorization", "Bearer"]) {
+        expect(`${result.stdout}\n${result.stderr}`).not.toContain(forbiddenToken);
+      }
+    } finally {
+      forbidden.server.stop(true);
+    }
+
+    const mismatchedScope = await createLinearWritebackFixture({
+      scopeIssueId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+    });
+    if (!mismatchedScope) {
+      expect(Bun.version).toBeString();
+      return;
+    }
+    try {
+      const result = await runCliRaw(
+        "linear-update-status",
+        "--config",
+        mismatchedScope.configPath,
+        "--issue-id",
+        mismatchedScope.issueId,
+        "--state-name",
+        "In Progress",
+      );
+      expect(result.exitCode).not.toBe(0);
+      expect(JSON.parse(result.stdout)).toMatchObject({ outcome: "failed", status: "scope_mismatch" });
+      expect(mismatchedScope.issueUpdateCalls()).toBe(0);
+    } finally {
+      mismatchedScope.server.stop(true);
     }
   });
 
@@ -8282,6 +8518,170 @@ describe("CLI", () => {
     ).toBe(false);
   });
 
+  test("self-improve-daemon keeps Codex executor failures on bounded Codex recovery", async () => {
+    for (const terminalReason of ["idle_timeout", "hard_timeout"]) {
+      const bootstrap = await runCliJson("self-iterate");
+      const setupHarness = new Harness(dbPath);
+      setupHarness.recordAttempt({
+        taskId: bootstrap.taskId,
+        input: {},
+        output: {
+          status: "done",
+          summary: "Initial assessment drained",
+          changedFiles: [],
+          checks: [],
+          artifacts: [],
+          problems: [],
+        },
+      });
+      setupHarness.updateRunStatus({ runId: bootstrap.runId, status: "done" });
+
+      const blockedRunId = setupHarness.createRun({
+        goal: `Codex ${terminalReason} needs bounded recovery`,
+        context: {
+          parentRunId: bootstrap.runId,
+          source: "design",
+          repairReplanBudget: { limit: 2, used: 0, entries: [] },
+          agentDefaults: {
+            global: "claude-code",
+            roles: { worker: "claude-code" },
+          },
+          agentBackends: {
+            "claude-code": { kind: "acpx", agent: "claude", approval: "approve-all" },
+            "codex-resumable": { kind: "codex-resumable" },
+          },
+        },
+      });
+      const sourceWorktreePath = `.ouroboros/worktrees/codex-${terminalReason}`;
+      const blockedTaskId = setupHarness.createTask({
+        runId: blockedRunId,
+        role: "worker",
+        goal: "Preserve the bounded worker recovery contract",
+        prompt: "Continue the worker task in its existing source worktree.",
+        doneWhen: ["the original focused checks pass", "the source worktree is preserved"],
+        worktreePath: sourceWorktreePath,
+        config: {
+          verifierContract: { deterministicChecks: ["bun test tests/cli.test.ts"] },
+          permissions: { sandbox: "workspace-write", browserProcessPolicy: "deny" },
+          retryPolicy: { maxAttempts: 3 },
+        },
+      });
+      const blockedAttemptId = setupHarness.recordAttempt({
+        taskId: blockedTaskId,
+        input: { backend: { id: "codex-resumable", kind: "codex-resumable" } },
+        output: {
+          status: "blocked",
+          summary: `Codex executor ${terminalReason}`,
+          changedFiles: [],
+          checks: [{ name: terminalReason, status: "failed" }],
+          artifacts: [
+            { kind: "acpx_terminal_evidence", terminalReason },
+            { kind: "worktree", path: sourceWorktreePath },
+          ],
+          problems: [terminalReason],
+        },
+      });
+      setupHarness.updateRunStatus({ runId: blockedRunId, status: "blocked" });
+
+      const codexBin = join(dir, `fake-codex-${terminalReason}`);
+      const payload = {
+        status: "done",
+        summary: `Codex recovery completed after ${terminalReason}`,
+        changedFiles: [],
+        checks: [{ name: "focused checks", status: "passed" }],
+        artifacts: [],
+        problems: [],
+      };
+      await writeFile(
+        codexBin,
+        [
+          "#!/usr/bin/env bun",
+          "import { writeFileSync } from 'node:fs';",
+          "const outputFlag = Bun.argv.indexOf('--output-last-message');",
+          "const outputPath = outputFlag >= 0 ? Bun.argv[outputFlag + 1] : '';",
+          `const payload = ${JSON.stringify(payload)};`,
+          "if (outputPath) writeFileSync(outputPath, JSON.stringify(payload));",
+          `console.log(JSON.stringify({ type: 'session.started', session_id: 'session_${terminalReason}' }));`,
+          "console.log(JSON.stringify({ type: 'agent.message', message: JSON.stringify(payload) }));",
+        ].join("\n"),
+      );
+      await chmod(codexBin, 0o755);
+
+      const result = await runCliJson(
+        "self-improve-daemon",
+        "--executor",
+        "codex-resumable",
+        "--root-run-id",
+        bootstrap.runId,
+        "--codex-bin",
+        codexBin,
+        "--parallel",
+        "auto",
+        "--max-ticks",
+        "1",
+        "--tick-cycles",
+        "1",
+        "--max-rounds",
+        "1",
+        "--stop-hook",
+        "create-tasks",
+        "--no-integrate",
+        "true",
+        "--interval-ms",
+        "1",
+        "--idle-ms",
+        "1",
+      );
+      const overview = await runCliJson("run-overview", "--run-id", blockedRunId);
+      const recoveryTask = overview.tasks.find(
+        (task: { config?: Record<string, unknown> }) =>
+          (task.config?.automaticRecovery as { sourceAttemptId?: string } | undefined)?.sourceAttemptId === blockedAttemptId,
+      );
+
+      expect(result.ticks[0].recovery).toMatchObject({
+        runId: blockedRunId,
+        sourceTaskId: blockedTaskId,
+        sourceAttemptId: blockedAttemptId,
+        terminalReason,
+        fromBackend: "codex-resumable",
+        toBackend: "codex-resumable",
+      });
+      expect(recoveryTask).toMatchObject({
+        role: "worker",
+        worktreePath: sourceWorktreePath,
+        doneWhen: ["the original focused checks pass", "the source worktree is preserved"],
+        config: {
+          agentBackend: "codex-resumable",
+          sourceWorktreePath,
+          verifierContract: { deterministicChecks: ["bun test tests/cli.test.ts"] },
+          permissions: { sandbox: "workspace-write", browserProcessPolicy: "deny" },
+          retryPolicy: { maxAttempts: 3 },
+          automaticRecovery: {
+            generation: 1,
+            sourceTaskId: blockedTaskId,
+            sourceAttemptId: blockedAttemptId,
+            terminalReason,
+            fromBackend: "codex-resumable",
+            toBackend: "codex-resumable",
+            strategy: "codex-repair",
+          },
+        },
+      });
+      expect(overview.run.context.repairReplanBudget).toMatchObject({ limit: 2, used: 1 });
+      expect(overview.run.context.automaticRecovery).toMatchObject({
+        sourceTaskId: blockedTaskId,
+        sourceAttemptId: blockedAttemptId,
+        generation: 1,
+        fromBackend: "codex-resumable",
+        toBackend: "codex-resumable",
+      });
+      expect(overview.tasks.some((task: { config?: Record<string, unknown> }) =>
+        (task.config?.agentBackend as string | undefined) === "claude-code" &&
+        (task.config?.automaticRecovery as { sourceAttemptId?: string } | undefined)?.sourceAttemptId === blockedAttemptId,
+      )).toBe(false);
+    }
+  });
+
   test("self-improve-daemon advances from the latest direct recovery failure", async () => {
     const bootstrap = await runCliJson("self-iterate");
     const setupHarness = new Harness(dbPath);
@@ -11489,6 +11889,8 @@ describe("CLI", () => {
     malformedCommentPage?: boolean;
     permissionDenied?: boolean;
     missingIssue?: boolean;
+    teamStatesOverride?: Array<{ id: string; name: string; type?: string | null }>;
+    malformedTeamStates?: boolean;
   } = {}) {
     const issueId = "0ad49c7d-9f2b-4f2e-8743-ee017d841171";
     const teamId = "8ec14dab-a05d-4d78-95fa-e59301005499";
@@ -11516,6 +11918,16 @@ describe("CLI", () => {
       type: id === targetStateId ? "started" : "backlog",
       team: { id: teamId, key: "PAN" },
     });
+    const teamStates = () => {
+      if (input.malformedTeamStates) {
+        return { nodes: "not-an-array" as unknown as Array<{ id: string; name: string; type?: string | null }> };
+      }
+      const base = [
+        { id: targetStateId, name: "In Progress", type: "started" },
+        { id: backlogStateId, name: "Backlog", type: "backlog" },
+      ];
+      return { nodes: input.teamStatesOverride ?? base };
+    };
     const issue = (id = issueId) => ({
       id,
       identifier: "PAN-1232",
@@ -11551,6 +11963,26 @@ describe("CLI", () => {
             data: {
               issue: input.missingIssue ? null : issue(input.scopeIssueId ?? issueId),
               workflowState: state(targetStateId),
+            },
+          });
+        }
+        if (body.query.includes("OuroborosLinearStatusNameResolve")) {
+          if (input.missingIssue) {
+            return Response.json({ data: { issue: null } });
+          }
+          const baseIssue = issue(input.scopeIssueId ?? issueId);
+          return Response.json({
+            data: {
+              issue: {
+                id: baseIssue.id,
+                identifier: baseIssue.identifier,
+                team: {
+                  id: teamId,
+                  key: "PAN",
+                  states: teamStates(),
+                },
+                state: state(currentStateId),
+              },
             },
           });
         }
@@ -11663,10 +12095,14 @@ describe("CLI", () => {
       typeof rawArgs.at(-1) === "object" ? (rawArgs.pop() as Record<string, string>) : {};
     const args = rawArgs as string[];
     const configArgs = args.includes("--config") ? [] : ["--config", join(dir, "missing-config.toml")];
+    const cleanProcessEnv = Object.fromEntries(
+      Object.entries(process.env).filter(([key]) => !key.startsWith("CODEX_")),
+    );
+    const mainEntry = join(import.meta.dir, "..", "packages", "cli", "src", "main.ts");
     const proc = Bun.spawn({
-      cmd: ["bun", "run", "packages/cli/src/main.ts", "--db", dbPath, ...configArgs, ...args],
+      cmd: ["bun", mainEntry, "--db", dbPath, ...configArgs, ...args],
       cwd: process.cwd(),
-      env: { ...process.env, ...envOverride },
+      env: { ...cleanProcessEnv, ...envOverride },
       stdout: "pipe",
       stderr: "pipe",
     });
@@ -11685,10 +12121,13 @@ describe("CLI", () => {
   async function runDefaultCliRaw(cwd: string, ...rawArgs: string[]) {
     const configArgs = rawArgs.includes("--config") ? [] : ["--config", join(dir, "missing-config.toml")];
     const mainEntry = join(import.meta.dir, "..", "packages", "cli", "src", "main.ts");
+    const cleanProcessEnv = Object.fromEntries(
+      Object.entries(process.env).filter(([key]) => !key.startsWith("CODEX_")),
+    );
     const proc = Bun.spawn({
-      cmd: ["bun", "run", mainEntry, ...configArgs, ...rawArgs],
+      cmd: ["bun", mainEntry, ...configArgs, ...rawArgs],
       cwd,
-      env: process.env,
+      env: cleanProcessEnv,
       stdout: "pipe",
       stderr: "pipe",
     });

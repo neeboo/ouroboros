@@ -24,7 +24,7 @@ After the run tree drains, the daemon compares the repository fingerprint with t
 
 - changed repository: create another designer cycle;
 - unchanged repository with no unresolved blocked delivery: enter `quiescent` and wait;
-- blocked delivery: reopen the same run and create an automatic recovery task; switch Claude Code to Codex or Codex to Claude Code for executor failures, and use Codex to diagnose logical or verification blocks;
+- blocked delivery: reopen the same run and create an automatic recovery task; return Claude Code failures to Codex, continue Codex failures as bounded Codex repair, and use Codex to diagnose logical or verification blocks;
 - active or repairable work: continue supervising the same run tree;
 - exhausted local retry budget: preserve auditable evidence and continue through automatic recovery; only a monetary or capital-policy checkpoint may wait for human authority.
 
@@ -68,11 +68,13 @@ Self-improvement uses these Codex defaults:
 
 Repository config can override these values. Claude Code workers remain isolated from inherited Codex model settings; only an explicit task-level Claude model preference is passed to that backend.
 
-The default backend split remains:
+The default backend routing is:
 
-- `designer`, `planner`, `verifier`, `outcome-review`, and `goal-review`: `codex-resumable`;
-- `worker`: `claude-code` when configured as the global or worker backend;
-- repair work: worker routing.
+- `designer`, `planner`, `worker`, `verifier`, `outcome-review`, and `goal-review`: `codex-resumable`;
+- Claude Code: only for a task with an explicit `config.agentBackend = "claude-code"`;
+- repair work: bounded `codex-resumable` routing.
+
+The supervisor does not rotate backends automatically or retry forever. Each recovery charges `repairReplanBudget`, records `fromBackend`, `toBackend`, `sourceAttemptId`, `terminalReason`, and `generation`, and preserves the source worktree and task contract.
 
 Child runs inherit model defaults, agent defaults, agent backend definitions, the active founder charter, the frozen evaluation contract, and active guardrails at the protocol layer. Planners do not need to repeat control-plane fields in prompts.
 

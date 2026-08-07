@@ -175,9 +175,10 @@ const SELF_ITERATION_PLANNER_DONE_WHEN = [
   "Planning begins only from an accepted proposal and preserves the frozen evaluation contract, authority context, budget, and integration boundary",
   "No delivery run is created from an unaccepted proposal or without an approved stored decision",
 ];
-const SELF_ITERATION_ROLE_AGENT_DEFAULTS: Record<"designer" | "planner" | "verifier" | "goal-review", string> = {
+const SELF_ITERATION_ROLE_AGENT_DEFAULTS: Record<"designer" | "planner" | "worker" | "verifier" | "goal-review", string> = {
   designer: "codex-resumable",
   planner: "codex-resumable",
+  worker: "codex-resumable",
   verifier: "codex-resumable",
   "goal-review": "codex-resumable",
 };
@@ -570,7 +571,8 @@ switch (parsed.command) {
     const linear = config.linear ?? {};
     const result = await updateLinearIssueStatus({
       issueId: flag(parsed, "issue-id") ?? "",
-      stateId: flag(parsed, "state-id") ?? "",
+      stateId: flag(parsed, "state-id") ?? null,
+      stateName: flag(parsed, "state-name") ?? null,
       teamKey: flag(parsed, "team-key") ?? linear.teamKey ?? null,
       tokenFile: flag(parsed, "token-file") ?? linear.tokenFile ?? null,
       tokenEnv: flag(parsed, "token-env") ?? linear.tokenEnv ?? null,
@@ -1214,7 +1216,7 @@ function printHelp() {
     "  action               Apply a harness action such as integrateVerifiedRun",
     "  poll-linear-issues   Run one bounded Linear polling cycle for a supervised run",
     "  linear-create-issue  Create a scoped Linear issue through the configured API token",
-    "  linear-update-status Update one issue to an exact state UUID and verify via independent readback",
+    "  linear-update-status Update one issue via --state-id or team-scoped --state-name and verify via independent readback",
     "  linear-write-evidence-comment Create or sequentially reuse one bounded evidence comment and verify readback (requires --idempotency-secret-file)",
     "  linear-poll-state    Print the durable Linear polling state for a supervised run",
     "  linear-consume-inbox Claim durable Linear issue events into issue-scoped Designer runs",
@@ -1402,6 +1404,7 @@ function withSelfIterationConfigDefaults(
         ...SELF_ITERATION_ROLE_AGENT_DEFAULTS,
         ...configRoles,
         ...mergedRoles,
+        worker: "codex-resumable",
       },
     },
   };
@@ -2274,7 +2277,7 @@ function recoverBlockedSelfImprovementRuns(
     const terminalReason = sourceSession ? terminalReasonForSession(sourceSession) : null;
     const isExecutorFailure = terminalReason != null && EXECUTOR_FAILURE_TERMINAL_REASONS.has(terminalReason);
     const fromBackend = sourceSession ? backendIdForSession(sourceSession) : configuredBackendForTask(run.context, sourceTask);
-    const toBackend = isExecutorFailure ? alternateRecoveryBackend(fromBackend) : "codex-resumable";
+    const toBackend = "codex-resumable";
 
     if (existingRecovery) {
       harness.updateRunStatus({ runId: run.id, status: "todo" });
@@ -2377,9 +2380,11 @@ function recoverBlockedSelfImprovementRuns(
           terminalReason,
           fromBackend,
           toBackend,
-          strategy: isExecutorFailure
+          strategy: isExecutorFailure && fromBackend === "claude-code"
             ? "switch-backend"
-            : "diagnose-and-repair",
+            : isExecutorFailure
+              ? "codex-repair"
+              : "diagnose-and-repair",
         },
       },
     });
@@ -2448,10 +2453,6 @@ function configuredBackendForTask(context: Record<string, unknown>, task: Task) 
   return typeof defaults.global === "string" && defaults.global.length > 0
     ? defaults.global
     : "codex-resumable";
-}
-
-function alternateRecoveryBackend(fromBackend: string) {
-  return fromBackend === "claude-code" ? "codex-resumable" : "claude-code";
 }
 
 function worktreePathForSession(session: RunOverview["sessions"][number]) {
