@@ -21,6 +21,19 @@ const RECOVERY_PROMPT = [
   "Use the files, checks, and artifacts you already produced this turn.",
 ].join(" ");
 
+const ACPX_CANCEL_TIMEOUT_MS = 10_000;
+
+type SessionCleanupEvidence = {
+  cancelAttempted: true;
+  cancelSucceeded: boolean;
+  cancelExitCode: number | null;
+  cancelFailureReason: string | null;
+  resetAttempted: true;
+  resetSucceeded: boolean;
+  resetExitCode: number | null;
+  resetFailureReason: string | null;
+};
+
 export const createAcpxCodexExecutor: AcpxCodexExecutorFactory = (options) => {
   return createAcpxAgentExecutor({ ...options, agent: "codex" });
 };
@@ -115,7 +128,12 @@ export const createAcpxAgentExecutor: AcpxAgentExecutorFactory = (options) => {
       attemptId: attemptId ?? null,
       exitCode: result.exitCode,
     });
-    if (commandFailed(result) && needsReconnect(result)) {
+    if (
+      commandFailed(result) &&
+      needsReconnect(result) &&
+      !isIdleTimeout(result) &&
+      !isHardTimeout(result, options.timeoutMs)
+    ) {
       const ownsRecovery = !attemptId || replayCache.reserveRecoveryRequest(attemptId);
       if (!ownsRecovery) {
         recorder?.event({
@@ -189,6 +207,15 @@ export const createAcpxAgentExecutor: AcpxAgentExecutorFactory = (options) => {
         idleTimeoutMs: options.idleTimeoutMs ?? null,
         attemptId: attemptId ?? null,
       });
+      const sessionCancel = await cancelTimedOutSession({
+        base,
+        runCommand,
+        env,
+        label,
+        sessionName,
+        attemptId,
+        recorder,
+      });
       output = await blockedFromIdleTimeout({
         label,
         sessionName,
@@ -197,6 +224,7 @@ export const createAcpxAgentExecutor: AcpxAgentExecutorFactory = (options) => {
         idleTimeoutMs: options.idleTimeoutMs,
         options,
         worktreePath,
+        sessionCancel,
       });
     } else if (isHardTimeout(result, options.timeoutMs)) {
       recorder?.event({
@@ -204,6 +232,15 @@ export const createAcpxAgentExecutor: AcpxAgentExecutorFactory = (options) => {
         sessionName,
         timeoutMs: options.timeoutMs ?? null,
         attemptId: attemptId ?? null,
+      });
+      const sessionCancel = await cancelTimedOutSession({
+        base,
+        runCommand,
+        env,
+        label,
+        sessionName,
+        attemptId,
+        recorder,
       });
       output = await blockedFromHardTimeout({
         label,
@@ -213,6 +250,7 @@ export const createAcpxAgentExecutor: AcpxAgentExecutorFactory = (options) => {
         timeoutMs: options.timeoutMs,
         options,
         worktreePath,
+        sessionCancel,
       });
     } else {
       const parsedOutput = parseSuccessfulPromptOutput(result);
@@ -545,6 +583,143 @@ function isHardTimeout(result: { exitCode: number; stdout: string; stderr: strin
   return false;
 }
 
+async function cancelTimedOutSession(input: {
+  base: string[];
+  runCommand: RunCommand;
+  env: Record<string, string | undefined>;
+  label: string;
+  sessionName: string;
+  attemptId?: string;
+  recorder?: ExecutorEventRecorder;
+}): Promise<SessionCleanupEvidence> {
+  input.recorder?.event({
+    type: "acpx.attempt.cancel.started",
+    agent: input.label,
+    sessionName: input.sessionName,
+    attemptId: input.attemptId ?? null,
+  });
+
+  let cancelExitCode: number | null = null;
+  let cancelSucceeded = false;
+  let cancelFailureReason: string | null = null;
+  try {
+    const result = await input.runCommand({
+      cmd: [...input.base, "cancel", "-s", input.sessionName],
+      stdin: "",
+      env: input.env,
+      timeoutMs: ACPX_CANCEL_TIMEOUT_MS,
+      idleTimeoutMs: ACPX_CANCEL_TIMEOUT_MS,
+    });
+    cancelExitCode = result.exitCode;
+    if (commandFailed(result)) {
+      cancelFailureReason = cleanupCommandFailureReason(result);
+    } else {
+      const requested = parseCancelRequested(result.stdout);
+      if (requested === null) {
+        cancelFailureReason = "unrecognized_response";
+      } else {
+        cancelSucceeded = requested;
+      }
+    }
+  } catch {
+    cancelFailureReason = "command_exception";
+  }
+
+  input.recorder?.event({
+    type: "acpx.attempt.cancel.terminal",
+    agent: input.label,
+    sessionName: input.sessionName,
+    attemptId: input.attemptId ?? null,
+    exitCode: cancelExitCode,
+    succeeded: cancelFailureReason === null,
+    cancelRequested: cancelSucceeded,
+    failureReason: cancelFailureReason,
+  });
+
+  input.recorder?.event({
+    type: "acpx.attempt.reset.started",
+    agent: input.label,
+    sessionName: input.sessionName,
+    attemptId: input.attemptId ?? null,
+  });
+  let resetExitCode: number | null = null;
+  let resetSucceeded = false;
+  let resetFailureReason: string | null = null;
+  try {
+    const result = await input.runCommand({
+      cmd: [...input.base, "sessions", "close", input.sessionName],
+      stdin: "",
+      env: input.env,
+      timeoutMs: ACPX_CANCEL_TIMEOUT_MS,
+      idleTimeoutMs: ACPX_CANCEL_TIMEOUT_MS,
+    });
+    resetExitCode = result.exitCode;
+    resetSucceeded = !commandFailed(result);
+    if (!resetSucceeded) {
+      resetFailureReason = cleanupCommandFailureReason(result);
+    }
+  } catch {
+    resetFailureReason = "command_exception";
+  }
+  input.recorder?.event({
+    type: "acpx.attempt.reset.terminal",
+    agent: input.label,
+    sessionName: input.sessionName,
+    attemptId: input.attemptId ?? null,
+    exitCode: resetExitCode,
+    succeeded: resetSucceeded,
+    failureReason: resetFailureReason,
+  });
+
+  return {
+    cancelAttempted: true,
+    cancelSucceeded,
+    cancelExitCode,
+    cancelFailureReason,
+    resetAttempted: true,
+    resetSucceeded,
+    resetExitCode,
+    resetFailureReason,
+  };
+}
+
+function parseCancelRequested(stdout: string): boolean | null {
+  const trimmed = stdout.trim();
+  if (trimmed === "cancel requested") {
+    return true;
+  }
+  if (trimmed === "nothing to cancel") {
+    return false;
+  }
+  try {
+    const parsed = JSON.parse(trimmed) as Record<string, unknown>;
+    return parsed.action === "cancel_result" && typeof parsed.cancelled === "boolean" ? parsed.cancelled : null;
+  } catch {
+    return null;
+  }
+}
+
+function cleanupCommandFailureReason(result: { exitCode: number; stdout: string; stderr: string }): string {
+  if (result.exitCode === 124) {
+    return "command_timeout";
+  }
+  if (result.exitCode !== 0) {
+    return `command_exit_${result.exitCode}`;
+  }
+  return "command_error_response";
+}
+
+function sessionCleanupProblem(
+  operation: "cancel" | "reset",
+  exitCode: number | null,
+  failureReason: string | null,
+): string {
+  if (failureReason?.startsWith("command_exit_")) {
+    return `acpx session ${operation} failed with exit code ${exitCode ?? "unknown"}`;
+  }
+  return `acpx session ${operation} failed: ${failureReason ?? "unknown"}`;
+}
+
 async function collectWorktreeEvidence(input: {
   cwd: string;
   worktreePath: string | null;
@@ -599,6 +774,7 @@ async function blockedFromIdleTimeout(input: {
   idleTimeoutMs?: number;
   options: { worktreeEvidence?: WorktreeEvidenceProbe; cwd: string };
   worktreePath: string | null;
+  sessionCancel: SessionCleanupEvidence;
 }): Promise<AttemptOutput> {
   const observedMs = idleTimeoutMsFromResult(input.result) ?? input.idleTimeoutMs;
   const summary = observedMs
@@ -615,6 +791,14 @@ async function blockedFromIdleTimeout(input: {
     changedFiles: evidence.changedFiles,
     checks: [
       { name: `acpx ${input.label} idle`, status: "failed" as const },
+      {
+        name: `acpx ${input.label} session cancel`,
+        status: input.sessionCancel.cancelFailureReason === null ? ("passed" as const) : ("failed" as const),
+      },
+      {
+        name: `acpx ${input.label} session reset`,
+        status: input.sessionCancel.resetSucceeded ? ("passed" as const) : ("failed" as const),
+      },
       ...(evidence.checks ?? []),
     ],
     artifacts: [
@@ -626,6 +810,14 @@ async function blockedFromIdleTimeout(input: {
         terminalReason: "idle_timeout",
         timeoutReason: "idle_timeout",
         idleTimeoutMs: observedMs ?? null,
+        sessionCancelAttempted: input.sessionCancel.cancelAttempted,
+        sessionCancelSucceeded: input.sessionCancel.cancelSucceeded,
+        sessionCancelExitCode: input.sessionCancel.cancelExitCode,
+        sessionCancelFailureReason: input.sessionCancel.cancelFailureReason,
+        sessionResetAttempted: input.sessionCancel.resetAttempted,
+        sessionResetSucceeded: input.sessionCancel.resetSucceeded,
+        sessionResetExitCode: input.sessionCancel.resetExitCode,
+        sessionResetFailureReason: input.sessionCancel.resetFailureReason,
         lastStdout: truncate(input.result.stdout),
         lastStderr: truncate(input.result.stderr),
         worktreeSnapshot: evidence.summary,
@@ -640,6 +832,12 @@ async function blockedFromIdleTimeout(input: {
         `terminalReason: idle_timeout`,
         `worktree: ${evidence.summary}`,
         "exit code: 124",
+        ...(input.sessionCancel.cancelFailureReason
+          ? [sessionCleanupProblem("cancel", input.sessionCancel.cancelExitCode, input.sessionCancel.cancelFailureReason)]
+          : []),
+        ...(!input.sessionCancel.resetSucceeded
+          ? [sessionCleanupProblem("reset", input.sessionCancel.resetExitCode, input.sessionCancel.resetFailureReason)]
+          : []),
         ...(input.result.stdout.trim().length > 0 ? [`stdout:\n${truncate(input.result.stdout.trim())}`] : []),
         ...(input.result.stderr.trim().length > 0 ? [`stderr:\n${truncate(input.result.stderr.trim())}`] : []),
       ].join("\n\n"),
@@ -655,6 +853,7 @@ async function blockedFromHardTimeout(input: {
   timeoutMs?: number;
   options: { worktreeEvidence?: WorktreeEvidenceProbe; cwd: string };
   worktreePath: string | null;
+  sessionCancel: SessionCleanupEvidence;
 }): Promise<AttemptOutput> {
   const observedMs = hardTimeoutMsFromResult(input.result) ?? input.timeoutMs;
   const summary = observedMs
@@ -671,6 +870,14 @@ async function blockedFromHardTimeout(input: {
     changedFiles: evidence.changedFiles,
     checks: [
       { name: `acpx ${input.label} hard_timeout`, status: "failed" as const },
+      {
+        name: `acpx ${input.label} session cancel`,
+        status: input.sessionCancel.cancelFailureReason === null ? ("passed" as const) : ("failed" as const),
+      },
+      {
+        name: `acpx ${input.label} session reset`,
+        status: input.sessionCancel.resetSucceeded ? ("passed" as const) : ("failed" as const),
+      },
       ...(evidence.checks ?? []),
     ],
     artifacts: [
@@ -682,6 +889,14 @@ async function blockedFromHardTimeout(input: {
         terminalReason: "hard_timeout",
         timeoutReason: "hard_timeout",
         timeoutMs: observedMs ?? null,
+        sessionCancelAttempted: input.sessionCancel.cancelAttempted,
+        sessionCancelSucceeded: input.sessionCancel.cancelSucceeded,
+        sessionCancelExitCode: input.sessionCancel.cancelExitCode,
+        sessionCancelFailureReason: input.sessionCancel.cancelFailureReason,
+        sessionResetAttempted: input.sessionCancel.resetAttempted,
+        sessionResetSucceeded: input.sessionCancel.resetSucceeded,
+        sessionResetExitCode: input.sessionCancel.resetExitCode,
+        sessionResetFailureReason: input.sessionCancel.resetFailureReason,
         lastStdout: truncate(input.result.stdout),
         lastStderr: truncate(input.result.stderr),
         worktreeSnapshot: evidence.summary,
@@ -696,6 +911,12 @@ async function blockedFromHardTimeout(input: {
         `terminalReason: hard_timeout`,
         `worktree: ${evidence.summary}`,
         "exit code: 124",
+        ...(input.sessionCancel.cancelFailureReason
+          ? [sessionCleanupProblem("cancel", input.sessionCancel.cancelExitCode, input.sessionCancel.cancelFailureReason)]
+          : []),
+        ...(!input.sessionCancel.resetSucceeded
+          ? [sessionCleanupProblem("reset", input.sessionCancel.resetExitCode, input.sessionCancel.resetFailureReason)]
+          : []),
         ...(input.result.stdout.trim().length > 0 ? [`stdout:\n${truncate(input.result.stdout.trim())}`] : []),
         ...(input.result.stderr.trim().length > 0 ? [`stderr:\n${truncate(input.result.stderr.trim())}`] : []),
       ].join("\n\n"),
