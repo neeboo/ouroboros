@@ -188,6 +188,7 @@ export async function createLinearIssue(input: LinearCreateIssueInput) {
 type LinearWriteFailureStatus =
   | "config_error"
   | "auth_failure"
+  | "permission_denied"
   | "graphql_error"
   | "transient_failure"
   | "issue_not_found"
@@ -809,8 +810,11 @@ async function safeLinearWriteRequest<T>(input: {
   } catch {
     return { ok: false, data: null, status: "transient_failure", error: "Linear network request failed" };
   }
-  if (response.status === 401 || response.status === 403) {
+  if (response.status === 401) {
     return { ok: false, data: null, status: "auth_failure", error: "Linear authentication failed" };
+  }
+  if (response.status === 403) {
+    return { ok: false, data: null, status: "permission_denied", error: "Linear permission denied" };
   }
   if (!response.ok) {
     return {
