@@ -6032,7 +6032,8 @@ describe("CLI", () => {
     const attempt = new Harness(dbPath).getAttempt(attemptId)!;
     const loggedCalls = (await Bun.file(logPath).text()).trim().split("\n").map((line) => JSON.parse(line));
     const promptCall = loggedCalls.find(
-      (args: string[]) => args.includes("claude") && args.includes("exec") && args.includes("-f"),
+      (args: string[]) =>
+        args.includes("claude") && args.includes("prompt") && args.includes("-s") && args.includes("-f"),
     );
 
     expect(result.rounds[0].tasks[0].taskId).toBe(task.id);

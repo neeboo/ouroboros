@@ -229,7 +229,7 @@ export function acpxSubsessionBaseCommand(backend: ResolvedSubsessionBackend, cw
 }
 
 export function buildAcpxPromptCommand(base: string[], sessionName: string): string[] {
-  return [...base, "-s", sessionName];
+  return [...base, "prompt", "-s", sessionName, "-f", "-"];
 }
 
 function approvalFromBackend(backend: ResolvedSubsessionBackend): ApprovalMode {

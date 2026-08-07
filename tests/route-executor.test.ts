@@ -67,7 +67,8 @@ describe("route executor", () => {
 
     expect(output.summary).toBe("claude route ok");
     expect(calls.map((call) => call.cmd)).toEqual([
-      ["acpx", "--cwd", "/repo", "--approve-all", "--format", "text", "--model", "sonnet", "claude", "exec", "-f", "-"],
+      ["acpx", "--cwd", "/repo", "--approve-all", "--format", "text", "--model", "sonnet", "claude", "sessions", "show", "task_1"],
+      ["acpx", "--cwd", "/repo", "--approve-all", "--format", "text", "--model", "sonnet", "claude", "prompt", "-s", "task_1", "-f", "-"],
     ]);
   });
 
