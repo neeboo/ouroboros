@@ -65,13 +65,15 @@ function normalizeBackendDefinition(
   }
   const backend: ResolvedAgentBackend = { id, kind, source };
   if (kind === "acpx") {
-    const agent = acpxAgent(stringOrNull(definition.agent));
+    const agent = acpxAgent(stringOrNull(definition.agent)) ?? builtInAcpxAgent(id);
     const agentCommand = stringOrNull(definition.agentCommand);
     if (agent) {
       backend.agent = agent;
-    } else if (agentCommand) {
+    }
+    if (agentCommand) {
       backend.agentCommand = agentCommand;
-    } else {
+    }
+    if (!agent && !agentCommand) {
       return null;
     }
     const approval = approvalMode(stringOrNull(definition.approval));
@@ -116,6 +118,16 @@ function runDefault(context: Record<string, unknown>) {
 
 function acpxAgent(value: string | null): AcpxBuiltInAgent | null {
   return value === "codex" || value === "claude" ? value : null;
+}
+
+function builtInAcpxAgent(id: string): AcpxBuiltInAgent | null {
+  if (id === "claude-code" || id === "claude") {
+    return "claude";
+  }
+  if (id === "acpx-codex" || id === "codex") {
+    return "codex";
+  }
+  return null;
 }
 
 function approvalMode(value: string | null): ApprovalMode | null {

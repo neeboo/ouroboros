@@ -86,7 +86,7 @@ Supported backend kinds are:
 - `codex-resumable`
 - `noop`
 
-For `acpx`, prefer the built-in `agent` values `codex` and `claude`. `agentCommand` is intentionally kept for experimental local adapters, but it is not a supported production path.
+For `acpx`, `agent` is the semantic agent/provider identity (`codex` or `claude`), while `agentCommand` is only the transport used to start an adapter. The fields may be declared together: routing and model inheritance use `agent`, and execution prefers `agentCommand`. When `agent` is omitted, the reserved backend ids `claude-code`, `claude`, `codex`, and `acpx-codex` supply their built-in semantic identity even if the definition replaces the built-in transport with `agentCommand`. Other raw backends are never classified from command text; a custom raw Claude backend must declare `agent: "claude"` explicitly. `agentCommand` remains an experimental path outside the supported production matrix.
 
 ## Model Defaults
 
@@ -121,7 +121,7 @@ then CLI --model
 
 Resolved attempts record `attempt.input.model` with `model`, `reasoning_effort`, `source`, `role`, and any supplied `provider`, `profile`, `base_url`, or `env_key` strings. Direct Codex executors pass `model` and `reasoning_effort`; the remaining adapter fields stay as metadata.
 
-Claude Code is isolated from inherited Codex model defaults. When a route resolves to `claude-code`, Orbs drops model preferences from role defaults, run defaults, and CLI `--model`. Only a task-level `config.modelPreference` is treated as an explicit Claude model override.
+Claude Code is isolated from inherited Codex model defaults. When a route resolves to semantic `agent: "claude"`—including `claude-code` backed by a raw `agentCommand`—Orbs drops model preferences from role defaults, run defaults, and CLI `--model`. Only a task-level `config.modelPreference` is treated as an explicit Claude model override. For backward compatibility, a task override may omit `provider`; when present, it must be `anthropic` or `claude`, otherwise the route drops the incompatible model. Raw backends without a semantic `agent` keep their existing model routing and are not inferred from executable paths or filenames.
 
 ## Doctor And Smoke
 
