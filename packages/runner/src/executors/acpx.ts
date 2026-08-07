@@ -29,7 +29,6 @@ export const createAcpxAgentExecutor: AcpxAgentExecutorFactory = (options) => {
   const approval = options.approval ?? "approve-reads";
   const runCommand = withBrowserProcessPolicy(options.runCommand ?? runLocalCommand, options.browserProcessPolicy);
   const label = agentLabel(options);
-  const oneShotExec = options.agent === "claude" && !options.format;
   const replayCache: AttemptReplayCache = options.replayCache ?? createInMemoryAttemptReplayCache();
 
   return async ({ prompt, sessionName, recorder, attemptId, task }) => {
@@ -76,29 +75,27 @@ export const createAcpxAgentExecutor: AcpxAgentExecutorFactory = (options) => {
       cwd: options.cwd,
       model: options.model ?? null,
       format: options.format ?? "text",
-      oneShot: oneShotExec,
+      oneShot: false,
       timeoutMs: options.timeoutMs ?? null,
       idleTimeoutMs: options.idleTimeoutMs ?? null,
       attemptId: attemptId ?? null,
       worktreePath,
     });
-    if (!oneShotExec) {
-      const session = await ensureSession({
-        base,
-        runCommand,
-        env,
-        sessionName,
-        timeoutMs: options.timeoutMs,
-        idleTimeoutMs: options.idleTimeoutMs,
-        recorder,
-      });
-      if (session) {
-        const output = session;
-        if (attemptId) {
-          replayCache.recordTerminalResult(attemptId, output);
-        }
-        return output;
+    const session = await ensureSession({
+      base,
+      runCommand,
+      env,
+      sessionName,
+      timeoutMs: options.timeoutMs,
+      idleTimeoutMs: options.idleTimeoutMs,
+      recorder,
+    });
+    if (session) {
+      const output = session;
+      if (attemptId) {
+        replayCache.recordTerminalResult(attemptId, output);
       }
+      return output;
     }
 
     let result = await runPrompt({
@@ -107,7 +104,6 @@ export const createAcpxAgentExecutor: AcpxAgentExecutorFactory = (options) => {
       env,
       sessionName,
       prompt,
-      oneShotExec,
       timeoutMs: options.timeoutMs,
       idleTimeoutMs: options.idleTimeoutMs,
       recorder,
@@ -119,7 +115,7 @@ export const createAcpxAgentExecutor: AcpxAgentExecutorFactory = (options) => {
       attemptId: attemptId ?? null,
       exitCode: result.exitCode,
     });
-    if (!oneShotExec && commandFailed(result) && needsReconnect(result)) {
+    if (commandFailed(result) && needsReconnect(result)) {
       const ownsRecovery = !attemptId || replayCache.reserveRecoveryRequest(attemptId);
       if (!ownsRecovery) {
         recorder?.event({
@@ -172,7 +168,6 @@ export const createAcpxAgentExecutor: AcpxAgentExecutorFactory = (options) => {
         env,
         sessionName,
         prompt,
-        oneShotExec,
         timeoutMs: options.timeoutMs,
         idleTimeoutMs: options.idleTimeoutMs,
         recorder,
@@ -248,7 +243,6 @@ export const createAcpxAgentExecutor: AcpxAgentExecutorFactory = (options) => {
             runCommand,
             env,
             sessionName,
-            oneShotExec,
             timeoutMs: options.timeoutMs,
             idleTimeoutMs: options.idleTimeoutMs,
             recorder,
@@ -473,13 +467,12 @@ function runPrompt(input: {
   env: Record<string, string | undefined>;
   sessionName: string;
   prompt: string;
-  oneShotExec?: boolean;
   timeoutMs?: number;
   idleTimeoutMs?: number;
   recorder?: ExecutorEventRecorder;
 }) {
   return input.runCommand({
-    cmd: input.oneShotExec ? [...input.base, "exec", "-f", "-"] : [...input.base, "-s", input.sessionName],
+    cmd: [...input.base, "prompt", "-s", input.sessionName, "-f", "-"],
     stdin: input.prompt,
     env: input.env,
     timeoutMs: input.timeoutMs,
@@ -495,13 +488,12 @@ function runRecoveryPrompt(input: {
   runCommand: RunCommand;
   env: Record<string, string | undefined>;
   sessionName: string;
-  oneShotExec?: boolean;
   timeoutMs?: number;
   idleTimeoutMs?: number;
   recorder?: ExecutorEventRecorder;
 }) {
   return input.runCommand({
-    cmd: input.oneShotExec ? [...input.base, "exec", "-f", "-"] : [...input.base, "-s", input.sessionName],
+    cmd: [...input.base, "prompt", "-s", input.sessionName, "-f", "-"],
     stdin: RECOVERY_PROMPT,
     env: input.env,
     timeoutMs: input.timeoutMs,

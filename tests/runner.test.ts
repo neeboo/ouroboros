@@ -19,6 +19,7 @@ import {
   createGoalReviewDecisionHook,
   createRefreshGuardrailProposalsHook,
   createRepairTaskHook,
+  createRouteExecutor,
   createRunsFromOutputHook,
   createTasksAction,
   createTasksFromOutputHook,
@@ -4240,6 +4241,83 @@ describe("runner", () => {
       },
       model: null,
     });
+  });
+
+  test("runs a raw ACPX backend through an explicit persistent prompt command", async () => {
+    const agentCommand = "/opt/acp/claude-agent-acp";
+    const runId = harness.createRun({
+      goal: "Run a persistent raw ACP adapter",
+      context: {
+        agentDefaults: { roles: { worker: "raw-claude" } },
+        agentBackends: {
+          "raw-claude": { kind: "acpx", agentCommand, approval: "approve-all", format: "quiet" },
+        },
+      },
+    });
+    const taskId = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Use the raw ACP adapter",
+      prompt: "Work through the persistent session.",
+    });
+    const calls: string[][] = [];
+    let showCalls = 0;
+
+    const [result] = await runReadyTasks({
+      harness,
+      runId,
+      limit: 1,
+      sessionForTask: () => "raw-session",
+      executorFactory: ({ cwd, route }) => createRouteExecutor({
+        cwd,
+        route,
+        runCommand: async ({ cmd }) => {
+          calls.push(cmd);
+          if (cmd.includes("show")) {
+            showCalls += 1;
+            return showCalls === 1
+              ? { exitCode: 1, stdout: "", stderr: "missing session" }
+              : { exitCode: 0, stdout: "session exists", stderr: "" };
+          }
+          if (cmd.includes("new")) {
+            return { exitCode: 0, stdout: "created", stderr: "" };
+          }
+          if (cmd.includes("prompt")) {
+            return {
+              exitCode: 0,
+              stdout: '{"status":"done","summary":"raw persistent ok","changedFiles":[],"checks":[],"artifacts":[],"problems":[]}',
+              stderr: "",
+            };
+          }
+          return { exitCode: 2, stdout: "", stderr: "error: unknown option '-s'" };
+        },
+      }),
+    });
+
+    expect(harness.getTask(taskId)?.status).toBe("done");
+    expect(harness.getAttempt(result.attemptId)?.output).toMatchObject({
+      status: "done",
+      summary: "raw persistent ok",
+    });
+    expect(harness.getAttempt(result.attemptId)?.input).toMatchObject({
+      sessionName: "raw-session",
+      route: { backend: { kind: "acpx", agentCommand } },
+    });
+    expect(calls.at(-1)).toEqual([
+      "acpx",
+      "--cwd",
+      process.cwd(),
+      "--approve-all",
+      "--format",
+      "quiet",
+      "--agent",
+      agentCommand,
+      "prompt",
+      "-s",
+      "raw-session",
+      "-f",
+      "-",
+    ]);
   });
 
   test("worker stop hook creates a verifier task", async () => {

@@ -106,7 +106,7 @@ describe("acpx recovery replay idempotency", () => {
     expect(replay.getTerminalResult("attempt_alpha")).toEqual(first);
   });
 
-  test("terminal replay returns the cached output for claude one-shot exec", async () => {
+  test("terminal replay returns the cached output for a persistent claude prompt", async () => {
     const calls: Array<{ cmd: string[]; stdin: string }> = [];
     const replay: AttemptReplayCache = createInMemoryAttemptReplayCache();
     const executor = createAcpxAgentExecutor({
@@ -114,9 +114,9 @@ describe("acpx recovery replay idempotency", () => {
       cwd: "/repo",
       approval: "approve-all",
       replayCache: replay,
-      runCommand: recordingRunCommand(calls, () => ({
+      runCommand: recordingRunCommand(calls, (cmd) => ({
         exitCode: 0,
-        stdout: doneOutput("claude ok"),
+        stdout: cmd.includes("prompt") ? doneOutput("claude ok") : "",
         stderr: "",
       })),
     });
@@ -232,7 +232,7 @@ describe("acpx recovery replay idempotency", () => {
       replayCache: replay,
       runCommand: recordingRunCommand(calls, (cmd) => ({
         exitCode: 0,
-        stdout: cmd.includes("exec") ? doneOutput("claude ok") : "",
+        stdout: cmd.includes("prompt") ? doneOutput("claude ok") : "",
         stderr: "",
       })),
     });
@@ -268,9 +268,9 @@ describe("acpx recovery replay idempotency", () => {
       cwd: "/repo",
       approval: "approve-all",
       replayCache: replay,
-      runCommand: recordingRunCommand(calls, () => ({
+      runCommand: recordingRunCommand(calls, (cmd) => ({
         exitCode: 0,
-        stdout: doneOutput("claude ok"),
+        stdout: cmd.includes("prompt") ? doneOutput("claude ok") : "",
         stderr: "",
       })),
     });
@@ -292,7 +292,8 @@ describe("acpx recovery replay idempotency", () => {
 
     expect(first.summary).toBe("claude ok");
     expect(second).toEqual(first);
-    expect(calls.length).toBe(2);
+    expect(calls.filter((call) => call.cmd.includes("prompt"))).toHaveLength(2);
+    expect(calls.length).toBe(4);
   });
 
   test("shared replay cache enforces idempotency across separate executor instances", async () => {
@@ -341,7 +342,10 @@ describe("acpx recovery replay idempotency", () => {
       cwd: "/repo",
       approval: "approve-all",
       replayCache: replay,
-      runCommand: recordingRunCommand(calls, () => {
+      runCommand: recordingRunCommand(calls, (cmd) => {
+        if (!cmd.includes("prompt")) {
+          return { exitCode: 0, stdout: "", stderr: "" };
+        }
         promptCalls += 1;
         if (promptCalls === 1) {
           return {
@@ -398,7 +402,10 @@ describe("acpx recovery replay idempotency", () => {
       cwd: "/repo",
       approval: "approve-all",
       replayCache: replay,
-      runCommand: recordingRunCommand(calls, () => {
+      runCommand: recordingRunCommand(calls, (cmd) => {
+        if (!cmd.includes("prompt")) {
+          return { exitCode: 0, stdout: "", stderr: "" };
+        }
         promptCalls += 1;
         return {
           exitCode: 0,

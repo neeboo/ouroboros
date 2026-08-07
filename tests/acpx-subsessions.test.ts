@@ -55,9 +55,9 @@ describe("acpx subsession runner", () => {
     expect(base).toContain("--approve-reads");
   });
 
-  test("buildAcpxPromptCommand emits a deterministic -s sessionName tail", () => {
+  test("buildAcpxPromptCommand emits an explicit persistent prompt command", () => {
     const prompt = buildAcpxPromptCommand(["acpx", "--cwd", "/x"], "task_x__research");
-    expect(prompt).toEqual(["acpx", "--cwd", "/x", "-s", "task_x__research"]);
+    expect(prompt).toEqual(["acpx", "--cwd", "/x", "prompt", "-s", "task_x__research", "-f", "-"]);
   });
 
   test("start spawns the prompt command after ensuring a named session exists", async () => {
@@ -92,7 +92,7 @@ describe("acpx subsession runner", () => {
     expect(result.sessionName).toBe("task_1__research");
     expect(result.agentSessionId).toBe("task_1__research");
     await Bun.sleep(0);
-    expect(calls[0]).toContain("-s task_1__research");
+    expect(calls[0]).toContain("prompt -s task_1__research -f -");
   });
 
   test("collect reports a done status when acpx reports the session finished", () => {

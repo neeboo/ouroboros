@@ -151,11 +151,11 @@ describe("acpx deadline classification", () => {
     expect(terminal?.worktreeSnapshot).toBe("1 file in worktree");
   });
 
-  test("claude one-shot recovery prompt is the structured envelope prompt", async () => {
+  test("claude persistent recovery prompt is the structured envelope prompt", async () => {
     let recoveryStdin = "";
     let calls = 0;
     const runCommand: RunCommand = async ({ cmd, stdin }) => {
-      if (cmd.includes("exec")) {
+      if (cmd.includes("prompt")) {
         calls += 1;
         if (calls === 1) {
           return { exitCode: 0, stdout: "[client] no envelope", stderr: "" };

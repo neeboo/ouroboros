@@ -22,6 +22,22 @@ const routeFixture = {
   executionMode: "generic",
 } as const;
 
+const taskFixture = {
+  id: "task_1",
+  runId: "run_1",
+  parentId: null,
+  cycleId: "task_1",
+  status: "todo" as const,
+  role: "worker",
+  goal: "Task",
+  prompt: "Do it",
+  dependsOn: [],
+  doneWhen: [],
+  worktreePath: null,
+  sessionRef: null,
+  contextVersion: 1,
+};
+
 describe("acpx executor", () => {
   test("parses structured attempt output from agent text", () => {
     const output = parseAttemptOutput(`
@@ -111,7 +127,20 @@ describe("acpx executor", () => {
         stdin: "",
       },
       {
-        cmd: ["acpx", "--cwd", "/repo", "--approve-all", "--format", "text", "codex", "-s", "task_1"],
+        cmd: [
+          "acpx",
+          "--cwd",
+          "/repo",
+          "--approve-all",
+          "--format",
+          "text",
+          "codex",
+          "prompt",
+          "-s",
+          "task_1",
+          "-f",
+          "-",
+        ],
         stdin: "Do the task",
       },
     ]);
@@ -161,7 +190,22 @@ describe("acpx executor", () => {
 
     expect(calls.map((call) => call.cmd)).toEqual([
       ["acpx", "--cwd", "/repo", "--approve-reads", "--format", "text", "--model", "sonnet", "codex", "sessions", "show", "task_1"],
-      ["acpx", "--cwd", "/repo", "--approve-reads", "--format", "text", "--model", "sonnet", "codex", "-s", "task_1"],
+      [
+        "acpx",
+        "--cwd",
+        "/repo",
+        "--approve-reads",
+        "--format",
+        "text",
+        "--model",
+        "sonnet",
+        "codex",
+        "prompt",
+        "-s",
+        "task_1",
+        "-f",
+        "-",
+      ],
     ]);
     expect(output.summary).toBe("codex ok");
   });
@@ -207,12 +251,73 @@ describe("acpx executor", () => {
 
     expect(calls).toEqual([
       {
-        cmd: ["acpx", "--cwd", "/repo", "--approve-all", "--format", "text", "--model", "sonnet", "claude", "exec", "-f", "-"],
+        cmd: ["acpx", "--cwd", "/repo", "--approve-all", "--format", "text", "--model", "sonnet", "claude", "sessions", "show", "task_1"],
+        stdin: "",
+        cleanupOnFailure: undefined,
+      },
+      {
+        cmd: ["acpx", "--cwd", "/repo", "--approve-all", "--format", "text", "--model", "sonnet", "claude", "prompt", "-s", "task_1", "-f", "-"],
         stdin: "Do the task",
         cleanupOnFailure: true,
       },
     ]);
     expect(output.summary).toBe("claude ok");
+  });
+
+  test("creates, continues, and reloads a named claude session across executor instances", async () => {
+    const calls: string[][] = [];
+    let sessionExists = false;
+    let createCalls = 0;
+    let promptCalls = 0;
+    const runCommand = async ({ cmd }: { cmd: string[] }) => {
+      calls.push(cmd);
+      if (cmd.includes("show")) {
+        return sessionExists
+          ? { exitCode: 0, stdout: "session exists", stderr: "" }
+          : { exitCode: 1, stdout: "", stderr: "missing session" };
+      }
+      if (cmd.includes("new")) {
+        sessionExists = true;
+        createCalls += 1;
+        return { exitCode: 0, stdout: "created", stderr: "" };
+      }
+      if (cmd.includes("prompt")) {
+        promptCalls += 1;
+        return {
+          exitCode: 0,
+          stdout: `{"status":"done","summary":"claude turn ${promptCalls}","changedFiles":[],"checks":[],"artifacts":[],"problems":[]}`,
+          stderr: "",
+        };
+      }
+      return { exitCode: 2, stdout: "", stderr: "unexpected command" };
+    };
+    const options = { cwd: "/repo", agent: "claude" as const, runCommand };
+
+    const first = await createAcpxAgentExecutor(options)({
+      prompt: "First turn",
+      sessionName: "persistent-claude",
+      run: runFixture,
+      route: routeFixture,
+      task: { ...taskFixture, id: "task_claude_first" },
+      attemptId: "attempt_claude_first",
+    });
+    const second = await createAcpxAgentExecutor(options)({
+      prompt: "Continue after process restart",
+      sessionName: "persistent-claude",
+      run: runFixture,
+      route: routeFixture,
+      task: { ...taskFixture, id: "task_claude_second" },
+      attemptId: "attempt_claude_second",
+    });
+
+    expect(first).toMatchObject({ status: "done", summary: "claude turn 1" });
+    expect(second).toMatchObject({ status: "done", summary: "claude turn 2" });
+    expect(createCalls).toBe(1);
+    expect(promptCalls).toBe(2);
+    expect(calls.filter((cmd) => cmd.includes("prompt"))).toEqual([
+      ["acpx", "--cwd", "/repo", "--approve-reads", "--format", "text", "claude", "prompt", "-s", "persistent-claude", "-f", "-"],
+      ["acpx", "--cwd", "/repo", "--approve-reads", "--format", "text", "claude", "prompt", "-s", "persistent-claude", "-f", "-"],
+    ]);
   });
 
   test("applies the browser process deny policy to Claude Code commands", async () => {
@@ -254,8 +359,8 @@ describe("acpx executor", () => {
       },
     });
 
-    expect(calls).toHaveLength(1);
-    expect(calls[0]?.env?.ORBS_BROWSER_PROCESS_POLICY).toBe("deny");
+    expect(calls).toHaveLength(2);
+    expect(calls.every((call) => call.env?.ORBS_BROWSER_PROCESS_POLICY === "deny")).toBe(true);
     if (process.platform === "darwin") {
       expect(calls[0]?.cmd.slice(0, 2)).toEqual(["/usr/bin/sandbox-exec", "-p"]);
       expect(calls[0]?.cmd[2]).toContain("Google Chrome");
@@ -265,18 +370,20 @@ describe("acpx executor", () => {
     }
   });
 
-  test("parses claude exec final JSON even when tool output contains Error text", async () => {
+  test("parses claude prompt final JSON even when tool output contains Error text", async () => {
     const executor = createAcpxAgentExecutor({
       agent: "claude",
       cwd: "/repo",
       approval: "approve-all",
-      runCommand: async () => ({
+      runCommand: async ({ cmd }) => ({
         exitCode: 0,
-        stdout: [
-          "[tool] Terminal output:",
-          "SQLiteError: unable to open database file",
-          '{"status":"done","summary":"claude planned despite tool error text","changedFiles":[],"checks":[],"artifacts":[],"problems":[]}',
-        ].join("\n"),
+        stdout: cmd.includes("prompt")
+          ? [
+              "[tool] Terminal output:",
+              "SQLiteError: unable to open database file",
+              '{"status":"done","summary":"claude planned despite tool error text","changedFiles":[],"checks":[],"artifacts":[],"problems":[]}',
+            ].join("\n")
+          : "",
         stderr: "",
       }),
     });
@@ -337,9 +444,10 @@ describe("acpx executor", () => {
 
   test("runs a raw acpx agent command through the generic executor", async () => {
     const calls: string[][] = [];
+    const agentCommand = "/opt/acp/claude-agent-acp";
     const executor = createAcpxAgentExecutor({
       cwd: "/repo",
-      agentCommand: "custom-acp",
+      agentCommand,
       approval: "deny-all",
       runCommand: async ({ cmd }) => {
         calls.push(cmd);
@@ -376,9 +484,95 @@ describe("acpx executor", () => {
     });
 
     expect(calls).toEqual([
-      ["acpx", "--cwd", "/repo", "--deny-all", "--format", "text", "--agent", "custom-acp", "sessions", "show", "task_1"],
-      ["acpx", "--cwd", "/repo", "--deny-all", "--format", "text", "--agent", "custom-acp", "-s", "task_1"],
+      ["acpx", "--cwd", "/repo", "--deny-all", "--format", "text", "--agent", agentCommand, "sessions", "show", "task_1"],
+      ["acpx", "--cwd", "/repo", "--deny-all", "--format", "text", "--agent", agentCommand, "prompt", "-s", "task_1", "-f", "-"],
     ]);
+  });
+
+  test("creates, continues, and reloads a raw agentCommand session across executor instances", async () => {
+    const calls: string[][] = [];
+    const agentCommand = "/opt/acp/claude-agent-acp";
+    let sessionExists = false;
+    let createCalls = 0;
+    let promptCalls = 0;
+    const runCommand = async ({ cmd }: { cmd: string[] }) => {
+      calls.push(cmd);
+      if (cmd.includes("show")) {
+        return sessionExists
+          ? { exitCode: 0, stdout: "session exists", stderr: "" }
+          : { exitCode: 1, stdout: "", stderr: "missing session" };
+      }
+      if (cmd.includes("new")) {
+        sessionExists = true;
+        createCalls += 1;
+        return { exitCode: 0, stdout: "created", stderr: "" };
+      }
+      if (cmd.includes("prompt")) {
+        promptCalls += 1;
+        return {
+          exitCode: 0,
+          stdout: `{"status":"done","summary":"turn ${promptCalls}","changedFiles":[],"checks":[],"artifacts":[],"problems":[]}`,
+          stderr: "",
+        };
+      }
+      return { exitCode: 2, stdout: "", stderr: "error: unknown option '-s'" };
+    };
+    const options = { cwd: "/repo", agentCommand, runCommand };
+
+    const first = await createAcpxAgentExecutor(options)({
+      prompt: "First turn",
+      sessionName: "persistent-task",
+      run: runFixture,
+      route: routeFixture,
+      task: { ...taskFixture, id: "task_first" },
+      attemptId: "attempt_first",
+    });
+    const second = await createAcpxAgentExecutor(options)({
+      prompt: "Continue after process restart",
+      sessionName: "persistent-task",
+      run: runFixture,
+      route: routeFixture,
+      task: { ...taskFixture, id: "task_second" },
+      attemptId: "attempt_second",
+    });
+
+    expect(first).toMatchObject({ status: "done", summary: "turn 1" });
+    expect(second).toMatchObject({ status: "done", summary: "turn 2" });
+    expect(createCalls).toBe(1);
+    expect(promptCalls).toBe(2);
+    expect(calls.filter((cmd) => cmd.includes("prompt"))).toEqual([
+      ["acpx", "--cwd", "/repo", "--approve-reads", "--format", "text", "--agent", agentCommand, "prompt", "-s", "persistent-task", "-f", "-"],
+      ["acpx", "--cwd", "/repo", "--approve-reads", "--format", "text", "--agent", agentCommand, "prompt", "-s", "persistent-task", "-f", "-"],
+    ]);
+  });
+
+  test("keeps unknown prompt options as terminal failures without reconnecting", async () => {
+    const calls: string[][] = [];
+    const executor = createAcpxAgentExecutor({
+      cwd: "/repo",
+      agentCommand: "/opt/acp/claude-agent-acp",
+      runCommand: async ({ cmd }) => {
+        calls.push(cmd);
+        if (cmd.includes("prompt")) {
+          return { exitCode: 2, stdout: "", stderr: "error: unknown option '--future-flag'" };
+        }
+        return { exitCode: 0, stdout: "session exists", stderr: "" };
+      },
+    });
+
+    const output = await executor({
+      prompt: "Do the task",
+      sessionName: "task_unknown_option",
+      run: runFixture,
+      route: routeFixture,
+      task: { ...taskFixture, id: "task_unknown_option" },
+      attemptId: "attempt_unknown_option",
+    });
+
+    expect(output.status).toBe("blocked");
+    expect(output.problems?.join("\n")).toContain("error: unknown option '--future-flag'");
+    expect(calls.filter((cmd) => cmd.includes("prompt"))).toHaveLength(1);
+    expect(calls.some((cmd) => cmd.includes("close") || cmd.includes("new"))).toBe(false);
   });
 
   test("passes backend env overrides to acpx commands", async () => {
@@ -464,7 +658,20 @@ describe("acpx executor", () => {
 
     expect(calls).toEqual([
       ["acpx", "--cwd", "/repo", "--approve-reads", "--format", "text", "codex", "sessions", "show", "existing"],
-      ["acpx", "--cwd", "/repo", "--approve-reads", "--format", "text", "codex", "-s", "existing"],
+      [
+        "acpx",
+        "--cwd",
+        "/repo",
+        "--approve-reads",
+        "--format",
+        "text",
+        "codex",
+        "prompt",
+        "-s",
+        "existing",
+        "-f",
+        "-",
+      ],
     ]);
   });
 
@@ -827,11 +1034,11 @@ describe("acpx executor", () => {
     expect(output.summary).toBe("recovered");
     expect(calls.map((call) => call.cmd)).toEqual([
       ["acpx", "--cwd", "/repo", "--approve-reads", "--format", "text", "codex", "sessions", "show", "task_1"],
-      ["acpx", "--cwd", "/repo", "--approve-reads", "--format", "text", "codex", "-s", "task_1"],
+      ["acpx", "--cwd", "/repo", "--approve-reads", "--format", "text", "codex", "prompt", "-s", "task_1", "-f", "-"],
       ["acpx", "--cwd", "/repo", "--approve-reads", "--format", "text", "codex", "sessions", "close", "task_1"],
       ["acpx", "--cwd", "/repo", "--approve-reads", "--format", "text", "codex", "sessions", "new", "--name", "task_1"],
       ["acpx", "--cwd", "/repo", "--approve-reads", "--format", "text", "codex", "sessions", "show", "task_1"],
-      ["acpx", "--cwd", "/repo", "--approve-reads", "--format", "text", "codex", "-s", "task_1"],
+      ["acpx", "--cwd", "/repo", "--approve-reads", "--format", "text", "codex", "prompt", "-s", "task_1", "-f", "-"],
     ]);
   });
 
