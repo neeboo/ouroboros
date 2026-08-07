@@ -95,7 +95,7 @@ Worker execution cannot weaken the verifier contract. Contract amendments requir
 
 `self-improve-daemon` supervises the root and every descendant run. Automatic parallelism chooses conservative run and task slots. Independent tasks use separate worktrees when `git-worktree` is enabled.
 
-Verified self-improvement changes are integrated into the local target branch by default so the repository fingerprint advances and the next assessment sees the new baseline. Pushing remains opt-in through `--integration-push true`. Use `--no-integrate true` only for experiments that must leave worktrees unmerged.
+Verified self-improvement changes are integrated into the local target branch by default so the repository fingerprint advances and the next assessment sees the new baseline. Remote writes require a separately frozen `pushExactGitRef` contract and independent readback. Use `--no-integrate true` only for experiments that must leave worktrees unmerged.
 
 ## Human Checkpoints
 

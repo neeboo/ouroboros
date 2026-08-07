@@ -1213,7 +1213,7 @@ function printHelp() {
     "  self-improve-daemon  Continuously derive and supervise improvement cycles",
     "  dashboard            Start the dashboard",
     "  intake               Split a requirement document into child runs",
-    "  action               Apply a harness action such as integrateVerifiedRun",
+    "  action               Apply a fixed harness action such as integrateVerifiedRun or pushExactGitRef",
     "  poll-linear-issues   Run one bounded Linear polling cycle for a supervised run",
     "  linear-create-issue  Create a scoped Linear issue through the configured API token",
     "  linear-update-status Update one issue via --state-id or team-scoped --state-name and verify via independent readback",
@@ -3547,7 +3547,6 @@ function supervisorCommand(
     "start-hook",
     "worktree-root",
     "integration-target-branch",
-    "integration-push",
     "no-integrate",
   ]) {
     const value = flag(parsed, name);

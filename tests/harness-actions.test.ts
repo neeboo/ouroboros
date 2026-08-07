@@ -1713,6 +1713,275 @@ describe("Harness actions", () => {
     expect(readinessAfter.integratedWorkerTaskIds.has(workerTaskId)).toBe(true);
   });
 
+  describe("pushExactGitRef", () => {
+    const expectedOldSha = "1111111111111111111111111111111111111111";
+    const newSha = "2222222222222222222222222222222222222222";
+    const remoteHost = "github.com";
+    const repository = "neeboo/hodor-web";
+    const ref = "refs/heads/main";
+
+    function frozenAction(
+      overrides: Record<string, unknown> = {},
+      frozenOverrides: Record<string, unknown> = {},
+    ) {
+      const repoPath = dir;
+      const contract = {
+        repoPath,
+        remoteHost,
+        repository,
+        ref,
+        expectedOldSha,
+        newSha,
+      };
+      const runId = harness.createRun({
+        goal: "Push one verified Git ref",
+        context: {
+          gitRemoteWriteContracts: {
+            hodorWebMain: { ...contract, ...frozenOverrides },
+          },
+        },
+      });
+      return {
+        action: {
+          type: "pushExactGitRef",
+          runId,
+          contractId: "hodorWebMain",
+          ...contract,
+          ...overrides,
+        },
+        runId,
+        repoPath,
+      };
+    }
+
+    function gitRemoteRunner(input: {
+      remoteReads?: string[];
+      pushExitCode?: number;
+      pushStderr?: string;
+      ancestorExitCode?: number;
+      remoteUrl?: string;
+      head?: string;
+    } = {}) {
+      const calls: string[][] = [];
+      const remoteReads = [...(input.remoteReads ?? [expectedOldSha, newSha])];
+      return {
+        calls,
+        runGit: ({ args }: { cwd: string; args: string[] }) => {
+          calls.push(args);
+          const command = args.join(" ");
+          if (command === "remote get-url --push origin") {
+            return { exitCode: 0, stdout: `${input.remoteUrl ?? "git@github.com:neeboo/hodor-web.git"}\n`, stderr: "" };
+          }
+          if (command === "rev-parse HEAD") {
+            return { exitCode: 0, stdout: `${input.head ?? newSha}\n`, stderr: "" };
+          }
+          if (command === `cat-file -e ${newSha}^{commit}`) {
+            return { exitCode: 0, stdout: "", stderr: "" };
+          }
+          if (command === `ls-remote --exit-code origin ${ref}`) {
+            const sha = remoteReads.shift() ?? expectedOldSha;
+            return { exitCode: 0, stdout: `${sha}\t${ref}\n`, stderr: "" };
+          }
+          if (command === `merge-base --is-ancestor ${expectedOldSha} ${newSha}`) {
+            return { exitCode: input.ancestorExitCode ?? 0, stdout: "", stderr: "" };
+          }
+          if (command === `push --no-verify --porcelain origin ${newSha}:${ref}`) {
+            return {
+              exitCode: input.pushExitCode ?? 0,
+              stdout: input.pushExitCode ? "" : `To github.com:neeboo/hodor-web.git\n\t${expectedOldSha.slice(0, 7)}..${newSha.slice(0, 7)}\t${newSha} -> main\n`,
+              stderr: input.pushStderr ?? "",
+            };
+          }
+          return { exitCode: 97, stdout: "", stderr: `unexpected git command: ${command}` };
+        },
+      };
+    }
+
+    test("allows one frozen host repository ref and verifies independent readback", () => {
+      const { action, repoPath } = frozenAction();
+      const remote = gitRemoteRunner();
+
+      const result = applyHarnessAction(harness, action, { runGit: remote.runGit });
+
+      expect(result).toMatchObject({
+        status: "done",
+        actionType: "pushExactGitRef",
+        summary: expect.stringContaining("verified"),
+      });
+      expect(result.artifacts).toContainEqual(expect.objectContaining({
+        kind: "git_remote_write",
+        outcome: "verified",
+        status: "pushed",
+        repoPath,
+        remoteHost,
+        repository,
+        ref,
+        expectedOldSha,
+        newSha,
+        verifiedBy: "independent_readback",
+      }));
+      expect(remote.calls).toContainEqual(["push", "--no-verify", "--porcelain", "origin", `${newSha}:${ref}`]);
+      expect(remote.calls.filter((args) => args[0] === "ls-remote")).toHaveLength(2);
+    });
+
+    test("reuses an already-pushed ref without issuing a second push", () => {
+      const { action } = frozenAction();
+      const remote = gitRemoteRunner({ remoteReads: [newSha] });
+
+      const result = applyHarnessAction(harness, action, { runGit: remote.runGit });
+
+      expect(result).toMatchObject({ status: "done", actionType: "pushExactGitRef" });
+      expect(result.artifacts).toContainEqual(expect.objectContaining({
+        kind: "git_remote_write",
+        outcome: "verified",
+        status: "reused",
+        verifiedBy: "independent_readback",
+      }));
+      expect(remote.calls.some((args) => args[0] === "push")).toBe(false);
+    });
+
+    test("fails closed when host repository or ref differs from the frozen run contract", () => {
+      const mismatches = [
+        { remoteHost: "gitlab.com" },
+        { repository: "neeboo/another-repo" },
+        { ref: "refs/heads/release" },
+      ];
+      for (const mismatch of mismatches) {
+        const { action } = frozenAction(mismatch);
+        const remote = gitRemoteRunner();
+        const result = applyHarnessAction(harness, action, { runGit: remote.runGit });
+        expect(result).toMatchObject({ status: "blocked", actionType: "pushExactGitRef" });
+        expect(result.artifacts).toContainEqual(expect.objectContaining({
+          kind: "git_remote_write",
+          outcome: "failed",
+          status: "scope_mismatch",
+        }));
+        expect(remote.calls).toHaveLength(0);
+      }
+    });
+
+    test("rejects non-fast-forward ancestry before push", () => {
+      const { action } = frozenAction();
+      const remote = gitRemoteRunner({ ancestorExitCode: 1 });
+
+      const result = applyHarnessAction(harness, action, { runGit: remote.runGit });
+
+      expect(result).toMatchObject({ status: "blocked", actionType: "pushExactGitRef" });
+      expect(result.artifacts).toContainEqual(expect.objectContaining({
+        kind: "git_remote_write",
+        outcome: "failed",
+        status: "non_fast_forward",
+      }));
+      expect(remote.calls.some((args) => args[0] === "push")).toBe(false);
+    });
+
+    test("recovers a lost push response from independent readback and redacts credentials", () => {
+      const { action } = frozenAction();
+      const remote = gitRemoteRunner({
+        remoteReads: [expectedOldSha, newSha],
+        pushExitCode: 1,
+        pushStderr: "fatal: https://x-access-token:ghp_super_secret@github.com/neeboo/hodor-web.git Authorization: Bearer also-secret",
+      });
+
+      const result = applyHarnessAction(harness, action, { runGit: remote.runGit });
+      const serialized = JSON.stringify(result);
+
+      expect(result).toMatchObject({ status: "done", actionType: "pushExactGitRef" });
+      expect(result.artifacts).toContainEqual(expect.objectContaining({
+        kind: "git_remote_write",
+        outcome: "verified",
+        status: "response_loss_recovered",
+        verifiedBy: "independent_readback",
+      }));
+      expect(serialized).not.toContain("ghp_super_secret");
+      expect(serialized).not.toContain("also-secret");
+    });
+
+    test("redacts credentials from a structured push failure", () => {
+      const { action } = frozenAction();
+      const remote = gitRemoteRunner({
+        remoteReads: [expectedOldSha, expectedOldSha],
+        pushExitCode: 1,
+        pushStderr: "fatal: https://oauth2:github_pat_super_secret@github.com/neeboo/hodor-web.git Authorization: Basic another-secret",
+      });
+
+      const result = applyHarnessAction(harness, action, { runGit: remote.runGit });
+      const serialized = JSON.stringify(result);
+
+      expect(result).toMatchObject({ status: "blocked", actionType: "pushExactGitRef" });
+      expect(result.artifacts).toContainEqual(expect.objectContaining({
+        kind: "git_remote_write",
+        outcome: "failed",
+        status: "push_failed",
+      }));
+      expect(serialized).not.toContain("github_pat_super_secret");
+      expect(serialized).not.toContain("another-secret");
+      expect(serialized).toContain("[REDACTED]");
+    });
+
+    test("fails when successful push is not confirmed by independent readback", () => {
+      const unexpectedSha = "3333333333333333333333333333333333333333";
+      const { action } = frozenAction();
+      const remote = gitRemoteRunner({ remoteReads: [expectedOldSha, unexpectedSha] });
+
+      const result = applyHarnessAction(harness, action, { runGit: remote.runGit });
+
+      expect(result).toMatchObject({ status: "blocked", actionType: "pushExactGitRef" });
+      expect(result.artifacts).toContainEqual(expect.objectContaining({
+        kind: "git_remote_write",
+        outcome: "failed",
+        status: "readback_mismatch",
+        observedSha: unexpectedSha,
+      }));
+    });
+
+    test("rejects force delete wildcard and non-commit inputs before any git command", () => {
+      const invalidActions = [
+        { force: true },
+        { delete: true },
+        { ref: "refs/heads/*" },
+        { newSha: "0000000000000000000000000000000000000000" },
+      ];
+      for (const invalid of invalidActions) {
+        const { action } = frozenAction(invalid);
+        const remote = gitRemoteRunner();
+        const result = applyHarnessAction(harness, action, { runGit: remote.runGit });
+        expect(result).toMatchObject({ status: "blocked", actionType: "invalid" });
+        expect(remote.calls).toHaveLength(0);
+      }
+    });
+
+    test("rejects unsupported fields in the frozen run contract", () => {
+      const { action } = frozenAction({}, { force: true });
+      const remote = gitRemoteRunner();
+
+      const result = applyHarnessAction(harness, action, { runGit: remote.runGit });
+
+      expect(result).toMatchObject({ status: "blocked", actionType: "pushExactGitRef" });
+      expect(result.artifacts).toContainEqual(expect.objectContaining({
+        kind: "git_remote_write",
+        outcome: "failed",
+        status: "scope_mismatch",
+      }));
+      expect(remote.calls).toHaveLength(0);
+    });
+
+    test("rejects the legacy broad integrateVerifiedRun push flag before any Git mutation", () => {
+      const remote = gitRemoteRunner();
+      const result = applyHarnessAction(harness, {
+        type: "integrateVerifiedRun",
+        runId: "run_untrusted",
+        repoPath: dir,
+        targetBranch: "main",
+        push: true,
+      }, { runGit: remote.runGit });
+
+      expect(result).toMatchObject({ status: "blocked", actionType: "invalid" });
+      expect(result.problems.join(" ")).toContain("pushExactGitRef");
+      expect(remote.calls).toHaveLength(0);
+    });
+  });
+
   test("retires a stale run from the active queue without deleting task evidence", () => {
     const runId = harness.createRun({ goal: "Old duplicate self-iteration" });
     const taskId = harness.createTask({

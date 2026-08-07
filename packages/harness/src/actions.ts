@@ -59,6 +59,18 @@ export type HarnessAction =
       immediateOutcomeReview?: boolean;
     }
   | {
+      type: "pushExactGitRef";
+      runId: string;
+      contractId: string;
+      repoPath: string;
+      remoteHost: string;
+      repository: string;
+      ref: string;
+      expectedOldSha: string;
+      newSha: string;
+      reason?: string;
+    }
+  | {
       type: "interruptAttemptAndCreateTask";
       attemptId: string;
       reason: string;
@@ -275,6 +287,10 @@ export function parseHarnessAction(value: unknown): HarnessAction {
     };
   }
   if (type === "integrateVerifiedRun") {
+    const push = optionalBooleanField(record, "push");
+    if (push === true) {
+      throw new Error("integrateVerifiedRun push is disabled; freeze and invoke pushExactGitRef instead");
+    }
     return {
       type,
       runId: stringField(record, "runId"),
@@ -282,9 +298,35 @@ export function parseHarnessAction(value: unknown): HarnessAction {
       repoPath: optionalStringField(record, "repoPath"),
       targetBranch: optionalStringField(record, "targetBranch"),
       commitMessage: optionalStringField(record, "commitMessage"),
-      push: optionalBooleanField(record, "push"),
+      push,
       reason: optionalStringField(record, "reason"),
       immediateOutcomeReview: optionalBooleanField(record, "immediateOutcomeReview"),
+    };
+  }
+  if (type === "pushExactGitRef") {
+    assertOnlyFields(record, type, [
+      "type",
+      "runId",
+      "contractId",
+      "repoPath",
+      "remoteHost",
+      "repository",
+      "ref",
+      "expectedOldSha",
+      "newSha",
+      "reason",
+    ]);
+    return {
+      type,
+      runId: stringField(record, "runId"),
+      contractId: safeIdentifierField(record, "contractId"),
+      repoPath: absolutePathField(record, "repoPath"),
+      remoteHost: gitRemoteHostField(record, "remoteHost"),
+      repository: gitRepositoryField(record, "repository"),
+      ref: gitBranchRefField(record, "ref"),
+      expectedOldSha: gitCommitShaField(record, "expectedOldSha"),
+      newSha: gitCommitShaField(record, "newSha"),
+      reason: optionalStringField(record, "reason"),
     };
   }
   if (type === "interruptAttemptAndCreateTask") {
@@ -353,7 +395,7 @@ export function parseHarnessAction(value: unknown): HarnessAction {
     };
   }
   throw new Error(
-    "harness action type must be reclaimRunningTasks, retryTask, markRunTodo, updateRunContext, amendRunContract, retireRun, prepareRunDrain, completeSystemTask, integrateVerifiedRun, interruptAttemptAndCreateTask, interruptRunningAttemptsAndCreateTask, acceptGuardrailProposal, startSubsession, collectSubsessions, or cancelSubsessions",
+    "harness action type must be reclaimRunningTasks, retryTask, markRunTodo, updateRunContext, amendRunContract, retireRun, prepareRunDrain, completeSystemTask, integrateVerifiedRun, pushExactGitRef, interruptAttemptAndCreateTask, interruptRunningAttemptsAndCreateTask, acceptGuardrailProposal, startSubsession, collectSubsessions, or cancelSubsessions",
   );
 }
 
@@ -581,6 +623,10 @@ function applyParsedHarnessAction(harness: Harness, action: Exclude<HarnessActio
 
   if (action.type === "integrateVerifiedRun") {
     return finalizeIntegrationOutcomeReview(harness, action, integrateVerifiedRun(harness, action, options));
+  }
+
+  if (action.type === "pushExactGitRef") {
+    return pushExactGitRef(harness, action, options);
   }
 
   if (action.type === "interruptAttemptAndCreateTask") {
@@ -1700,6 +1746,339 @@ function integrateMaterializedTargetChanges(input: {
       reason: input.action.reason ?? null,
     },
   ]);
+}
+
+type ExactGitRemoteWriteAction = Extract<HarnessAction, { type: "pushExactGitRef" }>;
+
+type ExactGitRemoteWriteStatus =
+  | "pushed"
+  | "reused"
+  | "response_loss_recovered"
+  | "scope_mismatch"
+  | "repo_invalid"
+  | "remote_read_failed"
+  | "remote_state_mismatch"
+  | "non_fast_forward"
+  | "push_failed"
+  | "readback_mismatch";
+
+function pushExactGitRef(
+  harness: Harness,
+  action: ExactGitRemoteWriteAction,
+  options: HarnessActionOptions,
+): HarnessActionResult {
+  const checks: HarnessActionResult["checks"] = [];
+  const run = harness.getRun(action.runId);
+  if (!run) {
+    return failedGitRemoteWrite(action, "scope_mismatch", `Run not found: ${action.runId}`, checks);
+  }
+  checks.push({ name: "run exists", status: "passed", evidence: action.runId });
+
+  const frozen = frozenGitRemoteWriteContract(run.context, action.contractId);
+  if (!frozen || !sameGitRemoteWriteContract(frozen, action)) {
+    return failedGitRemoteWrite(
+      action,
+      "scope_mismatch",
+      `Git remote write request does not match frozen contract ${action.contractId}.`,
+      checks,
+    );
+  }
+  checks.push({ name: "frozen write contract", status: "passed", evidence: action.contractId });
+
+  if (!existsSync(action.repoPath)) {
+    return failedGitRemoteWrite(action, "repo_invalid", `Repository path does not exist: ${action.repoPath}`, checks);
+  }
+
+  const git = options.runGit ?? defaultGitRunner;
+  const remoteUrl = safeGitStep(git, action.repoPath, ["remote", "get-url", "--push", "origin"]);
+  if (!remoteUrl.ok) {
+    return failedGitRemoteWrite(action, "repo_invalid", "Could not read the origin push URL.", checks, remoteUrl);
+  }
+  const remoteIdentity = parseGitRemoteIdentity(remoteUrl.stdout.trim());
+  if (
+    !remoteIdentity ||
+    remoteIdentity.host !== action.remoteHost ||
+    remoteIdentity.repository !== action.repository
+  ) {
+    return failedGitRemoteWrite(
+      action,
+      "scope_mismatch",
+      "Configured origin does not match the frozen host and repository.",
+      checks,
+    );
+  }
+  checks.push({
+    name: "origin scope",
+    status: "passed",
+    evidence: `${action.remoteHost}/${action.repository}`,
+  });
+
+  const head = safeGitStep(git, action.repoPath, ["rev-parse", "HEAD"]);
+  if (!head.ok || head.stdout.trim().toLowerCase() !== action.newSha) {
+    return failedGitRemoteWrite(
+      action,
+      "repo_invalid",
+      `Repository HEAD must equal frozen newSha ${action.newSha}.`,
+      checks,
+      head,
+    );
+  }
+  const commit = safeGitStep(git, action.repoPath, ["cat-file", "-e", `${action.newSha}^{commit}`]);
+  if (!commit.ok) {
+    return failedGitRemoteWrite(action, "repo_invalid", "Frozen newSha is not a local commit.", checks, commit);
+  }
+  checks.push({ name: "local commit", status: "passed", evidence: action.newSha });
+
+  const ancestor = safeGitStep(git, action.repoPath, [
+    "merge-base",
+    "--is-ancestor",
+    action.expectedOldSha,
+    action.newSha,
+  ]);
+  if (!ancestor.ok) {
+    return failedGitRemoteWrite(
+      action,
+      "non_fast_forward",
+      "Frozen newSha is not a fast-forward descendant of expectedOldSha.",
+      checks,
+    );
+  }
+  checks.push({
+    name: "fast-forward ancestry",
+    status: "passed",
+    evidence: `${action.expectedOldSha}..${action.newSha}`,
+  });
+
+  const before = readExactRemoteRef(git, action);
+  if (!before.ok) {
+    return failedGitRemoteWrite(action, "remote_read_failed", "Could not read the exact remote ref.", checks, before.result);
+  }
+  if (before.sha === action.newSha) {
+    checks.push({ name: "independent remote readback", status: "passed", evidence: action.newSha });
+    return verifiedGitRemoteWrite(action, "reused", checks);
+  }
+  if (before.sha !== action.expectedOldSha) {
+    return failedGitRemoteWrite(
+      action,
+      "remote_state_mismatch",
+      `Remote ref does not equal expectedOldSha ${action.expectedOldSha}.`,
+      checks,
+      undefined,
+      before.sha,
+    );
+  }
+  checks.push({ name: "remote expected old SHA", status: "passed", evidence: before.sha });
+
+  const push = safeGitStep(git, action.repoPath, [
+    "push",
+    "--no-verify",
+    "--porcelain",
+    "origin",
+    `${action.newSha}:${action.ref}`,
+  ]);
+  const after = readExactRemoteRef(git, action);
+  if (after.ok && after.sha === action.newSha) {
+    checks.push({ name: "independent remote readback", status: "passed", evidence: after.sha });
+    return verifiedGitRemoteWrite(action, push.ok ? "pushed" : "response_loss_recovered", checks);
+  }
+  if (!after.ok) {
+    return failedGitRemoteWrite(
+      action,
+      push.ok ? "readback_mismatch" : "push_failed",
+      push.ok
+        ? "Push returned success but independent remote readback failed."
+        : "Push failed and independent remote readback could not confirm recovery.",
+      checks,
+      push.ok ? after.result : push,
+    );
+  }
+  if (!push.ok && after.sha !== action.expectedOldSha) {
+    return failedGitRemoteWrite(
+      action,
+      "non_fast_forward",
+      "Remote ref changed during the exact push.",
+      checks,
+      push,
+      after.sha,
+    );
+  }
+  return failedGitRemoteWrite(
+    action,
+    push.ok ? "readback_mismatch" : "push_failed",
+    push.ok
+      ? "Push returned success but independent remote readback did not match newSha."
+      : "Push failed and the remote ref still equals expectedOldSha.",
+    checks,
+    push,
+    after.sha,
+  );
+}
+
+function frozenGitRemoteWriteContract(context: Record<string, unknown>, contractId: string) {
+  const contracts = context.gitRemoteWriteContracts;
+  if (!contracts || typeof contracts !== "object" || Array.isArray(contracts)) {
+    return null;
+  }
+  const value = (contracts as Record<string, unknown>)[contractId];
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  return value as Record<string, unknown>;
+}
+
+function sameGitRemoteWriteContract(frozen: Record<string, unknown>, action: ExactGitRemoteWriteAction) {
+  const fields = ["expectedOldSha", "newSha", "ref", "remoteHost", "repoPath", "repository"];
+  if (Object.keys(frozen).sort().join("\0") !== fields.join("\0")) {
+    return false;
+  }
+  return frozen.repoPath === action.repoPath &&
+    frozen.remoteHost === action.remoteHost &&
+    frozen.repository === action.repository &&
+    frozen.ref === action.ref &&
+    frozen.expectedOldSha === action.expectedOldSha &&
+    frozen.newSha === action.newSha;
+}
+
+function parseGitRemoteIdentity(value: string): { host: string; repository: string } | null {
+  let host = "";
+  let path = "";
+  try {
+    if (value.includes("://")) {
+      const url = new URL(value);
+      host = url.hostname.toLowerCase();
+      path = url.pathname;
+    } else {
+      const scp = value.match(/^(?:[^@/\s]+@)?([^:/\s]+):(.+)$/);
+      if (!scp) {
+        return null;
+      }
+      host = scp[1].toLowerCase();
+      path = scp[2];
+    }
+  } catch {
+    return null;
+  }
+  const repository = path.replace(/^\/+/, "").replace(/\/+$/, "").replace(/\.git$/, "");
+  if (!isGitRemoteHost(host) || !isGitRepository(repository)) {
+    return null;
+  }
+  return { host, repository };
+}
+
+function readExactRemoteRef(
+  git: GitRunner,
+  action: ExactGitRemoteWriteAction,
+): { ok: true; sha: string } | { ok: false; result: ReturnType<typeof safeGitStep> } {
+  const result = safeGitStep(git, action.repoPath, ["ls-remote", "--exit-code", "origin", action.ref]);
+  if (!result.ok) {
+    return { ok: false, result };
+  }
+  const rows = result.stdout
+    .split(/\r?\n/)
+    .map((line) => line.trim().split(/\s+/))
+    .filter((fields) => fields.length >= 2);
+  if (rows.length !== 1 || rows[0][1] !== action.ref || !isGitCommitSha(rows[0][0])) {
+    return {
+      ok: false,
+      result: {
+        ...result,
+        ok: false,
+        exitCode: 1,
+        stderr: "exact ls-remote readback returned an invalid or ambiguous ref",
+      },
+    };
+  }
+  return { ok: true, sha: rows[0][0].toLowerCase() };
+}
+
+function verifiedGitRemoteWrite(
+  action: ExactGitRemoteWriteAction,
+  status: Extract<ExactGitRemoteWriteStatus, "pushed" | "reused" | "response_loss_recovered">,
+  checks: HarnessActionResult["checks"],
+) {
+  return doneResult(action.type, `Exact Git remote write verified for ${action.ref}.`, checks, [
+    gitRemoteWriteArtifact(action, "verified", status),
+  ]);
+}
+
+function failedGitRemoteWrite(
+  action: ExactGitRemoteWriteAction,
+  status: Exclude<ExactGitRemoteWriteStatus, "pushed" | "reused" | "response_loss_recovered">,
+  summary: string,
+  checks: HarnessActionResult["checks"],
+  result?: ReturnType<typeof safeGitStep>,
+  observedSha?: string,
+): HarnessActionResult {
+  const error = sanitizeGitRemoteText(
+    result?.stderr.trim() || result?.stdout.trim() || summary,
+  );
+  return {
+    status: "blocked",
+    actionType: action.type,
+    summary,
+    checks: [
+      ...checks,
+      { name: "exact Git remote write", status: "failed", evidence: status },
+    ],
+    artifacts: [
+      {
+        ...gitRemoteWriteArtifact(action, "failed", status),
+        ...(observedSha ? { observedSha } : {}),
+        error,
+      },
+    ],
+    problems: [error],
+  };
+}
+
+function gitRemoteWriteArtifact(
+  action: ExactGitRemoteWriteAction,
+  outcome: "verified" | "failed",
+  status: ExactGitRemoteWriteStatus,
+) {
+  return {
+    kind: "git_remote_write",
+    outcome,
+    status,
+    runId: action.runId,
+    contractId: action.contractId,
+    repoPath: action.repoPath,
+    remoteHost: action.remoteHost,
+    repository: action.repository,
+    ref: action.ref,
+    expectedOldSha: action.expectedOldSha,
+    newSha: action.newSha,
+    verifiedBy: outcome === "verified" ? "independent_readback" : null,
+    reason: action.reason ?? null,
+  };
+}
+
+function safeGitStep(git: GitRunner, cwd: string, args: string[]) {
+  try {
+    const result = runGitStep(git, cwd, args);
+    return {
+      ...result,
+      stdout: sanitizeGitRemoteText(result.stdout),
+      stderr: sanitizeGitRemoteText(result.stderr),
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      exitCode: -1,
+      stdout: "",
+      stderr: sanitizeGitRemoteText(errorMessage(error)),
+      command: `git ${args.join(" ")}`,
+      cwd,
+    };
+  }
+}
+
+function sanitizeGitRemoteText(value: string) {
+  return value
+    .replace(/(https?:\/\/)[^\s/@]+(?::[^\s/@]*)?@/gi, "$1[REDACTED]@")
+    .replace(/\b(?:ghp|gho|ghu|ghs|ghr|github_pat|glpat)[_-][A-Za-z0-9_-]+\b/g, "[REDACTED]")
+    .replace(/(Authorization\s*:\s*(?:Bearer|Basic)\s+)[^\s]+/gi, "$1[REDACTED]")
+    .replace(/(x-access-token:)[^@\s]+/gi, "$1[REDACTED]");
 }
 
 function interruptAttemptAndCreateTask(
@@ -2915,6 +3294,103 @@ function stringField(record: Record<string, unknown>, key: string) {
     throw new Error(`${key} must be a non-empty string`);
   }
   return value.trim();
+}
+
+function assertOnlyFields(record: Record<string, unknown>, label: string, allowed: string[]) {
+  const allowedSet = new Set(allowed);
+  const unexpected = Object.keys(record).filter((key) => !allowedSet.has(key));
+  if (unexpected.length > 0) {
+    throw new Error(`${label} contains unsupported fields: ${unexpected.sort().join(", ")}`);
+  }
+}
+
+function safeIdentifierField(record: Record<string, unknown>, key: string) {
+  const value = stringField(record, key);
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$/.test(value)) {
+    throw new Error(`${key} must be a safe identifier of at most 200 characters`);
+  }
+  return value;
+}
+
+function absolutePathField(record: Record<string, unknown>, key: string) {
+  const value = stringField(record, key);
+  if (!isAbsolute(value)) {
+    throw new Error(`${key} must be an absolute path`);
+  }
+  return value;
+}
+
+function gitRemoteHostField(record: Record<string, unknown>, key: string) {
+  const value = stringField(record, key).toLowerCase();
+  if (!isGitRemoteHost(value)) {
+    throw new Error(`${key} must be an exact DNS hostname without a scheme, port, or wildcard`);
+  }
+  return value;
+}
+
+function isGitRemoteHost(value: string) {
+  return value.length <= 253 &&
+    value.split(".").length >= 2 &&
+    value.split(".").every((label) =>
+      /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/i.test(label)
+    );
+}
+
+function gitRepositoryField(record: Record<string, unknown>, key: string) {
+  const value = stringField(record, key);
+  if (!isGitRepository(value)) {
+    throw new Error(`${key} must be an exact repository path without scheme, credentials, wildcard, or .git suffix`);
+  }
+  return value;
+}
+
+function isGitRepository(value: string) {
+  const segments = value.split("/");
+  return segments.length >= 2 &&
+    !value.endsWith(".git") &&
+    !value.includes("..") &&
+    segments.every((segment) => /^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,99})$/.test(segment));
+}
+
+function gitBranchRefField(record: Record<string, unknown>, key: string) {
+  const value = stringField(record, key);
+  if (!isExactGitBranchRef(value)) {
+    throw new Error(`${key} must be one exact refs/heads/* branch without wildcard, deletion, or ref expressions`);
+  }
+  return value;
+}
+
+function isExactGitBranchRef(value: string) {
+  if (!value.startsWith("refs/heads/")) {
+    return false;
+  }
+  const branch = value.slice("refs/heads/".length);
+  if (
+    branch.length === 0 ||
+    branch.startsWith("/") ||
+    branch.endsWith("/") ||
+    branch.endsWith(".") ||
+    branch.includes("..") ||
+    branch.includes("@{") ||
+    /[\x00-\x20\x7f~^:?*\[\\]/.test(branch)
+  ) {
+    return false;
+  }
+  return branch.split("/").every((segment) =>
+    segment.length > 0 && segment !== "." && segment !== ".." && !segment.startsWith(".") && !segment.endsWith(".lock")
+  );
+}
+
+function gitCommitShaField(record: Record<string, unknown>, key: string) {
+  const value = stringField(record, key).toLowerCase();
+  if (!isGitCommitSha(value) || /^0+$/.test(value)) {
+    throw new Error(`${key} must be a non-zero full 40-character commit SHA`);
+  }
+  return value;
+}
+
+function isGitCommitSha(value: string) {
+  return /^[0-9a-f]{40}$/i.test(value);
 }
 
 function optionalStringField(record: Record<string, unknown>, key: string) {
