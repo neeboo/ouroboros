@@ -54,6 +54,267 @@ function recorderProbe() {
 }
 
 describe("acpx deadline classification", () => {
+  test.each([
+    ["idle", "command idle timed out after 30000ms"],
+    ["hard", "command timed out after 90000ms"],
+  ] as const)("cooperatively cancels the named session after a %s timeout", async (_kind, timeoutError) => {
+    const calls: Array<Parameters<RunCommand>[0]> = [];
+    const runCommand: RunCommand = async (input) => {
+      calls.push(input);
+      if (input.cmd.includes("prompt")) {
+        return { exitCode: 124, stdout: "", stderr: timeoutError };
+      }
+      if (input.cmd.includes("cancel")) {
+        return { exitCode: 0, stdout: "cancel requested\n", stderr: "" };
+      }
+      return { exitCode: 0, stdout: "", stderr: "" };
+    };
+    const { events, recorder } = recorderProbe();
+    const executor = createAcpxAgentExecutor({
+      agent: "claude",
+      cwd: "/repo",
+      timeoutMs: 90000,
+      idleTimeoutMs: 30000,
+      runCommand,
+    });
+
+    const output = await executor({
+      prompt: "Do the task",
+      sessionName: "task_timeout",
+      run: runFixture,
+      route: routeFixture,
+      task: taskFixture,
+      attemptId: `attempt_${_kind}`,
+      recorder,
+    });
+
+    const cancelCall = calls.find((call) => call.cmd.includes("cancel"));
+    expect(cancelCall).toMatchObject({
+      cmd: [
+        "acpx",
+        "--cwd",
+        "/repo",
+        "--approve-reads",
+        "--format",
+        "text",
+        "claude",
+        "cancel",
+        "-s",
+        "task_timeout",
+      ],
+      stdin: "",
+      timeoutMs: 10000,
+      idleTimeoutMs: 10000,
+    });
+    expect(events.some((event) => event.type === "acpx.attempt.cancel.started")).toBe(true);
+    expect(events.some((event) => event.type === "acpx.attempt.cancel.terminal" && event.succeeded === true)).toBe(true);
+    const resetCall = calls.find((call) => call.cmd.includes("close"));
+    expect(resetCall?.cmd).toEqual([
+      "acpx",
+      "--cwd",
+      "/repo",
+      "--approve-reads",
+      "--format",
+      "text",
+      "claude",
+      "sessions",
+      "close",
+      "task_timeout",
+    ]);
+    expect(events.some((event) => event.type === "acpx.attempt.reset.terminal" && event.succeeded === true)).toBe(true);
+    const terminal = output.artifacts?.find(
+      (artifact) => (artifact as Record<string, unknown>).kind === "acpx_terminal_evidence",
+    ) as Record<string, unknown> | undefined;
+    expect(terminal?.sessionCancelAttempted).toBe(true);
+    expect(terminal?.sessionCancelSucceeded).toBe(true);
+    expect(terminal?.sessionResetAttempted).toBe(true);
+    expect(terminal?.sessionResetSucceeded).toBe(true);
+  });
+
+  test("does not reconnect or replay when a timed-out prompt also reports needs reconnect", async () => {
+    const calls: Array<Parameters<RunCommand>[0]> = [];
+    const runCommand: RunCommand = async (input) => {
+      calls.push(input);
+      if (input.cmd.includes("prompt")) {
+        return {
+          exitCode: 124,
+          stdout: "session task_timeout_reconnect · agent needs reconnect",
+          stderr: "command idle timed out after 30000ms",
+        };
+      }
+      if (input.cmd.includes("cancel")) {
+        return { exitCode: 0, stdout: "cancel requested\n", stderr: "" };
+      }
+      return { exitCode: 0, stdout: "", stderr: "" };
+    };
+    const executor = createAcpxAgentExecutor({
+      agent: "claude",
+      cwd: "/repo",
+      timeoutMs: 90000,
+      idleTimeoutMs: 30000,
+      runCommand,
+    });
+
+    const output = await executor({
+      prompt: "Do the task",
+      sessionName: "task_timeout_reconnect",
+      run: runFixture,
+      route: routeFixture,
+      task: taskFixture,
+      attemptId: "attempt_timeout_reconnect",
+    });
+
+    expect(output.status).toBe("blocked");
+    expect(
+      calls.filter((call) => call.cmd.includes("prompt")),
+    ).toHaveLength(1);
+    expect(calls.filter((call) => call.cmd.includes("close"))).toHaveLength(1);
+    expect(calls.some((call) => call.cmd.includes("new"))).toBe(false);
+    expect(calls.some((call) => call.cmd.includes("cancel"))).toBe(true);
+    const terminal = output.artifacts?.find(
+      (artifact) => (artifact as Record<string, unknown>).kind === "acpx_terminal_evidence",
+    ) as Record<string, unknown> | undefined;
+    expect(terminal?.terminalReason).toBe("idle_timeout");
+  });
+
+  test("records a failed cooperative cancellation without hiding the timeout", async () => {
+    const runCommand: RunCommand = async ({ cmd }) => {
+      if (cmd.includes("prompt")) {
+        return { exitCode: 124, stdout: "", stderr: "command timed out after 90000ms" };
+      }
+      if (cmd.includes("cancel")) {
+        return { exitCode: 2, stdout: "", stderr: "unknown option" };
+      }
+      return { exitCode: 0, stdout: "", stderr: "" };
+    };
+    const { events, recorder } = recorderProbe();
+    const executor = createAcpxAgentExecutor({
+      agent: "claude",
+      cwd: "/repo",
+      timeoutMs: 90000,
+      idleTimeoutMs: 30000,
+      runCommand,
+    });
+
+    const output = await executor({
+      prompt: "Do the task",
+      sessionName: "task_cancel_failed",
+      run: runFixture,
+      route: routeFixture,
+      task: taskFixture,
+      attemptId: "attempt_cancel_failed",
+      recorder,
+    });
+
+    expect(output.status).toBe("blocked");
+    expect(output.summary).toContain("hard ceiling");
+    expect(output.problems?.join("\n")).toContain("session cancel failed with exit code 2");
+    expect(
+      events.some((event) => event.type === "acpx.attempt.cancel.terminal" && event.succeeded === false),
+    ).toBe(true);
+    const terminal = output.artifacts?.find(
+      (artifact) => (artifact as Record<string, unknown>).kind === "acpx_terminal_evidence",
+    ) as Record<string, unknown> | undefined;
+    expect(terminal?.sessionCancelAttempted).toBe(true);
+    expect(terminal?.sessionCancelSucceeded).toBe(false);
+    expect(terminal?.sessionCancelExitCode).toBe(2);
+    expect(terminal?.sessionCancelFailureReason).toBe("command_exit_2");
+    expect(terminal?.sessionResetSucceeded).toBe(true);
+  });
+
+  test("cancels a timed-out raw agentCommand session through the same backend", async () => {
+    const calls: Array<Parameters<RunCommand>[0]> = [];
+    const runCommand: RunCommand = async (input) => {
+      calls.push(input);
+      if (input.cmd.includes("prompt")) {
+        return { exitCode: 124, stdout: "", stderr: "command idle timed out after 30000ms" };
+      }
+      if (input.cmd.includes("cancel")) {
+        return { exitCode: 0, stdout: "cancel requested\n", stderr: "" };
+      }
+      return { exitCode: 0, stdout: "", stderr: "" };
+    };
+    const executor = createAcpxAgentExecutor({
+      agentCommand: "/opt/claude-agent-acp",
+      cwd: "/repo",
+      timeoutMs: 90000,
+      idleTimeoutMs: 30000,
+      runCommand,
+    });
+
+    await executor({
+      prompt: "Do the task",
+      sessionName: "task_raw_timeout",
+      run: runFixture,
+      route: routeFixture,
+      task: taskFixture,
+      attemptId: "attempt_raw_timeout",
+    });
+
+    expect(calls.find((call) => call.cmd.includes("cancel"))?.cmd).toEqual([
+      "acpx",
+      "--cwd",
+      "/repo",
+      "--approve-reads",
+      "--format",
+      "text",
+      "--agent",
+      "/opt/claude-agent-acp",
+      "cancel",
+      "-s",
+      "task_raw_timeout",
+    ]);
+    expect(calls.find((call) => call.cmd.includes("close"))?.cmd).toEqual([
+      "acpx",
+      "--cwd",
+      "/repo",
+      "--approve-reads",
+      "--format",
+      "text",
+      "--agent",
+      "/opt/claude-agent-acp",
+      "sessions",
+      "close",
+      "task_raw_timeout",
+    ]);
+  });
+
+  test("resets the contaminated session when no active prompt remains to cancel", async () => {
+    const runCommand: RunCommand = async ({ cmd }) => {
+      if (cmd.includes("prompt")) {
+        return { exitCode: 124, stdout: "", stderr: "command idle timed out after 30000ms" };
+      }
+      if (cmd.includes("cancel")) {
+        return { exitCode: 0, stdout: "nothing to cancel\n", stderr: "" };
+      }
+      return { exitCode: 0, stdout: "session closed\n", stderr: "" };
+    };
+    const executor = createAcpxAgentExecutor({
+      agent: "claude",
+      cwd: "/repo",
+      timeoutMs: 90000,
+      idleTimeoutMs: 30000,
+      runCommand,
+    });
+
+    const output = await executor({
+      prompt: "Do the task",
+      sessionName: "task_queued_timeout",
+      run: runFixture,
+      route: routeFixture,
+      task: taskFixture,
+      attemptId: "attempt_queued_timeout",
+    });
+
+    const terminal = output.artifacts?.find(
+      (artifact) => (artifact as Record<string, unknown>).kind === "acpx_terminal_evidence",
+    ) as Record<string, unknown> | undefined;
+    expect(terminal?.sessionCancelSucceeded).toBe(false);
+    expect(terminal?.sessionCancelFailureReason).toBeNull();
+    expect(terminal?.sessionResetSucceeded).toBe(true);
+    expect(output.problems?.join("\n")).not.toContain("session cancel failed");
+  });
+
   test("classifies exit 124 with idle-timeout stderr as idle_timeout", async () => {
     const runCommand: RunCommand = async ({ cmd }) => ({
       exitCode: cmd.includes("-s") ? 124 : 0,
