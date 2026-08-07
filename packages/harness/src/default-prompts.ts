@@ -1,5 +1,10 @@
 import { OUROBOROS_RUNTIME_PATHS } from "./runtime-paths";
 
+const CURRENT_TASK_ACTION_GUIDANCE =
+  "The JSON example below is role-specific. Keep every field at the shown JSON type and use only fixed actions allowed by the task instructions.";
+const LEGACY_TASK_ACTION_GUIDANCE =
+  "Prefer the `actions` array for follow-up work and run decisions. Supported action types are createTasks, createRuns, and setRunDecision.";
+
 const RUNTIME_PROTECTION_SECTION = [
   "## Runtime File Guardrail",
   `Treat ${OUROBOROS_RUNTIME_PATHS.map((path) => `\`${path}\``).join(", ")} as Ouroboros runtime/control paths.`,
@@ -50,13 +55,19 @@ export const DEFAULT_TASK_PROMPT_TEMPLATE = [
   "{{reusableExperienceEvidenceMarkdown}}",
   "## Required Output",
   "Return only JSON with this shape:",
-  "Prefer the `actions` array for follow-up work and run decisions. Supported action types are createTasks, createRuns, and setRunDecision.",
+  CURRENT_TASK_ACTION_GUIDANCE,
   "```json",
   "{{requiredOutputJson}}",
   "```",
 ].join("\n");
 
+const PREVIOUS_DEFAULT_TASK_PROMPT_TEMPLATE = DEFAULT_TASK_PROMPT_TEMPLATE.replace(
+  CURRENT_TASK_ACTION_GUIDANCE,
+  LEGACY_TASK_ACTION_GUIDANCE,
+);
+
 export const LEGACY_DEFAULT_TASK_PROMPT_TEMPLATES = [
+  PREVIOUS_DEFAULT_TASK_PROMPT_TEMPLATE,
   [
     "# Ouroboros Task",
     "",

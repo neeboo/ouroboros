@@ -43,6 +43,18 @@ import {
   runUntilIdle,
 } from "../packages/runner/src";
 
+function requiredOutputExample(prompt: string): Record<string, unknown> {
+  const section = prompt.split("## Required Output")[1];
+  if (!section) {
+    throw new Error("prompt is missing Required Output");
+  }
+  const match = /```json\n([\s\S]*?)\n```/.exec(section);
+  if (!match) {
+    throw new Error("Required Output is missing a JSON example");
+  }
+  return JSON.parse(match[1]) as Record<string, unknown>;
+}
+
 describe("runner", () => {
   let dir: string;
   let harness: Harness;
@@ -407,6 +419,61 @@ describe("runner", () => {
     expect(requiredOutput).toContain("decideDesign");
     expect(requiredOutput).toContain("recordDesignOutcome");
     expect(requiredOutput).toContain("createRunsFromDesign");
+  });
+
+  test("builds a Designer proposeDesign example that matches the fixed action parser contract", () => {
+    const runId = harness.createRun({ goal: "Designer proposes a bounded change" });
+    const taskId = harness.createTask({
+      runId,
+      role: "designer",
+      goal: "Propose one evidence-backed design",
+      prompt: "Use the frozen action contract.",
+    });
+    const prompt = buildTaskPrompt({
+      run: harness.getRun(runId)!,
+      task: harness.getTask(taskId)!,
+      dependencyAttempts: [],
+    });
+
+    expect(prompt).toContain("The JSON example below is role-specific");
+    expect(prompt).not.toContain(
+      "Supported action types are createTasks, createRuns, and setRunDecision",
+    );
+    const output = parseAttemptOutput(JSON.stringify(requiredOutputExample(prompt)));
+    const proposalAction = output.designActions?.find((action) => action.type === "proposeDesign");
+    expect(proposalAction).toBeDefined();
+    const proposal = proposalAction?.payload.proposal as Record<string, unknown>;
+    const option = (proposal.options as Array<Record<string, unknown>>)[0];
+    const experiment = proposal.experiment as Record<string, unknown>;
+
+    expect(proposal.options).toBeArray();
+    expect(proposal.options).not.toHaveLength(0);
+    expect(option.benefits).toBeArray();
+    expect(option.costs).toBeArray();
+    expect(option.risks).toBeArray();
+    expect(option.lockIn).toBeArray();
+    expect(experiment.rollback).toBeString();
+    expect(proposal).toMatchObject({
+      additions: expect.any(Array),
+      removals: expect.any(Array),
+      targetOutcome: expect.any(String),
+      assumptions: expect.any(Array),
+      uncertainty: expect.any(Array),
+      evaluationContract: {
+        baseline: expect.any(Array),
+        successMetrics: expect.any(Array),
+        guardMetrics: expect.any(Array),
+        requiredEvidence: expect.any(Array),
+        reviewAt: expect.any(String),
+      },
+      investment: {
+        reversibility: "easy",
+        portfolio: "core",
+        oneTimeCost: 0,
+        recurringCost: 0,
+        timeBudget: expect.any(String),
+      },
+    });
   });
 
   test("resolveModelPreference uses designer role defaults from run context", () => {
@@ -6051,6 +6118,8 @@ describe("runner", () => {
     ["negative oneTimeCost", { projectId: "project_1", title: "x", proposal: { problem: "x", recommendation: "x", evidenceRefs: ["signal_1"], evaluationContract: { successMetrics: ["x"] }, investment: { reversibility: "easy", portfolio: "core", oneTimeCost: -5 } } }],
     ["empty evidenceRefs", { projectId: "project_1", title: "x", proposal: { problem: "x", recommendation: "x", evidenceRefs: [], evaluationContract: { successMetrics: ["x"] }, investment: { reversibility: "easy", portfolio: "core" } } }],
     ["missing evidenceRefs", { projectId: "project_1", title: "x", proposal: { problem: "x", recommendation: "x", evaluationContract: { successMetrics: ["x"] }, investment: { reversibility: "easy", portfolio: "core" } } }],
+    ["string option lockIn", { projectId: "project_1", title: "x", proposal: { ...validProposal, options: [{ name: "x", benefits: [], costs: [], risks: [], lockIn: "none" }] } }],
+    ["array experiment rollback", { projectId: "project_1", title: "x", proposal: { ...validProposal, experiment: { hypothesis: "x", smallestTest: "x", stopConditions: [], rollback: ["undo"] } } }],
   ])("rejects malformed proposeDesign payloads with %s", (_name, payload) => {
     expect(() =>
       parseAttemptOutput(
@@ -7024,6 +7093,24 @@ describe("runner", () => {
     expect(continuationTask?.role).toBe("designer");
     expect(continuationTask?.prompt).toContain(signalId);
     expect(continuationTask?.dependsOn).toEqual([taskId]);
+
+    const continuationPrompt = buildTaskPrompt({
+      run: harness.getRun(runId)!,
+      task: continuationTask!,
+      dependencyAttempts: [],
+    });
+    const continuationExample = requiredOutputExample(continuationPrompt);
+    expect(continuationExample.actions).toEqual([
+      expect.objectContaining({ type: "proposeDesign" }),
+    ]);
+    const parsedContinuation = parseAttemptOutput(JSON.stringify(continuationExample));
+    expect(parsedContinuation.designActions).toEqual([
+      expect.objectContaining({ type: "proposeDesign" }),
+    ]);
+    const continuationProposal = parsedContinuation.designActions?.[0]?.payload.proposal as {
+      evidenceRefs: string[];
+    };
+    expect(continuationProposal.evidenceRefs).toEqual([signalId]);
 
     // The audit row captures both the durable signal ID and continuation task.
     const events = harness.listHarnessActionEvents({ limit: 5 });
