@@ -192,6 +192,20 @@ orbs linear-create-issue \
   --description "Zero-cost API verification for poll -> inbox -> Designer -> planning run -> external ref."
 ```
 
+Two narrow writeback primitives close the Linear delivery loop without exposing arbitrary GraphQL. `linear-update-status` accepts exactly one of `--state-id` (immutable UUID) or `--state-name` (team-scoped, exact match) and verifies the result through an independent issue readback. `linear-write-evidence-comment` writes one bounded evidence comment per `(issue id, idempotency key, normalized evidence)` tuple, recovers from a lost mutation response by reusing the existing marker, and reports `idempotency_conflict` for duplicate markers with divergent bodies. The two commands are separate Linear requests, not a transaction; partial success is reported explicitly (status stays, comment-only retry). See `docs/protocol.md` for the full contract, including `state_name_unknown`, `state_name_ambiguous`, `permission_denied`, `readback_mismatch`, idempotency boundaries, and remote-side-effect notes.
+
+```bash
+orbs linear-update-status \
+  --issue-id 0ad49c7d-9f2b-4f2e-8743-ee017d841171 \
+  --state-name "In Progress"
+
+orbs linear-write-evidence-comment \
+  --issue-id 0ad49c7d-9f2b-4f2e-8743-ee017d841171 \
+  --idempotency-key pan-1236-verifier-v1 \
+  --idempotency-secret-file ./secrets/linear-writeback-hmac.txt \
+  --evidence-summary "focused tests: pass; full suite: pass; typecheck: pass"
+```
+
 Autonomous self-improvement disables browser process launches across Codex and Claude Code by default. Use API, CLI, component-test, and SQLite evidence first. Pass `--browser-process-policy allow` only for a user-started run whose verification contract explicitly requires checking a rendered interface.
 
 Model preference can live on the run or on a single task:
@@ -225,7 +239,7 @@ Agent backend selection can also live on the run or on a single task:
 ```bash
 orbs create-run \
   --goal "Use Ouroboros to iterate on Ouroboros" \
-  --context-json '{"agentDefaults":{"global":"claude-code","roles":{"verifier":"codex-resumable"}},"agentBackends":{"claude-code":{"kind":"acpx","agent":"claude","approval":"approve-all"},"codex-resumable":{"kind":"codex-resumable"}}}'
+  --context-json '{"agentDefaults":{"global":"codex-resumable","roles":{"worker":"codex-resumable","verifier":"codex-resumable"}},"agentBackends":{"claude-code":{"kind":"acpx","agent":"claude","approval":"approve-all"},"codex-resumable":{"kind":"codex-resumable"}}}'
 ```
 
 ```bash
@@ -243,14 +257,15 @@ Claude Code uses its local Claude configuration by default. When a route resolve
 
 ### Self-Iteration Backend Default
 
-Self-iteration runs keep `planner`, `verifier`, and `goal-review` on `codex-resumable` by default, with `claude-code`/acpx still available for `worker` and as `agentDefaults.global`. This recovered policy was added after a real self-iteration run observed a `claude-code`/acpx planner attempt stay running for more than 13 minutes with zero attempt events, zero output, and no worktree changes (see `docs/self-iteration-plan.md` for the full reason and inspection commands). Configure it through `ouroboros.toml`:
+Self-iteration runs keep `designer`, `planner`, `worker`, `verifier`, `outcome-review`, and `goal-review` on `codex-resumable` by default. Claude Code remains available only through an explicit task-level `config.agentBackend = "claude-code"`. Claude failures recover to Codex; Codex failures continue as bounded Codex repair tasks under the repair budget. This policy is finite and does not rotate backends automatically or retry forever. Configure it through `ouroboros.toml`:
 
 ```toml
 [agentDefaults]
-global = "claude-code"
+global = "codex-resumable"
 
 [agentDefaults.roles]
 planner = "codex-resumable"
+worker = "codex-resumable"
 verifier = "codex-resumable"
 goal-review = "codex-resumable"
 

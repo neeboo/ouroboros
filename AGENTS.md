@@ -4,7 +4,9 @@ This repository is building a local harness for autonomous coding loops. Treat i
 
 ## Core Loop
 
-For normal project work, follow `docs/default-runbook.md` first. The default route is Codex for `designer`, `planner`, `verifier`, `outcome-review`, and `goal-review`, plus Claude Code for `worker`.
+For normal project work, follow `docs/default-runbook.md` first. The default route is `codex-resumable` for every role, including `worker`. Claude Code remains an explicitly selected optional backend, not an automatic worker default.
+
+Execution recovery is finite: a Claude Code executor failure returns to a Codex recovery task, and a Codex executor failure continues as a bounded Codex repair task under `repairReplanBudget`. Recovery preserves the source worktree, completion criteria, verifier contract, permissions, and terminal evidence. It does not rotate backends automatically or retry forever.
 
 The Designer-first control plane is the default operating mode. A run starts with a `designer` task that reads the active founder charter, strategy signals, lessons, run evidence, and due outcome reviews. The designer emits one of:
 

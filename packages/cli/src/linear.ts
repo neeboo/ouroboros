@@ -196,7 +196,11 @@ type LinearWriteFailureStatus =
   | "mutation_failed"
   | "readback_mismatch"
   | "idempotency_conflict"
-  | "pagination_limit";
+  | "pagination_limit"
+  | "state_name_unknown"
+  | "state_name_ambiguous";
+
+const LINEAR_STATE_NAME_MAX_CHARS = 200;
 
 interface LinearWriteRequestResult<T> {
   ok: boolean;
@@ -207,7 +211,8 @@ interface LinearWriteRequestResult<T> {
 
 export interface LinearUpdateStatusInput {
   issueId: string;
-  stateId: string;
+  stateId?: string | null;
+  stateName?: string | null;
   teamKey?: string | null;
   tokenFile?: string | null;
   tokenEnv?: string | null;
@@ -250,6 +255,23 @@ const LINEAR_STATUS_SCOPE_QUERY = `
   }
 `;
 
+const LINEAR_STATUS_NAME_SCOPE_QUERY = `
+  query OuroborosLinearStatusNameResolve($issueId: String!) {
+    issue(id: $issueId) {
+      id
+      identifier
+      team {
+        id
+        key
+        states(first: 100) {
+          nodes { id name type }
+        }
+      }
+      state { id name type }
+    }
+  }
+`;
+
 const LINEAR_STATUS_UPDATE_MUTATION = `
   mutation OuroborosLinearStatusUpdate($issueId: String!, $input: IssueUpdateInput!) {
     issueUpdate(id: $issueId, input: $input) {
@@ -277,7 +299,8 @@ const LINEAR_STATUS_READBACK_QUERY = `
 
 export async function updateLinearIssueStatus(input: LinearUpdateStatusInput) {
   const issueId = input.issueId.trim();
-  const stateId = input.stateId.trim();
+  const requestedStateId = input.stateId?.trim() ?? "";
+  const requestedStateName = input.stateName?.trim() ?? "";
   const teamKey = input.teamKey?.trim() ?? "";
   const failureBase = {
     outcome: "failed" as const,
@@ -289,8 +312,20 @@ export async function updateLinearIssueStatus(input: LinearUpdateStatusInput) {
   if (!isLinearUuid(issueId)) {
     return { ...failureBase, error: "--issue-id must be an immutable Linear issue UUID" };
   }
-  if (!isLinearUuid(stateId)) {
+  if (requestedStateId && requestedStateName) {
+    return { ...failureBase, error: "--state-id and --state-name are mutually exclusive" };
+  }
+  if (!requestedStateId && !requestedStateName) {
+    return { ...failureBase, error: "Provide exactly one of --state-id or --state-name" };
+  }
+  if (requestedStateId && !isLinearUuid(requestedStateId)) {
     return { ...failureBase, error: "--state-id must be an exact Linear workflow state UUID" };
+  }
+  if (requestedStateName && requestedStateName.length > LINEAR_STATE_NAME_MAX_CHARS) {
+    return {
+      ...failureBase,
+      error: `--state-name must be 1-${LINEAR_STATE_NAME_MAX_CHARS} characters`,
+    };
   }
   if (!teamKey) {
     return { ...failureBase, error: "Linear team_key is required for status update" };
@@ -301,52 +336,139 @@ export async function updateLinearIssueStatus(input: LinearUpdateStatusInput) {
   }
   const apiUrl = input.apiUrl?.trim() || "https://api.linear.app/graphql";
   const fetchImpl = input.fetchImpl ?? fetch;
-  const scope = await safeLinearWriteRequest<{
-    issue: LinearWritebackIssueRef | null;
-    workflowState: (LinearWritebackStateRef & { team: LinearWritebackTeamRef }) | null;
-  }>({
-    apiUrl,
-    token: credential.token,
-    query: LINEAR_STATUS_SCOPE_QUERY,
-    variables: { issueId, stateId },
-    fetchImpl,
-  });
-  if (!scope.ok) {
-    return { ...failureBase, status: scope.status!, error: scope.error! };
+  let resolvedStateId: string;
+  let scopedState: LinearWritebackStateRef;
+  let issue: LinearWritebackIssueRef;
+
+  if (requestedStateName) {
+    const nameScope = await safeLinearWriteRequest<{
+      issue: {
+        id: string;
+        identifier: string;
+        team: {
+          id: string;
+          key: string;
+          states: { nodes: Array<{ id: string; name: string; type?: string | null }> };
+        } | null;
+        state: { id: string; name: string; type?: string | null } | null;
+      } | null;
+    }>({
+      apiUrl,
+      token: credential.token,
+      query: LINEAR_STATUS_NAME_SCOPE_QUERY,
+      variables: { issueId },
+      fetchImpl,
+    });
+    if (!nameScope.ok) {
+      return { ...failureBase, status: nameScope.status!, error: nameScope.error! };
+    }
+    const rawIssue = nameScope.data?.issue ?? null;
+    if (!rawIssue) {
+      return {
+        ...failureBase,
+        status: "issue_not_found" as const,
+        error: "Linear issue was not found",
+      };
+    }
+    const safeIssue = safeLinearIssueRef(rawIssue, credential.token);
+    if (!safeIssue || safeIssue.id !== issueId || safeIssue.team.key !== teamKey) {
+      return {
+        ...failureBase,
+        status: "scope_mismatch" as const,
+        error: "Linear issue and team scope did not match the requested identifiers",
+      };
+    }
+    issue = safeIssue;
+    const rawStates = rawIssue.team?.states?.nodes;
+    if (!Array.isArray(rawStates)) {
+      return {
+        ...failureBase,
+        issue,
+        status: "graphql_error" as const,
+        error: "Linear team workflow states were not returned",
+      };
+    }
+    const sanitizedStates: LinearWritebackStateRef[] = [];
+    for (const candidate of rawStates) {
+      const sanitized = safeLinearStateRef(candidate, credential.token);
+      if (sanitized) {
+        sanitizedStates.push(sanitized);
+      }
+    }
+    const matches = sanitizedStates.filter((candidate) => candidate.name === requestedStateName);
+    if (matches.length === 0) {
+      return {
+        ...failureBase,
+        issue,
+        status: "state_name_unknown" as const,
+        error: `Linear team ${teamKey} has no workflow state named "${requestedStateName}"`,
+      };
+    }
+    if (matches.length > 1) {
+      return {
+        ...failureBase,
+        issue,
+        status: "state_name_ambiguous" as const,
+        error: `Linear team ${teamKey} has multiple workflow states named "${requestedStateName}"`,
+      };
+    }
+    resolvedStateId = matches[0]!.id;
+    scopedState = matches[0]!;
+  } else {
+    const stateId = requestedStateId;
+    const scope = await safeLinearWriteRequest<{
+      issue: LinearWritebackIssueRef | null;
+      workflowState: (LinearWritebackStateRef & { team: LinearWritebackTeamRef }) | null;
+    }>({
+      apiUrl,
+      token: credential.token,
+      query: LINEAR_STATUS_SCOPE_QUERY,
+      variables: { issueId, stateId },
+      fetchImpl,
+    });
+    if (!scope.ok) {
+      return { ...failureBase, status: scope.status!, error: scope.error! };
+    }
+    const rawIssue = scope.data?.issue ?? null;
+    const rawState = scope.data?.workflowState ?? null;
+    if (!rawIssue || !rawState) {
+      return {
+        ...failureBase,
+        status: "issue_not_found" as const,
+        error: "Linear issue or workflow state was not found",
+      };
+    }
+    const safeIssue = safeLinearIssueRef(rawIssue, credential.token);
+    const stateTeam = safeLinearTeamRef(isRecord(rawState) ? rawState.team : null, credential.token);
+    const sanitizedState = safeLinearStateRef(rawState, credential.token);
+    if (!safeIssue || !stateTeam || !sanitizedState) {
+      return {
+        ...failureBase,
+        status: "scope_mismatch" as const,
+        error: "Linear scope contained invalid or sensitive fields",
+      };
+    }
+    if (
+      safeIssue.id !== issueId ||
+      safeIssue.team.id !== stateTeam.id ||
+      safeIssue.team.key !== stateTeam.key ||
+      safeIssue.team.key !== teamKey ||
+      sanitizedState.id !== stateId
+    ) {
+      return {
+        ...failureBase,
+        issue: safeIssue,
+        state: sanitizedState,
+        status: "scope_mismatch" as const,
+        error: "Linear issue, team, and workflow state scope did not match the requested UUIDs",
+      };
+    }
+    issue = safeIssue;
+    resolvedStateId = stateId;
+    scopedState = sanitizedState;
   }
-  const rawIssue = scope.data?.issue ?? null;
-  const rawState = scope.data?.workflowState ?? null;
-  if (!rawIssue || !rawState) {
-    return {
-      ...failureBase,
-      status: "issue_not_found" as const,
-      error: "Linear issue or workflow state was not found",
-    };
-  }
-  const issue = safeLinearIssueRef(rawIssue, credential.token);
-  const stateTeam = safeLinearTeamRef(isRecord(rawState) ? rawState.team : null, credential.token);
-  const scopedState = safeLinearStateRef(rawState, credential.token);
-  if (!issue || !stateTeam || !scopedState) {
-    return {
-      ...failureBase,
-      status: "scope_mismatch" as const,
-      error: "Linear scope contained invalid or sensitive fields",
-    };
-  }
+
   const scopedFailure = { ...failureBase, issue, state: scopedState };
-  if (
-    issue.id !== issueId ||
-    issue.team.id !== stateTeam.id ||
-    issue.team.key !== stateTeam.key ||
-    issue.team.key !== teamKey ||
-    scopedState.id !== stateId
-  ) {
-    return {
-      ...scopedFailure,
-      status: "scope_mismatch" as const,
-      error: "Linear issue, team, and workflow state scope did not match the requested UUIDs",
-    };
-  }
 
   const mutation = await safeLinearWriteRequest<{
     issueUpdate: { success: boolean; issue: LinearWritebackIssueRef | null } | null;
@@ -354,7 +476,7 @@ export async function updateLinearIssueStatus(input: LinearUpdateStatusInput) {
     apiUrl,
     token: credential.token,
     query: LINEAR_STATUS_UPDATE_MUTATION,
-    variables: { issueId, input: { stateId } },
+    variables: { issueId, input: { stateId: resolvedStateId } },
     fetchImpl,
   });
   if (!mutation.ok) {
@@ -387,7 +509,7 @@ export async function updateLinearIssueStatus(input: LinearUpdateStatusInput) {
     readbackIssue.id !== issueId ||
     readbackIssue.team.id !== issue.team.id ||
     readbackIssue.team.key !== teamKey ||
-    readbackIssue.state?.id !== stateId ||
+    readbackIssue.state?.id !== resolvedStateId ||
     readbackIssue.state.name !== scopedState.name ||
     (scopedState.type !== null && readbackIssue.state.type !== scopedState.type)
   ) {
