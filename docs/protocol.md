@@ -626,7 +626,8 @@ Supported actions:
 { "type": "prepareRunDrain", "runId": "run_...", "maxTries": 3, "reason": "optional" }
 { "type": "retireRun", "runId": "run_...", "reason": "optional" }
 { "type": "completeSystemTask", "taskId": "task_...", "actionEventId": "action_...", "reason": "optional" }
-{ "type": "integrateVerifiedRun", "runId": "run_...", "workerTaskId": "optional", "targetBranch": "main", "push": false, "reason": "optional" }
+{ "type": "integrateVerifiedRun", "runId": "run_...", "workerTaskId": "optional", "targetBranch": "main", "reason": "optional" }
+{ "type": "pushExactGitRef", "runId": "run_...", "contractId": "hodorWebMain", "repoPath": "/absolute/verified/checkout", "remoteHost": "github.com", "repository": "owner/repo", "ref": "refs/heads/main", "expectedOldSha": "40-hex", "newSha": "40-hex", "reason": "optional" }
 { "type": "amendRunContract", "runId": "run_...", "contractKey": "goalContract", "value": { ... }, "version": 2, "expectedVersion": "optional non-negative integer", "reason": "optional" }
 { "type": "startSubsession", "parentTaskId": "task_...", "purpose": "research api", "prompt": "Inspect the protocol and summarize the harness-managed subsession contract.", "backend": "claude-code", "reason": "optional" }
 { "type": "collectSubsessions", "parentTaskId": "task_...", "status": "optional running|done|blocked|interrupted|orphaned", "reason": "optional" }
@@ -639,7 +640,44 @@ Supported actions:
 
 `completeSystemTask` records a task attempt from an existing `harness_action_events` row. It derives the attempt status, summary, checks, artifacts, and problems from the audited action result, so a system task can be closed without giving a worktree broad database write access or arbitrary attempt-writing power.
 
-`integrateVerifiedRun` is the overseer-owned integration path. It can integrate a specific verified worker before the entire run is done when `workerTaskId` is provided, or integrate a complete run after `goal-review` has returned `runDecision: "complete"`. In both modes the execution task must have changed-file evidence and a worktree, and the verifier depending on that task must have completed without failed checks. The action may commit dirty worker worktree changes, merge the worker branch into the target branch, and optionally push. If any preflight or git command fails, it records a blocked action event and leaves integration for repair or human review.
+`integrateVerifiedRun` is the overseer-owned local integration path. It can integrate a specific verified worker before the entire run is done when `workerTaskId` is provided, or integrate a complete run after `goal-review` has returned `runDecision: "complete"`. In both modes the execution task must have changed-file evidence and a worktree, and the verifier depending on that task must have completed without failed checks. The action may commit dirty worker worktree changes and merge the worker branch into the target branch. Broad `push: true` requests are rejected before any Git command; remote writes use `pushExactGitRef` only.
+
+`pushExactGitRef` is the host-owned remote-write primitive. Before invoking it, freeze an allowlist entry under `run.context.gitRemoteWriteContracts[contractId]` with exactly `repoPath`, `remoteHost`, `repository`, `ref`, `expectedOldSha`, and `newSha`. The action payload repeats those fields and must match the frozen entry byte for byte. It accepts only an absolute repository path, one DNS host, one repository path, one `refs/heads/...` branch, and two non-zero full commit SHAs. It validates the configured `origin` push URL, requires local `HEAD == newSha`, proves `expectedOldSha` is an ancestor of `newSha`, reads the exact remote ref before the push, issues only `git push --no-verify --porcelain origin <newSha>:<ref>` so repository-controlled pre-push hooks cannot execute in the host process, and independently reads the same ref afterwards. An already-updated ref returns `reused`; a failed push whose readback equals `newSha` returns `response_loss_recovered`. Force, delete, wildcard refspecs, unsupported fields, scope mismatches, non-fast-forward ancestry, ambiguous readback, and credential-bearing errors fail closed. Structured results redact URL userinfo, GitHub/GitLab token forms, and Authorization values.
+
+Freeze the contract through the existing audited context action, then invoke the exact write through the host process or protected action server:
+
+```json
+{
+  "type": "amendRunContract",
+  "runId": "run_...",
+  "contractKey": "gitRemoteWriteContracts",
+  "version": 1,
+  "value": {
+    "hodorWebMain": {
+      "repoPath": "/private/tmp/verified-merge",
+      "remoteHost": "github.com",
+      "repository": "owner/repo",
+      "ref": "refs/heads/main",
+      "expectedOldSha": "1111111111111111111111111111111111111111",
+      "newSha": "2222222222222222222222222222222222222222"
+    }
+  }
+}
+```
+
+```json
+{
+  "type": "pushExactGitRef",
+  "runId": "run_...",
+  "contractId": "hodorWebMain",
+  "repoPath": "/private/tmp/verified-merge",
+  "remoteHost": "github.com",
+  "repository": "owner/repo",
+  "ref": "refs/heads/main",
+  "expectedOldSha": "1111111111111111111111111111111111111111",
+  "newSha": "2222222222222222222222222222222222222222"
+}
+```
 
 `amendRunContract` is the audited run-level contract amendment path. It writes `run.context[contractKey] = value` and appends a `contractAmendments` entry to `run.context` with the previous value, the new value, the integer `version`, an optional `reason`, and an ISO `amendedAt` timestamp. Versions are monotonic per `contractKey`: a new amendment must use a positive integer `version` strictly greater than the latest recorded version for that key (or greater than 0 when no prior amendment exists). An optional `expectedVersion` asserts the version the caller read before issuing the amendment; if it does not match the current latest version, the action is blocked as stale and the run context is left untouched. The action never mutates the task-level verifier-contract baseline; it only amends JSON in the run context, and every accepted or rejected attempt records a `harness_action_events` audit row.
 
@@ -708,7 +746,7 @@ Visibility:
 - CLI: `orbs run-threads --run-id <run_id>` prints the threads attached to a run, including parent/child linkage and observed summaries.
 - Dashboard: child sessions render under their parent task in the flow workspace and inspector. Child-session rendering must not block the dashboard refresh polling; summaries come from the run overview payload, not from synchronous acpx calls.
 
-`supervise-runs` and `supervise-daemon` can call this action automatically with `--integrate-complete-runs`. The default remains off so planning-only runs and read-only experiments do not unexpectedly touch git. `--integration-target-branch <branch>` defaults to `main`; `--integration-push` opts into pushing after a successful local merge.
+`supervise-runs` and `supervise-daemon` can call local integration automatically with `--integrate-complete-runs`. The default remains off so planning-only runs and read-only experiments do not unexpectedly touch git. `--integration-target-branch <branch>` defaults to `main`. Remote writes are a separate frozen `pushExactGitRef` action and are never inferred from local integration.
 
 Every action writes a `harness_action_events` audit row with the validated request, result, checks, artifacts, and problems. Verifiers should cite these rows when checking whether a system-level repair actually happened.
 
