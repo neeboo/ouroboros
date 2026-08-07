@@ -4066,6 +4066,7 @@ describe("runner", () => {
           "task-acpx": { kind: "acpx", agent: "claude" },
           "role-acpx": { kind: "acpx", agent: "claude" },
           "global-acpx": { kind: "acpx", agentCommand: "custom-acp", env: { CUSTOM_ACP_HOME: "/tmp/custom-acp-home" } },
+          "raw-claude": { kind: "acpx", agent: "claude", agentCommand: "/opt/acp/claude-agent-acp" },
         },
       },
     };
@@ -4103,6 +4104,13 @@ describe("runner", () => {
       agentCommand: "custom-acp",
       env: { CUSTOM_ACP_HOME: "/tmp/custom-acp-home" },
       source: "run-default",
+    });
+    expect(resolveAgentBackend({ run, task: { ...baseTask, config: { agentBackend: "raw-claude" } } })).toMatchObject({
+      id: "raw-claude",
+      kind: "acpx",
+      agent: "claude",
+      agentCommand: "/opt/acp/claude-agent-acp",
+      source: "task",
     });
     expect(resolveAgentBackend({ run: { ...run, context: {} }, task: baseTask, cliAgentBackend: "claude" })).toMatchObject({
       id: "claude",
@@ -4247,6 +4255,225 @@ describe("runner", () => {
     });
   });
 
+  test("drops inherited Codex models when the reserved Claude backend uses a raw agent command", () => {
+    const run = {
+      id: "run_1",
+      projectId: null,
+      projectRoot: null,
+      goal: "Build loop",
+      status: "todo" as const,
+      context: {
+        modelDefaults: {
+          global: { model: "gpt-5.6-luna", provider: "openai" },
+          roles: { worker: { model: "gpt-5.4-mini", provider: "openai" } },
+        },
+        agentDefaults: { global: "claude-code" },
+        agentBackends: {
+          "claude-code": {
+            kind: "acpx",
+            agentCommand: "/opt/acp/claude-agent-acp",
+          },
+        },
+      },
+    };
+    const task = {
+      id: "task_1",
+      runId: "run_1",
+      parentId: null,
+      cycleId: "task_1",
+      status: "todo" as const,
+      role: "worker",
+      goal: "Work",
+      prompt: "Work.",
+      dependsOn: [],
+      doneWhen: [],
+      config: {},
+      worktreePath: null,
+      sessionRef: null,
+      contextVersion: 1,
+    };
+
+    for (const route of [
+      resolveExecutionRoute({ run, task }),
+      resolveExecutionRoute({
+        run: {
+          ...run,
+          context: {
+            ...run.context,
+            modelDefaults: { global: run.context.modelDefaults.global },
+          },
+        },
+        task,
+      }),
+      resolveExecutionRoute({
+        run: { ...run, context: { ...run.context, modelDefaults: {} } },
+        task,
+        globalModel: "gpt-5.6-luna",
+      }),
+    ]) {
+      expect(route.backend).toMatchObject({
+        id: "claude-code",
+        kind: "acpx",
+        agent: "claude",
+        agentCommand: "/opt/acp/claude-agent-acp",
+        source: "run-default",
+      });
+      expect(route.model).toBeNull();
+    }
+  });
+
+  test("passes an explicit provider-compatible task model to a raw Claude backend", () => {
+    const run = {
+      id: "run_1",
+      projectId: null,
+      projectRoot: null,
+      goal: "Build loop",
+      status: "todo" as const,
+      context: {
+        agentDefaults: { global: "raw-claude" },
+        agentBackends: {
+          "raw-claude": {
+            kind: "acpx",
+            agent: "claude",
+            agentCommand: "/opt/acp/claude-agent-acp",
+          },
+        },
+      },
+    };
+    const task = {
+      id: "task_1",
+      runId: "run_1",
+      parentId: null,
+      cycleId: "task_1",
+      status: "todo" as const,
+      role: "worker",
+      goal: "Work",
+      prompt: "Work.",
+      dependsOn: [],
+      doneWhen: [],
+      config: {
+        modelPreference: {
+          model: "claude-sonnet-4-5",
+          provider: "anthropic",
+          reason: "explicit Claude override",
+        },
+      },
+      worktreePath: null,
+      sessionRef: null,
+      contextVersion: 1,
+    };
+
+    expect(resolveExecutionRoute({ run, task })).toMatchObject({
+      backend: {
+        id: "raw-claude",
+        kind: "acpx",
+        agent: "claude",
+        agentCommand: "/opt/acp/claude-agent-acp",
+      },
+      model: {
+        model: "claude-sonnet-4-5",
+        provider: "anthropic",
+        source: "task",
+        role: "worker",
+      },
+    });
+  });
+
+  test("drops a task model explicitly declared for an incompatible Claude provider", () => {
+    const run = {
+      id: "run_1",
+      projectId: null,
+      projectRoot: null,
+      goal: "Build loop",
+      status: "todo" as const,
+      context: {
+        agentDefaults: { global: "claude-code" },
+        agentBackends: {
+          "claude-code": {
+            kind: "acpx",
+            agentCommand: "/opt/acp/claude-agent-acp",
+          },
+        },
+      },
+    };
+    const task = {
+      id: "task_1",
+      runId: "run_1",
+      parentId: null,
+      cycleId: "task_1",
+      status: "todo" as const,
+      role: "worker",
+      goal: "Work",
+      prompt: "Work.",
+      dependsOn: [],
+      doneWhen: [],
+      config: {
+        modelPreference: {
+          model: "gpt-5.6-luna",
+          provider: "openai",
+        },
+      },
+      worktreePath: null,
+      sessionRef: null,
+      contextVersion: 1,
+    };
+
+    expect(resolveExecutionRoute({ run, task })).toMatchObject({
+      backend: {
+        id: "claude-code",
+        kind: "acpx",
+        agent: "claude",
+        agentCommand: "/opt/acp/claude-agent-acp",
+      },
+      model: null,
+    });
+  });
+
+  test("does not infer a Claude provider from a raw ACP command string", () => {
+    const run = {
+      id: "run_1",
+      projectId: null,
+      projectRoot: null,
+      goal: "Build loop",
+      status: "todo" as const,
+      context: {
+        modelDefaults: { global: { model: "gpt-5.6-luna", provider: "openai" } },
+        agentDefaults: { global: "custom-acp" },
+        agentBackends: {
+          "custom-acp": {
+            kind: "acpx",
+            agentCommand: "/opt/acp/path-with-claude-in-its-name",
+          },
+        },
+      },
+    };
+    const task = {
+      id: "task_1",
+      runId: "run_1",
+      parentId: null,
+      cycleId: "task_1",
+      status: "todo" as const,
+      role: "worker",
+      goal: "Work",
+      prompt: "Work.",
+      dependsOn: [],
+      doneWhen: [],
+      config: {},
+      worktreePath: null,
+      sessionRef: null,
+      contextVersion: 1,
+    };
+
+    const route = resolveExecutionRoute({ run, task });
+    expect(route.backend.agent).toBeUndefined();
+    expect(route.backend.agentCommand).toBe("/opt/acp/path-with-claude-in-its-name");
+    expect(route.model).toMatchObject({
+      model: "gpt-5.6-luna",
+      provider: "openai",
+      source: "run-default",
+    });
+  });
+
   test("records resolved backend in attempt input", async () => {
     const runId = harness.createRun({
       goal: "Build loop",
@@ -4315,9 +4542,10 @@ describe("runner", () => {
     const runId = harness.createRun({
       goal: "Run a persistent raw ACP adapter",
       context: {
-        agentDefaults: { roles: { worker: "raw-claude" } },
+        modelDefaults: { global: { model: "gpt-5.6-luna", provider: "openai" } },
+        agentDefaults: { roles: { worker: "claude-code" } },
         agentBackends: {
-          "raw-claude": { kind: "acpx", agentCommand, approval: "approve-all", format: "quiet" },
+          "claude-code": { kind: "acpx", agentCommand, approval: "approve-all", format: "quiet" },
         },
       },
     });
@@ -4368,8 +4596,13 @@ describe("runner", () => {
     });
     expect(harness.getAttempt(result.attemptId)?.input).toMatchObject({
       sessionName: "raw-session",
-      route: { backend: { kind: "acpx", agentCommand } },
+      route: {
+        backend: { id: "claude-code", kind: "acpx", agent: "claude", agentCommand },
+        model: null,
+      },
+      model: null,
     });
+    expect(calls.every((cmd) => !cmd.includes("--model") && !cmd.includes("gpt-5.6-luna"))).toBe(true);
     expect(calls.at(-1)).toEqual([
       "acpx",
       "--cwd",

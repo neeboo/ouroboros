@@ -41,8 +41,18 @@ function modelForBackend(backend: ResolvedAgentBackend, model: ResolvedModelPref
   if (!model) {
     return null;
   }
-  if (backend.kind === "acpx" && backend.agent === "claude" && model.source !== "task") {
-    return null;
+  if (backend.kind === "acpx" && backend.agent === "claude") {
+    if (model.source !== "task") {
+      return null;
+    }
+    if (model.provider && !isClaudeModelProvider(model.provider)) {
+      return null;
+    }
   }
   return model;
+}
+
+function isClaudeModelProvider(provider: string) {
+  const normalized = provider.trim().toLowerCase();
+  return normalized === "anthropic" || normalized === "claude";
 }

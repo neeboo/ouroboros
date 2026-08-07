@@ -239,7 +239,7 @@ orbs create-task \
 
 See `docs/default-runbook.md` for the recommended end-to-end run commands. See `docs/agent-backends.md` for capability boundaries, smoke testing, and the experimental custom `agentCommand` escape hatch.
 
-Claude Code uses its local Claude configuration by default. When a route resolves to `claude-code`, Orbs drops inherited `modelDefaults` and CLI `--model` values, including inert metadata such as `base_url` and `env_key`. A task can still set an explicit `config.modelPreference` when the Claude adapter should receive a specific `--model`.
+Claude Code uses its local Claude configuration by default. When a route resolves to semantic `agent: "claude"`, including a reserved `claude-code` backend using raw `agentCommand` transport, Orbs drops inherited `modelDefaults` and CLI `--model` values, including inert metadata such as `base_url` and `env_key`. A task can still set an explicit `config.modelPreference` when the Claude adapter should receive a specific `--model`; an explicit provider must be `anthropic` or `claude`. Provider identity is declared by backend metadata and is never inferred from the command path.
 
 ### Self-Iteration Backend Default
 
