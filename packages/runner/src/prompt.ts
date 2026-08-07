@@ -23,7 +23,7 @@ export function buildTaskPrompt(input: PromptInput) {
     candidateGuardrailsMarkdown: renderCandidateGuardrails(compactRecentLessons),
     reusableExperienceEvidenceMarkdown: renderReusableExperienceEvidence(compactRecentLessons),
     runLessonsJson: prettyJson(compactRecentLessons),
-    requiredOutputJson: prettyJson(requiredOutputForRole(input.task.role)),
+    requiredOutputJson: prettyJson(requiredOutputForRole(input.task.role, input.task.config)),
   });
 }
 
@@ -62,9 +62,22 @@ const DEFAULT_REQUIRED_OUTPUT: RequiredOutputExample = {
   ],
 };
 
-function requiredOutputForRole(role: string): RequiredOutputExample {
+function requiredOutputForRole(role: string, taskConfig?: Record<string, unknown>): RequiredOutputExample {
   if (role !== "designer") {
     return DEFAULT_REQUIRED_OUTPUT;
+  }
+  const continuation = afterRecordSignalContinuation(taskConfig);
+  const proposeDesign = proposeDesignActionExample(continuation?.signalId);
+  if (continuation) {
+    return {
+      status: "done",
+      summary: "Proposed one bounded design anchored to the recorded signal",
+      changedFiles: [],
+      checks: [],
+      artifacts: [],
+      problems: [],
+      actions: [proposeDesign],
+    };
   }
   return {
     status: "done",
@@ -87,31 +100,7 @@ function requiredOutputForRole(role: string): RequiredOutputExample {
           evidence: [{ ref: "evidence reference", kind: "evidence-ref" }],
         },
       },
-      {
-        type: "proposeDesign",
-        payload: {
-          projectId: "<project_id>",
-          title: "short proposal title",
-          charterId: "<optional charter id>",
-          proposal: {
-            problem: "the demonstrated gap",
-            recommendation: "the recommended option",
-            evidenceRefs: ["signal_<id>"],
-            evaluationContract: {
-              baseline: ["current behavior"],
-              successMetrics: ["measurable outcome"],
-              requiredEvidence: ["bun test runs"],
-            },
-            investment: {
-              reversibility: "easy",
-              portfolio: "core",
-              oneTimeCost: 0,
-              recurringCost: 0,
-            },
-          },
-          status: "proposed",
-        },
-      },
+      proposeDesign,
       {
         type: "decideDesign",
         payload: {
@@ -145,6 +134,76 @@ function requiredOutputForRole(role: string): RequiredOutputExample {
         },
       },
     ],
+  };
+}
+
+function proposeDesignActionExample(signalId = "signal_<id>"): Record<string, unknown> {
+  return {
+    type: "proposeDesign",
+    payload: {
+      projectId: "<project_id>",
+      title: "short proposal title",
+      charterId: "<optional charter id>",
+      proposal: {
+        problem: "demonstrated gap",
+        recommendation: "recommended option",
+        evidenceRefs: [signalId],
+        options: [
+          {
+            name: "bounded alternative",
+            benefits: ["expected benefit"],
+            costs: ["maintenance cost"],
+            risks: ["failure risk"],
+            lockIn: ["migration or lock-in cost"],
+          },
+        ],
+        additions: ["capability to add"],
+        removals: ["complexity to remove"],
+        targetOutcome: "measurable target outcome",
+        assumptions: ["assumption to verify"],
+        uncertainty: ["remaining uncertainty"],
+        evaluationContract: {
+          baseline: ["current behavior"],
+          successMetrics: ["measurable outcome"],
+          guardMetrics: ["guard metric"],
+          requiredEvidence: ["verification evidence"],
+          reviewAt: "2026-09-01T00:00:00Z",
+        },
+        investment: {
+          reversibility: "easy",
+          portfolio: "core",
+          oneTimeCost: 0,
+          recurringCost: 0,
+          timeBudget: "bounded time budget",
+        },
+        experiment: {
+          hypothesis: "testable hypothesis",
+          smallestTest: "smallest bounded test",
+          stopConditions: ["stop condition"],
+          rollback: "remove experiment artifacts and restore the baseline",
+        },
+      },
+      status: "proposed",
+    },
+  };
+}
+
+function afterRecordSignalContinuation(
+  taskConfig: Record<string, unknown> | undefined,
+): { signalId: string } | null {
+  const continuation = taskConfig?.designContinuation;
+  if (!continuation || typeof continuation !== "object" || Array.isArray(continuation)) {
+    return null;
+  }
+  const record = continuation as Record<string, unknown>;
+  if (record.kind !== "after-recordSignal") {
+    return null;
+  }
+  return {
+    signalId:
+      typeof record.signalId === "string" && record.signalId.trim().length > 0
+        ? record.signalId
+        : "signal_<id>",
   };
 }
 
