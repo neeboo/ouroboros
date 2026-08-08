@@ -4210,17 +4210,18 @@ function latestSessionForTask(overview: RunOverview, taskId: string) {
 }
 
 function selectVerifierForWorker(overview: RunOverview, workerTaskId: string): Task | null {
-  return [...overview.tasks].reverse().find((task) => {
-    if (task.role !== "verifier" || task.status !== "done" || !task.dependsOn.includes(workerTaskId)) {
-      return false;
-    }
-    const session = latestSessionForTask(overview, task.id);
-    if (!session || session.output.status !== "done") {
-      return false;
-    }
-    const checks = Array.isArray(session.output.checks) ? session.output.checks : [];
-    return !checks.some(isFailedCheck);
-  }) ?? null;
+  const latest = [...overview.tasks].reverse().find(
+    (task) => task.role === "verifier" && task.dependsOn.includes(workerTaskId),
+  );
+  if (!latest || latest.status !== "done") {
+    return null;
+  }
+  const session = latestSessionForTask(overview, latest.id);
+  if (!session || session.output.status !== "done") {
+    return null;
+  }
+  const checks = Array.isArray(session.output.checks) ? session.output.checks : [];
+  return checks.some(isFailedCheck) ? null : latest;
 }
 
 function selectCompletedGoalReview(overview: RunOverview): Task | null {

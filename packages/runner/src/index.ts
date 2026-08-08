@@ -76,6 +76,10 @@ export { createTasksFromOutputHook } from "./hooks/create-tasks";
 export { createVerifierTaskHook } from "./hooks/create-verifier";
 export { createGitWorktreeHook } from "./hooks/git-worktree";
 export { createGoalReviewDecisionHook, inferExplicitRunDecision } from "./hooks/goal-review";
+export {
+  reconcileTerminalDesignDeliveries,
+  type TerminalDesignReconciliationResult,
+} from "./terminal-design-reconciliation";
 export { createRefreshGuardrailProposalsHook } from "./hooks/refresh-guardrail-proposals";
 export type {
   AgentAction,

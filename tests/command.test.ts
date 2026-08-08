@@ -240,6 +240,7 @@ describe("command runner", () => {
       stdin: "",
       timeoutMs: 1000,
       idleTimeoutMs: 100,
+      cleanupProcessTree: async () => {},
     });
     const elapsed = Date.now() - start;
 

@@ -718,10 +718,38 @@ describe("CLI", () => {
   });
 
   test("self-iteration designer routes accepted proposals to a planner run with frozen context and ignores generic createTasks", async () => {
-    const bootstrap = await runCliJson("self-iterate");
-
     const harness = new Harness(dbPath);
+    harness.init();
     const projectId = harness.createProject({ name: "ouroboros", rootPath: process.cwd() });
+    const charter = harness.createFounderCharter({
+      projectId,
+      mission: "Improve Ouroboros through evidence-backed bounded changes.",
+      charter: {
+        mission: "Improve Ouroboros through evidence-backed bounded changes.",
+        capitalPolicy: { currency: "USD", experimentBudget: 100 },
+        authority: { autoResearch: true, autoReversibleExperiments: true },
+      },
+      activate: true,
+    });
+    const bootstrap = {
+      runId: harness.createRun({
+        goal: "Assess Ouroboros and route accepted designs",
+        context: {
+          source: "self-improve",
+          founderCharterId: charter.id,
+          designCharterId: charter.id,
+          selfImprovement: { cycleIndex: 0, assessmentFingerprint: "design-routing-test" },
+        },
+      }),
+      taskId: "",
+    };
+    bootstrap.taskId = harness.createTask({
+      runId: bootstrap.runId,
+      role: "designer",
+      goal: "Route the accepted proposal",
+      prompt: "Apply only fixed design actions.",
+      doneWhen: ["accepted proposal is routed through createRunsFromDesign"],
+    });
     const proposal = harness.createDesignProposal({
       projectId,
       title: "Dashboard actions label clarity",
@@ -891,30 +919,26 @@ describe("CLI", () => {
       artifacts: [],
       problems: [],
     };
+    const shellQuote = (value: string) => `'${value.replaceAll("'", `'\\''`)}'`;
+    const emitCodexOutput = (sessionId: string, output: Record<string, unknown>) =>
+      [
+        JSON.stringify({ type: "session.started", session_id: sessionId }),
+        JSON.stringify({ type: "agent.message", message: JSON.stringify(output) }),
+      ]
+        .map(shellQuote)
+        .join(" ");
     await writeFile(
       codexBin,
       [
-        "#!/usr/bin/env bun",
-        "const prompt = await new Response(Bun.stdin.stream()).text();",
-        "const sessionId = prompt.includes('Role: goal-review') ? 'session_review' : prompt.includes('Role: designer') ? 'session_designer' : prompt.includes('Role: planner') ? 'session_planner' : prompt.includes('Role: verifier') ? 'session_verifier' : 'session_worker';",
-        "console.log(JSON.stringify({ type: 'session.started', session_id: sessionId }));",
-        "if (prompt.includes('Role: designer')) {",
-        `  console.log(JSON.stringify({ type: 'agent.message', message: ${JSON.stringify(JSON.stringify(designerOutput))} }));`,
-        "  process.exit(0);",
-        "}",
-        "if (prompt.includes('Role: planner')) {",
-        `  console.log(JSON.stringify({ type: 'agent.message', message: ${JSON.stringify(JSON.stringify(plannerOutput))} }));`,
-        "  process.exit(0);",
-        "}",
-        "if (prompt.includes('Role: goal-review')) {",
-        `  console.log(JSON.stringify({ type: 'agent.message', message: ${JSON.stringify(JSON.stringify(goalReviewOutput))} }));`,
-        "  process.exit(0);",
-        "}",
-        "if (prompt.includes('Role: verifier')) {",
-        `  console.log(JSON.stringify({ type: 'agent.message', message: ${JSON.stringify(JSON.stringify(verifierOutput))} }));`,
-        "  process.exit(0);",
-        "}",
-        `  console.log(JSON.stringify({ type: 'agent.message', message: ${JSON.stringify(JSON.stringify(workerOutput))} }));`,
+        "#!/bin/sh",
+        "prompt=$(cat)",
+        "case \"$prompt\" in",
+        `  *"Role: designer"*) printf '%s\\n' ${emitCodexOutput("session_designer", designerOutput)} ;;`,
+        `  *"Role: planner"*) printf '%s\\n' ${emitCodexOutput("session_planner", plannerOutput)} ;;`,
+        `  *"Role: goal-review"*) printf '%s\\n' ${emitCodexOutput("session_review", goalReviewOutput)} ;;`,
+        `  *"Role: verifier"*) printf '%s\\n' ${emitCodexOutput("session_verifier", verifierOutput)} ;;`,
+        `  *) printf '%s\\n' ${emitCodexOutput("session_worker", workerOutput)} ;;`,
+        "esac",
       ].join("\n"),
     );
     await chmod(codexBin, 0o755);
@@ -936,7 +960,7 @@ describe("CLI", () => {
       "--run-concurrency",
       "2",
       "--concurrency",
-      "1",
+      "2",
       "--max-cycles",
       "8",
       "--max-rounds",
@@ -945,13 +969,14 @@ describe("CLI", () => {
       "1",
     );
 
-    const bootstrapOverview = await runCliJson("run-overview", "--run-id", bootstrap.runId);
+    const after = new Harness(dbPath);
+    const bootstrapOverview = after.getRunOverview({ runId: bootstrap.runId, eventLimit: 0 });
     const bootstrapWorkers = bootstrapOverview.tasks.filter(
       (task: { role: string }) => task.role === "worker",
     );
     expect(bootstrapWorkers).toHaveLength(0);
 
-    const runs = await runCliJson("list-runs");
+    const runs = after.listRuns({ limit: 100 });
     const childRun = runs.find(
       (run: { context?: { designProposalId?: string } }) =>
         run.context?.designProposalId === proposal.id,
@@ -990,9 +1015,12 @@ describe("CLI", () => {
       }),
     });
 
-    const childOverview = await runCliJson("run-overview", "--run-id", childRun?.id ?? "");
-    const childLessons = await runCliJson("list-lessons", "--run-id", childRun?.id ?? "");
-    const childNext = await runCliJson("next-task", "--run-id", childRun?.id ?? "");
+    const childOverview = after.getRunOverview({
+      runId: childRun?.id ?? "",
+      eventLimit: 100,
+    });
+    const childLessons = after.listLessons({ runId: childRun?.id ?? "" });
+    const childNext = after.nextReadyTask(childRun?.id ?? "");
     const workers = childOverview.tasks.filter((task: { role: string }) => task.role === "worker");
     const verifiers = childOverview.tasks.filter(
       (task: { role: string }) => task.role === "verifier",
@@ -1001,7 +1029,7 @@ describe("CLI", () => {
       (task: { role: string }) => task.role === "goal-review",
     );
 
-    expect(childOverview.run.status).toBe("done");
+    expect(childOverview.run!.status).toBe("done");
     expect(childNext).toBeNull();
     expect(Array.isArray(childLessons)).toBe(true);
     expect(result.cycles.length).toBeGreaterThan(0);
@@ -4845,10 +4873,27 @@ describe("CLI", () => {
   });
 
   test("self-improve-daemon invokes configured Linear polling and persists durable state on the root run", async () => {
-    await runCli("init");
-    const bootstrap = await runCliJson("self-iterate");
-    // Pre-drain the bootstrap so the daemon tick stays focused on polling work.
+    // Seed a drained self-improvement root directly so the test budget measures
+    // the daemon and polling path, not a separate bootstrap CLI process.
     const drainHarness = new Harness(dbPath);
+    drainHarness.init();
+    const bootstrap = {
+      runId: drainHarness.createRun({
+        goal: "Poll Linear intake",
+        context: {
+          source: "self-improve",
+          selfImprovement: { cycleIndex: 0, assessmentFingerprint: "linear-poll-test" },
+        },
+      }),
+      taskId: "",
+    };
+    bootstrap.taskId = drainHarness.createTask({
+      runId: bootstrap.runId,
+      role: "designer",
+      goal: "Drained polling fixture",
+      prompt: "Remain quiescent.",
+      doneWhen: ["polling fixture is drained"],
+    });
     drainHarness.recordAttempt({
       taskId: bootstrap.taskId,
       input: {},
@@ -4905,7 +4950,6 @@ describe("CLI", () => {
       [
         "#!/usr/bin/env bun",
         "await new Response(Bun.stdin.stream()).text();",
-        "await Bun.sleep(180);",
         "console.log(JSON.stringify({ type: 'session.started', session_id: 'session_linear_poll_drain' }));",
         "console.log(JSON.stringify({ type: 'agent.message', message: JSON.stringify({ status: 'done', summary: 'Quiescent Linear intake', changedFiles: [], checks: [], artifacts: [], problems: [], actions: [] }) }));",
         "process.exit(0);",
@@ -4972,13 +5016,8 @@ describe("CLI", () => {
       expect(consumption.claimed).toBe(1);
       expect(consumption.processed).toBe(1);
 
-      // Durable state on the root run survives across CLI invocations.
-      const state = await runCliJson(
-        "linear-poll-state",
-        "--run-id",
-        bootstrap.runId,
-        { LINEAR_API_KEY: "tok" },
-      );
+      // Durable state survives a fresh Harness instance after the daemon process exits.
+      const state = getLinearIntakeState(new Harness(dbPath), bootstrap.runId);
       expect(state.lastStatus).toBe("ok");
       expect(state.terminalFailure).toBeNull();
       expect(state.overlapBoundary).toBe("2026-01-01T00:00:00.000Z");
@@ -5953,19 +5992,17 @@ describe("CLI", () => {
   });
 
   test("creates tasks from planner output when stop hook is enabled", async () => {
-    await runCli("init");
-    const run = await runCliJson("create-run", "--goal", "Bootstrap ouroboros");
-    const planner = await runCliJson(
-      "create-task",
-      "--run-id",
-      run.id,
-      "--role",
-      "planner",
-      "--goal",
-      "Plan next task",
-      "--prompt",
-      "Plan.",
-    );
+    const setupHarness = new Harness(dbPath);
+    setupHarness.init();
+    const run = { id: setupHarness.createRun({ goal: "Bootstrap ouroboros" }) };
+    const planner = {
+      id: setupHarness.createTask({
+        runId: run.id,
+        role: "planner",
+        goal: "Plan next task",
+        prompt: "Plan.",
+      }),
+    };
     const binDir = join(dir, "bin");
     await mkdir(binDir);
     await writeFile(
@@ -6002,7 +6039,7 @@ describe("CLI", () => {
       "create-tasks",
       { PATH: `${binDir}:${process.env.PATH}` },
     );
-    const generated = await runCliJson("next-task", "--run-id", run.id);
+    const generated = new Harness(dbPath).nextReadyTask(run.id)!;
 
     expect(result.tasks[0].taskId).toBe(planner.id);
     expect(generated.goal).toBe("Generated task");
@@ -6778,19 +6815,17 @@ describe("CLI", () => {
   });
 
   test("run-loop automatically starts and resumes codex attempts", async () => {
-    await runCli("init");
-    const run = await runCliJson("create-run", "--goal", "Bootstrap ouroboros");
-    const planner = await runCliJson(
-      "create-task",
-      "--run-id",
-      run.id,
-      "--role",
-      "planner",
-      "--goal",
-      "Async planner",
-      "--prompt",
-      "Plan asynchronously.",
-    );
+    const setupHarness = new Harness(dbPath);
+    setupHarness.init();
+    const run = { id: setupHarness.createRun({ goal: "Bootstrap ouroboros" }) };
+    const planner = {
+      id: setupHarness.createTask({
+        runId: run.id,
+        role: "planner",
+        goal: "Async planner",
+        prompt: "Plan asynchronously.",
+      }),
+    };
     const codexBin = join(dir, "fake-codex-loop");
     await writeFile(
       codexBin,
@@ -6827,8 +6862,9 @@ describe("CLI", () => {
       "--max-rounds",
       "1",
     );
-    const running = await runCliJson("list-running-attempts", "--run-id", run.id);
-    const overview = await runCliJson("run-overview", "--run-id", run.id);
+    const afterStart = new Harness(dbPath);
+    const running = afterStart.listRunningAttempts({ runId: run.id });
+    const overview = afterStart.getRunOverview({ runId: run.id, eventLimit: 100 });
     const resumed = await runCliJson(
       "run-loop",
       "--run-id",
@@ -6846,7 +6882,7 @@ describe("CLI", () => {
       "--max-rounds",
       "1",
     );
-    const next = await runCliJson("next-task", "--run-id", run.id);
+    const next = new Harness(dbPath).nextReadyTask(run.id);
 
     expect(started.rounds[0].tasks).toEqual([
       expect.objectContaining({
@@ -6993,7 +7029,7 @@ describe("CLI", () => {
         status: "done",
       }),
     ]);
-    expect(overview.run.status).toBe("done");
+    expect(overview.run!.status).toBe("done");
     expect(overview.tasks).toEqual([
       expect.objectContaining({
         role: "goal-review",
@@ -7738,31 +7774,29 @@ describe("CLI", () => {
   });
 
   test("autopilot drains active queue and then completes goal review", async () => {
-    await runCli("init");
-    const run = await runCliJson("create-run", "--goal", "Bootstrap ouroboros");
-    const worker = await runCliJson(
-      "create-task",
-      "--run-id",
-      run.id,
-      "--role",
-      "worker",
-      "--goal",
-      "Finish active queue item",
-      "--prompt",
-      "Complete the queued item.",
-    );
+    const setupHarness = new Harness(dbPath);
+    setupHarness.init();
+    const run = { id: setupHarness.createRun({ goal: "Bootstrap ouroboros" }) };
+    const worker = {
+      id: setupHarness.createTask({
+        runId: run.id,
+        role: "worker",
+        goal: "Finish active queue item",
+        prompt: "Complete the queued item.",
+      }),
+    };
     const codexBin = join(dir, "fake-codex-autopilot");
     await writeFile(
       codexBin,
       [
-        "#!/usr/bin/env bun",
-        "const prompt = await new Response(Bun.stdin.stream()).text();",
-        "console.log(JSON.stringify({ type: 'session.started', session_id: prompt.includes('Role: goal-review') ? 'session_goal' : 'session_worker' }));",
-        "if (prompt.includes('Role: goal-review')) {",
-        "  console.log(JSON.stringify({ type: 'agent.message', message: '{\"status\":\"done\",\"runDecision\":\"complete\",\"summary\":\"goal reached\",\"changedFiles\":[],\"checks\":[],\"artifacts\":[],\"problems\":[]}' }));",
-        "  process.exit(0);",
-        "}",
-        "console.log(JSON.stringify({ type: 'agent.message', message: '{\"status\":\"done\",\"summary\":\"worker done\",\"changedFiles\":[],\"checks\":[],\"artifacts\":[],\"problems\":[]}' }));",
+        "#!/bin/sh",
+        "prompt=$(cat)",
+        "case \"$prompt\" in",
+        "  *\"Role: goal-review\"*)",
+        "    printf '%s\\n' '{\"type\":\"session.started\",\"session_id\":\"session_goal\"}' '{\"type\":\"agent.message\",\"message\":\"{\\\"status\\\":\\\"done\\\",\\\"runDecision\\\":\\\"complete\\\",\\\"summary\\\":\\\"goal reached\\\",\\\"changedFiles\\\":[],\\\"checks\\\":[],\\\"artifacts\\\":[],\\\"problems\\\":[]}\"}' ;;",
+        "  *)",
+        "    printf '%s\\n' '{\"type\":\"session.started\",\"session_id\":\"session_worker\"}' '{\"type\":\"agent.message\",\"message\":\"{\\\"status\\\":\\\"done\\\",\\\"summary\\\":\\\"worker done\\\",\\\"changedFiles\\\":[],\\\"checks\\\":[],\\\"artifacts\\\":[],\\\"problems\\\":[]}\"}' ;;",
+        "esac",
       ].join("\n"),
     );
     await chmod(codexBin, 0o755);
@@ -7784,11 +7818,12 @@ describe("CLI", () => {
       "--interval-ms",
       "1",
     );
-    const overview = await runCliJson("run-overview", "--run-id", run.id);
+    const after = new Harness(dbPath);
+    const overview = after.getRunOverview({ runId: run.id, eventLimit: 100 });
 
     expect(result.cycles).toHaveLength(2);
     expect(result.status).toBe("done");
-    expect(overview.run.status).toBe("done");
+    expect(overview.run!.status).toBe("done");
     expect(overview.tasks).toContainEqual(
       expect.objectContaining({
         id: worker.id,
@@ -7801,30 +7836,26 @@ describe("CLI", () => {
         status: "done",
       }),
     );
-    expect(await runCliJson("next-task", "--run-id", run.id)).toBeNull();
+    expect(after.nextReadyTask(run.id)).toBeNull();
   });
 
   test("supervise-runs drains an intake run and generated child run", async () => {
-    await runCli("init");
-    const stale = await runCliJson("create-run", "--goal", "Unrelated stale run");
-    await runCliJson(
-      "create-task",
-      "--run-id",
-      stale.id,
-      "--role",
-      "worker",
-      "--goal",
-      "Should not run",
-      "--prompt",
-      "This task is outside the supervisor root scope.",
-    );
-    const intake = await runCliJson(
-      "intake",
-      "--title",
-      "React dashboard migration",
-      "--document",
-      "Migrate dashboard to React shadcn and add an attachment composer.",
-    );
+    const setupHarness = new Harness(dbPath);
+    setupHarness.init();
+    const staleRunId = setupHarness.createRun({ goal: "Unrelated stale run" });
+    setupHarness.createTask({
+      runId: staleRunId,
+      role: "worker",
+      goal: "Should not run",
+      prompt: "This task is outside the supervisor root scope.",
+    });
+    const intakeRunId = setupHarness.createRun({ goal: "React dashboard migration" });
+    setupHarness.createTask({
+      runId: intakeRunId,
+      role: "planner",
+      goal: "Split requirement document into child runs",
+      prompt: "Split requirement document: Migrate dashboard to React shadcn and add an attachment composer.",
+    });
     const codexBin = join(dir, "fake-codex-supervisor");
     await writeFile(
       codexBin,
@@ -7850,7 +7881,7 @@ describe("CLI", () => {
       "--executor",
       "codex-resumable",
       "--root-run-id",
-      intake.runId,
+      intakeRunId,
       "--codex-bin",
       codexBin,
       "--cwd",
@@ -7870,21 +7901,21 @@ describe("CLI", () => {
       "--interval-ms",
       "1",
     );
-    const runs = await runCliJson("list-runs");
-    const staleOverview = await runCliJson("run-overview", "--run-id", stale.id);
-    const intakeOverview = await runCliJson("run-overview", "--run-id", intake.runId);
-    const child = runs.find((run: { goal: string }) => run.goal === "Build React shadcn dashboard composer");
+    const runs = setupHarness.listRuns({ limit: 100 });
+    const staleOverview = setupHarness.getRunOverview({ runId: staleRunId, eventLimit: 0 });
+    const intakeOverview = setupHarness.getRunOverview({ runId: intakeRunId, eventLimit: 0 });
+    const child = runs.find((run) => run.goal === "Build React shadcn dashboard composer");
 
     expect(result.cycles.length).toBeGreaterThanOrEqual(3);
     expect(result.status).toBe("idle");
-    expect(intakeOverview.run.status).toBe("done");
-    expect(staleOverview.run.status).toBe("todo");
+    expect(intakeOverview.run?.status).toBe("done");
+    expect(staleOverview.run?.status).toBe("todo");
     expect(staleOverview.tasks[0].status).toBe("todo");
     expect(child).toMatchObject({
       goal: "Build React shadcn dashboard composer",
       status: "done",
       context: expect.objectContaining({
-        parentRunId: intake.runId,
+        parentRunId: intakeRunId,
         source: "nextRuns",
         area: "dashboard",
       }),
@@ -7948,6 +7979,108 @@ describe("CLI", () => {
     expect(result.ticks[0]).toMatchObject({
       type: "daemon.tick",
       result: expect.objectContaining({ status: "idle" }),
+    });
+  });
+
+  test("self-improve-daemon closes an exhausted accepted delivery before reassessment", async () => {
+    const setupHarness = new Harness(dbPath);
+    setupHarness.init();
+    const projectId = setupHarness.createProject({ name: "Reconciliation project", rootPath: dir });
+    const rootRunId = setupHarness.createRun({ goal: "Improve Ouroboros", projectId });
+    setupHarness.updateRunStatus({ runId: rootRunId, status: "done" });
+    const proposal = setupHarness.createDesignProposal({
+      projectId,
+      title: "Reconcile terminal delivery",
+      problem: "A terminal accepted delivery can be skipped.",
+      recommendation: "Close it before reassessment.",
+      proposal: {
+        problem: "A terminal accepted delivery can be skipped.",
+        recommendation: "Close it before reassessment.",
+        evaluationContract: {
+          baseline: ["accepted delivery has no terminal disposition"],
+          successMetrics: ["bounded disposition is durable"],
+          guardMetrics: ["no reassessment in the same tick"],
+          requiredEvidence: ["run overview and action event"],
+        },
+        investment: {
+          reversibility: "easy",
+          portfolio: "core",
+          oneTimeCost: 0,
+          recurringCost: 0,
+          timeBudget: "one hour",
+        },
+      },
+      status: "accepted",
+    });
+    const deliveryRunId = setupHarness.createRun({
+      projectId,
+      projectRoot: dir,
+      goal: "Deliver accepted design",
+      context: {
+        parentRunId: rootRunId,
+        source: "design",
+        designProposalId: proposal.id,
+        integrationBoundary: { targetBranch: "main", push: false },
+        repairReplanBudget: { limit: 1, used: 1, entries: [] },
+      },
+    });
+    const verifierTaskId = setupHarness.createTask({
+      runId: deliveryRunId,
+      role: "verifier",
+      goal: "Preserve terminal failure",
+      prompt: "Record the exhausted verification state.",
+    });
+    setupHarness.recordAttempt({
+      taskId: verifierTaskId,
+      input: { executor: "test" },
+      output: {
+        status: "blocked",
+        summary: "No repair budget remains",
+        changedFiles: [],
+        checks: [{ name: "repair budget", status: "failed" }],
+        artifacts: [],
+        problems: ["repair budget exhausted"],
+      },
+    });
+    setupHarness.updateRunStatus({ runId: deliveryRunId, status: "blocked" });
+
+    const result = await runCliJson(
+      "self-improve-daemon",
+      "--root-run-id",
+      rootRunId,
+      "--executor",
+      "codex-resumable",
+      "--codex-bin",
+      join(dir, "must-not-run-codex"),
+      "--max-ticks",
+      "1",
+      "--tick-cycles",
+      "1",
+      "--max-rounds",
+      "1",
+      "--interval-ms",
+      "1",
+      "--idle-ms",
+      "1",
+    );
+    const runs = setupHarness.listRuns({ limit: 100 });
+    const assessments = runs.filter((run) => run.context.source === "self-improvement-assessment");
+
+    expect(result.ticks[0]).toMatchObject({
+      type: "self-improvement.tick",
+      status: "ok",
+      createdCycle: null,
+      reconciliation: expect.objectContaining({
+        state: "exhausted",
+        deliveryRunId,
+        proposalId: proposal.id,
+      }),
+    });
+    expect(assessments).toHaveLength(0);
+    expect(setupHarness.getDesignProposal({ id: proposal.id })?.status).toBe("revise");
+    expect(setupHarness.getRun(deliveryRunId)?.context.terminalDesignReconciliation).toMatchObject({
+      state: "exhausted",
+      terminalDisposition: "repair-budget-exhausted",
     });
   });
 
@@ -8712,10 +8845,30 @@ describe("CLI", () => {
     ).toBe(false);
   });
 
-  test("self-improve-daemon keeps Codex executor failures on bounded Codex recovery", async () => {
-    for (const terminalReason of ["idle_timeout", "hard_timeout"]) {
-      const bootstrap = await runCliJson("self-iterate");
+  for (const terminalReason of ["idle_timeout", "hard_timeout"] as const) {
+    test(`self-improve-daemon keeps Codex ${terminalReason} failures on bounded Codex recovery`, async () => {
       const setupHarness = new Harness(dbPath);
+      setupHarness.init();
+      const bootstrap = {
+        runId: setupHarness.createRun({
+          goal: `Recover Codex ${terminalReason}`,
+          context: {
+            source: "self-improve",
+            selfImprovement: {
+              cycleIndex: 0,
+              assessmentFingerprint: `codex-${terminalReason}-recovery-test`,
+            },
+          },
+        }),
+        taskId: "",
+      };
+      bootstrap.taskId = setupHarness.createTask({
+        runId: bootstrap.runId,
+        role: "designer",
+        goal: "Drained recovery fixture",
+        prompt: "Remain quiescent.",
+        doneWhen: ["recovery fixture is drained"],
+      });
       setupHarness.recordAttempt({
         taskId: bootstrap.taskId,
         input: {},
@@ -8826,7 +8979,7 @@ describe("CLI", () => {
         "--idle-ms",
         "1",
       );
-      const overview = await runCliJson("run-overview", "--run-id", blockedRunId);
+      const overview = new Harness(dbPath).getRunOverview({ runId: blockedRunId, eventLimit: 0 });
       const recoveryTask = overview.tasks.find(
         (task: { config?: Record<string, unknown> }) =>
           (task.config?.automaticRecovery as { sourceAttemptId?: string } | undefined)?.sourceAttemptId === blockedAttemptId,
@@ -8861,8 +9014,8 @@ describe("CLI", () => {
           },
         },
       });
-      expect(overview.run.context.repairReplanBudget).toMatchObject({ limit: 2, used: 1 });
-      expect(overview.run.context.automaticRecovery).toMatchObject({
+      expect(overview.run!.context.repairReplanBudget).toMatchObject({ limit: 2, used: 1 });
+      expect(overview.run!.context.automaticRecovery).toMatchObject({
         sourceTaskId: blockedTaskId,
         sourceAttemptId: blockedAttemptId,
         generation: 1,
@@ -8873,8 +9026,8 @@ describe("CLI", () => {
         (task.config?.agentBackend as string | undefined) === "claude-code" &&
         (task.config?.automaticRecovery as { sourceAttemptId?: string } | undefined)?.sourceAttemptId === blockedAttemptId,
       )).toBe(false);
-    }
-  });
+    });
+  }
 
   test("self-improve-daemon advances from the latest direct recovery failure", async () => {
     const bootstrap = await runCliJson("self-iterate");

@@ -1,5 +1,6 @@
 import { inferExplicitRunDecision, type Harness } from "@ouroboros/harness";
 import type { StopHook } from "../types";
+import { readRepairBudget, repairBudgetExhausted } from "./repair-budget";
 
 const MAX_GOAL_REVIEW_NEXT_TASKS = 5;
 
@@ -49,6 +50,27 @@ export function createGoalReviewDecisionHook(_options: { harness: Harness }): St
         };
       }
       return { decision: "exit", artifacts, outputPatch };
+    }
+
+    const repairBudget = readRepairBudget(run.context);
+    if (output.status === "done" && repairBudgetExhausted(repairBudget)) {
+      return {
+        decision: "exit",
+        artifacts: [
+          ...artifacts,
+          {
+            kind: "repair_budget_exhausted",
+            taskId: task.id,
+            used: repairBudget.used,
+            limit: repairBudget.limit,
+            requestedRunDecision: inferredRunDecision,
+          },
+        ],
+        outputPatch,
+        problems: [
+          `goal-review cannot create ${inferredRunDecision} work after repair budget exhausted at ${repairBudget.used}/${repairBudget.limit}`,
+        ],
+      };
     }
 
     const nextTasks = output.nextTasks ?? [];

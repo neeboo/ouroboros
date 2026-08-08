@@ -40,6 +40,7 @@ import {
   createCollectSubsessionsHook,
   createRouteExecutor,
   reconcileDeferredDesignAuthority,
+  reconcileTerminalDesignDeliveries,
   resolveExecutionRoute,
   resumeCodexResumableAttempt,
   runCodexAutopilot,
@@ -1859,6 +1860,19 @@ async function superviseSelfImprovementDaemon(input: SelfImprovementDaemonInput)
             ...linearIntakePump.tickFields(),
             createdAt: new Date().toISOString(),
           };
+        } else if (cycle.state === "reconciliation") {
+          waitMs = input.idleMs;
+          tick = {
+            type: "self-improvement.tick",
+            index,
+            status: "ok",
+            createdCycle: null,
+            reconciliation: cycle.reconciliation,
+            authorityReconciliation,
+            runCounts: harness.countRunsByStatus(),
+            ...linearIntakePump.tickFields(),
+            createdAt: new Date().toISOString(),
+          };
         } else {
           const result = await superviseCodexRuns({
             ...input,
@@ -2170,6 +2184,19 @@ function ensureSelfImprovementCycle(rootRunId: string, cwd: string) {
       state: "outcome-review" as const,
       createdCycle: null,
       dueOutcomes,
+    };
+  }
+
+  const reconciliation = reconcileTerminalDesignDeliveries({
+    harness,
+    rootRunId,
+    runs: scopedRuns,
+  });
+  if (reconciliation.blocksAssessment) {
+    return {
+      state: "reconciliation" as const,
+      createdCycle: null,
+      reconciliation,
     };
   }
 
