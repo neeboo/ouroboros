@@ -14,6 +14,7 @@ import {
   type RunOverview,
   type Task,
 } from "@ouroboros/harness";
+import { randomUUID } from "node:crypto";
 import { buildTaskPrompt } from "./prompt";
 import { applyStartHooks } from "./runner";
 import { createCodexResumableClient, sessionIdFromEvents } from "./executors/codex-resumable";
@@ -23,7 +24,7 @@ import { createRouteExecutor } from "./route-executor";
 import { createDurableAttemptReplayCache } from "./executors/replay";
 import { resolveExecutionRoute } from "./execution-routing";
 import type { ResolvedExecutionRoute } from "./execution-routing";
-import type { ExecutorEventRecorder, StartHook, StartHookResult, StopHook, TaskExecutorFactory } from "./types";
+import type { ExecutorEventRecorder, StartHook, StartHookResult, StopHook, StopHookResult, TaskExecutorFactory } from "./types";
 import type { AttemptReplayCache } from "./executors/types";
 
 const DEFAULT_RUNNING_ATTEMPT_STALE_MS = 5 * 60 * 1000;
@@ -339,20 +340,32 @@ class CodexResumableOrchestrator {
   }
 
   async resumeAttempt(attemptId: string, promptOverride?: string) {
-    const attempt = this.harness.getAttempt(attemptId);
-    if (!attempt) {
+    const existingAttempt = this.harness.getAttempt(attemptId);
+    if (!existingAttempt) {
       throw new Error(`attempt not found: ${attemptId}`);
     }
-    if (attempt.status !== "running") {
+    if (existingAttempt.status !== "running") {
       throw new Error(`attempt is not running: ${attemptId}`);
     }
-    const task = this.taskOrThrow(attempt.taskId);
+    const task = this.taskOrThrow(existingAttempt.taskId);
     const run = this.runOrThrow(task.runId);
     this.harness.clearRunPause(run.id);
     const sessionId = this.sessionIdForAttempt(
-      attempt,
+      existingAttempt,
       this.harness.listExecutionThreads({ runId: run.id }).find((thread) => thread.attemptId === attemptId),
     );
+    const claimed = this.tryClaimDirectResume(attemptId);
+    if (!claimed) {
+      const refreshed = this.harness.getAttempt(attemptId);
+      if (!refreshed) {
+        throw new Error(`attempt not found: ${attemptId}`);
+      }
+      if (refreshed.status !== "running") {
+        throw new Error(`attempt is not running: ${attemptId}`);
+      }
+      throw new Error(`direct resume already claimed: ${attemptId}`);
+    }
+    const { attempt, claimToken } = claimed;
     if (!sessionId) {
       const output = missingResumableSessionOutput("direct resume");
       this.harness.finishAttempt({ attemptId, output });
@@ -364,18 +377,24 @@ class CodexResumableOrchestrator {
     const resolvedModel = attemptModelPreference(attempt.input);
     const cwd = typeof attempt.input.cwd === "string" ? attempt.input.cwd : task.worktreePath ?? this.cwd;
     const recorder = this.createAttemptEventRecorder(attemptId);
-    const result = await this.client({ model: resolvedModel?.model, reasoningEffort: resolvedModel?.reasoning_effort, cwd, task }).resume({
-      sessionId,
-      sessionName,
-      prompt,
-      onStdout: recorder.stdout,
-      onStderr: recorder.stderr,
-      onEvent: recorder.event,
-    });
+    let result: CodexResumableResult;
+    try {
+      result = await this.client({ model: resolvedModel?.model, reasoningEffort: resolvedModel?.reasoning_effort, cwd, task }).resume({
+        sessionId,
+        sessionName,
+        prompt,
+        onStdout: recorder.stdout,
+        onStderr: recorder.stderr,
+        onEvent: recorder.event,
+      });
+    } catch (error) {
+      this.releaseDirectResumeClaim(attemptId, claimToken);
+      throw error;
+    }
     this.harness.updateAttemptInput({
       attemptId,
       input: {
-        ...attempt.input,
+        ...(this.harness.getAttempt(attemptId)?.input ?? attempt.input),
         ...codexAttemptInput({ prompt, sessionName, result, model: resolvedModel, cwd }),
       },
     });
@@ -389,6 +408,7 @@ class CodexResumableOrchestrator {
           result,
         });
       }
+      this.releaseDirectResumeClaim(attemptId, claimToken);
       return { attemptId, status: "running" as const, codexSessionId: resumedSessionId };
     }
     const codexSessionId: string = result.sessionId ?? sessionId;
@@ -402,6 +422,68 @@ class CodexResumableOrchestrator {
       codexSessionId,
     });
     return { attemptId, status: output.status, codexSessionId: result.sessionId };
+  }
+
+  private tryClaimDirectResume(attemptId: string) {
+    for (let tryIndex = 0; tryIndex < 2; tryIndex += 1) {
+      const current = this.harness.getAttempt(attemptId);
+      if (!current) {
+        throw new Error(`attempt not found: ${attemptId}`);
+      }
+      if (current.status !== "running") {
+        return null;
+      }
+      const existingClaim = directResumeClaimFromAttempt(current);
+      if (existingClaim) {
+        if (!processIsAlive(existingClaim.pid)) {
+          this.releaseDirectResumeClaim(attemptId, existingClaim.token);
+          continue;
+        }
+        return null;
+      }
+
+      const claimToken = randomUUID();
+      const claimJson = JSON.stringify({
+        token: claimToken,
+        ownerId: this.ownerId,
+        pid: this.pid,
+        claimedAt: new Date().toISOString(),
+      });
+      const updated = this.harness.runInTransaction((db) => db
+        .query(
+          `
+          update attempts
+          set input_json = json_set(input_json, '$.directResumeClaim', json($claimJson))
+          where id = $attemptId
+            and status = 'running'
+            and json_type(input_json, '$.directResumeClaim') is null
+          `,
+        )
+        .run({ $attemptId: attemptId, $claimJson: claimJson }).changes > 0);
+      if (!updated) {
+        return null;
+      }
+      const attempt = this.harness.getAttempt(attemptId);
+      if (!attempt || attempt.status !== "running") {
+        return null;
+      }
+      return { attempt, claimToken };
+    }
+    return null;
+  }
+
+  private releaseDirectResumeClaim(attemptId: string, claimToken: string) {
+    this.harness.runInTransaction((db) => {
+      db.query(
+        `
+        update attempts
+        set input_json = json_remove(input_json, '$.directResumeClaim')
+        where id = $attemptId
+          and status = 'running'
+          and json_extract(input_json, '$.directResumeClaim.token') = $claimToken
+        `,
+      ).run({ $attemptId: attemptId, $claimToken: claimToken });
+    });
   }
 
   async resumeRunningAttempts(input: { runId: string; limit: number }) {
@@ -441,6 +523,11 @@ class CodexResumableOrchestrator {
           : "Continue until you can return the required structured JSON.";
       const resolvedModel = attemptModelPreference(attempt.input);
       const cwd = typeof attempt.input.cwd === "string" ? attempt.input.cwd : task.worktreePath ?? this.cwd;
+      const claimed = this.tryClaimDirectResume(attempt.id);
+      if (!claimed) {
+        return null;
+      }
+      const { attempt: claimedAttempt, claimToken } = claimed;
       this.upsertAttemptThread({
         runId: run.id,
         task,
@@ -451,18 +538,24 @@ class CodexResumableOrchestrator {
         status: "running",
       });
       const recorder = this.createAttemptEventRecorder(attempt.id);
-      const result = await this.client({ model: resolvedModel?.model, reasoningEffort: resolvedModel?.reasoning_effort, cwd, task }).resume({
-        sessionId,
-        sessionName,
-        prompt,
-        onStdout: recorder.stdout,
-        onStderr: recorder.stderr,
-        onEvent: recorder.event,
-      });
+      let result: CodexResumableResult;
+      try {
+        result = await this.client({ model: resolvedModel?.model, reasoningEffort: resolvedModel?.reasoning_effort, cwd, task }).resume({
+          sessionId,
+          sessionName,
+          prompt,
+          onStdout: recorder.stdout,
+          onStderr: recorder.stderr,
+          onEvent: recorder.event,
+        });
+      } catch (error) {
+        this.releaseDirectResumeClaim(attempt.id, claimToken);
+        throw error;
+      }
       this.harness.updateAttemptInput({
         attemptId: attempt.id,
         input: {
-          ...attempt.input,
+          ...(this.harness.getAttempt(attempt.id)?.input ?? claimedAttempt.input),
           ...codexAttemptInput({ prompt, sessionName, result, model: resolvedModel, cwd }),
           threadId: threadIdForAttempt(attempt.id),
         },
@@ -483,6 +576,7 @@ class CodexResumableOrchestrator {
             result,
           });
         }
+        this.releaseDirectResumeClaim(attempt.id, claimToken);
         return { taskId: task.id, attemptId: attempt.id, sessionName, status: "running" as const, codexSessionId: resumedSessionId };
       }
       const codexSessionId: string = result.sessionId ?? sessionId;
@@ -824,7 +918,12 @@ class CodexResumableOrchestrator {
     let decision: "continue" | "retry" | "exit" = "exit";
     const hooks = [...(this.input.stopHooksByRole?.[input.task.role] ?? [])];
     for (const hook of hooks) {
-      const result = await hook({ ...input, output });
+      let result: StopHookResult;
+      try {
+        result = await hook({ ...input, output });
+      } catch (error) {
+        return { output: stopHookErrorOutput(output, error), decision: "exit" as const };
+      }
       output.checks = [...(output.checks ?? []), ...(result.checks ?? [])];
       output.artifacts = [...(output.artifacts ?? []), ...(result.artifacts ?? [])];
       if (result.outputPatch) {
@@ -1411,6 +1510,57 @@ function processIsAlive(pid: number) {
   } catch {
     return false;
   }
+}
+
+function directResumeClaimFromAttempt(attempt: Attempt) {
+  const value = attempt.input.directResumeClaim;
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  const claim = value as Record<string, unknown>;
+  if (
+    typeof claim.token !== "string"
+    || claim.token.length === 0
+    || typeof claim.pid !== "number"
+    || !Number.isInteger(claim.pid)
+    || claim.pid <= 0
+  ) {
+    return null;
+  }
+  return { token: claim.token, pid: claim.pid };
+}
+
+function stopHookErrorOutput(rawOutput: AttemptOutput, error: unknown): AttemptOutput {
+  const rawSummary = typeof rawOutput.summary === "string" && rawOutput.summary.length > 0
+    ? rawOutput.summary
+    : "Codex output";
+  return {
+    ...rawOutput,
+    status: "blocked",
+    summary: `stop hook failed after ${rawSummary}`,
+    checks: [...(rawOutput.checks ?? []), { name: "stop hook", status: "failed" }],
+    problems: [...(rawOutput.problems ?? []), `stop hook threw: ${redactSensitiveText(errorMessage(error))}`],
+  };
+}
+
+function redactSensitiveText(value: string) {
+  return value
+    .replace(/(https?:\/\/)[^\s/@]+(?::[^\s/@]*)?@/gi, "$1[REDACTED]@")
+    .replace(/\b(?:ghp|gho|ghu|ghs|ghr|github_pat|glpat|lin_api|lin_oauth)[_-][A-Za-z0-9._-]+\b/gi, "[REDACTED]")
+    .replace(
+      /(\bauthorization\b\s*[:=]\s*)(?:(?:Bearer|Basic)\s+)?[^\s,;}\])]+/gi,
+      "$1[REDACTED]",
+    )
+    .replace(/\bBearer\s+\S+/gi, "Bearer [REDACTED]")
+    .replace(/(x-access-token\s*:\s*)[^@\s]+/gi, "$1[REDACTED]")
+    .replace(
+      /(\b(?:api[\s_-]*key|access[\s_-]*token|refresh[\s_-]*token|token|secret|password|credential)\b\s*[:=]\s*)(?:"[^"\r\n]*"|'[^'\r\n]*'|[^\s,;}\])]+)/gi,
+      "$1[REDACTED]",
+    )
+    .replace(
+      /(\b(?:access[\s_-]*token|refresh[\s_-]*token|token|secret|password|credential)\b\s+)(?=[^\s,;}\])]*[._~+\/-])[^\s,;}\])]+/gi,
+      "$1[REDACTED]",
+    );
 }
 
 function sleep(ms: number) {
