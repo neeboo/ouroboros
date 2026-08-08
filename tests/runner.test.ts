@@ -72,6 +72,8 @@ const FROZEN_LINEAR_SCOPE = {
   stateId: "100f8cf5-f7e3-4297-862c-b2b0b922afc3",
 } as const;
 
+const FROZEN_LINEAR_TEAM_ID = "8ec14dab-a05d-4d78-95fa-e59301005499";
+
 function matchingLinearDelivery(overrides: Record<string, unknown> = {}) {
   return {
     ...FROZEN_LINEAR_SCOPE,
@@ -104,6 +106,38 @@ function matchingSupervisorEvidence(input: {
       },
     },
     guardrails: { finalRemoteReadbackStillRequired: true },
+  };
+}
+
+function matchingNestedSupervisorEvidence(input: {
+  observedAt?: string;
+  status?: string;
+  issue?: Record<string, unknown>;
+  state?: Record<string, unknown>;
+  readbackIssue?: Record<string, unknown>;
+} = {}) {
+  const state = {
+    id: FROZEN_LINEAR_SCOPE.stateId,
+    name: FROZEN_LINEAR_SCOPE.state,
+    type: "started",
+  };
+  const issue = {
+    id: FROZEN_LINEAR_SCOPE.issueId,
+    identifier: FROZEN_LINEAR_SCOPE.identifier,
+    team: { id: FROZEN_LINEAR_TEAM_ID, key: FROZEN_LINEAR_SCOPE.teamKey },
+    state,
+  };
+  return {
+    version: 1,
+    observedAt: input.observedAt ?? new Date(Date.now() - 60_000).toISOString(),
+    linear: {
+      outcome: "verified",
+      status: input.status ?? "verified",
+      issue: { ...issue, ...input.issue },
+      state: { ...state, ...input.state },
+      readback: { issue: { ...issue, ...input.readbackIssue } },
+      verifiedBy: "independent_readback",
+    },
   };
 }
 
@@ -309,6 +343,46 @@ describe("runner", () => {
     expect(gate).toContain("SATISFIED");
   });
 
+  test("the native linear-update-status nested producer result satisfies the gate only after issue state and readback agree", () => {
+    const gate = frozenLinearGateSection(buildFrozenLinearPrompt(harness, {
+      supervisorEvidence: matchingNestedSupervisorEvidence(),
+    }));
+    expect(gate).toContain("SATISFIED");
+    expect(gate).toContain(FROZEN_LINEAR_SCOPE.issueId);
+    expect(gate).toContain(FROZEN_LINEAR_SCOPE.stateId);
+  });
+
+  test("a native status mutation that disagrees with independent readback fails closed", () => {
+    const gate = frozenLinearGateSection(buildFrozenLinearPrompt(harness, {
+      supervisorEvidence: matchingNestedSupervisorEvidence({
+        readbackIssue: {
+          state: {
+            id: "200f8cf5-f7e3-4297-862c-b2b0b922afc3",
+            name: "Backlog",
+            type: "backlog",
+          },
+        },
+      }),
+    }));
+    expect(gate).toContain("NOT SATISFIED");
+    expect(gate).toContain("issue state does not match readback state");
+    expect(gate).toContain("Fail closed");
+  });
+
+  test("nested producer evidence fails closed when issue state or readback fields are missing", () => {
+    const cases = [
+      { evidence: matchingNestedSupervisorEvidence({ issue: { identifier: null } }), problem: "nested issue is missing" },
+      { evidence: matchingNestedSupervisorEvidence({ state: { type: null } }), problem: "nested state is missing" },
+      { evidence: matchingNestedSupervisorEvidence({ readbackIssue: { team: null } }), problem: "nested readback issue is missing" },
+    ];
+    for (const { evidence, problem } of cases) {
+      const gate = frozenLinearGateSection(buildFrozenLinearPrompt(harness, { supervisorEvidence: evidence }));
+      expect(gate).toContain("NOT SATISFIED");
+      expect(gate).toContain(problem);
+      expect(gate).toContain("Fail closed");
+    }
+  });
+
   test("frozen Linear implementation guidance cannot be omitted by a custom task prompt template", () => {
     const prompt = buildFrozenLinearPrompt(harness, {
       context: { note: "## Frozen Linear Implementation Gate is only a label here" },
@@ -326,6 +400,25 @@ describe("runner", () => {
     expect(gate).toContain("expired");
     expect(gate).toContain("Fail closed");
     expect(gate).not.toContain("Do not repeat Linear or GitHub OAuth/network preflight before starting local implementation");
+  });
+
+  test("frozen Linear evidence requires an RFC3339 timezone and rejects future observations", () => {
+    const explicitOffset = new Date(Date.now() - 60_000).toISOString().replace("Z", "+00:00");
+    expect(frozenLinearGateSection(buildFrozenLinearPrompt(harness, {
+      supervisorEvidence: matchingNestedSupervisorEvidence({ observedAt: explicitOffset }),
+    }))).toContain("SATISFIED");
+
+    for (const observedAt of [
+      new Date(Date.now() - 60_000).toISOString().replace("Z", ""),
+      new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+      "2026-02-30T00:00:00Z",
+    ]) {
+      const gate = frozenLinearGateSection(buildFrozenLinearPrompt(harness, {
+        supervisorEvidence: matchingNestedSupervisorEvidence({ observedAt }),
+      }));
+      expect(gate).toContain("NOT SATISFIED");
+      expect(gate).toContain("observation time is invalid");
+    }
   });
 
   test("mismatched frozen Linear scope fails closed for issue team and state differences", () => {
@@ -358,6 +451,12 @@ describe("runner", () => {
       expect(gate).toContain(mismatch.field);
       expect(gate).toContain("Fail closed");
     }
+
+    const nestedGate = frozenLinearGateSection(buildFrozenLinearPrompt(harness, {
+      supervisorEvidence: matchingNestedSupervisorEvidence({ status: "failed" }),
+    }));
+    expect(nestedGate).toContain("NOT SATISFIED");
+    expect(nestedGate).toContain("status is not verified");
   });
 
   test("unrelated external supervisor evidence does not create a Linear implementation gate", () => {

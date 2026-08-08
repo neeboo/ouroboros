@@ -7,7 +7,7 @@ const MAX_PROMPT_LESSONS = 12;
 const MAX_LESSON_SUMMARY_CHARS = 320;
 const MAX_ACTIVE_GUARDRAILS = 8;
 const FROZEN_LINEAR_EVIDENCE_MAX_AGE_MS = 24 * 60 * 60 * 1000;
-const FROZEN_LINEAR_EVIDENCE_FUTURE_SKEW_MS = 5 * 60 * 1000;
+const RFC3339_WITH_TIMEZONE = /^(\d{4})-(\d{2})-(\d{2})T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/;
 
 export function buildTaskPrompt(input: PromptInput) {
   const compactRecentLessons = compactLessons(input.lessons ?? []);
@@ -71,8 +71,10 @@ function renderFrozenLinearImplementationGate(
   const contractRecord = taskContract ?? (usesSupervisorEvidence ? linearDelivery : null);
   const evidenceRecord = usesSupervisorEvidence ? supervisorLinear : taskContract ? linearDelivery : null;
   const contract = linearScope(contractRecord);
-  const evidence = linearScope(evidenceRecord);
+  const parsedEvidence = linearEvidenceScope(evidenceRecord);
+  const evidence = parsedEvidence.scope;
   const problems: string[] = [];
+  problems.push(...parsedEvidence.problems);
 
   if (!contract) {
     problems.push("current task contract is missing an exact issueId, identifier, teamKey, state, or stateId");
@@ -87,6 +89,9 @@ function renderFrozenLinearImplementationGate(
   }
   if (evidenceRecord && outcome !== "verified") {
     problems.push("frozen evidence outcome is not verified");
+  }
+  if (parsedEvidence.nested && readString(evidenceRecord, "status") !== "verified") {
+    problems.push("frozen evidence status is not verified");
   }
   if (usesSupervisorEvidence && supervisorEvidence?.version !== 1) {
     problems.push("frozen evidence version is not v1");
@@ -157,16 +162,129 @@ function linearScope(record: Record<string, unknown> | null): LinearDeliveryScop
   return Object.values(scope).every(Boolean) ? scope as LinearDeliveryScope : null;
 }
 
+interface NestedLinearState {
+  id: string;
+  name: string;
+  type: string;
+}
+
+interface NestedLinearIssue {
+  id: string;
+  identifier: string;
+  team: { id: string; key: string };
+  state: NestedLinearState;
+}
+
+function linearEvidenceScope(record: Record<string, unknown> | null): {
+  scope: LinearDeliveryScope | null;
+  problems: string[];
+  nested: boolean;
+} {
+  const nested = Boolean(
+    record && (asRecord(record.issue) || asRecord(record.state) || asRecord(record.readback)),
+  );
+  if (!record || !nested) {
+    return { scope: linearScope(record), problems: [], nested: false };
+  }
+
+  const problems: string[] = [];
+  const issue = nestedLinearIssue(asRecord(record.issue));
+  const state = nestedLinearState(asRecord(record.state));
+  const readback = asRecord(record.readback);
+  const readbackIssue = nestedLinearIssue(asRecord(readback?.issue));
+  if (!issue) {
+    problems.push("nested issue is missing required id, identifier, team, or state fields");
+  }
+  if (!state) {
+    problems.push("nested state is missing required id, name, or type fields");
+  }
+  if (!readbackIssue) {
+    problems.push("nested readback issue is missing required id, identifier, team, or state fields");
+  }
+  if (issue && readbackIssue) {
+    if (
+      issue.id !== readbackIssue.id ||
+      issue.identifier !== readbackIssue.identifier ||
+      issue.team.id !== readbackIssue.team.id ||
+      issue.team.key !== readbackIssue.team.key
+    ) {
+      problems.push("nested issue identity does not match readback issue");
+    }
+    if (!sameNestedLinearState(issue.state, readbackIssue.state)) {
+      problems.push("issue state does not match readback state");
+    }
+  }
+  if (issue && state && !sameNestedLinearState(issue.state, state)) {
+    problems.push("nested issue state does not match top-level state");
+  }
+  if (readbackIssue && state && !sameNestedLinearState(readbackIssue.state, state)) {
+    problems.push("nested readback state does not match top-level state");
+  }
+
+  return {
+    scope: readbackIssue
+      ? {
+          issueId: readbackIssue.id,
+          identifier: readbackIssue.identifier,
+          teamKey: readbackIssue.team.key,
+          state: readbackIssue.state.name,
+          stateId: readbackIssue.state.id,
+        }
+      : null,
+    problems,
+    nested: true,
+  };
+}
+
+function nestedLinearIssue(record: Record<string, unknown> | null): NestedLinearIssue | null {
+  const team = asRecord(record?.team);
+  const state = nestedLinearState(asRecord(record?.state));
+  const id = readString(record, "id");
+  const identifier = readString(record, "identifier");
+  const teamId = readString(team, "id");
+  const teamKey = readString(team, "key");
+  return id && identifier && teamId && teamKey && state
+    ? { id, identifier, team: { id: teamId, key: teamKey }, state }
+    : null;
+}
+
+function nestedLinearState(record: Record<string, unknown> | null): NestedLinearState | null {
+  const id = readString(record, "id");
+  const name = readString(record, "name");
+  const type = readString(record, "type");
+  return id && name && type ? { id, name, type } : null;
+}
+
+function sameNestedLinearState(left: NestedLinearState, right: NestedLinearState) {
+  return left.id === right.id && left.name === right.name && left.type === right.type;
+}
+
 function frozenEvidenceFreshness(observedAt: string | null): "fresh" | "expired" | "invalid" | "missing" {
   if (!observedAt) {
     return "missing";
   }
-  const observed = Date.parse(observedAt);
+  const observed = parseRfc3339Timestamp(observedAt);
   const now = Date.now();
-  if (!Number.isFinite(observed) || observed > now + FROZEN_LINEAR_EVIDENCE_FUTURE_SKEW_MS) {
+  if (observed === null || observed > now) {
     return "invalid";
   }
   return now - observed <= FROZEN_LINEAR_EVIDENCE_MAX_AGE_MS ? "fresh" : "expired";
+}
+
+function parseRfc3339Timestamp(value: string): number | null {
+  const match = RFC3339_WITH_TIMEZONE.exec(value);
+  if (!match) {
+    return null;
+  }
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const leapYear = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+  const daysInMonth = [31, leapYear ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+  const timestamp = Date.parse(value);
+  return month >= 1 && month <= 12 && day >= 1 && day <= daysInMonth[month - 1]! && Number.isFinite(timestamp)
+    ? timestamp
+    : null;
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
