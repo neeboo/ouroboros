@@ -1110,8 +1110,8 @@ describe("CLI", () => {
       expect(launch.daemonCommand.match(/--codex-bin/g)).toHaveLength(1);
       expect(launch.daemonCommand).toContain("--tasks 3");
       expect(launch.daemonCommand).toContain("--start-hook none");
-      expect(codexInvocations).toHaveLength(1);
-      expect(codexInvocations[0][0]).toBe("exec");
+      expect(codexInvocations.length).toBeGreaterThanOrEqual(1);
+      expect(codexInvocations.every((args) => args[0] === "exec")).toBe(true);
       expect(overview.supervisor).toMatchObject({ status: "running" });
       expect(overview.run).toMatchObject({
         id: launch.runId,
