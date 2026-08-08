@@ -3085,10 +3085,10 @@ function readExactRemoteRefAllowAbsent(
 ): { ok: true; sha: string | null } | { ok: false; result: ReturnType<typeof safeGitStep> } {
   const result = safeBoundedGitRemoteStep(git, action.repoPath, ["ls-remote", "--exit-code", "origin", action.ref]);
   if (!result.ok) {
-    if (result.exitCode === 2 && result.stdout.trim() === "" && result.stderr.trim() === "") {
+    if (result.exitCode === 2 && result.stdout === "" && isExactBenignGitTransportSuccessNotice(result.stderr)) {
       return { ok: true, sha: null };
     }
-    return { ok: false, result };
+    return { ok: false, result: { ...result, stderr: removeBenignGitTransportSuccessNotice(result.stderr) } };
   }
   const rows = result.stdout
     .split(/\r?\n/)
@@ -3106,6 +3106,24 @@ function readExactRemoteRefAllowAbsent(
     };
   }
   return { ok: true, sha: rows[0][0].toLowerCase() };
+}
+
+const BENIGN_GIT_TRANSPORT_SUCCESS_NOTICE = "Connection to ssh.github.com port 443 [tcp/https] succeeded!";
+
+function isExactBenignGitTransportSuccessNotice(value: string) {
+  return (
+    value === "" ||
+    value === BENIGN_GIT_TRANSPORT_SUCCESS_NOTICE ||
+    value === `${BENIGN_GIT_TRANSPORT_SUCCESS_NOTICE}\n` ||
+    value === `${BENIGN_GIT_TRANSPORT_SUCCESS_NOTICE}\r\n`
+  );
+}
+
+function removeBenignGitTransportSuccessNotice(value: string) {
+  return value
+    .split(/\r?\n/)
+    .filter((line) => line.trim() !== BENIGN_GIT_TRANSPORT_SUCCESS_NOTICE)
+    .join("\n");
 }
 
 function verifiedGitRefCreation(
