@@ -627,6 +627,7 @@ Supported actions:
 { "type": "retireRun", "runId": "run_...", "reason": "optional" }
 { "type": "completeSystemTask", "taskId": "task_...", "actionEventId": "action_...", "reason": "optional" }
 { "type": "integrateVerifiedRun", "runId": "run_...", "workerTaskId": "optional", "targetBranch": "main", "reason": "optional" }
+{ "type": "commitExactGitIndex", "contractId": "verifiedIndex", "runId": "run_...", "taskId": "task_...", "repoPath": "/absolute/repository", "branch": "main", "expectedParentSha": "40-hex", "commitMessage": "Commit verified additions", "files": [{ "status": "A", "path": "src/new.ts", "mode": "100644", "blobOid": "40-hex" }] }
 { "type": "pushExactGitRef", "runId": "run_...", "contractId": "hodorWebMain", "repoPath": "/absolute/verified/checkout", "remoteHost": "github.com", "repository": "owner/repo", "ref": "refs/heads/main", "expectedOldSha": "40-hex", "newSha": "40-hex", "reason": "optional" }
 { "type": "amendRunContract", "runId": "run_...", "contractKey": "goalContract", "value": { ... }, "version": 2, "expectedVersion": "optional non-negative integer", "reason": "optional" }
 { "type": "startSubsession", "parentTaskId": "task_...", "purpose": "research api", "prompt": "Inspect the protocol and summarize the harness-managed subsession contract.", "backend": "claude-code", "reason": "optional" }
@@ -643,6 +644,48 @@ Supported actions:
 `integrateVerifiedRun` is the overseer-owned local integration path. It can integrate a specific verified worker before the entire run is done when `workerTaskId` is provided, or integrate a complete run after `goal-review` has returned `runDecision: "complete"`. In both modes the execution task must have changed-file evidence and a worktree, and the verifier depending on that task must have completed without failed checks. The action may commit dirty worker worktree changes and merge the worker branch into the target branch. Broad `push: true` requests are rejected before any Git command; remote writes use `pushExactGitRef` only.
 
 When a worker committed directly on the target branch and later delivery commits already contain that work, `integrateVerifiedRun` performs bookkeeping without creating another commit. The target and worker worktrees must be clean, and the latest completed worker attempt must contain exactly one `git_commit` artifact with a non-zero full 40-character `sha` and a `branch` matching the target branch. The action proves that the object is a commit in the target repository, requires its exact `diff-tree` file set to match the attempt's safe `changedFiles`, proves the commit is an ancestor of the current target `HEAD`, preserves the verifier check, then records an `integration` artifact with `mode: "contained_worker_commit"` and `alreadyMerged: true`. Missing, duplicate, malformed, cross-repository, branch-mismatched, file-mismatched, non-ancestor, dirty-worktree, or failed-verifier evidence is blocked without a Git mutation.
+
+Every successful `integrateVerifiedRun` receipt has an explicit mode: `branch_merge`, `contained_worker_commit`, or `materialized_target_commit`. Its `runId` and `workerTaskId` must match the action request exactly. Repair work may be read from its source worktree, but the receipt remains bound to the requested repair worker. Run-drain bookkeeping ignores missing, cross-run, cross-worker, or mode-mismatched integration artifacts.
+
+`commitExactGitIndex` is the host-owned local commit primitive for a worker that has staged a frozen set of new files in the delivery checkout. Freeze `run.context.gitIndexCommitContracts[contractId]` with exactly `runId`, `taskId`, `repoPath`, `branch`, `expectedParentSha`, `commitMessage`, and unique `files` entries containing only `status: "A"`, a safe relative `path`, `mode: "100644"`, and a full lowercase `blobOid`. The action repeats every field exactly and accepts no additional action, contract, or file fields. Commit messages are one trimmed line limited to 4096 UTF-8 bytes, contracts contain at most 256 files, and each path is limited to 1024 UTF-8 bytes.
+
+Before creating an object, the action proves that the task belongs to the run, is a completed execution task, its latest done attempt has exactly the frozen `changedFiles`, and the task worktree resolves to the frozen repository top-level. Every verifier task depending on that worker must be `done`; each verifier's latest attempt must be `done` with no failed check, and at least one verifier is required. It also requires the exact branch and parent SHA, no `MERGE_HEAD`, no unstaged, untracked, or conflicted files, and an index whose only delta is the frozen additions with exact modes and blob OIDs. After `write-tree`, it independently compares the frozen parent to the resulting tree and rechecks the exact status, path, mode, and blob set before creating a commit object. After `git -c commit.gpgSign=false commit-tree` returns, the action runs `write-tree` again, requires the current index tree to remain byte-for-byte equal to the verified tree OID, and rechecks unstaged, untracked, and conflicted state before the compare-and-swap `update-ref`. A late index mutation therefore blocks before the branch moves. Repository hooks, persistent Git configuration changes, signing, and pushes are excluded. Independent commit readback verifies the parent, tree, message, absence of `gpgsig`, file set, modes, blobs, and clean worktree. A sequential retry returns `reused`; an `update-ref` error followed by exact successful readback returns `response_loss_recovered`. Successful results include both a `git_commit` artifact and an `integration` artifact with `mode: "exact_git_index_commit"`, `alreadyMerged: true`, and all worker/verifier task IDs. Run-drain bookkeeping accepts that receipt only when its run, worker, and mode exactly match the action request; empty or forged artifacts cannot clear pending integration. Structured failures redact credential-bearing Git output.
+
+Example frozen entry and matching action:
+
+```json
+{
+  "gitIndexCommitContracts": {
+    "verifiedIndex": {
+      "runId": "run_...",
+      "taskId": "task_...",
+      "repoPath": "/private/tmp/verified-checkout",
+      "branch": "main",
+      "expectedParentSha": "1111111111111111111111111111111111111111",
+      "commitMessage": "Commit verified additions",
+      "files": [
+        { "status": "A", "path": "src/new.ts", "mode": "100644", "blobOid": "2222222222222222222222222222222222222222" }
+      ]
+    }
+  }
+}
+```
+
+```json
+{
+  "type": "commitExactGitIndex",
+  "contractId": "verifiedIndex",
+  "runId": "run_...",
+  "taskId": "task_...",
+  "repoPath": "/private/tmp/verified-checkout",
+  "branch": "main",
+  "expectedParentSha": "1111111111111111111111111111111111111111",
+  "commitMessage": "Commit verified additions",
+  "files": [
+    { "status": "A", "path": "src/new.ts", "mode": "100644", "blobOid": "2222222222222222222222222222222222222222" }
+  ]
+}
+```
 
 `pushExactGitRef` is the host-owned remote-write primitive. Before invoking it, freeze an allowlist entry under `run.context.gitRemoteWriteContracts[contractId]` with exactly `repoPath`, `remoteHost`, `repository`, `ref`, `expectedOldSha`, and `newSha`. The action payload repeats those fields and must match the frozen entry byte for byte. It accepts only an absolute repository path, one DNS host, one repository path, one `refs/heads/...` branch, and two non-zero full commit SHAs. It validates the configured `origin` push URL, requires local `HEAD == newSha`, proves `expectedOldSha` is an ancestor of `newSha`, reads the exact remote ref before the push, issues only `git push --no-verify --porcelain origin <newSha>:<ref>` so repository-controlled pre-push hooks cannot execute in the host process, and independently reads the same ref afterwards. An already-updated ref returns `reused`; a failed push whose readback equals `newSha` returns `response_loss_recovered`. Force, delete, wildcard refspecs, unsupported fields, scope mismatches, non-fast-forward ancestry, ambiguous readback, and credential-bearing errors fail closed. Structured results redact URL userinfo, GitHub/GitLab token forms, and Authorization values.
 
