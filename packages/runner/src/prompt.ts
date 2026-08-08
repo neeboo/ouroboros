@@ -165,7 +165,7 @@ function linearScope(record: Record<string, unknown> | null): LinearDeliveryScop
 interface NestedLinearState {
   id: string;
   name: string;
-  type: string;
+  type: string | null;
 }
 
 interface NestedLinearIssue {
@@ -196,7 +196,7 @@ function linearEvidenceScope(record: Record<string, unknown> | null): {
     problems.push("nested issue is missing required id, identifier, team, or state fields");
   }
   if (!state) {
-    problems.push("nested state is missing required id, name, or type fields");
+    problems.push("nested state is missing required id or name fields, or has an invalid type");
   }
   if (!readbackIssue) {
     problems.push("nested readback issue is missing required id, identifier, team, or state fields");
@@ -251,12 +251,19 @@ function nestedLinearIssue(record: Record<string, unknown> | null): NestedLinear
 function nestedLinearState(record: Record<string, unknown> | null): NestedLinearState | null {
   const id = readString(record, "id");
   const name = readString(record, "name");
-  const type = readString(record, "type");
-  return id && name && type ? { id, name, type } : null;
+  const rawType = record?.type;
+  const type = rawType === null || rawType === undefined
+    ? null
+    : typeof rawType === "string" && rawType.trim()
+      ? rawType.trim()
+      : undefined;
+  return id && name && type !== undefined ? { id, name, type } : null;
 }
 
 function sameNestedLinearState(left: NestedLinearState, right: NestedLinearState) {
-  return left.id === right.id && left.name === right.name && left.type === right.type;
+  return left.id === right.id &&
+    left.name === right.name &&
+    (left.type === null || right.type === null || left.type === right.type);
 }
 
 function frozenEvidenceFreshness(observedAt: string | null): "fresh" | "expired" | "invalid" | "missing" {

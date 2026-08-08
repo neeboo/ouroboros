@@ -112,6 +112,7 @@ function matchingSupervisorEvidence(input: {
 function matchingNestedSupervisorEvidence(input: {
   observedAt?: string;
   status?: string;
+  type?: string | null;
   issue?: Record<string, unknown>;
   state?: Record<string, unknown>;
   readbackIssue?: Record<string, unknown>;
@@ -119,7 +120,7 @@ function matchingNestedSupervisorEvidence(input: {
   const state = {
     id: FROZEN_LINEAR_SCOPE.stateId,
     name: FROZEN_LINEAR_SCOPE.state,
-    type: "started",
+    type: input.type === undefined ? "started" : input.type,
   };
   const issue = {
     id: FROZEN_LINEAR_SCOPE.issueId,
@@ -352,6 +353,36 @@ describe("runner", () => {
     expect(gate).toContain(FROZEN_LINEAR_SCOPE.stateId);
   });
 
+  test("nested Linear evidence accepts null state types in issue state and readback", () => {
+    const gate = frozenLinearGateSection(buildFrozenLinearPrompt(harness, {
+      supervisorEvidence: matchingNestedSupervisorEvidence({ type: null }),
+    }));
+    expect(gate).toContain("Status: SATISFIED by");
+  });
+
+  test("nested Linear evidence accepts null alongside matching non-null state types", () => {
+    const gate = frozenLinearGateSection(buildFrozenLinearPrompt(harness, {
+      supervisorEvidence: matchingNestedSupervisorEvidence({ state: { type: null } }),
+    }));
+    expect(gate).toContain("Status: SATISFIED by");
+  });
+
+  test("nested Linear evidence rejects conflicting non-null state types", () => {
+    const gate = frozenLinearGateSection(buildFrozenLinearPrompt(harness, {
+      supervisorEvidence: matchingNestedSupervisorEvidence({
+        readbackIssue: {
+          state: {
+            id: FROZEN_LINEAR_SCOPE.stateId,
+            name: FROZEN_LINEAR_SCOPE.state,
+            type: "completed",
+          },
+        },
+      }),
+    }));
+    expect(gate).toContain("NOT SATISFIED");
+    expect(gate).toContain("issue state does not match readback state");
+  });
+
   test("a native status mutation that disagrees with independent readback fails closed", () => {
     const gate = frozenLinearGateSection(buildFrozenLinearPrompt(harness, {
       supervisorEvidence: matchingNestedSupervisorEvidence({
@@ -372,7 +403,7 @@ describe("runner", () => {
   test("nested producer evidence fails closed when issue state or readback fields are missing", () => {
     const cases = [
       { evidence: matchingNestedSupervisorEvidence({ issue: { identifier: null } }), problem: "nested issue is missing" },
-      { evidence: matchingNestedSupervisorEvidence({ state: { type: null } }), problem: "nested state is missing" },
+      { evidence: matchingNestedSupervisorEvidence({ state: { id: null } }), problem: "nested state is missing" },
       { evidence: matchingNestedSupervisorEvidence({ readbackIssue: { team: null } }), problem: "nested readback issue is missing" },
     ];
     for (const { evidence, problem } of cases) {
