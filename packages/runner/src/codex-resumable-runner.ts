@@ -343,6 +343,9 @@ class CodexResumableOrchestrator {
     if (!attempt) {
       throw new Error(`attempt not found: ${attemptId}`);
     }
+    if (attempt.status !== "running") {
+      throw new Error(`attempt is not running: ${attemptId}`);
+    }
     const task = this.taskOrThrow(attempt.taskId);
     const run = this.runOrThrow(task.runId);
     this.harness.clearRunPause(run.id);
@@ -388,11 +391,17 @@ class CodexResumableOrchestrator {
       }
       return { attemptId, status: "running" as const, codexSessionId: resumedSessionId };
     }
-    this.harness.finishAttempt({
+    const codexSessionId: string = result.sessionId ?? sessionId;
+    const output = await this.finishCodexAttempt({
       attemptId,
-      output: withCodexArtifacts(result.output, result.sessionId),
+      run,
+      task,
+      sessionName,
+      prompt,
+      rawOutput: result.output,
+      codexSessionId,
     });
-    return { attemptId, status: result.status, codexSessionId: result.sessionId };
+    return { attemptId, status: output.status, codexSessionId: result.sessionId };
   }
 
   async resumeRunningAttempts(input: { runId: string; limit: number }) {
@@ -476,19 +485,16 @@ class CodexResumableOrchestrator {
         }
         return { taskId: task.id, attemptId: attempt.id, sessionName, status: "running" as const, codexSessionId: resumedSessionId };
       }
-      const { output, decision } = await this.applyStopHooks({
+      const codexSessionId: string = result.sessionId ?? sessionId;
+      const output = await this.finishCodexAttempt({
+        attemptId: attempt.id,
         run,
         task,
         sessionName,
         prompt,
-        output: withCodexArtifacts(result.output, result.sessionId),
+        rawOutput: result.output,
+        codexSessionId,
       });
-      this.harness.finishAttempt({ attemptId: attempt.id, output });
-      applyPostAttemptRunEffects(this.harness, run.id, task, output);
-      this.updateAttemptThread({ attemptId: attempt.id, status: output.status, agentSessionId: result.sessionId, heartbeat: true });
-      if (decision === "retry") {
-        this.harness.retryTask({ taskId: task.id });
-      }
       return { taskId: task.id, attemptId: attempt.id, sessionName, status: output.status, codexSessionId: result.sessionId };
     }));
     return tasks.filter((task) => task !== null);
@@ -547,7 +553,13 @@ class CodexResumableOrchestrator {
     if (input.route.executionMode !== "codex-resumable") {
       return this.runLeasedGenericAttempt(input);
     }
-    const attemptId = this.harness.startAttempt({ taskId: input.task.id, input: input.baseInput });
+    const attemptId = this.harness.startAttempt({
+      taskId: input.task.id,
+      input: {
+        ...input.baseInput,
+        startHookEvidence: startHookEvidence(input.startResult),
+      },
+    });
     this.upsertAttemptThread({
       runId: input.run.id,
       task: input.task,
@@ -574,6 +586,7 @@ class CodexResumableOrchestrator {
     this.harness.updateAttemptInput({
       attemptId,
       input: {
+        ...(this.harness.getAttempt(attemptId)?.input ?? input.baseInput),
         ...codexAttemptInput({ prompt: input.prompt, sessionName: input.sessionName, result, model: input.route.model, cwd: input.cwd }),
         threadId: threadIdForAttempt(attemptId),
       },
@@ -596,28 +609,55 @@ class CodexResumableOrchestrator {
       }
       return { taskId: input.task.id, attemptId, sessionName: input.sessionName, status: "running" as const, codexSessionId: sessionId };
     }
+    const output = await this.finishCodexAttempt({
+      attemptId,
+      run: input.run,
+      task: input.task,
+      sessionName: input.sessionName,
+      prompt: input.prompt,
+      rawOutput: result.output,
+      codexSessionId: result.sessionId,
+      startResult: input.startResult,
+    });
+    return { taskId: input.task.id, attemptId, sessionName: input.sessionName, status: output.status, codexSessionId: result.sessionId };
+  }
+
+  private async finishCodexAttempt(input: {
+    attemptId: string;
+    run: NonNullable<ReturnType<Harness["getRun"]>>;
+    task: Task;
+    sessionName: string;
+    prompt: string;
+    rawOutput: AttemptOutput;
+    codexSessionId: string | null;
+    startResult?: StartHookResult;
+  }) {
     const { output, decision } = await this.applyStopHooks({
       run: input.run,
       task: input.task,
       sessionName: input.sessionName,
       prompt: input.prompt,
-      output: withCodexArtifacts(result.output, result.sessionId),
+      output: withCodexArtifacts(input.rawOutput, input.codexSessionId),
     });
-    this.harness.finishAttempt({
-      attemptId,
-      output: {
-        ...output,
-        checks: [...(input.startResult.checks ?? []), ...(output.checks ?? [])],
-        artifacts: [...(input.startResult.artifacts ?? []), ...(output.artifacts ?? [])],
-      },
+    const persistedStartResult = input.startResult ?? startHookEvidenceFromAttempt(this.harness.getAttempt(input.attemptId));
+    const finishedOutput: AttemptOutput = {
+      ...output,
+      checks: [...(persistedStartResult.checks ?? []), ...(output.checks ?? [])],
+      artifacts: [...(persistedStartResult.artifacts ?? []), ...(output.artifacts ?? [])],
+    };
+    this.harness.finishAttempt({ attemptId: input.attemptId, output: finishedOutput });
+    const finishedAttempt = this.harness.getAttempt(input.attemptId);
+    applyPostAttemptRunEffects(this.harness, input.run.id, input.task, finishedAttempt?.output ?? finishedOutput);
+    this.updateAttemptThread({
+      attemptId: input.attemptId,
+      status: finishedOutput.status,
+      agentSessionId: input.codexSessionId,
+      heartbeat: true,
     });
-    const finishedAttempt = this.harness.getAttempt(attemptId);
-    applyPostAttemptRunEffects(this.harness, input.run.id, input.task, finishedAttempt?.output ?? output);
-    this.updateAttemptThread({ attemptId, status: output.status, agentSessionId: result.sessionId, heartbeat: true });
     if (decision === "retry") {
       this.harness.retryTask({ taskId: input.task.id });
     }
-    return { taskId: input.task.id, attemptId, sessionName: input.sessionName, status: output.status, codexSessionId: result.sessionId };
+    return finishedOutput;
   }
 
   private async runLeasedGenericAttempt(input: {
@@ -1092,6 +1132,25 @@ function withCodexArtifacts(output: AttemptOutput, sessionId: string | null): At
   return {
     ...output,
     artifacts: [...(output.artifacts ?? []), { kind: "codex_session", sessionId }],
+  };
+}
+
+function startHookEvidence(result: StartHookResult) {
+  return {
+    checks: [...(result.checks ?? [])],
+    artifacts: [...(result.artifacts ?? [])],
+  };
+}
+
+function startHookEvidenceFromAttempt(attempt: Attempt | null): StartHookResult {
+  const evidence = attempt?.input.startHookEvidence;
+  if (!evidence || typeof evidence !== "object" || Array.isArray(evidence)) {
+    return {};
+  }
+  const record = evidence as Record<string, unknown>;
+  return {
+    checks: Array.isArray(record.checks) ? record.checks : [],
+    artifacts: Array.isArray(record.artifacts) ? record.artifacts : [],
   };
 }
 
