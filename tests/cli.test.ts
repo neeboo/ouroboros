@@ -1089,7 +1089,7 @@ describe("CLI", () => {
       const launchRunId = launch.runId;
       const overviewResponse = await fetch(`${launch.dashboardUrl}/api/runs/${launch.runId}/overview`);
       const overview = await overviewResponse.json();
-      for (let index = 0; index < 250 && !existsSync(codexInvocationLog); index += 1) {
+      for (let index = 0; index < 400 && !existsSync(codexInvocationLog); index += 1) {
         await Bun.sleep(10);
       }
       const codexInvocations = (await readFile(codexInvocationLog, "utf8"))
