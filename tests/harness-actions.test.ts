@@ -3166,6 +3166,74 @@ describe("Harness actions", () => {
       }
     });
 
+    test("accepts absent exit 2 with the exact benign SSH transport notice", () => {
+      const notice = "Connection to ssh.github.com port 443 [tcp/https] succeeded!";
+      const remote = gitRefCreationRunner({
+        remoteReads: [
+          { exitCode: 2, stdout: "", stderr: `${notice}\n` },
+          newSha,
+        ],
+      });
+
+      const result = applyHarnessAction(harness, frozenCreateAction(), { runGit: remote.runGit });
+      const serialized = JSON.stringify(result);
+
+      expect(result).toMatchObject({ status: "done", actionType: "createExactGitRef" });
+      expect(result.artifacts).toContainEqual(expect.objectContaining({ status: "created" }));
+      expect(remote.calls.filter((call) => call.args[0] === "push")).toHaveLength(1);
+      expect(serialized).not.toContain(notice);
+    });
+
+    test("does not treat authentication failure or nonempty stdout as absent", () => {
+      const notice = "Connection to ssh.github.com port 443 [tcp/https] succeeded!";
+      const cases = [
+        {
+          exitCode: 2,
+          stdout: "",
+          stderr: `${notice}\ngit@github.com: Permission denied (publickey).\n`,
+        },
+        {
+          exitCode: 2,
+          stdout: `${newSha}\trefs/heads/unexpected\n`,
+          stderr: `${notice}\n`,
+        },
+        {
+          exitCode: 2,
+          stdout: " \n",
+          stderr: `${notice}\n`,
+        },
+        {
+          exitCode: 2,
+          stdout: "",
+          stderr: "Connection to attacker.example port 443 [tcp/https] succeeded!\n",
+        },
+        {
+          exitCode: 2,
+          stdout: "",
+          stderr: ` ${notice}\n`,
+        },
+        {
+          exitCode: 2,
+          stdout: "",
+          stderr: `\n${notice}\n`,
+        },
+        {
+          exitCode: 2,
+          stdout: "",
+          stderr: `${notice}\n\n`,
+        },
+      ];
+      for (const read of cases) {
+        const remote = gitRefCreationRunner({ remoteReads: [read] });
+        const result = applyHarnessAction(harness, frozenCreateAction(), { runGit: remote.runGit });
+        const serialized = JSON.stringify(result);
+        expect(result).toMatchObject({ status: "blocked", actionType: "createExactGitRef" });
+        expect(result.artifacts).toContainEqual(expect.objectContaining({ status: "remote_read_failed" }));
+        expect(remote.calls.some((call) => call.args[0] === "push")).toBe(false);
+        expect(serialized).not.toContain(notice);
+      }
+    });
+
     test("treats ambiguous or failed absent readback as an error", () => {
       const cases = [
         { exitCode: 0, stdout: "", stderr: "" },
