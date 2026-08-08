@@ -2280,17 +2280,21 @@ function recoverBlockedSelfImprovementRuns(
     const toBackend = "codex-resumable";
 
     if (existingRecovery) {
-      harness.updateRunStatus({ runId: run.id, status: "todo" });
-      recoveries.push({
-        runId: run.id,
-        taskId: existingRecovery.id,
-        sourceTaskId: sourceTask.id,
-        sourceAttemptId,
-        terminalReason,
-        fromBackend,
-        toBackend,
-        resumed: true,
-      });
+      if (existingRecovery.status === "todo" || existingRecovery.status === "running") {
+        if (run.status !== "todo") {
+          harness.updateRunStatus({ runId: run.id, status: "todo" });
+        }
+        recoveries.push({
+          runId: run.id,
+          taskId: existingRecovery.id,
+          sourceTaskId: sourceTask.id,
+          sourceAttemptId,
+          terminalReason,
+          fromBackend,
+          toBackend,
+          resumed: true,
+        });
+      }
       continue;
     }
 
