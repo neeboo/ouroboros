@@ -25,6 +25,7 @@ import {
   buildTaskPrompt,
   createApplyDesignActionsHook,
   createContextSummaryHook,
+  defaultCodexBin,
   createDurableAttemptReplayCache,
   createGitWorktreeHook,
   createGoalReviewDecisionHook,
@@ -262,6 +263,7 @@ switch (parsed.command) {
     break;
   }
   case "self-iterate": {
+    const codexBin = flag(parsed, "codex-bin") ?? defaultCodexBin();
     const { runId, taskId } = await createSelfIterationBootstrap();
     printJson({
       runId,
@@ -277,6 +279,8 @@ switch (parsed.command) {
         "$(pwd)",
         "--sandbox",
         "workspace-write",
+        "--codex-bin",
+        codexBin,
         "--stop-hook",
         DEFAULT_STOP_HOOKS,
         "--tasks",
@@ -294,6 +298,8 @@ switch (parsed.command) {
         runId,
         "--executor",
         "codex-resumable",
+        "--codex-bin",
+        codexBin,
         "--parallel",
         "auto",
         "--worktree-root",
@@ -307,6 +313,8 @@ switch (parsed.command) {
         "7331",
         "--parallel",
         "auto",
+        "--codex-bin",
+        codexBin,
         "--worktree-root",
         DEFAULT_SELF_ITERATION_WORKTREE_ROOT,
         "--start-hook",
@@ -316,6 +324,7 @@ switch (parsed.command) {
     break;
   }
   case "self-iterate-launch": {
+    const codexBin = flag(parsed, "codex-bin") ?? defaultCodexBin();
     const { runId, taskId } = await createSelfIterationBootstrap();
     const port = parsePositiveInteger(flag(parsed, "port") ?? "7331", "--port");
     const selfIterationWorktreeArgs = defaultSelfIterationWorktreeArgs();
@@ -325,6 +334,7 @@ switch (parsed.command) {
       defaultConcurrency: DEFAULT_SELF_ITERATION_CONCURRENCY,
       defaultWorktreeRoot: DEFAULT_SELF_ITERATION_WORKTREE_ROOT,
       defaultStartHook: "git-worktree",
+      defaultCodexBin: codexBin,
       supervisorCommandName: "self-improve-daemon",
       defaultRootRunId: runId,
     });
@@ -346,6 +356,8 @@ switch (parsed.command) {
         "$(pwd)",
         "--sandbox",
         "workspace-write",
+        "--codex-bin",
+        codexBin,
         "--stop-hook",
         DEFAULT_STOP_HOOKS,
         "--tasks",
@@ -2740,6 +2752,7 @@ function createDashboardRuntime(input: {
   defaultConcurrency?: number;
   defaultWorktreeRoot?: string;
   defaultStartHook?: string;
+  defaultCodexBin?: string;
   supervisorCommandName?: "supervise-daemon" | "self-improve-daemon";
   defaultRootRunId?: string;
 }) {
@@ -2817,6 +2830,7 @@ function createDashboardRuntime(input: {
       defaultConcurrency: input.defaultConcurrency,
       defaultWorktreeRoot: input.defaultWorktreeRoot,
       defaultStartHook: input.defaultStartHook,
+      defaultCodexBin: input.defaultCodexBin,
     });
     runnerProcess = Bun.spawn({
       cmd,
@@ -2854,6 +2868,7 @@ function createDashboardRuntime(input: {
       defaultConcurrency: input.defaultConcurrency,
       defaultWorktreeRoot: input.defaultWorktreeRoot,
       defaultStartHook: input.defaultStartHook,
+      defaultCodexBin: input.defaultCodexBin,
       commandName: input.supervisorCommandName,
       rootRunId: input.defaultRootRunId,
     });
@@ -3448,7 +3463,12 @@ function applyCliPostAttemptRunEffects(runId: string, task: Pick<Task, "role">, 
 
 function dashboardRunnerCommand(
   runId: string,
-  options: { defaultConcurrency?: number; defaultWorktreeRoot?: string; defaultStartHook?: string } = {},
+  options: {
+    defaultConcurrency?: number;
+    defaultWorktreeRoot?: string;
+    defaultStartHook?: string;
+    defaultCodexBin?: string;
+  } = {},
 ) {
   const stopHook = flag(parsed, "stop-hook") ?? DEFAULT_STOP_HOOKS;
   const cmd = [
@@ -3500,6 +3520,9 @@ function dashboardRunnerCommand(
   if (flag(parsed, "start-hook") === undefined && options.defaultStartHook) {
     cmd.push("--start-hook", options.defaultStartHook);
   }
+  if (flag(parsed, "codex-bin") === undefined && options.defaultCodexBin) {
+    cmd.push("--codex-bin", options.defaultCodexBin);
+  }
   return cmd;
 }
 
@@ -3508,6 +3531,7 @@ function supervisorCommand(
     defaultConcurrency?: number;
     defaultWorktreeRoot?: string;
     defaultStartHook?: string;
+    defaultCodexBin?: string;
     commandName?: "supervise-daemon" | "self-improve-daemon";
     rootRunId?: string;
   } = {},
@@ -3569,6 +3593,9 @@ function supervisorCommand(
   }
   if (flag(parsed, "start-hook") === undefined && options.defaultStartHook) {
     cmd.push("--start-hook", options.defaultStartHook);
+  }
+  if (flag(parsed, "codex-bin") === undefined && options.defaultCodexBin) {
+    cmd.push("--codex-bin", options.defaultCodexBin);
   }
   return cmd;
 }

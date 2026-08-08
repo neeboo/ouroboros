@@ -31,6 +31,7 @@ import {
   INITIAL_LINEAR_INTAKE_POLLING_STATE,
 } from "../packages/cli/src/linear-intake";
 import { Database } from "bun:sqlite";
+import { defaultCodexBin } from "../packages/runner/src/executors/codex-bin";
 
 async function snapshotDatabaseFilesystem(dbPath: string, dir: string) {
   const dbStat = await stat(dbPath);
@@ -370,6 +371,9 @@ describe("CLI", () => {
     expect(result.runnerCommand).toContain(`run-loop --run-id ${result.runId}`);
     expect(result.launchCommand).toContain("self-iterate-launch");
     expect(result.daemonCommand).toContain(`self-improve-daemon --root-run-id ${result.runId}`);
+    expect(result.runnerCommand).toContain(`--codex-bin ${defaultCodexBin()}`);
+    expect(result.daemonCommand).toContain(`--codex-bin ${defaultCodexBin()}`);
+    expect(result.launchCommand).toContain(`--codex-bin ${defaultCodexBin()}`);
     expect(result.daemonCommand).toContain("--parallel auto");
     expect(result.launchCommand).toContain("--parallel auto");
     expect(result.launchCommand).toContain("--worktree-root .ouroboros/worktrees");
@@ -1029,11 +1033,14 @@ describe("CLI", () => {
       return;
     }
     const codexBin = join(dir, "fake-codex-launch");
+    const codexInvocationLog = join(dir, "fake-codex-launch-invocations.jsonl");
     await writeFile(
       codexBin,
       [
         "#!/usr/bin/env bun",
+        "const { appendFile } = await import('node:fs/promises');",
         "const args = Bun.argv.slice(2);",
+        `await appendFile(${JSON.stringify(codexInvocationLog)}, JSON.stringify(args) + '\\n');`,
         "if (args.includes('resume')) {",
         "  console.log(JSON.stringify({ type: 'session.started', session_id: 'session_launch_resume' }));",
         "  console.log(JSON.stringify({ type: 'agent.message', message: '{\"status\":\"done\",\"summary\":\"launch resumed\",\"changedFiles\":[],\"checks\":[],\"artifacts\":[],\"problems\":[]}' }));",
@@ -1082,6 +1089,13 @@ describe("CLI", () => {
       const launchRunId = launch.runId;
       const overviewResponse = await fetch(`${launch.dashboardUrl}/api/runs/${launch.runId}/overview`);
       const overview = await overviewResponse.json();
+      for (let index = 0; index < 250 && !existsSync(codexInvocationLog); index += 1) {
+        await Bun.sleep(10);
+      }
+      const codexInvocations = (await readFile(codexInvocationLog, "utf8"))
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line) as string[]);
 
       expect(launch).toMatchObject({
         runId: expect.any(String),
@@ -1092,8 +1106,12 @@ describe("CLI", () => {
       });
       expect(launch.daemonCommand).toContain("self-improve-daemon");
       expect(launch.daemonCommand).toContain(`--root-run-id ${launchRunId}`);
+      expect(launch.daemonCommand).toContain(`--codex-bin ${codexBin}`);
+      expect(launch.daemonCommand.match(/--codex-bin/g)).toHaveLength(1);
       expect(launch.daemonCommand).toContain("--tasks 3");
       expect(launch.daemonCommand).toContain("--start-hook none");
+      expect(codexInvocations).toHaveLength(1);
+      expect(codexInvocations[0][0]).toBe("exec");
       expect(overview.supervisor).toMatchObject({ status: "running" });
       expect(overview.run).toMatchObject({
         id: launch.runId,
@@ -5976,6 +5994,8 @@ describe("CLI", () => {
       "codex-cli",
       "--cwd",
       "/repo",
+      "--codex-bin",
+      join(binDir, "codex"),
       "--sandbox",
       "read-only",
       "--stop-hook",
@@ -6027,6 +6047,8 @@ describe("CLI", () => {
       "codex-cli",
       "--cwd",
       "/repo",
+      "--codex-bin",
+      join(binDir, "codex"),
       "--stop-hook",
       "create-tasks",
       "--max-rounds",
@@ -6078,6 +6100,8 @@ describe("CLI", () => {
       "codex-cli",
       "--cwd",
       "/repo",
+      "--codex-bin",
+      join(binDir, "codex"),
       "--stop-hook",
       "create-tasks,create-verifier",
       "--max-rounds",
@@ -6133,6 +6157,8 @@ describe("CLI", () => {
       "codex-cli",
       "--cwd",
       "/repo",
+      "--codex-bin",
+      join(binDir, "codex"),
       "--stop-hook",
       "create-tasks,create-verifier,create-repair",
       "--max-rounds",

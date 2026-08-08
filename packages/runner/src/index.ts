@@ -36,6 +36,7 @@ export type {
 } from "./acpx-subsessions";
 export { createCodexCliExecutor } from "./executors/codex-cli";
 export { createCodexResumableClient } from "./executors/codex-resumable";
+export { defaultCodexBin, resolveDefaultCodexBin } from "./executors/codex-bin";
 export { createRouteExecutor } from "./route-executor";
 export { parseAttemptOutput } from "./executors/output";
 export { resolveAgentBackend } from "./agent-backends";
