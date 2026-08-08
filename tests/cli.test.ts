@@ -6504,7 +6504,7 @@ describe("CLI", () => {
         "if (!args.includes('-m') || !args.includes('gpt-5-mini')) process.exit(9);",
         "if (args.includes('resume')) {",
         "  console.log(JSON.stringify({ type: 'session.started', session_id: 'session_123' }));",
-        "  console.log(JSON.stringify({ type: 'agent.message', message: '{\"status\":\"done\",\"summary\":\"resumed planner\",\"changedFiles\":[],\"checks\":[],\"artifacts\":[],\"problems\":[]}' }));",
+        "  console.log(JSON.stringify({ type: 'agent.message', message: '{\"status\":\"done\",\"summary\":\"resumed planner\",\"changedFiles\":[],\"checks\":[],\"artifacts\":[],\"problems\":[],\"nextTasks\":[{\"role\":\"worker\",\"goal\":\"Implement resumed CLI plan\",\"prompt\":\"Implement the task created by direct resume.\",\"doneWhen\":[\"tests pass\"]}]}' }));",
         "  process.exit(0);",
         "}",
         "console.log(JSON.stringify({ type: 'session.started', session_id: 'session_123' }));",
@@ -6541,6 +6541,8 @@ describe("CLI", () => {
       "300000",
       "--model",
       "gpt-5-codex",
+      "--stop-hook",
+      "create-tasks",
     );
 
     expect(started).toMatchObject({
@@ -6559,6 +6561,8 @@ describe("CLI", () => {
       status: "done",
     });
     const attempt = new Harness(dbPath).getAttempt(started.attemptId)!;
+    const overview = await runCliJson("run-overview", "--run-id", run.id);
+    const createdTask = overview.tasks.find((candidate: { id: string }) => candidate.id !== task.id);
     expect(attempt.input.model).toEqual({
       model: "gpt-5-mini",
       reason: "cheap planning",
@@ -6575,6 +6579,16 @@ describe("CLI", () => {
       },
     });
     expect(attempt.output.summary).toBe("resumed planner");
+    expect(createdTask).toMatchObject({
+      role: "worker",
+      goal: "Implement resumed CLI plan",
+      dependsOn: [task.id],
+    });
+    expect(attempt.output.artifacts).toContainEqual({
+      kind: "created_task",
+      taskId: createdTask.id,
+      sourceTaskId: task.id,
+    });
   });
 
   test("codex resumable attempts store and reuse config-seeded role model metadata", async () => {

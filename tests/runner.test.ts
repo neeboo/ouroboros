@@ -36,6 +36,7 @@ import {
   resolveModelPreference,
   runCodexResumableLoop,
   resumeCodexResumableAttempt,
+  startCodexResumableAttempt,
   runNextReadyTask,
   runReadyTasks,
   setRunDecisionAction,
@@ -1392,6 +1393,574 @@ describe("runner", () => {
     expect(resumedSessions).toEqual(["direct_session_from_thread"]);
     expect(result).toMatchObject({ attemptId, status: "done", codexSessionId: "direct_session_from_thread" });
     expect(attempt.input.codexSessionId).toBe("direct_session_from_thread");
+    expect(harness.getRunOverview({ runId, eventLimit: 0 }).tasks).toHaveLength(1);
+  });
+
+  test("direct planner resume applies stop hooks once and preserves start hook evidence", async () => {
+    const runId = harness.createRun({ goal: "Resume planner hooks" });
+    const plannerTaskId = harness.createTask({
+      runId,
+      role: "planner",
+      goal: "Plan resumable work",
+      prompt: "Return the next task after resuming.",
+    });
+    let resumeCalls = 0;
+    const clientFactory = () => ({
+      start: async () => ({
+        status: "running" as const,
+        sessionId: "planner_resume_session",
+        outputPath: join(dir, "planner-start-output.json"),
+        stdout: "",
+        stderr: "",
+        events: [],
+      }),
+      resume: async ({ sessionId }: { sessionId: string }) => {
+        resumeCalls += 1;
+        return {
+          status: "done" as const,
+          sessionId,
+          outputPath: join(dir, "planner-resume-output.json"),
+          stdout: "",
+          stderr: "",
+          events: [],
+          output: {
+            status: "done" as const,
+            summary: "Planned resumed work",
+            changedFiles: [],
+            checks: [{ name: "planner output", status: "passed" }],
+            artifacts: [],
+            problems: [],
+            nextTasks: [
+              {
+                role: "worker",
+                goal: "Implement resumed plan",
+                prompt: "Implement the task created from direct resume.",
+                doneWhen: ["tests pass"],
+              },
+            ],
+          },
+        };
+      },
+    });
+    const startHooks = [() => ({
+      checks: [{ name: "resume start evidence", status: "passed" }],
+      artifacts: [{ kind: "resume_start_evidence", source: "test" }],
+    })];
+
+    const started = await startCodexResumableAttempt({
+      harness,
+      taskId: plannerTaskId,
+      cwd: dir,
+      startHooks,
+      clientFactory,
+    });
+    const resumed = await resumeCodexResumableAttempt({
+      harness,
+      attemptId: started.attemptId,
+      cwd: dir,
+      stopHooksByRole: { planner: [createTasksFromOutputHook({ harness })] },
+      clientFactory,
+    });
+
+    const attempt = harness.getAttempt(started.attemptId)!;
+    const tasks = harness.getRunOverview({ runId, eventLimit: 0 }).tasks;
+    const createdTask = tasks.find((task) => task.id !== plannerTaskId)!;
+
+    expect(resumed).toMatchObject({
+      attemptId: started.attemptId,
+      status: "done",
+      codexSessionId: "planner_resume_session",
+    });
+    expect(createdTask).toMatchObject({
+      role: "worker",
+      goal: "Implement resumed plan",
+      dependsOn: [plannerTaskId],
+    });
+    expect(attempt.output.checks).toContainEqual({ name: "resume start evidence", status: "passed" });
+    expect(attempt.output.artifacts).toContainEqual({ kind: "resume_start_evidence", source: "test" });
+    expect(attempt.output.artifacts).toContainEqual({
+      kind: "created_task",
+      taskId: createdTask.id,
+      sourceTaskId: plannerTaskId,
+    });
+
+    await expect(resumeCodexResumableAttempt({
+      harness,
+      attemptId: started.attemptId,
+      cwd: dir,
+      stopHooksByRole: { planner: [createTasksFromOutputHook({ harness })] },
+      clientFactory,
+    })).rejects.toThrow(`attempt is not running: ${started.attemptId}`);
+    expect(resumeCalls).toBe(1);
+    expect(harness.getRunOverview({ runId, eventLimit: 0 }).tasks).toHaveLength(2);
+  });
+
+  test("concurrent direct resumes atomically claim one attempt and run planner stop hooks once", async () => {
+    const runId = harness.createRun({ goal: "Claim one direct planner resume" });
+    const plannerTaskId = harness.createTask({
+      runId,
+      role: "planner",
+      goal: "Plan exactly one child task",
+      prompt: "Return one child task after resuming.",
+    });
+    const attemptId = harness.startAttempt({
+      taskId: plannerTaskId,
+      input: {
+        sessionName: "concurrent-direct-resume",
+        executor: "codex-resumable",
+        codexSessionId: "concurrent_resume_session",
+        cwd: dir,
+      },
+    });
+    let releaseResume!: () => void;
+    const resumeRelease = new Promise<void>((resolve) => {
+      releaseResume = resolve;
+    });
+    let reportResumeStarted!: () => void;
+    const resumeStarted = new Promise<void>((resolve) => {
+      reportResumeStarted = resolve;
+    });
+    let resumeCalls = 0;
+    let stopHookCalls = 0;
+    const createTasksHook = createTasksFromOutputHook({ harness });
+    const stopHook = async (...args: Parameters<typeof createTasksHook>) => {
+      stopHookCalls += 1;
+      return createTasksHook(...args);
+    };
+    const clientFactory = () => ({
+      start: async () => {
+        throw new Error("start should not be called");
+      },
+      resume: async ({ sessionId }: { sessionId: string }) => {
+        resumeCalls += 1;
+        reportResumeStarted();
+        if (resumeCalls === 1) {
+          await resumeRelease;
+          return {
+            status: "running" as const,
+            sessionId,
+            outputPath: join(dir, "concurrent-resume-running.json"),
+            stdout: "",
+            stderr: "",
+            events: [],
+          };
+        }
+        return {
+          status: "done" as const,
+          sessionId,
+          outputPath: join(dir, "concurrent-resume-output.json"),
+          stdout: "",
+          stderr: "",
+          events: [],
+          output: {
+            status: "done" as const,
+            summary: "Planned once",
+            changedFiles: [],
+            checks: [],
+            artifacts: [],
+            problems: [],
+            nextTasks: [
+              {
+                role: "worker",
+                goal: "Implement the single resumed plan",
+                prompt: "Implement the child created by the claimed resume.",
+                doneWhen: ["tests pass"],
+              },
+            ],
+          },
+        };
+      },
+    });
+
+    const firstResume = resumeCodexResumableAttempt({
+      harness,
+      attemptId,
+      cwd: dir,
+      stopHooksByRole: { planner: [stopHook] },
+      clientFactory,
+    });
+    await resumeStarted;
+    const competingHarness = new Harness(harness.dbPath);
+    expect(competingHarness.getAttempt(attemptId)?.input.directResumeClaim).toMatchObject({
+      pid: process.pid,
+    });
+    const secondResume = resumeCodexResumableAttempt({
+      harness: competingHarness,
+      attemptId,
+      cwd: dir,
+      stopHooksByRole: { planner: [stopHook] },
+      clientFactory,
+    });
+
+    const secondOutcome = await secondResume.then(
+      (value) => ({ status: "fulfilled" as const, value }),
+      (reason: unknown) => ({ status: "rejected" as const, reason }),
+    );
+    releaseResume();
+    await expect(firstResume).resolves.toMatchObject({ attemptId, status: "running" });
+
+    expect(secondOutcome.status).toBe("rejected");
+    if (secondOutcome.status === "rejected") {
+      expect(String(secondOutcome.reason)).toContain(`direct resume already claimed: ${attemptId}`);
+    }
+    expect(competingHarness.getAttempt(attemptId)?.input.directResumeClaim).toBeUndefined();
+
+    await expect(resumeCodexResumableAttempt({
+      harness: competingHarness,
+      attemptId,
+      cwd: dir,
+      stopHooksByRole: { planner: [stopHook] },
+      clientFactory,
+    })).resolves.toMatchObject({ attemptId, status: "done" });
+
+    expect(resumeCalls).toBe(2);
+    expect(stopHookCalls).toBe(1);
+    const tasks = harness.getRunOverview({ runId, eventLimit: 0 }).tasks;
+    expect(tasks).toHaveLength(2);
+    expect(tasks.find((task) => task.id !== plannerTaskId)).toMatchObject({
+      role: "worker",
+      goal: "Implement the single resumed plan",
+      dependsOn: [plannerTaskId],
+    });
+  });
+
+  test("direct resume and run loop share one durable resume claim", async () => {
+    const runId = harness.createRun({ goal: "Coordinate direct and supervised resume" });
+    const plannerTaskId = harness.createTask({
+      runId,
+      role: "planner",
+      goal: "Create one supervised child",
+      prompt: "Return one child task.",
+    });
+    const attemptId = harness.startAttempt({
+      taskId: plannerTaskId,
+      input: {
+        sessionName: "direct-supervisor-race",
+        executor: "codex-resumable",
+        codexSessionId: "direct_supervisor_session",
+        cwd: dir,
+      },
+    });
+    let releaseResume!: () => void;
+    const resumeRelease = new Promise<void>((resolve) => {
+      releaseResume = resolve;
+    });
+    let reportResumeStarted!: () => void;
+    const resumeStarted = new Promise<void>((resolve) => {
+      reportResumeStarted = resolve;
+    });
+    let resumeCalls = 0;
+    let stopHookCalls = 0;
+    const createTasksHook = createTasksFromOutputHook({ harness });
+    const stopHook = async (...args: Parameters<typeof createTasksHook>) => {
+      stopHookCalls += 1;
+      return createTasksHook(...args);
+    };
+    const clientFactory = () => ({
+      start: async () => {
+        throw new Error("start should not be called");
+      },
+      resume: async ({ sessionId }: { sessionId: string }) => {
+        resumeCalls += 1;
+        reportResumeStarted();
+        if (resumeCalls === 1) {
+          await resumeRelease;
+        }
+        return {
+          status: "done" as const,
+          sessionId,
+          outputPath: join(dir, "direct-supervisor-output.json"),
+          stdout: "",
+          stderr: "",
+          events: [],
+          output: {
+            status: "done" as const,
+            summary: "Planned by one resume owner",
+            changedFiles: [],
+            checks: [],
+            artifacts: [],
+            problems: [],
+            nextTasks: [
+              {
+                role: "worker",
+                goal: "Implement the one supervised child",
+                prompt: "Implement the child task.",
+                doneWhen: ["tests pass"],
+              },
+            ],
+          },
+        };
+      },
+    });
+
+    const directResume = resumeCodexResumableAttempt({
+      harness,
+      attemptId,
+      cwd: dir,
+      stopHooksByRole: { planner: [stopHook] },
+      clientFactory,
+    });
+    await resumeStarted;
+    const supervisedResume = await runCodexResumableLoop({
+      harness: new Harness(harness.dbPath),
+      runId,
+      cwd: dir,
+      limit: 1,
+      maxRounds: 1,
+      maxTries: 3,
+      stopHooksByRole: { planner: [stopHook] },
+      clientFactory,
+    });
+    releaseResume();
+    await expect(directResume).resolves.toMatchObject({ attemptId, status: "done" });
+
+    expect(supervisedResume.rounds.flatMap((round) => round.tasks)).toHaveLength(0);
+    expect(resumeCalls).toBe(1);
+    expect(stopHookCalls).toBe(1);
+    const tasks = harness.getRunOverview({ runId, eventLimit: 0 }).tasks;
+    expect(tasks).toHaveLength(2);
+    expect(tasks.find((task) => task.id !== plannerTaskId)).toMatchObject({
+      role: "worker",
+      goal: "Implement the one supervised child",
+      dependsOn: [plannerTaskId],
+    });
+  });
+
+  test("direct resume terminalizes a stop hook exception and never runs the hook again", async () => {
+    const runId = harness.createRun({ goal: "Terminalize a direct resume hook failure" });
+    const taskId = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Preserve terminal Codex output when the hook fails",
+      prompt: "Return completed evidence.",
+    });
+    const attemptId = harness.startAttempt({
+      taskId,
+      input: {
+        sessionName: "direct-hook-failure",
+        executor: "codex-resumable",
+        codexSessionId: "hook_failure_session",
+        cwd: dir,
+      },
+    });
+    let resumeCalls = 0;
+    let stopHookCalls = 0;
+    const clientFactory = () => ({
+      start: async () => {
+        throw new Error("start should not be called");
+      },
+      resume: async ({ sessionId }: { sessionId: string }) => {
+        resumeCalls += 1;
+        return {
+          status: "done" as const,
+          sessionId,
+          outputPath: join(dir, "hook-failure-output.json"),
+          stdout: "",
+          stderr: "",
+          events: [],
+          output: {
+            status: "done" as const,
+            summary: "Codex completed before the hook failed",
+            changedFiles: ["src/completed.ts"],
+            checks: [{ name: "codex completion", status: "passed" as const }],
+            artifacts: [{ kind: "codex_result", state: "terminal" }],
+            problems: [],
+          },
+        };
+      },
+    });
+    const stopHook = async () => {
+      stopHookCalls += 1;
+      throw new Error(
+        "synthetic direct stop hook failure Authorization: Bearer bearer-secret-123 token=token-secret-456 api_key=api-secret-789",
+      );
+    };
+
+    const result = await resumeCodexResumableAttempt({
+      harness,
+      attemptId,
+      cwd: dir,
+      stopHooksByRole: { worker: [stopHook] },
+      clientFactory,
+    });
+
+    expect(result).toMatchObject({ attemptId, status: "blocked" });
+    const attempt = harness.getAttempt(attemptId)!;
+    expect(attempt.status).toBe("blocked");
+    expect(attempt.output).toMatchObject({
+      status: "blocked",
+      summary: "stop hook failed after Codex completed before the hook failed",
+      changedFiles: ["src/completed.ts"],
+    });
+    expect(attempt.output.checks).toContainEqual({ name: "codex completion", status: "passed" });
+    expect(attempt.output.checks).toContainEqual({ name: "stop hook", status: "failed" });
+    expect(attempt.output.artifacts).toContainEqual({ kind: "codex_result", state: "terminal" });
+    const persistedFailure = JSON.stringify({ output: attempt.output, error: attempt.error });
+    expect(persistedFailure).toContain("[REDACTED]");
+    expect(persistedFailure).not.toContain("bearer-secret-123");
+    expect(persistedFailure).not.toContain("token-secret-456");
+    expect(persistedFailure).not.toContain("api-secret-789");
+    expect(harness.getTask(taskId)?.status).toBe("blocked");
+
+    const db = new Database(harness.dbPath);
+    const running = db
+      .query("select id from attempts where task_id = $taskId and status = 'running'")
+      .all({ $taskId: taskId });
+    db.close();
+    expect(running).toHaveLength(0);
+
+    await expect(resumeCodexResumableAttempt({
+      harness,
+      attemptId,
+      cwd: dir,
+      stopHooksByRole: { worker: [stopHook] },
+      clientFactory,
+    })).rejects.toThrow(`attempt is not running: ${attemptId}`);
+    expect(resumeCalls).toBe(1);
+    expect(stopHookCalls).toBe(1);
+
+    const variantTaskId = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Redact spaced credential labels",
+      prompt: "Return completed evidence for the redaction variants.",
+    });
+    const variantAttemptId = harness.startAttempt({
+      taskId: variantTaskId,
+      input: {
+        sessionName: "direct-hook-redaction-variants",
+        executor: "codex-resumable",
+        codexSessionId: "hook_redaction_variant_session",
+        cwd: dir,
+      },
+    });
+    await resumeCodexResumableAttempt({
+      harness,
+      attemptId: variantAttemptId,
+      cwd: dir,
+      stopHooksByRole: {
+        worker: [async () => {
+          throw new Error(
+            "ordinary diagnostic context with token budget API key: api-space-secret-5 token token-space-secret-6 remains useful",
+          );
+        }],
+      },
+      clientFactory,
+    });
+    const variantAttempt = harness.getAttempt(variantAttemptId)!;
+    const persistedVariantFailure = JSON.stringify({ output: variantAttempt.output, error: variantAttempt.error });
+    expect(persistedVariantFailure).toContain("ordinary diagnostic context");
+    expect(persistedVariantFailure).toContain("token budget");
+    expect(persistedVariantFailure).toContain("remains useful");
+    expect(persistedVariantFailure).toContain("[REDACTED]");
+    expect(persistedVariantFailure).not.toContain("api-space-secret-5");
+    expect(persistedVariantFailure).not.toContain("token-space-secret-6");
+  });
+
+  test("direct codex resume applies goal review post-attempt effects without stop hooks", async () => {
+    const runId = harness.createRun({ goal: "Complete after direct goal review resume" });
+    const taskId = harness.createTask({
+      runId,
+      role: "goal-review",
+      goal: "Review the resumed run",
+      prompt: "Complete the run when all work is verified.",
+    });
+    const attemptId = harness.startAttempt({
+      taskId,
+      input: {
+        sessionName: "direct-goal-review",
+        executor: "codex-resumable",
+        codexSessionId: "goal_review_session",
+        cwd: dir,
+      },
+    });
+
+    const result = await resumeCodexResumableAttempt({
+      harness,
+      attemptId,
+      cwd: dir,
+      clientFactory: () => ({
+        start: async () => {
+          throw new Error("start should not be called");
+        },
+        resume: async ({ sessionId }) => ({
+          status: "done" as const,
+          sessionId,
+          outputPath: join(dir, "goal-review-output.json"),
+          stdout: "",
+          stderr: "",
+          events: [],
+          output: {
+            status: "done" as const,
+            summary: "Goal is complete",
+            changedFiles: [],
+            checks: [{ name: "goal review", status: "passed" }],
+            artifacts: [],
+            problems: [],
+            runDecision: "complete" as const,
+          },
+        }),
+      }),
+    });
+
+    expect(result.status).toBe("done");
+    expect(harness.getAttempt(attemptId)?.status).toBe("done");
+    expect(harness.getRun(runId)?.status).toBe("done");
+    expect(harness.getRunOverview({ runId, eventLimit: 0 }).tasks).toHaveLength(1);
+  });
+
+  test("direct codex resume honors retry decisions from role stop hooks", async () => {
+    const runId = harness.createRun({ goal: "Retry direct resume" });
+    const taskId = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Retry resumed work",
+      prompt: "Return retryable evidence.",
+    });
+    const attemptId = harness.startAttempt({
+      taskId,
+      input: {
+        sessionName: "direct-retry",
+        executor: "codex-resumable",
+        codexSessionId: "retry_session",
+        cwd: dir,
+      },
+    });
+
+    const result = await resumeCodexResumableAttempt({
+      harness,
+      attemptId,
+      cwd: dir,
+      stopHooksByRole: {
+        worker: [() => ({ decision: "retry", problems: ["retry with the same frozen contract"] })],
+      },
+      clientFactory: () => ({
+        start: async () => {
+          throw new Error("start should not be called");
+        },
+        resume: async ({ sessionId }) => ({
+          status: "done" as const,
+          sessionId,
+          outputPath: join(dir, "retry-output.json"),
+          stdout: "",
+          stderr: "",
+          events: [],
+          output: {
+            status: "done" as const,
+            summary: "Needs one bounded retry",
+            changedFiles: [],
+            checks: [],
+            artifacts: [],
+            problems: [],
+          },
+        }),
+      }),
+    });
+
+    expect(result.status).toBe("blocked");
+    expect(harness.getAttempt(attemptId)?.status).toBe("blocked");
+    expect(harness.getTask(taskId)?.status).toBe("todo");
+    expect(harness.getAttempt(attemptId)?.output.problems).toContain("retry with the same frozen contract");
   });
 
   test("runner-owned loop preserves fresh generic running attempts without Codex session ids", async () => {
