@@ -950,6 +950,97 @@ describe("Harness actions", () => {
     expect(headAfterSecond).toBe(headAfterFirst);
   });
 
+  test("integration readiness uses the latest verifier for a worker", () => {
+    const runId = harness.createRun({ goal: "Use current verifier evidence" });
+    const workerTaskId = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Implement current delivery",
+      prompt: "Change src/current.ts.",
+      worktreePath: join(dir, "worker-current-verifier"),
+    });
+    harness.recordAttempt({
+      taskId: workerTaskId,
+      input: { executor: "test" },
+      output: {
+        status: "done",
+        summary: "Changed current delivery",
+        changedFiles: ["src/current.ts"],
+        checks: [{ name: "worker", status: "passed" }],
+        artifacts: [],
+        problems: [],
+      },
+    });
+    const firstVerifierId = harness.createTask({
+      runId,
+      role: "verifier",
+      goal: "First verification",
+      prompt: "Verify once.",
+      dependsOn: [workerTaskId],
+    });
+    harness.recordAttempt({
+      taskId: firstVerifierId,
+      input: { executor: "test" },
+      output: {
+        status: "done",
+        summary: "First verification passed",
+        changedFiles: [],
+        checks: [{ name: "verify", status: "passed" }],
+        artifacts: [],
+        problems: [],
+      },
+    });
+    const blockedVerifierId = harness.createTask({
+      runId,
+      role: "verifier",
+      goal: "Current blocked verification",
+      prompt: "Verify again.",
+      dependsOn: [workerTaskId],
+    });
+    harness.recordAttempt({
+      taskId: blockedVerifierId,
+      input: { executor: "test" },
+      output: {
+        status: "blocked",
+        summary: "Current verification failed",
+        changedFiles: [],
+        checks: [{ name: "verify", status: "failed" }],
+        artifacts: [],
+        problems: ["current verification failed"],
+      },
+    });
+
+    expect(describeIntegrationReadiness(harness, runId).unintegrated).toHaveLength(0);
+
+    const latestVerifierId = harness.createTask({
+      runId,
+      role: "verifier",
+      goal: "Latest successful verification",
+      prompt: "Verify after repair.",
+      dependsOn: [workerTaskId],
+    });
+    harness.recordAttempt({
+      taskId: latestVerifierId,
+      input: { executor: "test" },
+      output: {
+        status: "done",
+        summary: "Latest verification passed",
+        changedFiles: [],
+        checks: [{ name: "verify", status: "passed" }],
+        artifacts: [],
+        problems: [],
+      },
+    });
+
+    expect(describeIntegrationReadiness(harness, runId).unintegrated).toEqual([
+      expect.objectContaining({
+        taskId: workerTaskId,
+        verifierTaskId: latestVerifierId,
+        changedFiles: ["src/current.ts"],
+      }),
+    ]);
+  });
+
   describe("same-branch contained worker commit bookkeeping", () => {
     async function createScenario(input: {
       artifactFactory?: (commits: { workerCommit: string; unrelatedCommit: string }) => unknown[];

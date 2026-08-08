@@ -6300,6 +6300,72 @@ describe("runner", () => {
     });
   });
 
+  test("goal-review cannot create another verifier after the repair budget is exhausted", async () => {
+    const runId = harness.createRun({
+      goal: "Stop bounded verification",
+      context: {
+        repairReplanBudget: {
+          limit: 3,
+          used: 3,
+          entries: [],
+        },
+      },
+    });
+    const taskId = harness.createTask({
+      runId,
+      role: "goal-review",
+      goal: "Review exhausted delivery",
+      prompt: "Do not create work beyond the frozen repair budget.",
+    });
+
+    const result = await runNextReadyTask({
+      harness,
+      runId,
+      stopHooksByRole: {
+        "goal-review": [
+          createGoalReviewDecisionHook({ harness }),
+          createTasksFromOutputHook({ harness }),
+        ],
+      },
+      executor: async () => ({
+        status: "done",
+        runDecision: "verify",
+        summary: "Run one more verification pass.",
+        changedFiles: [],
+        checks: [],
+        artifacts: [],
+        problems: [],
+        nextTasks: [
+          {
+            role: "verifier",
+            goal: "Repeat verification",
+            prompt: "Run the same frozen checks again.",
+          },
+        ],
+      }),
+    });
+    const attempt = harness.getAttempt(result!.attemptId)!;
+    const overview = harness.getRunOverview({ runId, eventLimit: 0 });
+
+    expect(result?.taskId).toBe(taskId);
+    expect(attempt.output).toMatchObject({
+      status: "blocked",
+      runDecision: "verify",
+      artifacts: expect.arrayContaining([
+        expect.objectContaining({
+          kind: "repair_budget_exhausted",
+          used: 3,
+          limit: 3,
+        }),
+      ]),
+      problems: expect.arrayContaining([
+        "goal-review cannot create verify work after repair budget exhausted at 3/3",
+      ]),
+    });
+    expect(overview.tasks.filter((task) => task.role === "verifier")).toHaveLength(0);
+    expect(harness.nextReadyTask(runId)).toBeNull();
+  });
+
   test("goal-review refresh hook surfaces repeated lesson guardrail proposals without auto-accepting", async () => {
     const lessonSummary = "Refresh hook must promote repeated blocked lessons during goal-review drain";
     const runId = harness.createRun({
