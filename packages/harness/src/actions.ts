@@ -3539,6 +3539,28 @@ function prepareRunDrain(harness: Harness, action: Extract<HarnessAction, { type
     ], [{ kind: "run", runId: action.runId, status: "done" }]);
   }
 
+  const initialOverview = harness.getRunOverview({ runId: action.runId, eventLimit: 0 });
+  const initialActive = initialOverview.tasks.some((task) => task.status === "todo" || task.status === "running");
+  const initialGoalReviewInvalidated = initialOverview.run?.context.goalReviewInvalidatedByIntegration === true;
+  const initialReviewSessions = currentGoalReviewSessions(initialOverview, initialGoalReviewInvalidated);
+  const initialLatestReview = initialReviewSessions[initialReviewSessions.length - 1];
+  const initialCompletedReview = initialGoalReviewInvalidated ? null : selectCompletedGoalReview(initialOverview);
+  const initialNonTerminalReviews = initialReviewSessions.filter((session) => {
+    const decision = resolveRunDecision(session.output);
+    return decision === "continue" || decision === "verify";
+  });
+  if (
+    !initialActive &&
+    !initialCompletedReview &&
+    resolveRunDecision(initialLatestReview?.output ?? {}) !== "defer" &&
+    initialNonTerminalReviews.length >= maxTries
+  ) {
+    return {
+      ...goalReviewContinueLimitResult(harness, action.runId, initialNonTerminalReviews.length, maxTries),
+      actionType: action.type,
+    };
+  }
+
   const reclaimed = harness.reclaimRunningTasksWithoutAttempts({ runId: action.runId });
   harness.clearRunPause(action.runId);
   harness.updateRunStatus({ runId: action.runId, status: "todo" });
@@ -3841,19 +3863,7 @@ function ensureGoalReviewTask(
   overview: ReturnType<Harness["getRunOverview"]>,
   goalReviewInvalidated = false,
 ) {
-  const invalidatedTaskIds = invalidatedGoalReviewTaskIds(overview);
-  const latestProgressIndex = overview.sessions.reduce((latest, session, index) => {
-    return session.role !== "goal-review" && session.role !== "verifier" && session.status === "done" ? index : latest;
-  }, -1);
-  const currentReviewSessions = goalReviewInvalidated
-    ? []
-    : overview.sessions.filter(
-      (session, index) =>
-        index > latestProgressIndex &&
-        session.role === "goal-review" &&
-        session.status === "done" &&
-        !invalidatedTaskIds.has(session.taskId),
-    );
+  const currentReviewSessions = currentGoalReviewSessions(overview, goalReviewInvalidated);
 
   const latestReview = currentReviewSessions[currentReviewSessions.length - 1];
   if (latestReview && resolveRunDecision(latestReview.output) === "defer") {
@@ -3872,16 +3882,10 @@ function ensureGoalReviewTask(
     return decision === "continue" || decision === "verify";
   });
   if (nonTerminalReviews.length >= maxTries) {
-    harness.updateRunStatus({ runId, status: "blocked" });
-    return {
-      status: "blocked" as const,
-      summary: `Run ${runId} reached ${nonTerminalReviews.length}/${maxTries} non-terminal goal-review decisions.`,
-      checks: [{ name: "goal review continue limit", status: "failed" as const, evidence: `${nonTerminalReviews.length}/${maxTries}` }],
-      artifacts: [{ kind: "goal_review", tries: nonTerminalReviews.length, maxTries, status: "blocked" }],
-      problems: [`goal-review continue/verify limit reached for ${runId}`],
-    };
+    return goalReviewContinueLimitResult(harness, runId, nonTerminalReviews.length, maxTries);
   }
 
+  const invalidatedTaskIds = invalidatedGoalReviewTaskIds(overview);
   const blockedReview = goalReviewInvalidated
     ? undefined
     : [...overview.tasks].reverse().find(
@@ -3947,6 +3951,39 @@ function ensureGoalReviewTask(
     checks: [{ name: "goal review created", status: "passed" as const, evidence: created.taskId }],
     artifacts: [goalReviewCreatedArtifact(created)],
     problems: [],
+  };
+}
+
+function currentGoalReviewSessions(
+  overview: ReturnType<Harness["getRunOverview"]>,
+  goalReviewInvalidated: boolean,
+) {
+  if (goalReviewInvalidated) {
+    return [];
+  }
+  const invalidatedTaskIds = invalidatedGoalReviewTaskIds(overview);
+  const latestProgressIndex = overview.sessions.reduce((latest, session, index) => {
+    return session.role !== "goal-review" && session.role !== "verifier" && session.status === "done" ? index : latest;
+  }, -1);
+  return overview.sessions.filter(
+    (session, index) =>
+      index > latestProgressIndex &&
+      session.role === "goal-review" &&
+      session.status === "done" &&
+      !invalidatedTaskIds.has(session.taskId),
+  );
+}
+
+function goalReviewContinueLimitResult(harness: Harness, runId: string, tries: number, maxTries: number) {
+  if (harness.getRun(runId)?.status !== "blocked") {
+    harness.updateRunStatus({ runId, status: "blocked" });
+  }
+  return {
+    status: "blocked" as const,
+    summary: `Run ${runId} reached ${tries}/${maxTries} non-terminal goal-review decisions.`,
+    checks: [{ name: "goal review continue limit", status: "failed" as const, evidence: `${tries}/${maxTries}` }],
+    artifacts: [{ kind: "goal_review", tries, maxTries, status: "blocked" }],
+    problems: [`goal-review continue/verify limit reached for ${runId}`],
   };
 }
 

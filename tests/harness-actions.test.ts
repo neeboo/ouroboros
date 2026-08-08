@@ -595,6 +595,54 @@ describe("Harness actions", () => {
     expect(harness.getRunOverview({ runId }).tasks.filter((task) => task.role === "goal-review").map((task) => task.id)).toEqual(reviewTaskIds);
   });
 
+  test("prepareRunDrain keeps an exhausted drained run terminal without refreshing it", () => {
+    const runId = harness.createRun({ goal: "Keep an exhausted run terminal" });
+    for (let index = 0; index < 3; index += 1) {
+      const taskId = harness.createTask({
+        runId,
+        role: "goal-review",
+        goal: `Non-terminal review ${index + 1}`,
+        prompt: "Continue without creating active work.",
+      });
+      harness.recordAttempt({
+        taskId,
+        input: { executor: "test" },
+        output: {
+          status: "done",
+          runDecision: "continue",
+          summary: "Continue",
+          changedFiles: [],
+          checks: [],
+          artifacts: [],
+          problems: [],
+        },
+      });
+    }
+    harness.updateRunStatus({ runId, status: "blocked" });
+    withDatabase(harness.dbPath, (db) => {
+      db.query("update runs set updated_at = '2000-01-01 00:00:00' where id = $runId").run({ $runId: runId });
+    });
+
+    const first = applyHarnessAction(harness, { type: "prepareRunDrain", runId, maxTries: 1 });
+    const second = applyHarnessAction(harness, { type: "prepareRunDrain", runId, maxTries: 1 });
+    const overview = harness.getRunOverview({ runId });
+    const terminalUpdatedAt = withDatabase(harness.dbPath, (db) =>
+      (db.query("select updated_at as updatedAt from runs where id = $runId").get({ $runId: runId }) as { updatedAt: string }).updatedAt,
+    );
+
+    expect(first).toMatchObject({
+      status: "blocked",
+      summary: expect.stringContaining("3/1 non-terminal goal-review decisions"),
+    });
+    expect(second).toMatchObject({
+      status: "blocked",
+      summary: expect.stringContaining("3/1 non-terminal goal-review decisions"),
+    });
+    expect(overview.run?.status).toBe("blocked");
+    expect(terminalUpdatedAt).toBe("2000-01-01 00:00:00");
+    expect(overview.tasks.some((task) => task.status === "todo" || task.status === "running")).toBe(false);
+  });
+
   test("prepares a drained run by blocking todo tasks whose dependencies are blocked", () => {
     const runId = harness.createRun({ goal: "Drain impossible dependency chain" });
     const workerTaskId = harness.createTask({

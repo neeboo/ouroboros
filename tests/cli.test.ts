@@ -8376,6 +8376,160 @@ describe("CLI", () => {
     });
   });
 
+  test("self-improve-daemon does not reopen a drained run whose matching recovery is terminal", async () => {
+    const bootstrap = await runCliJson("self-iterate");
+    const setupHarness = new Harness(dbPath);
+    setupHarness.recordAttempt({
+      taskId: bootstrap.taskId,
+      input: {},
+      output: {
+        status: "done",
+        summary: "Initial assessment drained",
+        changedFiles: [],
+        checks: [{ name: "assessment", status: "passed" }],
+        artifacts: [],
+        problems: [],
+      },
+    });
+    setupHarness.updateRunStatus({ runId: bootstrap.runId, status: "done" });
+    const blockedRunId = setupHarness.createRun({
+      goal: "A terminal recovery must become durable evidence",
+      context: { parentRunId: bootstrap.runId, source: "design" },
+    });
+    const blockedTaskId = setupHarness.createTask({
+      runId: blockedRunId,
+      role: "worker",
+      goal: "Original blocked work",
+      prompt: "Preserve the blocker.",
+    });
+    const blockedAttemptId = setupHarness.recordAttempt({
+      taskId: blockedTaskId,
+      input: {},
+      output: {
+        status: "blocked",
+        summary: "Original bounded attempt failed",
+        changedFiles: [],
+        checks: [{ name: "bounded attempt", status: "failed" }],
+        artifacts: [],
+        problems: ["bounded attempt failed"],
+      },
+    });
+    const recoveryTaskId = setupHarness.createTask({
+      runId: blockedRunId,
+      parentId: blockedTaskId,
+      role: "worker",
+      goal: "One bounded recovery",
+      prompt: "Record the recovery result.",
+      config: {
+        automaticRecovery: {
+          sourceTaskId: blockedTaskId,
+          sourceAttemptId: blockedAttemptId,
+          generation: 1,
+        },
+      },
+    });
+    setupHarness.recordAttempt({
+      taskId: recoveryTaskId,
+      input: {},
+      output: {
+        status: "done",
+        summary: "Recovery completed without reopening the original task",
+        changedFiles: [],
+        checks: [{ name: "recovery", status: "passed" }],
+        artifacts: [],
+        problems: [],
+      },
+    });
+    for (let index = 0; index < 3; index += 1) {
+      const reviewTaskId = setupHarness.createTask({
+        runId: blockedRunId,
+        role: "goal-review",
+        goal: `Non-terminal review ${index + 1}`,
+        prompt: "Continue without new active work.",
+      });
+      setupHarness.recordAttempt({
+        taskId: reviewTaskId,
+        input: {},
+        output: {
+          status: "done",
+          runDecision: "continue",
+          summary: "Continue",
+          changedFiles: [],
+          checks: [],
+          artifacts: [],
+          problems: [],
+        },
+      });
+    }
+    setupHarness.updateRunStatus({ runId: blockedRunId, status: "blocked" });
+    const database = new Database(dbPath);
+    database.query("update runs set updated_at = '2000-01-01 00:00:00' where id = $runId").run({ $runId: blockedRunId });
+    database.close();
+
+    const codexBin = join(dir, "fake-codex-terminal-recovery-assessment");
+    const payload = {
+      status: "done",
+      summary: "Terminal recovery evidence was assessed once.",
+      changedFiles: [],
+      checks: [{ name: "assessment", status: "passed" }],
+      artifacts: [],
+      problems: [],
+    };
+    await writeFile(
+      codexBin,
+      [
+        "#!/usr/bin/env bun",
+        "import { writeFileSync } from 'node:fs';",
+        "const outputFlag = Bun.argv.indexOf('--output-last-message');",
+        "const outputPath = outputFlag >= 0 ? Bun.argv[outputFlag + 1] : '';",
+        `const payload = ${JSON.stringify(payload)};`,
+        "if (outputPath) writeFileSync(outputPath, JSON.stringify(payload));",
+        "console.log(JSON.stringify({ type: 'session.started', session_id: 'session_terminal_recovery_assessment' }));",
+        "console.log(JSON.stringify({ type: 'agent.message', message: JSON.stringify(payload) }));",
+      ].join("\n"),
+    );
+    await chmod(codexBin, 0o755);
+
+    const result = await runCliJson(
+      "self-improve-daemon",
+      "--executor",
+      "codex-resumable",
+      "--root-run-id",
+      bootstrap.runId,
+      "--codex-bin",
+      codexBin,
+      "--parallel",
+      "auto",
+      "--max-ticks",
+      "2",
+      "--tick-cycles",
+      "1",
+      "--max-rounds",
+      "1",
+      "--stop-hook",
+      "create-tasks",
+      "--no-integrate",
+      "true",
+      "--interval-ms",
+      "1",
+      "--idle-ms",
+      "1",
+    );
+    const overview = await runCliJson("run-overview", "--run-id", blockedRunId);
+    const terminalDatabase = new Database(dbPath, { readonly: true });
+    const terminalUpdatedAt = (terminalDatabase
+      .query("select updated_at as updatedAt from runs where id = $runId")
+      .get({ $runId: blockedRunId }) as { updatedAt: string }).updatedAt;
+    terminalDatabase.close();
+
+    expect(result.ticks).toHaveLength(2);
+    expect(result.ticks.every((tick: { recovery?: unknown }) => tick.recovery === undefined)).toBe(true);
+    expect(overview.run.status).toBe("blocked");
+    expect(terminalUpdatedAt).toBe("2000-01-01 00:00:00");
+    expect(overview.tasks.some((task: { status: string }) => task.status === "todo" || task.status === "running")).toBe(false);
+    expect(overview.tasks).toContainEqual(expect.objectContaining({ id: recoveryTaskId, status: "done" }));
+  });
+
   test("self-improve-daemon switches worker backend after an executor-level block", async () => {
     const bootstrap = await runCliJson("self-iterate");
     const setupHarness = new Harness(dbPath);
