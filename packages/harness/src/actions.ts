@@ -71,6 +71,17 @@ export type HarnessAction =
       reason?: string;
     }
   | {
+      type: "commitExactGitIndex";
+      contractId: string;
+      runId: string;
+      taskId: string;
+      repoPath: string;
+      branch: string;
+      expectedParentSha: string;
+      commitMessage: string;
+      files: ExactGitIndexFile[];
+    }
+  | {
       type: "interruptAttemptAndCreateTask";
       attemptId: string;
       reason: string;
@@ -245,6 +256,17 @@ interface GitCommandResult {
 
 type GitRunner = (input: GitCommandInput) => GitCommandResult;
 
+interface ExactGitIndexFile {
+  status: "A";
+  path: string;
+  mode: "100644";
+  blobOid: string;
+}
+
+const EXACT_GIT_INDEX_MAX_FILES = 256;
+const EXACT_GIT_INDEX_MAX_PATH_BYTES = 1024;
+const EXACT_GIT_INDEX_MAX_COMMIT_MESSAGE_BYTES = 4096;
+
 // Bump when integration preflight semantics change so a previously converged
 // blocked action is re-evaluated under the new contract.
 const INTEGRATION_CONTRACT_VERSION = 2;
@@ -333,6 +355,30 @@ export function parseHarnessAction(value: unknown): HarnessAction {
       reason: optionalStringField(record, "reason"),
     };
   }
+  if (type === "commitExactGitIndex") {
+    assertOnlyFields(record, type, [
+      "type",
+      "contractId",
+      "runId",
+      "taskId",
+      "repoPath",
+      "branch",
+      "expectedParentSha",
+      "commitMessage",
+      "files",
+    ]);
+    return {
+      type,
+      contractId: exactSafeIdentifierField(record, "contractId"),
+      runId: exactNonEmptyStringField(record, "runId"),
+      taskId: exactNonEmptyStringField(record, "taskId"),
+      repoPath: exactAbsolutePathField(record, "repoPath"),
+      branch: exactGitBranchField(record, "branch"),
+      expectedParentSha: exactGitCommitShaField(record, "expectedParentSha"),
+      commitMessage: exactCommitMessageField(record, "commitMessage"),
+      files: exactGitIndexFilesField(record, "files"),
+    };
+  }
   if (type === "interruptAttemptAndCreateTask") {
     return {
       type,
@@ -399,7 +445,7 @@ export function parseHarnessAction(value: unknown): HarnessAction {
     };
   }
   throw new Error(
-    "harness action type must be reclaimRunningTasks, retryTask, markRunTodo, updateRunContext, amendRunContract, retireRun, prepareRunDrain, completeSystemTask, integrateVerifiedRun, pushExactGitRef, interruptAttemptAndCreateTask, interruptRunningAttemptsAndCreateTask, acceptGuardrailProposal, startSubsession, collectSubsessions, or cancelSubsessions",
+    "harness action type must be reclaimRunningTasks, retryTask, markRunTodo, updateRunContext, amendRunContract, retireRun, prepareRunDrain, completeSystemTask, integrateVerifiedRun, pushExactGitRef, commitExactGitIndex, interruptAttemptAndCreateTask, interruptRunningAttemptsAndCreateTask, acceptGuardrailProposal, startSubsession, collectSubsessions, or cancelSubsessions",
   );
 }
 
@@ -631,6 +677,10 @@ function applyParsedHarnessAction(harness: Harness, action: Exclude<HarnessActio
 
   if (action.type === "pushExactGitRef") {
     return pushExactGitRef(harness, action, options);
+  }
+
+  if (action.type === "commitExactGitIndex") {
+    return commitExactGitIndex(harness, action, options);
   }
 
   if (action.type === "interruptAttemptAndCreateTask") {
@@ -1489,7 +1539,7 @@ function integrateVerifiedRun(
       status: "passed",
       evidence: `${worker.id} -> ${redirectedFromRepair.sourceWorkerId} (${worktreePath})`,
     });
-    worker = { ...worker, id: redirectedFromRepair.sourceWorkerId, worktreePath };
+    worker = { ...worker, worktreePath };
   }
 
   const targetBranch = action.targetBranch ?? "main";
@@ -1639,6 +1689,7 @@ function integrateVerifiedRun(
       return doneResult(action.type, `Verified task ${worker.id} is already integrated into ${targetBranch}.`, checks, [
         {
           kind: "integration",
+          mode: "branch_merge",
           runId: action.runId,
           workerTaskId: worker.id,
           verifierTaskId: verifier.id,
@@ -1695,6 +1746,7 @@ function integrateVerifiedRun(
   return doneResult(action.type, `Integrated verified task ${worker.id} into ${targetBranch}.`, checks, [
     {
       kind: "integration",
+      mode: "branch_merge",
       runId: action.runId,
       workerTaskId: worker.id,
       verifierTaskId: verifier.id,
@@ -1946,6 +1998,582 @@ function integrateMaterializedTargetChanges(input: {
       reason: input.action.reason ?? null,
     },
   ]);
+}
+
+type ExactGitIndexCommitAction = Extract<HarnessAction, { type: "commitExactGitIndex" }>;
+
+type ExactGitIndexCommitStatus =
+  | "committed"
+  | "reused"
+  | "response_loss_recovered"
+  | "scope_mismatch"
+  | "task_invalid"
+  | "verification_invalid"
+  | "repo_invalid"
+  | "index_mismatch"
+  | "commit_failed"
+  | "cas_failed"
+  | "readback_mismatch";
+
+function commitExactGitIndex(
+  harness: Harness,
+  action: ExactGitIndexCommitAction,
+  options: HarnessActionOptions,
+): HarnessActionResult {
+  const checks: HarnessActionResult["checks"] = [];
+  const run = harness.getRun(action.runId);
+  if (!run) {
+    return failedGitIndexCommit(action, "scope_mismatch", `Run not found: ${action.runId}`, checks);
+  }
+  checks.push({ name: "run exists", status: "passed", evidence: action.runId });
+
+  const frozen = frozenGitIndexCommitContract(run.context, action.contractId);
+  if (!frozen || !sameGitIndexCommitContract(frozen, action)) {
+    return failedGitIndexCommit(
+      action,
+      "scope_mismatch",
+      `Git index commit request does not match frozen contract ${action.contractId}.`,
+      checks,
+    );
+  }
+  checks.push({ name: "frozen contract", status: "passed", evidence: action.contractId });
+
+  const task = harness.getTask(action.taskId);
+  if (
+    !task ||
+    task.runId !== action.runId ||
+    task.status !== "done" ||
+    ["planner", "verifier", "goal-review"].includes(task.role)
+  ) {
+    return failedGitIndexCommit(
+      action,
+      "task_invalid",
+      `Task ${action.taskId} is not a completed execution task in run ${action.runId}.`,
+      checks,
+    );
+  }
+  checks.push({ name: "execution task", status: "passed", evidence: action.taskId });
+
+  const overview = harness.getRunOverview({ runId: action.runId, eventLimit: 0 });
+  const attempt = latestSessionForTask(overview, action.taskId);
+  const contractPaths = action.files.map((file) => file.path);
+  const changedFiles = Array.isArray(attempt?.output.changedFiles) ? attempt.output.changedFiles : [];
+  if (!attempt || !sameUniqueStrings(changedFiles, contractPaths)) {
+    return failedGitIndexCommit(
+      action,
+      "task_invalid",
+      `Task ${action.taskId} done attempt changedFiles do not exactly match the frozen files.`,
+      checks,
+    );
+  }
+  checks.push({ name: "worker changedFiles", status: "passed", evidence: contractPaths.join(",") });
+
+  const verifierEvidence = exactCommitVerifierEvidence(overview, action.taskId);
+  if (!verifierEvidence.ok) {
+    return failedGitIndexCommit(
+      action,
+      "verification_invalid",
+      `Task ${action.taskId} dependency verifier evidence is incomplete or failed: ${verifierEvidence.reason}.`,
+      checks,
+    );
+  }
+  checks.push({
+    name: "all verifier evidence",
+    status: "passed",
+    evidence: verifierEvidence.verifiers.map((verifier) => verifier.id).join(","),
+  });
+
+  if (!existsSync(action.repoPath)) {
+    return failedGitIndexCommit(action, "repo_invalid", "Repository path does not exist.", checks);
+  }
+  const taskWorktreePath = task.worktreePath
+    ? resolveWorktreePath(action.repoPath, task.worktreePath)
+    : null;
+  if (!taskWorktreePath || !existsSync(taskWorktreePath)) {
+    return failedGitIndexCommit(action, "task_invalid", `Task ${action.taskId} has no existing worktree.`, checks);
+  }
+  try {
+    if (realpathSync(taskWorktreePath) !== realpathSync(action.repoPath)) {
+      return failedGitIndexCommit(
+        action,
+        "task_invalid",
+        `Task ${action.taskId} worktree does not match the frozen repository path.`,
+        checks,
+      );
+    }
+  } catch {
+    return failedGitIndexCommit(action, "task_invalid", `Task ${action.taskId} worktree could not be resolved.`, checks);
+  }
+  checks.push({ name: "task worktree", status: "passed", evidence: action.repoPath });
+  const git = options.runGit ?? defaultGitRunner;
+  const topLevel = safeGitStep(git, action.repoPath, ["rev-parse", "--show-toplevel"]);
+  if (!topLevel.ok) {
+    return failedGitIndexCommit(action, "repo_invalid", "Could not read the repository top-level.", checks, topLevel);
+  }
+  let requestedTopLevel: string;
+  let actualTopLevel: string;
+  try {
+    requestedTopLevel = realpathSync(action.repoPath);
+    actualTopLevel = realpathSync(topLevel.stdout.trim());
+  } catch {
+    return failedGitIndexCommit(action, "repo_invalid", "Could not resolve the repository top-level.", checks);
+  }
+  if (requestedTopLevel !== actualTopLevel) {
+    return failedGitIndexCommit(action, "repo_invalid", "repoPath must be the exact repository top-level.", checks);
+  }
+  checks.push({ name: "repository top-level", status: "passed", evidence: action.repoPath });
+
+  const branch = safeGitStep(git, action.repoPath, ["branch", "--show-current"]);
+  if (!branch.ok || branch.stdout.trim() !== action.branch) {
+    return failedGitIndexCommit(action, "repo_invalid", `Repository is not on frozen branch ${action.branch}.`, checks, branch);
+  }
+  checks.push({ name: "branch", status: "passed", evidence: action.branch });
+
+  const mergeHead = safeGitStep(git, action.repoPath, ["rev-parse", "--verify", "-q", "MERGE_HEAD"]);
+  if (mergeHead.ok) {
+    return failedGitIndexCommit(action, "repo_invalid", "Repository has an unfinished merge (MERGE_HEAD).", checks);
+  }
+  if (mergeHead.exitCode !== 1) {
+    return failedGitIndexCommit(action, "repo_invalid", "Could not verify MERGE_HEAD absence.", checks, mergeHead);
+  }
+  checks.push({ name: "no MERGE_HEAD", status: "passed", evidence: "absent" });
+
+  const initialWorktreeState = exactGitWorktreeState(git, action.repoPath);
+  if (!initialWorktreeState.ok) {
+    return failedGitIndexCommit(
+      action,
+      "repo_invalid",
+      initialWorktreeState.summary,
+      checks,
+      initialWorktreeState.result,
+    );
+  }
+  checks.push({ name: "worktree state", status: "passed", evidence: "no unstaged, untracked, or conflicted files" });
+
+  const head = safeGitStep(git, action.repoPath, ["rev-parse", "HEAD"]);
+  if (!head.ok || !/^[0-9a-f]{40}$/.test(head.stdout.trim())) {
+    return failedGitIndexCommit(action, "repo_invalid", "Could not read repository HEAD.", checks, head);
+  }
+  const observedHead = head.stdout.trim();
+  if (observedHead !== action.expectedParentSha) {
+    const reusedTree = safeGitStep(git, action.repoPath, ["write-tree"]);
+    if (!reusedTree.ok || !/^[0-9a-f]{40}$/.test(reusedTree.stdout.trim())) {
+      return failedGitIndexCommit(action, "readback_mismatch", "Could not read the existing index tree.", checks, reusedTree);
+    }
+    const reusedReadback = verifyExactGitIndexCommit(git, action, observedHead, reusedTree.stdout.trim());
+    if (!reusedReadback.ok) {
+      return failedGitIndexCommit(
+        action,
+        "repo_invalid",
+        `Repository HEAD does not equal expectedParentSha ${action.expectedParentSha}.`,
+        checks,
+        reusedReadback.result,
+      );
+    }
+    checks.push(...reusedReadback.checks);
+    return verifiedGitIndexCommit(
+      action,
+      verifierEvidence.verifiers.map((verifier) => verifier.id),
+      observedHead,
+      reusedTree.stdout.trim(),
+      "reused",
+      checks,
+    );
+  }
+  checks.push({ name: "expected parent", status: "passed", evidence: action.expectedParentSha });
+
+  const staged = safeGitStep(git, action.repoPath, [
+    "diff",
+    "--cached",
+    "--name-status",
+    "-z",
+    "--diff-filter=ACDMRTUXB",
+    action.expectedParentSha,
+    "--",
+  ]);
+  if (!staged.ok) {
+    return failedGitIndexCommit(action, "repo_invalid", "Could not inspect the staged index delta.", checks, staged);
+  }
+  const stagedFiles = parseNameStatusZ(staged.stdout);
+  if (!stagedFiles || !sameExactIndexFileSet(stagedFiles, action.files)) {
+    return failedGitIndexCommit(action, "index_mismatch", "Staged paths and statuses do not match the frozen additions.", checks);
+  }
+
+  for (const file of action.files) {
+    const entry = safeGitStep(git, action.repoPath, ["ls-files", "--stage", "-z", "--", file.path]);
+    if (!entry.ok || !sameExactIndexEntry(entry.stdout, file)) {
+      return failedGitIndexCommit(
+        action,
+        "index_mismatch",
+        `Staged mode or blob does not match the frozen addition ${file.path}.`,
+        checks,
+        entry,
+      );
+    }
+    const blob = safeGitStep(git, action.repoPath, ["cat-file", "-e", `${file.blobOid}^{blob}`]);
+    if (!blob.ok) {
+      return failedGitIndexCommit(
+        action,
+        "index_mismatch",
+        `Frozen blob OID is not a local blob for ${file.path}.`,
+        checks,
+        blob,
+      );
+    }
+  }
+  checks.push({ name: "exact staged index", status: "passed", evidence: contractPaths.join(",") });
+
+  const tree = safeGitStep(git, action.repoPath, ["write-tree"]);
+  if (!tree.ok || !/^[0-9a-f]{40}$/.test(tree.stdout.trim())) {
+    return failedGitIndexCommit(action, "commit_failed", "Could not write the exact index tree.", checks, tree);
+  }
+  const treeOid = tree.stdout.trim();
+  const exactTree = verifyExactGitIndexTree(git, action, treeOid);
+  if (!exactTree.ok) {
+    return failedGitIndexCommit(
+      action,
+      "index_mismatch",
+      "Written index tree does not exactly match the frozen additions.",
+      checks,
+      exactTree.result,
+    );
+  }
+  checks.push(...exactTree.checks);
+  const commit = safeGitStep(git, action.repoPath, [
+    "-c",
+    "commit.gpgSign=false",
+    "commit-tree",
+    treeOid,
+    "-p",
+    action.expectedParentSha,
+    "-m",
+    action.commitMessage,
+  ]);
+  const commitSha = commit.stdout.trim();
+  if (!commit.ok || !/^[0-9a-f]{40}$/.test(commitSha)) {
+    return failedGitIndexCommit(action, "commit_failed", "Could not create the exact unsigned commit object.", checks, commit);
+  }
+  checks.push({ name: "commit object", status: "passed", evidence: commitSha });
+
+  const lateIndexTree = safeGitStep(git, action.repoPath, ["write-tree"]);
+  if (!lateIndexTree.ok || lateIndexTree.stdout.trim() !== treeOid) {
+    return failedGitIndexCommit(
+      action,
+      "index_mismatch",
+      "Repository index tree changed after commit creation; branch was not updated.",
+      checks,
+      lateIndexTree,
+    );
+  }
+  const lateWorktreeState = exactGitWorktreeState(git, action.repoPath);
+  if (!lateWorktreeState.ok) {
+    return failedGitIndexCommit(
+      action,
+      "repo_invalid",
+      `Repository state changed after commit creation; branch was not updated. ${lateWorktreeState.summary}`,
+      checks,
+      lateWorktreeState.result,
+    );
+  }
+  checks.push({ name: "pre-CAS index and worktree", status: "passed", evidence: treeOid });
+
+  const update = safeGitStep(git, action.repoPath, [
+    "update-ref",
+    `refs/heads/${action.branch}`,
+    commitSha,
+    action.expectedParentSha,
+  ]);
+  const headAfter = safeGitStep(git, action.repoPath, ["rev-parse", "HEAD"]);
+  if (!headAfter.ok || headAfter.stdout.trim() !== commitSha) {
+    return failedGitIndexCommit(
+      action,
+      update.ok ? "readback_mismatch" : "cas_failed",
+      update.ok ? "CAS update returned success but HEAD readback mismatched." : "CAS update failed.",
+      checks,
+      update.ok ? headAfter : update,
+    );
+  }
+
+  const readback = verifyExactGitIndexCommit(git, action, commitSha, treeOid);
+  if (!readback.ok) {
+    return failedGitIndexCommit(action, "readback_mismatch", "Independent commit readback failed.", checks, readback.result);
+  }
+  checks.push(...readback.checks);
+  return verifiedGitIndexCommit(
+    action,
+    verifierEvidence.verifiers.map((verifier) => verifier.id),
+    commitSha,
+    treeOid,
+    update.ok ? "committed" : "response_loss_recovered",
+    checks,
+  );
+}
+
+function frozenGitIndexCommitContract(context: Record<string, unknown>, contractId: string) {
+  const contracts = context.gitIndexCommitContracts;
+  if (!contracts || typeof contracts !== "object" || Array.isArray(contracts)) {
+    return null;
+  }
+  const value = (contracts as Record<string, unknown>)[contractId];
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
+
+function sameGitIndexCommitContract(frozen: Record<string, unknown>, action: ExactGitIndexCommitAction) {
+  const fields = ["branch", "commitMessage", "expectedParentSha", "files", "repoPath", "runId", "taskId"];
+  if (Object.keys(frozen).sort().join("\0") !== fields.join("\0")) {
+    return false;
+  }
+  return frozen.runId === action.runId &&
+    frozen.taskId === action.taskId &&
+    frozen.repoPath === action.repoPath &&
+    frozen.branch === action.branch &&
+    frozen.expectedParentSha === action.expectedParentSha &&
+    frozen.commitMessage === action.commitMessage &&
+    JSON.stringify(frozen.files) === JSON.stringify(action.files);
+}
+
+function sameUniqueStrings(actual: unknown[], expected: string[]) {
+  if (actual.some((value) => typeof value !== "string")) {
+    return false;
+  }
+  const strings = actual as string[];
+  return strings.length === new Set(strings).size &&
+    strings.length === expected.length &&
+    [...strings].sort().join("\0") === [...expected].sort().join("\0");
+}
+
+function exactCommitVerifierEvidence(
+  overview: RunOverview,
+  workerTaskId: string,
+): { ok: true; verifiers: Task[] } | { ok: false; reason: string } {
+  const verifiers = overview.tasks.filter((task) =>
+    task.role === "verifier" && task.dependsOn.includes(workerTaskId)
+  );
+  if (verifiers.length === 0) {
+    return { ok: false, reason: "no dependency verifier exists" };
+  }
+  for (const verifier of verifiers) {
+    if (verifier.status !== "done") {
+      return { ok: false, reason: `verifier ${verifier.id} task status is ${verifier.status}` };
+    }
+    const latestAttempt = [...overview.sessions].reverse().find((session) => session.taskId === verifier.id);
+    if (!latestAttempt || latestAttempt.status !== "done" || latestAttempt.output.status !== "done") {
+      return { ok: false, reason: `verifier ${verifier.id} latest attempt is not done` };
+    }
+    const checks = Array.isArray(latestAttempt.output.checks) ? latestAttempt.output.checks : [];
+    if (checks.some(isFailedCheck)) {
+      return { ok: false, reason: `verifier ${verifier.id} has failed checks` };
+    }
+  }
+  return { ok: true, verifiers };
+}
+
+function parseNameStatusZ(value: string) {
+  const fields = value.split("\0");
+  if (fields[fields.length - 1] === "") {
+    fields.pop();
+  }
+  if (fields.length % 2 !== 0) {
+    return null;
+  }
+  const entries: Array<{ status: string; path: string }> = [];
+  for (let index = 0; index < fields.length; index += 2) {
+    entries.push({ status: fields[index]!, path: fields[index + 1]! });
+  }
+  return entries;
+}
+
+function sameExactIndexFileSet(actual: Array<{ status: string; path: string }>, expected: ExactGitIndexFile[]) {
+  return actual.length === expected.length && expected.every((file) =>
+    actual.some((entry) => entry.status === file.status && entry.path === file.path)
+  );
+}
+
+function sameExactIndexEntry(value: string, file: ExactGitIndexFile) {
+  const match = value.match(/^([0-9]{6}) ([0-9a-f]{40}) ([0-3])\t([^\0]+)\0$/);
+  return Boolean(
+    match &&
+    match[1] === file.mode &&
+    match[2] === file.blobOid &&
+    match[3] === "0" &&
+    match[4] === file.path,
+  );
+}
+
+function exactGitWorktreeState(
+  git: GitRunner,
+  repoPath: string,
+):
+  | { ok: true }
+  | { ok: false; summary: string; result: ReturnType<typeof safeGitStep> } {
+  const unstaged = safeGitStep(git, repoPath, ["diff", "--name-only", "-z"]);
+  if (!unstaged.ok || unstaged.stdout.length > 0) {
+    return { ok: false, summary: "Repository has unstaged changes.", result: unstaged };
+  }
+  const untracked = safeGitStep(git, repoPath, ["ls-files", "--others", "--exclude-standard", "-z"]);
+  if (!untracked.ok || untracked.stdout.length > 0) {
+    return { ok: false, summary: "Repository has untracked files.", result: untracked };
+  }
+  const conflicts = safeGitStep(git, repoPath, ["ls-files", "--unmerged", "-z"]);
+  if (!conflicts.ok || conflicts.stdout.length > 0) {
+    return { ok: false, summary: "Repository index contains conflicts.", result: conflicts };
+  }
+  return { ok: true };
+}
+
+function verifyExactGitIndexTree(
+  git: GitRunner,
+  action: ExactGitIndexCommitAction,
+  treeOid: string,
+): { ok: true; checks: HarnessActionResult["checks"] } | { ok: false; result?: ReturnType<typeof safeGitStep> } {
+  const changed = safeGitStep(git, action.repoPath, [
+    "diff-tree",
+    "--no-commit-id",
+    "--name-status",
+    "-r",
+    "-z",
+    action.expectedParentSha,
+    treeOid,
+    "--",
+  ]);
+  const changedFiles = changed.ok ? parseNameStatusZ(changed.stdout) : null;
+  if (!changed.ok || !changedFiles || !sameExactIndexFileSet(changedFiles, action.files)) {
+    return { ok: false, result: changed };
+  }
+  for (const file of action.files) {
+    const entry = safeGitStep(git, action.repoPath, ["ls-tree", "-z", treeOid, "--", file.path]);
+    const match = entry.stdout.match(/^([0-9]{6}) blob ([0-9a-f]{40})\t([^\0]+)\0$/);
+    if (!entry.ok || !match || match[1] !== file.mode || match[2] !== file.blobOid || match[3] !== file.path) {
+      return { ok: false, result: entry };
+    }
+  }
+  return {
+    ok: true,
+    checks: [{
+      name: "exact tree readback",
+      status: "passed",
+      evidence: `${treeOid}:${action.files.map((file) => file.path).join(",")}`,
+    }],
+  };
+}
+
+function verifyExactGitIndexCommit(
+  git: GitRunner,
+  action: ExactGitIndexCommitAction,
+  commitSha: string,
+  expectedTree: string,
+): { ok: true; checks: HarnessActionResult["checks"] } | { ok: false; result?: ReturnType<typeof safeGitStep> } {
+  const commit = safeGitStep(git, action.repoPath, ["cat-file", "-p", commitSha]);
+  if (!commit.ok) {
+    return { ok: false, result: commit };
+  }
+  const separator = commit.stdout.indexOf("\n\n");
+  if (separator < 0) {
+    return { ok: false, result: { ...commit, ok: false, exitCode: 1, stderr: "commit readback has no message separator" } };
+  }
+  const headers = commit.stdout.slice(0, separator).split("\n");
+  const storedMessage = commit.stdout.slice(separator + 2);
+  const treeHeaders = headers.filter((line) => line.startsWith("tree "));
+  const parentHeaders = headers.filter((line) => line.startsWith("parent "));
+  const hasSignature = headers.some((line) => line.startsWith("gpgsig "));
+  if (
+    treeHeaders.length !== 1 || treeHeaders[0] !== `tree ${expectedTree}` ||
+    parentHeaders.length !== 1 || parentHeaders[0] !== `parent ${action.expectedParentSha}` ||
+    hasSignature ||
+    storedMessage !== `${action.commitMessage}\n`
+  ) {
+    return { ok: false, result: { ...commit, ok: false, exitCode: 1, stdout: "", stderr: "commit parent tree message or signature readback mismatch" } };
+  }
+
+  const exactTree = verifyExactGitIndexTree(git, action, expectedTree);
+  if (!exactTree.ok) {
+    return exactTree;
+  }
+  const clean = safeGitStep(git, action.repoPath, ["status", "--porcelain=v1", "-z"]);
+  if (!clean.ok || clean.stdout.length > 0) {
+    return { ok: false, result: clean };
+  }
+  return {
+    ok: true,
+    checks: [
+      { name: "independent commit readback", status: "passed", evidence: commitSha },
+      { name: "parent tree message signature", status: "passed", evidence: "exact unsigned commit" },
+      ...exactTree.checks,
+      { name: "worktree clean", status: "passed", evidence: "clean" },
+    ],
+  };
+}
+
+function verifiedGitIndexCommit(
+  action: ExactGitIndexCommitAction,
+  verifierTaskIds: string[],
+  sha: string,
+  tree: string,
+  status: Extract<ExactGitIndexCommitStatus, "committed" | "reused" | "response_loss_recovered">,
+  checks: HarnessActionResult["checks"],
+) {
+  const verifierTaskId = verifierTaskIds[verifierTaskIds.length - 1]!;
+  return doneResult(action.type, `Exact Git index commit verified on ${action.branch}.`, checks, [
+    {
+      kind: "git_commit",
+      status,
+      runId: action.runId,
+      taskId: action.taskId,
+      contractId: action.contractId,
+      repoPath: action.repoPath,
+      branch: action.branch,
+      sha,
+      parentSha: action.expectedParentSha,
+      tree,
+      files: action.files,
+      signed: false,
+      verifiedBy: "independent_readback",
+    },
+    {
+      kind: "integration",
+      mode: "exact_git_index_commit",
+      runId: action.runId,
+      workerTaskId: action.taskId,
+      verifierTaskId,
+      verifierTaskIds,
+      repoPath: action.repoPath,
+      targetBranch: action.branch,
+      mergeCommit: sha,
+      changedFiles: action.files.map((file) => file.path),
+      alreadyMerged: true,
+      pushed: false,
+    },
+  ]);
+}
+
+function failedGitIndexCommit(
+  action: ExactGitIndexCommitAction,
+  status: Exclude<ExactGitIndexCommitStatus, "committed" | "reused" | "response_loss_recovered">,
+  summary: string,
+  checks: HarnessActionResult["checks"],
+  result?: ReturnType<typeof safeGitStep>,
+): HarnessActionResult {
+  const error = sanitizeGitRemoteText(result?.stderr.trim() || summary);
+  return {
+    status: "blocked",
+    actionType: action.type,
+    summary,
+    checks: [...checks, { name: "exact Git index commit", status: "failed", evidence: status }],
+    artifacts: [{
+      kind: "git_index_commit",
+      outcome: "failed",
+      status,
+      runId: action.runId,
+      taskId: action.taskId,
+      contractId: action.contractId,
+      repoPath: action.repoPath,
+      branch: action.branch,
+      error,
+    }],
+    problems: [error],
+  };
 }
 
 type ExactGitRemoteWriteAction = Extract<HarnessAction, { type: "pushExactGitRef" }>;
@@ -3185,33 +3813,36 @@ export function describeIntegrationReadiness(harness: Harness, runId: string): I
 function collectIntegratedWorkerTaskIds(harness: Harness, runId: string): Set<string> {
   const ids = new Set<string>();
   for (const event of harness.listHarnessActionEvents({ limit: 500 })) {
-    if (event.actionType !== "integrateVerifiedRun" || event.status !== "done") {
+    if (
+      (event.actionType !== "integrateVerifiedRun" && event.actionType !== "commitExactGitIndex") ||
+      event.status !== "done"
+    ) {
       continue;
     }
     const request = event.request as Record<string, unknown>;
-    if (request.runId !== runId || typeof request.workerTaskId !== "string") {
+    const requestedWorkerTaskId = event.actionType === "commitExactGitIndex" ? request.taskId : request.workerTaskId;
+    if (request.runId !== runId || typeof requestedWorkerTaskId !== "string") {
       continue;
     }
     const result = event.result as Record<string, unknown>;
     const artifacts = Array.isArray(result.artifacts) ? result.artifacts : [];
-    const integratedIds = artifacts.flatMap((artifact) => {
-      if (!artifact || typeof artifact !== "object") {
-        return [];
+    const hasMatchingReceipt = artifacts.some((artifact) => {
+      if (!artifact || typeof artifact !== "object" || Array.isArray(artifact)) {
+        return false;
       }
       const record = artifact as Record<string, unknown>;
-      if (record.kind !== "integration" || typeof record.workerTaskId !== "string") {
-        return [];
-      }
-      return [record.workerTaskId];
+      const modeMatches = event.actionType === "commitExactGitIndex"
+        ? record.mode === "exact_git_index_commit"
+        : record.mode === "branch_merge" ||
+          record.mode === "contained_worker_commit" ||
+          record.mode === "materialized_target_commit";
+      return record.kind === "integration" &&
+        modeMatches &&
+        record.runId === runId &&
+        record.workerTaskId === requestedWorkerTaskId;
     });
-    if (integratedIds.length > 0) {
-      ids.add(request.workerTaskId);
-    }
-    for (const id of integratedIds) {
-      ids.add(id);
-    }
-    if (integratedIds.length === 0) {
-      ids.add(request.workerTaskId);
+    if (hasMatchingReceipt) {
+      ids.add(requestedWorkerTaskId);
     }
   }
   return ids;
@@ -3509,6 +4140,116 @@ function safeIdentifierField(record: Record<string, unknown>, key: string) {
   const value = stringField(record, key);
   if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$/.test(value)) {
     throw new Error(`${key} must be a safe identifier of at most 200 characters`);
+  }
+  return value;
+}
+
+function exactNonEmptyStringField(record: Record<string, unknown>, key: string) {
+  const value = record[key];
+  if (typeof value !== "string" || value.length === 0 || value.trim() !== value || value.includes("\0")) {
+    throw new Error(`${key} must be an exact non-empty string without surrounding whitespace or NUL`);
+  }
+  return value;
+}
+
+function exactSafeIdentifierField(record: Record<string, unknown>, key: string) {
+  const value = exactNonEmptyStringField(record, key);
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$/.test(value)) {
+    throw new Error(`${key} must be a safe identifier of at most 200 characters`);
+  }
+  return value;
+}
+
+function exactAbsolutePathField(record: Record<string, unknown>, key: string) {
+  const value = exactNonEmptyStringField(record, key);
+  if (!isAbsolute(value)) {
+    throw new Error(`${key} must be an absolute path`);
+  }
+  return value;
+}
+
+function exactGitBranchField(record: Record<string, unknown>, key: string) {
+  const value = exactNonEmptyStringField(record, key);
+  if (!isExactGitBranchRef(`refs/heads/${value}`)) {
+    throw new Error(`${key} must be one exact branch name without wildcard or ref expressions`);
+  }
+  return value;
+}
+
+function exactGitCommitShaField(record: Record<string, unknown>, key: string) {
+  const value = exactNonEmptyStringField(record, key);
+  if (!/^[0-9a-f]{40}$/.test(value) || /^0+$/.test(value)) {
+    throw new Error(`${key} must be a non-zero lowercase full 40-character commit SHA`);
+  }
+  return value;
+}
+
+function exactCommitMessageField(record: Record<string, unknown>, key: string) {
+  const value = record[key];
+  if (
+    typeof value !== "string" ||
+    value.length === 0 ||
+    value.includes("\0") ||
+    value.includes("\r") ||
+    value.includes("\n") ||
+    value.trim() !== value ||
+    new TextEncoder().encode(value).byteLength > EXACT_GIT_INDEX_MAX_COMMIT_MESSAGE_BYTES
+  ) {
+    throw new Error(`${key} must be one exact non-empty trimmed line of at most ${EXACT_GIT_INDEX_MAX_COMMIT_MESSAGE_BYTES} UTF-8 bytes without NUL`);
+  }
+  return value;
+}
+
+function exactGitIndexFilesField(record: Record<string, unknown>, key: string): ExactGitIndexFile[] {
+  const value = record[key];
+  if (!Array.isArray(value) || value.length === 0 || value.length > EXACT_GIT_INDEX_MAX_FILES) {
+    throw new Error(`${key} must contain 1-${EXACT_GIT_INDEX_MAX_FILES} exact Git index additions`);
+  }
+  const seen = new Set<string>();
+  return value.map((item, index) => {
+    const file = objectRecord(item, `${key}[${index}]`);
+    assertOnlyFields(file, `${key}[${index}]`, ["status", "path", "mode", "blobOid"]);
+    if (file.status !== "A") {
+      throw new Error(`${key}[${index}].status must be A`);
+    }
+    if (file.mode !== "100644") {
+      throw new Error(`${key}[${index}].mode must be 100644`);
+    }
+    const path = exactRelativeGitPathField(file, "path", `${key}[${index}].path`);
+    if (seen.has(path)) {
+      throw new Error(`${key} must contain unique paths; duplicate: ${path}`);
+    }
+    seen.add(path);
+    return {
+      status: "A",
+      path,
+      mode: "100644",
+      blobOid: exactGitBlobOidField(file, "blobOid", `${key}[${index}].blobOid`),
+    };
+  });
+}
+
+function exactRelativeGitPathField(record: Record<string, unknown>, key: string, label: string) {
+  const value = record[key];
+  if (
+    typeof value !== "string" ||
+    value.length === 0 ||
+    value.trim() !== value ||
+    isAbsolute(value) ||
+    value.includes("\\") ||
+    /[\x00-\x1f\x7f]/.test(value) ||
+    new TextEncoder().encode(value).byteLength > EXACT_GIT_INDEX_MAX_PATH_BYTES ||
+    value.split("/").some((segment) => segment.length === 0 || segment === "." || segment === "..")
+  ) {
+    throw new Error(`${label} must be an exact safe relative Git path of at most ${EXACT_GIT_INDEX_MAX_PATH_BYTES} UTF-8 bytes`);
+  }
+  return value;
+}
+
+function exactGitBlobOidField(record: Record<string, unknown>, key: string, label: string) {
+  const value = record[key];
+  if (typeof value !== "string" || !/^[0-9a-f]{40}$/.test(value) || /^0+$/.test(value)) {
+    throw new Error(`${label} must be a non-zero lowercase full 40-character blob OID`);
   }
   return value;
 }

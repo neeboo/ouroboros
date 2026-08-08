@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { writeFileSync } from "node:fs";
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
@@ -194,7 +195,7 @@ describe("Harness actions", () => {
       request: { type: "integrateVerifiedRun", runId, workerTaskId },
       result: {
         status: "done",
-        artifacts: [{ kind: "integration", workerTaskId, mergeCommit: "abc123" }],
+        artifacts: [{ kind: "integration", mode: "branch_merge", runId, workerTaskId, mergeCommit: "abc123" }],
       },
     });
 
@@ -781,6 +782,7 @@ describe("Harness actions", () => {
     const mergedFile = await readFile(join(repoPath, "src", "app.ts"), "utf8");
     const log = git(repoPath, ["log", "--oneline", "-1"]).stdout;
     const event = harness.listHarnessActionEvents({ limit: 1 })[0];
+    const readiness = describeIntegrationReadiness(harness, runId);
 
     expect(result).toMatchObject({
       status: "done",
@@ -790,6 +792,8 @@ describe("Harness actions", () => {
     expect(result.artifacts).toContainEqual(
       expect.objectContaining({
         kind: "integration",
+        mode: "branch_merge",
+        runId,
         workerTaskId,
         verifierTaskId,
         goalReviewTaskId,
@@ -800,6 +804,8 @@ describe("Harness actions", () => {
     );
     expect(mergedFile.trim()).toBe("export const value = 1;");
     expect(log).toContain("Integrate verified worker");
+    expect(readiness.unintegrated).toHaveLength(0);
+    expect(readiness.integratedWorkerTaskIds.has(workerTaskId)).toBe(true);
     expect(event).toMatchObject({
       actionType: "integrateVerifiedRun",
       status: "done",
@@ -1683,7 +1689,9 @@ describe("Harness actions", () => {
     expect(result.artifacts).toContainEqual(
       expect.objectContaining({
         kind: "integration",
-        workerTaskId: sourceWorkerTaskId,
+        mode: "branch_merge",
+        runId,
+        workerTaskId: repairWorkerTaskId,
         verifierTaskId: repairVerifierTaskId,
         worktreePath: sourceWorktreePath,
         sourceBranch: "task-source-worker",
@@ -1692,7 +1700,7 @@ describe("Harness actions", () => {
     );
     expect(integratedFile?.trim()).toBe("export const fixed = true;");
     expect(readinessAfter.unintegrated).toHaveLength(0);
-    expect(readinessAfter.integratedWorkerTaskIds.has(sourceWorkerTaskId)).toBe(true);
+    expect(readinessAfter.integratedWorkerTaskIds.has(repairWorkerTaskId)).toBe(true);
     expect(event).toMatchObject({
       actionType: "integrateVerifiedRun",
       status: "done",
@@ -1981,6 +1989,609 @@ describe("Harness actions", () => {
     const readinessAfter = describeIntegrationReadiness(harness, runId);
     expect(readinessAfter.unintegrated).toHaveLength(0);
     expect(readinessAfter.integratedWorkerTaskIds.has(workerTaskId)).toBe(true);
+  });
+
+  describe("commitExactGitIndex", () => {
+    async function createScenario(input: {
+      changedFiles?: string[];
+      verifierFailed?: boolean;
+      worktreeMode?: "missing" | "foreign";
+    } = {}) {
+      const repoPath = join(dir, `repo-exact-index-${crypto.randomUUID()}`);
+      await mkdir(join(repoPath, "src"), { recursive: true });
+      await writeFile(join(repoPath, "README.md"), "initial\n");
+      git(repoPath, ["init", "-b", "main"]);
+      git(repoPath, ["config", "user.name", "Ouroboros Test"]);
+      git(repoPath, ["config", "user.email", "test@example.com"]);
+      git(repoPath, ["add", "README.md"]);
+      git(repoPath, ["commit", "-m", "Initial commit"]);
+      const expectedParentSha = git(repoPath, ["rev-parse", "HEAD"]).stdout.trim();
+
+      const failingSigner = join(dir, "failing-gpg");
+      await writeFile(failingSigner, "#!/bin/sh\nexit 93\n");
+      await chmod(failingSigner, 0o755);
+      git(repoPath, ["config", "commit.gpgSign", "true"]);
+      git(repoPath, ["config", "gpg.program", failingSigner]);
+      await mkdir(join(repoPath, ".git", "hooks"), { recursive: true });
+      const failingHook = join(repoPath, ".git", "hooks", "pre-commit");
+      await writeFile(failingHook, "#!/bin/sh\nexit 94\n");
+      await chmod(failingHook, 0o755);
+
+      await writeFile(join(repoPath, "src", "new.ts"), "export const value = 1;\n");
+      git(repoPath, ["add", "src/new.ts"]);
+      const blobOid = git(repoPath, ["hash-object", "src/new.ts"]).stdout.trim();
+      const commitMessage = "Commit exact verified index";
+      const branch = "main";
+      const files = [{ status: "A", path: "src/new.ts", mode: "100644", blobOid }];
+      const runId = harness.createRun({ goal: "Commit one exact staged index", projectRoot: repoPath });
+      let worktreePath: string | null = repoPath;
+      if (input.worktreeMode === "missing") {
+        worktreePath = null;
+      } else if (input.worktreeMode === "foreign") {
+        worktreePath = join(dir, `foreign-exact-index-${crypto.randomUUID()}`);
+        await mkdir(worktreePath, { recursive: true });
+        await writeFile(join(worktreePath, "README.md"), "foreign\n");
+        git(worktreePath, ["init", "-b", "main"]);
+        git(worktreePath, ["config", "user.name", "Ouroboros Test"]);
+        git(worktreePath, ["config", "user.email", "test@example.com"]);
+        git(worktreePath, ["add", "README.md"]);
+        git(worktreePath, ["commit", "-m", "Foreign initial commit"]);
+      }
+      const taskId = harness.createTask({
+        runId,
+        role: "worker",
+        goal: "Add src/new.ts",
+        prompt: "Add the frozen file.",
+        worktreePath,
+      });
+      harness.recordAttempt({
+        taskId,
+        input: { executor: "test" },
+        output: {
+          status: "done",
+          summary: "Staged the frozen file",
+          changedFiles: input.changedFiles ?? ["src/new.ts"],
+          checks: [{ name: "worker", status: "passed" }],
+          artifacts: [],
+          problems: [],
+        },
+      });
+      const verifierTaskId = harness.createTask({
+        runId,
+        role: "verifier",
+        goal: "Verify src/new.ts",
+        prompt: "Verify the frozen file.",
+        dependsOn: [taskId],
+      });
+      harness.recordAttempt({
+        taskId: verifierTaskId,
+        input: { executor: "test" },
+        output: {
+          status: "done",
+          summary: input.verifierFailed ? "Verifier rejected the frozen file" : "Verified the frozen file",
+          changedFiles: [],
+          checks: [{ name: "verify", status: input.verifierFailed ? "failed" : "passed" }],
+          artifacts: [],
+          problems: input.verifierFailed ? ["verification failed"] : [],
+        },
+      });
+      const action = {
+        type: "commitExactGitIndex",
+        contractId: "exactIndex",
+        runId,
+        taskId,
+        repoPath,
+        branch,
+        expectedParentSha,
+        commitMessage,
+        files,
+      };
+      const freeze = (nextAction: Record<string, unknown> = action) => {
+        const contract = Object.fromEntries([
+          "runId",
+          "taskId",
+          "repoPath",
+          "branch",
+          "expectedParentSha",
+          "commitMessage",
+          "files",
+        ].map((key) => [key, nextAction[key]]));
+        harness.updateRun({
+          runId,
+          contextPatch: { gitIndexCommitContracts: { exactIndex: contract } },
+        });
+      };
+      freeze();
+      return {
+        action,
+        blobOid,
+        branch,
+        commitMessage,
+        expectedParentSha,
+        files,
+        freeze,
+        repoPath,
+        runId,
+        taskId,
+        verifierTaskId,
+      };
+    }
+
+    function realGitRunner(input: { cwd: string; args: string[] }) {
+      const result = Bun.spawnSync({
+        cmd: ["git", ...input.args],
+        cwd: input.cwd,
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      return {
+        exitCode: result.exitCode,
+        stdout: new TextDecoder().decode(result.stdout),
+        stderr: new TextDecoder().decode(result.stderr),
+      };
+    }
+
+    test("commits the frozen staged additions without hooks or configured signing", async () => {
+      const scenario = await createScenario();
+      const result = applyHarnessAction(harness, scenario.action);
+
+      expect(result).toMatchObject({ status: "done", actionType: "commitExactGitIndex" });
+      expect(result.artifacts).toContainEqual(expect.objectContaining({
+        kind: "git_commit",
+        status: "committed",
+        branch: scenario.branch,
+        parentSha: scenario.expectedParentSha,
+      }));
+      expect(result.artifacts).toContainEqual(expect.objectContaining({
+        kind: "integration",
+        mode: "exact_git_index_commit",
+        alreadyMerged: true,
+        workerTaskId: scenario.taskId,
+        verifierTaskId: scenario.verifierTaskId,
+      }));
+      expect(git(scenario.repoPath, ["status", "--short"]).stdout).toBe("");
+      expect(git(scenario.repoPath, ["show", "--format=%G?", "--no-patch", "HEAD"]).stdout.trim()).toBe("N");
+      expect(describeIntegrationReadiness(harness, scenario.runId).unintegrated).toHaveLength(0);
+      const drain = applyHarnessAction(harness, { type: "prepareRunDrain", runId: scenario.runId });
+      expect(drain).toMatchObject({ status: "done", actionType: "prepareRunDrain" });
+      expect(drain.artifacts).not.toContainEqual(expect.objectContaining({ kind: "pending_integration" }));
+    });
+
+    test("reuses a commit already created from the exact frozen index", async () => {
+      const scenario = await createScenario();
+      const first = applyHarnessAction(harness, scenario.action);
+      const firstHead = git(scenario.repoPath, ["rev-parse", "HEAD"]).stdout.trim();
+      const second = applyHarnessAction(harness, scenario.action);
+
+      expect(first).toMatchObject({ status: "done", actionType: "commitExactGitIndex" });
+      expect(second).toMatchObject({ status: "done", actionType: "commitExactGitIndex" });
+      expect(second.artifacts).toContainEqual(expect.objectContaining({
+        kind: "git_commit",
+        status: "reused",
+        sha: firstHead,
+      }));
+      expect(git(scenario.repoPath, ["rev-parse", "HEAD"]).stdout.trim()).toBe(firstHead);
+    });
+
+    test("recovers a lost update-ref response from independent readback", async () => {
+      const scenario = await createScenario();
+      const calls: string[][] = [];
+      const runGit = (input: { cwd: string; args: string[] }) => {
+        calls.push(input.args);
+        const result = realGitRunner(input);
+        if (input.args[0] === "update-ref") {
+          return {
+            exitCode: 1,
+            stdout: "",
+            stderr: "fatal: https://oauth2:github_pat_exact_secret@example.com/repo.git Authorization: Bearer exact-bearer",
+          };
+        }
+        return result;
+      };
+
+      const result = applyHarnessAction(harness, scenario.action, { runGit });
+      const serialized = JSON.stringify(result);
+
+      expect(calls.some((args) => args[0] === "update-ref")).toBe(true);
+      expect(result).toMatchObject({ status: "done", actionType: "commitExactGitIndex" });
+      expect(result.artifacts).toContainEqual(expect.objectContaining({
+        kind: "git_commit",
+        status: "response_loss_recovered",
+      }));
+      expect(serialized).not.toContain("github_pat_exact_secret");
+      expect(serialized).not.toContain("exact-bearer");
+    });
+
+    test("blocks when any dependency verifier failed is blocked or is still pending", async () => {
+      const mixedFailure = await createScenario();
+      const failedVerifierId = harness.createTask({
+        runId: mixedFailure.runId,
+        role: "verifier",
+        goal: "Reject the same worker",
+        prompt: "Report a failed check.",
+        dependsOn: [mixedFailure.taskId],
+      });
+      harness.recordAttempt({
+        taskId: failedVerifierId,
+        input: { executor: "test" },
+        output: {
+          status: "done",
+          summary: "Rejected",
+          changedFiles: [],
+          checks: [{ name: "verify second opinion", status: "failed" }],
+          artifacts: [],
+          problems: ["verification failed"],
+        },
+      });
+
+      const blocked = await createScenario();
+      const blockedVerifierId = harness.createTask({
+        runId: blocked.runId,
+        role: "verifier",
+        goal: "Blocked verifier",
+        prompt: "Cannot complete verification.",
+        dependsOn: [blocked.taskId],
+      });
+      harness.recordAttempt({
+        taskId: blockedVerifierId,
+        input: { executor: "test" },
+        output: {
+          status: "blocked",
+          summary: "Blocked",
+          changedFiles: [],
+          checks: [],
+          artifacts: [],
+          problems: ["blocked verifier"],
+        },
+      });
+
+      const pending = await createScenario();
+      harness.createTask({
+        runId: pending.runId,
+        role: "verifier",
+        goal: "Pending verifier",
+        prompt: "Still waiting.",
+        dependsOn: [pending.taskId],
+      });
+
+      for (const scenario of [mixedFailure, blocked, pending]) {
+        const result = applyHarnessAction(harness, scenario.action);
+        expect(result).toMatchObject({ status: "blocked", actionType: "commitExactGitIndex" });
+        expect(result.problems.join(" ")).toContain("verifier");
+        expect(result.artifacts).not.toContainEqual(expect.objectContaining({ kind: "integration" }));
+        expect(git(scenario.repoPath, ["rev-parse", "HEAD"]).stdout.trim()).toBe(scenario.expectedParentSha);
+      }
+    }, 15_000);
+
+    test("blocks an index change injected after staged validation before creating or updating a commit", async () => {
+      const scenario = await createScenario();
+      let polluted = false;
+      const calls: string[][] = [];
+      const runGit = (input: { cwd: string; args: string[] }) => {
+        calls.push(input.args);
+        if (!polluted && input.args.join(" ") === "write-tree") {
+          polluted = true;
+          writeFileSync(join(scenario.repoPath, "evil.ts"), "export const evil = true;\n");
+          realGitRunner({ cwd: scenario.repoPath, args: ["add", "evil.ts"] });
+        }
+        return realGitRunner(input);
+      };
+
+      const result = applyHarnessAction(harness, scenario.action, { runGit });
+
+      expect(polluted).toBe(true);
+      expect(result).toMatchObject({ status: "blocked", actionType: "commitExactGitIndex" });
+      expect(result.artifacts).not.toContainEqual(expect.objectContaining({ kind: "integration" }));
+      expect(calls.some((args) => args.includes("commit-tree"))).toBe(false);
+      expect(calls.some((args) => args[0] === "update-ref")).toBe(false);
+      expect(git(scenario.repoPath, ["rev-parse", "HEAD"]).stdout.trim()).toBe(scenario.expectedParentSha);
+      expect(git(scenario.repoPath, ["log", "--format=%s", "-1"]).stdout.trim()).toBe("Initial commit");
+    });
+
+    test("blocks an index change injected after commit-tree before updating the branch", async () => {
+      const scenario = await createScenario();
+      let polluted = false;
+      const calls: string[][] = [];
+      const runGit = (input: { cwd: string; args: string[] }) => {
+        calls.push(input.args);
+        const result = realGitRunner(input);
+        if (!polluted && input.args.includes("commit-tree")) {
+          polluted = true;
+          writeFileSync(join(scenario.repoPath, "late-evil.ts"), "export const lateEvil = true;\n");
+          realGitRunner({ cwd: scenario.repoPath, args: ["add", "late-evil.ts"] });
+        }
+        return result;
+      };
+
+      const result = applyHarnessAction(harness, scenario.action, { runGit });
+
+      expect(polluted).toBe(true);
+      expect(result).toMatchObject({ status: "blocked", actionType: "commitExactGitIndex" });
+      expect(result.artifacts).not.toContainEqual(expect.objectContaining({ kind: "integration" }));
+      expect(calls.some((args) => args[0] === "update-ref")).toBe(false);
+      expect(git(scenario.repoPath, ["rev-parse", "HEAD"]).stdout.trim()).toBe(scenario.expectedParentSha);
+      expect(git(scenario.repoPath, ["log", "--format=%s", "-1"]).stdout.trim()).toBe("Initial commit");
+    });
+
+    test("requires an exact matching integration receipt before clearing worker readiness", () => {
+      const readinessFor = (
+        artifactsFor: (runId: string, workerTaskId: string) => Array<Record<string, unknown>>,
+      ) => {
+        const runId = harness.createRun({ goal: "Validate exact integration receipt" });
+        const workerTaskId = harness.createTask({
+          runId,
+          role: "worker",
+          goal: "Produce verified change",
+          prompt: "Produce one file.",
+          worktreePath: "/tmp/exact-receipt-worker",
+        });
+        harness.recordAttempt({
+          taskId: workerTaskId,
+          input: { executor: "test" },
+          output: {
+            status: "done",
+            summary: "Produced one file",
+            changedFiles: ["src/new.ts"],
+            checks: [{ name: "worker", status: "passed" }],
+            artifacts: [],
+            problems: [],
+          },
+        });
+        const verifierTaskId = harness.createTask({
+          runId,
+          role: "verifier",
+          goal: "Verify change",
+          prompt: "Verify one file.",
+          dependsOn: [workerTaskId],
+        });
+        harness.recordAttempt({
+          taskId: verifierTaskId,
+          input: { executor: "test" },
+          output: {
+            status: "done",
+            summary: "Verified",
+            changedFiles: [],
+            checks: [{ name: "verify", status: "passed" }],
+            artifacts: [],
+            problems: [],
+          },
+        });
+        harness.recordHarnessActionEvent({
+          actionType: "commitExactGitIndex",
+          status: "done",
+          request: { type: "commitExactGitIndex", runId, taskId: workerTaskId },
+          result: { status: "done", artifacts: artifactsFor(runId, workerTaskId) },
+        });
+        return { runId, workerTaskId };
+      };
+
+      const empty = readinessFor(() => []);
+      const wrongWorker = readinessFor((runId) => [
+        { kind: "integration", mode: "exact_git_index_commit", runId, workerTaskId: "task_other" },
+      ]);
+      const wrongRun = readinessFor((_runId, workerTaskId) => [
+        { kind: "integration", mode: "exact_git_index_commit", runId: "run_other", workerTaskId },
+      ]);
+      const wrongMode = readinessFor((runId, workerTaskId) => [
+        { kind: "integration", mode: "contained_worker_commit", runId, workerTaskId },
+      ]);
+      const valid = readinessFor((runId, workerTaskId) => [
+        { kind: "integration", mode: "exact_git_index_commit", runId, workerTaskId },
+      ]);
+
+      expect(describeIntegrationReadiness(harness, empty.runId).unintegrated).toHaveLength(1);
+      expect(describeIntegrationReadiness(harness, wrongWorker.runId).unintegrated).toHaveLength(1);
+      expect(describeIntegrationReadiness(harness, wrongRun.runId).unintegrated).toHaveLength(1);
+      expect(describeIntegrationReadiness(harness, wrongMode.runId).unintegrated).toHaveLength(1);
+      expect(describeIntegrationReadiness(harness, valid.runId).unintegrated).toHaveLength(0);
+    });
+
+    test("rejects frozen contract and action scope mismatches before Git mutation", async () => {
+      const scenario = await createScenario();
+      const cases: Array<(scenario: Awaited<ReturnType<typeof createScenario>>) => Record<string, unknown>> = [
+        (scenario) => ({ ...scenario.action, repoPath: join(scenario.repoPath, "src") }),
+        (scenario) => ({ ...scenario.action, branch: "release" }),
+        (scenario) => ({ ...scenario.action, expectedParentSha: "1111111111111111111111111111111111111111" }),
+        (scenario) => ({ ...scenario.action, commitMessage: "Different message" }),
+        (scenario) => ({ ...scenario.action, files: [{ ...scenario.files[0], path: "src/different.ts" }] }),
+        (scenario) => ({ ...scenario.action, files: [{ ...scenario.files[0], blobOid: "2222222222222222222222222222222222222222" }] }),
+      ];
+      for (const change of cases) {
+        const headBefore = git(scenario.repoPath, ["rev-parse", "HEAD"]).stdout.trim();
+        const result = applyHarnessAction(harness, change(scenario));
+        expect(result).toMatchObject({ status: "blocked", actionType: "commitExactGitIndex" });
+        expect(git(scenario.repoPath, ["rev-parse", "HEAD"]).stdout.trim()).toBe(headBefore);
+      }
+    });
+
+    test("rejects an unsupported or malformed frozen contract", async () => {
+      const scenario = await createScenario();
+      harness.updateRun({
+        runId: scenario.runId,
+        contextPatch: {
+          gitIndexCommitContracts: {
+            exactIndex: {
+              runId: scenario.runId,
+              taskId: scenario.taskId,
+              repoPath: scenario.repoPath,
+              branch: scenario.branch,
+              expectedParentSha: scenario.expectedParentSha,
+              commitMessage: scenario.commitMessage,
+              files: scenario.files,
+              force: true,
+            },
+          },
+        },
+      });
+
+      const result = applyHarnessAction(harness, scenario.action);
+
+      expect(result).toMatchObject({ status: "blocked", actionType: "commitExactGitIndex" });
+      expect(result.problems.join(" ")).toContain("frozen contract");
+    });
+
+    test("rejects repository top-level branch and parent mismatches", async () => {
+      const repoScenario = await createScenario();
+      const nestedAction = { ...repoScenario.action, repoPath: join(repoScenario.repoPath, "src") };
+      repoScenario.freeze(nestedAction);
+      const branchScenario = await createScenario();
+      const branchAction = { ...branchScenario.action, branch: "release" };
+      branchScenario.freeze(branchAction);
+      const parentScenario = await createScenario();
+      const parentAction = { ...parentScenario.action, expectedParentSha: "3333333333333333333333333333333333333333" };
+      parentScenario.freeze(parentAction);
+
+      for (const [scenario, action] of [
+        [repoScenario, nestedAction],
+        [branchScenario, branchAction],
+        [parentScenario, parentAction],
+      ] as const) {
+        const result = applyHarnessAction(harness, action);
+        expect(result).toMatchObject({ status: "blocked", actionType: "commitExactGitIndex" });
+        expect(git(scenario.repoPath, ["rev-parse", "HEAD"]).stdout.trim()).toBe(scenario.expectedParentSha);
+      }
+    });
+
+    test("rejects worker evidence and verifier failures", async () => {
+      const changedFiles = await createScenario({ changedFiles: ["src/other.ts"] });
+      const failedVerifier = await createScenario({ verifierFailed: true });
+
+      const changedResult = applyHarnessAction(harness, changedFiles.action);
+      const verifierResult = applyHarnessAction(harness, failedVerifier.action);
+
+      expect(changedResult).toMatchObject({ status: "blocked", actionType: "commitExactGitIndex" });
+      expect(changedResult.problems.join(" ")).toContain("changedFiles");
+      expect(verifierResult).toMatchObject({ status: "blocked", actionType: "commitExactGitIndex" });
+      expect(verifierResult.problems.join(" ")).toContain("verifier");
+    });
+
+    test("rejects missing or foreign task worktrees before any Git command", async () => {
+      const missing = await createScenario({ worktreeMode: "missing" });
+      const foreign = await createScenario({ worktreeMode: "foreign" });
+      let gitCalls = 0;
+      const runGit = (input: { cwd: string; args: string[] }) => {
+        gitCalls += 1;
+        return realGitRunner(input);
+      };
+
+      const missingResult = applyHarnessAction(harness, missing.action, { runGit });
+      const foreignResult = applyHarnessAction(harness, foreign.action, { runGit });
+
+      expect(missingResult).toMatchObject({ status: "blocked", actionType: "commitExactGitIndex" });
+      expect(foreignResult).toMatchObject({ status: "blocked", actionType: "commitExactGitIndex" });
+      expect(gitCalls).toBe(0);
+      expect(`${missingResult.problems.join(" ")} ${foreignResult.problems.join(" ")}`).toContain("worktree");
+    });
+
+    test("rejects extra staged unstaged untracked conflicted and MERGE_HEAD state", async () => {
+      const staged = await createScenario();
+      await writeFile(join(staged.repoPath, "extra.ts"), "extra\n");
+      git(staged.repoPath, ["add", "extra.ts"]);
+      const unstaged = await createScenario();
+      await writeFile(join(unstaged.repoPath, "README.md"), "unstaged\n");
+      const untracked = await createScenario();
+      await writeFile(join(untracked.repoPath, "untracked.txt"), "untracked\n");
+      const mergeHead = await createScenario();
+      const mergeHeadPath = git(mergeHead.repoPath, ["rev-parse", "--path-format=absolute", "--git-path", "MERGE_HEAD"]).stdout.trim();
+      await writeFile(mergeHeadPath, `${mergeHead.expectedParentSha}\n`);
+      const conflicted = await createScenario();
+      const conflictedRunner = (input: { cwd: string; args: string[] }) => {
+        if (input.args.join(" ") === "ls-files --unmerged -z") {
+          return { exitCode: 0, stdout: `100644 ${conflicted.blobOid} 1\tREADME.md\0`, stderr: "" };
+        }
+        return realGitRunner(input);
+      };
+
+      for (const scenario of [staged, unstaged, untracked, mergeHead]) {
+        const result = applyHarnessAction(harness, scenario.action);
+        expect(result).toMatchObject({ status: "blocked", actionType: "commitExactGitIndex" });
+        expect(git(scenario.repoPath, ["rev-parse", "HEAD"]).stdout.trim()).toBe(scenario.expectedParentSha);
+      }
+      const conflictResult = applyHarnessAction(harness, conflicted.action, { runGit: conflictedRunner });
+      expect(conflictResult).toMatchObject({ status: "blocked", actionType: "commitExactGitIndex" });
+      expect(conflictResult.problems.join(" ")).toContain("conflict");
+    }, 15_000);
+
+    test("rejects staged mode and blob mismatches", async () => {
+      const mode = await createScenario();
+      git(mode.repoPath, ["config", "core.fileMode", "false"]);
+      git(mode.repoPath, ["update-index", "--chmod=+x", "src/new.ts"]);
+      const blob = await createScenario();
+      await writeFile(join(blob.repoPath, "src", "new.ts"), "export const value = 2;\n");
+      git(blob.repoPath, ["add", "src/new.ts"]);
+
+      const modeResult = applyHarnessAction(harness, mode.action);
+      const blobResult = applyHarnessAction(harness, blob.action);
+
+      expect(modeResult).toMatchObject({ status: "blocked", actionType: "commitExactGitIndex" });
+      expect(blobResult).toMatchObject({ status: "blocked", actionType: "commitExactGitIndex" });
+      expect(`${modeResult.problems.join(" ")} ${blobResult.problems.join(" ")}`).toContain("mode or blob");
+      expect(git(mode.repoPath, ["rev-parse", "HEAD"]).stdout.trim()).toBe(mode.expectedParentSha);
+      expect(git(blob.repoPath, ["rev-parse", "HEAD"]).stdout.trim()).toBe(blob.expectedParentSha);
+    });
+
+    test("rejects invalid modes duplicate paths and unsupported action or file fields", async () => {
+      const mode = await createScenario();
+      const duplicate = await createScenario();
+      const extraAction = await createScenario();
+      const extraFile = await createScenario();
+      const invalidActions: Array<Record<string, unknown>> = [
+        { ...mode.action, files: [{ ...mode.files[0], mode: "100755" }] },
+        { ...duplicate.action, files: [duplicate.files[0], duplicate.files[0]] },
+        { ...extraAction.action, force: true },
+        { ...extraFile.action, files: [{ ...extraFile.files[0], source: "worker" }] },
+      ];
+
+      for (const action of invalidActions) {
+        const result = applyHarnessAction(harness, action);
+        expect(result).toMatchObject({ status: "blocked", actionType: "invalid" });
+      }
+    });
+
+    test("bounds commit messages file counts and path lengths", async () => {
+      const message = await createScenario();
+      const count = await createScenario();
+      const path = await createScenario();
+      const invalidActions = [
+        { ...message.action, commitMessage: "m".repeat(4097) },
+        { ...message.action, commitMessage: "multi\nline" },
+        {
+          ...count.action,
+          files: Array.from({ length: 257 }, (_, index) => ({
+            ...count.files[0],
+            path: `src/file-${index}.ts`,
+          })),
+        },
+        { ...path.action, files: [{ ...path.files[0], path: `src/${"p".repeat(1021)}` }] },
+      ];
+
+      for (const action of invalidActions) {
+        const result = applyHarnessAction(harness, action);
+        expect(result).toMatchObject({ status: "blocked", actionType: "invalid" });
+      }
+    }, 15_000);
+
+    test("redacts credentials from structured Git failures", async () => {
+      const scenario = await createScenario();
+      const runGit = (input: { cwd: string; args: string[] }) => {
+        if (input.args.join(" ") === "rev-parse --show-toplevel") {
+          return {
+            exitCode: 1,
+            stdout: "",
+            stderr: "fatal: https://x-access-token:ghp_exact_secret@example.com/repo.git Authorization: Basic exact-basic",
+          };
+        }
+        return realGitRunner(input);
+      };
+
+      const result = applyHarnessAction(harness, scenario.action, { runGit });
+      const serialized = JSON.stringify(result);
+
+      expect(result).toMatchObject({ status: "blocked", actionType: "commitExactGitIndex" });
+      expect(serialized).not.toContain("ghp_exact_secret");
+      expect(serialized).not.toContain("exact-basic");
+      expect(serialized).toContain("[REDACTED]");
+    });
   });
 
   describe("pushExactGitRef", () => {

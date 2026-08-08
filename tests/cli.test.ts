@@ -10743,6 +10743,96 @@ describe("CLI", () => {
     });
   });
 
+  test("CLI smoke: commitExactGitIndex commits one frozen verified index", async () => {
+    await runCli("init");
+    const repoPath = join(dir, "repo-exact-index-cli");
+    await mkdir(join(repoPath, "src"), { recursive: true });
+    await writeFile(join(repoPath, "README.md"), "initial\n");
+    gitCli(repoPath, ["init", "-b", "main"]);
+    gitCli(repoPath, ["config", "user.name", "Ouroboros Test"]);
+    gitCli(repoPath, ["config", "user.email", "test@example.com"]);
+    gitCli(repoPath, ["add", "README.md"]);
+    gitCli(repoPath, ["commit", "-m", "Initial commit"]);
+    const expectedParentSha = gitCli(repoPath, ["rev-parse", "HEAD"]).stdout.trim();
+    await writeFile(join(repoPath, "src", "cli.ts"), "export const cli = true;\n");
+    gitCli(repoPath, ["add", "src/cli.ts"]);
+    const blobOid = gitCli(repoPath, ["hash-object", "src/cli.ts"]).stdout.trim();
+    const run = await runCliJson("create-run", "--goal", "Commit exact CLI index", "--project-root", repoPath);
+    const actionHarness = new Harness(dbPath);
+    const taskId = actionHarness.createTask({
+      runId: run.id,
+      role: "worker",
+      goal: "Add src/cli.ts",
+      prompt: "Stage the exact file.",
+      worktreePath: repoPath,
+    });
+    actionHarness.recordAttempt({
+      taskId,
+      input: { executor: "test" },
+      output: {
+        status: "done",
+        summary: "Staged src/cli.ts",
+        changedFiles: ["src/cli.ts"],
+        checks: [{ name: "worker", status: "passed" }],
+        artifacts: [],
+        problems: [],
+      },
+    });
+    const verifierTaskId = actionHarness.createTask({
+      runId: run.id,
+      role: "verifier",
+      goal: "Verify src/cli.ts",
+      prompt: "Verify the exact file.",
+      dependsOn: [taskId],
+    });
+    actionHarness.recordAttempt({
+      taskId: verifierTaskId,
+      input: { executor: "test" },
+      output: {
+        status: "done",
+        summary: "Verified src/cli.ts",
+        changedFiles: [],
+        checks: [{ name: "verify", status: "passed" }],
+        artifacts: [],
+        problems: [],
+      },
+    });
+    const files = [{ status: "A", path: "src/cli.ts", mode: "100644", blobOid }];
+    const action = {
+      type: "commitExactGitIndex",
+      contractId: "cliExactIndex",
+      runId: run.id,
+      taskId,
+      repoPath,
+      branch: "main",
+      expectedParentSha,
+      commitMessage: "Commit exact CLI index",
+      files,
+    };
+    actionHarness.updateRun({
+      runId: run.id,
+      contextPatch: {
+        gitIndexCommitContracts: {
+          cliExactIndex: { runId: run.id, taskId, repoPath, branch: "main", expectedParentSha, commitMessage: action.commitMessage, files },
+        },
+      },
+    });
+
+    const result = await runCliJson("action", "--action-json", JSON.stringify(action));
+    const events = await runCliJson("action-events", "--limit", "1");
+
+    expect(result).toMatchObject({ status: "done", actionType: "commitExactGitIndex" });
+    expect(result.artifacts).toContainEqual(expect.objectContaining({
+      kind: "integration",
+      mode: "exact_git_index_commit",
+      alreadyMerged: true,
+      workerTaskId: taskId,
+      verifierTaskId,
+    }));
+    expect(events[0]).toMatchObject({ id: result.eventId, actionType: "commitExactGitIndex", status: "done" });
+    expect(gitCli(repoPath, ["status", "--short"]).stdout).toBe("");
+  });
+
   test("CLI smoke: integrateVerifiedRun records a done action event on a clean temporary repository", async () => {
     await runCli("init");
     const { repoPath, worktreePath, run, workerTask } = await prepareVerifiedIntegrationRepo({
