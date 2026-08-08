@@ -10833,6 +10833,54 @@ describe("CLI", () => {
     expect(gitCli(repoPath, ["status", "--short"]).stdout).toBe("");
   });
 
+  test("CLI smoke: createExactGitRef accepts the fixed action and audits a scope failure", async () => {
+    const repoPath = join(dir, "repo-exact-ref-cli");
+    await mkdir(repoPath, { recursive: true });
+    await writeFile(join(repoPath, "README.md"), "initial\n");
+    gitCli(repoPath, ["init", "-b", "delivery"]);
+    gitCli(repoPath, ["config", "user.name", "Ouroboros Test"]);
+    gitCli(repoPath, ["config", "user.email", "test@example.com"]);
+    gitCli(repoPath, ["add", "README.md"]);
+    gitCli(repoPath, ["commit", "-m", "Initial commit"]);
+    gitCli(repoPath, ["remote", "add", "origin", join(dir, "local-only-remote.git")]);
+    const newSha = gitCli(repoPath, ["rev-parse", "HEAD"]).stdout.trim();
+    const ref = "refs/heads/codex/exact-ref-cli";
+    const contract = {
+      repoPath,
+      remoteHost: "github.com",
+      repository: "neeboo/hodor-web",
+      ref,
+      newSha,
+      expectedAbsent: true,
+    };
+    const actionHarness = new Harness(dbPath);
+    actionHarness.init();
+    const runId = actionHarness.createRun({
+      goal: "Create exact CLI ref",
+      projectRoot: repoPath,
+      context: {
+        gitRefCreationContracts: {
+          cliExactRef: contract,
+        },
+      },
+    });
+
+    const result = await runCliJson("action", "--action-json", JSON.stringify({
+      type: "createExactGitRef",
+      runId,
+      contractId: "cliExactRef",
+      ...contract,
+    }));
+    const events = actionHarness.listHarnessActionEvents({ limit: 1 });
+
+    expect(result).toMatchObject({ status: "blocked", actionType: "createExactGitRef" });
+    expect(result.artifacts).toContainEqual(expect.objectContaining({
+      kind: "git_ref_creation",
+      status: "scope_mismatch",
+    }));
+    expect(events[0]).toMatchObject({ id: result.eventId, actionType: "createExactGitRef", status: "blocked" });
+  });
+
   test("CLI smoke: integrateVerifiedRun records a done action event on a clean temporary repository", async () => {
     await runCli("init");
     const { repoPath, worktreePath, run, workerTask } = await prepareVerifiedIntegrationRepo({

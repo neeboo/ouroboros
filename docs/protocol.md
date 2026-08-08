@@ -629,6 +629,7 @@ Supported actions:
 { "type": "integrateVerifiedRun", "runId": "run_...", "workerTaskId": "optional", "targetBranch": "main", "reason": "optional" }
 { "type": "commitExactGitIndex", "contractId": "verifiedIndex", "runId": "run_...", "taskId": "task_...", "repoPath": "/absolute/repository", "branch": "main", "expectedParentSha": "40-hex", "commitMessage": "Commit verified additions", "files": [{ "status": "A", "path": "src/new.ts", "mode": "100644", "blobOid": "40-hex" }] }
 { "type": "pushExactGitRef", "runId": "run_...", "contractId": "hodorWebMain", "repoPath": "/absolute/verified/checkout", "remoteHost": "github.com", "repository": "owner/repo", "ref": "refs/heads/main", "expectedOldSha": "40-hex", "newSha": "40-hex", "reason": "optional" }
+{ "type": "createExactGitRef", "runId": "run_...", "contractId": "deliveryBranch", "repoPath": "/absolute/verified/checkout", "remoteHost": "github.com", "repository": "owner/repo", "ref": "refs/heads/codex/delivery", "newSha": "40-hex", "expectedAbsent": true }
 { "type": "amendRunContract", "runId": "run_...", "contractKey": "goalContract", "value": { ... }, "version": 2, "expectedVersion": "optional non-negative integer", "reason": "optional" }
 { "type": "startSubsession", "parentTaskId": "task_...", "purpose": "research api", "prompt": "Inspect the protocol and summarize the harness-managed subsession contract.", "backend": "claude-code", "reason": "optional" }
 { "type": "collectSubsessions", "parentTaskId": "task_...", "status": "optional running|done|blocked|interrupted|orphaned", "reason": "optional" }
@@ -688,6 +689,39 @@ Example frozen entry and matching action:
 ```
 
 `pushExactGitRef` is the host-owned remote-write primitive. Before invoking it, freeze an allowlist entry under `run.context.gitRemoteWriteContracts[contractId]` with exactly `repoPath`, `remoteHost`, `repository`, `ref`, `expectedOldSha`, and `newSha`. The action payload repeats those fields and must match the frozen entry byte for byte. It accepts only an absolute repository path, one DNS host, one repository path, one `refs/heads/...` branch, and two non-zero full commit SHAs. It validates the configured `origin` push URL, requires local `HEAD == newSha`, proves `expectedOldSha` is an ancestor of `newSha`, reads the exact remote ref before the push, issues only `git push --no-verify --porcelain origin <newSha>:<ref>` so repository-controlled pre-push hooks cannot execute in the host process, and independently reads the same ref afterwards. An already-updated ref returns `reused`; a failed push whose readback equals `newSha` returns `response_loss_recovered`. Force, delete, wildcard refspecs, unsupported fields, scope mismatches, non-fast-forward ancestry, ambiguous readback, and credential-bearing errors fail closed. Structured results redact URL userinfo, GitHub/GitLab token forms, and Authorization values.
+
+`createExactGitRef` is a separate host-owned primitive for creating one delivery branch that the remote does not yet have. Freeze `run.context.gitRefCreationContracts[contractId]` with exactly `repoPath`, lowercase `remoteHost`, `repository`, one non-main `refs/heads/...` ref, lowercase full commit `newSha`, and `expectedAbsent: true`; the action repeats those fields exactly and accepts no additional fields. It verifies the configured `origin` identity, requires local `HEAD == newSha`, proves `newSha` is a commit, and independently reads the exact remote ref. An absent ref permits exactly one non-force `git push --no-verify --porcelain origin <newSha>:<ref>` followed by independent readback. An existing exact SHA returns `reused`; any other existing SHA returns `conflict` without a push; a failed push whose readback equals `newSha` returns `response_loss_recovered`. `main`, tags, `HEAD`, symbolic or wildcard refs, deletion, force fields, normalized payload values, ambiguous absence, origin mismatch, HEAD mismatch, and readback mismatch fail closed. Every Git step is limited to 30 seconds and 24 KiB of captured output; structured failures redact credentials.
+
+Example frozen creation contract and matching action:
+
+```json
+{
+  "gitRefCreationContracts": {
+    "deliveryBranch": {
+      "repoPath": "/private/tmp/verified-delivery",
+      "remoteHost": "github.com",
+      "repository": "owner/repo",
+      "ref": "refs/heads/codex/delivery",
+      "newSha": "2222222222222222222222222222222222222222",
+      "expectedAbsent": true
+    }
+  }
+}
+```
+
+```json
+{
+  "type": "createExactGitRef",
+  "runId": "run_...",
+  "contractId": "deliveryBranch",
+  "repoPath": "/private/tmp/verified-delivery",
+  "remoteHost": "github.com",
+  "repository": "owner/repo",
+  "ref": "refs/heads/codex/delivery",
+  "newSha": "2222222222222222222222222222222222222222",
+  "expectedAbsent": true
+}
+```
 
 Freeze the contract through the existing audited context action, then invoke the exact write through the host process or protected action server:
 
