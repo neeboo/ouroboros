@@ -704,6 +704,22 @@ export interface EvolutionInstance {
   };
 }
 
+export interface EvolutionFirstCandidate {
+  id: string;
+  mode: "shadow";
+  allowedEvolutionTargets: Array<"artifact" | "harness">;
+  prohibitedEvolutionTargets: ["model"];
+  sideEffectBudget: {
+    paidUsd: 0;
+    realProviderCalls: 0;
+    pancatWrites: 0;
+    productionPublishes: 0;
+    realAssetDeletes: 0;
+    crossProjectMemoryReads: 0;
+    crossProjectMemoryWrites: 0;
+  };
+}
+
 export interface EvolutionPackV1 {
   schemaVersion: 1;
   id: string;
@@ -752,6 +768,7 @@ export interface EvolutionPackV1 {
     projectLocalRules: string[];
     genericizationEvidence: string[];
   };
+  firstCandidate?: EvolutionFirstCandidate;
 }
 
 export interface EvolutionCausalHypothesis {

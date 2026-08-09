@@ -111,6 +111,7 @@ export type {
   EvolutionCausalHypothesis,
   EvolutionComparison,
   EvolutionCycleKind,
+  EvolutionFirstCandidate,
   EvolutionInstance,
   EvolutionMode,
   EvolutionMutationLayer,

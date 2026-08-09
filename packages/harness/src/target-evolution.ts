@@ -2,6 +2,7 @@ import type {
   EvolutionCausalHypothesis,
   EvolutionComparison,
   EvolutionCycleKind,
+  EvolutionFirstCandidate,
   EvolutionInstance,
   EvolutionMode,
   EvolutionMutationLayer,
@@ -51,6 +52,20 @@ const REASONING_EFFORTS = new Set<EvolutionComparison["equalBudget"]["reasoningE
 ]);
 const ARTIFACT_LAYERS = new Set<EvolutionMutationLayer>(["artifact", "code", "policy"]);
 const HARNESS_LAYERS = new Set<EvolutionMutationLayer>(["workflow", "prompt", "tool", "policy", "code"]);
+const FIRST_CANDIDATE_MODES = new Set<EvolutionFirstCandidate["mode"]>(["shadow"]);
+const FIRST_CANDIDATE_TARGETS = new Set<EvolutionFirstCandidate["allowedEvolutionTargets"][number]>([
+  "artifact",
+  "harness",
+]);
+const SIDE_EFFECT_BUDGET_KEYS = [
+  "paidUsd",
+  "realProviderCalls",
+  "pancatWrites",
+  "productionPublishes",
+  "realAssetDeletes",
+  "crossProjectMemoryReads",
+  "crossProjectMemoryWrites",
+] as const satisfies ReadonlyArray<keyof EvolutionFirstCandidate["sideEffectBudget"]>;
 
 export function parseEvolutionInstance(
   value: unknown,
@@ -113,6 +128,7 @@ export function parseEvolutionPackV1(
       "promotionPolicy",
       "handoff",
       "portability",
+      "firstCandidate",
     ],
     label,
   );
@@ -193,6 +209,9 @@ export function parseEvolutionPackV1(
     ["projectLocalRules", "genericizationEvidence"],
     `${label}.portability`,
   );
+  const firstCandidate = record.firstCandidate === undefined
+    ? undefined
+    : parseFirstCandidate(record.firstCandidate, `${label}.firstCandidate`);
 
   return {
     schemaVersion: 1,
@@ -272,6 +291,7 @@ export function parseEvolutionPackV1(
         TARGET_EVOLUTION_LIMITS.maxArrayItems,
       ),
     },
+    ...(firstCandidate === undefined ? {} : { firstCandidate }),
   };
 }
 
@@ -473,6 +493,75 @@ function parseMutationSurface(
   };
 }
 
+function parseFirstCandidate(value: unknown, label: string): EvolutionFirstCandidate {
+  const record = strictObject(
+    value,
+    [
+      "id",
+      "mode",
+      "allowedEvolutionTargets",
+      "prohibitedEvolutionTargets",
+      "sideEffectBudget",
+    ],
+    label,
+  );
+  const allowedEvolutionTargets = requireArray(
+    record.allowedEvolutionTargets,
+    `${label}.allowedEvolutionTargets`,
+    TARGET_EVOLUTION_LIMITS.maxArrayItems,
+  ).map((target, index) => {
+    requireString(
+      target,
+      `${label}.allowedEvolutionTargets[${index}]`,
+      TARGET_EVOLUTION_LIMITS.maxIdentifierLength,
+    );
+    return requireEnum(
+      target,
+      FIRST_CANDIDATE_TARGETS,
+      `${label}.allowedEvolutionTargets[${index}]`,
+    );
+  });
+  requireNonEmpty(allowedEvolutionTargets, `${label}.allowedEvolutionTargets`);
+  requireUniqueStrings(allowedEvolutionTargets, `${label}.allowedEvolutionTargets`);
+
+  const prohibitedEvolutionTargets = requireArray(
+    record.prohibitedEvolutionTargets,
+    `${label}.prohibitedEvolutionTargets`,
+    TARGET_EVOLUTION_LIMITS.maxArrayItems,
+  );
+  if (prohibitedEvolutionTargets.length !== 1) {
+    throw new Error(`${label}.prohibitedEvolutionTargets must equal [model]`);
+  }
+  const prohibitedTarget = requireString(
+    prohibitedEvolutionTargets[0],
+    `${label}.prohibitedEvolutionTargets[0]`,
+    TARGET_EVOLUTION_LIMITS.maxIdentifierLength,
+  );
+  if (prohibitedTarget !== "model") {
+    throw new Error(`${label}.prohibitedEvolutionTargets must equal [model]`);
+  }
+
+  const sideEffectBudget = strictObject(
+    record.sideEffectBudget,
+    SIDE_EFFECT_BUDGET_KEYS,
+    `${label}.sideEffectBudget`,
+  );
+  const normalizedSideEffectBudget = Object.fromEntries(
+    SIDE_EFFECT_BUDGET_KEYS.map((key) => [
+      key,
+      requireLiteralZero(sideEffectBudget[key], `${label}.sideEffectBudget.${key}`),
+    ]),
+  ) as EvolutionFirstCandidate["sideEffectBudget"];
+
+  return {
+    id: requireString(record.id, `${label}.id`, TARGET_EVOLUTION_LIMITS.maxIdentifierLength),
+    mode: requireEnum(record.mode, FIRST_CANDIDATE_MODES, `${label}.mode`),
+    allowedEvolutionTargets,
+    prohibitedEvolutionTargets: ["model"],
+    sideEffectBudget: normalizedSideEffectBudget,
+  };
+}
+
 function strictObject(value: unknown, allowedKeys: readonly string[], label: string): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new Error(`${label} must be an object`);
@@ -615,6 +704,13 @@ function requireTrue(value: unknown, label: string): asserts value is true {
   }
 }
 
+function requireLiteralZero(value: unknown, label: string): 0 {
+  if (!Object.is(value, 0)) {
+    throw new Error(`${label} must be exactly zero`);
+  }
+  return 0;
+}
+
 function requireSha256(value: unknown, label: string): string {
   const hash = requireString(value, label);
   if (!SHA256_PATTERN.test(hash)) {
@@ -630,6 +726,16 @@ function requireUniqueIds(values: Array<{ id: string }>, label: string): void {
       throw new Error(`${label} contains duplicate id ${value.id}`);
     }
     seen.add(value.id);
+  }
+}
+
+function requireUniqueStrings(values: string[], label: string): void {
+  const seen = new Set<string>();
+  for (const value of values) {
+    if (seen.has(value)) {
+      throw new Error(`${label} contains duplicate value ${value}`);
+    }
+    seen.add(value);
   }
 }
 

@@ -4,6 +4,7 @@ import type {
   DesignProposalData,
   EvolutionCausalHypothesis,
   EvolutionComparison,
+  EvolutionFirstCandidate,
   EvolutionPackV1,
 } from "../packages/harness/src";
 import { buildTaskPrompt, proposeDesignAction } from "../packages/runner/src";
@@ -18,12 +19,26 @@ interface HodorEvolutionReference {
   evolutionPack: EvolutionPackV1;
   causalHypothesis: EvolutionCausalHypothesis;
   comparison: EvolutionComparison;
-  firstCandidate: {
-    id: string;
-    mode: string;
-    sideEffectBudget: Record<string, number>;
-    allowedEvolutionTargets: string[];
-    prohibitedEvolutionTargets: string[];
+  firstCandidate: EvolutionFirstCandidate;
+}
+
+const ZERO_SIDE_EFFECT_BUDGET = {
+  paidUsd: 0,
+  realProviderCalls: 0,
+  pancatWrites: 0,
+  productionPublishes: 0,
+  realAssetDeletes: 0,
+  crossProjectMemoryReads: 0,
+  crossProjectMemoryWrites: 0,
+} as const;
+
+function validFirstCandidate(): EvolutionFirstCandidate {
+  return {
+    id: "hodor-spatial-risk-shadow-v1",
+    mode: "shadow",
+    allowedEvolutionTargets: ["artifact", "harness"],
+    prohibitedEvolutionTargets: ["model"],
+    sideEffectBudget: { ...ZERO_SIDE_EFFECT_BUDGET },
   };
 }
 
@@ -216,7 +231,26 @@ function jsonFenceAfter(prompt: string, heading: string): Record<string, unknown
 
 describe("target-system evolution contracts", () => {
   test("accepts the checked-in Hodor designed-state reference through production parsers", async () => {
-    const reference = await hodorEvolutionReference();
+    const fixtureText = await Bun.file(
+      new URL("./fixtures/hodor-evolution-pack-v0.json", import.meta.url),
+    ).text();
+    const docsText = await Bun.file(
+      new URL("../docs/examples/hodor-evolution-pack-v0.json", import.meta.url),
+    ).text();
+    expect(docsText).toBe(fixtureText);
+
+    const references = [JSON.parse(fixtureText), JSON.parse(docsText)] as HodorEvolutionReference[];
+    const reference = references[0]!;
+    for (const candidateReference of references) {
+      const parsedPack = parser("parseEvolutionPackV1")(
+        {
+          ...candidateReference.evolutionPack,
+          firstCandidate: candidateReference.firstCandidate,
+        },
+        candidateReference.projectId,
+      ) as EvolutionPackV1;
+      expect(parsedPack.firstCandidate).toEqual(candidateReference.firstCandidate);
+    }
     const pack = parser("parseEvolutionPackV1")(
       reference.evolutionPack,
       reference.projectId,
@@ -283,6 +317,87 @@ describe("target-system evolution contracts", () => {
       "assets/production/**",
       "memory/cross-project/**",
     ]));
+  });
+
+  test("normalizes a strict zero-side-effect first candidate on an evolution pack", () => {
+    const firstCandidate = validFirstCandidate();
+    const parsed = parser("parseEvolutionPackV1")(
+      { ...validEvolutionPack(), firstCandidate },
+      PROJECT_ID,
+    ) as EvolutionPackV1;
+
+    expect(parsed.firstCandidate).toEqual(firstCandidate);
+    expect(parser("parseEvolutionPackV1")(validEvolutionPack(), PROJECT_ID)).toEqual(
+      validEvolutionPack(),
+    );
+  });
+
+  test.each(Object.keys(ZERO_SIDE_EFFECT_BUDGET))(
+    "rejects nonzero first-candidate side-effect budget: %s",
+    (budgetKey) => {
+      const firstCandidate = {
+        ...validFirstCandidate(),
+        sideEffectBudget: {
+          ...validFirstCandidate().sideEffectBudget,
+          [budgetKey]: 1,
+        },
+      };
+
+      expect(() =>
+        parser("parseEvolutionPackV1")(
+          { ...validEvolutionPack(), firstCandidate },
+          PROJECT_ID,
+        ),
+      ).toThrow(/zero|0|sideEffectBudget/i);
+    },
+  );
+
+  test.each([
+    [
+      "model in allowed targets",
+      { ...validFirstCandidate(), allowedEvolutionTargets: ["artifact", "model"] },
+    ],
+    [
+      "missing model prohibition",
+      { ...validFirstCandidate(), prohibitedEvolutionTargets: [] },
+    ],
+    ["unknown candidate field", { ...validFirstCandidate(), surprise: true }],
+    [
+      "unknown side-effect field",
+      {
+        ...validFirstCandidate(),
+        sideEffectBudget: { ...ZERO_SIDE_EFFECT_BUDGET, networkWrites: 0 },
+      },
+    ],
+    ["illegal mode", { ...validFirstCandidate(), mode: "active" }],
+    [
+      "duplicate allowed target",
+      { ...validFirstCandidate(), allowedEvolutionTargets: ["artifact", "artifact"] },
+    ],
+    ["whitespace-polluted id", { ...validFirstCandidate(), id: " padded-candidate " }],
+    [
+      "whitespace-polluted target",
+      { ...validFirstCandidate(), allowedEvolutionTargets: ["artifact", " harness"] },
+    ],
+    ["empty allowed targets", { ...validFirstCandidate(), allowedEvolutionTargets: [] }],
+    [
+      "oversized allowed targets",
+      {
+        ...validFirstCandidate(),
+        allowedEvolutionTargets: Array.from(
+          { length: 101 },
+          (_, index) => (index % 2 === 0 ? "artifact" : "harness"),
+        ),
+      },
+    ],
+    ["oversized id", { ...validFirstCandidate(), id: "x".repeat(257) }],
+  ])("rejects invalid first-candidate contract: %s", (_name, firstCandidate) => {
+    expect(() =>
+      parser("parseEvolutionPackV1")(
+        { ...validEvolutionPack(), firstCandidate },
+        PROJECT_ID,
+      ),
+    ).toThrow();
   });
 
   test.each([
