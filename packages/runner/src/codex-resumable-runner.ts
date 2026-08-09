@@ -58,6 +58,7 @@ export interface CodexResumableOrchestrationInput {
   genericAttemptIdleTimeoutMs?: number;
   genericAttemptHardTimeoutMs?: number;
   genericAttemptHeartbeatMs?: number;
+  shouldStop?: () => boolean;
 }
 
 export interface RunCodexResumableLoopInput extends CodexResumableOrchestrationInput {
@@ -74,6 +75,9 @@ export async function runCodexResumableLoop(input: RunCodexResumableLoopInput) {
   const orchestrator = new CodexResumableOrchestrator(input);
   const rounds = [];
   for (let index = 0; index < input.maxRounds; index += 1) {
+    if (input.shouldStop?.()) {
+      break;
+    }
     const reclaimed = input.harness.reclaimRunningTasksWithoutAttempts({ runId: input.runId });
     const resumed = await orchestrator.resumeRunningAttempts({ runId: input.runId, limit: input.limit });
     if (resumed.length > 0) {
@@ -236,6 +240,7 @@ export async function superviseCodexDaemon(input: SuperviseCodexDaemonInput) {
       const result = await superviseCodexRuns({
         ...input,
         maxCycles: input.tickCycles,
+        shouldStop: () => stopping || input.shouldStop?.() === true,
       });
       waitMs = result.status === "idle" ? input.idleMs : input.intervalMs;
       tick = {
