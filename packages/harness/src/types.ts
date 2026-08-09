@@ -804,6 +804,123 @@ export interface EvolutionComparison {
   maximumGuardRegression: number;
 }
 
+export type EvolutionRecordKind = "profile" | "episode" | "variant" | "experiment" | "receipt";
+
+export interface EvolutionSideEffectCounters {
+  paidUsd: number;
+  realProviderCalls: number;
+  pancatWrites: number;
+  productionPublishes: number;
+  realAssetDeletes: number;
+  crossProjectMemoryReads: number;
+  crossProjectMemoryWrites: number;
+}
+
+export interface EvolutionProfile {
+  schemaVersion: 1;
+  id: string;
+  projectId: string;
+  pack: {
+    id: string;
+    version: number;
+    contentSha256: string;
+  };
+  charter: {
+    id: string;
+    version: number;
+    contentSha256: string;
+  };
+  maturity: EvolutionPackMaturity;
+  allowedSurfaceIds: string[];
+  activatedAt: string;
+  activatedByReceipt?: string;
+}
+
+export interface ProductionEpisode {
+  schemaVersion: 1;
+  id: string;
+  projectId: string;
+  profileId: string;
+  sourceRef: string;
+  leakageGroupId: string;
+  observedAt: string;
+  inputSnapshotSha256: string;
+  outcomeSnapshotSha256: string;
+  policyRef: string;
+  metrics: Record<string, number>;
+  sideEffectCounters: EvolutionSideEffectCounters;
+  evidenceRefs: string[];
+  privacyReview: {
+    status: "approved";
+    policySha256: string;
+    reviewerRef: string;
+    dataClassification: string;
+    retentionPolicyRef: string;
+    inputSnapshotSha256: string;
+    outcomeSnapshotSha256: string;
+    evidenceRefs: string[];
+  };
+}
+
+export interface HarnessVariant {
+  schemaVersion: 1;
+  id: string;
+  projectId: string;
+  profileId: string;
+  role: "control" | "candidate";
+  evolutionTargets: Array<"artifact" | "harness">;
+  contentSha256: string;
+  mutationSurfaceIds: string[];
+  changedPaths: string[];
+  toolPolicySha256: string;
+  createdFromEvidenceRefs: string[];
+}
+
+export interface MatchedExperiment {
+  schemaVersion: 1;
+  id: string;
+  projectId: string;
+  profileId: string;
+  controlVariantId: string;
+  candidateVariantId: string;
+  developmentEpisodeRefs: string[];
+  heldoutEpisodeRefs: string[];
+  unrelatedEpisodeRefs: string[];
+  corpusSnapshotSha256: string;
+  equalBudget: EvolutionComparison["equalBudget"];
+  primaryMetric: string;
+  guardMetrics: string[];
+  sideEffectCounters: {
+    paidUsd: 0;
+    realProviderCalls: 0;
+    pancatWrites: 0;
+    productionPublishes: 0;
+    realAssetDeletes: 0;
+    crossProjectMemoryReads: 0;
+    crossProjectMemoryWrites: 0;
+  };
+  outcome: "pending" | "candidate_wins" | "control_wins" | "inconclusive" | "invalid";
+  evidenceRefs: string[];
+}
+
+export interface PromotionReceipt {
+  schemaVersion: 1;
+  id: string;
+  projectId: string;
+  profileId: string;
+  experimentId: string;
+  action: "promote" | "rollback";
+  fromVariantId: string;
+  toVariantId: string;
+  authorizedDecisionRef: string;
+  appliedAt: string;
+  exactTargetRef: string;
+  readbackEvidenceRefs: string[];
+  canaryEvidenceRefs: string[];
+  rollbackPlanRef: string;
+  rollbackReceiptId?: string;
+}
+
 export interface DesignEvaluationContract {
   baseline: string[];
   successMetrics: string[];

@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 import * as harnessModule from "../packages/harness/src";
 import type {
   DesignProposalData,
@@ -13,6 +14,7 @@ const PROJECT_ID = "project_hodor";
 const HODOR_REFERENCE_PROJECT_ID = "project_hodor_reference";
 const SHA_A = "a".repeat(64);
 const SHA_B = "b".repeat(64);
+const SHA_C = "c".repeat(64);
 
 interface HodorEvolutionReference {
   projectId: string;
@@ -185,6 +187,143 @@ function parser(name: string): (...args: unknown[]) => unknown {
   const candidate = (harnessModule as unknown as Record<string, unknown>)[name];
   expect(candidate, `${name} must be exported by @ouroboros/harness`).toBeFunction();
   return candidate as (...args: unknown[]) => unknown;
+}
+
+type EvolutionRecordKind = "profile" | "episode" | "variant" | "experiment" | "receipt";
+
+function canonicalTestValue(value: unknown): unknown {
+  if (value === null || typeof value !== "object") {
+    return value;
+  }
+  if (Array.isArray(value)) {
+    return value.map(canonicalTestValue);
+  }
+  const record = value as Record<string, unknown>;
+  return Object.fromEntries(
+    Object.keys(record)
+      .sort()
+      .map((key) => [key, canonicalTestValue(record[key])]),
+  );
+}
+
+function testEvolutionRecordId(
+  kind: EvolutionRecordKind,
+  value: Record<string, unknown>,
+): string {
+  const { id: _ignored, ...recordWithoutId } = value;
+  const digest = createHash("sha256")
+    .update(JSON.stringify(canonicalTestValue(recordWithoutId)), "utf8")
+    .digest("hex");
+  return `${kind}_${digest}`;
+}
+
+function addressedRecord<T extends Record<string, unknown>>(
+  kind: EvolutionRecordKind,
+  value: T,
+): T & { id: string } {
+  return { ...value, id: testEvolutionRecordId(kind, value) };
+}
+
+function validEvolutionProfile() {
+  return addressedRecord("profile", {
+    schemaVersion: 1,
+    projectId: PROJECT_ID,
+    pack: { id: "hodor-evolution-pack", version: 1, contentSha256: SHA_A },
+    charter: { id: "charter_hodor", version: 2, contentSha256: SHA_B },
+    maturity: "shadowing",
+    allowedSurfaceIds: ["risk-policy-artifact", "evaluation-harness"],
+    activatedAt: "2026-08-09T01:02:03.456Z",
+  });
+}
+
+function validProductionEpisode(sourceRef = "episode_development_1") {
+  const profile = validEvolutionProfile();
+  return addressedRecord("episode", {
+    schemaVersion: 1,
+    projectId: PROJECT_ID,
+    profileId: profile.id,
+    sourceRef,
+    leakageGroupId: "leakage_group_development_1",
+    observedAt: "2026-08-09T02:03:04Z",
+    inputSnapshotSha256: SHA_A,
+    outcomeSnapshotSha256: SHA_B,
+    policyRef: "policy_spatial_risk_v1",
+    metrics: { quality: 0.95, signedDelta: -0.25 },
+    sideEffectCounters: { ...ZERO_SIDE_EFFECT_BUDGET, realProviderCalls: 1 },
+    evidenceRefs: ["evidence_episode_1"],
+    privacyReview: {
+      status: "approved",
+      policySha256: SHA_C,
+      reviewerRef: "privacy_reviewer_1",
+      dataClassification: "derived-confidential",
+      retentionPolicyRef: "retention_policy_1",
+      inputSnapshotSha256: SHA_A,
+      outcomeSnapshotSha256: SHA_B,
+      evidenceRefs: ["privacy_review_1"],
+    },
+  });
+}
+
+function validHarnessVariant(role: "control" | "candidate" = "control") {
+  const profile = validEvolutionProfile();
+  return addressedRecord("variant", {
+    schemaVersion: 1,
+    projectId: PROJECT_ID,
+    profileId: profile.id,
+    role,
+    evolutionTargets: role === "control" ? ["artifact"] : ["artifact", "harness"],
+    contentSha256: role === "control" ? SHA_A : SHA_C,
+    mutationSurfaceIds: ["risk-policy-artifact"],
+    changedPaths: role === "control" ? ["config/spatial-risk.json"] : ["tests/evolution/policy.test.ts"],
+    toolPolicySha256: SHA_B,
+    createdFromEvidenceRefs: [role === "control" ? "baseline_evidence" : "candidate_evidence"],
+  });
+}
+
+function validMatchedExperiment() {
+  return addressedRecord("experiment", {
+    schemaVersion: 1,
+    projectId: PROJECT_ID,
+    profileId: validEvolutionProfile().id,
+    controlVariantId: validHarnessVariant("control").id,
+    candidateVariantId: validHarnessVariant("candidate").id,
+    developmentEpisodeRefs: [validProductionEpisode("episode_development_1").id],
+    heldoutEpisodeRefs: [validProductionEpisode("episode_holdout_1").id],
+    unrelatedEpisodeRefs: [validProductionEpisode("episode_unrelated_1").id],
+    corpusSnapshotSha256: SHA_C,
+    equalBudget: { ...validComparison().equalBudget },
+    primaryMetric: "spatial-risk false-positive rate",
+    guardMetrics: ["zero production publishes"],
+    sideEffectCounters: { ...ZERO_SIDE_EFFECT_BUDGET },
+    outcome: "pending",
+    evidenceRefs: ["experiment_evidence_1"],
+  });
+}
+
+function validPromotionReceipt() {
+  return addressedRecord("receipt", {
+    schemaVersion: 1,
+    projectId: PROJECT_ID,
+    profileId: validEvolutionProfile().id,
+    experimentId: validMatchedExperiment().id,
+    action: "promote",
+    fromVariantId: validHarnessVariant("control").id,
+    toVariantId: validHarnessVariant("candidate").id,
+    authorizedDecisionRef: "decision_promote_1",
+    appliedAt: "2026-08-09T03:04:05Z",
+    exactTargetRef: "git:commit:0123456789abcdef",
+    readbackEvidenceRefs: ["readback_1"],
+    canaryEvidenceRefs: ["canary_1"],
+    rollbackPlanRef: "rollback_plan_1",
+  });
+}
+
+function readdress(
+  kind: EvolutionRecordKind,
+  value: Record<string, unknown>,
+): Record<string, unknown> {
+  const { id: _ignored, ...withoutId } = value;
+  return addressedRecord(kind, withoutId);
 }
 
 function designerPrompt(): string {
@@ -924,5 +1063,331 @@ describe("target-system evolution contracts", () => {
     expect(serializedExtension).toContain("holdoutevidencerefs");
     expect(serializedExtension).not.toContain("holdout content");
     expect(serializedExtension).not.toContain("holdout result");
+  });
+});
+
+describe("target-system evolution runtime records", () => {
+  test("exports content-address helpers with stable canonical key ordering", () => {
+    const hashValue = parser("canonicalEvolutionValueSha256");
+    const hashRecord = parser("canonicalEvolutionRecordSha256");
+    const expectedId = parser("expectedEvolutionRecordId");
+    const left = { z: [3, { b: 2, a: 1 }], a: "value" };
+    const right = { a: "value", z: [3, { a: 1, b: 2 }] };
+    const localHash = createHash("sha256")
+      .update(JSON.stringify(canonicalTestValue(left)), "utf8")
+      .digest("hex");
+
+    expect(hashValue(left)).toBe(localHash);
+    expect(hashValue(right)).toBe(localHash);
+    expect(hashRecord({ id: "ignored_a", ...left })).toBe(localHash);
+    expect(hashRecord({ ...right, id: "ignored_b" })).toBe(localHash);
+    expect(expectedId("profile", { id: "ignored", ...left })).toBe(`profile_${localHash}`);
+    expect(expectedId("episode", left)).toBe(`episode_${localHash}`);
+    expect(expectedId("variant", left)).toBe(`variant_${localHash}`);
+    expect(expectedId("experiment", left)).toBe(`experiment_${localHash}`);
+    expect(expectedId("receipt", left)).toBe(`receipt_${localHash}`);
+  });
+
+  test.each([
+    ["array root", []],
+    ["undefined value", { value: undefined }],
+    ["non-finite value", { value: Number.POSITIVE_INFINITY }],
+    ["non-JSON value", { value: 1n }],
+  ])("rejects invalid canonical evolution hash input: %s", (_name, value) => {
+    expect(() => parser("canonicalEvolutionRecordSha256")(value)).toThrow(/JSON|object|finite/i);
+  });
+
+  test("parses valid project-bound content-addressed runtime records", () => {
+    expect(parser("parseEvolutionProfile")(validEvolutionProfile(), PROJECT_ID)).toEqual(
+      validEvolutionProfile(),
+    );
+    expect(parser("parseProductionEpisode")(validProductionEpisode(), PROJECT_ID)).toEqual(
+      validProductionEpisode(),
+    );
+    expect(parser("parseHarnessVariant")(validHarnessVariant("candidate"), PROJECT_ID)).toEqual(
+      validHarnessVariant("candidate"),
+    );
+    expect(parser("parseMatchedExperiment")(validMatchedExperiment(), PROJECT_ID)).toEqual(
+      validMatchedExperiment(),
+    );
+    expect(parser("parsePromotionReceipt")(validPromotionReceipt(), PROJECT_ID)).toEqual(
+      validPromotionReceipt(),
+    );
+  });
+
+  test.each([
+    ["profile", "parseEvolutionProfile", validEvolutionProfile],
+    ["episode", "parseProductionEpisode", validProductionEpisode],
+    ["variant", "parseHarnessVariant", () => validHarnessVariant("candidate")],
+    ["experiment", "parseMatchedExperiment", validMatchedExperiment],
+    ["receipt", "parsePromotionReceipt", validPromotionReceipt],
+  ])("rejects unknown fields and mismatched content IDs on %s", (kind, parserName, makeRecord) => {
+    const record = makeRecord() as Record<string, unknown>;
+    expect(() => parser(parserName)({ ...record, surprise: true }, PROJECT_ID)).toThrow(
+      /unsupported fields/i,
+    );
+    expect(() => parser(parserName)({ ...record, id: `${kind}_${"f".repeat(64)}` }, PROJECT_ID)).toThrow(
+      /content-addressed|id/i,
+    );
+  });
+
+  test.each([
+    ["profile", "parseEvolutionProfile", validEvolutionProfile],
+    ["episode", "parseProductionEpisode", validProductionEpisode],
+    ["variant", "parseHarnessVariant", () => validHarnessVariant("candidate")],
+    ["experiment", "parseMatchedExperiment", validMatchedExperiment],
+    ["receipt", "parsePromotionReceipt", validPromotionReceipt],
+  ])("requires schemaVersion 1 and strict identity text on %s", (kind, parserName, makeRecord) => {
+    const record = makeRecord() as Record<string, unknown>;
+    const wrongVersion = readdress(kind as EvolutionRecordKind, { ...record, schemaVersion: 2 });
+    expect(() => parser(parserName)(wrongVersion, PROJECT_ID)).toThrow(/schemaVersion/i);
+    const paddedProject = readdress(kind as EvolutionRecordKind, {
+      ...record,
+      projectId: ` ${PROJECT_ID}`,
+    });
+    expect(() => parser(parserName)(paddedProject, ` ${PROJECT_ID}`)).toThrow(/whitespace/i);
+  });
+
+  test("requires a non-empty unpadded ProductionEpisode sourceRef", () => {
+    for (const sourceRef of ["", " episode_development_1 "]) {
+      const episode = readdress("episode", { ...validProductionEpisode(), sourceRef });
+      expect(() => parser("parseProductionEpisode")(episode, PROJECT_ID)).toThrow(
+        /non-empty|whitespace/i,
+      );
+    }
+  });
+
+  test.each([
+    ["profile", "parseEvolutionProfile", validEvolutionProfile],
+    ["episode", "parseProductionEpisode", validProductionEpisode],
+    ["variant", "parseHarnessVariant", () => validHarnessVariant("candidate")],
+    ["experiment", "parseMatchedExperiment", validMatchedExperiment],
+    ["receipt", "parsePromotionReceipt", validPromotionReceipt],
+  ])("rejects cross-project %s records", (_kind, parserName, makeRecord) => {
+    const record = makeRecord() as Record<string, unknown>;
+    expect(() => parser(parserName)(record, "project_other")).toThrow(/projectId/i);
+    expect(() => parser(parserName)({ ...record, targetProjectId: PROJECT_ID }, PROJECT_ID)).toThrow(
+      /unsupported fields/i,
+    );
+  });
+
+  test.each(["input", "output", "rawInput", "rawOutput", "prompt", "response"])(
+    "rejects raw episode content field %s",
+    (field) => {
+      expect(() =>
+        parser("parseProductionEpisode")(
+          { ...validProductionEpisode(), [field]: "private raw content" },
+          PROJECT_ID,
+        ),
+      ).toThrow(/unsupported fields/i);
+    },
+  );
+
+  test.each(["heldoutContents", "heldoutResults", "holdoutContent", "holdoutResult"])(
+    "rejects heldout content or result field %s",
+    (field) => {
+      expect(() =>
+        parser("parseMatchedExperiment")(
+          { ...validMatchedExperiment(), [field]: "leaked heldout material" },
+          PROJECT_ID,
+        ),
+      ).toThrow(/unsupported fields/i);
+    },
+  );
+
+  test.each([
+    ["NaN metric", { metrics: { score: Number.NaN } }],
+    ["infinite metric", { metrics: { score: Number.POSITIVE_INFINITY } }],
+    [
+      "negative side-effect counter",
+      { sideEffectCounters: { ...ZERO_SIDE_EFFECT_BUDGET, pancatWrites: -1 } },
+    ],
+    [
+      "infinite side-effect counter",
+      { sideEffectCounters: { ...ZERO_SIDE_EFFECT_BUDGET, paidUsd: Number.POSITIVE_INFINITY } },
+    ],
+  ])("rejects invalid ProductionEpisode numeric data: %s", (_name, override) => {
+    const episode = readdress("episode", { ...validProductionEpisode(), ...override });
+    expect(() => parser("parseProductionEpisode")(episode, PROJECT_ID)).toThrow(/finite|non-negative/i);
+  });
+
+  test.each([
+    "realProviderCalls",
+    "pancatWrites",
+    "productionPublishes",
+    "realAssetDeletes",
+    "crossProjectMemoryReads",
+    "crossProjectMemoryWrites",
+  ])("rejects fractional ProductionEpisode count: %s", (counter) => {
+    const episode = readdress("episode", {
+      ...validProductionEpisode(),
+      sideEffectCounters: { ...ZERO_SIDE_EFFECT_BUDGET, [counter]: 0.5 },
+    });
+    expect(() => parser("parseProductionEpisode")(episode, PROJECT_ID)).toThrow(/integer/i);
+  });
+
+  test("allows fractional paidUsd on a ProductionEpisode", () => {
+    const episode = readdress("episode", {
+      ...validProductionEpisode(),
+      sideEffectCounters: { ...ZERO_SIDE_EFFECT_BUDGET, paidUsd: 0.5 },
+    });
+    expect(() => parser("parseProductionEpisode")(episode, PROJECT_ID)).not.toThrow();
+  });
+
+  test.each(Object.keys(ZERO_SIDE_EFFECT_BUDGET))(
+    "requires zero MatchedExperiment side-effect counter: %s",
+    (counter) => {
+      const experiment = readdress("experiment", {
+        ...validMatchedExperiment(),
+        sideEffectCounters: { ...ZERO_SIDE_EFFECT_BUDGET, [counter]: 1 },
+      });
+      expect(() => parser("parseMatchedExperiment")(experiment, PROJECT_ID)).toThrow(/zero/i);
+    },
+  );
+
+  test.each([
+    ["empty development", { developmentEpisodeRefs: [] }],
+    ["empty heldout", { heldoutEpisodeRefs: [] }],
+    ["empty unrelated", { unrelatedEpisodeRefs: [] }],
+    [
+      "overlapping splits",
+      { heldoutEpisodeRefs: validMatchedExperiment().developmentEpisodeRefs },
+    ],
+    [
+      "same variants",
+      { candidateVariantId: validMatchedExperiment().controlVariantId },
+    ],
+  ])("rejects invalid MatchedExperiment partitions: %s", (_name, override) => {
+    const experiment = readdress("experiment", { ...validMatchedExperiment(), ...override });
+    expect(() => parser("parseMatchedExperiment")(experiment, PROJECT_ID)).toThrow();
+  });
+
+  test.each(["promote", "reject", "rollback"])(
+    "rejects executable MatchedExperiment outcome %s",
+    (outcome) => {
+      const experiment = readdress("experiment", { ...validMatchedExperiment(), outcome });
+      expect(() => parser("parseMatchedExperiment")(experiment, PROJECT_ID)).toThrow(/outcome/i);
+    },
+  );
+
+  test("accepts all non-executing MatchedExperiment outcomes", () => {
+    for (const outcome of [
+      "pending",
+      "candidate_wins",
+      "control_wins",
+      "inconclusive",
+      "invalid",
+    ]) {
+      const experiment = readdress("experiment", { ...validMatchedExperiment(), outcome });
+      expect(() => parser("parseMatchedExperiment")(experiment, PROJECT_ID)).not.toThrow();
+    }
+  });
+
+  test("rejects model targets and escaping HarnessVariant paths", () => {
+    const modelVariant = readdress("variant", {
+      ...validHarnessVariant("candidate"),
+      evolutionTargets: ["artifact", "model"],
+    });
+    const escapingVariant = readdress("variant", {
+      ...validHarnessVariant("candidate"),
+      changedPaths: ["../production/policy.json"],
+    });
+    expect(() => parser("parseHarnessVariant")(modelVariant, PROJECT_ID)).toThrow(/model|target/i);
+    expect(() => parser("parseHarnessVariant")(escapingVariant, PROJECT_ID)).toThrow(
+      /project-relative|path/i,
+    );
+  });
+
+  test.each([
+    ["profile", "activatedAt", "parseEvolutionProfile", validEvolutionProfile],
+    ["episode", "observedAt", "parseProductionEpisode", validProductionEpisode],
+    ["receipt", "appliedAt", "parsePromotionReceipt", validPromotionReceipt],
+  ])("requires strict UTC ISO time on %s", (kind, field, parserName, makeRecord) => {
+    for (const timestamp of [
+      "2026-08-09 01:02:03Z",
+      "2026-08-09T01:02:03+08:00",
+      "2026-02-30T01:02:03Z",
+      " padded ",
+    ]) {
+      const record = readdress(kind as EvolutionRecordKind, {
+        ...(makeRecord() as Record<string, unknown>),
+        [field]: timestamp,
+      });
+      expect(() => parser(parserName)(record, PROJECT_ID)).toThrow(/UTC|ISO|timestamp/i);
+    }
+  });
+
+  test("binds privacy review hashes to the exact ProductionEpisode snapshots", () => {
+    const episode = validProductionEpisode();
+    const mismatched = readdress("episode", {
+      ...episode,
+      privacyReview: {
+        ...(episode.privacyReview as Record<string, unknown>),
+        inputSnapshotSha256: SHA_C,
+      },
+    });
+    expect(() => parser("parseProductionEpisode")(mismatched, PROJECT_ID)).toThrow(
+      /privacyReview.*inputSnapshotSha256|match/i,
+    );
+    for (const privacyMutation of [
+      { status: "pending" },
+      { surprise: true },
+      { evidenceRefs: [] },
+    ]) {
+      const invalid = readdress("episode", {
+        ...episode,
+        privacyReview: {
+          ...(episode.privacyReview as Record<string, unknown>),
+          ...privacyMutation,
+        },
+      });
+      expect(() => parser("parseProductionEpisode")(invalid, PROJECT_ID)).toThrow();
+    }
+  });
+
+  test("requires receipt readback, canary evidence, and distinct variants", () => {
+    const receipt = validPromotionReceipt();
+    for (const override of [
+      { readbackEvidenceRefs: [] },
+      { canaryEvidenceRefs: [] },
+      { toVariantId: receipt.fromVariantId },
+    ]) {
+      const invalid = readdress("receipt", { ...receipt, ...override });
+      expect(() => parser("parsePromotionReceipt")(invalid, PROJECT_ID)).toThrow();
+    }
+  });
+
+  test("enforces runtime record capacity boundaries", () => {
+    const surfacesAtLimit = Array.from({ length: 100 }, (_, index) => `surface_${index}`);
+    const profileAtLimit = readdress("profile", {
+      ...validEvolutionProfile(),
+      allowedSurfaceIds: surfacesAtLimit,
+    });
+    expect(() => parser("parseEvolutionProfile")(profileAtLimit, PROJECT_ID)).not.toThrow();
+
+    const profileOverLimit = readdress("profile", {
+      ...validEvolutionProfile(),
+      allowedSurfaceIds: [...surfacesAtLimit, "surface_100"],
+    });
+    expect(() => parser("parseEvolutionProfile")(profileOverLimit, PROJECT_ID)).toThrow(/at most/i);
+
+    const episodeAtLimit = readdress("episode", {
+      ...validProductionEpisode(),
+      sourceRef: "x".repeat(4_000),
+      metrics: Object.fromEntries(Array.from({ length: 100 }, (_, index) => [`metric_${index}`, index])),
+    });
+    expect(() => parser("parseProductionEpisode")(episodeAtLimit, PROJECT_ID)).not.toThrow();
+
+    const episodeOverTextLimit = readdress("episode", {
+      ...validProductionEpisode(),
+      sourceRef: "x".repeat(4_001),
+    });
+    expect(() => parser("parseProductionEpisode")(episodeOverTextLimit, PROJECT_ID)).toThrow(/at most/i);
+
+    const episodeOverMetricsLimit = readdress("episode", {
+      ...validProductionEpisode(),
+      metrics: Object.fromEntries(Array.from({ length: 101 }, (_, index) => [`metric_${index}`, index])),
+    });
+    expect(() => parser("parseProductionEpisode")(episodeOverMetricsLimit, PROJECT_ID)).toThrow(/at most/i);
   });
 });
