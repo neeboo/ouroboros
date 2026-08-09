@@ -521,10 +521,7 @@ function reconciliationContracts(context: Record<string, unknown>) {
 }
 
 function integrationTargetBranch(context: Record<string, unknown>) {
-  const boundary = recordValue(context.integrationBoundary);
-  return typeof boundary.targetBranch === "string" && boundary.targetBranch.length > 0
-    ? boundary.targetBranch
-    : "main";
+  return "main";
 }
 
 function recordValue(value: unknown): Record<string, unknown> {

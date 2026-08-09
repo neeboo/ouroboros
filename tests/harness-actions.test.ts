@@ -765,6 +765,16 @@ describe("Harness actions", () => {
     git(repoPath, ["worktree", "add", "-b", "task-worker", worktreePath, "main"]);
     await mkdir(join(worktreePath, "src"), { recursive: true });
     await writeFile(join(worktreePath, "src", "app.ts"), "export const value = 1;\n");
+    git(worktreePath, ["add", "src/app.ts"]);
+    git(worktreePath, ["commit", "-m", "Worker implementation"]);
+    await writeFile(join(repoPath, "target-only.txt"), "committed on target after worker branched\n");
+    git(repoPath, ["add", "target-only.txt"]);
+    git(repoPath, ["commit", "-m", "Target-only delivery"]);
+    const targetHeadBefore = git(repoPath, ["rev-parse", "HEAD"]).stdout.trim();
+    const workerHead = git(worktreePath, ["rev-parse", "HEAD"]).stdout.trim();
+    await writeFile(join(repoPath, "README.md"), "operator edit\n");
+    git(repoPath, ["add", "README.md"]);
+    await writeFile(join(repoPath, "NOTES.md"), "operator note\n");
 
     const runId = harness.createRun({ goal: "Integrate verified work", projectRoot: repoPath });
     const workerTaskId = harness.createTask({
@@ -856,6 +866,16 @@ describe("Harness actions", () => {
         pushed: false,
       }),
     );
+    expect(await readFile(join(repoPath, "README.md"), "utf8")).toBe("operator edit\n");
+    expect(await readFile(join(repoPath, "NOTES.md"), "utf8")).toBe("operator note\n");
+    expect(git(repoPath, ["status", "--short"]).stdout).toContain("M  README.md");
+    expect(git(repoPath, ["status", "--short"]).stdout).toContain("?? NOTES.md");
+    expect(git(repoPath, ["show", "HEAD:target-only.txt"]).stdout).toBe("committed on target after worker branched\n");
+    expect(git(repoPath, ["show", "HEAD:src/app.ts"]).stdout).toBe("export const value = 1;\n");
+    expect(git(repoPath, ["rev-list", "--parents", "-n", "1", "HEAD"]).stdout.trim().split(" ").slice(1)).toEqual([
+      targetHeadBefore,
+      workerHead,
+    ]);
     expect(mergedFile.trim()).toBe("export const value = 1;");
     expect(log).toContain("Integrate verified worker");
     expect(readiness.unintegrated).toHaveLength(0);
@@ -865,6 +885,60 @@ describe("Harness actions", () => {
       status: "done",
       request: expect.objectContaining({ runId, workerTaskId }),
     });
+  });
+
+  test("blocks target HEAD drift before recording an integration receipt", async () => {
+    const scenario = await createDisjointBranchIntegrationScenario(harness, dir);
+    let drifted = false;
+    const runGit = (input: { cwd: string; args: string[] }) => {
+      if (!drifted && input.cwd === scenario.repoPath && input.args[0] === "merge-tree") {
+        writeFileSync(join(scenario.repoPath, "operator-drift.txt"), "drift\n");
+        git(scenario.repoPath, ["add", "operator-drift.txt"]);
+        git(scenario.repoPath, ["-c", "commit.gpgSign=false", "commit", "--only", "-m", "Operator drift", "--", "operator-drift.txt"]);
+        drifted = true;
+      }
+      return rawGit(input.cwd, input.args);
+    };
+
+    const result = applyHarnessAction(harness, {
+      type: "integrateVerifiedRun",
+      runId: scenario.runId,
+      workerTaskId: scenario.workerTaskId,
+      repoPath: scenario.repoPath,
+      targetBranch: "main",
+    }, { runGit });
+
+    expect(result).toMatchObject({ status: "blocked", actionType: "integrateVerifiedRun" });
+    expect(result.problems.join(" ")).toContain("target HEAD drifted");
+    expect(result.artifacts).toHaveLength(0);
+    expect(git(scenario.repoPath, ["show", "--format=", "--name-only", "HEAD"]).stdout).toContain("operator-drift.txt");
+    expect(harness.listHarnessActionEvents({ limit: 10 }).filter((event) => event.status === "done")).toHaveLength(0);
+  });
+
+  test("blocks when independent preserved-path readback fails", async () => {
+    const scenario = await createDisjointBranchIntegrationScenario(harness, dir);
+    let sabotaged = false;
+    const runGit = (input: { cwd: string; args: string[] }) => {
+      const result = rawGit(input.cwd, input.args);
+      if (!sabotaged && input.cwd === scenario.repoPath && input.args[0] === "hash-object") {
+        sabotaged = true;
+        return { ...result, stdout: `${"0".repeat(40)}\n` };
+      }
+      return result;
+    };
+
+    const result = applyHarnessAction(harness, {
+      type: "integrateVerifiedRun",
+      runId: scenario.runId,
+      workerTaskId: scenario.workerTaskId,
+      repoPath: scenario.repoPath,
+      targetBranch: "main",
+    }, { runGit });
+
+    expect(result).toMatchObject({ status: "blocked", actionType: "integrateVerifiedRun" });
+    expect(result.problems.join(" ")).toContain("readback mismatch");
+    expect(result.artifacts).toHaveLength(0);
+    expect(sabotaged).toBe(true);
   });
 
   test("treats an already merged verified worker as an idempotent integration", async () => {
@@ -1471,9 +1545,9 @@ describe("Harness actions", () => {
     });
     expect(result.checks).toContainEqual(
       expect.objectContaining({
-        name: "target materialized worker changes",
+        name: "target path classification",
         status: "passed",
-        evidence: "src/landing.ts",
+        evidence: "verified=src/landing.ts;preserved=none",
       }),
     );
     expect(result.artifacts).toContainEqual(
@@ -1491,7 +1565,7 @@ describe("Harness actions", () => {
     expect(git(repoPath, ["status", "--short"]).stdout.trim()).toBe("");
   });
 
-  test("blocks materialized target integration when dirty files are not verified worker output", async () => {
+  test("integrates disjoint materialized changes while preserving staged and untracked target edits", async () => {
     const repoPath = join(dir, "repo-materialized-unrelated");
     const worktreePath = join(dir, "worker-tree-materialized-unrelated");
     await mkdir(repoPath, { recursive: true });
@@ -1507,9 +1581,11 @@ describe("Harness actions", () => {
     await mkdir(join(worktreePath, "src"), { recursive: true });
     await writeFile(join(repoPath, "src", "landing.ts"), "export const landing = true;\n");
     await writeFile(join(worktreePath, "src", "landing.ts"), "export const landing = true;\n");
+    await writeFile(join(repoPath, "README.md"), "operator edit\n");
+    git(repoPath, ["add", "README.md"]);
     await writeFile(join(repoPath, "NOTES.md"), "human note\n");
 
-    const runId = harness.createRun({ goal: "Reject unrelated target changes", projectRoot: repoPath });
+    const runId = harness.createRun({ goal: "Preserve unrelated target changes", projectRoot: repoPath });
     const workerTaskId = harness.createTask({
       runId,
       role: "worker",
@@ -1553,28 +1629,251 @@ describe("Harness actions", () => {
       type: "integrateVerifiedRun",
       runId,
       workerTaskId,
-      commitMessage: "Should not integrate unrelated target changes",
+      commitMessage: "Integrate verified landing page",
+      reason: "supervisor integrated verified worker before goal review",
+    });
+
+    expect(result).toMatchObject({
+      status: "done",
+      actionType: "integrateVerifiedRun",
+      summary: expect.stringContaining("Committed materialized verified task"),
+    });
+    expect(await readFile(join(repoPath, "src", "landing.ts"), "utf8")).toBe("export const landing = true;\n");
+    expect(await readFile(join(repoPath, "README.md"), "utf8")).toBe("operator edit\n");
+    expect(await readFile(join(repoPath, "NOTES.md"), "utf8")).toBe("human note\n");
+    expect(git(repoPath, ["status", "--short"]).stdout).toContain("M  README.md");
+    expect(git(repoPath, ["status", "--short"]).stdout).toContain("?? NOTES.md");
+    expect(git(repoPath, ["show", "--format=", "--name-only", "HEAD"]).stdout).toContain("src/landing.ts");
+  });
+
+  test("blocks overlapping target edits without changing target HEAD or status", async () => {
+    const repoPath = join(dir, "repo-materialized-overlap");
+    const worktreePath = join(dir, "worker-tree-materialized-overlap");
+    await mkdir(repoPath, { recursive: true });
+    await writeFile(join(repoPath, "README.md"), "initial\n");
+    git(repoPath, ["init", "-b", "main"]);
+    git(repoPath, ["config", "user.name", "Ouroboros Test"]);
+    git(repoPath, ["config", "user.email", "test@example.com"]);
+    git(repoPath, ["config", "commit.gpgSign", "false"]);
+    git(repoPath, ["add", "README.md"]);
+    git(repoPath, ["commit", "-m", "Initial commit"]);
+    git(repoPath, ["worktree", "add", "-b", "task-worker-materialized-overlap", worktreePath, "main"]);
+    await mkdir(join(repoPath, "src"), { recursive: true });
+    await mkdir(join(worktreePath, "src"), { recursive: true });
+    await writeFile(join(repoPath, "src", "landing.ts"), "operator version\n");
+    await writeFile(join(worktreePath, "src", "landing.ts"), "verified version\n");
+
+    const runId = harness.createRun({ goal: "Reject overlapping target changes", projectRoot: repoPath });
+    const workerTaskId = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Build landing page",
+      prompt: "Create src/landing.ts.",
+      worktreePath,
+    });
+    harness.recordAttempt({
+      taskId: workerTaskId,
+      input: { executor: "test" },
+      output: {
+        status: "done",
+        summary: "Created landing page",
+        changedFiles: ["src/landing.ts"],
+        checks: [{ name: "worker", status: "passed" }],
+        artifacts: [],
+        problems: [],
+      },
+    });
+    const verifierTaskId = harness.createTask({
+      runId,
+      role: "verifier",
+      goal: "Verify landing page",
+      prompt: "Verify worker changes.",
+      dependsOn: [workerTaskId],
+    });
+    harness.recordAttempt({
+      taskId: verifierTaskId,
+      input: { executor: "test" },
+      output: {
+        status: "done",
+        summary: "Verified landing page",
+        changedFiles: [],
+        checks: [{ name: "verify", status: "passed" }],
+        artifacts: [],
+        problems: [],
+      },
+    });
+
+    const headBefore = git(repoPath, ["rev-parse", "HEAD"]).stdout.trim();
+    const statusBefore = git(repoPath, ["status", "--short"]).stdout;
+    const result = applyHarnessAction(harness, {
+      type: "integrateVerifiedRun",
+      runId,
+      workerTaskId,
+      commitMessage: "Must reject overlap",
+    });
+
+    expect(result).toMatchObject({ status: "blocked", actionType: "integrateVerifiedRun" });
+    expect(result.problems.join(" ")).toContain("overlap");
+    expect(git(repoPath, ["rev-parse", "HEAD"]).stdout.trim()).toBe(headBefore);
+    expect(git(repoPath, ["status", "--short"]).stdout).toBe(statusBefore);
+  });
+
+  test("blocks materialized integration when a dirty path is a rename record", async () => {
+    const repoPath = join(dir, "repo-materialized-rename");
+    const worktreePath = join(dir, "worker-tree-materialized-rename");
+    await mkdir(repoPath, { recursive: true });
+    await writeFile(join(repoPath, "README.md"), "initial\n");
+    await writeFile(join(repoPath, "OPERATOR.md"), "operator note\n");
+    git(repoPath, ["init", "-b", "main"]);
+    git(repoPath, ["config", "user.name", "Ouroboros Test"]);
+    git(repoPath, ["config", "user.email", "test@example.com"]);
+    git(repoPath, ["config", "commit.gpgSign", "false"]);
+    git(repoPath, ["add", "README.md", "OPERATOR.md"]);
+    git(repoPath, ["commit", "-m", "Initial commit"]);
+    git(repoPath, ["worktree", "add", "-b", "task-worker-materialized-rename", worktreePath, "main"]);
+    await mkdir(join(repoPath, "src"), { recursive: true });
+    await mkdir(join(worktreePath, "src"), { recursive: true });
+    await writeFile(join(repoPath, "src", "landing.ts"), "export const landing = true;\n");
+    await writeFile(join(worktreePath, "src", "landing.ts"), "export const landing = true;\n");
+    // Stage an unrelated operator rename so porcelain reports `R`.
+    git(repoPath, ["mv", "OPERATOR.md", "OPERATOR-RENAMED.md"]);
+    const headBefore = git(repoPath, ["rev-parse", "HEAD"]).stdout.trim();
+    const porcelainBefore = git(repoPath, ["status", "--short"]).stdout;
+
+    const runId = harness.createRun({ goal: "Reject rename in target changes", projectRoot: repoPath });
+    const workerTaskId = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Build landing page",
+      prompt: "Create src/landing.ts.",
+      worktreePath,
+    });
+    harness.recordAttempt({
+      taskId: workerTaskId,
+      input: { executor: "test" },
+      output: {
+        status: "done",
+        summary: "Created landing page file",
+        changedFiles: ["src/landing.ts"],
+        checks: [{ name: "worker", status: "passed" }],
+        artifacts: [],
+        problems: [],
+      },
+    });
+    const verifierTaskId = harness.createTask({
+      runId,
+      role: "verifier",
+      goal: "Verify landing page",
+      prompt: "Verify worker changes.",
+      dependsOn: [workerTaskId],
+    });
+    harness.recordAttempt({
+      taskId: verifierTaskId,
+      input: { executor: "test" },
+      output: {
+        status: "done",
+        summary: "Verified landing page",
+        changedFiles: [],
+        checks: [{ name: "verify", status: "passed" }],
+        artifacts: [],
+        problems: [],
+      },
+    });
+
+    const result = applyHarnessAction(harness, {
+      type: "integrateVerifiedRun",
+      runId,
+      workerTaskId,
+      commitMessage: "Should not integrate when a rename is staged",
     });
 
     expect(result).toMatchObject({
       status: "blocked",
       actionType: "integrateVerifiedRun",
-      summary: expect.stringContaining("outside the verified worker output"),
-      problems: [expect.stringContaining("NOTES.md")],
+      summary: expect.stringContaining("renamed path"),
     });
-    const replay = applyHarnessAction(harness, {
+    expect(result.problems).toContainEqual(expect.stringContaining("rename detected"));
+    expect(git(repoPath, ["rev-parse", "HEAD"]).stdout.trim()).toBe(headBefore);
+    expect(git(repoPath, ["status", "--short"]).stdout).toBe(porcelainBefore);
+  });
+
+  test("blocks materialized integration when dirty and verified paths collide as file and directory", async () => {
+    const repoPath = join(dir, "repo-materialized-collision");
+    const worktreePath = join(dir, "worker-tree-materialized-collision");
+    await mkdir(repoPath, { recursive: true });
+    await writeFile(join(repoPath, "README.md"), "initial\n");
+    git(repoPath, ["init", "-b", "main"]);
+    git(repoPath, ["config", "user.name", "Ouroboros Test"]);
+    git(repoPath, ["config", "user.email", "test@example.com"]);
+    git(repoPath, ["config", "commit.gpgSign", "false"]);
+    git(repoPath, ["add", "README.md"]);
+    git(repoPath, ["commit", "-m", "Initial commit"]);
+    git(repoPath, ["worktree", "add", "-b", "task-worker-materialized-collision", worktreePath, "main"]);
+    await mkdir(join(repoPath, "src"), { recursive: true });
+    await mkdir(join(worktreePath, "src"), { recursive: true });
+    await mkdir(join(worktreePath, "src", "landing"), { recursive: true });
+    await writeFile(join(worktreePath, "src", "landing", "index.ts"), "export const nested = true;\n");
+    // Operator dirty path `src/landing` (file) collides with worker `src/landing/index.ts` (under a directory).
+    await writeFile(join(repoPath, "src", "landing"), "operator file\n");
+    const headBefore = git(repoPath, ["rev-parse", "HEAD"]).stdout.trim();
+
+    const runId = harness.createRun({ goal: "Reject file/directory collision", projectRoot: repoPath });
+    const workerTaskId = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Build landing nested module",
+      prompt: "Create src/landing/index.ts.",
+      worktreePath,
+    });
+    harness.recordAttempt({
+      taskId: workerTaskId,
+      input: { executor: "test" },
+      output: {
+        status: "done",
+        summary: "Created nested module",
+        changedFiles: ["src/landing/index.ts"],
+        checks: [{ name: "worker", status: "passed" }],
+        artifacts: [],
+        problems: [],
+      },
+    });
+    const verifierTaskId = harness.createTask({
+      runId,
+      role: "verifier",
+      goal: "Verify landing nested module",
+      prompt: "Verify worker changes.",
+      dependsOn: [workerTaskId],
+    });
+    harness.recordAttempt({
+      taskId: verifierTaskId,
+      input: { executor: "test" },
+      output: {
+        status: "done",
+        summary: "Verified landing nested module",
+        changedFiles: [],
+        checks: [{ name: "verify", status: "passed" }],
+        artifacts: [],
+        problems: [],
+      },
+    });
+
+    const result = applyHarnessAction(harness, {
       type: "integrateVerifiedRun",
       runId,
       workerTaskId,
-      commitMessage: "Should remain suppressed",
+      commitMessage: "Should not integrate a file/directory collision",
     });
-    const integrationEvents = harness
-      .listHarnessActionEvents({ limit: 10 })
-      .filter((event) => event.actionType === "integrateVerifiedRun");
 
-    expect(replay.eventId).toBe(result.eventId);
-    expect(integrationEvents).toHaveLength(1);
-    expect(git(repoPath, ["log", "--oneline", "-1"]).stdout).toContain("Initial commit");
+    expect(result).toMatchObject({
+      status: "blocked",
+      actionType: "integrateVerifiedRun",
+      summary: expect.stringContaining("overlap"),
+    });
+    expect(result.problems).toContainEqual(
+      expect.stringContaining("overlap between verified src/landing/index.ts and disjoint src/landing"),
+    );
+    expect(git(repoPath, ["rev-parse", "HEAD"]).stdout.trim()).toBe(headBefore);
+    expect(await readFile(join(repoPath, "src", "landing"), "utf8")).toBe("operator file\n");
   });
 
   test("ignores Ouroboros runtime files when integrating materialized target changes", async () => {
@@ -2148,6 +2447,7 @@ describe("Harness actions", () => {
       git(repoPath, ["init", "-b", "main"]);
       git(repoPath, ["config", "user.name", "Ouroboros Test"]);
       git(repoPath, ["config", "user.email", "test@example.com"]);
+      git(repoPath, ["config", "commit.gpgSign", "false"]);
       git(repoPath, ["add", "README.md"]);
       git(repoPath, ["commit", "-m", "Initial commit"]);
       const expectedParentSha = git(repoPath, ["rev-parse", "HEAD"]).stdout.trim();
@@ -2179,6 +2479,7 @@ describe("Harness actions", () => {
         git(worktreePath, ["init", "-b", "main"]);
         git(worktreePath, ["config", "user.name", "Ouroboros Test"]);
         git(worktreePath, ["config", "user.email", "test@example.com"]);
+        git(worktreePath, ["config", "commit.gpgSign", "false"]);
         git(worktreePath, ["add", "README.md"]);
         git(worktreePath, ["commit", "-m", "Foreign initial commit"]);
       }
@@ -6280,6 +6581,77 @@ describe("Evolution runtime fixed actions", () => {
     expect(harness.getMatchedExperiment({ projectId: graph.projectId, id: graph.experiment.id })).toBeNull();
   });
 });
+
+async function createDisjointBranchIntegrationScenario(harness: Harness, dir: string) {
+  const repoPath = join(dir, `repo-disjoint-branch-${crypto.randomUUID()}`);
+  const worktreePath = join(dir, `worker-disjoint-branch-${crypto.randomUUID()}`);
+  await mkdir(repoPath, { recursive: true });
+  await writeFile(join(repoPath, "README.md"), "initial\n");
+  git(repoPath, ["init", "-b", "main"]);
+  git(repoPath, ["config", "user.name", "Ouroboros Test"]);
+  git(repoPath, ["config", "user.email", "test@example.com"]);
+  git(repoPath, ["config", "commit.gpgSign", "false"]);
+  git(repoPath, ["add", "README.md"]);
+  git(repoPath, ["commit", "-m", "Initial commit"]);
+  git(repoPath, ["worktree", "add", "-b", "task-disjoint-worker", worktreePath, "main"]);
+  await mkdir(join(worktreePath, "src"), { recursive: true });
+  await writeFile(join(worktreePath, "src", "feature.ts"), "export const feature = true;\n");
+  git(worktreePath, ["add", "src/feature.ts"]);
+  git(worktreePath, ["commit", "-m", "Verified worker change"]);
+  await writeFile(join(repoPath, "README.md"), "operator edit\n");
+  git(repoPath, ["add", "README.md"]);
+  await writeFile(join(repoPath, "NOTES.md"), "operator note\n");
+
+  const runId = harness.createRun({ goal: "Test disjoint branch integration", projectRoot: repoPath });
+  const workerTaskId = harness.createTask({
+    runId,
+    role: "worker",
+    goal: "Implement verified feature",
+    prompt: "Create src/feature.ts.",
+    worktreePath,
+  });
+  harness.recordAttempt({
+    taskId: workerTaskId,
+    input: { executor: "test" },
+    output: {
+      status: "done",
+      summary: "Verified worker change",
+      changedFiles: ["src/feature.ts"],
+      checks: [{ name: "worker", status: "passed" }],
+      artifacts: [],
+      problems: [],
+    },
+  });
+  const verifierTaskId = harness.createTask({
+    runId,
+    role: "verifier",
+    goal: "Verify feature",
+    prompt: "Verify src/feature.ts.",
+    dependsOn: [workerTaskId],
+  });
+  harness.recordAttempt({
+    taskId: verifierTaskId,
+    input: { executor: "test" },
+    output: {
+      status: "done",
+      summary: "Feature verified",
+      changedFiles: [],
+      checks: [{ name: "verify", status: "passed" }],
+      artifacts: [],
+      problems: [],
+    },
+  });
+  return { repoPath, runId, workerTaskId };
+}
+
+function rawGit(cwd: string, args: string[]) {
+  const result = Bun.spawnSync({ cmd: ["git", ...args], cwd, stdout: "pipe", stderr: "pipe" });
+  return {
+    exitCode: result.exitCode,
+    stdout: new TextDecoder().decode(result.stdout),
+    stderr: new TextDecoder().decode(result.stderr),
+  };
+}
 
 function git(cwd: string, args: string[]) {
   const result = Bun.spawnSync({

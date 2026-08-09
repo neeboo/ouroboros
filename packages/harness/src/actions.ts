@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync, realpathSync } from "node:fs";
-import { isAbsolute, join } from "node:path";
+import { chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, realpathSync, rmSync, unlinkSync } from "node:fs";
+import { dirname, isAbsolute, join } from "node:path";
+import { tmpdir } from "node:os";
 import { acceptGuardrailProposal, proposeGuardrailsFromLessons } from "./guardrails";
 import type { HarnessDatabase } from "./database";
 import {
@@ -12,7 +13,7 @@ import {
 } from "./goal-review";
 import { Harness } from "./harness";
 import { makeId } from "./ids";
-import { filterOuroborosRuntimePaths } from "./runtime-paths";
+import { filterOuroborosRuntimePaths, isOuroborosRuntimePath } from "./runtime-paths";
 import {
   canonicalEvolutionRecordSha256,
   canonicalEvolutionValueSha256,
@@ -281,6 +282,7 @@ export interface HarnessActionOptions {
 interface GitCommandInput {
   cwd: string;
   args: string[];
+  env?: Record<string, string | undefined>;
   timeoutMs?: number;
   maxOutputBytes?: number;
 }
@@ -328,7 +330,7 @@ function frozenDesignContextKeys(keys: Iterable<string>): string[] {
 
 // Bump when integration preflight semantics change so a previously converged
 // blocked action is re-evaluated under the new contract.
-const INTEGRATION_CONTRACT_VERSION = 2;
+const INTEGRATION_CONTRACT_VERSION = 3;
 
 export function parseHarnessAction(value: unknown): HarnessAction {
   const record = objectRecord(value, "harness action");
@@ -593,7 +595,7 @@ export function applyHarnessAction(
   }
 
   if (action.type === "integrateVerifiedRun") {
-    const replay = findBlockedIntegrationReplay(harness, action, options);
+    const replay = findIntegrationReplay(harness, action, options);
     if (replay) {
       return replay;
     }
@@ -606,8 +608,12 @@ export function applyHarnessAction(
     request: safeRequest(action),
     result: resultToRecord(result),
   });
-  if (action.type === "integrateVerifiedRun" && result.status === "blocked") {
-    recordBlockedIntegration(harness, action, options, eventId);
+  if (action.type === "integrateVerifiedRun") {
+    if (result.status === "blocked") {
+      recordIntegrationConvergence(harness, action, options, eventId);
+    } else if (result.artifacts.some((artifact) => artifact.kind === "integration")) {
+      recordIntegrationConvergence(harness, action, options, eventId);
+    }
   }
   return { ...result, eventId };
 }
@@ -1367,7 +1373,7 @@ type IntegrationConvergenceRecord = {
   recordedAt: string;
 };
 
-function findBlockedIntegrationReplay(
+function findIntegrationReplay(
   harness: Harness,
   action: Extract<HarnessAction, { type: "integrateVerifiedRun" }>,
   options: HarnessActionOptions,
@@ -1382,13 +1388,24 @@ function findBlockedIntegrationReplay(
     return null;
   }
   const event = harness.getHarnessActionEvent({ id: record.actionEventId });
-  if (!event || event.status !== "blocked" || event.actionType !== "integrateVerifiedRun") {
+  if (!event || (event.status !== "blocked" && event.status !== "done") || event.actionType !== "integrateVerifiedRun") {
     return null;
   }
-  return { ...(event.result as unknown as HarnessActionResult), eventId: event.id };
+  const result = event.result as unknown as HarnessActionResult;
+  if (event.status !== "done") {
+    return { ...result, eventId: event.id };
+  }
+  return {
+    ...result,
+    summary: `Verified task ${action.workerTaskId ?? "worker"} is already integrated into ${action.targetBranch ?? "main"}.`,
+    artifacts: result.artifacts.map((artifact) =>
+      artifact.kind === "integration" ? { ...artifact, alreadyMerged: true } : artifact,
+    ),
+    eventId: event.id,
+  };
 }
 
-function recordBlockedIntegration(
+function recordIntegrationConvergence(
   harness: Harness,
   action: Extract<HarnessAction, { type: "integrateVerifiedRun" }>,
   options: HarnessActionOptions,
@@ -2426,6 +2443,11 @@ function integrateVerifiedRun(
   }
 
   const targetBranch = action.targetBranch ?? "main";
+  if (targetBranch !== "main") {
+    return blockedIntegration(action.type, "Integration boundary is frozen to targetBranch=main.", checks, [
+      `targetBranch ${targetBranch} is not allowed; expected main`,
+    ]);
+  }
   const commitMessage = action.commitMessage ?? `Integrate verified task ${worker.id}`;
   const targetBranchResult = runGitStep(git, repoPath, ["branch", "--show-current"]);
   if (!targetBranchResult.ok) {
@@ -2450,6 +2472,7 @@ function integrateVerifiedRun(
     ]);
   }
   checks.push({ name: "no concurrent merge", status: "passed", evidence: "no MERGE_HEAD" });
+  let preservedTargetSnapshot: DisjointSnapshot | null = null;
 
   const sourceBranchResult = runGitStep(git, worktreePath, ["branch", "--show-current"]);
   if (!sourceBranchResult.ok) {
@@ -2494,7 +2517,61 @@ function integrateVerifiedRun(
         "target repository must be clean for same-branch integration",
       ]);
     }
-    return integrateMaterializedTargetChanges({
+    // Classify the target dirty paths against the verified worker output.
+    // When at least one verified worker path is materialized in the target,
+    // route through the materialized-target commit path (which preserves
+    // disjoint operator edits). When all dirty paths are disjoint from the
+    // worker output, fall through to the branch-merge path; git merge can
+    // preserve disjoint uncommitted changes when the merge does not touch
+    // those paths.
+    const dirtyClassification = classifyTargetDirtyForWorker(git, repoPath, changedFiles, checks, action.type);
+    if (dirtyClassification.result) {
+      return dirtyClassification.result;
+    }
+    if (!dirtyClassification.hasMaterializedWorkerPath) {
+      const preservedStatus = readTargetDirtyStatus(git, repoPath);
+      if (!preservedStatus.ok) {
+        return blockedCommand(action.type, "Could not snapshot disjoint target status before branch integration.", checks, preservedStatus.result);
+      }
+      preservedTargetSnapshot = snapshotDisjointTargetPaths(
+        git,
+        repoPath,
+        preservedStatus.entries,
+        dirtyClassification.disjointPaths,
+      );
+      if (preservedTargetSnapshot.incomplete) {
+        return blockedIntegration(action.type, "Could not snapshot disjoint target paths before branch integration.", checks, [
+          `incomplete snapshot for disjoint paths: ${preservedTargetSnapshot.incomplete.join(",")}`,
+        ]);
+      }
+      checks.push({
+        name: "disjoint target paths preserved",
+        status: "passed",
+        evidence: dirtyClassification.disjointPaths.join(","),
+      });
+      // Fall through to the branch-merge path with disjoint dirty state.
+    } else {
+      return integrateMaterializedTargetChanges({
+        action,
+        checks,
+        changedFiles,
+        commitMessage,
+        git,
+        goalReview,
+        isPreCompletionIntegration,
+        repoPath,
+        targetBranch,
+        verifier,
+        worker,
+        worktreePath,
+      });
+    }
+  }
+  checks.push({ name: "target repository clean", status: "passed", evidence: "clean" });
+  checks.push({ name: "source branch", status: "passed", evidence: sourceBranch });
+
+  if (preservedTargetSnapshot) {
+    return integrateDirtyBranchChanges({
       action,
       checks,
       changedFiles,
@@ -2503,14 +2580,14 @@ function integrateVerifiedRun(
       goalReview,
       isPreCompletionIntegration,
       repoPath,
+      sourceBranch,
       targetBranch,
       verifier,
       worker,
       worktreePath,
+      snapshot: preservedTargetSnapshot,
     });
   }
-  checks.push({ name: "target repository clean", status: "passed", evidence: "clean" });
-  checks.push({ name: "source branch", status: "passed", evidence: sourceBranch });
 
   const workerStatus = runGitStep(git, worktreePath, ["status", "--short"]);
   if (!workerStatus.ok) {
@@ -2790,6 +2867,292 @@ function recordContainedWorkerCommitIntegration(input: {
   );
 }
 
+function integrateDirtyBranchChanges(input: {
+  action: Extract<HarnessAction, { type: "integrateVerifiedRun" }>;
+  checks: HarnessActionResult["checks"];
+  changedFiles: string[];
+  commitMessage: string;
+  git: GitRunner;
+  goalReview: Task | null;
+  isPreCompletionIntegration: boolean;
+  repoPath: string;
+  sourceBranch: string;
+  targetBranch: string;
+  verifier: Task;
+  worker: Task;
+  worktreePath: string;
+  snapshot: DisjointSnapshot;
+}): HarnessActionResult {
+  const workerStatus = runGitStep(input.git, input.worktreePath, ["status", "--short"]);
+  if (!workerStatus.ok) {
+    return blockedCommand(input.action.type, "Could not inspect worker worktree status.", input.checks, workerStatus);
+  }
+  if (workerStatus.stdout.trim().length > 0) {
+    const stage = runGitStep(input.git, input.worktreePath, ["add", "-A"]);
+    if (!stage.ok) {
+      return blockedCommand(input.action.type, "Could not stage worker changes for preserved-target branch integration.", input.checks, stage);
+    }
+    const commit = runGitStep(input.git, input.worktreePath, [
+      "-c",
+      "commit.gpgSign=false",
+      "commit",
+      "-m",
+      input.commitMessage,
+    ]);
+    if (!commit.ok) {
+      return blockedCommand(input.action.type, "Could not commit worker changes for preserved-target branch integration.", input.checks, commit);
+    }
+    input.checks.push({ name: "worker commit", status: "passed", evidence: readGitStdout(input.git, input.worktreePath, ["rev-parse", "--short", "HEAD"]) ?? "created" });
+  }
+
+  const targetHead = readGitStdout(input.git, input.repoPath, ["rev-parse", "HEAD"]);
+  const sourceHead = readGitStdout(input.git, input.worktreePath, ["rev-parse", input.sourceBranch]);
+  if (!targetHead || !sourceHead) {
+    return blockedIntegration(input.action.type, "Could not read branch integration commits.", input.checks, [
+      "target HEAD and source HEAD are required",
+    ]);
+  }
+  const mergeTree = runGitStep(input.git, input.repoPath, [
+    "merge-tree",
+    "--write-tree",
+    targetHead,
+    sourceHead,
+  ]);
+  if (!mergeTree.ok) {
+    return blockedIntegration(input.action.type, "Could not construct a conflict-free integration tree.", input.checks, [
+      `verified worker branch merge is not conflict-free: ${mergeTree.stderr.trim() || mergeTree.stdout.trim()}`,
+    ]);
+  }
+  const integratedTree = mergeTree.stdout.trim().toLowerCase();
+  if (!/^[0-9a-f]{40}$/.test(integratedTree) || /^0+$/.test(integratedTree)) {
+    return blockedIntegration(input.action.type, "Could not read the conflict-free integration tree.", input.checks, [
+      "git merge-tree --write-tree must return one non-zero full tree SHA",
+    ]);
+  }
+  const targetHeadBeforeCommit = readGitStdout(input.git, input.repoPath, ["rev-parse", "HEAD"]);
+  if (targetHeadBeforeCommit !== targetHead) {
+    return blockedIntegration(input.action.type, "Target HEAD drifted during integration preflight; no receipt was recorded.", input.checks, [
+      `target HEAD drifted from ${targetHead}`,
+    ]);
+  }
+  const aheadResult = runGitStep(input.git, input.repoPath, ["rev-list", "--count", `${input.targetBranch}..${input.sourceBranch}`]);
+  if (!aheadResult.ok) {
+    return blockedCommand(input.action.type, "Could not compare source and target branches.", input.checks, aheadResult);
+  }
+  const ahead = Number.parseInt(aheadResult.stdout.trim(), 10);
+  if (!Number.isFinite(ahead) || ahead < 1) {
+    const ancestor = runGitStep(input.git, input.repoPath, ["merge-base", "--is-ancestor", input.sourceBranch, input.targetBranch]);
+    if (ancestor.ok) {
+      const readback = readbackDisjointTargetPaths(input.git, input.repoPath, input.snapshot);
+      if (!readback.ok) {
+        return blockedIntegration(input.action.type, "Preserved target readback failed for an already integrated branch.", input.checks, readback.mismatched);
+      }
+      return doneResult(input.action.type, `Verified task ${input.worker.id} is already integrated into ${input.targetBranch}.`, input.checks, [{
+        kind: "integration",
+        mode: "branch_merge",
+        runId: input.action.runId,
+        workerTaskId: input.worker.id,
+        verifierTaskId: input.verifier.id,
+        goalReviewTaskId: input.goalReview?.id ?? null,
+        preCompletion: input.isPreCompletionIntegration,
+        repoPath: input.repoPath,
+        worktreePath: input.worktreePath,
+        targetBranch: input.targetBranch,
+        sourceBranch: input.sourceBranch,
+        workerCommit: sourceHead.slice(0, 7),
+        mergeCommit: targetHead.slice(0, 7),
+        pushed: false,
+        changedFiles: input.changedFiles,
+        alreadyMerged: true,
+        reason: input.action.reason ?? null,
+      }]);
+    }
+    return blockedIntegration(input.action.type, "Source branch has no commits ahead of target during preserved-target integration.", input.checks, [
+      `source branch ${input.sourceBranch} has no commits ahead of ${input.targetBranch}`,
+    ]);
+  }
+
+  const commit = runGitStep(input.git, input.repoPath, [
+    "-c",
+    "commit.gpgSign=false",
+    "commit-tree",
+    integratedTree,
+    "-p",
+    targetHead,
+    "-p",
+    sourceHead,
+    "-m",
+    input.commitMessage,
+  ]);
+  const mergeCommit = commit.stdout.trim();
+  if (!commit.ok || !/^[0-9a-f]{40}$/i.test(mergeCommit)) {
+    return blockedCommand(input.action.type, "Could not create an isolated branch integration commit.", input.checks, commit);
+  }
+  const update = runGitStep(input.git, input.repoPath, [
+    "update-ref",
+    `refs/heads/${input.targetBranch}`,
+    mergeCommit,
+    targetHead,
+  ]);
+  if (!update.ok) {
+    return blockedCommand(input.action.type, "Target branch changed before preserved-target integration could be recorded.", input.checks, update);
+  }
+  if (!materializeWorkerFiles(input.repoPath, input.worktreePath, input.changedFiles)) {
+    const rollback = rollbackMaterializedIntegration(input.git, input.repoPath, input.action.type, input.checks, targetHead);
+    return rollback ?? blockedIntegration(input.action.type, "Could not materialize verified branch paths in the target worktree.", input.checks, [
+      "worker files could not be copied without changing unrelated target paths",
+    ]);
+  }
+  const indexSync = syncIndexToTree(input.git, input.repoPath, integratedTree, input.changedFiles);
+  if (!indexSync.ok) {
+    const rollback = rollbackMaterializedIntegration(input.git, input.repoPath, input.action.type, input.checks, targetHead);
+    return rollback ?? blockedIntegration(input.action.type, "Could not synchronize verified branch paths in the target index.", input.checks, [
+      "worker files were copied but target index synchronization failed",
+    ]);
+  }
+  const readback = readbackDisjointTargetPaths(input.git, input.repoPath, input.snapshot);
+  if (!readback.ok) {
+    const rollback = rollbackMaterializedIntegration(input.git, input.repoPath, input.action.type, input.checks, targetHead);
+    return rollback ?? blockedIntegration(input.action.type, "Preserved target readback failed after branch integration.", input.checks, readback.mismatched);
+  }
+  const integratedReadback = verifyIntegratedTargetPaths(
+    input.git,
+    input.repoPath,
+    mergeCommit,
+    input.changedFiles,
+  );
+  if (!integratedReadback.ok) {
+    const rollback = rollbackMaterializedIntegration(input.git, input.repoPath, input.action.type, input.checks, targetHead);
+    if (rollback) {
+      return { ...rollback, problems: [integratedReadback.reason, ...rollback.problems] };
+    }
+    return blockedIntegration(input.action.type, "Independent target readback failed after branch integration.", input.checks, [
+      integratedReadback.reason,
+    ]);
+  }
+  input.checks.push({ name: "preserved target readback", status: "passed", evidence: input.snapshot.entries.map((entry) => entry.path).join(",") });
+  return doneResult(input.action.type, `Integrated verified task ${input.worker.id} into ${input.targetBranch}.`, input.checks, [{
+    kind: "integration",
+    mode: "branch_merge",
+    runId: input.action.runId,
+    workerTaskId: input.worker.id,
+    verifierTaskId: input.verifier.id,
+    goalReviewTaskId: input.goalReview?.id ?? null,
+    preCompletion: input.isPreCompletionIntegration,
+    repoPath: input.repoPath,
+    worktreePath: input.worktreePath,
+    targetBranch: input.targetBranch,
+    sourceBranch: input.sourceBranch,
+    workerCommit: sourceHead.slice(0, 7),
+    mergeCommit: mergeCommit.slice(0, 7),
+    pushed: false,
+    changedFiles: input.changedFiles,
+    preservedDisjointFiles: input.snapshot.entries.map((entry) => entry.path),
+    targetHeadBefore: targetHead,
+    reason: input.action.reason ?? null,
+  }]);
+}
+
+function materializeWorkerFiles(repoPath: string, worktreePath: string, paths: string[]) {
+  try {
+    for (const path of paths) {
+      const source = join(worktreePath, path);
+      const target = join(repoPath, path);
+      if (!existsSync(source)) {
+        if (existsSync(target)) {
+          unlinkSync(target);
+        }
+        continue;
+      }
+      const sourceStat = lstatSync(source);
+      if (!sourceStat.isFile()) {
+        return false;
+      }
+      mkdirSync(dirname(target), { recursive: true });
+      copyFileSync(source, target);
+      chmodSync(target, sourceStat.mode & 0o777);
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function classifyTargetDirtyForWorker(
+  git: GitRunner,
+  repoPath: string,
+  changedFiles: string[],
+  checks: HarnessActionResult["checks"],
+  actionType: Extract<HarnessAction, { type: "integrateVerifiedRun" }>["type"],
+): { hasMaterializedWorkerPath: boolean; disjointPaths: string[]; result: HarnessActionResult | null } {
+  const normalizedChangedFiles = normalizeRelativeFiles(changedFiles);
+  if (normalizedChangedFiles.length !== changedFiles.length) {
+    return {
+      hasMaterializedWorkerPath: false,
+      disjointPaths: [],
+      result: blockedIntegration(actionType, "Worker changedFiles contain unsafe paths.", checks, [
+        "changedFiles must be relative paths inside the repository",
+      ]),
+    };
+  }
+  const dirtyStatus = readTargetDirtyStatus(git, repoPath);
+  if (!dirtyStatus.ok) {
+    return {
+      hasMaterializedWorkerPath: false,
+      disjointPaths: [],
+      result: blockedCommand(actionType, "Could not inspect target repository dirty status.", checks, dirtyStatus.result),
+    };
+  }
+  for (const entry of dirtyStatus.entries) {
+    if (entry.kind === "unsafe") {
+      return {
+        hasMaterializedWorkerPath: false,
+        disjointPaths: [],
+        result: blockedIntegration(actionType, "Target repository has unsafe or non-relative dirty paths.", checks, [
+          `unsafe target path: ${entry.path}`,
+        ]),
+      };
+    }
+    if (entry.kind === "rename") {
+      return {
+        hasMaterializedWorkerPath: false,
+        disjointPaths: [],
+        result: blockedIntegration(actionType, "Target repository has a renamed path that the verified worker did not authorize.", checks, [
+          `rename detected in target repository: ${entry.path}`,
+        ]),
+      };
+    }
+  }
+  const changedFileSet = new Set(normalizedChangedFiles);
+  const verifiedDirty: string[] = [];
+  const disjointDirty: string[] = [];
+  for (const entry of dirtyStatus.entries) {
+    if (changedFileSet.has(entry.path)) {
+      verifiedDirty.push(entry.path);
+    } else {
+      disjointDirty.push(entry.path);
+    }
+  }
+  for (const verifiedPath of normalizedChangedFiles) {
+    for (const disjointPath of disjointDirty) {
+      if (pathContains(verifiedPath, disjointPath) || pathContains(disjointPath, verifiedPath)) {
+        return {
+          hasMaterializedWorkerPath: false,
+          disjointPaths: disjointDirty,
+          result: blockedIntegration(actionType, "Target repository dirty paths overlap verified worker output.", checks, [
+            `overlap between verified ${verifiedPath} and disjoint ${disjointPath}`,
+          ]),
+        };
+      }
+    }
+  }
+  return {
+    hasMaterializedWorkerPath: verifiedDirty.length > 0,
+    disjointPaths: disjointDirty,
+    result: null,
+  };
+}
+
 function integrateMaterializedTargetChanges(input: {
   action: Extract<HarnessAction, { type: "integrateVerifiedRun" }>;
   checks: HarnessActionResult["checks"];
@@ -2804,55 +3167,225 @@ function integrateMaterializedTargetChanges(input: {
   worker: Task;
   worktreePath: string;
 }): HarnessActionResult {
-  const dirtyFiles = readTargetDirtyFiles(input.git, input.repoPath);
-  if (!dirtyFiles.ok) {
-    return blockedCommand(input.action.type, "Could not inspect target repository dirty files.", input.checks, dirtyFiles.result);
-  }
-
   const normalizedChangedFiles = normalizeRelativeFiles(input.changedFiles);
   if (normalizedChangedFiles.length !== input.changedFiles.length) {
     return blockedIntegration(input.action.type, "Worker changedFiles contain unsafe paths.", input.checks, [
       "changedFiles must be relative paths inside the repository",
     ]);
   }
-  const changedFileSet = new Set(normalizedChangedFiles);
-  const unexpected = dirtyFiles.files.filter((file) => !changedFileSet.has(file));
-  if (unexpected.length > 0) {
-    return blockedIntegration(input.action.type, "Target repository has uncommitted changes outside the verified worker output.", input.checks, [
-      `unexpected target changes: ${unexpected.join(",")}`,
-    ]);
+
+  // Read rich porcelain status (with rename detection) once, before any
+  // mutation. This is the canonical preflight evidence used to classify
+  // verified, disjoint, overlapping, renamed, or colliding target paths.
+  const dirtyStatus = readTargetDirtyStatus(input.git, input.repoPath);
+  if (!dirtyStatus.ok) {
+    return blockedCommand(input.action.type, "Could not inspect target repository dirty status.", input.checks, dirtyStatus.result);
+  }
+  for (const entry of dirtyStatus.entries) {
+    if (entry.kind === "unsafe") {
+      return blockedIntegration(input.action.type, "Target repository has unsafe or non-relative dirty paths.", input.checks, [
+        `unsafe target path: ${entry.path}`,
+      ]);
+    }
+    if (entry.kind === "rename") {
+      return blockedIntegration(input.action.type, "Target repository has a renamed path that the verified worker did not authorize.", input.checks, [
+        `rename detected in target repository: ${entry.path}`,
+      ]);
+    }
   }
 
-  const mismatched = dirtyFiles.files.filter((file) =>
+  const changedFileSet = new Set(normalizedChangedFiles);
+  const verifiedDirty: string[] = [];
+  const disjointDirty: string[] = [];
+  for (const entry of dirtyStatus.entries) {
+    if (changedFileSet.has(entry.path)) {
+      verifiedDirty.push(entry.path);
+    } else {
+      disjointDirty.push(entry.path);
+    }
+  }
+
+  // Reject overlap, ancestor/descendant, and file/directory collision between
+  // verified worker paths and disjoint dirty paths. These cases are not safe
+  // to preserve through a partial-target commit.
+  for (const verifiedPath of normalizedChangedFiles) {
+    for (const disjointPath of disjointDirty) {
+      if (pathContains(verifiedPath, disjointPath) || pathContains(disjointPath, verifiedPath)) {
+        return blockedIntegration(input.action.type, "Target repository dirty paths overlap verified worker output.", input.checks, [
+          `overlap between verified ${verifiedPath} and disjoint ${disjointPath}`,
+        ]);
+      }
+      if (pathCollidesAsFileAndDirectory(verifiedPath, disjointPath)) {
+        return blockedIntegration(input.action.type, "Target repository has a file/directory collision with verified worker output.", input.checks, [
+          `collision between verified ${verifiedPath} and disjoint ${disjointPath}`,
+        ]);
+      }
+    }
+    // Also detect file/directory collisions where both paths exist as actual
+    // filesystem entries inside the repository (a verified file path whose
+    // parent is a disjoint file, or vice versa).
+    for (const otherVerified of normalizedChangedFiles) {
+      if (verifiedPath !== otherVerified && pathCollidesAsFileAndDirectory(verifiedPath, otherVerified)) {
+        return blockedIntegration(input.action.type, "Verified worker paths contain a file/directory collision.", input.checks, [
+          `collision between verified ${verifiedPath} and verified ${otherVerified}`,
+        ]);
+      }
+    }
+  }
+
+  // Verified dirty paths must already match the worker worktree byte-for-byte.
+  const mismatched = verifiedDirty.filter((file) =>
     !sameMaterializedFile(input.repoPath, input.worktreePath, file)
   );
   if (mismatched.length > 0) {
-    return blockedIntegration(input.action.type, "Target repository dirty files do not match the verified worker worktree.", input.checks, [
-      `mismatched target files: ${mismatched.join(",")}`,
+    return blockedIntegration(input.action.type, "Target edits overlap verified worker output and do not match the verified worker worktree.", input.checks, [
+      `overlapping target files do not match the verified worker worktree: ${mismatched.join(",")}`,
+    ]);
+  }
+
+  // Snapshot disjoint dirty paths and HEAD before mutation. These snapshots
+  // are the evidence used for post-integration readback and rollback.
+  const disjointSnapshot = snapshotDisjointTargetPaths(input.git, input.repoPath, dirtyStatus.entries, disjointDirty);
+  if (disjointSnapshot.incomplete) {
+    return blockedIntegration(input.action.type, "Could not snapshot disjoint target paths before integration.", input.checks, [
+      `incomplete snapshot for disjoint paths: ${disjointSnapshot.incomplete.join(",")}`,
+    ]);
+  }
+  const headBeforeCommit = readGitStdout(input.git, input.repoPath, ["rev-parse", "HEAD"]);
+  if (!headBeforeCommit) {
+    return blockedIntegration(input.action.type, "Could not read target repository HEAD before integration.", input.checks, [
+      "HEAD readback returned no SHA",
+    ]);
+  }
+  const porcelainBeforeCommit = readGitStdout(input.git, input.repoPath, ["status", "--short"]);
+  if (porcelainBeforeCommit === null) {
+    return blockedIntegration(input.action.type, "Could not read target repository porcelain status before integration.", input.checks, [
+      "porcelain status readback returned no output",
+    ]);
+  }
+
+  const verifiedIndexBefore = snapshotIndexEntries(input.git, input.repoPath, verifiedDirty);
+  if (!verifiedIndexBefore.ok) {
+    return blockedIntegration(input.action.type, "Could not snapshot verified target index entries.", input.checks, [
+      `failed to read verified index paths: ${verifiedDirty.join(",")}`,
     ]);
   }
 
   input.checks.push({
+    name: "target path classification",
+    status: "passed",
+    evidence: `verified=${verifiedDirty.join(",") || "none"};preserved=${disjointDirty.join(",") || "none"}`,
+  });
+  input.checks.push({
     name: "target materialized worker changes",
     status: "passed",
-    evidence: dirtyFiles.files.join(","),
+    evidence: verifiedDirty.join(","),
   });
-
-  const add = runGitStep(input.git, input.repoPath, ["add", "-A", "--", ...dirtyFiles.files]);
-  if (!add.ok) {
-    return blockedCommand(input.action.type, "Could not stage materialized target changes.", input.checks, add);
+  if (disjointDirty.length > 0) {
+    input.checks.push({
+      name: "disjoint target paths preserved",
+      status: "passed",
+      evidence: disjointDirty.join(","),
+    });
   }
-  const commit = runGitStep(input.git, input.repoPath, ["commit", "-m", input.commitMessage]);
+
+  // Detect target HEAD drift between snapshot and commit. If a concurrent
+  // actor moved HEAD, leave the snapshot intact and the working tree untouched,
+  // and surface a blocked result without producing a receipt.
+  const headAtCommit = readGitStdout(input.git, input.repoPath, ["rev-parse", "HEAD"]);
+  if (!headAtCommit || headAtCommit !== headBeforeCommit) {
+    return blockedIntegration(input.action.type, "Target repository HEAD drifted between snapshot and commit.", input.checks, [
+      `HEAD moved from ${headBeforeCommit} to ${headAtCommit ?? "unknown"} before commit`,
+    ]);
+  }
+
+  const temporaryTree = createMaterializedIntegrationTree(input.git, input.repoPath, headBeforeCommit, verifiedDirty);
+  if (!temporaryTree.ok) {
+    return blockedCommand(input.action.type, "Could not create an isolated integration tree.", input.checks, temporaryTree.result);
+  }
+  const commit = runGitStep(input.git, input.repoPath, [
+    "-c",
+    "commit.gpgSign=false",
+    "commit-tree",
+    temporaryTree.tree,
+    "-p",
+    headBeforeCommit,
+    "-m",
+    input.commitMessage,
+  ]);
   if (!commit.ok) {
     return blockedCommand(input.action.type, "Could not commit materialized target changes.", input.checks, commit);
   }
-  const mergeCommit = readGitStdout(input.git, input.repoPath, ["rev-parse", "--short", "HEAD"]);
-  input.checks.push({ name: "target commit", status: "passed", evidence: mergeCommit ?? "created" });
+  const mergeCommit = commit.stdout.trim();
+  if (!/^[0-9a-f]{40}$/i.test(mergeCommit)) {
+    return blockedCommand(input.action.type, "Git returned an invalid integration commit.", input.checks, commit);
+  }
+  const update = runGitStep(input.git, input.repoPath, [
+    "update-ref",
+    `refs/heads/${input.targetBranch}`,
+    mergeCommit,
+    headBeforeCommit,
+  ]);
+  if (!update.ok) {
+    return blockedCommand(input.action.type, "Could not update the target branch with the verified integration commit.", input.checks, update);
+  }
+  input.checks.push({ name: "target commit", status: "passed", evidence: mergeCommit });
+
+  const indexSync = syncIndexToTree(input.git, input.repoPath, temporaryTree.tree, verifiedDirty);
+  if (!indexSync.ok) {
+    const rollback = rollbackMaterializedIntegration(input.git, input.repoPath, input.action.type, input.checks, headBeforeCommit);
+    restoreIndexEntries(input.git, input.repoPath, verifiedIndexBefore.entries);
+    return rollback ?? blockedIntegration(input.action.type, "Could not synchronize the target index with the verified integration commit.", input.checks, [
+      `failed to synchronize verified index paths: ${verifiedDirty.join(",")}`,
+    ]);
+  }
+
+  // Independent post-integration readback of every preserved disjoint path.
+  // Failed readback rolls back the integration commit so no success receipt
+  // is emitted until disjoint operator edits are proven intact.
+  const readback = readbackDisjointTargetPaths(input.git, input.repoPath, disjointSnapshot);
+  if (!readback.ok) {
+    const rollback = rollbackMaterializedIntegration(input.git, input.repoPath, input.action.type, input.checks, headBeforeCommit);
+    restoreIndexEntries(input.git, input.repoPath, verifiedIndexBefore.entries);
+    if (rollback) {
+      restoreIndexEntries(input.git, input.repoPath, verifiedIndexBefore.entries);
+      return rollback;
+    }
+    restoreIndexEntries(input.git, input.repoPath, verifiedIndexBefore.entries);
+    return blockedIntegration(input.action.type, "Independent post-integration readback of preserved target paths failed.", input.checks, [
+      `readback mismatch for disjoint paths: ${readback.mismatched.join(",")}`,
+    ]);
+  }
+  const integratedReadback = verifyIntegratedTargetPaths(
+    input.git,
+    input.repoPath,
+    mergeCommit,
+    verifiedDirty,
+  );
+  if (!integratedReadback.ok) {
+    const rollback = rollbackMaterializedIntegration(input.git, input.repoPath, input.action.type, input.checks, headBeforeCommit);
+    restoreIndexEntries(input.git, input.repoPath, verifiedIndexBefore.entries);
+    if (rollback) {
+      return { ...rollback, problems: [integratedReadback.reason, ...rollback.problems] };
+    }
+    return blockedIntegration(input.action.type, "Independent post-integration readback of verified target paths failed.", input.checks, [
+      integratedReadback.reason,
+    ]);
+  }
+  input.checks.push({
+    name: "preserved target readback",
+    status: "passed",
+    evidence: disjointDirty.length === 0 ? "no disjoint paths" : disjointDirty.join(","),
+  });
 
   let pushed = false;
   if (input.action.push === true) {
     const push = runGitStep(input.git, input.repoPath, ["push", "origin", input.targetBranch]);
     if (!push.ok) {
+      const rollback = rollbackMaterializedIntegration(input.git, input.repoPath, input.action.type, input.checks, headBeforeCommit);
+      if (rollback) {
+        return rollback;
+      }
       return blockedCommand(input.action.type, "Could not push target branch.", input.checks, push);
     }
     pushed = true;
@@ -2877,7 +3410,10 @@ function integrateMaterializedTargetChanges(input: {
       mergeCommit,
       pushed,
       changedFiles: input.changedFiles,
-      materializedFiles: dirtyFiles.files,
+      materializedFiles: verifiedDirty,
+      preservedDisjointFiles: disjointDirty,
+      targetHeadBefore: headBeforeCommit,
+      porcelainBefore: porcelainBeforeCommit,
       reason: input.action.reason ?? null,
     },
   ]);
@@ -5111,6 +5647,7 @@ function defaultGitRunner(input: GitCommandInput): GitCommandResult {
     cwd: input.cwd,
     stdout: "pipe",
     stderr: "pipe",
+    ...(input.env ? { env: { ...process.env, ...input.env } } : {}),
     ...(input.timeoutMs === undefined ? {} : { timeout: input.timeoutMs }),
     ...(input.maxOutputBytes === undefined ? {} : { maxBuffer: input.maxOutputBytes }),
   });
@@ -5177,6 +5714,562 @@ function sameMaterializedFile(repoPath: string, worktreePath: string, file: stri
   return readFileSync(repoFile).equals(readFileSync(worktreeFile));
 }
 
+type DirtyStatusEntry =
+  | { kind: "regular"; path: string; staged: string; worktree: string }
+  | { kind: "rename"; path: string; fromPath: string }
+  | { kind: "unsafe"; path: string };
+
+type DirtyStatusResult =
+  | { ok: true; entries: DirtyStatusEntry[] }
+  | { ok: false; result: ReturnType<typeof runGitStep> };
+
+function readTargetDirtyStatus(git: GitRunner, cwd: string): DirtyStatusResult {
+  // Porcelain v1 with `-z` NUL separators, `--untracked-files=all` so
+  // individual untracked files are listed instead of collapsed directories,
+  // and `-c core.quotepath=false` so non-ASCII paths are not C-escaped. With
+  // `-z`, each entry is XY <space> path. For renames and copies, the orig
+  // path and the new path are emitted as two consecutive NUL-separated
+  // segments after the XY marker.
+  const result = runGitStep(git, cwd, [
+    "-c",
+    "core.quotepath=false",
+    "status",
+    "--short",
+    "-z",
+    "--untracked-files=all",
+  ]);
+  if (!result.ok) {
+    return { ok: false, result };
+  }
+  const entries: DirtyStatusEntry[] = [];
+  const segments = result.stdout.split("\0");
+  let i = 0;
+  while (i < segments.length) {
+    const segment = segments[i];
+    if (!segment || segment.length < 4) {
+      i += 1;
+      continue;
+    }
+    const xy = segment.slice(0, 2);
+    const rest = segment.slice(3);
+    const staged = xy.charAt(0);
+    const worktree = xy.charAt(1);
+    if (staged === "R" || staged === "C" || worktree === "R" || worktree === "C") {
+      // For -z output, the orig path is the next NUL-separated segment.
+      const fromPath = rest;
+      const toPath = segments[i + 1] ?? "";
+      i += 2;
+      const cleanFrom = normalizeRelativeFiles([fromPath])[0];
+      const cleanTo = normalizeRelativeFiles([toPath])[0];
+      if (!cleanFrom || !cleanTo) {
+        entries.push({ kind: "unsafe", path: toPath || fromPath });
+        continue;
+      }
+      entries.push({ kind: "rename", path: cleanTo, fromPath: cleanFrom });
+      continue;
+    }
+    const path = normalizeRelativeFiles([rest])[0];
+    i += 1;
+    if (!path) {
+      entries.push({ kind: "unsafe", path: rest });
+      continue;
+    }
+    entries.push({ kind: "regular", path, staged, worktree });
+  }
+  // Filter out Ouroboros runtime paths so the supervisor never classifies
+  // runtime control state as operator edits.
+  const filtered = entries.filter((entry) => !isOuroborosRuntimePath(entry.path));
+  return { ok: true, entries: filtered };
+}
+
+function pathContains(parent: string, child: string) {
+  if (parent === child) {
+    return true;
+  }
+  const parentSegments = parent.split(/[\\/]+/).filter(Boolean);
+  const childSegments = child.split(/[\\/]+/).filter(Boolean);
+  if (parentSegments.length >= childSegments.length) {
+    return false;
+  }
+  for (let i = 0; i < parentSegments.length; i += 1) {
+    if (parentSegments[i] !== childSegments[i]) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function pathCollidesAsFileAndDirectory(left: string, right: string) {
+  // A file/directory collision occurs when one path is a strict prefix of the
+  // other AND the prefix path terminates without a separator. Example:
+  //   left  = "src/foo"
+  //   right = "src/foo/bar.ts"
+  // Here `src/foo` would have to be both a file (per left) and a directory
+  // (per right) — git cannot stage both at the same time.
+  if (left === right) {
+    return false;
+  }
+  const leftParts = left.split(/[\\/]+/).filter(Boolean);
+  const rightParts = right.split(/[\\/]+/).filter(Boolean);
+  const shorter = leftParts.length <= rightParts.length ? leftParts : rightParts;
+  const longer = shorter === leftParts ? rightParts : leftParts;
+  if (longer.length <= shorter.length) {
+    return false;
+  }
+  for (let i = 0; i < shorter.length; i += 1) {
+    if (shorter[i] !== longer[i]) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function createMaterializedIntegrationTree(
+  git: GitRunner,
+  repoPath: string,
+  parentSha: string,
+  verifiedPaths: string[],
+): { ok: true; tree: string } | { ok: false; result: ReturnType<typeof runGitStep> } {
+  let tempDir: string;
+  try {
+    tempDir = mkdtempSync(join(tmpdir(), "ouroboros-integration-index-"));
+  } catch {
+    return {
+      ok: false,
+      result: {
+        ok: false,
+        exitCode: 1,
+        stdout: "",
+        stderr: "could not create isolated Git index directory",
+        command: "git read-tree",
+        cwd: repoPath,
+      },
+    };
+  }
+  const indexPath = join(tempDir, "index");
+  const env = { GIT_INDEX_FILE: indexPath };
+  try {
+    const readTree = runGitWithEnvStep(git, repoPath, ["read-tree", parentSha], env);
+    if (!readTree.ok) {
+      return { ok: false, result: readTree };
+    }
+    const add = runGitWithEnvStep(git, repoPath, ["add", "--", ...verifiedPaths], env);
+    if (!add.ok) {
+      return { ok: false, result: add };
+    }
+    const tree = runGitWithEnvStep(git, repoPath, ["write-tree"], env);
+    if (!tree.ok || !/^[0-9a-f]{40}$/i.test(tree.stdout.trim())) {
+      return { ok: false, result: tree };
+    }
+    const changed = runGitStep(git, repoPath, [
+      "diff-tree",
+      "--no-commit-id",
+      "--name-status",
+      "-r",
+      "-z",
+      parentSha,
+      tree.stdout.trim(),
+      "--",
+    ]);
+    const entries = changed.ok ? parseNameStatusZ(changed.stdout) : null;
+    const expected = [...new Set(verifiedPaths)].sort();
+    const actual = entries?.map((entry) => entry.path).sort() ?? [];
+    if (!changed.ok || !entries || entries.some((entry) => entry.status.startsWith("R") || entry.status.startsWith("C")) ||
+      actual.length !== expected.length || actual.join("\0") !== expected.join("\0")) {
+      return {
+        ok: false,
+        result: {
+          ...changed,
+          ok: false,
+          exitCode: changed.ok ? 1 : changed.exitCode,
+          stderr: changed.ok ? "isolated integration tree changed paths do not match verified worker paths" : changed.stderr,
+        },
+      };
+    }
+    return { ok: true, tree: tree.stdout.trim() };
+  } finally {
+    rmSync(tempDir, { recursive: true, force: true });
+  }
+}
+
+interface DisjointSnapshotEntry {
+  path: string;
+  exists: boolean;
+  isSymlink: boolean;
+  isDirectory: boolean;
+  mode: number | null;
+  content: Buffer | null;
+  symlinkTarget: string | null;
+  porcelain: string;
+  tracked: boolean;
+  indexMode: string | null;
+  indexBlob: string | null;
+  indexStage: string | null;
+}
+
+interface DisjointSnapshot {
+  entries: DisjointSnapshotEntry[];
+  incomplete: string[] | null;
+}
+
+type IndexEntry = { mode: string; blob: string; stage: string };
+
+function snapshotIndexEntries(
+  git: GitRunner,
+  repoPath: string,
+  paths: string[],
+): { ok: true; entries: Array<{ path: string; entry: IndexEntry | null }> } | { ok: false } {
+  const entries: Array<{ path: string; entry: IndexEntry | null }> = [];
+  for (const path of paths) {
+    const result = readIndexEntry(git, repoPath, path);
+    if (!result.ok) {
+      return { ok: false };
+    }
+    entries.push({ path, entry: result.entry });
+  }
+  return { ok: true, entries };
+}
+
+function syncIndexToTree(
+  git: GitRunner,
+  repoPath: string,
+  tree: string,
+  paths: string[],
+): { ok: true } | { ok: false } {
+  for (const path of paths) {
+    const treeResult = runGitStep(git, repoPath, ["ls-tree", "-z", tree, "--", path]);
+    if (!treeResult.ok) {
+      return { ok: false };
+    }
+    const segment = treeResult.stdout.split("\0").find(Boolean);
+    const match = segment ? /^(\d+) blob ([0-9a-fA-F]{40})\t(.+)$/.exec(segment) : null;
+    const update = match
+      ? runGitStep(git, repoPath, ["update-index", "--add", "--cacheinfo", `${match[1]},${match[2]},${path}`])
+      : runGitStep(git, repoPath, ["update-index", "--force-remove", "--", path]);
+    if (!update.ok) {
+      return { ok: false };
+    }
+  }
+  return { ok: true };
+}
+
+function restoreIndexEntries(
+  git: GitRunner,
+  repoPath: string,
+  entries: Array<{ path: string; entry: IndexEntry | null }>,
+) {
+  for (const { path, entry } of entries) {
+    if (entry) {
+      runGitStep(git, repoPath, ["update-index", "--add", "--cacheinfo", `${entry.mode},${entry.blob},${path}`]);
+    } else {
+      runGitStep(git, repoPath, ["update-index", "--force-remove", "--", path]);
+    }
+  }
+}
+
+function readIndexEntry(
+  git: GitRunner,
+  repoPath: string,
+  path: string,
+): { ok: true; entry: { mode: string; blob: string; stage: string } | null } | { ok: false } {
+  const result = runGitStep(git, repoPath, ["ls-files", "--stage", "-z", "--", path]);
+  if (!result.ok) {
+    return { ok: false };
+  }
+  const segment = result.stdout.split("\0").find(Boolean);
+  if (!segment) {
+    return { ok: true, entry: null };
+  }
+  const match = /^(\d+) ([0-9a-fA-F]{40}) (\d+)\t(.+)$/.exec(segment);
+  if (!match || match[4] !== path) {
+    return { ok: false };
+  }
+  return { ok: true, entry: { mode: match[1]!, blob: match[2]!.toLowerCase(), stage: match[3]! } };
+}
+
+function snapshotDisjointTargetPaths(
+  git: GitRunner,
+  repoPath: string,
+  dirtyEntries: DirtyStatusEntry[],
+  disjointPaths: string[],
+): DisjointSnapshot {
+  const entries: DisjointSnapshotEntry[] = [];
+  const incomplete: string[] = [];
+  for (const path of disjointPaths) {
+    const abs = join(repoPath, path);
+    const dirtyEntry = dirtyEntries.find((entry) => entry.kind === "regular" && entry.path === path);
+    const index = readIndexEntry(git, repoPath, path);
+    if (!dirtyEntry || dirtyEntry.kind !== "regular" || !index.ok) {
+      incomplete.push(path);
+      continue;
+    }
+    const common = {
+      path,
+      porcelain: `${dirtyEntry.staged}${dirtyEntry.worktree} ${path}`,
+      tracked: index.entry !== null,
+      indexMode: index.entry?.mode ?? null,
+      indexBlob: index.entry?.blob ?? null,
+      indexStage: index.entry?.stage ?? null,
+    };
+    let snapshot: DisjointSnapshotEntry;
+    try {
+      if (!existsSync(abs)) {
+        snapshot = {
+          ...common,
+          exists: false,
+          isSymlink: false,
+          isDirectory: false,
+          mode: null,
+          content: null,
+          symlinkTarget: null,
+        };
+      } else {
+        const stat = lstatSync(abs);
+        if (stat.isSymbolicLink()) {
+          let target: string | null;
+          try {
+            target = readlinkSync(abs);
+          } catch {
+            incomplete.push(path);
+            continue;
+          }
+          snapshot = {
+            ...common,
+            exists: true,
+            isSymlink: true,
+            isDirectory: false,
+            mode: stat.mode & 0o777,
+            content: null,
+            symlinkTarget: target,
+          };
+        } else if (stat.isDirectory()) {
+          snapshot = {
+            ...common,
+            exists: true,
+            isSymlink: false,
+            isDirectory: true,
+            mode: stat.mode & 0o777,
+            content: null,
+            symlinkTarget: null,
+          };
+        } else {
+          snapshot = {
+            ...common,
+            exists: true,
+            isSymlink: false,
+            isDirectory: false,
+            mode: stat.mode & 0o777,
+            content: readFileSync(abs),
+            symlinkTarget: null,
+          };
+        }
+      }
+    } catch {
+      incomplete.push(path);
+      continue;
+    }
+    entries.push(snapshot);
+  }
+  return { entries, incomplete: incomplete.length > 0 ? incomplete : null };
+}
+
+function readbackDisjointTargetPaths(
+  git: GitRunner,
+  repoPath: string,
+  snapshot: DisjointSnapshot,
+): { ok: true } | { ok: false; mismatched: string[] } {
+  const mismatched: string[] = [];
+  const status = readTargetDirtyStatus(git, repoPath);
+  if (!status.ok) {
+    return { ok: false, mismatched: snapshot.entries.map((entry) => entry.path) };
+  }
+  for (const entry of snapshot.entries) {
+    const abs = join(repoPath, entry.path);
+    const current = status.entries.find((candidate) => candidate.kind === "regular" && candidate.path === entry.path);
+    const index = readIndexEntry(git, repoPath, entry.path);
+    if (!current || current.kind !== "regular" || !index.ok ||
+      `${current.staged}${current.worktree} ${entry.path}` !== entry.porcelain ||
+      (index.entry !== null) !== entry.tracked ||
+      (index.entry?.mode ?? null) !== entry.indexMode ||
+      (index.entry?.blob ?? null) !== entry.indexBlob ||
+      (index.entry?.stage ?? null) !== entry.indexStage) {
+      mismatched.push(entry.path);
+      continue;
+    }
+    if (entry.exists !== existsSync(abs)) {
+      mismatched.push(entry.path);
+      continue;
+    }
+    if (!entry.exists) {
+      continue;
+    }
+    try {
+      const stat = lstatSync(abs);
+      if (entry.isSymlink) {
+        if (!stat.isSymbolicLink()) {
+          mismatched.push(entry.path);
+          continue;
+        }
+        let target: string;
+        try {
+          target = readlinkSync(abs);
+        } catch {
+          mismatched.push(entry.path);
+          continue;
+        }
+        if (target !== entry.symlinkTarget) {
+          mismatched.push(entry.path);
+        }
+        continue;
+      }
+      if (entry.isDirectory !== stat.isDirectory()) {
+        mismatched.push(entry.path);
+        continue;
+      }
+      if (entry.isDirectory) {
+        if ((stat.mode & 0o777) !== entry.mode) {
+          mismatched.push(entry.path);
+        }
+        continue;
+      }
+      const content = readFileSync(abs);
+      if (!content.equals(entry.content ?? Buffer.alloc(0))) {
+        mismatched.push(entry.path);
+        continue;
+      }
+      if ((stat.mode & 0o777) !== entry.mode) {
+        mismatched.push(entry.path);
+      }
+    } catch {
+      mismatched.push(entry.path);
+    }
+  }
+  return mismatched.length === 0 ? { ok: true } : { ok: false, mismatched };
+}
+
+function verifyIntegratedTargetPaths(
+  git: GitRunner,
+  repoPath: string,
+  commitSha: string,
+  paths: string[],
+): { ok: true } | { ok: false; reason: string } {
+  for (const path of paths) {
+    const expected = runGitStep(git, repoPath, ["rev-parse", `${commitSha}:${path}`]);
+    if (!expected.ok) {
+      if (!existsSync(join(repoPath, path))) {
+        continue;
+      }
+      return { ok: false, reason: `integrated path readback mismatch: ${path}` };
+    }
+    const actual = runGitStep(git, repoPath, ["hash-object", "--", path]);
+    if (!actual.ok || actual.stdout.trim() !== expected.stdout.trim()) {
+      return { ok: false, reason: `integrated path readback mismatch: ${path}` };
+    }
+  }
+  return { ok: true };
+}
+
+function rollbackMaterializedIntegration(
+  git: GitRunner,
+  repoPath: string,
+  actionType: Extract<HarnessAction, { type: "integrateVerifiedRun" }>["type"],
+  checks: HarnessActionResult["checks"],
+  expectedHead: string,
+): HarnessActionResult | null {
+  // Roll back ONLY the commit created by this integration attempt. Operator
+  // edits in the working tree are left untouched. Returns null when rollback
+  // is unavailable (e.g., HEAD already matches expected) and the caller must
+  // produce its own blocked result.
+  const head = readGitStdout(git, repoPath, ["rev-parse", "HEAD"]);
+  if (!head) {
+    return null;
+  }
+  if (head === expectedHead) {
+    return null;
+  }
+  const rollback = runGitStep(git, repoPath, [
+    "update-ref",
+    "HEAD",
+    expectedHead,
+    head,
+  ]);
+  if (!rollback.ok) {
+    return null;
+  }
+  return blockedIntegration(
+    actionType,
+    "Rolled back materialized integration after post-commit readback failure with a compare-and-swap ref update; operator edits preserved.",
+    checks,
+    [`readback mismatch; ref restored from ${head} to ${expectedHead}`],
+  );
+}
+
+function snapshotStagedIndex(
+  git: GitRunner,
+  repoPath: string,
+  paths: string[],
+): { ok: true; entries: { path: string; mode: string; blob: string }[] } | { ok: false } {
+  // Use `git ls-files --stage -z` to read the index entries for the given
+  // paths. Each entry is `<mode> SP <blob> SP <stage>\t<path>\0`.
+  const entries: { path: string; mode: string; blob: string }[] = [];
+  const result = runGitStep(git, repoPath, ["ls-files", "--stage", "-z", "--", ...paths]);
+  if (!result.ok) {
+    return { ok: false };
+  }
+  const seen = new Set<string>();
+  for (const segment of result.stdout.split("\0")) {
+    if (!segment) {
+      continue;
+    }
+    const match = /^(\d+) ([0-9a-fA-F]{40}) (\d+)\t(.+)$/.exec(segment);
+    if (!match) {
+      continue;
+    }
+    const path = match[4];
+    if (!path || seen.has(path)) {
+      continue;
+    }
+    seen.add(path);
+    entries.push({ path, mode: match[1], blob: match[2].toLowerCase() });
+  }
+  if (entries.length !== paths.length) {
+    return { ok: false };
+  }
+  return { ok: true, entries };
+}
+
+function restoreStagedIndex(
+  git: GitRunner,
+  repoPath: string,
+  entries: { path: string; mode: string; blob: string }[],
+): { ok: true } | { ok: false } {
+  // Re-stage the operator's disjoint paths by adding them from the worktree.
+  // The worktree bytes are byte-for-byte unchanged (preserved through the
+  // integration commit), so the resulting index entries match the original
+  // snapshot. This restores the porcelain status of every preserved path.
+  if (entries.length === 0) {
+    return { ok: true };
+  }
+  const paths = entries.map((entry) => entry.path);
+  // Verify the worktree bytes still hash to the original blobs. If anything
+  // drifted, surface a failure rather than re-staging mismatched content.
+  for (const entry of entries) {
+    const hashResult = runGitStep(git, repoPath, ["hash-object", "--", entry.path]);
+    if (!hashResult.ok) {
+      return { ok: false };
+    }
+    const hash = hashResult.stdout.trim().toLowerCase();
+    if (hash !== entry.blob) {
+      return { ok: false };
+    }
+  }
+  const add = runGitStep(git, repoPath, ["add", "--", ...paths]);
+  if (!add.ok) {
+    return { ok: false };
+  }
+  return { ok: true };
+}
+
 function readGitStdout(git: GitRunner, cwd: string, args: string[]) {
   const result = runGitStep(git, cwd, args);
   return result.ok ? result.stdout.trim() : null;
@@ -5197,6 +6290,10 @@ function integrationOperationKey(
     ? resolveWorktreePath(repoPath, worker.worktreePath)
     : worker?.worktreePath ?? null;
   const slot = worker?.id ?? action.workerTaskId ?? "automatic";
+  const latestWorkerAttempt = worker
+    ? [...overview.sessions].reverse().find((session) => session.taskId === worker.id)?.attemptId ?? null
+    : null;
+  const goalReviewTaskId = overview.tasks.find((task) => task.role === "goal-review")?.id ?? null;
   return {
     slot,
     key: stableFingerprint({
@@ -5208,21 +6305,26 @@ function integrationOperationKey(
         targetBranch: action.targetBranch ?? "main",
         push: action.push ?? false,
       },
-      tasks: overview.tasks.map((task) => ({
-        id: task.id,
-        role: task.role,
-        status: task.status,
-        dependsOn: [...task.dependsOn].sort(),
-        worktreePath: task.worktreePath,
-      })),
-      attempts: overview.sessions.map((session) => ({
-        taskId: session.taskId,
-        attemptId: session.attemptId,
-        status: session.status,
-      })),
-      targetRepository: gitRepositoryState(git, repoPath),
-      workerRepository: gitRepositoryState(git, workerPath),
+      workerTaskId: worker?.id ?? null,
+      workerAttemptId: latestWorkerAttempt,
+      goalReviewTaskId,
+      workerPath,
     }),
+  };
+}
+
+function runGitWithEnvStep(
+  git: GitRunner,
+  cwd: string,
+  args: string[],
+  env: Record<string, string | undefined>,
+) {
+  const result = git({ cwd, args, env });
+  return {
+    ...result,
+    ok: result.exitCode === 0,
+    command: `git ${args.join(" ")}`,
+    cwd,
   };
 }
 

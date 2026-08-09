@@ -32,7 +32,7 @@ describe("terminal design delivery reconciliation", () => {
     await mkdir(join(worktreePath, "src"), { recursive: true });
     await writeFile(join(worktreePath, "src", "feature.ts"), "export const delivered = true;\n");
 
-    const { rootRunId, deliveryRunId, proposalId } = createDesignDelivery({ repoPath });
+    const { rootRunId, deliveryRunId, proposalId } = createDesignDelivery({ repoPath, targetBranch: "release" });
     const workerTaskId = harness.createTask({
       runId: deliveryRunId,
       role: "worker",
@@ -120,6 +120,7 @@ describe("terminal design delivery reconciliation", () => {
       state: "integrated",
       actionEventId: integrationEvent?.id,
     });
+    expect(integrationEvent?.request).toMatchObject({ targetBranch: "main" });
     expect(completionEvent?.request).toMatchObject({ actionEventId: integrationEvent?.id });
 
     setupHistoricalReceiptReplay();
@@ -299,6 +300,7 @@ describe("terminal design delivery reconciliation", () => {
   function createDesignDelivery(input: {
     repoPath?: string;
     repairReplanBudget?: { limit: number; used: number; entries: unknown[] };
+    targetBranch?: string;
   } = {}) {
     const projectId = harness.createProject({ name: "Terminal design project", rootPath: input.repoPath ?? dir });
     const rootRunId = harness.createRun({ goal: "Improve Ouroboros", projectId });
@@ -337,7 +339,7 @@ describe("terminal design delivery reconciliation", () => {
         goalContract: { desiredState: "terminal delivery is reconciled" },
         designEvaluationContract: proposal.proposal.evaluationContract,
         verifierContract: { deterministicChecks: ["bun test"] },
-        integrationBoundary: { targetBranch: "main", push: false },
+        integrationBoundary: { targetBranch: input.targetBranch ?? "main", push: false },
         permissions: { filesystem: "workspace-write" },
         completionCriteria: ["one audited integration or bounded disposition"],
         repairReplanBudget: input.repairReplanBudget ?? { limit: 3, used: 0, entries: [] },

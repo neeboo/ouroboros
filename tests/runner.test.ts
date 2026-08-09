@@ -2928,7 +2928,7 @@ describe("runner", () => {
     });
   });
 
-  test("supervisor exits a blocked integration pass instead of replaying forever", async () => {
+  test("supervisor integrates disjoint target edits without replaying forever", async () => {
     const repoPath = join(dir, "repo-blocked-integration");
     const worktreePath = join(dir, "verified-worker-blocked-integration");
     await mkdir(repoPath, { recursive: true });
@@ -3021,11 +3021,18 @@ describe("runner", () => {
     const integrationEvents = harness
       .listHarnessActionEvents({ limit: 10 })
       .filter((event) => event.actionType === "integrateVerifiedRun");
+    const preservedNotes = await readFile(join(repoPath, "NOTES.md"), "utf8");
+    const integratedFile = await readFile(join(repoPath, "src", "blocked.ts"), "utf8");
 
     expect(result.cycles).toHaveLength(1);
-    expect(integrationEvents).toHaveLength(2);
-    expect(integrationEvents.every((event) => event.status === "blocked")).toBe(true);
-  }, 2_000);
+    expect(integrationEvents).toHaveLength(1);
+    expect(integrationEvents[0]).toMatchObject({
+      actionType: "integrateVerifiedRun",
+      status: "done",
+    });
+    expect(preservedNotes).toBe("unrelated target change\n");
+    expect(integratedFile).toBe("export const blocked = true;\n");
+  }, 10_000);
 
   test("supervisor integrates verified worker work before goal review when run is still todo", async () => {
     const repoPath = join(dir, "repo-pre-review");
