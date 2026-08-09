@@ -1,4 +1,9 @@
-export { buildTaskPrompt, normalizedLessonSummary } from "./prompt";
+export {
+  buildTaskPrompt,
+  normalizedLessonSummary,
+  protectedPromptContractFingerprint,
+  protectedPromptContractFingerprintForSource,
+} from "./prompt";
 export {
   blockedOutput,
   createRunsAction,
@@ -16,6 +21,7 @@ export {
   resumeCodexResumableAttempt,
   runCodexAutopilot,
   runCodexResumableLoop,
+  runtimeGenerationAllowsLeasing,
   startCodexResumableAttempt,
   superviseCodexDaemon,
   superviseCodexRuns,

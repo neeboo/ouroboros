@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, setDefaultTimeout, test } from "bun:test";
-import { chmod, mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, cp, mkdir, mkdtemp, readdir, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { homedir, tmpdir } from "node:os";
@@ -40,6 +40,7 @@ import {
 } from "../packages/cli/src/linear-intake";
 import { Database } from "bun:sqlite";
 import { defaultCodexBin } from "../packages/runner/src/executors/codex-bin";
+import { protectedPromptContractFingerprintForSource } from "../packages/runner/src/prompt";
 import {
   listEvolutionRecords,
   showEvolutionRecord,
@@ -768,6 +769,19 @@ describe("CLI", () => {
       cycleIndex: 0,
       assessmentFingerprint: expect.any(String),
     });
+    expect(overview.run.context.controlPlaneRuntime).toEqual(expect.objectContaining({
+      state: "current",
+      generation: 1,
+      canonicalEntrypoint: expect.stringContaining("packages/cli/src/main.ts"),
+      sourceRoot: expect.any(String),
+      launchHead: expect.any(String),
+      observedDirtyStateFingerprint: expect.any(String),
+      promptContractHash: expect.stringMatching(/^[a-f0-9]{64}$/),
+      processIdentity: expect.any(String),
+      startedAt: expect.any(String),
+      attestedAt: expect.any(String),
+    }));
+    expect(overview.controlPlaneRuntime).toEqual(overview.run.context.controlPlaneRuntime);
     const goalContract = overview.run.context.goalContract;
     expect(goalContract).toBeDefined();
     expect(typeof goalContract.desiredState).toBe("string");
@@ -821,6 +835,413 @@ describe("CLI", () => {
       "Planning begins only from an accepted proposal and preserves the frozen evaluation contract, authority context, budget, and integration boundary",
       "No delivery run is created from an unaccepted proposal or without an approved stored decision",
     ]);
+  });
+
+  test("records one bounded reload-failed result when the canonical entrypoint is missing", async () => {
+    const bootstrap = await runCliJson("self-iterate");
+    const setup = new Harness(dbPath);
+    const root = setup.getRun(bootstrap.runId)!;
+    setup.updateRun({
+      runId: bootstrap.runId,
+      contextPatch: {
+        controlPlaneRuntime: {
+          ...(root.context.controlPlaneRuntime as Record<string, unknown>),
+          state: "current",
+          sourceRoot: join(dir, "missing-source-root"),
+          canonicalEntrypoint: join(dir, "missing-source-root/packages/cli/src/main.ts"),
+          launchHead: "commit-A",
+          observedHead: "commit-A",
+        },
+      },
+    });
+
+    const result = await runCliJson(
+      "self-improve-daemon",
+      "--root-run-id",
+      bootstrap.runId,
+      "--executor",
+      "codex-resumable",
+      "--cwd",
+      dir,
+      "--max-ticks",
+      "2",
+      "--tick-cycles",
+      "1",
+      "--max-rounds",
+      "1",
+      "--interval-ms",
+      "1",
+      "--idle-ms",
+      "1",
+    );
+    const runtime = new Harness(dbPath).getRun(bootstrap.runId)!.context.controlPlaneRuntime as Record<string, unknown>;
+
+    expect(result.status).toBe("tick_limit");
+    expect(runtime.state).toBe("reload-failed");
+    expect(runtime.reloadAttempt).toMatchObject({ count: 1, status: "failed" });
+    expect(runtime.handoffReceipt).toBeNull();
+  });
+
+  test("replays a two-commit handoff into one generation-B Designer attempt", async () => {
+    const sourceRoot = join(dir, "two-generation-source");
+    await mkdir(join(sourceRoot, "packages/runner/src"), { recursive: true });
+    await mkdir(join(sourceRoot, "packages/cli/src"), { recursive: true });
+    gitCli(sourceRoot, ["init", "-b", "main"]);
+    gitCli(sourceRoot, ["config", "user.name", "Ouroboros Test"]);
+    gitCli(sourceRoot, ["config", "user.email", "test@example.com"]);
+    gitCli(sourceRoot, ["config", "commit.gpgSign", "false"]);
+
+    const actualHarness = resolve(import.meta.dir, "..", "packages/harness/src/index.ts");
+    const actualPrompt = resolve(import.meta.dir, "..", "packages/runner/src/prompt.ts");
+    const fakeMain = (sentinel: string) => `
+import { Harness } from ${JSON.stringify(actualHarness)};
+import { protectedPromptContractFingerprintForSource } from ${JSON.stringify(actualPrompt)};
+
+function selfIterationDesignerPrompt() { return ${JSON.stringify(sentinel)}; }
+const args = Bun.argv.slice(2);
+if (args.includes("self-improve-daemon")) {
+  const value = (name) => { const index = args.indexOf(name); return index >= 0 ? args[index + 1] : ""; };
+  const dbPath = value("--db");
+  const rootRunId = value("--root-run-id");
+  const sourceRoot = value("--cwd");
+  const harness = new Harness(dbPath);
+  const root = harness.getRun(rootRunId);
+  const runtime = root.context.controlPlaneRuntime;
+  const promptContractHash = protectedPromptContractFingerprintForSource(sourceRoot);
+  const processIdentity = String(process.pid);
+  harness.updateRun({ runId: rootRunId, contextPatch: {
+    controlPlaneRuntime: {
+      ...runtime,
+      state: "current",
+      processIdentity,
+      attestedGeneration: runtime.generation,
+      attestedHead: runtime.launchHead,
+      attestedPromptContractHash: promptContractHash,
+      attestedProcessIdentity: processIdentity,
+      attestedAt: new Date().toISOString(),
+    },
+  }});
+  const task = harness.nextReadyTask(rootRunId);
+  if (!task) throw new Error("generation-B Designer task was not ready");
+  harness.recordAttempt({ taskId: task.id, input: {
+    prompt: selfIterationDesignerPrompt(),
+    promptContractHash,
+    processIdentity,
+  }, output: {
+    status: "done", summary: "generation-B Designer attested", changedFiles: [], checks: [], artifacts: [], problems: [],
+  }});
+}
+`;
+    await writeFile(join(sourceRoot, "packages/runner/src/prompt.ts"), "export const generation = 'A';\n");
+    await writeFile(join(sourceRoot, "packages/cli/src/main.ts"), fakeMain("COMMIT_A_SENTINEL"));
+    gitCli(sourceRoot, ["add", "."]);
+    gitCli(sourceRoot, ["commit", "-m", "generation A"]);
+    const headA = gitCli(sourceRoot, ["rev-parse", "HEAD"]).stdout.trim();
+    const promptA = protectedPromptContractFingerprintForSource(sourceRoot);
+
+    const harness = new Harness(dbPath);
+    harness.init();
+    const rootRunId = harness.createRun({
+      goal: "Replay runtime generation handoff",
+      context: {
+        source: "self-improve",
+        controlPlaneRuntime: {
+          canonicalEntrypoint: join(sourceRoot, "packages/cli/src/main.ts"),
+          sourceRoot,
+          launchHead: headA,
+          observedHead: headA,
+          observedDirtyStateFingerprint: "clean",
+          promptContractHash: promptA,
+          generation: 1,
+          processIdentity: String(process.pid),
+          startedAt: new Date().toISOString(),
+          attestedAt: new Date().toISOString(),
+          state: "current",
+          reloadAttempt: { count: 0, fingerprint: null, status: "none", cooldownUntil: null },
+          handoffReceipt: null,
+          attestedGeneration: 1,
+          attestedHead: headA,
+          attestedPromptContractHash: promptA,
+          attestedProcessIdentity: String(process.pid),
+        },
+      },
+    });
+    const taskId = harness.createTask({
+      runId: rootRunId,
+      role: "designer",
+      goal: "Assess generation B",
+      prompt: "COMMIT_A_SENTINEL",
+    });
+
+    await writeFile(join(sourceRoot, "packages/runner/src/prompt.ts"), "export const generation = 'B';\n");
+    await writeFile(join(sourceRoot, "packages/cli/src/main.ts"), fakeMain("COMMIT_B_SENTINEL"));
+    gitCli(sourceRoot, ["add", "."]);
+    gitCli(sourceRoot, ["commit", "-m", "generation B"]);
+    const headB = gitCli(sourceRoot, ["rev-parse", "HEAD"]).stdout.trim();
+    const promptB = protectedPromptContractFingerprintForSource(sourceRoot);
+
+    const daemonArgs = [
+      "self-improve-daemon",
+      "--root-run-id", rootRunId,
+      "--executor", "codex-resumable",
+      "--cwd", sourceRoot,
+      "--max-ticks", "2",
+      "--tick-cycles", "1",
+      "--max-rounds", "1",
+      "--interval-ms", "1",
+      "--idle-ms", "1",
+    ];
+    const results = await Promise.all([
+      runCliRaw(...daemonArgs),
+      runCliRaw(...daemonArgs),
+    ]);
+    expect(results.every((result) => result.exitCode === 0)).toBe(true);
+
+    let generationBAttempt: ReturnType<Harness["getAttempt"]> = null;
+    for (let index = 0; index < 100 && !generationBAttempt; index += 1) {
+      const overview = new Harness(dbPath).getRunOverview({ runId: rootRunId, eventLimit: 0 });
+      const session = overview.sessions.find((candidate) => candidate.taskId === taskId);
+      generationBAttempt = session ? new Harness(dbPath).getAttempt(session.attemptId) : null;
+      if (!generationBAttempt) await Bun.sleep(10);
+    }
+    const finalHarness = new Harness(dbPath);
+    const runtime = finalHarness.getRun(rootRunId)!.context.controlPlaneRuntime as Record<string, unknown>;
+    const attempts = finalHarness.getRunOverview({ runId: rootRunId, eventLimit: 0 }).sessions
+      .filter((session) => session.taskId === taskId)
+      .map((session) => finalHarness.getAttempt(session.attemptId)!);
+
+    expect(promptB).not.toBe(promptA);
+    expect(runtime).toMatchObject({
+      state: "current",
+      generation: 2,
+      launchHead: headB,
+      promptContractHash: promptB,
+      handoffReceipt: expect.objectContaining({ oldHead: headA, newHead: headB }),
+    });
+    expect(attempts).toHaveLength(1);
+    expect(attempts[0].input).toMatchObject({
+      prompt: "COMMIT_B_SENTINEL",
+      promptContractHash: promptB,
+    });
+
+    const replay = await runCliRaw(...daemonArgs);
+    expect(replay.exitCode).toBe(0);
+    const replayed = new Harness(dbPath).getRunOverview({ runId: rootRunId, eventLimit: 0 });
+    const replayedRuntime = replayed.run!.context.controlPlaneRuntime as Record<string, unknown>;
+    expect(replayedRuntime.handoffReceipt).toEqual(runtime.handoffReceipt);
+    expect(replayed.sessions.filter((session) => session.taskId === taskId)).toHaveLength(1);
+  });
+
+  test("runs a real two-process handoff from commit A to commit B", async () => {
+    const sourceRoot = join(dir, "real-generation-source");
+    const repositoryRoot = resolve(import.meta.dir, "..");
+    await mkdir(sourceRoot, { recursive: true });
+    await cp(join(repositoryRoot, "packages"), join(sourceRoot, "packages"), { recursive: true });
+    await cp(join(repositoryRoot, "scripts"), join(sourceRoot, "scripts"), { recursive: true });
+    await symlink(join(repositoryRoot, "node_modules"), join(sourceRoot, "node_modules"), "dir");
+    await writeFile(join(sourceRoot, "package.json"), await readFile(join(repositoryRoot, "package.json"), "utf8"));
+    await writeFile(join(sourceRoot, ".gitignore"), "node_modules\n");
+
+    gitCli(sourceRoot, ["init", "-b", "main"]);
+    gitCli(sourceRoot, ["config", "user.name", "Ouroboros Test"]);
+    gitCli(sourceRoot, ["config", "user.email", "test@example.com"]);
+    gitCli(sourceRoot, ["config", "commit.gpgSign", "false"]);
+    gitCli(sourceRoot, ["add", "package.json", ".gitignore", "packages"]);
+    gitCli(sourceRoot, ["commit", "-m", "generation A"]);
+    const mainPath = join(sourceRoot, "packages/cli/src/main.ts");
+    const headA = gitCli(sourceRoot, ["rev-parse", "HEAD"]).stdout.trim();
+    const promptA = protectedPromptContractFingerprintForSource(sourceRoot);
+
+    const bootstrap = await runCliJson("self-iterate", "--cwd", sourceRoot);
+    const codexBin = join(dir, "real-generation-codex");
+    const promptLog = join(dir, "real-generation-prompts.jsonl");
+    const releasePath = join(dir, "release-generation-a");
+    await writeFile(
+      codexBin,
+      [
+        "#!/usr/bin/env bun",
+        "import { appendFileSync, existsSync, writeFileSync } from 'node:fs';",
+        "const prompt = await new Response(Bun.stdin.stream()).text();",
+        `appendFileSync(${JSON.stringify(promptLog)}, JSON.stringify({ pid: process.pid, supervisorPid: process.ppid, prompt }) + '\\n');`,
+        "const outputFlag = Bun.argv.indexOf('--output-last-message');",
+        "const outputPath = outputFlag >= 0 ? Bun.argv[outputFlag + 1] : '';",
+        "const payload = { status: 'done', summary: 'generation completed', changedFiles: [], checks: [{ name: 'generation replay', status: 'passed' }], artifacts: [], problems: [] };",
+        "if (!prompt.includes('COMMIT_B_DESIGNER_SENTINEL')) while (!existsSync(" + JSON.stringify(releasePath) + ")) await Bun.sleep(10);",
+        "if (outputPath) writeFileSync(outputPath, JSON.stringify(payload));",
+        "console.log(JSON.stringify({ type: 'session.started', session_id: `session_${process.pid}` }));",
+        "console.log(JSON.stringify({ type: 'agent.message', message: JSON.stringify(payload) }));",
+      ].join("\n"),
+    );
+    await chmod(codexBin, 0o755);
+
+    const oldProcess = Bun.spawn({
+      cmd: [
+        "bun",
+        mainPath,
+        "--db",
+        dbPath,
+        "self-improve-daemon",
+        "--root-run-id",
+        bootstrap.runId,
+        "--executor",
+        "codex-resumable",
+        "--cwd",
+        sourceRoot,
+        "--codex-bin",
+        codexBin,
+        "--max-ticks",
+        "0",
+        "--tick-cycles",
+        "1",
+        "--max-rounds",
+        "1",
+        "--interval-ms",
+        "10",
+        "--idle-ms",
+        "10",
+        "--start-hook",
+        "none",
+      ],
+      cwd: sourceRoot,
+      env: { ...process.env },
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const oldStdout = new Response(oldProcess.stdout).text();
+    const oldStderr = new Response(oldProcess.stderr).text();
+    let newProcessId: number | null = null;
+    let processesStopped = false;
+    const stopProcesses = async () => {
+      if (processesStopped) return;
+      processesStopped = true;
+      if (newProcessId && newProcessId !== process.pid) {
+        try { process.kill(newProcessId, "SIGTERM"); } catch {}
+      }
+      oldProcess.kill();
+      await oldProcess.exited;
+      await Promise.all([oldStdout, oldStderr]);
+    };
+    try {
+      let prompts: Array<{ pid: number; supervisorPid: number; prompt: string }> = [];
+      for (let index = 0; index < 600 && prompts.length === 0; index += 1) {
+        if (existsSync(promptLog)) {
+          prompts = (await readFile(promptLog, "utf8"))
+            .trim()
+            .split("\n")
+            .filter(Boolean)
+            .map((line) => JSON.parse(line) as { pid: number; supervisorPid: number; prompt: string });
+        }
+        if (prompts.length === 0) await Bun.sleep(10);
+      }
+      if (prompts.length === 0) {
+        throw new Error(`generation A never started\nstdout: ${await oldStdout}\nstderr: ${await oldStderr}`);
+      }
+      expect(prompts).toHaveLength(1);
+      expect(prompts[0].prompt).not.toContain("COMMIT_B_DESIGNER_SENTINEL");
+
+      const sourceA = await readFile(mainPath, "utf8");
+      const sourceB = sourceA.replace(
+        "function selfIterationDesignerPrompt() {\r\n  return [",
+        "function selfIterationDesignerPrompt() {\r\n  return [\r\n    \"COMMIT_B_DESIGNER_SENTINEL\",",
+      );
+      expect(sourceB).not.toBe(sourceA);
+      await writeFile(mainPath, sourceB);
+      gitCli(sourceRoot, ["add", "packages/cli/src/main.ts"]);
+      gitCli(sourceRoot, ["commit", "-m", "generation B"]);
+      const headB = gitCli(sourceRoot, ["rev-parse", "HEAD"]).stdout.trim();
+      const promptB = protectedPromptContractFingerprintForSource(sourceRoot);
+      expect(headB).not.toBe(headA);
+      expect(promptB).not.toBe(promptA);
+      expect(new Harness(dbPath).listRunningAttempts({ runId: bootstrap.runId })).toHaveLength(1);
+
+      const pausedAt = new Date().toISOString();
+      new Harness(dbPath).updateRun({
+        runId: bootstrap.runId,
+        contextPatch: {
+          runPause: { reason: "human requested pause during reload drain", pausedAt },
+        },
+      });
+      await Bun.sleep(100);
+      const pausedRuntime = new Harness(dbPath).getRun(bootstrap.runId)!.context;
+      expect(pausedRuntime.runPause).toEqual({
+        reason: "human requested pause during reload drain",
+        pausedAt,
+      });
+      const pausedPrompts = (await readFile(promptLog, "utf8"))
+        .trim()
+        .split("\n")
+        .filter(Boolean)
+        .map((line) => JSON.parse(line) as { pid: number; supervisorPid: number; prompt: string });
+      expect(pausedPrompts.some((entry) => entry.prompt.includes("COMMIT_B_DESIGNER_SENTINEL"))).toBe(false);
+      new Harness(dbPath).updateRun({
+        runId: bootstrap.runId,
+        contextPatch: { runPause: null, runPauseClearedAt: new Date().toISOString() },
+      });
+      await writeFile(releasePath, "release\n");
+      for (let index = 0; index < 3000; index += 1) {
+        prompts = (await readFile(promptLog, "utf8"))
+          .trim()
+          .split("\n")
+          .filter(Boolean)
+          .map((line) => JSON.parse(line) as { pid: number; supervisorPid: number; prompt: string });
+        if (prompts.some((entry) => entry.prompt.includes("COMMIT_B_DESIGNER_SENTINEL"))) break;
+        await Bun.sleep(10);
+      }
+      const generationBPrompt = prompts.find((entry) => entry.prompt.includes("COMMIT_B_DESIGNER_SENTINEL"));
+      expect(generationBPrompt).toBeDefined();
+      expect(generationBPrompt?.supervisorPid).not.toBe(prompts[0].supervisorPid);
+
+      const overview = new Harness(dbPath).getRunOverview({ runId: bootstrap.runId, eventLimit: 0 });
+      const runtime = overview.run!.context.controlPlaneRuntime as Record<string, unknown>;
+      expect(runtime).toMatchObject({
+        state: "current",
+        generation: 2,
+        launchHead: headB,
+        promptContractHash: promptB,
+        handoffReceipt: expect.objectContaining({
+          oldHead: headA,
+          newHead: headB,
+          oldProcessIdentity: String(prompts[0].supervisorPid),
+          newProcessIdentity: String(generationBPrompt?.supervisorPid),
+        }),
+      });
+      newProcessId = Number(runtime.processIdentity);
+
+      await stopProcesses();
+
+      const overviewEvidence = await runCliJson("run-overview", "--run-id", bootstrap.runId);
+      expect(overviewEvidence.controlPlaneRuntime).toMatchObject({
+        generation: 2,
+        launchHead: headB,
+        promptContractHash: promptB,
+      });
+      const evidence = await runCli("run-evidence", "--run-id", bootstrap.runId);
+      expect(evidence).toContain("old HEAD: " + headA);
+      expect(evidence).toContain("new HEAD: " + headB);
+      expect(evidence).toContain("old process: " + prompts[0].supervisorPid);
+      expect(evidence).toContain("new process: " + generationBPrompt?.supervisorPid);
+      expect(evidence).toContain(promptB);
+    } finally {
+      await stopProcesses();
+    }
+  }, 60_000);
+
+  test("canonical self-iteration launch evidence ignores an ambient orbs link", async () => {
+    const ambientBin = join(dir, "ambient-bin");
+    await mkdir(ambientBin, { recursive: true });
+    const ambientOrbs = join(ambientBin, "orbs");
+    await writeFile(ambientOrbs, "#!/bin/sh\nprintf '%s\\n' ambient-worktree\n");
+    await chmod(ambientOrbs, 0o755);
+
+    const ambientPath = `${ambientBin}:${process.env.PATH ?? ""}`;
+    const result = await runCliJson("self-iterate", { PATH: ambientPath });
+    const overview = await runCliJson("run-overview", "--run-id", result.runId, { PATH: ambientPath });
+    const runtime = overview.run.context.controlPlaneRuntime;
+
+    expect(runtime.canonicalEntrypoint).toBe(join(resolve(import.meta.dir, ".."), "packages/cli/src/main.ts"));
+    expect(runtime.sourceRoot).toBe(resolve(import.meta.dir, ".."));
+    expect(runtime.canonicalEntrypoint).not.toContain("ambient-worktree");
   });
 
   test("self-iteration bootstrap forces every role through codex-resumable over a claude-code global default", async () => {
@@ -1477,6 +1898,10 @@ describe("CLI", () => {
     }
     const codexBin = join(dir, "fake-codex-launch");
     const codexInvocationLog = join(dir, "fake-codex-launch-invocations.jsonl");
+    const ambientBin = join(dir, "ambient-orbs-bin");
+    await mkdir(ambientBin, { recursive: true });
+    await writeFile(join(ambientBin, "orbs"), "#!/bin/sh\nprintf '%s\\n' ambient-worktree\n");
+    await chmod(join(ambientBin, "orbs"), 0o755);
     await writeFile(
       codexBin,
       [
@@ -1509,7 +1934,7 @@ describe("CLI", () => {
         "--codex-bin",
         codexBin,
         "--cwd",
-        "/repo",
+        process.cwd(),
         "--sandbox",
         "read-only",
         "--max-cycles",
@@ -1522,7 +1947,7 @@ describe("CLI", () => {
         "none",
       ],
       cwd: process.cwd(),
-      env: { ...process.env },
+      env: { ...process.env, PATH: `${ambientBin}:${process.env.PATH ?? ""}` },
       stdout: "pipe",
       stderr: "pipe",
     });
@@ -1559,6 +1984,10 @@ describe("CLI", () => {
       expect(overview.run).toMatchObject({
         id: launch.runId,
         goal: "Continuously improve Ouroboros from evidence-backed gaps",
+      });
+      expect(overview.run.context.controlPlaneRuntime).toMatchObject({
+        sourceRoot: resolve(import.meta.dir, ".."),
+        canonicalEntrypoint: join(resolve(import.meta.dir, ".."), "packages/cli/src/main.ts"),
       });
       expect(overview.tasks).toHaveLength(1);
       expect(overview.tasks[0]).toMatchObject({
@@ -10859,6 +11288,70 @@ describe("CLI", () => {
     expect(summary).toContain("Latest goal-review decision: (none recorded)");
     expect(summary).toContain("Changed files (1)");
     expect(summary).toContain("README.md");
+  });
+
+  test("formatRunEvidence renders the persisted runtime handoff receipt and attestation fields", () => {
+    const oldPrompt = "a".repeat(64);
+    const newPrompt = "b".repeat(64);
+    const evidenceHarness = new Harness(dbPath);
+    evidenceHarness.init();
+    const runId = evidenceHarness.createRun({
+      goal: "Show runtime generation evidence",
+      context: {
+        controlPlaneRuntime: {
+          state: "reloaded",
+          generation: 2,
+          canonicalEntrypoint: "/repo/packages/cli/src/main.ts",
+          sourceRoot: "/repo",
+          launchHead: "head-new",
+          observedHead: "head-new",
+          promptContractHash: newPrompt,
+          processIdentity: "222",
+          startedAt: "2026-08-10T01:00:00.000Z",
+          attestedAt: "2026-08-10T01:00:02.000Z",
+          attestedGeneration: 2,
+          attestedHead: "head-new",
+          attestedPromptContractHash: newPrompt,
+          attestedProcessIdentity: "222",
+          reloadAttempt: {
+            count: 1,
+            status: "launched",
+            fingerprint: "head-new",
+            cooldownUntil: "2026-08-10T01:05:00.000Z",
+            claimedAt: "2026-08-10T00:59:58.000Z",
+          },
+          handoffReceipt: {
+            oldGeneration: 1,
+            newGeneration: 2,
+            oldHead: "head-old",
+            newHead: "head-new",
+            oldPromptContractHash: oldPrompt,
+            newPromptContractHash: newPrompt,
+            oldProcessIdentity: "111",
+            newProcessIdentity: "222",
+            claimAt: "2026-08-10T00:59:58.000Z",
+            startAt: "2026-08-10T01:00:00.000Z",
+            attestationAt: "2026-08-10T01:00:02.000Z",
+          },
+        },
+      },
+    });
+
+    const summary = formatRunEvidence(evidenceHarness.getRunOverview({ runId, eventLimit: 0 }));
+
+    expect(summary).toContain("state: reloaded");
+    expect(summary).toContain("generation: 2");
+    expect(summary).toContain("old generation: 1");
+    expect(summary).toContain("new generation: 2");
+    expect(summary).toContain("old HEAD: head-old");
+    expect(summary).toContain("new HEAD: head-new");
+    expect(summary).toContain(`old prompt contract: ${oldPrompt}`);
+    expect(summary).toContain(`new prompt contract: ${newPrompt}`);
+    expect(summary).toContain("old process: 111");
+    expect(summary).toContain("new process: 222");
+    expect(summary).toContain("claim at: 2026-08-10T00:59:58.000Z");
+    expect(summary).toContain("attestation at: 2026-08-10T01:00:02.000Z");
+    expect(summary).toContain("cooldown until: 2026-08-10T01:05:00.000Z");
   });
 
   test("formatRunEvidence throws when the run is missing", async () => {
