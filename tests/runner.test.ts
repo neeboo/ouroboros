@@ -2906,7 +2906,11 @@ describe("runner", () => {
     await mkdir(join(worktreePath, "src"), { recursive: true });
     await writeFile(join(worktreePath, "src", "supervised.ts"), "export const supervised = true;\n");
 
-    const runId = harness.createRun({ goal: "Integrate supervised work", projectRoot: repoPath });
+    const runId = harness.createRun({
+      goal: "Integrate supervised work",
+      projectRoot: repoPath,
+      context: { integrationBoundary: { targetBranch: "main", push: false } },
+    });
     const workerTaskId = harness.createTask({
       runId,
       role: "worker",
@@ -2952,6 +2956,31 @@ describe("runner", () => {
       prompt: "Return runDecision complete.",
       dependsOn: [verifierTaskId],
     });
+
+    await expect(superviseCodexRuns({
+      harness,
+      cwd: repoPath,
+      rootRunId: runId,
+      runConcurrency: 1,
+      taskConcurrency: 1,
+      maxCycles: 1,
+      maxRounds: 1,
+      maxTries: 3,
+      intervalMs: 1,
+      integrateCompletedRuns: true,
+      integrationTargetBranch: "release",
+      integrationPush: true,
+      clientFactory: () => ({
+        start: async () => {
+          throw new Error("ambient integration overrides must fail before task execution");
+        },
+        resume: async () => {
+          throw new Error("resume should not be called");
+        },
+      }),
+    })).rejects.toThrow("automatic integration cannot accept ambient target branch or push overrides");
+    expect(harness.listHarnessActionEvents({ limit: 10 })).toHaveLength(0);
+    expect(existsSync(join(repoPath, "src", "supervised.ts"))).toBe(false);
 
     let startCount = 0;
     const result = await superviseCodexRuns({
@@ -3025,7 +3054,105 @@ describe("runner", () => {
     expect(actionEvent).toMatchObject({
       actionType: "integrateVerifiedRun",
       status: "done",
+      request: expect.objectContaining({ targetBranch: "main", push: false }),
     });
+  });
+
+  test("supervisor does not integrate verified work without a frozen integration boundary", async () => {
+    const repoPath = join(dir, "repo-missing-integration-boundary");
+    const worktreePath = join(dir, "verified-worker-missing-integration-boundary");
+    await mkdir(repoPath, { recursive: true });
+    await writeFile(join(repoPath, "README.md"), "initial\n");
+    git(repoPath, ["init", "-b", "main"]);
+    git(repoPath, ["config", "user.name", "Ouroboros Test"]);
+    git(repoPath, ["config", "user.email", "test@example.com"]);
+    git(repoPath, ["config", "commit.gpgSign", "false"]);
+    git(repoPath, ["add", "README.md"]);
+    git(repoPath, ["commit", "-m", "Initial commit"]);
+    git(repoPath, ["worktree", "add", "-b", "task-missing-boundary", worktreePath, "main"]);
+    await mkdir(join(worktreePath, "src"), { recursive: true });
+    await writeFile(join(worktreePath, "src", "missing-boundary.ts"), "export const frozen = false;\n");
+
+    const runId = harness.createRun({ goal: "Require a frozen boundary", projectRoot: repoPath });
+    const workerTaskId = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Create a candidate file",
+      prompt: "Create src/missing-boundary.ts.",
+      worktreePath,
+    });
+    harness.recordAttempt({
+      taskId: workerTaskId,
+      input: { executor: "test" },
+      output: {
+        status: "done",
+        summary: "Created candidate file",
+        changedFiles: ["src/missing-boundary.ts"],
+        checks: [{ name: "worker check", status: "passed" }],
+        artifacts: [],
+        problems: [],
+      },
+    });
+    const verifierTaskId = harness.createTask({
+      runId,
+      role: "verifier",
+      goal: "Verify candidate file",
+      prompt: "Verify worker output.",
+      dependsOn: [workerTaskId],
+    });
+    harness.recordAttempt({
+      taskId: verifierTaskId,
+      input: { executor: "test" },
+      output: {
+        status: "done",
+        summary: "Verified candidate file",
+        changedFiles: [],
+        checks: [{ name: "verify", status: "passed" }],
+        artifacts: [],
+        problems: [],
+      },
+    });
+
+    await superviseCodexRuns({
+      harness,
+      cwd: repoPath,
+      rootRunId: runId,
+      runConcurrency: 1,
+      taskConcurrency: 1,
+      maxCycles: 1,
+      maxRounds: 1,
+      maxTries: 3,
+      intervalMs: 1,
+      integrateCompletedRuns: true,
+      clientFactory: () => ({
+        start: async () => ({
+          status: "done" as const,
+          sessionId: "session_missing_boundary_review",
+          outputPath: join(dir, "missing-boundary-review.json"),
+          stdout: "",
+          stderr: "",
+          events: [],
+          output: {
+            status: "done" as const,
+            runDecision: "defer" as const,
+            summary: "Integration boundary is missing",
+            changedFiles: [],
+            checks: [],
+            artifacts: [],
+            problems: [],
+          },
+        }),
+        resume: async () => {
+          throw new Error("resume should not be called");
+        },
+      }),
+    });
+
+    const integrationEvents = harness.listHarnessActionEvents({ limit: 20 })
+      .filter((event) => event.actionType === "integrateVerifiedRun");
+    expect(integrationEvents).toHaveLength(0);
+    expect(existsSync(join(repoPath, "src", "missing-boundary.ts"))).toBe(false);
+    expect(existsSync(join(worktreePath, "src", "missing-boundary.ts"))).toBe(true);
   });
 
   test("supervisor integrates disjoint target edits without replaying forever", async () => {
@@ -3044,7 +3171,11 @@ describe("runner", () => {
     await writeFile(join(worktreePath, "src", "blocked.ts"), "export const blocked = true;\n");
     await writeFile(join(repoPath, "NOTES.md"), "unrelated target change\n");
 
-    const runId = harness.createRun({ goal: "Bound blocked integration", projectRoot: repoPath });
+    const runId = harness.createRun({
+      goal: "Bound blocked integration",
+      projectRoot: repoPath,
+      context: { integrationBoundary: { targetBranch: "main", push: false } },
+    });
     const workerTaskId = harness.createTask({
       runId,
       role: "worker",
@@ -3149,7 +3280,10 @@ describe("runner", () => {
     await mkdir(join(worktreePath, "src"), { recursive: true });
     await writeFile(join(worktreePath, "src", "pre-review.ts"), "export const preReview = true;\n");
 
-    const runId = harness.createRun({ goal: "Integrate before review" });
+    const runId = harness.createRun({
+      goal: "Integrate before review",
+      context: { integrationBoundary: { targetBranch: "main", push: false } },
+    });
     const workerTaskId = harness.createTask({
       runId,
       role: "worker",
@@ -3252,7 +3386,11 @@ describe("runner", () => {
     await mkdir(join(worktreePath, "src"), { recursive: true });
     await writeFile(join(worktreePath, "src", "same-tick.ts"), "export const sameTick = true;\n");
 
-    const runId = harness.createRun({ goal: "Review merged worker evidence", projectRoot: repoPath });
+    const runId = harness.createRun({
+      goal: "Review merged worker evidence",
+      projectRoot: repoPath,
+      context: { integrationBoundary: { targetBranch: "main", push: false } },
+    });
     const workerTaskId = harness.createTask({
       runId,
       role: "worker",
@@ -3397,7 +3535,11 @@ describe("runner", () => {
     await mkdir(join(workerBWorktree, "src"), { recursive: true });
     await writeFile(join(workerBWorktree, "src", "worker_b.ts"), "export const workerB = true;\n");
 
-    const runId = harness.createRun({ goal: "Integrate two verified workers", projectRoot: repoPath });
+    const runId = harness.createRun({
+      goal: "Integrate two verified workers",
+      projectRoot: repoPath,
+      context: { integrationBoundary: { targetBranch: "main", push: false } },
+    });
     const workerATaskId = harness.createTask({
       runId,
       role: "worker",
@@ -3559,7 +3701,11 @@ describe("runner", () => {
     await mkdir(join(worktreePath, "src"), { recursive: true });
     await writeFile(join(worktreePath, "src", "unrelated-wait.ts"), "export const unrelatedWait = true;\n");
 
-    const runId = harness.createRun({ goal: "Integrate ready branch while another branch waits", projectRoot: repoPath });
+    const runId = harness.createRun({
+      goal: "Integrate ready branch while another branch waits",
+      projectRoot: repoPath,
+      context: { integrationBoundary: { targetBranch: "main", push: false } },
+    });
     const workerTaskId = harness.createTask({
       runId,
       role: "worker",
@@ -3828,7 +3974,11 @@ describe("runner", () => {
     await mkdir(join(repairWorktreePath, "src"), { recursive: true });
     await writeFile(join(repairWorktreePath, "src", "repair.ts"), "export const repair = true;\n");
 
-    const runId = harness.createRun({ goal: "Integrate repaired work", projectRoot: repoPath });
+    const runId = harness.createRun({
+      goal: "Integrate repaired work",
+      projectRoot: repoPath,
+      context: { integrationBoundary: { targetBranch: "main", push: false } },
+    });
     const originalTaskId = harness.createTask({
       runId,
       role: "worker",

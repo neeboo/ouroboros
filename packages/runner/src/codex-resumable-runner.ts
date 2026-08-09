@@ -72,6 +72,7 @@ export interface RunCodexResumableLoopInput extends CodexResumableOrchestrationI
 }
 
 export async function runCodexResumableLoop(input: RunCodexResumableLoopInput) {
+  assertNoAmbientIntegrationOverrides(input);
   const orchestrator = new CodexResumableOrchestrator(input);
   const rounds = [];
   for (let index = 0; index < input.maxRounds; index += 1) {
@@ -164,6 +165,7 @@ export interface SuperviseCodexRunsInput extends CodexResumableOrchestrationInpu
 }
 
 export async function superviseCodexRuns(input: SuperviseCodexRunsInput) {
+  assertNoAmbientIntegrationOverrides(input);
   const cycles = [];
   for (let index = 0; index < input.maxCycles; index += 1) {
     const candidates = runnableRuns(input.harness, { limit: input.runConcurrency, rootRunId: input.rootRunId ?? null });
@@ -1319,10 +1321,14 @@ function runnableRuns(harness: Harness, input: { limit: number; rootRunId?: stri
 }
 
 function maybeIntegrateCompletedRun(
-  input: Pick<SuperviseCodexRunsInput, "harness" | "cwd" | "integrateCompletedRuns" | "integrationTargetBranch" | "integrationPush">,
+  input: Pick<SuperviseCodexRunsInput, "harness" | "cwd" | "integrateCompletedRuns">,
   overview: RunOverview,
 ): Array<HarnessActionResult & { eventId: string }> | null {
   if (!input.integrateCompletedRuns || !overview.run) {
+    return null;
+  }
+  const boundary = frozenIntegrationBoundary(overview.run.context);
+  if (!boundary) {
     return null;
   }
   const preCompletion = overview.run.status !== "done";
@@ -1338,8 +1344,8 @@ function maybeIntegrateCompletedRun(
       runId: overview.run.id,
       workerTaskId: worker.id,
       repoPath: overview.run.projectRoot ?? overview.project?.rootPath ?? input.cwd,
-      targetBranch: input.integrationTargetBranch ?? "main",
-      push: input.integrationPush ?? false,
+      targetBranch: boundary.targetBranch,
+      push: boundary.push,
       reason: preCompletion
         ? "supervisor integrated verified worker before goal review"
         : "supervisor integrated a completed verified run",
@@ -1361,6 +1367,30 @@ function maybeIntegrateCompletedRun(
     });
   }
   return results;
+}
+
+function frozenIntegrationBoundary(context: Record<string, unknown>): { targetBranch: string; push: false } | null {
+  const raw = context.integrationBoundary;
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    return null;
+  }
+  const boundary = raw as Record<string, unknown>;
+  if (boundary.push !== false) {
+    return null;
+  }
+  const targetBranch = typeof boundary.targetBranch === "string" ? boundary.targetBranch.trim() : "";
+  if (!targetBranch) {
+    return null;
+  }
+  return { targetBranch, push: false };
+}
+
+function assertNoAmbientIntegrationOverrides(
+  input: Pick<RunCodexResumableLoopInput, "integrationTargetBranch" | "integrationPush">,
+) {
+  if (input.integrationTargetBranch !== undefined || input.integrationPush !== undefined) {
+    throw new Error("automatic integration cannot accept ambient target branch or push overrides");
+  }
 }
 
 interface SuccessfulIntegrationState {
