@@ -211,3 +211,49 @@ export interface DesignOutcomeRow {
   payload_json: string;
   created_at: string;
 }
+
+export interface EvolutionProfileRow {
+  id: string;
+  schema_version: 1;
+  project_id: string;
+  maturity: string;
+  record_sha256: string;
+  record_json: string;
+  created_at: string;
+}
+
+export interface ProductionEpisodeRow {
+  id: string;
+  schema_version: 1;
+  project_id: string;
+  profile_id: string;
+  source_ref: string;
+  leakage_group_id: string;
+  record_sha256: string;
+  record_json: string;
+  created_at: string;
+}
+
+export interface HarnessVariantRow {
+  id: string;
+  schema_version: 1;
+  project_id: string;
+  profile_id: string;
+  role: "control" | "candidate";
+  record_sha256: string;
+  record_json: string;
+  created_at: string;
+}
+
+export interface MatchedExperimentRow {
+  id: string;
+  schema_version: 1;
+  project_id: string;
+  profile_id: string;
+  control_variant_id: string;
+  candidate_variant_id: string;
+  outcome: "pending" | "candidate_wins" | "control_wins" | "inconclusive" | "invalid";
+  record_sha256: string;
+  record_json: string;
+  created_at: string;
+}
