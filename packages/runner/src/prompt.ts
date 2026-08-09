@@ -1,5 +1,6 @@
 import { DEFAULT_TASK_PROMPT_TEMPLATE } from "@ouroboros/harness";
 import type { Lesson } from "@ouroboros/harness";
+import { createHash } from "node:crypto";
 import type { PromptInput } from "./types";
 import { prettyJson, renderPromptTemplate } from "./template";
 
@@ -147,7 +148,7 @@ function renderFrozenTargetEvolutionContract(
   return [
     "## Frozen Target Evolution Contract",
     "This task may implement or evaluate the accepted design, but it must not weaken, replace, or amend these frozen values.",
-    "Holdout evidence references identify the sealed split. Do not request, infer, reproduce, or expose holdout contents or results during candidate generation.",
+    "The holdout split is sealed. Ordinary roles receive only its commitment and count; do not request, infer, reproduce, expose, or query its references, contents, or results.",
     "### Optimization target pack",
     "```json",
     prettyJson(frozenEvolutionPackView(evolutionPack)),
@@ -219,7 +220,7 @@ function frozenComparisonView(comparison: Record<string, unknown>): Record<strin
   return pickDefined({
     controlRef: comparison.controlRef,
     developmentEvidenceRefs: comparison.developmentEvidenceRefs,
-    holdoutEvidenceRefs: comparison.holdoutEvidenceRefs,
+    holdoutEvidenceCommitment: sealedHoldoutEvidenceCommitment(comparison.holdoutEvidenceRefs),
     unrelatedEvidenceRefs: comparison.unrelatedEvidenceRefs,
     corpusSnapshotSha256: comparison.corpusSnapshotSha256,
     equalBudget: equalBudget
@@ -237,6 +238,17 @@ function frozenComparisonView(comparison: Record<string, unknown>): Record<strin
     minimumUplift: comparison.minimumUplift,
     maximumGuardRegression: comparison.maximumGuardRegression,
   });
+}
+
+function sealedHoldoutEvidenceCommitment(value: unknown): Record<string, unknown> | undefined {
+  if (!Array.isArray(value) || !value.every((entry) => typeof entry === "string")) {
+    return undefined;
+  }
+  return {
+    algorithm: "sha256",
+    count: value.length,
+    refsSha256: createHash("sha256").update(JSON.stringify(value), "utf8").digest("hex"),
+  };
 }
 
 function frozenCausalHypothesisView(hypothesis: Record<string, unknown>): Record<string, unknown> {
@@ -375,13 +387,7 @@ function isSensitivePromptMaterialKey(key: string): boolean {
 
 function isHeldoutMaterialKey(key: string): boolean {
   const normalized = key.replace(/[-_]/g, "").toLowerCase();
-  for (const prefix of ["holdout", "heldout"]) {
-    if (normalized.startsWith(prefix)) {
-      const suffix = normalized.slice(prefix.length);
-      return !(suffix.endsWith("ref") || suffix.endsWith("refs"));
-    }
-  }
-  return false;
+  return normalized.includes("holdout") || normalized.includes("heldout");
 }
 
 function renderTargetEvolutionProposalContract(role: string): string {
@@ -395,7 +401,7 @@ function renderTargetEvolutionProposalContract(role: string): string {
     "- Artifacts, Harness, and Model are optimization targets; the meta-kernel, project pack, and delivery path are responsibility layers. Milestone-one model mutation is prohibited.",
     "- causalHypothesis must state a supported failureClass, mechanism, predictedEffects, and disconfirmingEvidence.",
     "- comparison must freeze non-empty development, holdout, and unrelated evidence refs plus a corpus hash, controlRef, primary metric, thresholds, and the same equal budget for control and candidate.",
-    "- Candidate generation may cite frozen holdoutEvidenceRefs, but must not receive or reproduce holdout contents or results. Tests alone do not replace the matched baseline or unrelated-regression evidence.",
+    "- Candidate generation receives only a sealed holdout commitment, hash, and count. It must not receive, cite, query, or reproduce holdout refs, contents, or results. Tests alone do not replace the matched baseline or unrelated-regression evidence.",
     "Merge this exact optional extension fragment into the single proposeDesign proposal shown below. Do not emit another proposeDesign action:",
     "```json",
     prettyJson(TARGET_EVOLUTION_PROPOSAL_EXTENSION),
