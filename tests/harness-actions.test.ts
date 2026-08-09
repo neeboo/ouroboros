@@ -5,7 +5,6 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
   applyHarnessAction,
-  canonicalEvolutionRecordSha256,
   canonicalEvolutionValueSha256,
   describeAuthorityEvaluation,
   describeIntegrationReadiness,
@@ -5728,15 +5727,11 @@ describe("Evolution runtime fixed actions", () => {
     };
   }
 
-  function applyGraph(graph: ReturnType<typeof fixture>) {
+  function applyDeclaredGraph(graph: ReturnType<typeof fixture>) {
     const results = [
       applyHarnessAction(harness, { type: "registerEvolutionProfile", runId: graph.runId, profile: graph.profile }),
-      ...[graph.development, graph.heldout, graph.unrelated].map((episode) =>
-        applyHarnessAction(harness, { type: "recordProductionEpisode", runId: graph.runId, episode })
-      ),
       applyHarnessAction(harness, { type: "registerHarnessVariant", runId: graph.runId, variant: graph.control }),
       applyHarnessAction(harness, { type: "registerHarnessVariant", runId: graph.runId, variant: graph.candidate }),
-      applyHarnessAction(harness, { type: "freezeMatchedExperiment", runId: graph.runId, experiment: graph.experiment }),
     ];
     for (const result of results) {
       expect(result.status, result.summary).toBe("done");
@@ -5749,21 +5744,57 @@ describe("Evolution runtime fixed actions", () => {
     return results;
   }
 
-  test("records the declared evidence graph atomically and reports sequential replay without external effects", () => {
+  function createEquivalentDesignRun(graph: ReturnType<typeof fixture>, marker: string) {
+    const proposal = harness.createDesignProposal({
+      id: `design_hodor_evolution_actions_${marker}`,
+      projectId: graph.projectId,
+      charterId: graph.charter.id,
+      title: `Equivalent evolution design ${marker}`,
+      problem: graph.proposal.problem,
+      recommendation: graph.proposal.recommendation,
+      status: "accepted",
+      proposal: graph.proposal.proposal,
+    });
+    const decision = harness.recordDesignDecision({
+      id: `decision_hodor_evolution_actions_${marker}`,
+      proposalId: proposal.id,
+      charterId: graph.charter.id,
+      decision: "approved",
+      actorKind: "auto",
+      actorRef: "authority-evaluator",
+      reasons: ["Equivalent content still requires independent authority provenance."],
+      authority: { disposition: "automatic" },
+    });
+    const sourceRun = harness.getRun(graph.runId)!;
+    const runId = harness.createRun({
+      id: `run_hodor_evolution_actions_${marker}`,
+      projectId: graph.projectId,
+      goal: `Exercise equivalent design ${marker}.`,
+      context: {
+        ...sourceRun.context,
+        designProposalId: proposal.id,
+        designDecisionId: decision.id,
+        designProposal: proposal.proposal,
+      },
+    });
+    return { proposal, decision, runId };
+  }
+
+  test("records the declared profile and variants with exact provenance and same-design replay", () => {
     const graph = fixture();
-    applyGraph(graph);
+    applyDeclaredGraph(graph);
 
     expect(harness.getEvolutionProfile({ projectId: graph.projectId, id: graph.profile.id })).toEqual(graph.profile);
-    expect(harness.getProductionEpisode({ projectId: graph.projectId, id: graph.development.id })).toEqual(graph.development);
     expect(harness.getHarnessVariant({ projectId: graph.projectId, id: graph.candidate.id })).toEqual(graph.candidate);
-    expect(harness.getMatchedExperiment({ projectId: graph.projectId, id: graph.experiment.id })).toEqual(graph.experiment);
+    expect(harness.getProductionEpisode({ projectId: graph.projectId, id: graph.development.id })).toBeNull();
+    expect(harness.getMatchedExperiment({ projectId: graph.projectId, id: graph.experiment.id })).toBeNull();
 
     const replay = applyHarnessAction(harness, {
-      type: "freezeMatchedExperiment",
+      type: "registerHarnessVariant",
       runId: graph.runId,
-      experiment: graph.experiment,
+      variant: graph.candidate,
     });
-    expect(replay).toMatchObject({ status: "done", actionType: "freezeMatchedExperiment" });
+    expect(replay).toMatchObject({ status: "done", actionType: "registerHarnessVariant" });
     expect(replay.artifacts[0]).toMatchObject({
       replayed: true,
       externalEffectsApplied: false,
@@ -5771,20 +5802,35 @@ describe("Evolution runtime fixed actions", () => {
     });
     const event = harness.getHarnessActionEvent({ id: replay.eventId });
     expect(event).toMatchObject({
-      actionType: "freezeMatchedExperiment",
+      actionType: "registerHarnessVariant",
       status: "done",
       request: {
-        type: "freezeMatchedExperiment",
+        type: "registerHarnessVariant",
         runId: graph.runId,
-        entityKind: "experiment",
-        recordId: graph.experiment.id,
+        entityKind: "variant",
+        recordId: graph.candidate.id,
         recordSha256: canonicalEvolutionValueSha256(
-          Object.fromEntries(Object.entries(graph.experiment).filter(([key]) => key !== "id")),
+          Object.fromEntries(Object.entries(graph.candidate).filter(([key]) => key !== "id")),
         ),
       },
       result: expect.objectContaining({ summary: replay.summary }),
     });
-    expect(event?.request).not.toHaveProperty("experiment");
+    expect(event?.request).not.toHaveProperty("variant");
+
+    const receipts = withDatabase(harness.dbPath, (db) => db.query(`
+      select record_kind, design_proposal_id, design_decision_id, design_charter_id
+      from evolution_action_receipts
+      where project_id = $projectId
+      order by created_at, action_event_id
+    `).all({ $projectId: graph.projectId })) as Array<Record<string, unknown>>;
+    expect(receipts).toHaveLength(4);
+    for (const receipt of receipts) {
+      expect(receipt).toMatchObject({
+        design_proposal_id: graph.proposal.id,
+        design_decision_id: graph.authorityDecision.id,
+        design_charter_id: graph.charter.id,
+      });
+    }
   });
 
   test("blocks episode and variant references to a profile recorded without a fixed-action receipt", () => {
@@ -5810,50 +5856,6 @@ describe("Evolution runtime fixed actions", () => {
     expect(harness.getHarnessVariant({ projectId: graph.projectId, id: graph.control.id })).toBeNull();
   });
 
-  test("blocks a referenced profile when any immutable receipt has a different record digest", () => {
-    const graph = fixture();
-    const profileSha256 = canonicalEvolutionRecordSha256(graph.profile);
-    const mismatchedSha256 = profileSha256 === "f".repeat(64) ? "e".repeat(64) : "f".repeat(64);
-    expect(applyHarnessAction(harness, {
-      type: "registerEvolutionProfile",
-      runId: graph.runId,
-      profile: graph.profile,
-    }).status).toBe("done");
-
-    withDatabase(harness.dbPath, (db) => {
-      db.query(`
-        insert into harness_action_events (id, action_type, status, request_json, result_json)
-        values ($id, 'registerEvolutionProfile', 'done', '{}', '{}')
-      `).run({ $id: "action_mismatched_profile_receipt" });
-      db.query(`
-        insert into evolution_action_receipts (
-          action_event_id, action_type, source_run_id, project_id,
-          record_kind, record_id, record_sha256,
-          profile_id, episode_id, variant_id, experiment_id
-        ) values (
-          $actionEventId, 'registerEvolutionProfile', $sourceRunId, $projectId,
-          'profile', $recordId, $recordSha256,
-          $recordId, null, null, null
-        )
-      `).run({
-        $actionEventId: "action_mismatched_profile_receipt",
-        $sourceRunId: graph.runId,
-        $projectId: graph.projectId,
-        $recordId: graph.profile.id,
-        $recordSha256: mismatchedSha256,
-      });
-    });
-
-    const result = applyHarnessAction(harness, {
-      type: "recordProductionEpisode",
-      runId: graph.runId,
-      episode: graph.development,
-    });
-    expect(result.status).toBe("blocked");
-    expect(result.problems.join(" ")).toMatch(/receipt.*digest|digest.*receipt/i);
-    expect(harness.getProductionEpisode({ projectId: graph.projectId, id: graph.development.id })).toBeNull();
-  });
-
   test("accepts multiple consistent profile receipts from sequential replay", () => {
     const graph = fixture();
     for (let index = 0; index < 2; index += 1) {
@@ -5874,11 +5876,45 @@ describe("Evolution runtime fixed actions", () => {
     expect(receiptCount.count).toBe(2);
 
     const result = applyHarnessAction(harness, {
-      type: "recordProductionEpisode",
+      type: "registerHarnessVariant",
       runId: graph.runId,
-      episode: graph.development,
+      variant: graph.control,
     });
     expect(result.status, result.summary).toBe("done");
+  });
+
+  test("rejects cross-design reuse of an identical record while preserving same-design replay", () => {
+    const graph = fixture();
+    expect(applyHarnessAction(harness, {
+      type: "registerEvolutionProfile",
+      runId: graph.runId,
+      profile: graph.profile,
+    }).status).toBe("done");
+    expect(applyHarnessAction(harness, {
+      type: "registerEvolutionProfile",
+      runId: graph.runId,
+      profile: graph.profile,
+    })).toMatchObject({
+      status: "done",
+      artifacts: [expect.objectContaining({ replayed: true })],
+    });
+
+    const secondDesign = createEquivalentDesignRun(graph, "second");
+    const profileReuse = applyHarnessAction(harness, {
+      type: "registerEvolutionProfile",
+      runId: secondDesign.runId,
+      profile: graph.profile,
+    });
+    expect(profileReuse.status).toBe("blocked");
+    expect(profileReuse.problems.join(" ")).toMatch(/proposal|decision|charter|provenance|receipt/i);
+
+    const episodeReuse = applyHarnessAction(harness, {
+      type: "recordProductionEpisode",
+      runId: secondDesign.runId,
+      episode: graph.development,
+    });
+    expect(episodeReuse.status).toBe("blocked");
+    expect(episodeReuse.problems.join(" ")).toMatch(/proposal|decision|charter|provenance|receipt/i);
   });
 
   test("blocks an experiment that references episodes recorded without fixed-action receipts", () => {
@@ -5909,9 +5945,7 @@ describe("Evolution runtime fixed actions", () => {
       type: "registerEvolutionProfile", runId: graph.runId, profile: graph.profile,
     }).status).toBe("done");
     for (const episode of [graph.development, graph.heldout, graph.unrelated]) {
-      expect(applyHarnessAction(harness, {
-        type: "recordProductionEpisode", runId: graph.runId, episode,
-      }).status).toBe("done");
+      harness.recordProductionEpisode(episode);
     }
     harness.recordHarnessVariant(graph.control);
     harness.recordHarnessVariant(graph.candidate);
@@ -5975,7 +6009,7 @@ describe("Evolution runtime fixed actions", () => {
     expect(rejected.problems.join(" ")).toMatch(/decision|approved/i);
   });
 
-  test("prevents updateRunContext from replacing frozen design and evolution bindings", () => {
+  test("prevents context updates and contract amendments from replacing frozen design and evolution bindings", () => {
     const graph = fixture();
     for (const key of [
       "source",
@@ -5999,6 +6033,17 @@ describe("Evolution runtime fixed actions", () => {
         contextPatch: { [key]: "tampered" },
       });
       expect(result.status, key).toBe("blocked");
+      expect(harness.getRun(graph.runId)?.context[key]).not.toBe("tampered");
+
+      const amendment = applyHarnessAction(harness, {
+        type: "amendRunContract",
+        runId: graph.runId,
+        contractKey: key,
+        value: "tampered",
+        version: 1,
+        expectedVersion: 0,
+      });
+      expect(amendment.status, key).toBe("blocked");
       expect(harness.getRun(graph.runId)?.context[key]).not.toBe("tampered");
     }
   });
@@ -6068,7 +6113,7 @@ describe("Evolution runtime fixed actions", () => {
     }
   });
 
-  test("accepts only frozen comparison episode sources and rolls back an entity if the done audit cannot commit", () => {
+  test("rejects episode sources outside the frozen comparison before any record write", () => {
     const graph = fixture();
     expect(applyHarnessAction(harness, {
       type: "registerEvolutionProfile",
@@ -6086,29 +6131,9 @@ describe("Evolution runtime fixed actions", () => {
     });
     expect(rejected.status).toBe("blocked");
     expect(harness.getProductionEpisode({ projectId: graph.projectId, id: foreign.id })).toBeNull();
-
-    const original = harness.recordHarnessActionEventWithDb.bind(harness);
-    let failOnce = true;
-    harness.recordHarnessActionEventWithDb = (...args: Parameters<typeof original>) => {
-      if (failOnce) {
-        failOnce = false;
-        throw new Error("synthetic audit write failure; API key: action-secret-123");
-      }
-      return original(...args);
-    };
-    const auditFailure = applyHarnessAction(harness, {
-      type: "recordProductionEpisode",
-      runId: graph.runId,
-      episode: graph.development,
-    });
-    expect(auditFailure.status).toBe("blocked");
-    expect(auditFailure.problems.join(" ")).toContain("synthetic audit write failure");
-    expect(JSON.stringify(auditFailure)).not.toContain("action-secret-123");
-    expect(harness.getProductionEpisode({ projectId: graph.projectId, id: graph.development.id })).toBeNull();
-    expect(harness.getHarnessActionEvent({ id: auditFailure.eventId })?.status).toBe("blocked");
   });
 
-  test("requires an exact same-project verifier privacy receipt and keeps heldout results sealed", () => {
+  test("blocks perfect verifier artifacts through direct and HTTP actions until host-owned privacy receipts exist", async () => {
     const graph = fixture();
     expect(applyHarnessAction(harness, {
       type: "registerEvolutionProfile",
@@ -6116,59 +6141,41 @@ describe("Evolution runtime fixed actions", () => {
       profile: graph.profile,
     }).status).toBe("done");
 
-    const failedTaskId = harness.createTask({
+    const direct = applyHarnessAction(harness, {
+      type: "recordProductionEpisode",
       runId: graph.runId,
-      role: "verifier",
-      goal: "Rejected privacy review",
-      prompt: "Reject the receipt.",
+      episode: graph.development,
     });
-    const failedAttemptId = harness.recordAttempt({
-      taskId: failedTaskId,
-      input: { executor: "test" },
-      output: {
-        status: "done",
-        summary: "Privacy review failed.",
-        checks: [{ name: "privacy policy", status: "failed" }],
-        artifacts: [{
-          kind: "privacy_review",
-          status: "approved",
-          policySha256: graph.development.privacyReview.policySha256,
-          inputSnapshotSha256: graph.development.inputSnapshotSha256,
-          outcomeSnapshotSha256: graph.development.outcomeSnapshotSha256,
-        }],
-        problems: [],
-      },
-    });
-    const invalidEpisodes = [
-      addressed("episode", {
-        ...graph.development,
-        privacyReview: { ...graph.development.privacyReview, reviewerRef: "attempt:missing" },
+    expect(direct.status).toBe("blocked");
+    expect(direct.problems.join(" ")).toMatch(/host-owned privacy receipt capability.*not implemented/i);
+
+    const response = await handleHarnessActionRequest(
+      new Request("http://127.0.0.1/actions", {
+        method: "POST",
+        headers: { authorization: "Bearer evolution-test" },
+        body: JSON.stringify({
+          type: "recordProductionEpisode",
+          runId: graph.runId,
+          episode: graph.development,
+        }),
       }),
-      addressed("episode", {
-        ...graph.development,
-        privacyReview: {
-          ...graph.development.privacyReview,
-          reviewerRef: `attempt:${failedAttemptId}`,
-        },
-      }),
-      addressed("episode", {
-        ...graph.heldout,
-        metrics: { leakedHeldoutResult: 1 },
-      }),
-      addressed("episode", {
-        ...graph.heldout,
-        evidenceRefs: [graph.heldout.privacyReview.reviewerRef, "evidence:heldout-result"],
-      }),
-    ];
-    for (const episode of invalidEpisodes) {
-      const result = applyHarnessAction(harness, {
-        type: "recordProductionEpisode",
-        runId: graph.runId,
-        episode,
-      });
-      expect(result.status, result.summary).toBe("blocked");
-      expect(harness.getProductionEpisode({ projectId: graph.projectId, id: episode.id })).toBeNull();
-    }
+      { harness, token: "evolution-test" },
+    );
+    const body = await response.json() as { status: string; problems: string[] };
+    expect(response.status).toBe(422);
+    expect(body.status).toBe("blocked");
+    expect(body.problems.join(" ")).toMatch(/host-owned privacy receipt capability.*not implemented/i);
+
+    expect(harness.getProductionEpisode({ projectId: graph.projectId, id: graph.development.id })).toBeNull();
+    const episodeReceipts = withDatabase(harness.dbPath, (db) => db.query(`
+      select count(*) as count
+      from evolution_action_receipts
+      where project_id = $projectId and record_kind = 'episode'
+    `).get({ $projectId: graph.projectId }) as { count: number });
+    expect(episodeReceipts.count).toBe(0);
+    expect(harness.listHarnessActionEvents({ limit: 50 }).filter((event) =>
+      event.actionType === "recordProductionEpisode" && event.status === "done"
+    )).toHaveLength(0);
   });
 
   test("confines variants to frozen surfaces, paths, targets, and development-only candidate evidence", () => {
@@ -6200,106 +6207,20 @@ describe("Evolution runtime fixed actions", () => {
     }
   });
 
-  test("freezes only pending experiments matching the exact split, budget, metrics, and zero-side-effect contract", () => {
+  test("keeps matched experiments blocked while trusted production episode receipts are unavailable", () => {
     const graph = fixture();
-    applyGraph({ ...graph, experiment: addressed("experiment", { ...graph.experiment, id: undefined }) });
-
-    const variants = [
-      addressed("experiment", { ...graph.experiment, outcome: "candidate_wins" }),
-      addressed("experiment", { ...graph.experiment, guardMetrics: ["different guard"] }),
-      addressed("experiment", {
-        ...graph.experiment,
-        equalBudget: { ...graph.experiment.equalBudget, maxAttempts: 2 },
-      }),
-      addressed("experiment", {
-        ...graph.experiment,
-        developmentEpisodeRefs: [graph.heldout.id],
-        heldoutEpisodeRefs: [graph.development.id],
-      }),
-    ];
-    for (const experiment of variants) {
-      const result = applyHarnessAction(harness, {
-        type: "freezeMatchedExperiment",
-        runId: graph.runId,
-        experiment,
-      });
-      expect(result.status, result.summary).toBe("blocked");
-      expect(harness.getMatchedExperiment({ projectId: graph.projectId, id: experiment.id })).toBeNull();
+    applyDeclaredGraph(graph);
+    for (const episode of [graph.development, graph.heldout, graph.unrelated]) {
+      harness.recordProductionEpisode(episode);
     }
-  });
-
-  test("rejects snapshot or leakage-group reuse across experiment splits", () => {
-    const graph = fixture();
-    expect(applyHarnessAction(harness, {
-      type: "registerEvolutionProfile",
-      runId: graph.runId,
-      profile: graph.profile,
-    }).status).toBe("done");
-    expect(applyHarnessAction(harness, {
-      type: "recordProductionEpisode",
-      runId: graph.runId,
-      episode: graph.development,
-    }).status).toBe("done");
-    const collidingHeldout = graph.episode("heldout", "colliding-heldout", {
-      leakageGroupId: graph.development.leakageGroupId,
-      inputSnapshotSha256: graph.development.inputSnapshotSha256,
-      outcomeSnapshotSha256: graph.development.outcomeSnapshotSha256,
-    });
-    for (const episode of [collidingHeldout, graph.unrelated]) {
-      expect(applyHarnessAction(harness, {
-        type: "recordProductionEpisode",
-        runId: graph.runId,
-        episode,
-      }).status).toBe("done");
-    }
-    for (const variant of [graph.control, graph.candidate]) {
-      expect(applyHarnessAction(harness, {
-        type: "registerHarnessVariant",
-        runId: graph.runId,
-        variant,
-      }).status).toBe("done");
-    }
-    const experiment = addressed("experiment", {
-      ...graph.experiment,
-      heldoutEpisodeRefs: [collidingHeldout.id],
-    });
     const result = applyHarnessAction(harness, {
       type: "freezeMatchedExperiment",
       runId: graph.runId,
-      experiment,
+      experiment: graph.experiment,
     });
     expect(result.status).toBe("blocked");
-    expect(result.problems.join(" ")).toMatch(/snapshot|leakage/i);
-    expect(harness.getMatchedExperiment({ projectId: graph.projectId, id: experiment.id })).toBeNull();
-  });
-
-  test("rejects a snapshot hash reused across input and outcome in different splits", () => {
-    const graph = fixture();
-    expect(applyHarnessAction(harness, {
-      type: "registerEvolutionProfile", runId: graph.runId, profile: graph.profile,
-    }).status).toBe("done");
-    const crossKindHeldout = graph.episode("heldout", "heldout", {
-      outcomeSnapshotSha256: graph.development.inputSnapshotSha256,
-    });
-    for (const episode of [graph.development, crossKindHeldout, graph.unrelated]) {
-      expect(applyHarnessAction(harness, {
-        type: "recordProductionEpisode", runId: graph.runId, episode,
-      }).status).toBe("done");
-    }
-    for (const variant of [graph.control, graph.candidate]) {
-      expect(applyHarnessAction(harness, {
-        type: "registerHarnessVariant", runId: graph.runId, variant,
-      }).status).toBe("done");
-    }
-    const experiment = addressed("experiment", {
-      ...graph.experiment,
-      heldoutEpisodeRefs: [crossKindHeldout.id],
-    });
-    const result = applyHarnessAction(harness, {
-      type: "freezeMatchedExperiment", runId: graph.runId, experiment,
-    });
-    expect(result.status).toBe("blocked");
-    expect(result.problems.join(" ")).toMatch(/snapshot/i);
+    expect(result.problems.join(" ")).toMatch(/episode.*receipt|receipt.*episode/i);
+    expect(harness.getMatchedExperiment({ projectId: graph.projectId, id: graph.experiment.id })).toBeNull();
   });
 });
 

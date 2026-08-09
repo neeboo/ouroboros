@@ -57,6 +57,9 @@ interface EvolutionActionReceiptReadRow {
   record_kind: EvolutionReadbackKind;
   record_id: string;
   record_sha256: string;
+  design_proposal_id: string;
+  design_decision_id: string;
+  design_charter_id: string;
   created_at: string;
   event_action_type: string;
   event_status: "done" | "blocked";
@@ -76,6 +79,9 @@ interface SafeEvolutionActionAudit {
   projectId: string;
   recordId: string;
   recordSha256: string;
+  designProposalId: string;
+  designDecisionId: string;
+  designCharterId: string;
   replayed: boolean;
   receiptCount: number;
 }
@@ -315,6 +321,9 @@ function readDoneEvolutionActionAudit(input: {
           receipt.record_kind,
           receipt.record_id,
           receipt.record_sha256,
+          receipt.design_proposal_id,
+          receipt.design_decision_id,
+          receipt.design_charter_id,
           receipt.created_at,
           event.action_type as event_action_type,
           event.status as event_status,
@@ -355,9 +364,9 @@ function readDoneEvolutionActionAudit(input: {
         validateEvolutionReceiptRow(receipt, input, validatedEvents.get(receipt.action_event_id));
       }
       const receipts = receiptRows.map((row) => validatedEvents.get(row.action_event_id)!);
-      const sourceRunId = receipts[0].sourceRunId;
-      if (receipts.some((receipt) => receipt.sourceRunId !== sourceRunId)) {
-        throw new Error("matching done action receipts disagree on sourceRunId");
+      const frozenDesignSource = designSourceKey(receipts[0]);
+      if (receipts.some((receipt) => designSourceKey(receipt) !== frozenDesignSource)) {
+        throw new Error("matching done action receipts disagree on frozen design source");
       }
       return {
         ...receipts[0],
@@ -419,8 +428,12 @@ function validateEvolutionAuditRow(
     throw new Error("artifact fields do not match the immutable evolution record");
   }
   const sourceRun = db
-    .query("select id, project_id from runs where id = $id")
-    .get({ $id: artifact.sourceRunId }) as { id: string; project_id: string | null } | null;
+    .query("select id, project_id, context_json from runs where id = $id")
+    .get({ $id: artifact.sourceRunId }) as {
+      id: string;
+      project_id: string | null;
+      context_json: string;
+    } | null;
   if (!sourceRun) {
     throw new Error(`evolution action audit source run not found: ${artifact.sourceRunId}`);
   }
@@ -429,6 +442,7 @@ function validateEvolutionAuditRow(
       `evolution action audit source run project mismatch: ${sourceRun.id} belongs to ${sourceRun.project_id ?? "none"}`,
     );
   }
+  const designSource = requireFrozenDesignSource(sourceRun.context_json, sourceRun.id);
   return {
     id: row.id,
     actionType: row.action_type,
@@ -440,6 +454,7 @@ function validateEvolutionAuditRow(
     projectId: input.projectId,
     recordId: input.recordId,
     recordSha256: input.recordSha256,
+    ...designSource,
     replayed: artifact.replayed === true,
   };
 }
@@ -455,6 +470,16 @@ function validateEvolutionReceiptRow(
   event: Omit<SafeEvolutionActionAudit, "receiptCount"> | undefined,
 ): void {
   if (
+    event
+    && (
+      row.design_proposal_id !== event.designProposalId
+      || row.design_decision_id !== event.designDecisionId
+      || row.design_charter_id !== event.designCharterId
+    )
+  ) {
+    throw new Error("immutable evolution receipt design source does not match source run frozen context");
+  }
+  if (
     !event
     || row.action_event_id !== event.id
     || row.action_type !== ACTION_TYPE_BY_KIND[input.kind]
@@ -469,4 +494,37 @@ function validateEvolutionReceiptRow(
   ) {
     throw new Error("immutable evolution receipt fields do not match the action event and record");
   }
+}
+
+function requireFrozenDesignSource(contextJson: string, runId: string): {
+  designProposalId: string;
+  designDecisionId: string;
+  designCharterId: string;
+} {
+  const context = JSON.parse(contextJson) as Record<string, unknown>;
+  const designProposalId = requireFrozenDesignSourceId(context.designProposalId, "designProposalId", runId);
+  const designDecisionId = requireFrozenDesignSourceId(context.designDecisionId, "designDecisionId", runId);
+  const designCharterId = requireFrozenDesignSourceId(context.designCharterId, "designCharterId", runId);
+  if (context.source !== "design") {
+    throw new Error(`evolution action audit source run is not design-frozen: ${runId}`);
+  }
+  return { designProposalId, designDecisionId, designCharterId };
+}
+
+function requireFrozenDesignSourceId(value: unknown, key: string, runId: string): string {
+  if (typeof value !== "string" || value.length === 0 || value !== value.trim()) {
+    throw new Error(`evolution action audit source run ${key} is invalid: ${runId}`);
+  }
+  return value;
+}
+
+function designSourceKey(input: Pick<
+  SafeEvolutionActionAudit,
+  "designProposalId" | "designDecisionId" | "designCharterId"
+>): string {
+  return JSON.stringify([
+    input.designProposalId,
+    input.designDecisionId,
+    input.designCharterId,
+  ]);
 }

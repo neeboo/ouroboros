@@ -4,7 +4,7 @@
 
 Ouroboros can describe how another project may evolve while keeping delivery, evidence, and authority boundaries explicit. The first reference target is Hodor.
 
-The checked-in Hodor reference is a **designed-state contract only**. It proves that the current production parsers accept a bounded pack, causal hypothesis, and matched comparison. Ouroboros now also has strict, immutable declarations for a target profile, replayable episode commitments, harness variants, and a pending shadow experiment specification. These records do not claim that Hodor is instrumented, has emitted real production episodes, has run a shadow experiment, has promoted a variant, has rolled it back, or operates autonomously.
+The checked-in Hodor reference is a **designed-state contract only**. It proves that the current production parsers accept a bounded pack, causal hypothesis, and matched comparison. Ouroboros now also has strict, immutable declarations for a target profile, episode commitments intended for later replay, harness variants, and a pending shadow experiment specification. These records do not claim that Hodor is instrumented, has emitted real production episodes, has run a shadow experiment, has promoted a variant, has rolled it back, or operates autonomously.
 
 The machine-readable reference is [the Hodor evolution pack v0](examples/hodor-evolution-pack-v0.json). Tests parse its `evolutionPack`, `causalHypothesis`, and `comparison` fields with the production target-evolution parsers.
 
@@ -97,7 +97,7 @@ type EvolutionProfile = {
 
 ### 2. `ProductionEpisode`
 
-An immutable observation commitment that can be replayed without calling a production provider.
+An immutable observation commitment intended for a later isolated replay executor.
 
 ```ts
 type ProductionEpisode = {
@@ -135,7 +135,9 @@ type ProductionEpisode = {
 };
 ```
 
-The episode stores hashes, bounded metrics, counters, and opaque evidence references only. Raw input and output are forbidden. The privacy review must resolve to a completed same-project verifier attempt whose checks all pass and whose structured receipt binds the policy, classification, retention rule, and the same two snapshot hashes. Call and write counters are non-negative integers; `paidUsd` is a non-negative finite amount. `sourceRef` identifies exactly one frozen evidence split, while `leakageGroupId` prevents related observations from crossing splits. A heldout episode stores commitments only: its metrics are empty and its evidence is limited to the privacy-review receipt. Fixtures may resemble an episode, but fixture data is not production telemetry.
+The episode parser and immutable storage contract accept hashes, bounded metrics, counters, and opaque evidence references only. Raw input and output are forbidden. Call and write counters are non-negative integers; `paidUsd` is a non-negative finite amount. `sourceRef` identifies exactly one frozen evidence split, while `leakageGroupId` prevents related observations from crossing splits. A heldout episode stores commitments only: its metrics are empty and its evidence is limited to a future host-owned privacy receipt. Fixtures may resemble an episode, but fixture data is not production telemetry.
+
+V1 deliberately blocks the public `recordProductionEpisode` action. A normal verifier attempt is not a privacy authority because public harness commands can create tasks and attempt output. Enabling this action requires an immutable privacy receipt minted only by a private host runner completion path and bound to the exact proposal, authority decision, charter, profile, snapshots, policy, classification, retention rule, verifier contract, task, and attempt. Until that capability exists, no episode action receipt can be created and no matched experiment can be frozen.
 
 ### 3. `HarnessVariant`
 
@@ -222,14 +224,14 @@ This shape is intentionally not exported from the public harness API. Ouroboros 
 
 ## Fixed runtime actions
 
-Four narrow actions register the declared runtime graph:
+Four narrow action names describe the intended runtime graph, with only the declaration-safe subset enabled:
 
 - `registerEvolutionProfile`
-- `recordProductionEpisode`
+- `recordProductionEpisode` — disabled until the host-owned privacy receipt path exists
 - `registerHarnessVariant`
 - `freezeMatchedExperiment`
 
-Each action requires a project-bound design delivery run. The action rebuilds its contract from the stored accepted proposal, latest approved authority decision, and active frozen charter; repeated context views must match exactly and the generic context-update action cannot replace them. It validates the comparison, surfaces, exact paths, privacy verifier receipt, and referenced records; writes one immutable record; reads it back in the same transaction; and binds a minimal audit event to an immutable action receipt. An identical replay reuses the record; the same identity with different content fails closed. The actions do not use Git, network access, provider credentials, target repositories, or production databases.
+Each enabled action requires a project-bound design delivery run. The action rebuilds its contract from the stored accepted proposal, latest approved authority decision, and active frozen charter; repeated context views must match exactly and neither generic context mutation path can replace them. It validates the comparison, surfaces, exact paths, and referenced records; writes one immutable record; reads it back in the same transaction; and binds a minimal audit event to an immutable action receipt carrying the exact proposal, decision, and charter provenance. An identical replay under the same authorization reuses the record; cross-authorization reuse and the same identity with different content fail closed. The actions do not use Git, network access, provider credentials, target repositories, or production databases.
 
 There is no action for experiment results, promotion, rollback, or maturity advancement beyond the declared runtime state.
 
@@ -241,7 +243,7 @@ orbs show-evolution-record --kind profile --project-id <project_id> --id <profil
 orbs list-evolution-records --kind episode --project-id <project_id> --profile-id <profile_id> --json
 ```
 
-`show-evolution-record` recomputes the canonical record hash and verifies the matching immutable action receipt, real source run, project, action, and successful artifact. Episode and experiment output is a commitment-only projection: it does not expose split references, metrics, evidence references, or privacy-review identities. Both inspection commands open the database read-only and do not run migrations or create SQLite sidecar files.
+`show-evolution-record` recomputes the canonical record hash and verifies the matching immutable action receipt, real source run, exact proposal, authority decision, charter, project, action, and successful artifact. Episode and experiment output is a commitment-only projection: it does not expose split references, metrics, evidence references, or privacy-review identities. Both inspection commands open the database read-only and do not run migrations or create SQLite sidecar files.
 
 ## First candidate: spatial-risk shadow comparison
 
@@ -254,7 +256,7 @@ The first candidate is a zero-side-effect shadow experiment for Hodor's spatial-
 - allowed paths are limited to the reference spatial-risk policy and evaluation areas;
 - production, provider, credential, production-asset, and cross-project-memory paths remain forbidden.
 
-The production parser now enforces this candidate's static declaration: shadow mode only, `artifact` and `harness` targets only, explicit `model` prohibition, and zero for every side-effect budget counter. At `designed` maturity this remains a contract example. Ouroboros can now register the declared graph and freeze a pending experiment, but it does not yet provide the isolated Hodor experiment executor or artifact attestation needed to prove those declarations. Reaching `instrumented` requires source and artifact receipts plus an explicit maturity receipt. Reaching `shadowing` additionally requires sealed holdout access, equal-budget arm receipts, and independent side-effect readback. Promotion, canary readback, and rollback execution remain later capabilities.
+The production parser now enforces this candidate's static declaration: shadow mode only, `artifact` and `harness` targets only, explicit `model` prohibition, and zero for every side-effect budget counter. At `designed` maturity this remains a contract example. Ouroboros can register a declared profile and its exact variants, but it cannot record trusted production episodes or freeze the pending experiment until the host-owned privacy receipt path exists. It also does not yet provide the isolated Hodor experiment executor or artifact attestation needed to prove those declarations. Reaching `instrumented` requires source and artifact receipts plus an explicit maturity receipt. Reaching `shadowing` additionally requires sealed holdout access, equal-budget arm receipts, and independent side-effect readback. Promotion, canary readback, and rollback execution remain later capabilities.
 
 ## Maturity gates
 

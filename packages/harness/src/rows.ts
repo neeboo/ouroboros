@@ -263,12 +263,14 @@ export interface EvolutionActionReceiptRow {
   action_event_id: string;
   action_type:
     | "registerEvolutionProfile"
-    | "recordProductionEpisode"
     | "registerHarnessVariant"
     | "freezeMatchedExperiment";
   source_run_id: string;
   project_id: string;
-  record_kind: "profile" | "episode" | "variant" | "experiment";
+  design_proposal_id: string;
+  design_decision_id: string;
+  design_charter_id: string;
+  record_kind: "profile" | "variant" | "experiment";
   record_id: string;
   record_sha256: string;
   profile_id: string | null;

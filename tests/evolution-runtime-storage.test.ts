@@ -14,7 +14,10 @@ import {
   type HarnessVariant,
   type MatchedExperiment,
   type ProductionEpisode,
+  type RecordHarnessActionEventInput,
 } from "../packages/harness/src";
+import * as publicHarnessApi from "../packages/harness/src";
+import * as harnessImplementation from "../packages/harness/src/harness";
 
 const SHA_A = "a".repeat(64);
 const SHA_B = "b".repeat(64);
@@ -64,6 +67,45 @@ function evolutionProfile(projectId: string, surfaceIds = ["surface_spatial_poli
     allowedSurfaceIds: surfaceIds,
     registeredAt: "2026-08-09T00:00:00.000Z",
   }) as EvolutionProfile;
+}
+
+function successfulProfileActionEvent(
+  id: string,
+  runId: string,
+  projectId: string,
+  profile: EvolutionProfile,
+): RecordHarnessActionEventInput {
+  const recordSha256 = canonicalEvolutionRecordSha256(profile);
+  return {
+    id,
+    actionType: "registerEvolutionProfile",
+    status: "done",
+    request: {
+      type: "registerEvolutionProfile",
+      runId,
+      entityKind: "profile",
+      recordId: profile.id,
+      recordSha256,
+    },
+    result: {
+      actionType: "registerEvolutionProfile",
+      status: "done",
+      summary: "Recorded profile.",
+      checks: [],
+      artifacts: [{
+        kind: "evolution_profile",
+        entityKind: "profile",
+        recordId: profile.id,
+        recordSha256,
+        projectId,
+        sourceRunId: runId,
+        replayed: false,
+        externalEffectsApplied: false,
+        promotionApplied: false,
+      }],
+      problems: [],
+    },
+  };
 }
 
 function productionEpisode(
@@ -250,16 +292,28 @@ describe("evolution runtime storage", () => {
       const tables = db
         .query(
           `select name from sqlite_master where type = 'table' and name in
-           ('evolution_profiles','production_episodes','harness_variants','matched_experiments')
+           ('evolution_profiles','production_episodes','harness_variants','matched_experiments',
+            'evolution_action_receipts')
            order by name`,
         )
         .all() as Array<{ name: string }>;
       expect(tables.map((row) => row.name)).toEqual([
+        "evolution_action_receipts",
         "evolution_profiles",
         "harness_variants",
         "matched_experiments",
         "production_episodes",
       ]);
+      const receiptColumns = db.query("pragma table_info(evolution_action_receipts)")
+        .all() as Array<{ name: string; notnull: number }>;
+      for (const name of ["design_proposal_id", "design_decision_id", "design_charter_id"]) {
+        expect(receiptColumns).toContainEqual(expect.objectContaining({ name, notnull: 1 }));
+      }
+      const receiptForeignKeys = db.query("pragma foreign_key_list(evolution_action_receipts)")
+        .all() as Array<{ from: string; on_delete: string }>;
+      for (const from of ["design_proposal_id", "design_decision_id", "design_charter_id"]) {
+        expect(receiptForeignKeys).toContainEqual(expect.objectContaining({ from, on_delete: "RESTRICT" }));
+      }
     });
   });
 
@@ -372,7 +426,10 @@ describe("evolution runtime storage", () => {
     expect(harness.getEvolutionProfile({ projectId, id: profile.id })).toBeNull();
   });
 
-  test("links a successful evolution action event to its runtime record in the same transaction", () => {
+  test("does not treat a hand-written done event as a trusted evolution receipt", () => {
+    expect(publicHarnessApi).not.toHaveProperty("recordTrustedEvolutionActionEventWithDbForFixedAction");
+    expect(harnessImplementation).not.toHaveProperty("recordTrustedEvolutionActionEventWithDbForFixedAction");
+    expect(harness).not.toHaveProperty("recordTrustedEvolutionActionEventWithDbForFixedAction");
     const runId = harness.createRun({ projectId, goal: "Activate evolution profile" });
     const profile = evolutionProfile(projectId);
     const recordSha256 = canonicalEvolutionRecordSha256(profile);
@@ -416,30 +473,18 @@ describe("evolution runtime storage", () => {
       const receipt = db
         .query("select * from evolution_action_receipts where action_event_id = $eventId")
         .get({ $eventId: eventId }) as Record<string, unknown> | null;
-      expect(receipt).toMatchObject({
-        action_event_id: eventId,
-        action_type: "registerEvolutionProfile",
-        source_run_id: runId,
-        project_id: projectId,
-        record_kind: "profile",
-        record_id: profile.id,
-        record_sha256: recordSha256,
-        profile_id: profile.id,
-        episode_id: null,
-        variant_id: null,
-        experiment_id: null,
-      });
-      expect(() =>
-        db.query("update evolution_action_receipts set record_sha256 = record_sha256 where action_event_id = $eventId")
-          .run({ $eventId: eventId }),
-      ).toThrow(/immutable/i);
-      expect(() =>
-        db.query("update harness_action_events set request_json = '{}' where id = $eventId")
-          .run({ $eventId: eventId }),
-      ).toThrow(/immutable/i);
-      expect(() =>
-        db.query("delete from harness_action_events where id = $eventId").run({ $eventId: eventId }),
-      ).toThrow(/immutable|foreign key|constraint/i);
+      expect(receipt).toBeNull();
+      expect(db.query("select id from harness_action_events where id = $eventId").get({ $eventId: eventId }))
+        .toEqual({ id: eventId });
+    });
+
+    const publicEventId = "action_evolution_profile_public_event";
+    harness.recordHarnessActionEvent(
+      successfulProfileActionEvent(publicEventId, runId, projectId, profile),
+    );
+    withDatabase(harness.dbPath, (db) => {
+      expect(db.query("select * from evolution_action_receipts where action_event_id = $eventId")
+        .get({ $eventId: publicEventId })).toBeNull();
     });
 
     expect(() =>
@@ -475,8 +520,12 @@ describe("evolution runtime storage", () => {
           },
         });
       }),
-    ).toThrow(/receipt|artifact|hash|mismatch/i);
-    expect(harness.getHarnessActionEvent({ id: "action_evolution_profile_forged" })).toBeNull();
+    ).not.toThrow();
+    expect(harness.getHarnessActionEvent({ id: "action_evolution_profile_forged" })).not.toBeNull();
+    withDatabase(harness.dbPath, (db) => {
+      expect(db.query("select * from evolution_action_receipts where action_event_id = $eventId")
+        .get({ $eventId: "action_evolution_profile_forged" })).toBeNull();
+    });
   });
 
   test("rejects missing and foreign projects or profiles", () => {
