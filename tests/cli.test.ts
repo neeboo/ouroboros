@@ -951,6 +951,57 @@ describe("CLI", () => {
     });
   });
 
+  test("rejects ambient integration overrides before self-improvement supervision creates an action", async () => {
+    const bootstrap = await runCliJson("self-iterate");
+
+    const result = await runCliRaw(
+      "self-improve-daemon",
+      "--root-run-id",
+      bootstrap.runId,
+      "--executor",
+      "codex-resumable",
+      "--integration-push",
+      "true",
+      "--max-ticks",
+      "1",
+      "--tick-cycles",
+      "1",
+      "--max-rounds",
+      "1",
+      "--interval-ms",
+      "1",
+      "--idle-ms",
+      "1",
+    );
+
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stderr).toContain("--integration-push cannot override the frozen integrationBoundary");
+
+    const targetResult = await runCliRaw(
+      "self-improve-daemon",
+      "--root-run-id",
+      bootstrap.runId,
+      "--executor",
+      "codex-resumable",
+      "--integration-target-branch",
+      "release",
+      "--max-ticks",
+      "1",
+      "--tick-cycles",
+      "1",
+      "--max-rounds",
+      "1",
+      "--interval-ms",
+      "1",
+      "--idle-ms",
+      "1",
+    );
+
+    expect(targetResult.exitCode).not.toBe(0);
+    expect(targetResult.stderr).toContain("--integration-target-branch cannot override the frozen integrationBoundary");
+    expect(new Harness(dbPath).listHarnessActionEvents({ limit: 20 })).toHaveLength(0);
+  });
+
   test("self-iteration bootstrap honors an explicit config integration boundary over the default", async () => {
     await runCli("init");
     const configPath = join(dir, "self-iterate.toml");
@@ -13925,6 +13976,7 @@ describe("CLI", () => {
       cmd: ["bun", mainEntry, "--db", dbPath, ...configArgs, ...args],
       cwd: process.cwd(),
       env: { ...cleanProcessEnv, ...envOverride },
+      stdin: "ignore",
       stdout: "pipe",
       stderr: "pipe",
     });
@@ -13950,6 +14002,7 @@ describe("CLI", () => {
       cmd: ["bun", mainEntry, ...configArgs, ...rawArgs],
       cwd,
       env: cleanProcessEnv,
+      stdin: "ignore",
       stdout: "pipe",
       stderr: "pipe",
     });
@@ -14111,6 +14164,7 @@ describe("CLI", () => {
       cmd: ["bun", "./bin/orbs", "--db", dbPath, ...args],
       cwd: process.cwd(),
       env: process.env,
+      stdin: "ignore",
       stdout: "pipe",
       stderr: "pipe",
     });

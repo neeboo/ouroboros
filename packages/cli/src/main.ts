@@ -260,10 +260,10 @@ const SELF_ITERATION_INTEGRATION_BOUNDARY = {
 
 if (parsed.command === "help" || flag(parsed, "help") !== undefined) {
   printHelp();
-  process.exit(0);
-}
+} else {
+  rejectAmbientIntegrationOverrides();
 
-switch (parsed.command) {
+  switch (parsed.command) {
   case "init": {
     harness.init();
     printJson({ db: parsed.db, status: "initialized" });
@@ -893,8 +893,6 @@ switch (parsed.command) {
         maxTries: parsePositiveInteger(flag(parsed, "max-tries") ?? String(DEFAULT_MAX_TRIES), "--max-tries"),
         intervalMs: parseNonNegativeInteger(flag(parsed, "interval-ms") ?? "1500", "--interval-ms"),
         integrateCompletedRuns: flag(parsed, "integrate-complete-runs") !== undefined,
-        integrationTargetBranch: flag(parsed, "integration-target-branch") ?? "main",
-        integrationPush: flag(parsed, "integration-push") !== undefined,
       }),
     );
     break;
@@ -917,8 +915,6 @@ switch (parsed.command) {
       idleMs: parseNonNegativeInteger(flag(parsed, "idle-ms") ?? flag(parsed, "interval-ms") ?? "1500", "--idle-ms"),
       maxTicks,
       integrateCompletedRuns: flag(parsed, "integrate-complete-runs") !== undefined,
-      integrationTargetBranch: flag(parsed, "integration-target-branch") ?? "main",
-      integrationPush: flag(parsed, "integration-push") !== undefined,
       onTick: maxTicks === 0 ? (tick) => console.log(JSON.stringify(tick)) : undefined,
     });
     printJson(result);
@@ -948,8 +944,6 @@ switch (parsed.command) {
       idleMs: parseNonNegativeInteger(flag(parsed, "idle-ms") ?? flag(parsed, "interval-ms") ?? "1500", "--idle-ms"),
       maxTicks,
       integrateCompletedRuns: flag(parsed, "no-integrate") === undefined,
-      integrationTargetBranch: flag(parsed, "integration-target-branch") ?? "main",
-      integrationPush: flag(parsed, "integration-push") !== undefined,
       onTick: maxTicks === 0 ? (tick) => console.log(JSON.stringify(tick)) : undefined,
     });
     printJson({
@@ -1277,6 +1271,7 @@ switch (parsed.command) {
   }
   default:
     fail(`unknown command: ${parsed.command}`);
+  }
 }
 
 function printHelp() {
@@ -1712,6 +1707,21 @@ function codexRunnerInput(defaultStopHooks?: string) {
       idleTimeoutMs: parseTimeoutMs(flag(parsed, "idle-timeout-ms"), "--idle-timeout-ms"),
     },
   };
+}
+
+function rejectAmbientIntegrationOverrides() {
+  const automaticIntegrationCommand = parsed.command === "supervise-runs"
+    || parsed.command === "supervise-daemon"
+    || parsed.command === "self-improve-daemon";
+  if (!automaticIntegrationCommand) {
+    return;
+  }
+  if (flag(parsed, "integration-push") !== undefined) {
+    fail("--integration-push cannot override the frozen integrationBoundary; use pushExactGitRef for remote publication");
+  }
+  if (flag(parsed, "integration-target-branch") !== undefined) {
+    fail("--integration-target-branch cannot override the frozen integrationBoundary");
+  }
 }
 
 function parseBrowserProcessPolicy(): "allow" | "deny" | undefined {
