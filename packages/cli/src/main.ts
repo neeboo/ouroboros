@@ -36,6 +36,7 @@ import {
   createVerifierTaskHook,
   chargeRepairBudget,
   childEnvForProcess,
+  codexOnlyAgentDefaults,
   createAcpxSubsessionRunner,
   createCollectSubsessionsHook,
   createRouteExecutor,
@@ -182,13 +183,6 @@ const SELF_ITERATION_PLANNER_DONE_WHEN = [
   "Planning begins only from an accepted proposal and preserves the frozen evaluation contract, authority context, budget, and integration boundary",
   "No delivery run is created from an unaccepted proposal or without an approved stored decision",
 ];
-const SELF_ITERATION_ROLE_AGENT_DEFAULTS: Record<"designer" | "planner" | "worker" | "verifier" | "goal-review", string> = {
-  designer: "codex-resumable",
-  planner: "codex-resumable",
-  worker: "codex-resumable",
-  verifier: "codex-resumable",
-  "goal-review": "codex-resumable",
-};
 const SELF_ITERATION_DESIGN_DOC = "docs/designer-control-plane.md";
 const TARGET_SYSTEM_EVOLUTION_DOC = "docs/target-system-evolution.md";
 const TARGET_SYSTEM_DESIGN_DONE_WHEN = [
@@ -1500,10 +1494,6 @@ function withSelfIterationConfigDefaults(
   const configModelRoles = recordValue(configModelDefaults.roles);
   const mergedModelDefaults = recordValue(merged.modelDefaults);
   const mergedModelRoles = recordValue(mergedModelDefaults.roles);
-  const configAgentDefaults = recordValue(config.agentDefaults);
-  const configRoles = recordValue(configAgentDefaults.roles);
-  const mergedAgentDefaults = recordValue(merged.agentDefaults);
-  const mergedRoles = recordValue(mergedAgentDefaults.roles);
   // A fresh self-iteration root must hand its descendants a concrete
   // integration boundary. Caller-supplied context wins, then config, then the
   // built-in default — never undefined, so design-spawned planner runs always
@@ -1525,15 +1515,7 @@ function withSelfIterationConfigDefaults(
         ...mergedModelRoles,
       },
     },
-    agentDefaults: {
-      ...mergedAgentDefaults,
-      roles: {
-        ...SELF_ITERATION_ROLE_AGENT_DEFAULTS,
-        ...configRoles,
-        ...mergedRoles,
-        worker: "codex-resumable",
-      },
-    },
+    agentDefaults: codexOnlyAgentDefaults(merged.agentDefaults),
   };
 }
 
@@ -2762,11 +2744,14 @@ function linkDueOutcomeReviews(runs: ReturnType<typeof selfImprovementRuns>) {
 }
 
 function selfImprovementControlContext(context: Record<string, unknown>) {
-  return Object.fromEntries(
-    ["modelDefaults", "agentDefaults", "agentBackends", "guardrails", "integrationBoundary"]
-      .filter((key) => context[key] !== undefined)
-      .map((key) => [key, context[key]]),
-  );
+  return {
+    ...Object.fromEntries(
+      ["modelDefaults", "agentBackends", "guardrails", "integrationBoundary"]
+        .filter((key) => context[key] !== undefined)
+        .map((key) => [key, context[key]]),
+    ),
+    agentDefaults: codexOnlyAgentDefaults(context.agentDefaults),
+  };
 }
 
 function repositoryFingerprint(cwd: string) {

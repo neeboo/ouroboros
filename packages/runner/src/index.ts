@@ -39,7 +39,7 @@ export { createCodexResumableClient } from "./executors/codex-resumable";
 export { defaultCodexBin, resolveDefaultCodexBin } from "./executors/codex-bin";
 export { createRouteExecutor } from "./route-executor";
 export { parseAttemptOutput } from "./executors/output";
-export { resolveAgentBackend } from "./agent-backends";
+export { codexOnlyAgentDefaults, resolveAgentBackend } from "./agent-backends";
 export { resolveExecutionRoute } from "./execution-routing";
 export { resolveModelPreference } from "./model-preferences";
 export {

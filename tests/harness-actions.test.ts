@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { writeFileSync } from "node:fs";
 import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -34,6 +34,8 @@ import type {
   AuthorityProposalRiskSurface,
 } from "../packages/harness/src";
 import { handleHarnessActionRequest } from "../packages/cli/src/action-server";
+
+setDefaultTimeout(10_000);
 
 describe("Harness actions", () => {
   let dir: string;

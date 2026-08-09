@@ -26,6 +26,7 @@ import {
 } from "@ouroboros/harness";
 import { optionalStrictIsoTimestamp } from "@ouroboros/harness";
 import { createHash } from "node:crypto";
+import { codexOnlyAgentDefaults } from "../agent-backends";
 import type { StopHook, StopHookResult } from "../types";
 
 export interface ApplyDesignActionsHookOptions {
@@ -1565,7 +1566,7 @@ function applyCreateRunsFromDesignWithDb(
 }
 
 function inheritedControlContext(context: Record<string, unknown>) {
-  return Object.fromEntries(
+  const inherited = Object.fromEntries(
     [
       "modelDefaults",
       "agentDefaults",
@@ -1578,6 +1579,10 @@ function inheritedControlContext(context: Record<string, unknown>) {
       .filter((key) => context[key] !== undefined)
       .map((key) => [key, context[key]]),
   );
+  if (context.source === "self-improve" || context.source === "self-improvement-assessment") {
+    inherited.agentDefaults = codexOnlyAgentDefaults(context.agentDefaults);
+  }
+  return inherited;
 }
 
 const PROTECTED_DESIGN_CONTEXT_KEYS = [
