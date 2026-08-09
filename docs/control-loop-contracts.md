@@ -398,6 +398,83 @@ Recommended flow:
 
 This keeps prompts compact while letting the harness become more capable over time.
 
+## Supervisor-Owned Integration Handoff
+
+Integration of verified worker output into the target repository is a database-writing harness action. Only the supervisor process may perform it. Worker and verifier attempts may collect repository evidence (diffs, command output, worktree state) but their sessions cannot write the shared harness database and cannot represent their own output as integration proof. The supervisor performs the audited integration after the verifier has accepted the worker evidence and goal review has produced a terminal decision.
+
+The supervisor invokes `integrateVerifiedRun` with these frozen boundary fields on every accepted terminal delivery:
+
+```ts
+{
+  type: "integrateVerifiedRun",
+  runId,
+  workerTaskId,
+  repoPath: run.projectRoot,
+  targetBranch: "main",
+  push: false,
+  immediateOutcomeReview: true,
+}
+```
+
+The supervisor only records `integrated` state when all three of the following hold:
+
+1. The `integrateVerifiedRun` action status is `done`.
+2. The corresponding harness action event status is `done`.
+3. A matching integration artifact (kind `integration`) is present on that event for the run and worker.
+
+Worker status, verifier status, and goal-review prose are necessary but never sufficient. Without an audited receipt the proposal stays in its previous state and no outcome-review task is created.
+
+### Disjoint-Path Classification
+
+When the target repository has uncommitted changes at integration time, the supervisor does not reject the integration outright. It classifies every dirty path against the normalized verified worker output:
+
+- **Verified dirty paths**: dirty in the target AND present in the worker's `changedFiles`. These must match the worker worktree byte-for-byte before they can be staged.
+- **Disjoint dirty paths**: dirty in the target but NOT present in the worker's `changedFiles`. These are operator edits that must be preserved through the integration commit.
+- **Overlapping paths**: any dirty path that is a parent, child, or equal of any verified worker path. These block integration.
+- **Rename records**: any dirty path reported as `R` or `C` in porcelain v1. These block integration.
+- **File/directory collisions**: any verified worker path that is a parent of a disjoint dirty path or vice versa. These block integration.
+- **Unsafe paths**: any path that fails normalization (absolute, traversal, empty). These block integration.
+
+The supervisor rejects every unsafe, overlapping, renamed, or colliding path before any mutation. The target HEAD and operator edits stay byte-for-byte unchanged and no successful receipt is recorded.
+
+### Snapshot, Stage, Restore, Readback
+
+For every integration that proceeds, the supervisor captures the following evidence and applies the following ordering:
+
+1. **Preflight snapshot**. Read porcelain v1 with `--untracked-files=all` and `-c core.quotepath=false`. Classify each dirty path. Reject unsafe, renamed, or colliding entries.
+2. **Disjoint snapshot**. For each disjoint dirty path, capture its exact porcelain state, tracked status, index mode/blob/stage, existence, lstat mode (regular file, directory, or symlink), byte content, or symlink target. If any path cannot be snapshotted, block without mutating the working tree.
+3. **HEAD and porcelain baseline**. Read `rev-parse HEAD` and `status --short` once, immediately before creating the isolated tree. Drift between this baseline and the commit attempt blocks the integration.
+4. **Isolated index**. Create a temporary `GIT_INDEX_FILE` from target HEAD and add only verified paths. The operator's real index and worktree are never unstaged or restored by the supervisor.
+5. **Commit only verified paths**. Write the isolated tree and create an unsigned `commit-tree` object, then update the target branch with a compare-and-swap against `<HEAD-before>`.
+6. **Synchronize verified paths**. After the branch update, copy only verified worker bytes and modes into the target worktree and update only their index entries. Disjoint operator index entries are left untouched.
+7. **Independent readback**. Re-read porcelain, tracking status, index mode/blob/stage, existence, mode, content, and symlink target for every disjoint path. Any mismatch blocks the integration.
+8. **Rollback on failure**. If commit or readback fails, the supervisor may compare-and-swap the target branch ref back from the supervisor-created commit to `<HEAD-before>`. It must leave operator paths untouched; a failed compare-and-swap remains blocked and cannot emit a receipt.
+
+A successful receipt is emitted only when isolated tree creation, branch update, verified-path synchronization, and readback all succeed and the preserved-path evidence matches its pre-integration snapshot.
+
+### Repair Limits
+
+The supervisor owns a bounded repair budget for each accepted terminal delivery. The default limit is `3` repair attempts per delivery. An unchanged failure fingerprint does not create repeated repair work; the supervisor records the same failure evidence and either schedules the same bounded repair or transitions the proposal to `revise` after exhaustion.
+
+After exhaustion the supervisor:
+
+- Records a terminal disposition of `repair-budget-exhausted` on the run context.
+- Transitions the proposal to `revise`.
+- Does not create additional worker, verifier, repair, reconciliation, or outcome-review tasks for the same delivery.
+
+### Exact-Once Behavior
+
+The supervisor's terminal reconciliation is idempotent. Repeated invocations of `reconcileTerminalDesignDeliveries` for the same accepted proposal and delivery run must not create:
+
+- a duplicate child run;
+- a duplicate harness action event for the same `integrateVerifiedRun` operation;
+- a duplicate integration receipt;
+- a duplicate repair task;
+- a duplicate reconciliation task; or
+- a duplicate outcome-review task.
+
+Replay uses the recorded `integrationConvergence` fingerprint on the run context to return the previously recorded blocked or successful event without mutating the database. A previously completed integration is therefore detected by the same audited receipt, and the supervisor binds its reconciliation task to that receipt instead of issuing another action.
+
 ## Minimal Next Implementation
 
 The smallest useful implementation should add:

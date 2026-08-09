@@ -11446,6 +11446,7 @@ describe("CLI", () => {
     gitCli(repoPath, ["init", "-b", "main"]);
     gitCli(repoPath, ["config", "user.name", "Ouroboros Test"]);
     gitCli(repoPath, ["config", "user.email", "test@example.com"]);
+    gitCli(repoPath, ["config", "commit.gpgSign", "false"]);
     gitCli(repoPath, ["add", "README.md"]);
     gitCli(repoPath, ["commit", "-m", "Initial commit"]);
     const expectedParentSha = gitCli(repoPath, ["rev-parse", "HEAD"]).stdout.trim();
@@ -11535,6 +11536,7 @@ describe("CLI", () => {
     gitCli(repoPath, ["init", "-b", "delivery"]);
     gitCli(repoPath, ["config", "user.name", "Ouroboros Test"]);
     gitCli(repoPath, ["config", "user.email", "test@example.com"]);
+    gitCli(repoPath, ["config", "commit.gpgSign", "false"]);
     gitCli(repoPath, ["add", "README.md"]);
     gitCli(repoPath, ["commit", "-m", "Initial commit"]);
     gitCli(repoPath, ["remote", "add", "origin", join(dir, "local-only-remote.git")]);
@@ -11680,7 +11682,7 @@ describe("CLI", () => {
     });
   });
 
-  test("CLI smoke: integrateVerifiedRun blocks via the CLI when the target repository has uncommitted changes", async () => {
+  test("CLI smoke: integrateVerifiedRun preserves disjoint target edits through verified integration", async () => {
     await runCli("init");
     const { repoPath, run, workerTask } = await prepareVerifiedIntegrationRepo({
       branch: "task-worker-dirty",
@@ -11689,6 +11691,7 @@ describe("CLI", () => {
     });
 
     await writeFile(join(repoPath, "uncommitted.txt"), "dirty target\n");
+    const operatorBefore = await readFile(join(repoPath, "uncommitted.txt"), "utf8");
 
     const result = await runCliJson(
       "action",
@@ -11697,32 +11700,38 @@ describe("CLI", () => {
         type: "integrateVerifiedRun",
         runId: run.id,
         workerTaskId: workerTask.id,
-        commitMessage: "Should not merge into a dirty target",
-        reason: "CLI smoke for blocked git preflight",
+        commitMessage: "Integrate verified worker while preserving operator edit",
+        reason: "CLI smoke for disjoint-edit preservation",
       }),
     );
     const events = await runCliJson("action-events", "--limit", "1");
+    const operatorAfter = await readFile(join(repoPath, "uncommitted.txt"), "utf8");
 
     expect(result).toMatchObject({
-      status: "blocked",
+      status: "done",
       actionType: "integrateVerifiedRun",
       eventId: expect.any(String),
-      summary: "Target repository has uncommitted changes outside the verified worker output.",
-      problems: expect.arrayContaining([expect.stringContaining("unexpected target changes: uncommitted.txt")]),
     });
     expect(result.checks).toContainEqual(
       expect.objectContaining({
-        name: "integration preflight",
-        status: "failed",
-        evidence: expect.stringContaining("unexpected target changes: uncommitted.txt"),
+        name: "disjoint target paths preserved",
+        status: "passed",
+        evidence: expect.stringContaining("uncommitted.txt"),
       }),
+    );
+    expect(result.checks).toContainEqual(
+      expect.objectContaining({ name: "preserved target readback", status: "passed" }),
     );
     expect(events[0]).toMatchObject({
       id: result.eventId,
       actionType: "integrateVerifiedRun",
-      status: "blocked",
+      status: "done",
       request: expect.objectContaining({ runId: run.id, workerTaskId: workerTask.id }),
     });
+    // Operator edit remains byte-for-byte intact through integration.
+    expect(operatorAfter).toBe(operatorBefore);
+    // Verified worker file landed in the target repository.
+    expect(await readFile(join(repoPath, "src", "dirty.ts"), "utf8")).toBe("export const dirty = true;\n");
   });
 
   test("overseer-tick prints diagnosis JSON with empty-run and queue starvation signals", async () => {
@@ -13766,7 +13775,7 @@ describe("CLI", () => {
     const args = rawArgs as string[];
     const configArgs = args.includes("--config") ? [] : ["--config", join(dir, "missing-config.toml")];
     const cleanProcessEnv = Object.fromEntries(
-      Object.entries(process.env).filter(([key]) => !key.startsWith("CODEX_")),
+      Object.entries(process.env).filter(([key]) => key === "CODEX_SANDBOX" || !key.startsWith("CODEX_")),
     );
     const mainEntry = join(import.meta.dir, "..", "packages", "cli", "src", "main.ts");
     const proc = Bun.spawn({
@@ -13792,7 +13801,7 @@ describe("CLI", () => {
     const configArgs = rawArgs.includes("--config") ? [] : ["--config", join(dir, "missing-config.toml")];
     const mainEntry = join(import.meta.dir, "..", "packages", "cli", "src", "main.ts");
     const cleanProcessEnv = Object.fromEntries(
-      Object.entries(process.env).filter(([key]) => !key.startsWith("CODEX_")),
+      Object.entries(process.env).filter(([key]) => key === "CODEX_SANDBOX" || !key.startsWith("CODEX_")),
     );
     const proc = Bun.spawn({
       cmd: ["bun", mainEntry, ...configArgs, ...rawArgs],
