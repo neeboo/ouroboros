@@ -172,15 +172,158 @@ function validComparison(): EvolutionComparison {
   };
 }
 
+function validEvolutionDeliveryContracts(pack: EvolutionPackV1) {
+  const privacyContractId = "hodor-production-episode-privacy-v1";
+  const exactTargetRef = "artifact:hodor-evolution-policy-v4";
+  const rollbackPlanRef = "plan:hodor-evolution-rollback-v4";
+  return {
+    episodeCollectionContract: {
+      schemaVersion: 1,
+      id: "hodor-episode-collection-v1",
+      projectId: PROJECT_ID,
+      mode: "commitment-only",
+      allowedSources: ["host-owned-fixture-replay"],
+      requiredEpisodeFields: [
+        "profileId",
+        "sourceRef",
+        "leakageGroupId",
+        "observedAt",
+        "inputSnapshotSha256",
+        "outcomeSnapshotSha256",
+        "policyRef",
+        "metrics",
+        "sideEffectCounters",
+        "evidenceRefs",
+        "privacyReview",
+      ],
+      privacyReceiptContractRef: privacyContractId,
+      appendOnly: true,
+      rawPayloadPolicy: "reject",
+      sideEffectBudget: { ...ZERO_SIDE_EFFECT_BUDGET },
+    },
+    maturityGateContract: {
+      schemaVersion: 1,
+      id: "hodor-maturity-gates-v1",
+      projectId: PROJECT_ID,
+      packRef: {
+        id: pack.id,
+        version: pack.version,
+        contentSha256: targetEvolutionModule.canonicalEvolutionValueSha256(pack),
+      },
+      currentMaturity: "designed",
+      allowedTransitions: ["designed->instrumented", "instrumented->shadowing"],
+      forbiddenTransitions: [
+        "designed->shadowing",
+        "designed->autonomous",
+        "instrumented->autonomous",
+        "shadowing->autonomous",
+      ],
+      requireIndependentReceiptForEveryTransition: true,
+      stages: [
+        {
+          id: "designed",
+          requiredEvidenceRefs: ["evidence:accepted-design-v4"],
+          guardMetrics: ["zero external side effects"],
+          allowedOperations: ["freeze contracts"],
+          failureMaturity: "designed",
+        },
+        {
+          id: "instrumented",
+          requiredEvidenceRefs: ["evidence:host-privacy-receipt"],
+          guardMetrics: ["all episodes are content addressed"],
+          allowedOperations: ["collect commitments"],
+          failureMaturity: "designed",
+        },
+        {
+          id: "shadowing",
+          requiredEvidenceRefs: ["evidence:matched-shadow-readback"],
+          guardMetrics: ["all side effect counters remain zero"],
+          allowedOperations: ["compare frozen variants"],
+          failureMaturity: "instrumented",
+        },
+      ],
+    },
+    productionEpisodePrivacyReceiptContract: {
+      schemaVersion: 1,
+      id: privacyContractId,
+      projectId: PROJECT_ID,
+      mode: "requirements-only",
+      privacyReview: {
+        requiredStatus: "approved",
+        policySha256: SHA_B,
+        reviewerRef: "reviewer:host-privacy-verifier",
+        dataClassification: "confidential",
+        retentionPolicyRef: "policy:hodor-episode-retention-v1",
+        evidenceRefs: ["evidence:privacy-review-v1"],
+      },
+      snapshotBinding: {
+        inputSnapshotSha256Required: true,
+        outcomeSnapshotSha256Required: true,
+        mustMatchEpisode: true,
+      },
+      rawPayloadPolicy: "reject",
+      appendOnly: true,
+      rejectionConditions: ["privacy review receipt is absent or mismatched"],
+    },
+    promotionReceiptContract: {
+      schemaVersion: 1,
+      id: "hodor-promotion-receipt-v1",
+      mode: "draft-only",
+      projectId: PROJECT_ID,
+      authorizedDecisionRef: "decision:hodor-evolution-v4",
+      fromVariantId: `variant_${"1".repeat(64)}`,
+      toVariantId: `variant_${"2".repeat(64)}`,
+      exactTargetRef,
+      readbackEvidenceRefs: ["evidence:promotion-readback-v1"],
+      canaryEvidenceRefs: ["evidence:promotion-canary-v1"],
+      observationWindow: {
+        matchedRuns: 3,
+        startsAfterMaturity: "instrumented",
+      },
+      rollbackPlanRef,
+      rollbackReceiptId: null,
+      issuerRef: "issuer:ouroboros-authority",
+      issuedAtRequired: true,
+    },
+    rollbackContract: {
+      schemaVersion: 1,
+      id: "hodor-rollback-v1",
+      projectId: PROJECT_ID,
+      exactTargetRef,
+      lastKnownGoodRef: "artifact:hodor-evolution-policy-v3",
+      idempotencyKey: "rollback:hodor-evolution-policy-v4",
+      rollbackPlanRef,
+      rollbackReceiptId: null,
+      triggers: [
+        { id: "guard-regression", condition: "any frozen guard metric regresses" },
+      ],
+      readbackEvidenceRefs: ["evidence:rollback-readback-v1"],
+      canaryEvidenceRefs: ["evidence:rollback-canary-v1"],
+      appendOnly: true,
+      deleteOrRewriteHistory: false,
+      forbiddenScopes: ["HEAD", "latest", "wildcard target"],
+    },
+  } as unknown as Required<Pick<
+    DesignProposalData,
+    | "episodeCollectionContract"
+    | "maturityGateContract"
+    | "productionEpisodePrivacyReceiptContract"
+    | "promotionReceiptContract"
+    | "rollbackContract"
+  >>;
+}
+
 function validEvolutionProposal(): DesignProposalData {
+  const pack = { ...validEvolutionPack(), version: 4 };
   return {
     ...ordinaryProposal(),
-    evolutionPack: validEvolutionPack(),
+    evolutionPack: pack,
     causalHypothesis: validCausalHypothesis(),
     evaluationContract: {
       ...ordinaryProposal().evaluationContract,
       comparison: validComparison(),
     },
+    ...validEvolutionDeliveryContracts(pack),
   };
 }
 
@@ -345,7 +488,7 @@ function designerPrompt(): string {
       projectRoot: "/tmp/hodor",
       goal: "Design Hodor evolution",
       status: "todo",
-      context: {},
+      context: { founderCharterId: "charter_hodor" },
     },
     task: {
       id: "task_1",
@@ -581,6 +724,25 @@ describe("target-system evolution contracts", () => {
     expect(action.payload.proposal).toEqual(ordinaryProposal());
   });
 
+  test("keeps stored version-one through version-three evolution proposals readable", () => {
+    const legacyPack = { ...validEvolutionPack(), version: 3 };
+    const legacyProposal: DesignProposalData = {
+      ...ordinaryProposal(),
+      evolutionPack: legacyPack,
+      causalHypothesis: validCausalHypothesis(),
+      evaluationContract: {
+        ...ordinaryProposal().evaluationContract,
+        comparison: validComparison(),
+      },
+    };
+    const action = proposeDesignAction({
+      projectId: PROJECT_ID,
+      title: "Read legacy target evolution",
+      proposal: legacyProposal,
+    });
+    expect(action.payload.proposal).toEqual(legacyProposal);
+  });
+
   test("normalizes and preserves a complete target-evolution proposal", () => {
     const action = proposeDesignAction({
       projectId: PROJECT_ID,
@@ -589,6 +751,187 @@ describe("target-system evolution contracts", () => {
     });
 
     expect(action.payload.proposal).toMatchObject(validEvolutionProposal());
+  });
+
+  test("requires and preserves all version-four delivery contracts", () => {
+    const proposal = validEvolutionProposal();
+    const action = proposeDesignAction({
+      projectId: PROJECT_ID,
+      title: "Design Hodor evolution delivery contracts",
+      proposal,
+    });
+
+    expect(action.payload.proposal).toEqual(proposal);
+
+    for (const key of [
+      "episodeCollectionContract",
+      "maturityGateContract",
+      "productionEpisodePrivacyReceiptContract",
+      "promotionReceiptContract",
+      "rollbackContract",
+    ] as const) {
+      const missing = structuredClone(proposal) as DesignProposalData & Record<string, unknown>;
+      delete missing[key];
+      expect(() => proposeDesignAction({
+        projectId: PROJECT_ID,
+        title: `Missing ${key}`,
+        proposal: missing,
+      })).toThrow(/delivery contracts|complete group/i);
+    }
+  });
+
+  test("rejects unknown fields and invalid hashes inside delivery contracts", () => {
+    const proposal = validEvolutionProposal() as DesignProposalData & Record<string, unknown>;
+    for (const key of [
+      "episodeCollectionContract",
+      "maturityGateContract",
+      "productionEpisodePrivacyReceiptContract",
+      "promotionReceiptContract",
+      "rollbackContract",
+    ] as const) {
+      const contract = proposal[key] as unknown as Record<string, unknown>;
+      expect(() => proposeDesignAction({
+        projectId: PROJECT_ID,
+        title: `Unknown ${key} field`,
+        proposal: {
+          ...proposal,
+          [key]: { ...contract, surprise: true },
+        } as unknown as DesignProposalData,
+      })).toThrow(/unknown field|surprise/i);
+    }
+
+    const privacy = proposal.productionEpisodePrivacyReceiptContract as unknown as Record<string, unknown>;
+    const privacyReview = privacy.privacyReview as Record<string, unknown>;
+    expect(() => proposeDesignAction({
+      projectId: PROJECT_ID,
+      title: "Invalid privacy policy hash",
+      proposal: {
+        ...proposal,
+        productionEpisodePrivacyReceiptContract: {
+          ...privacy,
+          privacyReview: { ...privacyReview, policySha256: "ABC123" },
+        },
+      } as DesignProposalData,
+    })).toThrow(/policySha256|sha256/i);
+  });
+
+  test("rejects isolated delivery contracts and reserved aliases instead of dropping them", () => {
+    const rollbackContract = validEvolutionProposal().rollbackContract;
+    expect(() => proposeDesignAction({
+      projectId: PROJECT_ID,
+      title: "Isolated rollback contract",
+      proposal: { ...ordinaryProposal(), rollbackContract },
+    })).toThrow(/target evolution|complete group|evolutionPack/i);
+
+    const complete = validEvolutionProposal() as DesignProposalData & Record<string, unknown>;
+    complete.privacyReceiptContract = complete.productionEpisodePrivacyReceiptContract;
+    expect(() => proposeDesignAction({
+      projectId: PROJECT_ID,
+      title: "Reserved delivery alias",
+      proposal: complete,
+    })).toThrow(/privacyReceiptContract|alias|unsupported/i);
+  });
+
+  test("keeps the privacy block contract-only and rejects forged approval semantics", () => {
+    const proposal = validEvolutionProposal() as DesignProposalData & Record<string, unknown>;
+    const privacy = proposal.productionEpisodePrivacyReceiptContract as unknown as Record<string, unknown>;
+    const privacyReview = privacy.privacyReview as Record<string, unknown>;
+    expect(privacy.mode).toBe("requirements-only");
+    expect(privacyReview.requiredStatus).toBe("approved");
+    expect(privacyReview.status).toBeUndefined();
+    expect(() => proposeDesignAction({
+      projectId: PROJECT_ID,
+      title: "Forged privacy approval",
+      proposal: {
+        ...proposal,
+        productionEpisodePrivacyReceiptContract: {
+          ...privacy,
+          privacyReview: { ...privacyReview, requiredStatus: undefined, status: "approved" },
+        },
+      } as unknown as DesignProposalData,
+    })).toThrow(/requiredStatus|unknown field|status/i);
+  });
+
+  test("rejects mutable exact targets and sensitive free text in delivery contracts", () => {
+    for (const target of [
+      "main",
+      "branch:main",
+      "git:refs/heads/main",
+      "git:refs/tags/release-v1",
+      "git:refs/remotes/origin/release-v1",
+      "ref:latest",
+      "artifact:unversioned-target",
+    ]) {
+      const mutable = structuredClone(validEvolutionProposal()) as unknown as Record<string, unknown>;
+      const promotion = mutable.promotionReceiptContract as Record<string, unknown>;
+      const rollback = mutable.rollbackContract as Record<string, unknown>;
+      mutable.promotionReceiptContract = { ...promotion, exactTargetRef: target };
+      mutable.rollbackContract = { ...rollback, exactTargetRef: target };
+      expect(() => proposeDesignAction({
+        projectId: PROJECT_ID,
+        title: "Mutable target",
+        proposal: mutable as unknown as DesignProposalData,
+      })).toThrow(/exact|immutable|typed|versioned|content-addressed/i);
+    }
+
+    for (const mutate of [
+      (proposal: Record<string, unknown>) => {
+        const contract = proposal.rollbackContract as Record<string, unknown>;
+        contract.triggers = [{ id: "guard-regression", condition: "Authorization: Bearer SECRET_VALUE" }];
+      },
+      (proposal: Record<string, unknown>) => {
+        const contract = proposal.maturityGateContract as Record<string, unknown>;
+        const stages = structuredClone(contract.stages) as Array<Record<string, unknown>>;
+        stages[0]!.guardMetrics = ["api_key=SECRET_VALUE"];
+        contract.stages = stages;
+      },
+      (proposal: Record<string, unknown>) => {
+        const contract = proposal.productionEpisodePrivacyReceiptContract as Record<string, unknown>;
+        contract.rejectionConditions = ["token: SECRET_VALUE"];
+      },
+    ]) {
+      const proposal = structuredClone(validEvolutionProposal()) as unknown as Record<string, unknown>;
+      mutate(proposal);
+      expect(() => proposeDesignAction({
+        projectId: PROJECT_ID,
+        title: "Sensitive delivery text",
+        proposal: proposal as unknown as DesignProposalData,
+      })).toThrow(/sensitive|credential/i);
+    }
+  });
+
+  test.each([
+    ["episode source enum", (proposal: Record<string, unknown>) => {
+      const contract = proposal.episodeCollectionContract as Record<string, unknown>;
+      proposal.episodeCollectionContract = { ...contract, allowedSources: ["agent-generated"] };
+    }],
+    ["maturity pack hash", (proposal: Record<string, unknown>) => {
+      const contract = proposal.maturityGateContract as Record<string, unknown>;
+      const packRef = contract.packRef as Record<string, unknown>;
+      proposal.maturityGateContract = { ...contract, packRef: { ...packRef, contentSha256: SHA_C } };
+    }],
+    ["promotion variant identity", (proposal: Record<string, unknown>) => {
+      const contract = proposal.promotionReceiptContract as Record<string, unknown>;
+      proposal.promotionReceiptContract = { ...contract, toVariantId: contract.fromVariantId };
+    }],
+    ["promotion exact target", (proposal: Record<string, unknown>) => {
+      const promotion = proposal.promotionReceiptContract as Record<string, unknown>;
+      const rollback = proposal.rollbackContract as Record<string, unknown>;
+      proposal.promotionReceiptContract = { ...promotion, exactTargetRef: "HEAD" };
+      proposal.rollbackContract = { ...rollback, exactTargetRef: "HEAD" };
+    }],
+    ["rollback idempotency key", (proposal: Record<string, unknown>) => {
+      const contract = proposal.rollbackContract as Record<string, unknown>;
+      proposal.rollbackContract = { ...contract, idempotencyKey: "token:rollback-secret" };
+    }],
+  ])("rejects invalid delivery contract value: %s", (_name, mutate) => {
+    const proposal = structuredClone(validEvolutionProposal()) as unknown as Record<string, unknown>;
+    mutate(proposal);
+    expect(() => proposeDesignAction({
+      projectId: PROJECT_ID,
+      title: "Invalid delivery contract",
+      proposal: proposal as unknown as DesignProposalData,
+    })).toThrow();
   });
 
   test.each([
@@ -1071,6 +1414,12 @@ describe("target-system evolution contracts", () => {
     expect(prompt).toContain("causalHypothesis");
     expect(prompt).toContain("evaluationContract.comparison");
     expect(prompt).toContain("all three");
+    expect(prompt).toContain("all five strict delivery contracts");
+    expect(prompt).toContain("episodeCollectionContract");
+    expect(prompt).toContain("maturityGateContract");
+    expect(prompt).toContain("productionEpisodePrivacyReceiptContract");
+    expect(prompt).toContain("promotionReceiptContract");
+    expect(prompt).toContain("rollbackContract");
     expect(prompt).toContain("equal budget");
     expect(prompt).toContain("holdout");
     expect(prompt).toContain("unrelated");
@@ -1088,6 +1437,8 @@ describe("target-system evolution contracts", () => {
     const proposals = actions.filter((action) => action.type === "proposeDesign");
     expect(proposals).toHaveLength(1);
     expect(extension.type).toBeUndefined();
+    expect(JSON.stringify(extension)).not.toContain("<project_id>");
+    expect(JSON.stringify(extension)).not.toContain("<charter_id>");
 
     const basePayload = proposals[0]!.payload as Record<string, unknown>;
     const baseProposal = basePayload.proposal as Record<string, unknown>;
@@ -1103,7 +1454,7 @@ describe("target-system evolution contracts", () => {
 
     expect(() =>
       proposeDesignAction({
-        projectId: basePayload.projectId as string,
+        projectId: PROJECT_ID,
         title: basePayload.title as string,
         proposal: proposal as unknown as DesignProposalData,
       }),

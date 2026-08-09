@@ -1,4 +1,4 @@
-import { DEFAULT_TASK_PROMPT_TEMPLATE } from "@ouroboros/harness";
+import { canonicalEvolutionValueSha256, DEFAULT_TASK_PROMPT_TEMPLATE } from "@ouroboros/harness";
 import type { Lesson } from "@ouroboros/harness";
 import { createHash } from "node:crypto";
 import type { PromptInput } from "./types";
@@ -9,54 +9,60 @@ const MAX_LESSON_SUMMARY_CHARS = 320;
 const MAX_ACTIVE_GUARDRAILS = 8;
 const FROZEN_LINEAR_EVIDENCE_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 const RFC3339_WITH_TIMEZONE = /^(\d{4})-(\d{2})-(\d{2})T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/;
-const TARGET_EVOLUTION_PROPOSAL_EXTENSION = {
-  evolutionPack: {
-    schemaVersion: 1,
-    id: "target-evolution-pack",
-    targetSystemId: "target-system",
-    version: 1,
-    knowledgeScope: "project:<project_id>",
-    objective: {
-      charterId: "<charter_id>",
-      domainOutcomes: ["measurable domain outcome"],
-      nonGoals: ["production side effect outside the experiment"],
-    },
-    observation: {
-      signalSources: [{ id: "run-evidence", kind: "run-evidence" }],
-    },
-    mutationSurfaces: [
-      {
-        id: "bounded-policy-artifact",
-        evolutionTarget: "artifact",
-        layer: "policy",
-        projectId: "<project_id>",
-        allowedPaths: ["config/evolution/**"],
-        forbiddenPaths: ["db/**"],
-        owner: "target",
-      },
-    ],
-    experimentPolicy: {
-      controlRequired: true,
-      holdoutRequired: true,
-      unrelatedRegressionRequired: true,
-      equalBudgetRequired: true,
-      maxCandidates: 2,
-    },
-    promotionPolicy: {
-      guardMetrics: ["zero unintended writes"],
-      observationWindow: "three matched runs",
-      rollback: "restore the frozen control artifact",
-    },
-    handoff: {
-      maturity: "designed",
-      targetOwner: "target-system",
-      requiredCapabilities: ["frozen evidence replay"],
-    },
-    portability: {
-      projectLocalRules: ["keep domain semantics project-local"],
-      genericizationEvidence: [],
-    },
+function targetEvolutionPackExample(projectId: string, charterId: string) {
+  return {
+  schemaVersion: 1,
+  id: "target-evolution-pack",
+  targetSystemId: "target-system",
+  version: 4,
+  knowledgeScope: `project:${projectId}`,
+  objective: {
+    charterId,
+    domainOutcomes: ["measurable domain outcome"],
+    nonGoals: ["production side effect outside the experiment"],
   },
+  observation: {
+    signalSources: [{ id: "run-evidence", kind: "run-evidence" }],
+  },
+  mutationSurfaces: [
+    {
+      id: "bounded-policy-artifact",
+      evolutionTarget: "artifact",
+      layer: "policy",
+      projectId,
+      allowedPaths: ["config/evolution/**"],
+      forbiddenPaths: ["db/**"],
+      owner: "target",
+    },
+  ],
+  experimentPolicy: {
+    controlRequired: true,
+    holdoutRequired: true,
+    unrelatedRegressionRequired: true,
+    equalBudgetRequired: true,
+    maxCandidates: 2,
+  },
+  promotionPolicy: {
+    guardMetrics: ["zero unintended writes"],
+    observationWindow: "three matched runs",
+    rollback: "restore the frozen control artifact",
+  },
+  handoff: {
+    maturity: "designed",
+    targetOwner: "target-system",
+    requiredCapabilities: ["frozen evidence replay"],
+  },
+  portability: {
+    projectLocalRules: ["keep domain semantics project-local"],
+    genericizationEvidence: [],
+  },
+  } as const;
+}
+
+function targetEvolutionProposalExtension(projectId: string, charterId: string) {
+  const evolutionPack = targetEvolutionPackExample(projectId, charterId);
+  return {
+  evolutionPack,
   causalHypothesis: {
     failureClass: "domain-hypothesis",
     mechanism: "one bounded policy causes the measured gap",
@@ -84,7 +90,137 @@ const TARGET_EVOLUTION_PROPOSAL_EXTENSION = {
       maximumGuardRegression: 0,
     },
   },
-} as const;
+  episodeCollectionContract: {
+    schemaVersion: 1,
+    id: "episode-collection-contract-v1",
+    projectId,
+    mode: "commitment-only",
+    allowedSources: ["host-owned-fixture-replay"],
+    requiredEpisodeFields: [
+      "profileId",
+      "sourceRef",
+      "leakageGroupId",
+      "observedAt",
+      "inputSnapshotSha256",
+      "outcomeSnapshotSha256",
+      "policyRef",
+      "metrics",
+      "sideEffectCounters",
+      "evidenceRefs",
+      "privacyReview",
+    ],
+    privacyReceiptContractRef: "production-episode-privacy-contract-v1",
+    appendOnly: true,
+    rawPayloadPolicy: "reject",
+    sideEffectBudget: {
+      paidUsd: 0,
+      realProviderCalls: 0,
+      pancatWrites: 0,
+      productionPublishes: 0,
+      realAssetDeletes: 0,
+      crossProjectMemoryReads: 0,
+      crossProjectMemoryWrites: 0,
+    },
+  },
+  maturityGateContract: {
+    schemaVersion: 1,
+    id: "maturity-gate-contract-v1",
+    projectId,
+    packRef: {
+      id: evolutionPack.id,
+      version: evolutionPack.version,
+      contentSha256: canonicalEvolutionValueSha256(evolutionPack),
+    },
+    currentMaturity: "designed",
+    allowedTransitions: ["designed->instrumented", "instrumented->shadowing"],
+    forbiddenTransitions: [
+      "designed->shadowing",
+      "designed->autonomous",
+      "instrumented->autonomous",
+      "shadowing->autonomous",
+    ],
+    requireIndependentReceiptForEveryTransition: true,
+    stages: [
+      {
+        id: "designed",
+        requiredEvidenceRefs: ["evidence:accepted-design"],
+        guardMetrics: ["frozen contracts are complete"],
+        allowedOperations: ["freeze delivery contracts"],
+        failureMaturity: "designed",
+      },
+      {
+        id: "instrumented",
+        requiredEvidenceRefs: ["evidence:host-privacy-receipt"],
+        guardMetrics: ["episodes are commitment-only"],
+        allowedOperations: ["collect episode commitments"],
+        failureMaturity: "designed",
+      },
+      {
+        id: "shadowing",
+        requiredEvidenceRefs: ["evidence:matched-shadow-readback"],
+        guardMetrics: ["side effect counters remain zero"],
+        allowedOperations: ["compare frozen variants"],
+        failureMaturity: "instrumented",
+      },
+    ],
+  },
+  productionEpisodePrivacyReceiptContract: {
+    schemaVersion: 1,
+    id: "production-episode-privacy-contract-v1",
+    projectId,
+    mode: "requirements-only",
+    privacyReview: {
+      requiredStatus: "approved",
+      policySha256: "2".repeat(64),
+      reviewerRef: "reviewer:host-privacy-verifier",
+      dataClassification: "confidential",
+      retentionPolicyRef: "policy:episode-retention-v1",
+      evidenceRefs: ["evidence:privacy-review"],
+    },
+    snapshotBinding: {
+      inputSnapshotSha256Required: true,
+      outcomeSnapshotSha256Required: true,
+      mustMatchEpisode: true,
+    },
+    rawPayloadPolicy: "reject",
+    appendOnly: true,
+    rejectionConditions: ["privacy receipt is absent or mismatched"],
+  },
+  promotionReceiptContract: {
+    schemaVersion: 1,
+    id: "promotion-receipt-contract-v1",
+    mode: "draft-only",
+    projectId,
+    authorizedDecisionRef: "decision:accepted-evolution-design",
+    fromVariantId: `variant_${"3".repeat(64)}`,
+    toVariantId: `variant_${"4".repeat(64)}`,
+    exactTargetRef: "artifact:target-policy-v4",
+    readbackEvidenceRefs: ["evidence:promotion-readback"],
+    canaryEvidenceRefs: ["evidence:promotion-canary"],
+    observationWindow: { matchedRuns: 3, startsAfterMaturity: "instrumented" },
+    rollbackPlanRef: "plan:exact-target-rollback-v4",
+    rollbackReceiptId: null,
+    issuerRef: "issuer:design-authority",
+    issuedAtRequired: true,
+  },
+  rollbackContract: {
+    schemaVersion: 1,
+    id: "rollback-contract-v1",
+    projectId,
+    exactTargetRef: "artifact:target-policy-v4",
+    lastKnownGoodRef: "artifact:target-policy-v3",
+    idempotencyKey: "rollback:target-policy-v4",
+    rollbackPlanRef: "plan:exact-target-rollback-v4",
+    rollbackReceiptId: null,
+    triggers: [{ id: "guard-regression", condition: "any frozen guard metric regresses" }],
+    readbackEvidenceRefs: ["evidence:rollback-readback"],
+    canaryEvidenceRefs: ["evidence:rollback-canary"],
+    appendOnly: true,
+    deleteOrRewriteHistory: false,
+    forbiddenScopes: ["HEAD", "latest", "wildcard target"],
+  },
+  } as const;
+}
 
 export function buildTaskPrompt(input: PromptInput) {
   const compactRecentLessons = compactLessons(input.lessons ?? []);
@@ -120,7 +256,7 @@ export function buildTaskPrompt(input: PromptInput) {
     ),
     activeGuardrailsMarkdown: [
       ...protectedSections,
-      renderTargetEvolutionProposalContract(input.task.role),
+      renderTargetEvolutionProposalContract(input.task.role, input.run),
       sealText(renderActiveGuardrails(input.run.context, input.task.role)),
     ].filter(Boolean).join("\n"),
     candidateGuardrailsMarkdown: sealText(renderCandidateGuardrails(compactRecentLessons)),
@@ -154,11 +290,25 @@ function renderFrozenTargetEvolutionContract(
   const causalHypothesis = asRecord(runContext.causalHypothesis);
   const comparison = asRecord(runContext.evolutionComparison) ?? asRecord(runContext.comparison);
   const evaluationContract = asRecord(runContext.designEvaluationContract);
+  const designProposal = asRecord(runContext.designProposal);
   if (!evolutionInstance || !evolutionPack || !causalHypothesis || !comparison || !evaluationContract) {
     return "";
   }
   const sealedHoldoutRefs = frozenHoldoutEvidenceRefs(runContext);
   const safeComparison = frozenComparisonView(comparison);
+  const deliveryContracts = designProposal
+    ? pickDefined({
+        episodeCollectionContract: designProposal.episodeCollectionContract,
+        maturityGateContract: designProposal.maturityGateContract,
+        productionEpisodePrivacyReceiptContract: designProposal.productionEpisodePrivacyReceiptContract,
+        promotionReceiptContract: designProposal.promotionReceiptContract,
+        rollbackContract: designProposal.rollbackContract,
+      })
+    : {};
+  const safeDeliveryContracts = redactSealedPromptValues(
+    redactSensitivePromptMaterial(deliveryContracts),
+    sealedHoldoutRefs,
+  );
   return [
     "## Frozen Target Evolution Contract",
     "This task may implement or evaluate the accepted design, but it must not weaken, replace, or amend these frozen values.",
@@ -183,6 +333,14 @@ function renderFrozenTargetEvolutionContract(
       frozenEvaluationContractView(evaluationContract, safeComparison, sealedHoldoutRefs),
     ),
     "```",
+    ...(Object.keys(deliveryContracts).length === 0
+      ? []
+      : [
+          "### Frozen delivery contracts",
+          "```json",
+          prettyJson(safeDeliveryContracts),
+          "```",
+        ]),
     "### Evolution instance identity",
     "```json",
     prettyJson(
@@ -446,6 +604,9 @@ function pickDefined(record: Record<string, unknown>): Record<string, unknown> {
 }
 
 function redactSensitivePromptMaterial(value: unknown): unknown {
+  if (typeof value === "string") {
+    return redactPromptCredentialText(value);
+  }
   if (Array.isArray(value)) {
     return value.map(redactSensitivePromptMaterial);
   }
@@ -457,6 +618,26 @@ function redactSensitivePromptMaterial(value: unknown): unknown {
       .filter(([key]) => !isSensitivePromptMaterialKey(key))
       .map(([key, entry]) => [key, redactSensitivePromptMaterial(entry)]),
   );
+}
+
+function redactPromptCredentialText(value: string): string {
+  return value
+    .replace(/(https?:\/\/)[^\s/@]+(?::[^\s/@]*)?@/gi, "$1[REDACTED]@")
+    .replace(/\b(?:ghp|gho|ghu|ghs|ghr|github_pat|glpat|lin_api|lin_oauth)[_-][A-Za-z0-9._-]+\b/gi, "[REDACTED]")
+    .replace(
+      /(\bauthorization\b\s*[:=]\s*)(?:(?:Bearer|Basic)\s+)?[^\s,;}\])]+/gi,
+      "$1[REDACTED]",
+    )
+    .replace(/\bBearer\s+\S+/gi, "Bearer [REDACTED]")
+    .replace(/(x-access-token\s*:\s*)[^@\s]+/gi, "$1[REDACTED]")
+    .replace(
+      /(\b(?:api[\s_-]*key|access[\s_-]*token|refresh[\s_-]*token|token|secret|password|credential)\b\s*[:=]\s*)(?:"[^"\r\n]*"|'[^'\r\n]*'|[^\s,;}\])]+)/gi,
+      "$1[REDACTED]",
+    )
+    .replace(
+      /(\b(?:access[\s_-]*token|refresh[\s_-]*token|token|secret|password|credential)\b\s+)(?=[^\s,;}\])]*[._~+\/-])[^\s,;}\])]+/gi,
+      "$1[REDACTED]",
+    );
 }
 
 function isSensitivePromptMaterialKey(key: string): boolean {
@@ -480,21 +661,30 @@ function isHeldoutMaterialKey(key: string): boolean {
   return normalized.includes("holdout") || normalized.includes("heldout");
 }
 
-function renderTargetEvolutionProposalContract(role: string): string {
+function renderTargetEvolutionProposalContract(role: string, run: PromptInput["run"]): string {
   if (role !== "designer") {
     return "";
   }
+  const projectId = run.projectId
+    ?? (typeof run.context.projectId === "string" ? run.context.projectId : "<project_id>");
+  const charterId = typeof run.context.designCharterId === "string"
+    ? run.context.designCharterId
+    : typeof run.context.founderCharterId === "string"
+      ? run.context.founderCharterId
+      : "<charter_id>";
   return [
     "## Target System Evolution Proposal Contract",
-    "A normal proposeDesign may omit target-evolution data. An evolution proposal must include all three blocks together: proposal.evolutionPack, proposal.causalHypothesis, and proposal.evaluationContract.comparison.",
+    "A normal proposeDesign may omit target-evolution data. The core evolution group must include all three blocks together: proposal.evolutionPack, proposal.causalHypothesis, and proposal.evaluationContract.comparison.",
+    "For evolutionPack version 4 or later, the proposal must also include all five strict delivery contracts together: episodeCollectionContract, maturityGateContract, productionEpisodePrivacyReceiptContract, promotionReceiptContract, and rollbackContract. Do not use aliases such as projectIdentityContract, privacyReceiptContract, or equalBudgetComparisonContract.",
     "- evolutionPack schemaVersion is 1. It names the project-local objective, observation sources, mutation surfaces, experiment and promotion policy, designed handoff, and portability boundary.",
     "- Artifacts, Harness, and Model are optimization targets; the meta-kernel, project pack, and delivery path are responsibility layers. Milestone-one model mutation is prohibited.",
     "- causalHypothesis must state a supported failureClass, mechanism, predictedEffects, and disconfirmingEvidence.",
     "- comparison must freeze non-empty development, holdout, and unrelated evidence refs plus a corpus hash, controlRef, primary metric, thresholds, and the same equal budget for control and candidate.",
+    "- The five delivery contracts freeze commitment-only episode collection, designed-to-instrumented-to-shadowing gates, privacy-review requirements (not an approval receipt), a draft-only promotion receipt shape, and exact idempotent rollback/readback. Their nested fields are strict; unknown or missing fields are rejected.",
     "- Candidate generation receives only a sealed holdout commitment, hash, and count. It must not receive, cite, query, or reproduce holdout refs, contents, or results. Tests alone do not replace the matched baseline or unrelated-regression evidence.",
     "Merge this exact optional extension fragment into the single proposeDesign proposal shown below. Do not emit another proposeDesign action:",
     "```json",
-    prettyJson(TARGET_EVOLUTION_PROPOSAL_EXTENSION),
+    prettyJson(targetEvolutionProposalExtension(projectId, charterId)),
     "```",
     "",
   ].join("\n");
