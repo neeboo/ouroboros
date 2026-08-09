@@ -29,6 +29,7 @@ export function buildTaskPrompt(input: PromptInput) {
     dependencyAttemptsJson: prettyJson(input.dependencyAttempts),
     activeGuardrailsMarkdown: [
       frozenLinearImplementationGate,
+      renderTargetEvolutionProposalContract(input.task.role),
       renderActiveGuardrails(input.run.context, input.task.role),
     ].filter(Boolean).join("\n"),
     candidateGuardrailsMarkdown: renderCandidateGuardrails(compactRecentLessons),
@@ -40,6 +41,22 @@ export function buildTaskPrompt(input: PromptInput) {
     return `${prompt}\n\n${frozenLinearImplementationGate}`;
   }
   return prompt;
+}
+
+function renderTargetEvolutionProposalContract(role: string): string {
+  if (role !== "designer") {
+    return "";
+  }
+  return [
+    "## Target System Evolution Proposal Contract",
+    "A normal proposeDesign may omit target-evolution data. An evolution proposal must include all three blocks together: proposal.evolutionPack, proposal.causalHypothesis, and proposal.evaluationContract.comparison.",
+    "- evolutionPack schemaVersion is 1. It names the project-local objective, observation sources, mutation surfaces, experiment and promotion policy, designed handoff, and portability boundary.",
+    "- Artifacts, Harness, and Model are optimization targets; the meta-kernel, project pack, and delivery path are responsibility layers. Milestone-one model mutation is prohibited.",
+    "- causalHypothesis must state a supported failureClass, mechanism, predictedEffects, and disconfirmingEvidence.",
+    "- comparison must freeze non-empty development, holdout, and unrelated evidence refs plus a corpus hash, controlRef, primary metric, thresholds, and the same equal budget for control and candidate.",
+    "- Candidate generation may cite frozen holdoutEvidenceRefs, but must not receive or reproduce holdout contents or results. Tests alone do not replace the matched baseline or unrelated-regression evidence.",
+    "",
+  ].join("\n");
 }
 
 interface LinearDeliveryScope {
