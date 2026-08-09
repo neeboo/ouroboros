@@ -40,6 +40,7 @@ import {
   runNextReadyTask,
   runReadyTasks,
   setRunDecisionAction,
+  superviseCodexDaemon,
   superviseCodexRuns,
   runUntilIdle,
 } from "../packages/runner/src";
@@ -2565,6 +2566,69 @@ describe("runner", () => {
     expect(attempt.output.problems).toContain("silent executor crash");
     expect(systemEvents.some((event) => event.type === "generic.attempt.started")).toBe(true);
     expect(systemEvents.some((event) => event.type === "generic.attempt.executor_threw")).toBe(true);
+  });
+
+  test("daemon SIGTERM drains the current attempt without starting another round", async () => {
+    const runId = harness.createRun({ goal: "Stop between bounded rounds" });
+    const firstTaskId = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Finish the current attempt",
+      prompt: "Return done.",
+    });
+    const secondTaskId = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Remain queued after shutdown",
+      prompt: "Do not start after SIGTERM.",
+      dependsOn: [firstTaskId],
+    });
+    const startedTaskIds: string[] = [];
+
+    const result = await superviseCodexDaemon({
+      harness,
+      runConcurrency: 1,
+      taskConcurrency: 1,
+      tickCycles: 1,
+      maxRounds: 2,
+      maxTries: 3,
+      intervalMs: 0,
+      idleMs: 0,
+      maxTicks: 0,
+      cwd: dir,
+      clientFactory: ({ task }) => ({
+        start: async () => {
+          startedTaskIds.push(task!.id);
+          if (task!.id === firstTaskId) {
+            process.emit("SIGTERM");
+          }
+          return {
+            status: "done" as const,
+            sessionId: `session_${task!.id}`,
+            outputPath: join(dir, `${task!.id}.json`),
+            stdout: "",
+            stderr: "",
+            events: [],
+            output: {
+              status: "done" as const,
+              summary: "Current attempt finished",
+              changedFiles: [],
+              checks: [],
+              artifacts: [],
+              problems: [],
+            },
+          };
+        },
+        resume: async () => {
+          throw new Error("resume should not be called");
+        },
+      }),
+    });
+
+    expect(result.status).toBe("stopped");
+    expect(startedTaskIds).toEqual([firstTaskId]);
+    expect(harness.getTask(firstTaskId)?.status).toBe("done");
+    expect(harness.getTask(secondTaskId)?.status).toBe("todo");
   });
 
   test("supervisor skips paused and complete runs while draining blocked and orphaned work", async () => {

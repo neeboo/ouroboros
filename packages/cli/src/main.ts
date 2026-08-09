@@ -2036,6 +2036,7 @@ async function superviseSelfImprovementDaemon(input: SelfImprovementDaemonInput)
             ...input,
             rootRunId: input.rootRunId,
             maxCycles: input.tickCycles,
+            shouldStop: () => stopping || input.shouldStop?.() === true,
           });
           waitMs = result.status === "idle" ? input.idleMs : input.intervalMs;
           tick = {
