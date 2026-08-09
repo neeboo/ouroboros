@@ -1244,6 +1244,42 @@ describe("runner", () => {
     }
   });
 
+  test("runner-owned codex attempts enforce the existing generic timeout contract by default", async () => {
+    const runId = harness.createRun({ goal: "Enforce bounded Codex execution" });
+    harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Complete within the frozen attempt window",
+      prompt: "Return a terminal result.",
+    });
+    const observedTimeouts: Array<{ timeoutMs?: number; idleTimeoutMs?: number }> = [];
+
+    await runCodexResumableLoop({
+      harness,
+      runId,
+      limit: 1,
+      maxRounds: 1,
+      maxTries: 3,
+      cwd: dir,
+      codexOptions: {
+        codexBin: "/custom/codex",
+        runCommand: async ({ timeoutMs, idleTimeoutMs }) => {
+          observedTimeouts.push({ timeoutMs, idleTimeoutMs });
+          return {
+            exitCode: 0,
+            stdout: JSON.stringify({
+              type: "agent.message",
+              message: '{"status":"done","summary":"bounded","changedFiles":[],"checks":[],"artifacts":[],"problems":[]}',
+            }),
+            stderr: "",
+          };
+        },
+      },
+    });
+
+    expect(observedTimeouts).toEqual([{ timeoutMs: 30 * 60 * 1000, idleTimeoutMs: 5 * 60 * 1000 }]);
+  });
+
   test("runner-owned codex loop blocks running starts that have no resumable session id", async () => {
     const runId = harness.createRun({ goal: "Build loop" });
     const taskId = harness.createTask({
