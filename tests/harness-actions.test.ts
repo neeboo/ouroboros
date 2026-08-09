@@ -5,12 +5,18 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
   applyHarnessAction,
+  canonicalEvolutionValueSha256,
   describeAuthorityEvaluation,
   describeIntegrationReadiness,
   evaluateAuthority,
+  expectedEvolutionRecordId,
   Harness,
   HARD_AUTHORITY_RULES,
   isHardAuthorityReason,
+  parseEvolutionProfile,
+  parseHarnessVariant,
+  parseMatchedExperiment,
+  parseProductionEpisode,
   withDatabase,
   type HarnessDatabase,
   type SubsessionRunner,
@@ -5377,6 +5383,526 @@ describe("Founder charter authority evaluator", () => {
     // plain JSON-serializable data. The evaluator can be transported across a
     // process boundary without losing fidelity.
     expect(() => JSON.stringify(sample)).not.toThrow();
+  });
+});
+
+describe("Evolution runtime fixed actions", () => {
+  const SHA_A = "a".repeat(64);
+  const SHA_B = "b".repeat(64);
+  const SHA_C = "c".repeat(64);
+  const ZERO_SIDE_EFFECTS = {
+    paidUsd: 0,
+    realProviderCalls: 0,
+    pancatWrites: 0,
+    productionPublishes: 0,
+    realAssetDeletes: 0,
+    crossProjectMemoryReads: 0,
+    crossProjectMemoryWrites: 0,
+  } as const;
+
+  let dir: string;
+  let harness: Harness;
+
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), "ouroboros-evolution-actions-"));
+    harness = new Harness(join(dir, "ouroboros.db"));
+    harness.init();
+  });
+
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  function addressed<T extends Record<string, unknown>>(
+    kind: "profile" | "episode" | "variant" | "experiment",
+    value: T,
+  ): T & { id: string } {
+    const { id: _ignored, ...body } = value;
+    return { ...body, id: expectedEvolutionRecordId(kind, body) } as T & { id: string };
+  }
+
+  function fixture() {
+    const projectId = harness.createProject({
+      id: "project_hodor_evolution_actions",
+      name: "Hodor",
+      rootPath: join(dir, "hodor"),
+    });
+    const charter = harness.createFounderCharter({
+      id: "charter_hodor_evolution_actions",
+      projectId,
+      mission: "Improve Hodor from bounded replay evidence.",
+      charter: {
+        mission: "Improve Hodor from bounded replay evidence.",
+        principles: ["No production side effects during shadow design."],
+        nonGoals: ["No model mutation."],
+      },
+      activate: true,
+    });
+    const pack = {
+      schemaVersion: 1 as const,
+      id: "pack_hodor_evolution_actions",
+      targetSystemId: "hodor",
+      version: 1,
+      knowledgeScope: `project:${projectId}` as const,
+      objective: {
+        charterId: charter.id,
+        domainOutcomes: ["Reduce spatial-risk false positives."],
+        nonGoals: ["No production mutation."],
+      },
+      observation: {
+        signalSources: [{ id: "hodor_replay", kind: "domain-metric" as const }],
+      },
+      mutationSurfaces: [
+        {
+          id: "surface_policy",
+          evolutionTarget: "artifact" as const,
+          layer: "policy" as const,
+          projectId,
+          allowedPaths: ["config/evolution/**"],
+          forbiddenPaths: ["config/evolution/forbidden/**"],
+          owner: "target" as const,
+        },
+        {
+          id: "surface_harness",
+          evolutionTarget: "harness" as const,
+          layer: "workflow" as const,
+          projectId,
+          allowedPaths: ["evals/evolution/**"],
+          forbiddenPaths: ["evals/evolution/secrets/**"],
+          owner: "ouroboros" as const,
+        },
+      ],
+      experimentPolicy: {
+        controlRequired: true as const,
+        holdoutRequired: true as const,
+        unrelatedRegressionRequired: true as const,
+        equalBudgetRequired: true as const,
+        maxCandidates: 1,
+      },
+      promotionPolicy: {
+        guardMetrics: ["blocking-safety regressions"],
+        observationWindow: "Frozen before any later shadow execution.",
+        rollback: "A later authorized receipt must name exact rollback evidence.",
+      },
+      handoff: {
+        maturity: "designed" as const,
+        targetOwner: "hodor",
+        requiredCapabilities: ["Immutable replay evidence."],
+      },
+      portability: {
+        projectLocalRules: ["Hodor evidence remains project local."],
+        genericizationEvidence: [],
+      },
+    };
+    const comparison = {
+      controlRef: "hodor_policy_control_v1",
+      developmentEvidenceRefs: ["episode:hodor:development:001"],
+      holdoutEvidenceRefs: ["episode:hodor:heldout:001"],
+      unrelatedEvidenceRefs: ["episode:hodor:unrelated:001"],
+      corpusSnapshotSha256: SHA_A,
+      equalBudget: {
+        model: "fixture-replay-no-provider",
+        reasoningEffort: "high" as const,
+        wallClockMs: 120_000,
+        maxAttempts: 1,
+        maxTokens: 20_000,
+        toolPolicySha256: SHA_B,
+        concurrency: 1,
+      },
+      primaryMetric: "spatial-risk false-positive rate",
+      minimumUplift: 0.05,
+      maximumGuardRegression: 0,
+    };
+    const packHash = canonicalEvolutionValueSha256(pack);
+    const runId = harness.createRun({
+      id: "run_hodor_evolution_actions",
+      projectId,
+      goal: "Freeze Hodor instrumented evolution evidence.",
+      context: {
+        evolutionPack: pack,
+        evolutionInstance: {
+          schemaVersion: 1,
+          mode: "design-target",
+          kernelProjectId: "project_ouroboros_kernel",
+          targetProjectId: projectId,
+          cycle: { kind: "bootstrap", index: 1 },
+          pack: { id: pack.id, version: pack.version, contentSha256: packHash },
+        },
+        evolutionComparison: comparison,
+      },
+    });
+    const profile = parseEvolutionProfile(addressed("profile", {
+      schemaVersion: 1 as const,
+      projectId,
+      pack: { id: pack.id, version: pack.version, contentSha256: packHash },
+      charter: {
+        id: charter.id,
+        version: charter.version,
+        contentSha256: canonicalEvolutionValueSha256(charter.charter),
+      },
+      maturity: "instrumented",
+      allowedSurfaceIds: pack.mutationSurfaces.map((surface) => surface.id),
+      activatedAt: "2026-08-09T08:00:00.000Z",
+    }), projectId);
+    const episode = (
+      split: "development" | "heldout" | "unrelated",
+      marker: string = split,
+      override: Record<string, unknown> = {},
+    ) => {
+      const sourceRefs = {
+        development: comparison.developmentEvidenceRefs,
+        heldout: comparison.holdoutEvidenceRefs,
+        unrelated: comparison.unrelatedEvidenceRefs,
+      };
+      const inputSnapshotSha256 = canonicalEvolutionValueSha256({ input: marker });
+      const outcomeSnapshotSha256 = canonicalEvolutionValueSha256({ outcome: marker });
+      return parseProductionEpisode(addressed("episode", {
+        schemaVersion: 1 as const,
+        projectId,
+        profileId: profile.id,
+        sourceRef: sourceRefs[split][0],
+        leakageGroupId: `leakage:${marker}`,
+        observedAt: "2026-08-09T08:01:00.000Z",
+        inputSnapshotSha256,
+        outcomeSnapshotSha256,
+        policyRef: "policy_hodor_replay_v1",
+        metrics: { falsePositiveRate: 0.1 },
+        sideEffectCounters: ZERO_SIDE_EFFECTS,
+        evidenceRefs: [`evidence:${marker}`],
+        privacyReview: {
+          status: "approved",
+          policySha256: SHA_C,
+          reviewerRef: "reviewer:privacy",
+          dataClassification: "derived-fixture",
+          retentionPolicyRef: "retention:test-only",
+          inputSnapshotSha256,
+          outcomeSnapshotSha256,
+          evidenceRefs: [`privacy:${marker}`],
+        },
+        ...override,
+      }), projectId);
+    };
+    const control = parseHarnessVariant(addressed("variant", {
+      schemaVersion: 1 as const,
+      projectId,
+      profileId: profile.id,
+      role: "control",
+      evolutionTargets: ["artifact"],
+      contentSha256: SHA_A,
+      mutationSurfaceIds: ["surface_policy"],
+      changedPaths: ["config/evolution/control.json"],
+      toolPolicySha256: SHA_B,
+      createdFromEvidenceRefs: [comparison.controlRef],
+    }), projectId);
+    const candidate = parseHarnessVariant(addressed("variant", {
+      schemaVersion: 1 as const,
+      projectId,
+      profileId: profile.id,
+      role: "candidate",
+      evolutionTargets: ["harness"],
+      contentSha256: SHA_C,
+      mutationSurfaceIds: ["surface_harness"],
+      changedPaths: ["evals/evolution/candidate.test.ts"],
+      toolPolicySha256: SHA_B,
+      createdFromEvidenceRefs: [...comparison.developmentEvidenceRefs],
+    }), projectId);
+    const development = episode("development");
+    const heldout = episode("heldout");
+    const unrelated = episode("unrelated");
+    const experiment = parseMatchedExperiment(addressed("experiment", {
+      schemaVersion: 1 as const,
+      projectId,
+      profileId: profile.id,
+      controlVariantId: control.id,
+      candidateVariantId: candidate.id,
+      developmentEpisodeRefs: [development.id],
+      heldoutEpisodeRefs: [heldout.id],
+      unrelatedEpisodeRefs: [unrelated.id],
+      corpusSnapshotSha256: comparison.corpusSnapshotSha256,
+      equalBudget: comparison.equalBudget,
+      primaryMetric: comparison.primaryMetric,
+      guardMetrics: pack.promotionPolicy.guardMetrics,
+      sideEffectCounters: ZERO_SIDE_EFFECTS,
+      outcome: "pending",
+      evidenceRefs: ["evidence:experiment-spec"],
+    }), projectId);
+    return {
+      projectId,
+      charter,
+      pack,
+      comparison,
+      runId,
+      profile,
+      episode,
+      development,
+      heldout,
+      unrelated,
+      control,
+      candidate,
+      experiment,
+    };
+  }
+
+  function applyGraph(graph: ReturnType<typeof fixture>) {
+    const results = [
+      applyHarnessAction(harness, { type: "activateEvolutionProfile", runId: graph.runId, profile: graph.profile }),
+      ...[graph.development, graph.heldout, graph.unrelated].map((episode) =>
+        applyHarnessAction(harness, { type: "recordProductionEpisode", runId: graph.runId, episode })
+      ),
+      applyHarnessAction(harness, { type: "registerHarnessVariant", runId: graph.runId, variant: graph.control }),
+      applyHarnessAction(harness, { type: "registerHarnessVariant", runId: graph.runId, variant: graph.candidate }),
+      applyHarnessAction(harness, { type: "freezeMatchedExperiment", runId: graph.runId, experiment: graph.experiment }),
+    ];
+    for (const result of results) {
+      expect(result.status, result.summary).toBe("done");
+      expect(result.artifacts[0]).toMatchObject({
+        externalEffectsApplied: false,
+        promotionApplied: false,
+        replayed: false,
+      });
+    }
+    return results;
+  }
+
+  test("records the instrumented graph atomically and reports sequential replay without external effects", () => {
+    const graph = fixture();
+    applyGraph(graph);
+
+    expect(harness.getEvolutionProfile({ projectId: graph.projectId, id: graph.profile.id })).toEqual(graph.profile);
+    expect(harness.getProductionEpisode({ projectId: graph.projectId, id: graph.development.id })).toEqual(graph.development);
+    expect(harness.getHarnessVariant({ projectId: graph.projectId, id: graph.candidate.id })).toEqual(graph.candidate);
+    expect(harness.getMatchedExperiment({ projectId: graph.projectId, id: graph.experiment.id })).toEqual(graph.experiment);
+
+    const replay = applyHarnessAction(harness, {
+      type: "freezeMatchedExperiment",
+      runId: graph.runId,
+      experiment: graph.experiment,
+    });
+    expect(replay).toMatchObject({ status: "done", actionType: "freezeMatchedExperiment" });
+    expect(replay.artifacts[0]).toMatchObject({
+      replayed: true,
+      externalEffectsApplied: false,
+      promotionApplied: false,
+    });
+    const event = harness.getHarnessActionEvent({ id: replay.eventId });
+    expect(event).toMatchObject({
+      actionType: "freezeMatchedExperiment",
+      status: "done",
+      result: expect.objectContaining({ summary: replay.summary }),
+    });
+  });
+
+  test("rejects extra action fields and redacts credentials in the blocked audit", () => {
+    const graph = fixture();
+    const result = applyHarnessAction(harness, {
+      type: "activateEvolutionProfile",
+      runId: graph.runId,
+      profile: graph.profile,
+      authorization: "Bearer should-never-appear",
+    });
+    expect(result.status).toBe("blocked");
+    expect(result.actionType).toBe("invalid");
+    expect(harness.getEvolutionProfile({ projectId: graph.projectId, id: graph.profile.id })).toBeNull();
+    const event = harness.getHarnessActionEvent({ id: result.eventId });
+    expect(event?.request).toMatchObject({ authorization: "[REDACTED]" });
+    expect(JSON.stringify(event)).not.toContain("should-never-appear");
+  });
+
+  test("fails closed when the run is unbound or profile disagrees with frozen pack, instance, charter, or surfaces", () => {
+    const graph = fixture();
+    const unboundRunId = harness.createRun({ goal: "Unbound evolution run" });
+    const unbound = applyHarnessAction(harness, {
+      type: "activateEvolutionProfile",
+      runId: unboundRunId,
+      profile: graph.profile,
+    });
+    expect(unbound.status).toBe("blocked");
+    const foreignProjectId = harness.createProject({
+      id: "project_foreign_evolution_action",
+      name: "Foreign",
+      rootPath: join(dir, "foreign"),
+    });
+    const foreignRunId = harness.createRun({
+      projectId: foreignProjectId,
+      goal: "Must not record Hodor evolution state.",
+      context: harness.getRun(graph.runId)?.context,
+    });
+    const crossProject = applyHarnessAction(harness, {
+      type: "activateEvolutionProfile",
+      runId: foreignRunId,
+      profile: graph.profile,
+    });
+    expect(crossProject.status).toBe("blocked");
+
+    const invalidProfiles = [
+      addressed("profile", { ...graph.profile, maturity: "shadowing" }),
+      addressed("profile", { ...graph.profile, activatedByReceipt: `receipt_${"a".repeat(64)}` }),
+      addressed("profile", {
+        ...graph.profile,
+        pack: { ...graph.profile.pack, contentSha256: SHA_C },
+      }),
+      addressed("profile", {
+        ...graph.profile,
+        charter: { ...graph.profile.charter, contentSha256: SHA_C },
+      }),
+      addressed("profile", { ...graph.profile, allowedSurfaceIds: ["surface_policy"] }),
+    ];
+    for (const profile of invalidProfiles) {
+      const result = applyHarnessAction(harness, {
+        type: "activateEvolutionProfile",
+        runId: graph.runId,
+        profile,
+      });
+      expect(result.status, result.summary).toBe("blocked");
+      expect(harness.getEvolutionProfile({ projectId: graph.projectId, id: profile.id })).toBeNull();
+    }
+  });
+
+  test("accepts only frozen comparison episode sources and rolls back an entity if the done audit cannot commit", () => {
+    const graph = fixture();
+    expect(applyHarnessAction(harness, {
+      type: "activateEvolutionProfile",
+      runId: graph.runId,
+      profile: graph.profile,
+    }).status).toBe("done");
+
+    const foreign = graph.episode("development", "foreign", {
+      sourceRef: "episode:foreign:development:999",
+    });
+    const rejected = applyHarnessAction(harness, {
+      type: "recordProductionEpisode",
+      runId: graph.runId,
+      episode: foreign,
+    });
+    expect(rejected.status).toBe("blocked");
+    expect(harness.getProductionEpisode({ projectId: graph.projectId, id: foreign.id })).toBeNull();
+
+    const original = harness.recordHarnessActionEventWithDb.bind(harness);
+    let failOnce = true;
+    harness.recordHarnessActionEventWithDb = (...args: Parameters<typeof original>) => {
+      if (failOnce) {
+        failOnce = false;
+        throw new Error("synthetic audit write failure; API key: action-secret-123");
+      }
+      return original(...args);
+    };
+    const auditFailure = applyHarnessAction(harness, {
+      type: "recordProductionEpisode",
+      runId: graph.runId,
+      episode: graph.development,
+    });
+    expect(auditFailure.status).toBe("blocked");
+    expect(auditFailure.problems.join(" ")).toContain("synthetic audit write failure");
+    expect(JSON.stringify(auditFailure)).not.toContain("action-secret-123");
+    expect(harness.getProductionEpisode({ projectId: graph.projectId, id: graph.development.id })).toBeNull();
+    expect(harness.getHarnessActionEvent({ id: auditFailure.eventId })?.status).toBe("blocked");
+  });
+
+  test("confines variants to frozen surfaces, paths, targets, and development-only candidate evidence", () => {
+    const graph = fixture();
+    expect(applyHarnessAction(harness, {
+      type: "activateEvolutionProfile",
+      runId: graph.runId,
+      profile: graph.profile,
+    }).status).toBe("done");
+
+    const invalidVariants = [
+      addressed("variant", { ...graph.candidate, mutationSurfaceIds: ["surface_missing"] }),
+      addressed("variant", { ...graph.candidate, changedPaths: ["src/escape.ts"] }),
+      addressed("variant", { ...graph.candidate, changedPaths: ["evals/evolution/secrets/token.json"] }),
+      addressed("variant", { ...graph.candidate, evolutionTargets: ["artifact"] }),
+      addressed("variant", {
+        ...graph.candidate,
+        createdFromEvidenceRefs: [...graph.comparison.holdoutEvidenceRefs],
+      }),
+    ];
+    for (const variant of invalidVariants) {
+      const result = applyHarnessAction(harness, {
+        type: "registerHarnessVariant",
+        runId: graph.runId,
+        variant,
+      });
+      expect(result.status, result.summary).toBe("blocked");
+      expect(harness.getHarnessVariant({ projectId: graph.projectId, id: variant.id })).toBeNull();
+    }
+  });
+
+  test("freezes only pending experiments matching the exact split, budget, metrics, and zero-side-effect contract", () => {
+    const graph = fixture();
+    applyGraph({ ...graph, experiment: addressed("experiment", { ...graph.experiment, id: undefined }) });
+
+    const variants = [
+      addressed("experiment", { ...graph.experiment, outcome: "candidate_wins" }),
+      addressed("experiment", { ...graph.experiment, guardMetrics: ["different guard"] }),
+      addressed("experiment", {
+        ...graph.experiment,
+        equalBudget: { ...graph.experiment.equalBudget, maxAttempts: 2 },
+      }),
+      addressed("experiment", {
+        ...graph.experiment,
+        developmentEpisodeRefs: [graph.heldout.id],
+        heldoutEpisodeRefs: [graph.development.id],
+      }),
+    ];
+    for (const experiment of variants) {
+      const result = applyHarnessAction(harness, {
+        type: "freezeMatchedExperiment",
+        runId: graph.runId,
+        experiment,
+      });
+      expect(result.status, result.summary).toBe("blocked");
+      expect(harness.getMatchedExperiment({ projectId: graph.projectId, id: experiment.id })).toBeNull();
+    }
+  });
+
+  test("rejects snapshot or leakage-group reuse across experiment splits", () => {
+    const graph = fixture();
+    expect(applyHarnessAction(harness, {
+      type: "activateEvolutionProfile",
+      runId: graph.runId,
+      profile: graph.profile,
+    }).status).toBe("done");
+    expect(applyHarnessAction(harness, {
+      type: "recordProductionEpisode",
+      runId: graph.runId,
+      episode: graph.development,
+    }).status).toBe("done");
+    const collidingHeldout = graph.episode("heldout", "colliding-heldout", {
+      leakageGroupId: graph.development.leakageGroupId,
+      inputSnapshotSha256: graph.development.inputSnapshotSha256,
+      outcomeSnapshotSha256: graph.development.outcomeSnapshotSha256,
+      privacyReview: {
+        ...graph.heldout.privacyReview,
+        inputSnapshotSha256: graph.development.inputSnapshotSha256,
+        outcomeSnapshotSha256: graph.development.outcomeSnapshotSha256,
+      },
+    });
+    for (const episode of [collidingHeldout, graph.unrelated]) {
+      expect(applyHarnessAction(harness, {
+        type: "recordProductionEpisode",
+        runId: graph.runId,
+        episode,
+      }).status).toBe("done");
+    }
+    for (const variant of [graph.control, graph.candidate]) {
+      expect(applyHarnessAction(harness, {
+        type: "registerHarnessVariant",
+        runId: graph.runId,
+        variant,
+      }).status).toBe("done");
+    }
+    const experiment = addressed("experiment", {
+      ...graph.experiment,
+      heldoutEpisodeRefs: [collidingHeldout.id],
+    });
+    const result = applyHarnessAction(harness, {
+      type: "freezeMatchedExperiment",
+      runId: graph.runId,
+      experiment,
+    });
+    expect(result.status).toBe("blocked");
+    expect(result.problems.join(" ")).toMatch(/snapshot|leakage/i);
+    expect(harness.getMatchedExperiment({ projectId: graph.projectId, id: experiment.id })).toBeNull();
   });
 });
 
