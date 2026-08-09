@@ -259,6 +259,7 @@ function applyRecordSignalWithDb(
 ): ApplyActionResult {
   const payload = action.payload;
   const projectId = requiredProjectId(payload.projectId);
+  assertActionSourceProject(harness, db, context, projectId, "recordSignal");
   const expiresAt = optionalIsoTimestamp(payload.expiresAt, "recordSignal payload.expiresAt");
   if (expiresAt !== null && expiresAt !== undefined) {
     if (Date.parse(expiresAt) < context.now) {
@@ -347,6 +348,8 @@ function applyProposeDesignWithDb(
 ): ApplyActionResult {
   const payload = action.payload;
   const projectId = requiredProjectId(payload.projectId);
+  const sourceRun = assertActionSourceProject(harness, db, context, projectId, "proposeDesign");
+  assertProposalCharterProjects(harness, db, sourceRun.context, payload.charterId, projectId);
   const title = requiredString(payload.title, "proposeDesign payload.title");
   const proposalData = payload.proposal as Record<string, unknown> | undefined;
   if (!proposalData) {
@@ -1090,6 +1093,8 @@ function applyCreateRunsFromDesignWithDb(
       `createRunsFromDesign requires an accepted proposal; ${proposalId} status is ${proposal.status}`,
     );
   }
+  const proposalProjectId = requiredProjectId(proposal.projectId);
+  assertActionSourceProject(harness, db, context, proposalProjectId, "createRunsFromDesign");
 
   const decisions = harness.listDesignDecisionsWithDb(db, { proposalId });
   const approval = decisions.find((decision) => decision.decision === "approved");
@@ -1275,6 +1280,9 @@ function applyCreateRunsFromDesignWithDb(
       `createRunsFromDesign requires a resolved founder charter for ${proposalId}; automatic approvals must inherit the active charter recorded during authority evaluation`,
     );
   }
+  if (resolvedCharterId) {
+    assertCharterProject(harness, db, resolvedCharterId, proposalProjectId, "createRunsFromDesign");
+  }
 
   const frozenContract = { ...proposal.proposal.evaluationContract };
   // Preserve the complete stored proposal envelope — including any extension
@@ -1341,6 +1349,7 @@ function applyCreateRunsFromDesignWithDb(
       const childContext: Record<string, unknown> = {
         ...(plannedRun.context ?? {}),
         ...inheritedControlContext(context.run.context),
+        projectId: proposalProjectId,
         parentRunId: context.run.id,
         sourceTaskId: context.task.id,
         source: "design",
@@ -1366,17 +1375,25 @@ function applyCreateRunsFromDesignWithDb(
       harness.createRunWithDb(db, {
         id: childRunId,
         goal: plannedRun.goal,
+        projectId: proposalProjectId,
         context: childContext,
       });
-    } else if (linearIntake) {
-      verifyExistingRunIntakeProvenance(existingRun.context, {
-        parent: linearIntake,
-        proposalId: proposal.id,
-        decisionId: approval.id,
-        sourceDesignerRunId: context.run.id,
-        sourceDesignerTaskId: linearIntakeSourceDesignerTaskId ?? context.task.id,
-        childRunId,
-      });
+    } else {
+      if (existingRun.projectId !== proposalProjectId) {
+        throw new Error(
+          `createRunsFromDesign child run ${childRunId} belongs to project ${existingRun.projectId ?? "<null>"}; expected ${proposalProjectId}`,
+        );
+      }
+      if (linearIntake) {
+        verifyExistingRunIntakeProvenance(existingRun.context, {
+          parent: linearIntake,
+          proposalId: proposal.id,
+          decisionId: approval.id,
+          sourceDesignerRunId: context.run.id,
+          sourceDesignerTaskId: linearIntakeSourceDesignerTaskId ?? context.task.id,
+          childRunId,
+        });
+      }
     }
     const existingTask = harness.getTask(plannerTaskId);
     if (!existingTask) {
@@ -1473,6 +1490,76 @@ function inheritedControlContext(context: Record<string, unknown>) {
       .filter((key) => context[key] !== undefined)
       .map((key) => [key, context[key]]),
   );
+}
+
+function assertActionSourceProject(
+  harness: Harness,
+  db: HarnessDatabase,
+  context: ActionContext,
+  projectId: string,
+  actionType: "recordSignal" | "proposeDesign" | "createRunsFromDesign",
+): Run {
+  const sourceRun = harness.getRunWithDb(db, context.run.id);
+  if (!sourceRun) {
+    throw new Error(`${actionType} source run not found: ${context.run.id}`);
+  }
+  const sourceTask = harness.getTask(context.task.id);
+  if (!sourceTask) {
+    throw new Error(`${actionType} source task not found: ${context.task.id}`);
+  }
+  if (sourceTask.runId !== sourceRun.id) {
+    throw new Error(
+      `${actionType} source task ${sourceTask.id} does not belong to source run ${sourceRun.id}`,
+    );
+  }
+  if (sourceRun.projectId && sourceRun.projectId !== projectId) {
+    throw new Error(
+      `${actionType} project ${projectId} does not match source run project ${sourceRun.projectId}`,
+    );
+  }
+  return sourceRun;
+}
+
+function assertProposalCharterProjects(
+  harness: Harness,
+  db: HarnessDatabase,
+  sourceRunContext: Record<string, unknown>,
+  payloadCharterId: unknown,
+  projectId: string,
+) {
+  const charterIds = new Set<string>();
+  const candidates: Array<[unknown, string]> = [
+    [payloadCharterId, "proposeDesign payload.charterId"],
+    [sourceRunContext.designCharterId, "proposeDesign source run context.designCharterId"],
+    [sourceRunContext.founderCharterId, "proposeDesign source run context.founderCharterId"],
+  ];
+  for (const [candidate, label] of candidates) {
+    if (candidate === undefined || candidate === null) {
+      continue;
+    }
+    charterIds.add(requiredString(candidate, label));
+  }
+  for (const charterId of charterIds) {
+    assertCharterProject(harness, db, charterId, projectId, "proposeDesign");
+  }
+}
+
+function assertCharterProject(
+  harness: Harness,
+  db: HarnessDatabase,
+  charterId: string,
+  projectId: string,
+  actionType: "proposeDesign" | "createRunsFromDesign",
+) {
+  const charter = harness.getFounderCharterWithDb(db, { id: charterId });
+  if (!charter) {
+    throw new Error(`${actionType} founder charter not found: ${charterId}`);
+  }
+  if (charter.projectId !== projectId) {
+    throw new Error(
+      `${actionType} founder charter ${charterId} belongs to project ${charter.projectId}; expected ${projectId}`,
+    );
+  }
 }
 
 // ---------------------------------------------------------------------------

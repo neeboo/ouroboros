@@ -7416,6 +7416,152 @@ describe("runner", () => {
     expect(events[0].result).toMatchObject({ signalId: signals[0].id });
   });
 
+  test("apply-design-actions hook rejects recordSignal when a project-bound run names another project", async () => {
+    const projectId = harness.createProject({ name: "ouroboros", rootPath: dir });
+    const otherProjectId = harness.createProject({ name: "other", rootPath: join(dir, "other") });
+    const runId = harness.createRun({ goal: "project-bound design run", projectId });
+    const taskId = harness.createTask({
+      runId,
+      role: "designer",
+      goal: "design",
+      prompt: "design",
+    });
+    const hook = createApplyDesignActionsHook({ harness });
+
+    const result = await hook({
+      run: harness.getRun(runId)!,
+      task: harness.getTask(taskId)!,
+      sessionName: "session",
+      prompt: "design",
+      output: {
+        status: "done",
+        summary: "cross-project signal",
+        designActions: [
+          {
+            type: "recordSignal",
+            payload: {
+              projectId: otherProjectId,
+              signalClass: "delivery",
+              source: "tests",
+              title: "cross-project",
+              summary: "must fail closed",
+              observationTime: "2026-08-02T00:00:00Z",
+              confidence: 0.5,
+            },
+          },
+        ],
+      } as AttemptOutput,
+    });
+
+    expect(result.decision).toBe("exit");
+    expect(result.problems?.[0]).toContain("does not match source run project");
+    expect(harness.listStrategySignals({ projectId: otherProjectId })).toHaveLength(0);
+  });
+
+  test("apply-design-actions hook rejects proposeDesign when the source run or charter belongs to another project", async () => {
+    const projectId = harness.createProject({ name: "ouroboros", rootPath: dir });
+    const otherProjectId = harness.createProject({ name: "other", rootPath: join(dir, "other") });
+    const otherCharter = harness.createFounderCharter({
+      projectId: otherProjectId,
+      mission: "Other project mission",
+      charter: { mission: "Other project mission" },
+      activate: true,
+    });
+    const hook = createApplyDesignActionsHook({ harness });
+
+    const mismatchedRunId = harness.createRun({ goal: "bound elsewhere", projectId: otherProjectId });
+    const mismatchedTaskId = harness.createTask({
+      runId: mismatchedRunId,
+      role: "designer",
+      goal: "design",
+      prompt: "design",
+    });
+    const runMismatch = await hook({
+      run: harness.getRun(mismatchedRunId)!,
+      task: harness.getTask(mismatchedTaskId)!,
+      sessionName: "session",
+      prompt: "design",
+      output: {
+        status: "done",
+        summary: "cross-project proposal",
+        designActions: [{
+          type: "proposeDesign",
+          payload: { projectId, title: "Cross-project proposal", proposal: validProposal },
+        }],
+      } as AttemptOutput,
+    });
+    expect(runMismatch.problems?.[0]).toContain("does not match source run project");
+    expect(harness.listDesignProposals({ projectId })).toHaveLength(0);
+
+    const runId = harness.createRun({ goal: "project-bound design run", projectId });
+    const taskId = harness.createTask({
+      runId,
+      role: "designer",
+      goal: "design",
+      prompt: "design",
+    });
+    const charterMismatch = await hook({
+      run: harness.getRun(runId)!,
+      task: harness.getTask(taskId)!,
+      sessionName: "session",
+      prompt: "design",
+      output: {
+        status: "done",
+        summary: "cross-project charter",
+        designActions: [{
+          type: "proposeDesign",
+          payload: {
+            projectId,
+            charterId: otherCharter.id,
+            title: "Cross-project charter proposal",
+            proposal: validProposal,
+          },
+        }],
+      } as AttemptOutput,
+    });
+    expect(charterMismatch.problems?.[0]).toContain("belongs to project");
+    expect(harness.listDesignProposals({ projectId })).toHaveLength(0);
+  });
+
+  test("apply-design-actions hook rejects a source task that does not belong to the source run", async () => {
+    const projectId = harness.createProject({ name: "ouroboros", rootPath: dir });
+    const runId = harness.createRun({ goal: "source run", projectId });
+    const otherRunId = harness.createRun({ goal: "other run", projectId });
+    const otherTaskId = harness.createTask({
+      runId: otherRunId,
+      role: "designer",
+      goal: "design",
+      prompt: "design",
+    });
+    const hook = createApplyDesignActionsHook({ harness });
+
+    const result = await hook({
+      run: harness.getRun(runId)!,
+      task: harness.getTask(otherTaskId)!,
+      sessionName: "session",
+      prompt: "design",
+      output: {
+        status: "done",
+        summary: "mismatched source task",
+        designActions: [{
+          type: "recordSignal",
+          payload: {
+            projectId,
+            signalClass: "delivery",
+            source: "tests",
+            title: "mismatched task",
+            summary: "must fail closed",
+            observationTime: "2026-08-02T00:00:00Z",
+            confidence: 0.5,
+          },
+        }],
+      } as AttemptOutput,
+    });
+
+    expect(result.problems?.[0]).toContain("does not belong to source run");
+    expect(harness.listStrategySignals({ projectId })).toHaveLength(0);
+  });
+
   test("apply-design-actions hook records proposal, decision, outcome, and runs", async () => {
     const runId = harness.createRun({ goal: "design run" });
     const taskId = harness.createTask({
@@ -7489,6 +7635,7 @@ describe("runner", () => {
               {
                 goal: "Plan pre-warm",
                 prompt: "Plan the change.",
+                context: { projectId: "project_untrusted_override" },
               },
             ],
           },
@@ -7511,7 +7658,9 @@ describe("runner", () => {
     expect(createdRunArtifacts).toHaveLength(1);
     const childRunId = (createdRunArtifacts[0] as { runId: string }).runId;
     const childRun = harness.getRun(childRunId);
+    expect(childRun?.projectId).toBe(projectId);
     expect(childRun?.context).toMatchObject({
+      projectId,
       designProposalId: proposalId,
       source: "design",
       designEvaluationContract: expect.objectContaining({

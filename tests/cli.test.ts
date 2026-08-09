@@ -630,6 +630,8 @@ describe("CLI", () => {
     const projects = harness.listProjects();
     expect(projects.length).toBe(1);
     const project = projects[0];
+    expect(firstOverview.run.projectId).toBe(project.id);
+    expect(secondOverview.run.projectId).toBe(project.id);
     const charter = harness.getActiveFounderCharter({ projectId: project.id });
     expect(charter?.id).toBe(firstCharterId);
     expect(charter?.mission).toContain("reliable");
@@ -8525,6 +8527,10 @@ describe("CLI", () => {
 
     expect(result.ticks[0].recovery).toBeUndefined();
     expect(result.ticks[0].createdCycle).toBeDefined();
+    const createdCycleRun = setupHarness.getRun(result.ticks[0].createdCycle.runId);
+    const selfIterationProjectId = setupHarness.listProjects()[0].id;
+    expect(setupHarness.getRun(bootstrap.runId)?.projectId).toBe(selfIterationProjectId);
+    expect(createdCycleRun?.projectId).toBe(selfIterationProjectId);
     expect(recoveryTasks).toHaveLength(0);
     expect(overview.run.status).toBe("blocked");
     expect(overview.run.context.automaticRecoveryExhausted).toMatchObject({

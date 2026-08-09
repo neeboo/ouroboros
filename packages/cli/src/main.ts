@@ -1716,6 +1716,7 @@ async function createSelfIterationBootstrap() {
   const charterId = ensureSelfIterationFounderCharter(projectId);
   const runId = harness.createRun({
     goal: SELF_ITERATION_GOAL,
+    projectId,
     context: withSelfIterationConfigDefaults({
       source: "self-improve",
       planDoc: SELF_ITERATION_PLAN_DOC,
@@ -2233,6 +2234,7 @@ function ensureSelfImprovementCycle(rootRunId: string, cwd: string) {
   }
   const runId = harness.createRun({
     goal: `Designer assesses Ouroboros for cycle ${cycleIndex}`,
+    projectId,
     context: {
       ...selfImprovementControlContext(root.context),
       parentRunId: rootRunId,
