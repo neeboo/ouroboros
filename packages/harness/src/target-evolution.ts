@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { requireStrictIsoTimestamp } from "./iso-timestamp";
 import type {
+  DraftPromotionReceipt,
   EvolutionCausalHypothesis,
   EvolutionComparison,
   EvolutionCycleKind,
@@ -12,12 +13,12 @@ import type {
   EvolutionPackV1,
   EvolutionProfile,
   EvolutionRecordKind,
+  EvolutionRuntimeMaturity,
   EvolutionSideEffectCounters,
   EvolutionTarget,
   HarnessVariant,
   MatchedExperiment,
   ProductionEpisode,
-  PromotionReceipt,
 } from "./types";
 
 export const TARGET_EVOLUTION_LIMITS = Object.freeze({
@@ -36,6 +37,10 @@ export const TARGET_EVOLUTION_LIMITS = Object.freeze({
 });
 
 const SHA256_PATTERN = /^[0-9a-f]{64}$/;
+const SAFE_SHORT_REF_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+const TYPED_OPAQUE_REF_PATTERN = /^[a-z][a-z0-9-]{0,31}:[A-Za-z0-9][A-Za-z0-9._:/-]*$/;
+const SENSITIVE_REF_TEXT_PATTERN = /credential|authorization|bearer|token|secret|password|api[-_.]?key/i;
+const GLOB_META_PATTERN = /[*?\[\]{}!]/;
 const EVOLUTION_MODES = new Set<EvolutionMode>(["self", "design-target", "target-cycle"]);
 const CYCLE_KINDS = new Set<EvolutionCycleKind>(["design", "bootstrap", "operate", "assess-handoff"]);
 const SIGNAL_SOURCE_KINDS = new Set(["run-evidence", "repository", "external-ref", "domain-metric"] as const);
@@ -78,7 +83,14 @@ const MATCHED_EXPERIMENT_OUTCOMES = new Set<MatchedExperiment["outcome"]>([
   "inconclusive",
   "invalid",
 ]);
-const PROMOTION_RECEIPT_ACTIONS = new Set<PromotionReceipt["action"]>(["promote", "rollback"]);
+const DATA_CLASSIFICATIONS = new Set<ProductionEpisode["privacyReview"]["dataClassification"]>([
+  "public",
+  "internal",
+  "confidential",
+  "restricted",
+]);
+const EVOLUTION_RUNTIME_MATURITIES = new Set<EvolutionRuntimeMaturity>(["declared"]);
+const PROMOTION_RECEIPT_ACTIONS = new Set<DraftPromotionReceipt["action"]>(["promote", "rollback"]);
 const EVOLUTION_RECORD_KINDS = new Set<EvolutionRecordKind>([
   "profile",
   "episode",
@@ -314,7 +326,7 @@ export function parseEvolutionPackV1(
         `${label}.portability.projectLocalRules`,
         TARGET_EVOLUTION_LIMITS.maxArrayItems,
       ),
-      genericizationEvidence: requireStringArray(
+      genericizationEvidence: requireOpaqueRefArray(
         portability.genericizationEvidence,
         `${label}.portability.genericizationEvidence`,
         TARGET_EVOLUTION_LIMITS.maxArrayItems,
@@ -372,17 +384,17 @@ export function parseEvolutionComparison(
     ],
     label,
   );
-  const developmentEvidenceRefs = requireNonEmptyStringArray(
+  const developmentEvidenceRefs = requireNonEmptyOpaqueRefArray(
     record.developmentEvidenceRefs,
     `${label}.developmentEvidenceRefs`,
     TARGET_EVOLUTION_LIMITS.maxEvidenceRefsPerSplit,
   );
-  const holdoutEvidenceRefs = requireNonEmptyStringArray(
+  const holdoutEvidenceRefs = requireNonEmptyOpaqueRefArray(
     record.holdoutEvidenceRefs,
     `${label}.holdoutEvidenceRefs`,
     TARGET_EVOLUTION_LIMITS.maxEvidenceRefsPerSplit,
   );
-  const unrelatedEvidenceRefs = requireNonEmptyStringArray(
+  const unrelatedEvidenceRefs = requireNonEmptyOpaqueRefArray(
     record.unrelatedEvidenceRefs,
     `${label}.unrelatedEvidenceRefs`,
     TARGET_EVOLUTION_LIMITS.maxEvidenceRefsPerSplit,
@@ -395,10 +407,9 @@ export function parseEvolutionComparison(
   const equalBudget = parseEvolutionEqualBudget(record.equalBudget, `${label}.equalBudget`);
 
   return {
-    controlRef: requireString(
+    controlRef: requireOpaqueRef(
       record.controlRef,
       `${label}.controlRef`,
-      TARGET_EVOLUTION_LIMITS.maxTextLength,
     ),
     developmentEvidenceRefs,
     holdoutEvidenceRefs,
@@ -453,32 +464,31 @@ export function parseEvolutionProfile(
       "projectId",
       "pack",
       "charter",
-      "maturity",
+      "runtimeMaturity",
       "allowedSurfaceIds",
-      "activatedAt",
-      "activatedByReceipt",
+      "registeredAt",
     ],
     label,
   );
   requireSchemaVersion(record.schemaVersion, `${label}.schemaVersion`);
-  const activatedByReceipt = record.activatedByReceipt === undefined
-    ? undefined
-    : requireEvolutionRecordRef(record.activatedByReceipt, "receipt", `${label}.activatedByReceipt`);
   const normalized: EvolutionProfile = {
     schemaVersion: 1,
     id: requireString(record.id, `${label}.id`, TARGET_EVOLUTION_LIMITS.maxIdentifierLength),
     projectId: requireExpectedProjectId(record.projectId, expectedProjectId, label),
     pack: parseVersionedContentRef(record.pack, `${label}.pack`),
     charter: parseVersionedContentRef(record.charter, `${label}.charter`),
-    maturity: requireEnum(record.maturity, PACK_MATURITIES, `${label}.maturity`),
+    runtimeMaturity: requireEnum(
+      record.runtimeMaturity,
+      EVOLUTION_RUNTIME_MATURITIES,
+      `${label}.runtimeMaturity`,
+    ),
     allowedSurfaceIds: requireUniqueNonEmptyStringArray(
       record.allowedSurfaceIds,
       `${label}.allowedSurfaceIds`,
       TARGET_EVOLUTION_LIMITS.maxMutationSurfaces,
       TARGET_EVOLUTION_LIMITS.maxIdentifierLength,
     ),
-    activatedAt: requireEvolutionTimestamp(record.activatedAt, `${label}.activatedAt`),
-    ...(activatedByReceipt === undefined ? {} : { activatedByReceipt }),
+    registeredAt: requireEvolutionTimestamp(record.registeredAt, `${label}.registeredAt`),
   };
   requireMatchingEvolutionRecordId("profile", normalized, label);
   return normalized;
@@ -529,20 +539,15 @@ export function parseProductionEpisode(
     id: requireString(record.id, `${label}.id`, TARGET_EVOLUTION_LIMITS.maxIdentifierLength),
     projectId: requireExpectedProjectId(record.projectId, expectedProjectId, label),
     profileId: requireEvolutionRecordRef(record.profileId, "profile", `${label}.profileId`),
-    sourceRef: requireString(record.sourceRef, `${label}.sourceRef`, TARGET_EVOLUTION_LIMITS.maxTextLength),
-    leakageGroupId: requireString(
+    sourceRef: requireOpaqueRef(record.sourceRef, `${label}.sourceRef`),
+    leakageGroupId: requireOpaqueRef(
       record.leakageGroupId,
       `${label}.leakageGroupId`,
-      TARGET_EVOLUTION_LIMITS.maxIdentifierLength,
     ),
     observedAt: requireEvolutionTimestamp(record.observedAt, `${label}.observedAt`),
     inputSnapshotSha256,
     outcomeSnapshotSha256,
-    policyRef: requireString(
-      record.policyRef,
-      `${label}.policyRef`,
-      TARGET_EVOLUTION_LIMITS.maxIdentifierLength,
-    ),
+    policyRef: requireOpaqueRef(record.policyRef, `${label}.policyRef`),
     metrics: parseFiniteMetrics(record.metrics, `${label}.metrics`),
     sideEffectCounters: parseEvolutionSideEffectCounters(
       record.sideEffectCounters,
@@ -602,7 +607,7 @@ export function parseHarnessVariant(
       TARGET_EVOLUTION_LIMITS.maxMutationSurfaces,
       TARGET_EVOLUTION_LIMITS.maxIdentifierLength,
     ),
-    changedPaths: requireUniqueProjectRelativePaths(record.changedPaths, `${label}.changedPaths`),
+    changedPaths: requireUniqueExactProjectRelativePaths(record.changedPaths, `${label}.changedPaths`),
     toolPolicySha256: requireSha256(record.toolPolicySha256, `${label}.toolPolicySha256`),
     createdFromEvidenceRefs: requireEvidenceRefs(
       record.createdFromEvidenceRefs,
@@ -710,11 +715,12 @@ export function parseMatchedExperiment(
   return normalized;
 }
 
-export function parsePromotionReceipt(
+/** @internal Draft evidence parser only. No promotion execution chain exists. */
+export function parseDraftPromotionReceipt(
   value: unknown,
   expectedProjectId: string,
-  label = "promotionReceipt",
-): PromotionReceipt {
+  label = "draftPromotionReceipt",
+): DraftPromotionReceipt {
   const record = strictObject(
     value,
     [
@@ -753,7 +759,7 @@ export function parsePromotionReceipt(
   const rollbackReceiptId = record.rollbackReceiptId === undefined
     ? undefined
     : requireEvolutionRecordRef(record.rollbackReceiptId, "receipt", `${label}.rollbackReceiptId`);
-  const normalized: PromotionReceipt = {
+  const normalized: DraftPromotionReceipt = {
     schemaVersion: 1,
     id: requireString(record.id, `${label}.id`, TARGET_EVOLUTION_LIMITS.maxIdentifierLength),
     projectId: requireExpectedProjectId(record.projectId, expectedProjectId, label),
@@ -766,17 +772,12 @@ export function parsePromotionReceipt(
     action: requireEnum(record.action, PROMOTION_RECEIPT_ACTIONS, `${label}.action`),
     fromVariantId,
     toVariantId,
-    authorizedDecisionRef: requireString(
+    authorizedDecisionRef: requireOpaqueRef(
       record.authorizedDecisionRef,
       `${label}.authorizedDecisionRef`,
-      TARGET_EVOLUTION_LIMITS.maxTextLength,
     ),
     appliedAt: requireEvolutionTimestamp(record.appliedAt, `${label}.appliedAt`),
-    exactTargetRef: requireString(
-      record.exactTargetRef,
-      `${label}.exactTargetRef`,
-      TARGET_EVOLUTION_LIMITS.maxTextLength,
-    ),
+    exactTargetRef: requireOpaqueRef(record.exactTargetRef, `${label}.exactTargetRef`),
     readbackEvidenceRefs: requireEvidenceRefs(
       record.readbackEvidenceRefs,
       `${label}.readbackEvidenceRefs`,
@@ -785,11 +786,7 @@ export function parsePromotionReceipt(
       record.canaryEvidenceRefs,
       `${label}.canaryEvidenceRefs`,
     ),
-    rollbackPlanRef: requireString(
-      record.rollbackPlanRef,
-      `${label}.rollbackPlanRef`,
-      TARGET_EVOLUTION_LIMITS.maxTextLength,
-    ),
+    rollbackPlanRef: requireOpaqueRef(record.rollbackPlanRef, `${label}.rollbackPlanRef`),
     ...(rollbackReceiptId === undefined ? {} : { rollbackReceiptId }),
   };
   requireMatchingEvolutionRecordId("receipt", normalized, label);
@@ -811,7 +808,7 @@ function parseSignalSource(value: unknown, label: string): EvolutionPackV1["obse
     ? undefined
     : requirePositiveInteger(record.freshnessMs, `${label}.freshnessMs`);
   return {
-    id: requireString(record.id, `${label}.id`, TARGET_EVOLUTION_LIMITS.maxIdentifierLength),
+    id: requireOpaqueRef(record.id, `${label}.id`),
     kind: requireEnum(record.kind, SIGNAL_SOURCE_KINDS, `${label}.kind`),
     ...(freshnessMs === undefined ? {} : { freshnessMs }),
   };
@@ -1023,21 +1020,13 @@ function parseProductionEpisodePrivacyReview(
   return {
     status: "approved",
     policySha256: requireSha256(record.policySha256, `${label}.policySha256`),
-    reviewerRef: requireString(
-      record.reviewerRef,
-      `${label}.reviewerRef`,
-      TARGET_EVOLUTION_LIMITS.maxTextLength,
-    ),
-    dataClassification: requireString(
+    reviewerRef: requireOpaqueRef(record.reviewerRef, `${label}.reviewerRef`),
+    dataClassification: requireEnum(
       record.dataClassification,
+      DATA_CLASSIFICATIONS,
       `${label}.dataClassification`,
-      TARGET_EVOLUTION_LIMITS.maxIdentifierLength,
     ),
-    retentionPolicyRef: requireString(
-      record.retentionPolicyRef,
-      `${label}.retentionPolicyRef`,
-      TARGET_EVOLUTION_LIMITS.maxTextLength,
-    ),
+    retentionPolicyRef: requireOpaqueRef(record.retentionPolicyRef, `${label}.retentionPolicyRef`),
     inputSnapshotSha256,
     outcomeSnapshotSha256,
     evidenceRefs: requireEvidenceRefs(record.evidenceRefs, `${label}.evidenceRefs`),
@@ -1079,7 +1068,7 @@ function parseFiniteMetrics(value: unknown, label: string): Record<string, numbe
     throw new Error(`${label} must contain at most ${TARGET_EVOLUTION_LIMITS.maxArrayItems} metrics`);
   }
   return Object.fromEntries(entries.map(([key, metric]) => [
-    requireString(key, `${label} metric name`, TARGET_EVOLUTION_LIMITS.maxIdentifierLength),
+    requireSafeShortIdentifier(key, `${label} metric name`),
     requireFiniteNumber(metric, `${label}.${key}`),
   ]));
 }
@@ -1167,11 +1156,49 @@ function requireEvolutionRecordRefs(
 }
 
 function requireEvidenceRefs(value: unknown, label: string): string[] {
-  return requireUniqueNonEmptyStringArray(
+  return requireNonEmptyOpaqueRefArray(
     value,
     label,
     TARGET_EVOLUTION_LIMITS.maxEvidenceRefsPerSplit,
   );
+}
+
+function requireOpaqueRefArray(value: unknown, label: string, maxItems: number): string[] {
+  const refs = requireArray(value, label, maxItems).map((item, index) =>
+    requireOpaqueRef(item, `${label}[${index}]`),
+  );
+  requireUniqueStrings(refs, label);
+  return refs;
+}
+
+function requireNonEmptyOpaqueRefArray(value: unknown, label: string, maxItems: number): string[] {
+  const refs = requireOpaqueRefArray(value, label, maxItems);
+  requireNonEmpty(refs, label);
+  return refs;
+}
+
+function requireOpaqueRef(value: unknown, label: string): string {
+  const ref = requireString(value, label, TARGET_EVOLUTION_LIMITS.maxIdentifierLength);
+  if (!SAFE_SHORT_REF_PATTERN.test(ref) && !TYPED_OPAQUE_REF_PATTERN.test(ref)) {
+    throw new Error(`${label} must be an opaque ref or a safe short ID`);
+  }
+  requireNoSensitiveRefText(ref, label);
+  return ref;
+}
+
+function requireSafeShortIdentifier(value: unknown, label: string): string {
+  const identifier = requireString(value, label, TARGET_EVOLUTION_LIMITS.maxIdentifierLength);
+  if (!SAFE_SHORT_REF_PATTERN.test(identifier)) {
+    throw new Error(`${label} must be a safe short identifier`);
+  }
+  requireNoSensitiveRefText(identifier, label);
+  return identifier;
+}
+
+function requireNoSensitiveRefText(value: string, label: string): void {
+  if (SENSITIVE_REF_TEXT_PATTERN.test(value)) {
+    throw new Error(`${label} must not contain credential-like or sensitive text`);
+  }
 }
 
 function requireUniqueNonEmptyStringArray(
@@ -1188,6 +1215,16 @@ function requireUniqueNonEmptyStringArray(
 function requireUniqueProjectRelativePaths(value: unknown, label: string): string[] {
   const paths = requireProjectRelativePaths(value, label);
   requireUniqueStrings(paths, label);
+  return paths;
+}
+
+function requireUniqueExactProjectRelativePaths(value: unknown, label: string): string[] {
+  const paths = requireUniqueProjectRelativePaths(value, label);
+  for (const path of paths) {
+    if (GLOB_META_PATTERN.test(path)) {
+      throw new Error(`${label} must contain exact project-relative file paths without glob syntax`);
+    }
+  }
   return paths;
 }
 

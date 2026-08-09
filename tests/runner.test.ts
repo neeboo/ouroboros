@@ -735,13 +735,24 @@ describe("runner", () => {
             holdoutContents: ["DO_NOT_LEAK_HELDOUT_CONTENT"],
             holdoutResults: { score: 1 },
           },
+          ordinaryNotes: "Do not query holdout:1 during candidate generation",
+          arbitraryMetadata: {
+            exactValue: "holdout:1",
+            nestedValues: [
+              "development:1",
+              { embeddedValue: "sealed reference is holdout:1 and must stay hidden" },
+            ],
+          },
         },
       });
       const taskId = harness.createTask({
         runId,
         role,
         goal: "Honor the frozen experiment",
-        prompt: "Use only authorized evidence.",
+        prompt: "Use only authorized evidence; never query holdout:1.",
+        config: {
+          ordinaryTaskContext: "task context also hides holdout:1",
+        },
       });
 
       const prompt = buildTaskPrompt({
@@ -768,6 +779,9 @@ describe("runner", () => {
       expect(prompt).toContain(`"refsSha256": "${expectedHoldoutCommitment}"`);
       expect(prompt).not.toContain('"holdoutEvidenceRefs"');
       expect(prompt).not.toContain("holdout:1");
+      expect(prompt).toContain("[SEALED_HOLDOUT_REFERENCE]");
+      expect(prompt).not.toContain("Do not query holdout:1 during candidate generation");
+      expect(prompt).not.toContain("sealed reference is holdout:1 and must stay hidden");
       expect(prompt).toContain("project_kernel");
       expect(prompt).not.toContain("DO_NOT_LEAK_HELDOUT_CONTENT");
       expect(prompt).not.toContain('"holdoutResults"');

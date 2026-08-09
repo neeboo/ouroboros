@@ -1,10 +1,13 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { Database } from "bun:sqlite";
 import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   Harness,
+  canonicalEvolutionRecordSha256,
   initDatabase,
   withDatabase,
   type EvolutionProfile,
@@ -57,9 +60,9 @@ function evolutionProfile(projectId: string, surfaceIds = ["surface_spatial_poli
     projectId,
     pack: { id: "pack_hodor_v1", version: 1, contentSha256: SHA_A },
     charter: { id: "charter_hodor_v1", version: 1, contentSha256: SHA_B },
-    maturity: "instrumented",
+    runtimeMaturity: "declared",
     allowedSurfaceIds: surfaceIds,
-    activatedAt: "2026-08-09T00:00:00.000Z",
+    registeredAt: "2026-08-09T00:00:00.000Z",
   }) as EvolutionProfile;
 }
 
@@ -68,9 +71,15 @@ function productionEpisode(
   profileId: string,
   sourceRef: string,
   marker: string,
+  snapshotOverrides: {
+    inputSnapshotSha256?: string;
+    outcomeSnapshotSha256?: string;
+  } = {},
 ): ProductionEpisode {
-  const inputSnapshotSha256 = createHash("sha256").update(`input:${marker}`).digest("hex");
-  const outcomeSnapshotSha256 = createHash("sha256").update(`outcome:${marker}`).digest("hex");
+  const inputSnapshotSha256 = snapshotOverrides.inputSnapshotSha256
+    ?? createHash("sha256").update(`input:${marker}`).digest("hex");
+  const outcomeSnapshotSha256 = snapshotOverrides.outcomeSnapshotSha256
+    ?? createHash("sha256").update(`outcome:${marker}`).digest("hex");
   return contentAddress("episode", {
     schemaVersion: 1,
     projectId,
@@ -88,7 +97,7 @@ function productionEpisode(
       status: "approved",
       policySha256: SHA_D,
       reviewerRef: "reviewer:privacy-test",
-      dataClassification: "internal-replay-fixture",
+      dataClassification: "internal",
       retentionPolicyRef: "retention:ephemeral-test",
       inputSnapshotSha256,
       outcomeSnapshotSha256,
@@ -254,6 +263,20 @@ describe("evolution runtime storage", () => {
     });
   });
 
+  test("the static new-database schema uses declared runtime profile columns", () => {
+    const staticDbPath = join(dir, "static-schema.db");
+    const db = new Database(staticDbPath);
+    try {
+      db.exec(readFileSync(join(import.meta.dir, "..", "packages", "harness", "schema.sql"), "utf8"));
+      const columns = db.query("pragma table_info(evolution_profiles)").all() as Array<{ name: string }>;
+      expect(columns.map((column) => column.name)).toContain("runtime_maturity");
+      expect(columns.map((column) => column.name)).toContain("registered_at");
+      expect(columns.map((column) => column.name)).not.toContain("maturity");
+    } finally {
+      db.close();
+    }
+  });
+
   test("migrates an old database without evolution tables and preserves existing rows", () => {
     const legacyDbPath = join(dir, "legacy.db");
     const legacy = new Harness(legacyDbPath);
@@ -266,6 +289,7 @@ describe("evolution runtime storage", () => {
     });
     withDatabase(legacyDbPath, (db) => {
       db.exec(`
+        drop table evolution_action_receipts;
         drop table matched_experiments;
         drop table harness_variants;
         drop table production_episodes;
@@ -281,6 +305,17 @@ describe("evolution runtime storage", () => {
     });
     const profile = evolutionProfile(legacyProjectId);
     expect(migrated.recordEvolutionProfile(profile)).toEqual({ record: profile, reused: false });
+    withDatabase(legacyDbPath, (db) => {
+      const profileColumns = db.query("pragma table_info(evolution_profiles)").all() as Array<{ name: string }>;
+      expect(profileColumns.map((column) => column.name)).toEqual(
+        expect.arrayContaining(["runtime_maturity", "registered_at"]),
+      );
+      expect(
+        db.query(
+          "select name from sqlite_master where type = 'table' and name = 'evolution_action_receipts'",
+        ).get(),
+      ).toEqual({ name: "evolution_action_receipts" });
+    });
   });
 
   test("reuses exact sequential replays and rejects a different stored canonical record", () => {
@@ -293,12 +328,13 @@ describe("evolution runtime storage", () => {
     withDatabase(harness.dbPath, (db) => {
       db.query(
         `insert into evolution_profiles
-         (id, schema_version, project_id, maturity, record_sha256, record_json)
-         values ($id, 1, $projectId, $maturity, $recordSha256, $recordJson)`,
+         (id, schema_version, project_id, runtime_maturity, registered_at, record_sha256, record_json)
+         values ($id, 1, $projectId, $runtimeMaturity, $registeredAt, $recordSha256, $recordJson)`,
       ).run({
         $id: conflictTarget.id,
         $projectId: projectId,
-        $maturity: conflictTarget.maturity,
+        $runtimeMaturity: conflictTarget.runtimeMaturity,
+        $registeredAt: conflictTarget.registeredAt,
         $recordSha256: conflictTarget.id.slice("profile_".length),
         $recordJson: JSON.stringify(conflictingProfile),
       });
@@ -311,12 +347,13 @@ describe("evolution runtime storage", () => {
       expect(() =>
         db.query(
           `insert into evolution_profiles
-           (id, schema_version, project_id, maturity, record_sha256, record_json)
-           values ($id, 1, $projectId, $maturity, $recordSha256, $recordJson)`,
+           (id, schema_version, project_id, runtime_maturity, registered_at, record_sha256, record_json)
+           values ($id, 1, $projectId, $runtimeMaturity, $registeredAt, $recordSha256, $recordJson)`,
         ).run({
           $id: `profile_${"f".repeat(64)}`,
           $projectId: projectId,
-          $maturity: profile.maturity,
+          $runtimeMaturity: profile.runtimeMaturity,
+          $registeredAt: profile.registeredAt,
           $recordSha256: profile.id.slice("profile_".length),
           $recordJson: JSON.stringify(profile),
         }),
@@ -333,6 +370,113 @@ describe("evolution runtime storage", () => {
       }),
     ).toThrow("audit write failed");
     expect(harness.getEvolutionProfile({ projectId, id: profile.id })).toBeNull();
+  });
+
+  test("links a successful evolution action event to its runtime record in the same transaction", () => {
+    const runId = harness.createRun({ projectId, goal: "Activate evolution profile" });
+    const profile = evolutionProfile(projectId);
+    const recordSha256 = canonicalEvolutionRecordSha256(profile);
+    const eventId = "action_evolution_profile_receipt";
+
+    harness.runInTransaction((db) => {
+      harness.recordEvolutionProfileWithDb(db, profile);
+      harness.recordHarnessActionEventWithDb(db, {
+        id: eventId,
+        actionType: "registerEvolutionProfile",
+        status: "done",
+        request: {
+          type: "registerEvolutionProfile",
+          runId,
+          entityKind: "profile",
+          recordId: profile.id,
+          recordSha256,
+        },
+        result: {
+          actionType: "registerEvolutionProfile",
+          status: "done",
+          summary: "Recorded profile.",
+          checks: [],
+          artifacts: [{
+            kind: "evolution_profile",
+            entityKind: "profile",
+            recordId: profile.id,
+            recordSha256,
+            projectId,
+            sourceRunId: runId,
+            replayed: false,
+            externalEffectsApplied: false,
+            promotionApplied: false,
+          }],
+          problems: [],
+        },
+      });
+    });
+
+    withDatabase(harness.dbPath, (db) => {
+      const receipt = db
+        .query("select * from evolution_action_receipts where action_event_id = $eventId")
+        .get({ $eventId: eventId }) as Record<string, unknown> | null;
+      expect(receipt).toMatchObject({
+        action_event_id: eventId,
+        action_type: "registerEvolutionProfile",
+        source_run_id: runId,
+        project_id: projectId,
+        record_kind: "profile",
+        record_id: profile.id,
+        record_sha256: recordSha256,
+        profile_id: profile.id,
+        episode_id: null,
+        variant_id: null,
+        experiment_id: null,
+      });
+      expect(() =>
+        db.query("update evolution_action_receipts set record_sha256 = record_sha256 where action_event_id = $eventId")
+          .run({ $eventId: eventId }),
+      ).toThrow(/immutable/i);
+      expect(() =>
+        db.query("update harness_action_events set request_json = '{}' where id = $eventId")
+          .run({ $eventId: eventId }),
+      ).toThrow(/immutable/i);
+      expect(() =>
+        db.query("delete from harness_action_events where id = $eventId").run({ $eventId: eventId }),
+      ).toThrow(/immutable|foreign key|constraint/i);
+    });
+
+    expect(() =>
+      harness.runInTransaction((db) => {
+        harness.recordHarnessActionEventWithDb(db, {
+          id: "action_evolution_profile_forged",
+          actionType: "registerEvolutionProfile",
+          status: "done",
+          request: {
+            type: "registerEvolutionProfile",
+            runId,
+            entityKind: "profile",
+            recordId: profile.id,
+            recordSha256,
+          },
+          result: {
+            actionType: "registerEvolutionProfile",
+            status: "done",
+            summary: "Forged result.",
+            checks: [],
+            artifacts: [{
+              kind: "evolution_profile",
+              entityKind: "profile",
+              recordId: profile.id,
+              recordSha256: "f".repeat(64),
+              projectId,
+              sourceRunId: runId,
+              replayed: false,
+              externalEffectsApplied: false,
+              promotionApplied: false,
+            }],
+            problems: [],
+          },
+        });
+      }),
+    ).toThrow(/receipt|artifact|hash|mismatch/i);
+    expect(harness.getHarnessActionEvent({ id: "action_evolution_profile_forged" })).toBeNull();
   });
 
   test("rejects missing and foreign projects or profiles", () => {
@@ -450,6 +594,60 @@ describe("evolution runtime storage", () => {
       unrelated: [unrelated.id],
     });
     expect(() => harness.recordMatchedExperiment(wrongScope)).toThrow(/episode.*not found|same profile/i);
+  });
+
+  test("rejects every snapshot hash collision that crosses experiment splits", () => {
+    const profile = evolutionProfile(projectId);
+    harness.recordEvolutionProfile(profile);
+    const control = harnessVariant(projectId, profile.id, "control", "snapshot-control");
+    const candidate = harnessVariant(projectId, profile.id, "candidate", "snapshot-candidate");
+    harness.recordHarnessVariant(control);
+    harness.recordHarnessVariant(candidate);
+
+    const collisionSha256 = "e".repeat(64);
+    const cases = [
+      ["input", "input"],
+      ["input", "outcome"],
+      ["outcome", "input"],
+      ["outcome", "outcome"],
+    ] as const;
+    for (const [developmentField, heldoutField] of cases) {
+      const marker = `${developmentField}-to-${heldoutField}`;
+      const development = productionEpisode(
+        projectId,
+        profile.id,
+        `episode:development:${marker}`,
+        `snapshot-development-${marker}`,
+        developmentField === "input"
+          ? { inputSnapshotSha256: collisionSha256 }
+          : { outcomeSnapshotSha256: collisionSha256 },
+      );
+      const heldout = productionEpisode(
+        projectId,
+        profile.id,
+        `episode:heldout:${marker}`,
+        `snapshot-heldout-${marker}`,
+        heldoutField === "input"
+          ? { inputSnapshotSha256: collisionSha256 }
+          : { outcomeSnapshotSha256: collisionSha256 },
+      );
+      const unrelated = productionEpisode(
+        projectId,
+        profile.id,
+        `episode:unrelated:${marker}`,
+        `snapshot-unrelated-${marker}`,
+      );
+      [development, heldout, unrelated].forEach((episode) =>
+        harness.recordProductionEpisode(episode),
+      );
+      const experiment = matchedExperiment(projectId, profile.id, control.id, candidate.id, {
+        development: [development.id],
+        heldout: [heldout.id],
+        unrelated: [unrelated.id],
+      });
+
+      expect(() => harness.recordMatchedExperiment(experiment)).toThrow(/snapshot.*split|split.*snapshot/i);
+    }
   });
 
   test("supports deterministic readback and scoped list filtering", () => {

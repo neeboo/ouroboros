@@ -177,6 +177,18 @@ interface EvolutionRecordWriteResult<T> {
   reused: boolean;
 }
 
+type EvolutionReceiptRecordKind = "profile" | "episode" | "variant" | "experiment";
+
+const EVOLUTION_RECEIPT_ACTIONS = {
+  registerEvolutionProfile: { recordKind: "profile", artifactKind: "evolution_profile" },
+  recordProductionEpisode: { recordKind: "episode", artifactKind: "production_episode" },
+  registerHarnessVariant: { recordKind: "variant", artifactKind: "harness_variant" },
+  freezeMatchedExperiment: { recordKind: "experiment", artifactKind: "matched_experiment" },
+} as const satisfies Record<string, {
+  recordKind: EvolutionReceiptRecordKind;
+  artifactKind: string;
+}>;
+
 export class Harness {
   readonly dbPath: string;
 
@@ -265,16 +277,17 @@ export class Harness {
     db.query(
       `
       insert into evolution_profiles (
-        id, schema_version, project_id, maturity, record_sha256, record_json
+        id, schema_version, project_id, runtime_maturity, registered_at, record_sha256, record_json
       ) values (
-        $id, $schemaVersion, $projectId, $maturity, $recordSha256, $recordJson
+        $id, $schemaVersion, $projectId, $runtimeMaturity, $registeredAt, $recordSha256, $recordJson
       )
       `,
     ).run({
       $id: record.id,
       $schemaVersion: record.schemaVersion,
       $projectId: record.projectId,
-      $maturity: record.maturity,
+      $runtimeMaturity: record.runtimeMaturity,
+      $registeredAt: record.registeredAt,
       $recordSha256: canonicalEvolutionRecordSha256(record),
       $recordJson: recordJson,
     });
@@ -1561,7 +1574,9 @@ export class Harness {
 
   recordHarnessActionEvent(input: RecordHarnessActionEventInput) {
     const id = input.id ?? makeId("action");
-    return withDatabase(this.dbPath, (db) => this.recordHarnessActionEventWithDb(db, { ...input, id }));
+    return withDatabase(this.dbPath, (db) =>
+      db.transaction(() => this.recordHarnessActionEventWithDb(db, { ...input, id }))(),
+    );
   }
 
   recordHarnessActionEventWithDb(db: HarnessDatabase, input: RecordHarnessActionEventInput) {
@@ -1583,7 +1598,81 @@ export class Harness {
       $requestJson: toJson(input.request),
       $resultJson: toJson(input.result),
     });
+    this.recordEvolutionActionReceiptForEventWithDb(db, { ...input, id });
     return id;
+  }
+
+  recordEvolutionActionReceiptForEventWithDb(
+    db: HarnessDatabase,
+    input: RecordHarnessActionEventInput & { id: string },
+  ): void {
+    if (input.status !== "done" || !isEvolutionReceiptAction(input.actionType)) {
+      return;
+    }
+    ensureEvolutionRuntimeTables(db);
+    const specification = EVOLUTION_RECEIPT_ACTIONS[input.actionType];
+    const request = requireExactEvolutionReceiptRequest(input.request, input.actionType);
+    if (request.entityKind !== specification.recordKind) {
+      throw new Error(
+        `evolution action receipt kind mismatch: ${input.actionType} requires ${specification.recordKind}`,
+      );
+    }
+    const run = this.getRunWithDb(db, request.runId);
+    if (!run?.projectId) {
+      throw new Error(`evolution action receipt source run not found or projectless: ${request.runId}`);
+    }
+
+    const record = getEvolutionReceiptRecordWithDb(
+      this,
+      db,
+      specification.recordKind,
+      run.projectId,
+      request.recordId,
+    );
+    if (!record) {
+      throw new Error(
+        `evolution action receipt record not found: ${specification.recordKind} ${request.recordId}`,
+      );
+    }
+    const recordSha256 = canonicalEvolutionRecordSha256(record);
+    if (record.projectId !== run.projectId || request.recordSha256 !== recordSha256) {
+      throw new Error(`evolution action receipt project or hash mismatch: ${request.recordId}`);
+    }
+    requireEvolutionReceiptArtifact(
+      input.result,
+      input.actionType,
+      specification.recordKind,
+      specification.artifactKind,
+      request,
+      run.projectId,
+      recordSha256,
+    );
+
+    db.query(
+      `
+      insert into evolution_action_receipts (
+        action_event_id, action_type, source_run_id, project_id,
+        record_kind, record_id, record_sha256,
+        profile_id, episode_id, variant_id, experiment_id
+      ) values (
+        $actionEventId, $actionType, $sourceRunId, $projectId,
+        $recordKind, $recordId, $recordSha256,
+        $profileId, $episodeId, $variantId, $experimentId
+      )
+      `,
+    ).run({
+      $actionEventId: input.id,
+      $actionType: input.actionType,
+      $sourceRunId: run.id,
+      $projectId: run.projectId,
+      $recordKind: specification.recordKind,
+      $recordId: record.id,
+      $recordSha256: recordSha256,
+      $profileId: specification.recordKind === "profile" ? record.id : null,
+      $episodeId: specification.recordKind === "episode" ? record.id : null,
+      $variantId: specification.recordKind === "variant" ? record.id : null,
+      $experimentId: specification.recordKind === "experiment" ? record.id : null,
+    });
   }
 
   listHarnessActionEvents(input: ListHarnessActionEventsInput = {}) {
@@ -2913,6 +3002,119 @@ export class Harness {
   }
 }
 
+function isEvolutionReceiptAction(
+  actionType: string,
+): actionType is keyof typeof EVOLUTION_RECEIPT_ACTIONS {
+  return Object.prototype.hasOwnProperty.call(EVOLUTION_RECEIPT_ACTIONS, actionType);
+}
+
+function requireExactEvolutionReceiptRequest(
+  value: Record<string, unknown>,
+  actionType: keyof typeof EVOLUTION_RECEIPT_ACTIONS,
+): {
+  type: keyof typeof EVOLUTION_RECEIPT_ACTIONS;
+  runId: string;
+  entityKind: EvolutionReceiptRecordKind;
+  recordId: string;
+  recordSha256: string;
+} {
+  const expectedKeys = ["entityKind", "recordId", "recordSha256", "runId", "type"];
+  const actualKeys = Object.keys(value).sort();
+  if (actualKeys.length !== expectedKeys.length || actualKeys.some((key, index) => key !== expectedKeys[index])) {
+    throw new Error(
+      `evolution action receipt request must contain only ${expectedKeys.join(", ")}`,
+    );
+  }
+  if (value.type !== actionType) {
+    throw new Error(`evolution action receipt request type mismatch: ${String(value.type)}`);
+  }
+  const runId = requireEvolutionReceiptString(value.runId, "runId");
+  const entityKind = requireEvolutionReceiptString(value.entityKind, "entityKind");
+  if (!(["profile", "episode", "variant", "experiment"] as const).includes(
+    entityKind as EvolutionReceiptRecordKind,
+  )) {
+    throw new Error(`evolution action receipt entityKind is invalid: ${entityKind}`);
+  }
+  const recordId = requireEvolutionReceiptString(value.recordId, "recordId");
+  const recordSha256 = requireEvolutionReceiptString(value.recordSha256, "recordSha256");
+  if (!/^[0-9a-f]{64}$/.test(recordSha256)) {
+    throw new Error("evolution action receipt recordSha256 must be lowercase SHA-256");
+  }
+  return {
+    type: actionType,
+    runId,
+    entityKind: entityKind as EvolutionReceiptRecordKind,
+    recordId,
+    recordSha256,
+  };
+}
+
+function requireEvolutionReceiptString(value: unknown, label: string): string {
+  if (typeof value !== "string" || value.length === 0 || value !== value.trim()) {
+    throw new Error(`evolution action receipt ${label} must be a non-empty trimmed string`);
+  }
+  return value;
+}
+
+function getEvolutionReceiptRecordWithDb(
+  harness: Harness,
+  db: HarnessDatabase,
+  kind: EvolutionReceiptRecordKind,
+  projectId: string,
+  id: string,
+): EvolutionProfile | ProductionEpisode | HarnessVariant | MatchedExperiment | null {
+  if (kind === "profile") {
+    return harness.getEvolutionProfileWithDb(db, { projectId, id });
+  }
+  if (kind === "episode") {
+    return harness.getProductionEpisodeWithDb(db, { projectId, id });
+  }
+  if (kind === "variant") {
+    return harness.getHarnessVariantWithDb(db, { projectId, id });
+  }
+  return harness.getMatchedExperimentWithDb(db, { projectId, id });
+}
+
+function requireEvolutionReceiptArtifact(
+  result: Record<string, unknown>,
+  actionType: keyof typeof EVOLUTION_RECEIPT_ACTIONS,
+  recordKind: EvolutionReceiptRecordKind,
+  artifactKind: string,
+  request: { runId: string; recordId: string },
+  projectId: string,
+  recordSha256: string,
+): void {
+  if (result.status !== "done" || result.actionType !== actionType) {
+    throw new Error(`evolution action receipt result status or action mismatch: ${actionType}`);
+  }
+  if (!Array.isArray(result.artifacts)) {
+    throw new Error(`evolution action receipt result artifacts are missing: ${actionType}`);
+  }
+  const artifacts = result.artifacts.filter(
+    (value): value is Record<string, unknown> =>
+      value !== null && typeof value === "object" && !Array.isArray(value)
+      && (value as Record<string, unknown>).kind === artifactKind,
+  );
+  if (artifacts.length !== 1) {
+    throw new Error(`evolution action receipt requires one ${artifactKind} artifact`);
+  }
+  const artifact = artifacts[0];
+  const expected: Record<string, unknown> = {
+    entityKind: recordKind,
+    recordId: request.recordId,
+    recordSha256,
+    projectId,
+    sourceRunId: request.runId,
+    externalEffectsApplied: false,
+    promotionApplied: false,
+  };
+  for (const [key, expectedValue] of Object.entries(expected)) {
+    if (artifact[key] !== expectedValue) {
+      throw new Error(`evolution action receipt artifact ${key} mismatch: ${request.recordId}`);
+    }
+  }
+}
+
 function evolutionRecordProjectId(value: unknown, label: string): string {
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
     throw new Error(`${label} must be an object`);
@@ -3049,6 +3251,7 @@ function requireExperimentEpisodesWithDb(
 ): void {
   const sourceSplit = new Map<string, string>();
   const leakageGroupSplit = new Map<string, string>();
+  const snapshotSplit = new Map<string, string>();
   const splits = [
     ["development", experiment.developmentEpisodeRefs],
     ["heldout", experiment.heldoutEpisodeRefs],
@@ -3086,6 +3289,20 @@ function requireExperimentEpisodesWithDb(
         episode.leakageGroupId,
         split,
         "leakageGroupId",
+        experiment.id,
+      );
+      requireSplitIsolation(
+        snapshotSplit,
+        episode.inputSnapshotSha256,
+        split,
+        "snapshot hash",
+        experiment.id,
+      );
+      requireSplitIsolation(
+        snapshotSplit,
+        episode.outcomeSnapshotSha256,
+        split,
+        "snapshot hash",
         experiment.id,
       );
     }

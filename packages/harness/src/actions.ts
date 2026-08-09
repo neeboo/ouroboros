@@ -15,6 +15,7 @@ import { filterOuroborosRuntimePaths } from "./runtime-paths";
 import {
   canonicalEvolutionRecordSha256,
   canonicalEvolutionValueSha256,
+  parseEvolutionCausalHypothesis,
   parseEvolutionComparison,
   parseEvolutionInstance,
   parseEvolutionPackV1,
@@ -110,7 +111,7 @@ export type HarnessAction =
       commitMessage: string;
       files: ExactGitIndexFile[];
     }
-  | { type: "activateEvolutionProfile"; runId: string; profile: EvolutionProfile }
+  | { type: "registerEvolutionProfile"; runId: string; profile: EvolutionProfile }
   | { type: "recordProductionEpisode"; runId: string; episode: ProductionEpisode }
   | { type: "registerHarnessVariant"; runId: string; variant: HarnessVariant }
   | { type: "freezeMatchedExperiment"; runId: string; experiment: MatchedExperiment }
@@ -303,6 +304,22 @@ const EXACT_GIT_INDEX_MAX_PATH_BYTES = 1024;
 const EXACT_GIT_INDEX_MAX_COMMIT_MESSAGE_BYTES = 4096;
 const EXACT_GIT_REMOTE_TIMEOUT_MS = 30_000;
 const EXACT_GIT_REMOTE_MAX_OUTPUT_BYTES = 24 * 1024;
+const FROZEN_DESIGN_CONTEXT_KEYS = new Set([
+  "source",
+  "projectId",
+  "designProposalId",
+  "designDecisionId",
+  "designProposal",
+  "designCharterId",
+  "evolutionPack",
+  "causalHypothesis",
+  "comparison",
+  "evolutionComparison",
+  "evolutionInstance",
+  "evaluationContract",
+  "designEvaluationContract",
+  "linearIntake",
+]);
 
 // Bump when integration preflight semantics change so a previously converged
 // blocked action is re-evaluated under the new contract.
@@ -443,7 +460,7 @@ export function parseHarnessAction(value: unknown): HarnessAction {
       files: exactGitIndexFilesField(record, "files"),
     };
   }
-  if (type === "activateEvolutionProfile") {
+  if (type === "registerEvolutionProfile") {
     assertOnlyFields(record, type, ["type", "runId", "profile"]);
     const runId = exactNonEmptyStringField(record, "runId");
     const profileRecord = objectRecord(record.profile, "profile");
@@ -537,7 +554,7 @@ export function parseHarnessAction(value: unknown): HarnessAction {
     };
   }
   throw new Error(
-    "harness action type must be reclaimRunningTasks, retryTask, markRunTodo, updateRunContext, amendRunContract, retireRun, prepareRunDrain, completeSystemTask, integrateVerifiedRun, pushExactGitRef, createExactGitRef, commitExactGitIndex, activateEvolutionProfile, recordProductionEpisode, registerHarnessVariant, freezeMatchedExperiment, interruptAttemptAndCreateTask, interruptRunningAttemptsAndCreateTask, acceptGuardrailProposal, startSubsession, collectSubsessions, or cancelSubsessions",
+    "harness action type must be reclaimRunningTasks, retryTask, markRunTodo, updateRunContext, amendRunContract, retireRun, prepareRunDrain, completeSystemTask, integrateVerifiedRun, pushExactGitRef, createExactGitRef, commitExactGitIndex, registerEvolutionProfile, recordProductionEpisode, registerHarnessVariant, freezeMatchedExperiment, interruptAttemptAndCreateTask, interruptRunningAttemptsAndCreateTask, acceptGuardrailProposal, startSubsession, collectSubsessions, or cancelSubsessions",
   );
 }
 
@@ -594,7 +611,7 @@ type EvolutionAction = Extract<
   HarnessAction,
   {
     type:
-      | "activateEvolutionProfile"
+      | "registerEvolutionProfile"
       | "recordProductionEpisode"
       | "registerHarnessVariant"
       | "freezeMatchedExperiment";
@@ -602,7 +619,7 @@ type EvolutionAction = Extract<
 >;
 
 function isEvolutionAction(action: HarnessAction): action is EvolutionAction {
-  return action.type === "activateEvolutionProfile"
+  return action.type === "registerEvolutionProfile"
     || action.type === "recordProductionEpisode"
     || action.type === "registerHarnessVariant"
     || action.type === "freezeMatchedExperiment";
@@ -618,7 +635,7 @@ function applyEvolutionActionAtomically(
       const eventId = harness.recordHarnessActionEventWithDb(db, {
         actionType: action.type,
         status: "done",
-        request: action,
+        request: evolutionActionAuditRequest(action),
         result: resultToRecord(result),
       });
       return { ...result, eventId };
@@ -629,7 +646,7 @@ function applyEvolutionActionAtomically(
     const eventId = harness.recordHarnessActionEvent({
       actionType: action.type,
       status: "blocked",
-      request: safeRequest(action),
+      request: evolutionActionAuditRequest(action),
       result: resultToRecord(result),
     });
     return { ...result, eventId };
@@ -668,15 +685,15 @@ function applyEvolutionActionWithDb(
       `evolution action project mismatch: run ${action.runId} belongs to ${run.projectId}; record belongs to ${record.projectId}`,
     );
   }
-  const frozen = frozenEvolutionContext(run.context, run.projectId, action.type);
+  const frozen = frozenEvolutionContext(harness, db, run, action.type);
 
   let entityKind: "profile" | "episode" | "variant" | "experiment";
   let artifactKind: "evolution_profile" | "production_episode" | "harness_variant" | "matched_experiment";
   let stored: EvolutionProfile | ProductionEpisode | HarnessVariant | MatchedExperiment;
   let replayed: boolean;
 
-  if (action.type === "activateEvolutionProfile") {
-    validateEvolutionProfileAction(harness, db, action.profile, frozen);
+  if (action.type === "registerEvolutionProfile") {
+    validateRegisterEvolutionProfileAction(action.profile, frozen);
     const write = harness.recordEvolutionProfileWithDb(db, action.profile);
     entityKind = "profile";
     artifactKind = "evolution_profile";
@@ -705,18 +722,24 @@ function applyEvolutionActionWithDb(
     replayed = write.reused;
   }
 
+  const transactionalReadback = evolutionActionReadback(harness, db, action);
+  if (!transactionalReadback) {
+    throw new Error(`${action.type} transactional readback missing for ${record.id}`);
+  }
+  stored = transactionalReadback;
   const recordSha256 = canonicalEvolutionRecordSha256(stored);
   const expectedSha256 = canonicalEvolutionRecordSha256(record);
   if (recordSha256 !== expectedSha256 || stored.id !== record.id) {
-    throw new Error(`${action.type} independent readback mismatch for ${record.id}`);
+    throw new Error(`${action.type} transactional readback mismatch for ${record.id}`);
   }
   return doneResult(
     action.type,
     `${replayed ? "Reused" : "Recorded"} ${entityKind} ${stored.id}.`,
     [
       { name: "source run project", status: "passed", evidence: run.projectId },
-      { name: "frozen evolution contract", status: "passed", evidence: frozen.pack.id },
-      { name: "independent record readback", status: "passed", evidence: recordSha256 },
+      { name: "accepted design proposal", status: "passed", evidence: frozen.proposalId },
+      { name: "approved authority decision", status: "passed", evidence: frozen.authorityDecisionId },
+      { name: "transactional record readback", status: "passed", evidence: recordSha256 },
     ],
     [{
       kind: artifactKind,
@@ -724,6 +747,7 @@ function applyEvolutionActionWithDb(
       recordId: stored.id,
       recordSha256,
       projectId: run.projectId,
+      runId: run.id,
       sourceRunId: run.id,
       replayed,
       externalEffectsApplied: false,
@@ -732,76 +756,233 @@ function applyEvolutionActionWithDb(
   );
 }
 
+function evolutionActionReadback(harness: Harness, db: HarnessDatabase, action: EvolutionAction) {
+  const record = evolutionActionRecord(action);
+  const input = { projectId: record.projectId, id: record.id };
+  if (action.type === "registerEvolutionProfile") return harness.getEvolutionProfileWithDb(db, input);
+  if (action.type === "recordProductionEpisode") return harness.getProductionEpisodeWithDb(db, input);
+  if (action.type === "registerHarnessVariant") return harness.getHarnessVariantWithDb(db, input);
+  return harness.getMatchedExperimentWithDb(db, input);
+}
+
 function evolutionActionRecord(action: EvolutionAction) {
-  if (action.type === "activateEvolutionProfile") return action.profile;
+  if (action.type === "registerEvolutionProfile") return action.profile;
   if (action.type === "recordProductionEpisode") return action.episode;
   if (action.type === "registerHarnessVariant") return action.variant;
   return action.experiment;
 }
 
+function evolutionActionAuditRequest(action: EvolutionAction) {
+  const record = evolutionActionRecord(action);
+  return {
+    type: action.type,
+    runId: action.runId,
+    entityKind: evolutionActionEntityKind(action),
+    recordId: record.id,
+    recordSha256: canonicalEvolutionRecordSha256(record),
+  };
+}
+
+function evolutionActionEntityKind(action: EvolutionAction): "profile" | "episode" | "variant" | "experiment" {
+  if (action.type === "registerEvolutionProfile") return "profile";
+  if (action.type === "recordProductionEpisode") return "episode";
+  if (action.type === "registerHarnessVariant") return "variant";
+  return "experiment";
+}
+
 interface FrozenEvolutionActionContext {
   pack: EvolutionPackV1;
   comparison: EvolutionComparison;
+  proposalId: string;
+  authorityDecisionId: string;
+  charter: {
+    id: string;
+    version: number;
+    contentSha256: string;
+  };
 }
 
 function frozenEvolutionContext(
-  context: Record<string, unknown>,
-  projectId: string,
+  harness: Harness,
+  db: HarnessDatabase,
+  run: NonNullable<ReturnType<Harness["getRunWithDb"]>>,
   actionType: EvolutionAction["type"],
 ): FrozenEvolutionActionContext {
-  const pack = parseEvolutionPackV1(context.evolutionPack, projectId, `${actionType} run evolutionPack`);
-  const instance = parseEvolutionInstance(context.evolutionInstance, `${actionType} run evolutionInstance`);
-  if (instance.targetProjectId !== projectId) {
-    throw new Error(`${actionType} evolutionInstance targetProjectId must equal ${projectId}`);
+  const projectId = run.projectId;
+  if (!projectId) {
+    throw new Error(`${actionType} requires a project-bound run`);
   }
+  if (run.context.source !== "design") {
+    throw new Error(`${actionType} requires run.context.source=design`);
+  }
+  const proposalId = exactContextId(run.context.designProposalId, `${actionType} designProposalId`);
+  const charterId = exactContextId(run.context.designCharterId, `${actionType} designCharterId`);
+  const proposal = harness.getDesignProposalWithDb(db, { id: proposalId });
+  if (!proposal || proposal.status !== "accepted") {
+    throw new Error(`${actionType} requires a stored accepted design proposal: ${proposalId}`);
+  }
+  if (proposal.projectId !== projectId || proposal.charterId !== charterId) {
+    throw new Error(`${actionType} proposal project or charter does not match the frozen run binding`);
+  }
+  const activeCharter = harness.getActiveFounderCharterWithDb(db, { projectId });
+  if (!activeCharter || activeCharter.id !== charterId) {
+    throw new Error(`${actionType} active charter does not match the frozen designCharterId`);
+  }
+  const authorityDecision = db.query(`
+    select id, charter_id, decision
+    from design_decisions
+    where proposal_id = $proposalId
+    order by rowid desc
+    limit 1
+  `).get({ $proposalId: proposalId }) as {
+    id: string;
+    charter_id: string | null;
+    decision: string;
+  } | null;
+  if (!authorityDecision || authorityDecision.decision !== "approved") {
+    throw new Error(`${actionType} latest authority decision must be approved`);
+  }
+  if (authorityDecision.charter_id !== charterId) {
+    throw new Error(`${actionType} authority decision charter does not match the frozen design charter`);
+  }
+  const pack = parseEvolutionPackV1(
+    proposal.proposal.evolutionPack,
+    projectId,
+    `${actionType} accepted proposal evolutionPack`,
+  );
+  if (pack.objective.charterId !== charterId) {
+    throw new Error(`${actionType} pack objective charter does not match the accepted proposal charter`);
+  }
+  const comparison = parseEvolutionComparison(
+    proposal.proposal.evaluationContract.comparison,
+    `${actionType} accepted proposal comparison`,
+  );
+  const causalHypothesis = parseEvolutionCausalHypothesis(
+    proposal.proposal.causalHypothesis,
+    `${actionType} accepted proposal causalHypothesis`,
+  );
+  if (run.context.designDecisionId !== authorityDecision.id) {
+    throw new Error(`${actionType} designDecisionId does not match the latest approved authority decision`);
+  }
+  const contextPack = parseEvolutionPackV1(
+    run.context.evolutionPack,
+    projectId,
+    `${actionType} run evolutionPack`,
+  );
+  if (!sameCanonicalValue(contextPack, pack)) {
+    throw new Error(`${actionType} run evolutionPack differs from the accepted proposal`);
+  }
+  const contextCausalHypothesis = parseEvolutionCausalHypothesis(
+    run.context.causalHypothesis,
+    `${actionType} run causalHypothesis`,
+  );
+  if (!sameCanonicalValue(contextCausalHypothesis, causalHypothesis)) {
+    throw new Error(`${actionType} run causalHypothesis differs from the accepted proposal`);
+  }
+  for (const [label, value] of [
+    ["comparison", run.context.comparison],
+    ["evolutionComparison", run.context.evolutionComparison],
+  ] as const) {
+    const contextComparison = parseEvolutionComparison(value, `${actionType} run ${label}`);
+    if (!sameCanonicalValue(contextComparison, comparison)) {
+      throw new Error(`${actionType} run ${label} differs from the accepted proposal`);
+    }
+  }
+  const designEvaluationContract = objectRecord(
+    run.context.designEvaluationContract,
+    `${actionType} run designEvaluationContract`,
+  );
+  const contractComparison = parseEvolutionComparison(
+    designEvaluationContract.comparison,
+    `${actionType} run designEvaluationContract.comparison`,
+  );
+  if (!sameCanonicalValue(contractComparison, comparison)) {
+    throw new Error(`${actionType} run designEvaluationContract comparison differs from the accepted proposal`);
+  }
+  if (run.context.evaluationContract !== undefined) {
+    const evaluationContract = objectRecord(run.context.evaluationContract, `${actionType} run evaluationContract`);
+    const duplicateComparison = parseEvolutionComparison(
+      evaluationContract.comparison,
+      `${actionType} run evaluationContract.comparison`,
+    );
+    if (!sameCanonicalValue(duplicateComparison, comparison)) {
+      throw new Error(`${actionType} run evaluationContract comparison differs from the accepted proposal`);
+    }
+  }
+  const designProposal = objectRecord(run.context.designProposal, `${actionType} run designProposal`);
+  if (
+    !sameCanonicalValue(
+      parseEvolutionPackV1(designProposal.evolutionPack, projectId, `${actionType} run designProposal.evolutionPack`),
+      pack,
+    )
+    || !sameCanonicalValue(
+      parseEvolutionCausalHypothesis(designProposal.causalHypothesis, `${actionType} run designProposal.causalHypothesis`),
+      causalHypothesis,
+    )
+  ) {
+    throw new Error(`${actionType} run designProposal differs from the stored accepted proposal`);
+  }
+  const designProposalContract = objectRecord(
+    designProposal.evaluationContract,
+    `${actionType} run designProposal.evaluationContract`,
+  );
+  if (!sameCanonicalValue(
+    parseEvolutionComparison(
+      designProposalContract.comparison,
+      `${actionType} run designProposal.evaluationContract.comparison`,
+    ),
+    comparison,
+  )) {
+    throw new Error(`${actionType} run designProposal comparison differs from the stored accepted proposal`);
+  }
+  const instance = parseEvolutionInstance(run.context.evolutionInstance, `${actionType} run evolutionInstance`);
   const packSha256 = canonicalEvolutionValueSha256(pack);
   if (
-    !instance.pack
+    instance.targetProjectId !== projectId
+    || !instance.pack
     || instance.pack.id !== pack.id
     || instance.pack.version !== pack.version
     || instance.pack.contentSha256 !== packSha256
   ) {
-    throw new Error(`${actionType} evolutionInstance pack does not match the frozen evolutionPack`);
+    throw new Error(`${actionType} evolutionInstance does not match the accepted proposal pack and target project`);
   }
-  const comparisonValue = context.evolutionComparison
-    ?? (context.evaluationContract && typeof context.evaluationContract === "object"
-      ? (context.evaluationContract as Record<string, unknown>).comparison
-      : undefined);
-  const comparison = parseEvolutionComparison(comparisonValue, `${actionType} run evolutionComparison`);
-  return { pack, comparison };
+  return {
+    pack,
+    comparison,
+    proposalId,
+    authorityDecisionId: authorityDecision.id,
+    charter: {
+      id: activeCharter.id,
+      version: activeCharter.version,
+      contentSha256: canonicalEvolutionValueSha256(activeCharter.charter),
+    },
+  };
 }
 
-function validateEvolutionProfileAction(
-  harness: Harness,
-  db: HarnessDatabase,
+function exactContextId(value: unknown, label: string) {
+  if (typeof value !== "string" || value.length === 0 || value.trim() !== value) {
+    throw new Error(`${label} must be a non-empty exact string`);
+  }
+  return value;
+}
+
+function validateRegisterEvolutionProfileAction(
   profile: EvolutionProfile,
   frozen: FrozenEvolutionActionContext,
 ) {
-  if (profile.maturity !== "instrumented") {
-    throw new Error("activateEvolutionProfile accepts only instrumented maturity");
-  }
-  if (profile.activatedByReceipt !== undefined) {
-    throw new Error("activateEvolutionProfile does not accept activatedByReceipt before receipt support exists");
-  }
-  const activeCharter = harness.getActiveFounderCharterWithDb(db, { projectId: profile.projectId });
-  if (!activeCharter) {
-    throw new Error(`active founder charter not found for project ${profile.projectId}`);
+  if (profile.runtimeMaturity !== "declared") {
+    throw new Error("registerEvolutionProfile accepts only declared runtimeMaturity");
   }
   const expectedPack = {
     id: frozen.pack.id,
     version: frozen.pack.version,
     contentSha256: canonicalEvolutionValueSha256(frozen.pack),
   };
-  const expectedCharter = {
-    id: activeCharter.id,
-    version: activeCharter.version,
-    contentSha256: canonicalEvolutionValueSha256(activeCharter.charter),
-  };
   if (!sameCanonicalValue(profile.pack, expectedPack)) {
     throw new Error("EvolutionProfile pack does not match the frozen run pack");
   }
-  if (!sameCanonicalValue(profile.charter, expectedCharter)) {
-    throw new Error("EvolutionProfile charter does not match the active founder charter");
+  if (!sameCanonicalValue(profile.charter, frozen.charter)) {
+    throw new Error("EvolutionProfile charter does not match the accepted proposal's active founder charter");
   }
   const expectedSurfaces = frozen.pack.mutationSurfaces.map((surface) => surface.id);
   if (!sameCanonicalValue(profile.allowedSurfaceIds, expectedSurfaces)) {
@@ -816,6 +997,7 @@ function validateProductionEpisodeAction(
   frozen: FrozenEvolutionActionContext,
 ) {
   requireEvolutionProfileScope(harness, db, episode.projectId, episode.profileId);
+  validateEpisodePrivacyReviewReceipt(db, episode);
   const allowedSourceRefs = new Set([
     ...frozen.comparison.developmentEvidenceRefs,
     ...frozen.comparison.holdoutEvidenceRefs,
@@ -824,6 +1006,82 @@ function validateProductionEpisodeAction(
   if (!allowedSourceRefs.has(episode.sourceRef)) {
     throw new Error(`ProductionEpisode sourceRef is outside the frozen comparison: ${episode.sourceRef}`);
   }
+  if (frozen.comparison.holdoutEvidenceRefs.includes(episode.sourceRef)) {
+    if (Object.keys(episode.metrics).length !== 0) {
+      throw new Error("heldout ProductionEpisode metrics must remain empty before independent evaluation");
+    }
+    const expectedReceiptRefs = [episode.privacyReview.reviewerRef];
+    if (
+      !sameCanonicalValue(episode.evidenceRefs, expectedReceiptRefs)
+      || !sameCanonicalValue(episode.privacyReview.evidenceRefs, expectedReceiptRefs)
+    ) {
+      throw new Error("heldout ProductionEpisode evidence may contain only its privacy review receipt reference");
+    }
+  }
+}
+
+function validateEpisodePrivacyReviewReceipt(db: HarnessDatabase, episode: ProductionEpisode) {
+  const match = /^attempt:([^\s:]+)$/.exec(episode.privacyReview.reviewerRef);
+  if (!match) {
+    throw new Error("ProductionEpisode privacyReview.reviewerRef must be attempt:<attemptId>");
+  }
+  const row = db.query(`
+    select attempts.status as attempt_status,
+           attempts.output_json as output_json,
+           tasks.role as task_role,
+           runs.project_id as project_id
+    from attempts
+    join tasks on tasks.id = attempts.task_id
+    join runs on runs.id = tasks.run_id
+    where attempts.id = $attemptId
+  `).get({ $attemptId: match[1] }) as {
+    attempt_status: string;
+    output_json: string;
+    task_role: string;
+    project_id: string | null;
+  } | null;
+  if (!row || row.attempt_status !== "done" || row.task_role !== "verifier" || row.project_id !== episode.projectId) {
+    throw new Error("ProductionEpisode privacy review attempt must be a done same-project verifier attempt");
+  }
+  const output = parseJsonRecord(row.output_json, "ProductionEpisode privacy review attempt output");
+  if (output.status !== "done") {
+    throw new Error("ProductionEpisode privacy review attempt output must be done");
+  }
+  const checks = Array.isArray(output.checks) ? output.checks : [];
+  if (
+    checks.length === 0
+    || checks.some((check) => !isRecord(check) || check.status !== "passed")
+  ) {
+    throw new Error("ProductionEpisode privacy review attempt requires non-empty all-passed checks");
+  }
+  const artifacts = Array.isArray(output.artifacts) ? output.artifacts : [];
+  const receipt = artifacts.find((artifact) =>
+    isRecord(artifact)
+    && artifact.kind === "privacy_review"
+    && artifact.status === "approved"
+    && artifact.policySha256 === episode.privacyReview.policySha256
+    && artifact.dataClassification === episode.privacyReview.dataClassification
+    && artifact.retentionPolicyRef === episode.privacyReview.retentionPolicyRef
+    && artifact.inputSnapshotSha256 === episode.inputSnapshotSha256
+    && artifact.outcomeSnapshotSha256 === episode.outcomeSnapshotSha256
+  );
+  if (!receipt) {
+    throw new Error("ProductionEpisode privacy review attempt lacks an exact approved privacy_review artifact");
+  }
+}
+
+function parseJsonRecord(value: string, label: string): Record<string, unknown> {
+  try {
+    const parsed: unknown = JSON.parse(value);
+    if (!isRecord(parsed)) throw new Error("not an object");
+    return parsed;
+  } catch {
+    throw new Error(`${label} must be valid structured JSON`);
+  }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
 function validateHarnessVariantAction(
@@ -891,6 +1149,14 @@ function validateMatchedExperimentAction(
   if (!candidate || candidate.profileId !== experiment.profileId || candidate.role !== "candidate") {
     throw new Error("MatchedExperiment candidate variant is missing or invalid");
   }
+  for (const variant of [control, candidate]) {
+    requireEvolutionActionReceipt(db, {
+      projectId: experiment.projectId,
+      recordKind: "variant",
+      recordId: variant.id,
+      recordSha256: canonicalEvolutionRecordSha256(variant),
+    });
+  }
   validateExperimentSplit(harness, db, experiment, "development", frozen.comparison.developmentEvidenceRefs);
   validateExperimentSplit(harness, db, experiment, "heldout", frozen.comparison.holdoutEvidenceRefs);
   validateExperimentSplit(harness, db, experiment, "unrelated", frozen.comparison.unrelatedEvidenceRefs);
@@ -919,7 +1185,71 @@ function requireEvolutionProfileScope(
   if (!profile) {
     throw new Error(`EvolutionProfile not found for project ${projectId}: ${profileId}`);
   }
+  requireEvolutionActionReceipt(db, {
+    projectId,
+    recordKind: "profile",
+    recordId: profile.id,
+    recordSha256: canonicalEvolutionRecordSha256(profile),
+  });
   return profile;
+}
+
+function requireEvolutionActionReceipt(
+  db: HarnessDatabase,
+  input: {
+    projectId: string;
+    recordKind: "profile" | "episode" | "variant";
+    recordId: string;
+    recordSha256: string;
+  },
+) {
+  const expectedActionType = {
+    profile: "registerEvolutionProfile",
+    episode: "recordProductionEpisode",
+    variant: "registerHarnessVariant",
+  }[input.recordKind];
+  const receipts = db.query(`
+    select receipts.record_sha256 as record_sha256,
+           receipts.action_type as receipt_action_type,
+           events.action_type as event_action_type,
+           events.status as event_status
+    from evolution_action_receipts receipts
+    join harness_action_events events on events.id = receipts.action_event_id
+    where receipts.project_id = $projectId
+      and receipts.record_kind = $recordKind
+      and receipts.record_id = $recordId
+    order by receipts.created_at, receipts.action_event_id
+  `).all({
+    $projectId: input.projectId,
+    $recordKind: input.recordKind,
+    $recordId: input.recordId,
+  }) as Array<{
+    record_sha256: string;
+    receipt_action_type: string;
+    event_action_type: string;
+    event_status: string;
+  }>;
+  if (receipts.length === 0) {
+    throw new Error(
+      `${input.recordKind} ${input.recordId} lacks an immutable done evolution action receipt`,
+    );
+  }
+  for (const receipt of receipts) {
+    if (
+      receipt.receipt_action_type !== expectedActionType
+      || receipt.event_action_type !== expectedActionType
+      || receipt.event_status !== "done"
+    ) {
+      throw new Error(
+        `${input.recordKind} ${input.recordId} has an invalid evolution action receipt`,
+      );
+    }
+    if (receipt.record_sha256 !== input.recordSha256) {
+      throw new Error(
+        `${input.recordKind} ${input.recordId} evolution action receipt digest mismatch`,
+      );
+    }
+  }
 }
 
 function validateExperimentSplit(
@@ -939,6 +1269,12 @@ function validateExperimentSplit(
     if (!episode || episode.profileId !== experiment.profileId) {
       throw new Error(`MatchedExperiment ${split} episode is missing or outside the profile: ${id}`);
     }
+    requireEvolutionActionReceipt(db, {
+      projectId: experiment.projectId,
+      recordKind: "episode",
+      recordId: episode.id,
+      recordSha256: canonicalEvolutionRecordSha256(episode),
+    });
     return episode;
   });
   if (!sameCanonicalValue(episodes.map((episode) => episode.sourceRef), expectedSourceRefs)) {
@@ -962,8 +1298,8 @@ function validateExperimentLeakageIsolation(
       const episode = harness.getProductionEpisodeWithDb(db, { projectId: experiment.projectId, id });
       if (!episode) throw new Error(`MatchedExperiment episode not found: ${id}`);
       for (const [kind, value] of [
-        ["input snapshot", episode.inputSnapshotSha256],
-        ["outcome snapshot", episode.outcomeSnapshotSha256],
+        ["snapshot", episode.inputSnapshotSha256],
+        ["snapshot", episode.outcomeSnapshotSha256],
         ["leakage group", episode.leakageGroupId],
       ] as const) {
         const key = `${kind}:${value}`;
@@ -1092,6 +1428,14 @@ function applyParsedHarnessAction(
     const run = harness.getRun(action.runId);
     if (!run) {
       return blockedResult(action.type, `Run not found: ${action.runId}`, [`run not found: ${action.runId}`]);
+    }
+    const frozenKeys = Object.keys(action.contextPatch).filter((key) => FROZEN_DESIGN_CONTEXT_KEYS.has(key));
+    if (frozenKeys.length > 0) {
+      return blockedResult(
+        action.type,
+        `Run ${action.runId} frozen design context cannot be overwritten.`,
+        [`frozen context keys: ${frozenKeys.sort().join(",")}`],
+      );
     }
     const updated = harness.updateRun({
       runId: action.runId,

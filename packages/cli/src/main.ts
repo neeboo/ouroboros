@@ -1149,6 +1149,7 @@ switch (parsed.command) {
     try {
       printJson(listEvolutionRecords({
         harness,
+        dbPath: parsed.db,
         kind: parseEvolutionReadbackKind(required(parsed, "kind")),
         projectId: required(parsed, "project-id"),
         profileId: flag(parsed, "profile-id"),

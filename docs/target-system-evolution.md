@@ -4,7 +4,7 @@
 
 Ouroboros can describe how another project may evolve while keeping delivery, evidence, and authority boundaries explicit. The first reference target is Hodor.
 
-The checked-in Hodor reference is a **designed-state contract only**. It proves that the current production parsers accept a bounded pack, causal hypothesis, and matched comparison. Ouroboros now also has strict, immutable runtime records for an instrumented target and a pending shadow experiment specification. That capability does not claim that Hodor has emitted real production episodes, run a shadow experiment, promoted a variant, rolled it back, or operated autonomously.
+The checked-in Hodor reference is a **designed-state contract only**. It proves that the current production parsers accept a bounded pack, causal hypothesis, and matched comparison. Ouroboros now also has strict, immutable declarations for a target profile, replayable episode commitments, harness variants, and a pending shadow experiment specification. These records do not claim that Hodor is instrumented, has emitted real production episodes, has run a shadow experiment, has promoted a variant, has rolled it back, or operates autonomously.
 
 The machine-readable reference is [the Hodor evolution pack v0](examples/hodor-evolution-pack-v0.json). Tests parse its `evolutionPack`, `causalHypothesis`, and `comparison` fields with the production target-evolution parsers.
 
@@ -72,13 +72,13 @@ Milestone one fails closed for cross-project mutation surfaces, non-canonical or
 
 The Hodor JSON uses the stable example identity `project_hodor_reference`. Its outer object is a reference envelope containing the three production-parsed contract blocks: `evolutionPack`, `causalHypothesis`, and `comparison`. `firstCandidate` is a strict field inside `evolutionPack`, so the production pack parser enforces its shadow-only shape and zero-side-effect budget without test-side assembly.
 
-## Instrumented runtime contracts
+## Declared runtime contracts
 
-The following five contracts are implemented as strict production parsers. The first four can be stored as immutable, project-bound, content-addressed records. `PromotionReceipt` is parsed for future compatibility but has no write action. Runtime support in Ouroboros is platform capability; Hodor remains `designed` until Hodor-bound records are created from current evidence and independently read back.
+Four contracts are public, strict production parsers and can be stored as immutable, project-bound, content-addressed records. A draft promotion shape remains internal until result authority, exact target readback, canary evidence, and rollback execution exist. Runtime support in Ouroboros is platform capability; Hodor remains `designed` until independent evidence advances it through a later maturity receipt.
 
 ### 1. `EvolutionProfile`
 
-An activated, immutable view of the target's evolution rules for one cycle.
+A registered, immutable declaration of the target's evolution rules for one cycle.
 
 ```ts
 type EvolutionProfile = {
@@ -87,18 +87,17 @@ type EvolutionProfile = {
   projectId: "project_hodor_reference";
   pack: { id: string; version: number; contentSha256: string };
   charter: { id: string; version: number; contentSha256: string };
-  maturity: "instrumented";
+  runtimeMaturity: "declared";
   allowedSurfaceIds: string[];
-  activatedAt: string;
-  activatedByReceipt?: string;
+  registeredAt: string;
 };
 ```
 
-The parser understands later maturity labels and `activatedByReceipt` for future receipts, but the current activation action accepts only `instrumented` and rejects `activatedByReceipt` because no receipt write path exists yet. The profile binds every later episode, variant, experiment, and receipt to the exact pack and charter. A new profile is required when those inputs change; existing evidence is never relabeled.
+`runtimeMaturity: "declared"` is deliberately separate from the pack maturity ladder. Registration proves identity and frozen provenance only. It does not prove observation coverage, artifact readback, shadow execution, or promotion readiness. The profile binds every later episode, variant, and experiment declaration to the exact accepted proposal, approved authority decision, pack, and charter. A new profile is required when those inputs change; existing evidence is never relabeled.
 
 ### 2. `ProductionEpisode`
 
-An immutable, privacy-reviewed observation that can be replayed without calling a production provider.
+An immutable observation commitment that can be replayed without calling a production provider.
 
 ```ts
 type ProductionEpisode = {
@@ -136,7 +135,7 @@ type ProductionEpisode = {
 };
 ```
 
-The episode stores hashes, bounded metrics, counters, and evidence references only. Raw input and output are forbidden. The embedded privacy review must bind the same two snapshot hashes. Call and write counters are non-negative integers; `paidUsd` is a non-negative finite amount. `sourceRef` identifies exactly one frozen evidence split, while `leakageGroupId` prevents related observations from crossing splits. Fixtures may resemble an episode, but fixture data is not production telemetry.
+The episode stores hashes, bounded metrics, counters, and opaque evidence references only. Raw input and output are forbidden. The privacy review must resolve to a completed same-project verifier attempt whose checks all pass and whose structured receipt binds the policy, classification, retention rule, and the same two snapshot hashes. Call and write counters are non-negative integers; `paidUsd` is a non-negative finite amount. `sourceRef` identifies exactly one frozen evidence split, while `leakageGroupId` prevents related observations from crossing splits. A heldout episode stores commitments only: its metrics are empty and its evidence is limited to the privacy-review receipt. Fixtures may resemble an episode, but fixture data is not production telemetry.
 
 ### 3. `HarnessVariant`
 
@@ -158,7 +157,7 @@ type HarnessVariant = {
 };
 ```
 
-`model` is intentionally absent from `evolutionTargets`. A later model-training charter would need separate provenance, compute, spend, isolation, distribution, and rollback controls.
+`changedPaths` contains exact project-relative file paths, never glob expressions. `model` is intentionally absent from `evolutionTargets`. A later model-training charter would need separate provenance, compute, spend, isolation, distribution, and rollback controls. The current record binds a declared content hash; an independent artifact/commit attestation is still required before a maturity receipt may call the target instrumented.
 
 ### 4. `MatchedExperiment`
 
@@ -193,9 +192,9 @@ type MatchedExperiment = {
 };
 ```
 
-All three sets must be non-empty and pairwise disjoint. Candidate generation may use development evidence only. Ordinary roles receive only a commitment and count for the heldout split; its references, contents, and results are removed from their prompt view. Unrelated episodes detect broad regressions. The current fixed action accepts only `outcome: "pending"`: it freezes a future comparison and does not run either arm or claim a result.
+All three sets must be non-empty and pairwise disjoint. Source references, leakage groups, and input or outcome snapshot hashes cannot cross splits, including input-to-outcome collisions. Candidate generation may use development evidence only. Ordinary roles receive only a commitment and count for the heldout split; matching values are also removed from arbitrary nested prompt context. Unrelated episodes detect broad regressions. The current fixed action accepts only `outcome: "pending"`: it freezes a future comparison and does not run either arm or claim a result.
 
-### 5. `PromotionReceipt`
+### Internal draft: promotion receipt
 
 An auditable record of a later promotion, canary readback, or rollback. Recording intent is insufficient; the receipt must cite observed state.
 
@@ -219,20 +218,20 @@ type PromotionReceipt = {
 };
 ```
 
-Ouroboros does not expose an action that records this receipt, applies a promotion, performs readback, or runs rollback in this milestone. The `promotionPolicy` strings in the reference pack are frozen requirements for later design work, not executable promotion capability.
+This shape is intentionally not exported from the public harness API. Ouroboros does not expose an action that records it, applies a promotion, performs readback, or runs rollback in this milestone. The `promotionPolicy` strings in the reference pack are frozen requirements for later design work, not executable promotion capability.
 
 ## Fixed runtime actions
 
-Four narrow actions build the instrumented evidence graph:
+Four narrow actions register the declared runtime graph:
 
-- `activateEvolutionProfile`
+- `registerEvolutionProfile`
 - `recordProductionEpisode`
 - `registerHarnessVariant`
 - `freezeMatchedExperiment`
 
-Each action requires a project-bound source run, validates the frozen pack, charter, comparison, surfaces, paths, and referenced records, writes one immutable record, reads it back in the same transaction, and commits the success audit with the record. An identical replay reuses the record; the same identity with different content fails closed. The actions do not use Git, network access, provider credentials, target repositories, or production databases.
+Each action requires a project-bound design delivery run. The action rebuilds its contract from the stored accepted proposal, latest approved authority decision, and active frozen charter; repeated context views must match exactly and the generic context-update action cannot replace them. It validates the comparison, surfaces, exact paths, privacy verifier receipt, and referenced records; writes one immutable record; reads it back in the same transaction; and binds a minimal audit event to an immutable action receipt. An identical replay reuses the record; the same identity with different content fails closed. The actions do not use Git, network access, provider credentials, target repositories, or production databases.
 
-There is no action for experiment results, promotion, rollback, or maturity advancement beyond `instrumented`.
+There is no action for experiment results, promotion, rollback, or maturity advancement beyond the declared runtime state.
 
 The supervising control plane submits these records through the existing strict action entry point. Independent inspection uses a project-bound, read-only command:
 
@@ -242,7 +241,7 @@ orbs show-evolution-record --kind profile --project-id <project_id> --id <profil
 orbs list-evolution-records --kind episode --project-id <project_id> --profile-id <profile_id> --json
 ```
 
-`show-evolution-record` recomputes the canonical record hash and verifies the matching successful action artifact. Both inspection commands open the database read-only and do not run migrations or create SQLite sidecar files.
+`show-evolution-record` recomputes the canonical record hash and verifies the matching immutable action receipt, real source run, project, action, and successful artifact. Episode and experiment output is a commitment-only projection: it does not expose split references, metrics, evidence references, or privacy-review identities. Both inspection commands open the database read-only and do not run migrations or create SQLite sidecar files.
 
 ## First candidate: spatial-risk shadow comparison
 
@@ -255,16 +254,16 @@ The first candidate is a zero-side-effect shadow experiment for Hodor's spatial-
 - allowed paths are limited to the reference spatial-risk policy and evaluation areas;
 - production, provider, credential, production-asset, and cross-project-memory paths remain forbidden.
 
-The production parser now enforces this candidate's static declaration: shadow mode only, `artifact` and `harness` targets only, explicit `model` prohibition, and zero for every side-effect budget counter. At `designed` maturity this remains a contract example. Ouroboros can now record the instrumented graph and freeze a pending experiment, but it does not yet provide the isolated Hodor experiment executor that could prove those counters stayed at zero during both arms. Reaching `shadowing` requires real Hodor-bound records plus sealed holdout access, equal-budget arm receipts, and independent side-effect readback. Promotion, canary readback, and rollback execution remain later capabilities.
+The production parser now enforces this candidate's static declaration: shadow mode only, `artifact` and `harness` targets only, explicit `model` prohibition, and zero for every side-effect budget counter. At `designed` maturity this remains a contract example. Ouroboros can now register the declared graph and freeze a pending experiment, but it does not yet provide the isolated Hodor experiment executor or artifact attestation needed to prove those declarations. Reaching `instrumented` requires source and artifact receipts plus an explicit maturity receipt. Reaching `shadowing` additionally requires sealed holdout access, equal-budget arm receipts, and independent side-effect readback. Promotion, canary readback, and rollback execution remain later capabilities.
 
 ## Maturity gates
 
 | Maturity | Required evidence | May do |
 | --- | --- | --- |
 | `designed` | Production parsers accept the static pack, strict first candidate, hypothesis, and comparison; boundary tests reject unsafe variants | Design and review only |
-| `instrumented` | Immutable profile, episode, and variant identities with readback | Capture and replay observations |
+| `instrumented` | Declared graph plus independent source, privacy, artifact, and maturity receipts | Capture and replay verified observations |
 | `shadowing` | Matched experiments with sealed heldout data and zero-side-effect proof | Evaluate without promotion |
 | `autonomous` | Authority-gated promotion receipts, exact readback, canary observation, and tested rollback | Promote and roll back within the frozen charter |
 | `retired` | Retirement decision and retained evidence pointers | Historical read-only access |
 
-The Hodor reference remains at `designed`. Promotion and rollback are later capabilities and must not be inferred from the presence of `promotionPolicy` fields.
+`runtimeMaturity: "declared"` is a registration state, not a pack maturity. The Hodor reference remains at `designed`. Promotion and rollback are later capabilities and must not be inferred from the presence of `promotionPolicy` fields.

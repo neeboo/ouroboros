@@ -301,7 +301,8 @@ export function evolutionProfileFromRow(row: EvolutionProfileRow): EvolutionProf
   if (
     record.id !== row.id ||
     record.schemaVersion !== row.schema_version ||
-    record.maturity !== row.maturity
+    record.runtimeMaturity !== row.runtime_maturity
+    || record.registeredAt !== row.registered_at
     || canonicalEvolutionRecordSha256(record) !== row.record_sha256
   ) {
     throw new Error(`evolution profile readback mismatch: ${row.id}`);

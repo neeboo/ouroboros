@@ -216,7 +216,8 @@ export interface EvolutionProfileRow {
   id: string;
   schema_version: 1;
   project_id: string;
-  maturity: string;
+  runtime_maturity: "declared";
+  registered_at: string;
   record_sha256: string;
   record_json: string;
   created_at: string;
@@ -255,5 +256,24 @@ export interface MatchedExperimentRow {
   outcome: "pending" | "candidate_wins" | "control_wins" | "inconclusive" | "invalid";
   record_sha256: string;
   record_json: string;
+  created_at: string;
+}
+
+export interface EvolutionActionReceiptRow {
+  action_event_id: string;
+  action_type:
+    | "registerEvolutionProfile"
+    | "recordProductionEpisode"
+    | "registerHarnessVariant"
+    | "freezeMatchedExperiment";
+  source_run_id: string;
+  project_id: string;
+  record_kind: "profile" | "episode" | "variant" | "experiment";
+  record_id: string;
+  record_sha256: string;
+  profile_id: string | null;
+  episode_id: string | null;
+  variant_id: string | null;
+  experiment_id: string | null;
   created_at: string;
 }

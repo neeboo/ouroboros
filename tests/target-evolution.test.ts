@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import * as harnessModule from "../packages/harness/src";
+import * as targetEvolutionModule from "../packages/harness/src/target-evolution";
 import type {
   DesignProposalData,
   EvolutionCausalHypothesis,
@@ -189,6 +190,16 @@ function parser(name: string): (...args: unknown[]) => unknown {
   return candidate as (...args: unknown[]) => unknown;
 }
 
+function draftParser(name: string): (...args: unknown[]) => unknown {
+  const candidate = (targetEvolutionModule as unknown as Record<string, unknown>)[name];
+  expect(candidate, `${name} must remain available only from the internal target-evolution module`).toBeFunction();
+  return candidate as (...args: unknown[]) => unknown;
+}
+
+function runtimeRecordParser(name: string): (...args: unknown[]) => unknown {
+  return name === "parseDraftPromotionReceipt" ? draftParser(name) : parser(name);
+}
+
 type EvolutionRecordKind = "profile" | "episode" | "variant" | "experiment" | "receipt";
 
 function canonicalTestValue(value: unknown): unknown {
@@ -230,13 +241,13 @@ function validEvolutionProfile() {
     projectId: PROJECT_ID,
     pack: { id: "hodor-evolution-pack", version: 1, contentSha256: SHA_A },
     charter: { id: "charter_hodor", version: 2, contentSha256: SHA_B },
-    maturity: "shadowing",
+    runtimeMaturity: "declared",
     allowedSurfaceIds: ["risk-policy-artifact", "evaluation-harness"],
-    activatedAt: "2026-08-09T01:02:03.456Z",
+    registeredAt: "2026-08-09T01:02:03.456Z",
   });
 }
 
-function validProductionEpisode(sourceRef = "episode_development_1") {
+function validProductionEpisode(sourceRef = "evidence:episode-development-1") {
   const profile = validEvolutionProfile();
   return addressedRecord("episode", {
     schemaVersion: 1,
@@ -247,19 +258,19 @@ function validProductionEpisode(sourceRef = "episode_development_1") {
     observedAt: "2026-08-09T02:03:04Z",
     inputSnapshotSha256: SHA_A,
     outcomeSnapshotSha256: SHA_B,
-    policyRef: "policy_spatial_risk_v1",
+    policyRef: "policy:spatial-risk-v1",
     metrics: { quality: 0.95, signedDelta: -0.25 },
     sideEffectCounters: { ...ZERO_SIDE_EFFECT_BUDGET, realProviderCalls: 1 },
-    evidenceRefs: ["evidence_episode_1"],
+    evidenceRefs: ["evidence:episode-1"],
     privacyReview: {
       status: "approved",
       policySha256: SHA_C,
-      reviewerRef: "privacy_reviewer_1",
-      dataClassification: "derived-confidential",
-      retentionPolicyRef: "retention_policy_1",
+      reviewerRef: "reviewer:privacy-1",
+      dataClassification: "confidential",
+      retentionPolicyRef: "retention:policy-1",
       inputSnapshotSha256: SHA_A,
       outcomeSnapshotSha256: SHA_B,
-      evidenceRefs: ["privacy_review_1"],
+      evidenceRefs: ["evidence:privacy-review-1"],
     },
   });
 }
@@ -276,7 +287,7 @@ function validHarnessVariant(role: "control" | "candidate" = "control") {
     mutationSurfaceIds: ["risk-policy-artifact"],
     changedPaths: role === "control" ? ["config/spatial-risk.json"] : ["tests/evolution/policy.test.ts"],
     toolPolicySha256: SHA_B,
-    createdFromEvidenceRefs: [role === "control" ? "baseline_evidence" : "candidate_evidence"],
+    createdFromEvidenceRefs: [role === "control" ? "evidence:baseline" : "evidence:candidate"],
   });
 }
 
@@ -287,16 +298,16 @@ function validMatchedExperiment() {
     profileId: validEvolutionProfile().id,
     controlVariantId: validHarnessVariant("control").id,
     candidateVariantId: validHarnessVariant("candidate").id,
-    developmentEpisodeRefs: [validProductionEpisode("episode_development_1").id],
-    heldoutEpisodeRefs: [validProductionEpisode("episode_holdout_1").id],
-    unrelatedEpisodeRefs: [validProductionEpisode("episode_unrelated_1").id],
+    developmentEpisodeRefs: [validProductionEpisode("evidence:episode-development-1").id],
+    heldoutEpisodeRefs: [validProductionEpisode("evidence:episode-heldout-1").id],
+    unrelatedEpisodeRefs: [validProductionEpisode("evidence:episode-unrelated-1").id],
     corpusSnapshotSha256: SHA_C,
     equalBudget: { ...validComparison().equalBudget },
     primaryMetric: "spatial-risk false-positive rate",
     guardMetrics: ["zero production publishes"],
     sideEffectCounters: { ...ZERO_SIDE_EFFECT_BUDGET },
     outcome: "pending",
-    evidenceRefs: ["experiment_evidence_1"],
+    evidenceRefs: ["evidence:experiment-1"],
   });
 }
 
@@ -309,12 +320,12 @@ function validPromotionReceipt() {
     action: "promote",
     fromVariantId: validHarnessVariant("control").id,
     toVariantId: validHarnessVariant("candidate").id,
-    authorizedDecisionRef: "decision_promote_1",
+    authorizedDecisionRef: "decision:promote-1",
     appliedAt: "2026-08-09T03:04:05Z",
     exactTargetRef: "git:commit:0123456789abcdef",
-    readbackEvidenceRefs: ["readback_1"],
-    canaryEvidenceRefs: ["canary_1"],
-    rollbackPlanRef: "rollback_plan_1",
+    readbackEvidenceRefs: ["evidence:readback-1"],
+    canaryEvidenceRefs: ["evidence:canary-1"],
+    rollbackPlanRef: "rollback:plan-1",
   });
 }
 
@@ -772,6 +783,44 @@ describe("target-system evolution contracts", () => {
     ).toThrow();
   });
 
+  test.each([
+    ["control credential", { controlRef: "authorization_bearer_secret" }],
+    ["development api key", { developmentEvidenceRefs: ["evidence_api_key_prod"] }],
+    ["development dotted api key", { developmentEvidenceRefs: ["evidence:api.key-prod"] }],
+    ["holdout token", { holdoutEvidenceRefs: ["evidence:token-prod"] }],
+    ["unrelated password", { unrelatedEvidenceRefs: ["password_prod"] }],
+    ["non-opaque syntax", { controlRef: "control@example.com" }],
+  ])("rejects unsafe EvolutionComparison ref: %s", (_name, override) => {
+    expect(() => parser("parseEvolutionComparison")({ ...validComparison(), ...override })).toThrow(
+      /opaque|credential|sensitive|ref/i,
+    );
+  });
+
+  test.each([
+    [
+      "signal source credential",
+      {
+        observation: {
+          signalSources: [{ id: "source_api_key_prod", kind: "repository" }],
+        },
+      },
+    ],
+    [
+      "portability secret",
+      {
+        portability: {
+          ...validEvolutionPack().portability,
+          genericizationEvidence: ["evidence:secret-prod"],
+        },
+      },
+    ],
+  ])("rejects unsafe prompt-visible evolution pack ref: %s", (_name, override) => {
+    const pack = { ...validEvolutionPack(), ...override };
+    expect(() => parser("parseEvolutionPackV1")(pack, PROJECT_ID)).toThrow(
+      /opaque|credential|sensitive|ref/i,
+    );
+  });
+
   test("parses a clean EvolutionInstance", () => {
     const value = {
       schemaVersion: 1,
@@ -1110,23 +1159,117 @@ describe("target-system evolution runtime records", () => {
     expect(parser("parseMatchedExperiment")(validMatchedExperiment(), PROJECT_ID)).toEqual(
       validMatchedExperiment(),
     );
-    expect(parser("parsePromotionReceipt")(validPromotionReceipt(), PROJECT_ID)).toEqual(
+    expect(draftParser("parseDraftPromotionReceipt")(validPromotionReceipt(), PROJECT_ID)).toEqual(
       validPromotionReceipt(),
     );
   });
+
+  test("keeps PromotionReceipt draft-only and off the harness package surface", () => {
+    expect(
+      (harnessModule as unknown as Record<string, unknown>).parsePromotionReceipt,
+    ).toBeUndefined();
+    expect(
+      (targetEvolutionModule as unknown as Record<string, unknown>).parseDraftPromotionReceipt,
+    ).toBeFunction();
+  });
+
+  test("registers only declared runtime maturity without activation placeholders", () => {
+    expect(() => parser("parseEvolutionProfile")(validEvolutionProfile(), PROJECT_ID)).not.toThrow();
+    for (const unsafeMaturity of [
+      { runtimeMaturity: "prepared" },
+      { runtimeMaturity: "instrumented" },
+      { maturity: "instrumented" },
+      { activatedAt: "2026-08-09T01:02:03Z" },
+      { activatedByReceipt: `receipt_${"a".repeat(64)}` },
+    ]) {
+      const profile = readdress("profile", { ...validEvolutionProfile(), ...unsafeMaturity });
+      expect(() => parser("parseEvolutionProfile")(profile, PROJECT_ID)).toThrow(
+        /runtimeMaturity|unsupported fields/i,
+      );
+    }
+  });
+
+  test.each([
+    ["non-opaque source ref", () => ({ ...validProductionEpisode(), sourceRef: "ref@example.com" }), "episode"],
+    ["authorization ref", () => ({ ...validProductionEpisode(), policyRef: "authorization:bearer-secret" }), "episode"],
+    ["token evidence", () => ({ ...validProductionEpisode(), evidenceRefs: ["evidence:token-prod"] }), "episode"],
+    [
+      "credential reviewer",
+      () => ({
+        ...validProductionEpisode(),
+        privacyReview: {
+          ...validProductionEpisode().privacyReview,
+          reviewerRef: "reviewer:credential-prod",
+        },
+      }),
+      "episode",
+    ],
+    [
+      "password retention ref",
+      () => ({
+        ...validProductionEpisode(),
+        privacyReview: {
+          ...validProductionEpisode().privacyReview,
+          retentionPolicyRef: "retention:password-prod",
+        },
+      }),
+      "episode",
+    ],
+    [
+      "api key privacy evidence",
+      () => ({
+        ...validProductionEpisode(),
+        privacyReview: {
+          ...validProductionEpisode().privacyReview,
+          evidenceRefs: ["evidence:api-key-prod"],
+        },
+      }),
+      "episode",
+    ],
+    [
+      "secret variant evidence",
+      () => ({
+        ...validHarnessVariant("candidate"),
+        createdFromEvidenceRefs: ["evidence:secret-prod"],
+      }),
+      "variant",
+    ],
+    [
+      "bearer experiment evidence",
+      () => ({ ...validMatchedExperiment(), evidenceRefs: ["evidence:bearer-prod"] }),
+      "experiment",
+    ],
+  ])("rejects non-opaque or credential-like runtime ref: %s", (_name, makeRecord, kind) => {
+    const record = readdress(kind as EvolutionRecordKind, makeRecord() as Record<string, unknown>);
+    const parse = kind === "episode" ? "parseProductionEpisode"
+      : kind === "variant" ? "parseHarnessVariant"
+        : "parseMatchedExperiment";
+    expect(() => parser(parse)(record, PROJECT_ID)).toThrow(/opaque|credential|sensitive|ref/i);
+  });
+
+  test.each(["src/**", "src/file?.ts", "src/[ab].ts", "src/{a,b}.ts", "!src/file.ts"])(
+    "rejects glob-like HarnessVariant changedPath %s",
+    (changedPath) => {
+      const variant = readdress("variant", {
+        ...validHarnessVariant("candidate"),
+        changedPaths: [changedPath],
+      });
+      expect(() => parser("parseHarnessVariant")(variant, PROJECT_ID)).toThrow(/exact|glob|path/i);
+    },
+  );
 
   test.each([
     ["profile", "parseEvolutionProfile", validEvolutionProfile],
     ["episode", "parseProductionEpisode", validProductionEpisode],
     ["variant", "parseHarnessVariant", () => validHarnessVariant("candidate")],
     ["experiment", "parseMatchedExperiment", validMatchedExperiment],
-    ["receipt", "parsePromotionReceipt", validPromotionReceipt],
+    ["receipt", "parseDraftPromotionReceipt", validPromotionReceipt],
   ])("rejects unknown fields and mismatched content IDs on %s", (kind, parserName, makeRecord) => {
     const record = makeRecord() as Record<string, unknown>;
-    expect(() => parser(parserName)({ ...record, surprise: true }, PROJECT_ID)).toThrow(
+    expect(() => runtimeRecordParser(parserName)({ ...record, surprise: true }, PROJECT_ID)).toThrow(
       /unsupported fields/i,
     );
-    expect(() => parser(parserName)({ ...record, id: `${kind}_${"f".repeat(64)}` }, PROJECT_ID)).toThrow(
+    expect(() => runtimeRecordParser(parserName)({ ...record, id: `${kind}_${"f".repeat(64)}` }, PROJECT_ID)).toThrow(
       /content-addressed|id/i,
     );
   });
@@ -1136,16 +1279,16 @@ describe("target-system evolution runtime records", () => {
     ["episode", "parseProductionEpisode", validProductionEpisode],
     ["variant", "parseHarnessVariant", () => validHarnessVariant("candidate")],
     ["experiment", "parseMatchedExperiment", validMatchedExperiment],
-    ["receipt", "parsePromotionReceipt", validPromotionReceipt],
+    ["receipt", "parseDraftPromotionReceipt", validPromotionReceipt],
   ])("requires schemaVersion 1 and strict identity text on %s", (kind, parserName, makeRecord) => {
     const record = makeRecord() as Record<string, unknown>;
     const wrongVersion = readdress(kind as EvolutionRecordKind, { ...record, schemaVersion: 2 });
-    expect(() => parser(parserName)(wrongVersion, PROJECT_ID)).toThrow(/schemaVersion/i);
+    expect(() => runtimeRecordParser(parserName)(wrongVersion, PROJECT_ID)).toThrow(/schemaVersion/i);
     const paddedProject = readdress(kind as EvolutionRecordKind, {
       ...record,
       projectId: ` ${PROJECT_ID}`,
     });
-    expect(() => parser(parserName)(paddedProject, ` ${PROJECT_ID}`)).toThrow(/whitespace/i);
+    expect(() => runtimeRecordParser(parserName)(paddedProject, ` ${PROJECT_ID}`)).toThrow(/whitespace/i);
   });
 
   test("requires a non-empty unpadded ProductionEpisode sourceRef", () => {
@@ -1162,11 +1305,11 @@ describe("target-system evolution runtime records", () => {
     ["episode", "parseProductionEpisode", validProductionEpisode],
     ["variant", "parseHarnessVariant", () => validHarnessVariant("candidate")],
     ["experiment", "parseMatchedExperiment", validMatchedExperiment],
-    ["receipt", "parsePromotionReceipt", validPromotionReceipt],
+    ["receipt", "parseDraftPromotionReceipt", validPromotionReceipt],
   ])("rejects cross-project %s records", (_kind, parserName, makeRecord) => {
     const record = makeRecord() as Record<string, unknown>;
-    expect(() => parser(parserName)(record, "project_other")).toThrow(/projectId/i);
-    expect(() => parser(parserName)({ ...record, targetProjectId: PROJECT_ID }, PROJECT_ID)).toThrow(
+    expect(() => runtimeRecordParser(parserName)(record, "project_other")).toThrow(/projectId/i);
+    expect(() => runtimeRecordParser(parserName)({ ...record, targetProjectId: PROJECT_ID }, PROJECT_ID)).toThrow(
       /unsupported fields/i,
     );
   });
@@ -1299,9 +1442,9 @@ describe("target-system evolution runtime records", () => {
   });
 
   test.each([
-    ["profile", "activatedAt", "parseEvolutionProfile", validEvolutionProfile],
+    ["profile", "registeredAt", "parseEvolutionProfile", validEvolutionProfile],
     ["episode", "observedAt", "parseProductionEpisode", validProductionEpisode],
-    ["receipt", "appliedAt", "parsePromotionReceipt", validPromotionReceipt],
+    ["receipt", "appliedAt", "parseDraftPromotionReceipt", validPromotionReceipt],
   ])("requires strict UTC ISO time on %s", (kind, field, parserName, makeRecord) => {
     for (const timestamp of [
       "2026-08-09 01:02:03Z",
@@ -1313,7 +1456,7 @@ describe("target-system evolution runtime records", () => {
         ...(makeRecord() as Record<string, unknown>),
         [field]: timestamp,
       });
-      expect(() => parser(parserName)(record, PROJECT_ID)).toThrow(/UTC|ISO|timestamp/i);
+      expect(() => runtimeRecordParser(parserName)(record, PROJECT_ID)).toThrow(/UTC|ISO|timestamp/i);
     }
   });
 
@@ -1345,6 +1488,58 @@ describe("target-system evolution runtime records", () => {
     }
   });
 
+  test.each(["derived-confidential", "private", "restricted-secret"])(
+    "rejects unsupported privacy data classification %s",
+    (dataClassification) => {
+      const episode = validProductionEpisode();
+      const invalid = readdress("episode", {
+        ...episode,
+        privacyReview: { ...episode.privacyReview, dataClassification },
+      });
+      expect(() => parser("parseProductionEpisode")(invalid, PROJECT_ID)).toThrow(
+        /dataClassification/i,
+      );
+    },
+  );
+
+  test.each(["public", "internal", "confidential", "restricted"])(
+    "accepts privacy data classification %s",
+    (dataClassification) => {
+      const episode = validProductionEpisode();
+      const classified = readdress("episode", {
+        ...episode,
+        privacyReview: { ...episode.privacyReview, dataClassification },
+      });
+      expect(() => parser("parseProductionEpisode")(classified, PROJECT_ID)).not.toThrow();
+    },
+  );
+
+  test.each(["api_key_count", "secret-score", "score@raw"])(
+    "rejects unsafe ProductionEpisode metric key %s",
+    (metricKey) => {
+      const episode = readdress("episode", {
+        ...validProductionEpisode(),
+        metrics: { [metricKey]: 1 },
+      });
+      expect(() => parser("parseProductionEpisode")(episode, PROJECT_ID)).toThrow(
+        /metric|opaque|sensitive/i,
+      );
+    },
+  );
+
+  test.each(["secret_group", "group@raw"])(
+    "rejects unsafe ProductionEpisode leakageGroupId %s",
+    (leakageGroupId) => {
+      const episode = readdress("episode", {
+        ...validProductionEpisode(),
+        leakageGroupId,
+      });
+      expect(() => parser("parseProductionEpisode")(episode, PROJECT_ID)).toThrow(
+        /leakageGroupId|sensitive|identifier/i,
+      );
+    },
+  );
+
   test("requires receipt readback, canary evidence, and distinct variants", () => {
     const receipt = validPromotionReceipt();
     for (const override of [
@@ -1353,8 +1548,21 @@ describe("target-system evolution runtime records", () => {
       { toVariantId: receipt.fromVariantId },
     ]) {
       const invalid = readdress("receipt", { ...receipt, ...override });
-      expect(() => parser("parsePromotionReceipt")(invalid, PROJECT_ID)).toThrow();
+      expect(() => draftParser("parseDraftPromotionReceipt")(invalid, PROJECT_ID)).toThrow();
     }
+  });
+
+  test.each([
+    { authorizedDecisionRef: "decision:authorization-prod" },
+    { exactTargetRef: "target@production" },
+    { readbackEvidenceRefs: ["evidence:credential-prod"] },
+    { canaryEvidenceRefs: ["evidence:bearer-prod"] },
+    { rollbackPlanRef: "rollback:password-prod" },
+  ])("rejects unsafe refs in the internal draft PromotionReceipt", (override) => {
+    const receipt = readdress("receipt", { ...validPromotionReceipt(), ...override });
+    expect(() => draftParser("parseDraftPromotionReceipt")(receipt, PROJECT_ID)).toThrow(
+      /opaque|credential|sensitive|ref/i,
+    );
   });
 
   test("enforces runtime record capacity boundaries", () => {
@@ -1373,16 +1581,16 @@ describe("target-system evolution runtime records", () => {
 
     const episodeAtLimit = readdress("episode", {
       ...validProductionEpisode(),
-      sourceRef: "x".repeat(4_000),
+      sourceRef: `e:${"x".repeat(254)}`,
       metrics: Object.fromEntries(Array.from({ length: 100 }, (_, index) => [`metric_${index}`, index])),
     });
     expect(() => parser("parseProductionEpisode")(episodeAtLimit, PROJECT_ID)).not.toThrow();
 
-    const episodeOverTextLimit = readdress("episode", {
+    const episodeOverRefLimit = readdress("episode", {
       ...validProductionEpisode(),
-      sourceRef: "x".repeat(4_001),
+      sourceRef: `e:${"x".repeat(255)}`,
     });
-    expect(() => parser("parseProductionEpisode")(episodeOverTextLimit, PROJECT_ID)).toThrow(/at most/i);
+    expect(() => parser("parseProductionEpisode")(episodeOverRefLimit, PROJECT_ID)).toThrow(/at most/i);
 
     const episodeOverMetricsLimit = readdress("episode", {
       ...validProductionEpisode(),

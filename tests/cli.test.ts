@@ -11756,6 +11756,10 @@ describe("CLI", () => {
         rootPath: dir,
       }),
     };
+    const sourceRunId = harness.createRun({
+      projectId: project.id,
+      goal: "Record bounded evolution evidence",
+    });
     const sha = (digit: string) => digit.repeat(64);
     const address = <T extends Record<string, unknown>>(
       kind: "profile" | "episode" | "variant" | "experiment",
@@ -11776,9 +11780,9 @@ describe("CLI", () => {
       projectId: project.id,
       pack: { id: "pack_hodor_v1", version: 1, contentSha256: sha("1") },
       charter: { id: "charter_hodor_v1", version: 1, contentSha256: sha("2") },
-      maturity: "instrumented",
+      runtimeMaturity: "declared",
       allowedSurfaceIds: ["surface.runtime"],
-      activatedAt: "2026-08-09T08:00:00Z",
+      registeredAt: "2026-08-09T08:00:00Z",
     });
     harness.recordEvolutionProfile(profile);
 
@@ -11792,14 +11796,14 @@ describe("CLI", () => {
       inputSnapshotSha256: sha(snapshotDigit),
       outcomeSnapshotSha256: sha(String(Number(snapshotDigit) + 1)),
       policyRef: "policy:hodor-production-observation:v1",
-      metrics: { completionRate: 0.75 },
+      metrics: { [`${suffix}CompletionRate`]: 0.75 },
       sideEffectCounters: zeroSideEffects,
       evidenceRefs: [`evidence:hodor:${suffix}`],
       privacyReview: {
         status: "approved",
         policySha256: sha("9"),
         reviewerRef: "privacy-review:local:v1",
-        dataClassification: "deidentified",
+        dataClassification: "confidential",
         retentionPolicyRef: "retention:30d",
         inputSnapshotSha256: sha(snapshotDigit),
         outcomeSnapshotSha256: sha(String(Number(snapshotDigit) + 1)),
@@ -11857,8 +11861,11 @@ describe("CLI", () => {
     });
     harness.recordMatchedExperiment(experiment);
     const actionFixtures = [
-      ["activateEvolutionProfile", "profile", "evolution_profile", profile],
+      ["registerEvolutionProfile", "profile", "evolution_profile", profile],
       ["recordProductionEpisode", "episode", "production_episode", developmentEpisode],
+      ["recordProductionEpisode", "episode", "production_episode", heldoutEpisode],
+      ["recordProductionEpisode", "episode", "production_episode", unrelatedEpisode],
+      ["registerHarnessVariant", "variant", "harness_variant", controlVariant],
       ["registerHarnessVariant", "variant", "harness_variant", candidateVariant],
       ["freezeMatchedExperiment", "experiment", "matched_experiment", experiment],
     ] as const;
@@ -11868,18 +11875,21 @@ describe("CLI", () => {
         status: "done",
         request: {
           type: actionType,
-          runId: "run_evolution_readback",
-          [requestKey]: record,
+          runId: sourceRunId,
+          entityKind: requestKey,
+          recordId: record.id,
+          recordSha256: canonicalEvolutionRecordSha256(record),
         },
         result: {
           status: "done",
+          actionType,
           artifacts: [{
             kind: artifactKind,
             entityKind: requestKey,
             recordId: record.id,
             recordSha256: canonicalEvolutionRecordSha256(record),
             projectId: project.id,
-            runId: "run_evolution_readback",
+            sourceRunId,
             externalEffectsApplied: false,
             promotionApplied: false,
             replayed: false,
@@ -11887,6 +11897,32 @@ describe("CLI", () => {
         },
       });
     }
+    harness.recordHarnessActionEvent({
+      actionType: "registerEvolutionProfile",
+      status: "done",
+      request: {
+        type: "registerEvolutionProfile",
+        runId: sourceRunId,
+        entityKind: "profile",
+        recordId: profile.id,
+        recordSha256: canonicalEvolutionRecordSha256(profile),
+      },
+      result: {
+        status: "done",
+        actionType: "registerEvolutionProfile",
+        artifacts: [{
+          kind: "evolution_profile",
+          entityKind: "profile",
+          recordId: profile.id,
+          recordSha256: canonicalEvolutionRecordSha256(profile),
+          projectId: project.id,
+          sourceRunId,
+          externalEffectsApplied: false,
+          promotionApplied: false,
+          replayed: true,
+        }],
+      },
+    });
 
     checkpointDatabase(dbPath);
     await rm(`${dbPath}-wal`).catch(() => undefined);
@@ -11898,9 +11934,7 @@ describe("CLI", () => {
       const before = await snapshotDatabaseFilesystem(dbPath, dir);
       const records = [
         ["profile", profile],
-        ["episode", developmentEpisode],
         ["variant", candidateVariant],
-        ["experiment", experiment],
       ] as const;
       const shownRecords = await Promise.all(records.map(([kind, record]) =>
         runCliJson(
@@ -11925,12 +11959,101 @@ describe("CLI", () => {
           actionAudit: {
             actionType: actionFixtures.find((fixture) => fixture[1] === kind)?.[0],
             status: "done",
-            result: { artifacts: [expect.objectContaining({ recordId: record.id })] },
+            sourceRunId,
+            recordId: record.id,
+            projectId: project.id,
+            recordSha256: canonicalEvolutionRecordSha256(record),
+            receiptCount: kind === "profile" ? 2 : 1,
           },
         });
+        expect(shown.actionAudit.request).toBeUndefined();
+        expect(shown.actionAudit.result).toBeUndefined();
       }
 
-      const listedRecords = await Promise.all(records.map(([kind]) => {
+      const shownHeldout = await runCliJson(
+        "show-evolution-record",
+        "--kind",
+        "episode",
+        "--project-id",
+        project.id,
+        "--id",
+        heldoutEpisode.id,
+        "--json",
+        "true",
+      );
+      expect(shownHeldout).toMatchObject({
+        kind: "episode",
+        id: heldoutEpisode.id,
+        recordSha256: canonicalEvolutionRecordSha256(heldoutEpisode),
+        record: {
+          schemaVersion: 1,
+          id: heldoutEpisode.id,
+          projectId: project.id,
+          profileId: profile.id,
+          contentDisclosure: "commitment-only",
+          observedAt: heldoutEpisode.observedAt,
+          inputSnapshotSha256: heldoutEpisode.inputSnapshotSha256,
+          outcomeSnapshotSha256: heldoutEpisode.outcomeSnapshotSha256,
+          metricCount: 1,
+          evidenceCount: 1,
+          privacyReview: {
+            status: "approved",
+            policySha256: heldoutEpisode.privacyReview.policySha256,
+            dataClassification: "confidential",
+            evidenceCount: 1,
+          },
+        },
+      });
+      const shownHeldoutText = JSON.stringify(shownHeldout);
+      expect(shownHeldoutText).not.toContain(heldoutEpisode.sourceRef);
+      expect(shownHeldoutText).not.toContain(heldoutEpisode.leakageGroupId);
+      expect(shownHeldoutText).not.toContain("heldoutCompletionRate");
+      expect(shownHeldoutText).not.toContain(heldoutEpisode.evidenceRefs[0]);
+      expect(shownHeldoutText).not.toContain(heldoutEpisode.privacyReview.reviewerRef);
+      expect(shownHeldoutText).not.toContain(heldoutEpisode.privacyReview.retentionPolicyRef);
+      expect(shownHeldoutText).not.toContain(heldoutEpisode.privacyReview.evidenceRefs[0]);
+
+      const shownExperiment = await runCliJson(
+        "show-evolution-record",
+        "--kind",
+        "experiment",
+        "--project-id",
+        project.id,
+        "--id",
+        experiment.id,
+        "--json",
+        "true",
+      );
+      expect(shownExperiment).toMatchObject({
+        kind: "experiment",
+        id: experiment.id,
+        recordSha256: canonicalEvolutionRecordSha256(experiment),
+        record: {
+          developmentEpisodeCount: 1,
+          developmentCommitmentSha256: expect.stringMatching(/^[a-f0-9]{64}$/),
+          heldoutEpisodeCount: 1,
+          heldoutCommitmentSha256: expect.stringMatching(/^[a-f0-9]{64}$/),
+          unrelatedEpisodeCount: 1,
+          unrelatedCommitmentSha256: expect.stringMatching(/^[a-f0-9]{64}$/),
+          evidenceCount: 1,
+        },
+        actionAudit: {
+          sourceRunId,
+          recordId: experiment.id,
+          receiptCount: 1,
+        },
+      });
+      expect(shownExperiment.record.developmentEpisodeRefs).toBeUndefined();
+      expect(shownExperiment.record.heldoutEpisodeRefs).toBeUndefined();
+      expect(shownExperiment.record.unrelatedEpisodeRefs).toBeUndefined();
+      expect(shownExperiment.record.evidenceRefs).toBeUndefined();
+      expect(JSON.stringify(shownExperiment)).not.toContain(developmentEpisode.id);
+      expect(JSON.stringify(shownExperiment)).not.toContain(heldoutEpisode.id);
+      expect(JSON.stringify(shownExperiment)).not.toContain(unrelatedEpisode.id);
+      expect(JSON.stringify(shownExperiment)).not.toContain(experiment.evidenceRefs[0]);
+
+      const listKinds = ["profile", "episode", "variant", "experiment"] as const;
+      const listedRecords = await Promise.all(listKinds.map((kind) => {
         const profileArgs = kind === "profile" ? [] : ["--profile-id", profile.id];
         return runCliJson(
           "list-evolution-records",
@@ -11943,19 +12066,42 @@ describe("CLI", () => {
           "true",
         );
       }));
-      for (const [[kind, expectedRecord], listed] of records.map((entry, index) => [entry, listedRecords[index]] as const)) {
+      for (const [index, kind] of listKinds.entries()) {
+        const listed = listedRecords[index];
         expect(listed).toMatchObject({
           kind,
           projectId: project.id,
           profileId: kind === "profile" ? null : profile.id,
           totalCount: kind === "episode" ? 3 : kind === "variant" ? 2 : 1,
         });
-        expect(listed.records).toContainEqual(expect.objectContaining({
-          id: expectedRecord.id,
-          recordSha256: canonicalEvolutionRecordSha256(expectedRecord),
-          record: expectedRecord,
-        }));
+        expect(listed.records.every(
+          (entry: { actionAudit?: { status?: string; receiptCount?: number } }) =>
+            entry.actionAudit?.status === "done"
+            && (entry.actionAudit.receiptCount === 1
+              || (kind === "profile" && entry.actionAudit.receiptCount === 2)),
+        )).toBe(true);
       }
+      const listedHeldout = listedRecords[1].records.find(
+        (entry: { id: string }) => entry.id === heldoutEpisode.id,
+      );
+      expect(listedHeldout.record).toMatchObject({
+        contentDisclosure: "commitment-only",
+        metricCount: 1,
+        evidenceCount: 1,
+      });
+      expect(JSON.stringify(listedHeldout)).not.toContain(heldoutEpisode.sourceRef);
+      expect(JSON.stringify(listedHeldout)).not.toContain("heldoutCompletionRate");
+      expect(listedRecords[1].records.every(
+        (entry: { record: { contentDisclosure?: string } }) =>
+          entry.record.contentDisclosure === "commitment-only",
+      )).toBe(true);
+      expect(JSON.stringify(listedRecords[3])).not.toContain(developmentEpisode.id);
+      expect(JSON.stringify(listedRecords[3])).not.toContain(heldoutEpisode.id);
+      expect(JSON.stringify(listedRecords[3])).not.toContain(unrelatedEpisode.id);
+      expect(listedRecords[3].records[0].record).toMatchObject({
+        heldoutEpisodeCount: 1,
+        heldoutCommitmentSha256: shownExperiment.record.heldoutCommitmentSha256,
+      });
       const after = await snapshotDatabaseFilesystem(dbPath, dir);
       expect(after.size).toBe(before.size);
       expect(after.mtimeMs).toBe(before.mtimeMs);
@@ -11984,39 +12130,118 @@ describe("CLI", () => {
         rootPath: join(dir, "other-project"),
       }),
     };
+    const missingReceiptProject = {
+      id: harness.createProject({
+        name: "Missing Evolution Receipt Project",
+        rootPath: join(dir, "missing-receipt-project"),
+      }),
+    };
+    const validSourceRunId = harness.createRun({ projectId: project.id, goal: "Valid audit source" });
+    const otherProjectRunId = harness.createRun({ projectId: otherProject.id, goal: "Foreign audit source" });
     const profileBody = {
       schemaVersion: 1,
       projectId: project.id,
       pack: { id: "pack_scope_v1", version: 1, contentSha256: "4".repeat(64) },
       charter: { id: "charter_scope_v1", version: 1, contentSha256: "5".repeat(64) },
-      maturity: "instrumented",
+      runtimeMaturity: "declared",
       allowedSurfaceIds: ["surface.scope"],
-      activatedAt: "2026-08-09T09:00:00Z",
+      registeredAt: "2026-08-09T09:00:00Z",
     };
     const profile = {
       ...profileBody,
       id: expectedEvolutionRecordId("profile", profileBody),
     };
     harness.recordEvolutionProfile(profile);
-    harness.recordHarnessActionEvent({
-      actionType: "activateEvolutionProfile",
-      status: "done",
-      request: { type: "activateEvolutionProfile", runId: "run_tampered_audit", profile },
-      result: {
-        status: "done",
-        artifacts: [{
-          kind: "evolution_profile",
+    const missingRunProfileBody = {
+      ...profileBody,
+      registeredAt: "2026-08-09T09:01:00Z",
+    };
+    const missingRunProfile = {
+      ...missingRunProfileBody,
+      id: expectedEvolutionRecordId("profile", missingRunProfileBody),
+    };
+    harness.recordEvolutionProfile(missingRunProfile);
+    const foreignRunProfileBody = {
+      ...profileBody,
+      registeredAt: "2026-08-09T09:02:00Z",
+    };
+    const foreignRunProfile = {
+      ...foreignRunProfileBody,
+      id: expectedEvolutionRecordId("profile", foreignRunProfileBody),
+    };
+    harness.recordEvolutionProfile(foreignRunProfile);
+    const missingReceiptProfileBody = {
+      ...profileBody,
+      projectId: missingReceiptProject.id,
+      registeredAt: "2026-08-09T09:03:00Z",
+    };
+    const missingReceiptProfile = {
+      ...missingReceiptProfileBody,
+      id: expectedEvolutionRecordId("profile", missingReceiptProfileBody),
+    };
+    harness.recordEvolutionProfile(missingReceiptProfile);
+    const insertForgedProfileActionEvent = (input: {
+      id: string;
+      runId: string;
+      profileId: string;
+      recordSha256: string;
+    }) => {
+      const database = new Database(dbPath);
+      try {
+        const request = {
+          type: "registerEvolutionProfile",
+          runId: input.runId,
           entityKind: "profile",
-          recordId: profile.id,
-          recordSha256: "f".repeat(64),
-          projectId: project.id,
-          runId: "run_tampered_audit",
-          externalEffectsApplied: false,
-          promotionApplied: false,
-          replayed: false,
-        }],
-      },
+          recordId: input.profileId,
+          recordSha256: input.recordSha256,
+        };
+        const result = {
+          status: "done",
+          actionType: "registerEvolutionProfile",
+          artifacts: [{
+            kind: "evolution_profile",
+            entityKind: "profile",
+            recordId: input.profileId,
+            recordSha256: input.recordSha256,
+            projectId: project.id,
+            sourceRunId: input.runId,
+            externalEffectsApplied: false,
+            promotionApplied: false,
+            replayed: false,
+          }],
+        };
+        database.query(
+          `insert into harness_action_events
+           (id, action_type, status, request_json, result_json)
+           values ($id, 'registerEvolutionProfile', 'done', $requestJson, $resultJson)`,
+        ).run({
+          $id: input.id,
+          $requestJson: JSON.stringify(request),
+          $resultJson: JSON.stringify(result),
+        });
+      } finally {
+        database.close();
+      }
+    };
+    insertForgedProfileActionEvent({
+      id: "action_tampered_evolution_hash",
+      runId: validSourceRunId,
+      profileId: profile.id,
+      recordSha256: "f".repeat(64),
     });
+    insertForgedProfileActionEvent({
+      id: "action_missing_evolution_run",
+      runId: "run_missing_audit_source",
+      profileId: missingRunProfile.id,
+      recordSha256: canonicalEvolutionRecordSha256(missingRunProfile),
+    });
+    insertForgedProfileActionEvent({
+      id: "action_foreign_evolution_run",
+      runId: otherProjectRunId,
+      profileId: foreignRunProfile.id,
+      recordSha256: canonicalEvolutionRecordSha256(foreignRunProfile),
+    });
+    checkpointDatabase(dbPath);
     const unknownKindPromise = runCliRaw(
       "show-evolution-record",
       "--kind",
@@ -12065,6 +12290,52 @@ describe("CLI", () => {
       "true",
     );
 
+    const missingRunAuditPromise = runCliRaw(
+      "show-evolution-record",
+      "--kind",
+      "profile",
+      "--project-id",
+      project.id,
+      "--id",
+      missingRunProfile.id,
+      "--json",
+      "true",
+    );
+
+    const foreignRunAuditPromise = runCliRaw(
+      "show-evolution-record",
+      "--kind",
+      "profile",
+      "--project-id",
+      project.id,
+      "--id",
+      foreignRunProfile.id,
+      "--json",
+      "true",
+    );
+
+    const missingReceiptAuditPromise = runCliRaw(
+      "show-evolution-record",
+      "--kind",
+      "profile",
+      "--project-id",
+      missingReceiptProject.id,
+      "--id",
+      missingReceiptProfile.id,
+      "--json",
+      "true",
+    );
+
+    const missingReceiptListPromise = runCliRaw(
+      "list-evolution-records",
+      "--kind",
+      "profile",
+      "--project-id",
+      missingReceiptProject.id,
+      "--json",
+      "true",
+    );
+
     const invalidFilterPromise = runCliRaw(
       "list-evolution-records",
       "--kind",
@@ -12084,12 +12355,27 @@ describe("CLI", () => {
       "--project-id",
       project.id,
     );
-    const [unknownKind, unknownRecord, wrongProject, tamperedAudit, invalidFilter, missingJson] =
+    const [
+      unknownKind,
+      unknownRecord,
+      wrongProject,
+      tamperedAudit,
+      missingRunAudit,
+      foreignRunAudit,
+      missingReceiptAudit,
+      missingReceiptList,
+      invalidFilter,
+      missingJson,
+    ] =
       await Promise.all([
         unknownKindPromise,
         unknownRecordPromise,
         wrongProjectPromise,
         tamperedAuditPromise,
+        missingRunAuditPromise,
+        foreignRunAuditPromise,
+        missingReceiptAuditPromise,
+        missingReceiptListPromise,
         invalidFilterPromise,
         missingJsonPromise,
       ]);
@@ -12103,6 +12389,14 @@ describe("CLI", () => {
     );
     expect(tamperedAudit.exitCode).not.toBe(0);
     expect(tamperedAudit.stderr).toContain("evolution action audit readback mismatch");
+    expect(missingRunAudit.exitCode).not.toBe(0);
+    expect(missingRunAudit.stderr).toContain("evolution action audit source run not found");
+    expect(foreignRunAudit.exitCode).not.toBe(0);
+    expect(foreignRunAudit.stderr).toContain("evolution action audit source run project mismatch");
+    expect(missingReceiptAudit.exitCode).not.toBe(0);
+    expect(missingReceiptAudit.stderr).toContain("evolution action audit receipt not found");
+    expect(missingReceiptList.exitCode).not.toBe(0);
+    expect(missingReceiptList.stderr).toContain("evolution action audit receipt not found");
     expect(invalidFilter.exitCode).not.toBe(0);
     expect(invalidFilter.stderr).toContain("--profile-id is not valid for profile records");
     expect(missingJson.exitCode).not.toBe(0);

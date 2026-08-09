@@ -805,6 +805,7 @@ export interface EvolutionComparison {
 }
 
 export type EvolutionRecordKind = "profile" | "episode" | "variant" | "experiment" | "receipt";
+export type EvolutionRuntimeMaturity = "declared";
 
 export interface EvolutionSideEffectCounters {
   paidUsd: number;
@@ -830,10 +831,9 @@ export interface EvolutionProfile {
     version: number;
     contentSha256: string;
   };
-  maturity: EvolutionPackMaturity;
+  runtimeMaturity: EvolutionRuntimeMaturity;
   allowedSurfaceIds: string[];
-  activatedAt: string;
-  activatedByReceipt?: string;
+  registeredAt: string;
 }
 
 export interface ProductionEpisode {
@@ -854,7 +854,7 @@ export interface ProductionEpisode {
     status: "approved";
     policySha256: string;
     reviewerRef: string;
-    dataClassification: string;
+    dataClassification: "public" | "internal" | "confidential" | "restricted";
     retentionPolicyRef: string;
     inputSnapshotSha256: string;
     outcomeSnapshotSha256: string;
@@ -903,7 +903,8 @@ export interface MatchedExperiment {
   evidenceRefs: string[];
 }
 
-export interface PromotionReceipt {
+/** @internal Draft evidence shape only. No promotion execution chain exists. */
+export interface DraftPromotionReceipt {
   schemaVersion: 1;
   id: string;
   projectId: string;

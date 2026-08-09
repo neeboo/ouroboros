@@ -44,7 +44,6 @@ export {
   parseHarnessVariant,
   parseMatchedExperiment,
   parseProductionEpisode,
-  parsePromotionReceipt,
 } from "./target-evolution";
 export type {
   ContractAmendmentEntry,
@@ -127,6 +126,7 @@ export type {
   EvolutionPackV1,
   EvolutionProfile,
   EvolutionRecordKind,
+  EvolutionRuntimeMaturity,
   EvolutionSideEffectCounters,
   EvolutionTarget,
   ExecutionThread,
@@ -170,7 +170,6 @@ export type {
   PlannedTask,
   Project,
   ProductionEpisode,
-  PromotionReceipt,
   PromptTemplate,
   RecordAttemptEventInput,
   RecordAttemptInput,

@@ -2,6 +2,7 @@ import { Database } from "bun:sqlite";
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
+import { EVOLUTION_ACTION_RECEIPTS_SCHEMA_SQL } from "./schema";
 
 export type HarnessDatabase = Database;
 
@@ -403,7 +404,8 @@ export function ensureEvolutionRuntimeTables(db: Pick<Database, "exec">) {
       id text primary key,
       schema_version integer not null check (schema_version = 1),
       project_id text not null,
-      maturity text not null,
+      runtime_maturity text not null check (runtime_maturity = 'declared'),
+      registered_at text not null,
       record_sha256 text not null check (length(record_sha256) = 64),
       record_json text not null,
       created_at text not null default current_timestamp,
@@ -523,6 +525,7 @@ export function ensureEvolutionRuntimeTables(db: Pick<Database, "exec">) {
       select raise(abort, 'matched_experiments are immutable');
     end;
   `);
+  db.exec(EVOLUTION_ACTION_RECEIPTS_SCHEMA_SQL);
 }
 
 function ensureRunLifecycleGuards(db: Database) {
