@@ -603,7 +603,7 @@ export function applyHarnessAction(
   const eventId = harness.recordHarnessActionEvent({
     actionType: action.type,
     status: result.status,
-    request: action,
+    request: safeRequest(action),
     result: resultToRecord(result),
   });
   if (action.type === "integrateVerifiedRun" && result.status === "blocked") {
@@ -1622,7 +1622,7 @@ function recordSubsessionEvent(
   return harness.recordHarnessActionEvent({
     actionType: action.type,
     status: result.status,
-    request: action as unknown as Record<string, unknown>,
+    request: safeRequest(action),
     result: resultToRecord(result),
   });
 }
@@ -5709,7 +5709,7 @@ function sanitizeActionRequestValue(
     return "[REDACTED]";
   }
   if (typeof value === "string") {
-    return sanitizeGitRemoteText(value);
+    return sanitizeEvolutionErrorText(value);
   }
   if (!value || typeof value !== "object") {
     return value;

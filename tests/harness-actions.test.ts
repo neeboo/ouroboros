@@ -3602,6 +3602,53 @@ describe("Harness actions", () => {
     });
   });
 
+  test("redacts sensitive values from a parsed blocked generic action audit", () => {
+    const runId = harness.createRun({
+      goal: "Reject a stale sensitive amendment",
+      context: { goalContract: { version: 1 } },
+    });
+    const result = applyHarnessAction(harness, {
+      type: "amendRunContract",
+      runId,
+      contractKey: "goalContract",
+      value: {
+        Authorization: "Bearer authorization-secret",
+        token: "token-secret",
+        api_key: "api-key-secret",
+        diagnostic: "Bearer embedded-secret",
+        ordinary: "preserve this audit detail",
+      },
+      version: 1,
+      expectedVersion: 1,
+      reason: "retain ordinary amendment reason",
+    });
+    const event = harness.getHarnessActionEvent({ id: result.eventId });
+    const serializedEvent = JSON.stringify(event);
+
+    expect(result.status).toBe("blocked");
+    expect(event).toMatchObject({
+      actionType: "amendRunContract",
+      status: "blocked",
+      request: {
+        type: "amendRunContract",
+        runId,
+        contractKey: "goalContract",
+        reason: "retain ordinary amendment reason",
+        value: {
+          Authorization: "[REDACTED]",
+          token: "[REDACTED]",
+          api_key: "[REDACTED]",
+          diagnostic: expect.stringContaining("[REDACTED]"),
+          ordinary: "preserve this audit detail",
+        },
+      },
+    });
+    for (const secret of ["authorization-secret", "token-secret", "api-key-secret", "embedded-secret"]) {
+      expect(serializedEvent).not.toContain(secret);
+    }
+    expect(harness.getRun(runId)?.context.goalContract).toEqual({ version: 1 });
+  });
+
   test("rejects a non-monotonic contract amendment version", () => {
     const runId = harness.createRun({
       goal: "Reject non-monotonic amendment",
@@ -4071,13 +4118,14 @@ describe("Harness actions", () => {
       },
     };
 
+    const sensitivePrompt = "Inspect the protocol docs. Authorization: Bearer subsession-secret";
     const result = applyHarnessAction(
       harness,
       {
         type: "startSubsession",
         parentTaskId: taskId,
         purpose: "Research API contracts",
-        prompt: "Inspect the protocol docs and summarize the harness-managed subsession contract.",
+        prompt: sensitivePrompt,
         backend: "codex-resumable",
       },
       { subsessionRunner: runner },
@@ -4101,6 +4149,15 @@ describe("Harness actions", () => {
       kind: "subsession_thread",
       threadId: recordedThreadId,
     }));
+    expect(calls[0]?.prompt).toBe(sensitivePrompt);
+    const event = harness.getHarnessActionEvent({ id: result.eventId });
+    expect(event?.request).toMatchObject({
+      parentTaskId: taskId,
+      purpose: "Research API contracts",
+      prompt: expect.stringContaining("[REDACTED]"),
+      backend: "codex-resumable",
+    });
+    expect(JSON.stringify(event)).not.toContain("subsession-secret");
   });
 
   test("collectSubsessions and cancelSubsessions update recorded child thread evidence", () => {
