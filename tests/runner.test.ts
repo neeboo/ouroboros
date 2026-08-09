@@ -708,7 +708,11 @@ describe("runner", () => {
           evolutionPack: proposal.evolutionPack,
           causalHypothesis: proposal.causalHypothesis,
           evolutionComparison: proposal.evaluationContract.comparison,
-          designEvaluationContract: proposal.evaluationContract,
+          designEvaluationContract: {
+            ...proposal.evaluationContract,
+            holdoutContents: ["DO_NOT_LEAK_HELDOUT_CONTENT"],
+            secret: "DO_NOT_LEAK_EVALUATION_SECRET",
+          },
           evolutionInstance: {
             schemaVersion: 1,
             mode: "design-target",
@@ -723,6 +727,11 @@ describe("runner", () => {
           },
           designProposal: {
             ...proposal,
+            evaluationContract: {
+              ...proposal.evaluationContract,
+              holdoutContents: ["DO_NOT_LEAK_HELDOUT_CONTENT"],
+              secret: "DO_NOT_LEAK_EVALUATION_SECRET",
+            },
             holdoutContents: ["DO_NOT_LEAK_HELDOUT_CONTENT"],
             holdoutResults: { score: 1 },
           },
@@ -752,6 +761,8 @@ describe("runner", () => {
       expect(prompt).toContain("project_kernel");
       expect(prompt).not.toContain("DO_NOT_LEAK_HELDOUT_CONTENT");
       expect(prompt).not.toContain('"holdoutResults"');
+      expect(prompt).not.toContain("DO_NOT_LEAK_EVALUATION_SECRET");
+      expect(prompt).not.toContain('"secret"');
     },
   );
 
@@ -7849,26 +7860,23 @@ describe("runner", () => {
           }],
         } as AttemptOutput,
       });
-      expect(result.decision).toBe("continue");
       const artifact = (result.artifacts ?? []).find(
         (entry) => (entry as { kind?: string }).kind === "created_run",
-      ) as { runId: string };
-      return harness.getRun(artifact.runId)!;
+      ) as { runId: string } | undefined;
+      return {
+        result,
+        child: artifact ? harness.getRun(artifact.runId) : null,
+      };
     };
 
     const selfProposal = targetEvolutionProposal(targetProjectId);
-    const selfChild = await deliver({
+    (selfProposal.evaluationContract as Record<string, unknown>).holdoutContents = [
+      "DO_NOT_LEAK_CHILD_HELDOUT_CONTENT",
+    ];
+    (selfProposal.evaluationContract as Record<string, unknown>).secret =
+      "DO_NOT_LEAK_EVALUATION_SECRET";
+    const selfDelivery = await deliver({
       proposalData: selfProposal,
-      sourceContext: {
-        evolutionInstance: {
-          schemaVersion: 1,
-          mode: "design-target",
-          kernelProjectId,
-          targetProjectId,
-          // Missing cycle makes this inherited instance untrusted. The child
-          // must fall back to the source run's bound project identity.
-        },
-      },
       plannedContext: {
         projectId: "project_polluted",
         evolutionPack: { id: "pack_polluted" },
@@ -7879,6 +7887,8 @@ describe("runner", () => {
         evolutionInstance: { schemaVersion: 999, kernelProjectId: "project_polluted" },
       },
     });
+    expect(selfDelivery.result.decision).toBe("continue");
+    const selfChild = selfDelivery.child!;
     const canonicalize = (value: unknown): unknown => {
       if (value === null || typeof value !== "object") return value;
       if (Array.isArray(value)) return value.map(canonicalize);
@@ -7890,13 +7900,20 @@ describe("runner", () => {
       .digest("hex");
 
     expect(selfChild.projectId).toBe(targetProjectId);
+    const expectedEvaluationContract = {
+      baseline: validProposal.evaluationContract.baseline,
+      successMetrics: validProposal.evaluationContract.successMetrics,
+      guardMetrics: validProposal.evaluationContract.guardMetrics,
+      requiredEvidence: validProposal.evaluationContract.requiredEvidence,
+      comparison: selfProposal.evaluationContract.comparison,
+    };
     expect(selfChild.context).toMatchObject({
       projectId: targetProjectId,
       evolutionPack: selfProposal.evolutionPack,
       causalHypothesis: selfProposal.causalHypothesis,
       comparison: selfProposal.evaluationContract.comparison,
       evolutionComparison: selfProposal.evaluationContract.comparison,
-      designEvaluationContract: selfProposal.evaluationContract,
+      designEvaluationContract: expectedEvaluationContract,
       evolutionInstance: {
         schemaVersion: 1,
         mode: "self",
@@ -7910,6 +7927,23 @@ describe("runner", () => {
         },
       },
     });
+    expect(selfChild.context.designEvaluationContract).not.toHaveProperty("holdoutContents");
+    expect(selfChild.context.designEvaluationContract).not.toHaveProperty("secret");
+    expect(
+      (selfChild.context.designProposal as { evaluationContract: Record<string, unknown> })
+        .evaluationContract,
+    ).toEqual(expectedEvaluationContract);
+    const selfPlanner = harness.getRunOverview({ runId: selfChild.id }).tasks.find(
+      (task) => task.role === "planner",
+    )!;
+    const selfPlannerPrompt = buildTaskPrompt({
+      run: selfChild,
+      task: selfPlanner,
+      dependencyAttempts: [],
+    });
+    expect(selfPlannerPrompt).not.toContain("DO_NOT_LEAK_CHILD_HELDOUT_CONTENT");
+    expect(selfPlannerPrompt).not.toContain("DO_NOT_LEAK_EVALUATION_SECRET");
+    expect(selfPlannerPrompt).not.toContain('"secret"');
 
     const reordered = targetEvolutionProposal(targetProjectId);
     reordered.evolutionPack = {
@@ -7926,7 +7960,7 @@ describe("runner", () => {
       id: reordered.evolutionPack.id,
       schemaVersion: reordered.evolutionPack.schemaVersion,
     } as typeof reordered.evolutionPack;
-    const designTargetChild = await deliver({
+    const designTargetDelivery = await deliver({
       proposalData: reordered,
       sourceContext: {
         evolutionInstance: {
@@ -7938,6 +7972,8 @@ describe("runner", () => {
         },
       },
     });
+    expect(designTargetDelivery.result.decision).toBe("continue");
+    const designTargetChild = designTargetDelivery.child!;
     expect(designTargetChild.context.evolutionInstance).toMatchObject({
       schemaVersion: 1,
       mode: "design-target",
@@ -7946,6 +7982,24 @@ describe("runner", () => {
       cycle: { kind: "bootstrap", index: 0 },
       pack: { contentSha256: expectedHash },
     });
+
+    const invalidSourceDelivery = await deliver({
+      proposalData: targetEvolutionProposal(targetProjectId),
+      sourceContext: {
+        evolutionInstance: {
+          schemaVersion: 1,
+          mode: "design-target",
+          kernelProjectId,
+          targetProjectId,
+          // Deliberately missing cycle: present-but-invalid identity must fail.
+        },
+      },
+    });
+    expect(invalidSourceDelivery.result.decision).toBe("exit");
+    expect(invalidSourceDelivery.result.problems?.[0]).toContain(
+      "source run evolutionInstance",
+    );
+    expect(invalidSourceDelivery.child).toBeNull();
   });
 
   test("apply-design-actions hook records proposal, decision, outcome, and runs", async () => {

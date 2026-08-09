@@ -7,6 +7,7 @@ import {
   type AuthorityPortfolioUsage,
   type AuthorityProposalRiskSurface,
   type DesignActionInput,
+  type DesignEvaluationContract,
   type EvolutionCausalHypothesis,
   type EvolutionComparison,
   type EvolutionInstance,
@@ -1309,14 +1310,19 @@ function applyCreateRunsFromDesignWithDb(
     assertCharterProject(harness, db, resolvedCharterId, proposalProjectId, "createRunsFromDesign");
   }
 
-  const frozenEvolution = freezeTargetEvolutionContract(proposal, sourceRun, proposalProjectId);
-  const frozenContract = {
-    ...proposal.proposal.evaluationContract,
-    ...(frozenEvolution ? { comparison: frozenEvolution.comparison } : {}),
-  };
-  // Preserve the complete stored proposal envelope — including any extension
-  // fields the designer recorded beyond the canonical contract — so planners,
-  // workers, and verifiers inherit a single durable source of truth. The
+  const frozenContract = normalizeDesignEvaluationContract(
+    proposal.proposal.evaluationContract,
+    "createRunsFromDesign proposal.evaluationContract",
+  );
+  const frozenEvolution = freezeTargetEvolutionContract(
+    proposal,
+    sourceRun,
+    proposalProjectId,
+    frozenContract.comparison,
+  );
+  // Preserve proposal envelope extensions outside evaluationContract. The
+  // evaluation contract itself is normalized to the supported whitelist so
+  // arbitrary stored fields cannot become child-run or prompt material. The
   // canonical top-level fields are re-pinned from the stored columns to defend
   // against a proposal_json payload that drifts away from them.
   const frozenProposal: Record<string, unknown> = {
@@ -1461,6 +1467,13 @@ function applyCreateRunsFromDesignWithDb(
       }
     }
     const existingTask = harness.getTask(plannerTaskId);
+    const plannerGoal = `Plan run: ${plannedRun.goal}`;
+    const plannerDoneWhen = plannedRun.doneWhen ?? [
+      "Planner returns a small nextTasks graph for this run",
+      "Every generated task honors the frozen design evaluation contract",
+      "The run can be drained by the supervisor without manual task injection",
+    ];
+    const plannerConfig = plannedRun.modelPreference ? { modelPreference: plannedRun.modelPreference } : {};
     if (!existingTask) {
       if (options.requireExisting || (existingRun && frozenEvolution)) {
         throw new Error(
@@ -1471,14 +1484,19 @@ function applyCreateRunsFromDesignWithDb(
         id: plannerTaskId,
         runId: childRunId,
         role: "planner",
-        goal: `Plan run: ${plannedRun.goal}`,
+        goal: plannerGoal,
         prompt: plannedRun.prompt,
-        doneWhen: plannedRun.doneWhen ?? [
-          "Planner returns a small nextTasks graph for this run",
-          "Every generated task honors the frozen design evaluation contract",
-          "The run can be drained by the supervisor without manual task injection",
-        ],
-        config: plannedRun.modelPreference ? { modelPreference: plannedRun.modelPreference } : {},
+        doneWhen: plannerDoneWhen,
+        config: plannerConfig,
+      });
+    } else if (frozenEvolution) {
+      verifyExistingPlannerTask(existingTask, {
+        runId: childRunId,
+        role: "planner",
+        goal: plannerGoal,
+        prompt: plannedRun.prompt,
+        doneWhen: plannerDoneWhen,
+        config: plannerConfig,
       });
     }
     createdRuns.push({ runId: childRunId, plannerTaskId, proposalId: proposal.id });
@@ -1600,15 +1618,14 @@ function freezeTargetEvolutionContract(
   proposal: DesignProposal,
   sourceRun: Run,
   targetProjectId: string,
+  comparison: EvolutionComparison | undefined,
 ): FrozenTargetEvolutionContract | null {
   const rawPack = proposal.proposal.evolutionPack;
   const rawCausalHypothesis = proposal.proposal.causalHypothesis;
-  const rawComparison = proposal.proposal.evaluationContract?.comparison;
-  const present = [rawPack, rawCausalHypothesis, rawComparison].map((value) => value !== undefined);
-  if (present.every((value) => !value)) {
+  if (rawPack === undefined && rawCausalHypothesis === undefined && comparison === undefined) {
     return null;
   }
-  if (!present.every(Boolean)) {
+  if (rawPack === undefined || rawCausalHypothesis === undefined || comparison === undefined) {
     throw new Error(
       "createRunsFromDesign target evolution data must include evolutionPack, causalHypothesis, and evaluationContract.comparison as one complete group",
     );
@@ -1623,22 +1640,12 @@ function freezeTargetEvolutionContract(
     rawCausalHypothesis,
     "createRunsFromDesign proposal.causalHypothesis",
   );
-  const comparison = parseEvolutionComparison(
-    rawComparison,
-    "createRunsFromDesign proposal.evaluationContract.comparison",
-  );
-
   let kernelProjectId = sourceRun.projectId;
   if (sourceRun.context.evolutionInstance !== undefined) {
-    try {
-      kernelProjectId = parseEvolutionInstance(
-        sourceRun.context.evolutionInstance,
-        "createRunsFromDesign source run evolutionInstance",
-      ).kernelProjectId;
-    } catch {
-      // Only a fully valid source instance is trusted. Invalid inherited
-      // metadata carries no authority and falls back to the bound source run.
-    }
+    kernelProjectId = parseEvolutionInstance(
+      sourceRun.context.evolutionInstance,
+      "createRunsFromDesign source run evolutionInstance",
+    ).kernelProjectId;
   }
   if (!kernelProjectId) {
     throw new Error(
@@ -1662,6 +1669,35 @@ function freezeTargetEvolutionContract(
   }, "createRunsFromDesign evolutionInstance");
 
   return { pack, causalHypothesis, comparison, instance };
+}
+
+function normalizeDesignEvaluationContract(
+  value: unknown,
+  label: string,
+): DesignEvaluationContract {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error(`${label} must be an object`);
+  }
+  const record = value as Record<string, unknown>;
+  const baseline = optionalStringArray(record.baseline, `${label}.baseline`) ?? [];
+  const successMetrics = optionalStringArray(record.successMetrics, `${label}.successMetrics`) ?? [];
+  const guardMetrics = optionalStringArray(record.guardMetrics, `${label}.guardMetrics`) ?? [];
+  const requiredEvidence = optionalStringArray(record.requiredEvidence, `${label}.requiredEvidence`) ?? [];
+  if (successMetrics.length === 0 && requiredEvidence.length === 0) {
+    throw new Error(`${label} must define successMetrics or requiredEvidence`);
+  }
+  const reviewAt = optionalString(record.reviewAt, `${label}.reviewAt`);
+  const comparison = record.comparison === undefined
+    ? undefined
+    : parseEvolutionComparison(record.comparison, `${label}.comparison`);
+  return {
+    baseline,
+    successMetrics,
+    guardMetrics,
+    requiredEvidence,
+    ...(reviewAt === undefined ? {} : { reviewAt }),
+    ...(comparison ? { comparison } : {}),
+  };
 }
 
 function withoutProtectedDesignContext(value: unknown): Record<string, unknown> {
@@ -1702,6 +1738,33 @@ function verifyExistingFrozenDesignRun(
     ) {
       throw new Error(
         `createRunsFromDesign child run ${existingRun.id} frozen context.${key} drifted from the accepted proposal`,
+      );
+    }
+  }
+}
+
+function verifyExistingPlannerTask(
+  task: Task,
+  expected: {
+    runId: string;
+    role: string;
+    goal: string;
+    prompt: string;
+    doneWhen: string[];
+    config: Record<string, unknown>;
+  },
+) {
+  for (const key of ["runId", "role", "goal", "prompt"] as const) {
+    if (task[key] !== expected[key]) {
+      throw new Error(
+        `createRunsFromDesign planner task ${task.id} ${key} drifted; expected ${JSON.stringify(expected[key])}, found ${JSON.stringify(task[key])}`,
+      );
+    }
+  }
+  for (const key of ["doneWhen", "config"] as const) {
+    if (stableCanonicalJson(task[key] ?? {}) !== stableCanonicalJson(expected[key])) {
+      throw new Error(
+        `createRunsFromDesign planner task ${task.id} ${key} drifted from the planned task contract`,
       );
     }
   }

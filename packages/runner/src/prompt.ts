@@ -143,39 +143,197 @@ function renderFrozenTargetEvolutionContract(
   if (!evolutionInstance || !evolutionPack || !causalHypothesis || !comparison || !evaluationContract) {
     return "";
   }
+  const safeComparison = frozenComparisonView(comparison);
   return [
     "## Frozen Target Evolution Contract",
     "This task may implement or evaluate the accepted design, but it must not weaken, replace, or amend these frozen values.",
     "Holdout evidence references identify the sealed split. Do not request, infer, reproduce, or expose holdout contents or results during candidate generation.",
     "### Optimization target pack",
     "```json",
-    prettyJson(evolutionPack),
+    prettyJson(frozenEvolutionPackView(evolutionPack)),
     "```",
     "### Causal hypothesis",
     "```json",
-    prettyJson(causalHypothesis),
+    prettyJson(frozenCausalHypothesisView(causalHypothesis)),
     "```",
     "### Matched comparison protocol",
     "```json",
-    prettyJson(comparison),
+    prettyJson(safeComparison),
     "```",
     "### Frozen evaluation contract",
     "```json",
-    prettyJson(evaluationContract),
+    prettyJson(frozenEvaluationContractView(evaluationContract, safeComparison)),
     "```",
     "### Evolution instance identity",
     "```json",
-    prettyJson(evolutionInstance),
+    prettyJson(frozenEvolutionInstanceView(evolutionInstance)),
     "```",
     "",
   ].join("\n");
 }
 
 function promptSafeRunContext(context: Record<string, unknown>): Record<string, unknown> {
-  if (!asRecord(context.evolutionInstance)) {
+  const evolutionInstance = asRecord(context.evolutionInstance);
+  if (!evolutionInstance) {
     return context;
   }
-  return redactHeldoutMaterial(context) as Record<string, unknown>;
+  const {
+    evolutionPack: _evolutionPack,
+    causalHypothesis: _causalHypothesis,
+    comparison: _comparison,
+    evolutionComparison: _evolutionComparison,
+    designEvaluationContract: _designEvaluationContract,
+    designProposal: _designProposal,
+    evolutionInstance: _evolutionInstance,
+    ...rest
+  } = context;
+  return {
+    ...(redactHeldoutMaterial(rest) as Record<string, unknown>),
+    targetEvolutionSummary: frozenEvolutionInstanceView(evolutionInstance),
+  };
+}
+
+function frozenEvaluationContractView(
+  contract: Record<string, unknown>,
+  comparison: Record<string, unknown>,
+): Record<string, unknown> {
+  return pickDefined({
+    baseline: contract.baseline,
+    successMetrics: contract.successMetrics,
+    guardMetrics: contract.guardMetrics,
+    requiredEvidence: contract.requiredEvidence,
+    reviewAt: contract.reviewAt,
+    comparison,
+  });
+}
+
+function frozenComparisonView(comparison: Record<string, unknown>): Record<string, unknown> {
+  const equalBudget = asRecord(comparison.equalBudget);
+  return pickDefined({
+    controlRef: comparison.controlRef,
+    developmentEvidenceRefs: comparison.developmentEvidenceRefs,
+    holdoutEvidenceRefs: comparison.holdoutEvidenceRefs,
+    unrelatedEvidenceRefs: comparison.unrelatedEvidenceRefs,
+    corpusSnapshotSha256: comparison.corpusSnapshotSha256,
+    equalBudget: equalBudget
+      ? pickDefined({
+          model: equalBudget.model,
+          reasoningEffort: equalBudget.reasoningEffort,
+          wallClockMs: equalBudget.wallClockMs,
+          maxAttempts: equalBudget.maxAttempts,
+          maxTokens: equalBudget.maxTokens,
+          toolPolicySha256: equalBudget.toolPolicySha256,
+          concurrency: equalBudget.concurrency,
+        })
+      : undefined,
+    primaryMetric: comparison.primaryMetric,
+    minimumUplift: comparison.minimumUplift,
+    maximumGuardRegression: comparison.maximumGuardRegression,
+  });
+}
+
+function frozenCausalHypothesisView(hypothesis: Record<string, unknown>): Record<string, unknown> {
+  return pickDefined({
+    failureClass: hypothesis.failureClass,
+    mechanism: hypothesis.mechanism,
+    predictedEffects: hypothesis.predictedEffects,
+    disconfirmingEvidence: hypothesis.disconfirmingEvidence,
+  });
+}
+
+function frozenEvolutionInstanceView(instance: Record<string, unknown>): Record<string, unknown> {
+  const cycle = asRecord(instance.cycle);
+  const pack = asRecord(instance.pack);
+  return pickDefined({
+    schemaVersion: instance.schemaVersion,
+    mode: instance.mode,
+    kernelProjectId: instance.kernelProjectId,
+    targetProjectId: instance.targetProjectId,
+    cycle: cycle ? pickDefined({ kind: cycle.kind, index: cycle.index }) : undefined,
+    pack: pack
+      ? pickDefined({ id: pack.id, version: pack.version, contentSha256: pack.contentSha256 })
+      : undefined,
+  });
+}
+
+function frozenEvolutionPackView(pack: Record<string, unknown>): Record<string, unknown> {
+  const objective = asRecord(pack.objective);
+  const observation = asRecord(pack.observation);
+  const experimentPolicy = asRecord(pack.experimentPolicy);
+  const promotionPolicy = asRecord(pack.promotionPolicy);
+  const handoff = asRecord(pack.handoff);
+  const portability = asRecord(pack.portability);
+  const signalSources = Array.isArray(observation?.signalSources)
+    ? observation.signalSources.map((value) => {
+        const source = asRecord(value);
+        return source ? pickDefined({ id: source.id, kind: source.kind, freshnessMs: source.freshnessMs }) : {};
+      })
+    : undefined;
+  const mutationSurfaces = Array.isArray(pack.mutationSurfaces)
+    ? pack.mutationSurfaces.map((value) => {
+        const surface = asRecord(value);
+        return surface
+          ? pickDefined({
+              id: surface.id,
+              evolutionTarget: surface.evolutionTarget,
+              layer: surface.layer,
+              projectId: surface.projectId,
+              allowedPaths: surface.allowedPaths,
+              forbiddenPaths: surface.forbiddenPaths,
+              owner: surface.owner,
+            })
+          : {};
+      })
+    : undefined;
+  return pickDefined({
+    schemaVersion: pack.schemaVersion,
+    id: pack.id,
+    targetSystemId: pack.targetSystemId,
+    version: pack.version,
+    knowledgeScope: pack.knowledgeScope,
+    objective: objective
+      ? pickDefined({
+          charterId: objective.charterId,
+          domainOutcomes: objective.domainOutcomes,
+          nonGoals: objective.nonGoals,
+        })
+      : undefined,
+    observation: observation ? pickDefined({ signalSources }) : undefined,
+    mutationSurfaces,
+    experimentPolicy: experimentPolicy
+      ? pickDefined({
+          controlRequired: experimentPolicy.controlRequired,
+          holdoutRequired: experimentPolicy.holdoutRequired,
+          unrelatedRegressionRequired: experimentPolicy.unrelatedRegressionRequired,
+          equalBudgetRequired: experimentPolicy.equalBudgetRequired,
+          maxCandidates: experimentPolicy.maxCandidates,
+        })
+      : undefined,
+    promotionPolicy: promotionPolicy
+      ? pickDefined({
+          guardMetrics: promotionPolicy.guardMetrics,
+          observationWindow: promotionPolicy.observationWindow,
+          rollback: promotionPolicy.rollback,
+        })
+      : undefined,
+    handoff: handoff
+      ? pickDefined({
+          maturity: handoff.maturity,
+          targetOwner: handoff.targetOwner,
+          requiredCapabilities: handoff.requiredCapabilities,
+        })
+      : undefined,
+    portability: portability
+      ? pickDefined({
+          projectLocalRules: portability.projectLocalRules,
+          genericizationEvidence: portability.genericizationEvidence,
+        })
+      : undefined,
+  });
+}
+
+function pickDefined(record: Record<string, unknown>): Record<string, unknown> {
+  return Object.fromEntries(Object.entries(record).filter(([, value]) => value !== undefined));
 }
 
 function redactHeldoutMaterial(value: unknown): unknown {
