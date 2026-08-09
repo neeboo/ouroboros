@@ -93,6 +93,11 @@ import {
   formatListSignals,
   formatShowDesign,
 } from "./design-status";
+import {
+  listEvolutionRecords,
+  parseEvolutionReadbackKind,
+  showEvolutionRecord,
+} from "./evolution-readback";
 import { buildAgentMatrix, doctorAgent } from "../../../scripts/acpx-agent-smoke";
 import { join, resolve } from "node:path";
 import { cpus, totalmem } from "node:os";
@@ -1124,6 +1129,35 @@ switch (parsed.command) {
     printJson({ taskId, status: "todo" });
     break;
   }
+  case "show-evolution-record": {
+    requireEvolutionJsonOutput();
+    try {
+      printJson(showEvolutionRecord({
+        harness,
+        dbPath: parsed.db,
+        kind: parseEvolutionReadbackKind(required(parsed, "kind")),
+        projectId: required(parsed, "project-id"),
+        id: required(parsed, "id"),
+      }));
+    } catch (error) {
+      fail((error as Error).message);
+    }
+    break;
+  }
+  case "list-evolution-records": {
+    requireEvolutionJsonOutput();
+    try {
+      printJson(listEvolutionRecords({
+        harness,
+        kind: parseEvolutionReadbackKind(required(parsed, "kind")),
+        projectId: required(parsed, "project-id"),
+        profileId: flag(parsed, "profile-id"),
+      }));
+    } catch (error) {
+      fail((error as Error).message);
+    }
+    break;
+  }
   case "design-status": {
     const projectId = resolveDesignProjectId(parsed);
     const asJson = flag(parsed, "json") !== undefined;
@@ -1293,6 +1327,8 @@ function printHelp() {
     "  list-signals         List strategy signals filtered by class and status",
     "  show-design          Print a design proposal with decisions and outcomes",
     "  list-design-outcomes List design outcomes filtered by proposal, stage, or due status",
+    "  show-evolution-record Read one project-scoped evolution record and its successful action audit",
+    "  list-evolution-records List project-scoped evolution records with recomputed content hashes",
     "",
     "Examples:",
     "  orbs init",
@@ -1320,6 +1356,12 @@ function parseApproval(raw: string) {
     fail("--approval must be approve-all, approve-reads, or deny-all");
   }
   return raw;
+}
+
+function requireEvolutionJsonOutput() {
+  if (flag(parsed, "json") === undefined) {
+    fail("--json is required for evolution record inspection");
+  }
 }
 
 function parseSandbox(raw: string): CodexSandbox {
