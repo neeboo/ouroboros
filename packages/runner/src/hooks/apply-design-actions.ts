@@ -10,6 +10,7 @@ import {
   type DesignEvaluationContract,
   type EvolutionCausalHypothesis,
   type EvolutionComparison,
+  type EvolutionDeliveryContracts,
   type EvolutionInstance,
   type EvolutionPackV1,
   type DesignProposal,
@@ -21,6 +22,7 @@ import {
   type Task,
   parseEvolutionCausalHypothesis,
   parseEvolutionComparison,
+  parseEvolutionDeliveryContracts,
   parseEvolutionInstance,
   parseEvolutionPackV1,
 } from "@ouroboros/harness";
@@ -1344,6 +1346,7 @@ function applyCreateRunsFromDesignWithDb(
       ? {
           evolutionPack: frozenEvolution.pack,
           causalHypothesis: frozenEvolution.causalHypothesis,
+          ...(frozenEvolution.deliveryContracts ?? {}),
         }
       : {}),
   };
@@ -1612,12 +1615,18 @@ interface FrozenTargetEvolutionContract {
   causalHypothesis: EvolutionCausalHypothesis;
   comparison: EvolutionComparison;
   instance: EvolutionInstance;
+  deliveryContracts: EvolutionDeliveryContracts | null;
 }
 
 function proposalHasAnyTargetEvolutionData(proposal: DesignProposal): boolean {
   return proposal.proposal.evolutionPack !== undefined
     || proposal.proposal.causalHypothesis !== undefined
-    || proposal.proposal.evaluationContract?.comparison !== undefined;
+    || proposal.proposal.evaluationContract?.comparison !== undefined
+    || proposal.proposal.episodeCollectionContract !== undefined
+    || proposal.proposal.maturityGateContract !== undefined
+    || proposal.proposal.productionEpisodePrivacyReceiptContract !== undefined
+    || proposal.proposal.promotionReceiptContract !== undefined
+    || proposal.proposal.rollbackContract !== undefined;
 }
 
 function freezeTargetEvolutionContract(
@@ -1645,6 +1654,12 @@ function freezeTargetEvolutionContract(
   const causalHypothesis = parseEvolutionCausalHypothesis(
     rawCausalHypothesis,
     "createRunsFromDesign proposal.causalHypothesis",
+  );
+  const deliveryContracts = parseEvolutionDeliveryContracts(
+    proposal.proposal,
+    targetProjectId,
+    pack,
+    "createRunsFromDesign proposal",
   );
   let kernelProjectId = sourceRun.projectId;
   if (sourceRun.context.evolutionInstance !== undefined) {
@@ -1674,7 +1689,7 @@ function freezeTargetEvolutionContract(
     },
   }, "createRunsFromDesign evolutionInstance");
 
-  return { pack, causalHypothesis, comparison, instance };
+  return { pack, causalHypothesis, comparison, instance, deliveryContracts };
 }
 
 function normalizeDesignEvaluationContract(

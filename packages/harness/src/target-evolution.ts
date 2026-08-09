@@ -4,6 +4,8 @@ import type {
   DraftPromotionReceipt,
   EvolutionCausalHypothesis,
   EvolutionComparison,
+  EvolutionDeliveryContracts,
+  EpisodeCollectionContract,
   EvolutionCycleKind,
   EvolutionFirstCandidate,
   EvolutionInstance,
@@ -18,7 +20,11 @@ import type {
   EvolutionTarget,
   HarnessVariant,
   MatchedExperiment,
+  MaturityGateContract,
   ProductionEpisode,
+  ProductionEpisodePrivacyReceiptContract,
+  PromotionReceiptContract,
+  RollbackContract,
 } from "./types";
 
 export const TARGET_EVOLUTION_LIMITS = Object.freeze({
@@ -107,6 +113,39 @@ const SIDE_EFFECT_BUDGET_KEYS = [
   "crossProjectMemoryReads",
   "crossProjectMemoryWrites",
 ] as const satisfies ReadonlyArray<keyof EvolutionSideEffectCounters>;
+const EPISODE_COLLECTION_SOURCES = new Set<EpisodeCollectionContract["allowedSources"][number]>([
+  "host-owned-production-observation",
+  "host-owned-fixture-replay",
+]);
+const REQUIRED_EPISODE_FIELDS = [
+  "profileId",
+  "sourceRef",
+  "leakageGroupId",
+  "observedAt",
+  "inputSnapshotSha256",
+  "outcomeSnapshotSha256",
+  "policyRef",
+  "metrics",
+  "sideEffectCounters",
+  "evidenceRefs",
+  "privacyReview",
+] as const satisfies EpisodeCollectionContract["requiredEpisodeFields"];
+const MATURITY_STAGE_IDS = ["designed", "instrumented", "shadowing"] as const;
+const MATURITY_STAGE_ID_SET = new Set<MaturityGateContract["stages"][number]["id"]>(MATURITY_STAGE_IDS);
+const MATURITY_FAILURES = new Set<MaturityGateContract["stages"][number]["failureMaturity"]>([
+  "designed",
+  "instrumented",
+]);
+const REQUIRED_MATURITY_TRANSITIONS = [
+  "designed->instrumented",
+  "instrumented->shadowing",
+] as const satisfies MaturityGateContract["allowedTransitions"];
+const REQUIRED_FORBIDDEN_MATURITY_TRANSITIONS = [
+  "designed->shadowing",
+  "designed->autonomous",
+  "instrumented->autonomous",
+  "shadowing->autonomous",
+] as const satisfies MaturityGateContract["forbiddenTransitions"];
 
 export function parseEvolutionInstance(
   value: unknown,
@@ -430,6 +469,462 @@ export function parseEvolutionComparison(
       `${label}.maximumGuardRegression`,
     ),
   };
+}
+
+export function parseEpisodeCollectionContract(
+  value: unknown,
+  expectedProjectId: string,
+  label = "episodeCollectionContract",
+): EpisodeCollectionContract {
+  const record = strictObject(value, [
+    "schemaVersion",
+    "id",
+    "projectId",
+    "mode",
+    "allowedSources",
+    "requiredEpisodeFields",
+    "privacyReceiptContractRef",
+    "appendOnly",
+    "rawPayloadPolicy",
+    "sideEffectBudget",
+  ], label);
+  requireSchemaVersion(record.schemaVersion, `${label}.schemaVersion`);
+  const allowedSources = requireArray(
+    record.allowedSources,
+    `${label}.allowedSources`,
+    EPISODE_COLLECTION_SOURCES.size,
+  ).map((entry, index) => requireEnum(
+    entry,
+    EPISODE_COLLECTION_SOURCES,
+    `${label}.allowedSources[${index}]`,
+  ));
+  requireNonEmpty(allowedSources, `${label}.allowedSources`);
+  requireUniqueStrings(allowedSources, `${label}.allowedSources`);
+  const requiredEpisodeFields = requireExactStringSet(
+    record.requiredEpisodeFields,
+    REQUIRED_EPISODE_FIELDS,
+    `${label}.requiredEpisodeFields`,
+  ) as EpisodeCollectionContract["requiredEpisodeFields"];
+  requireTrue(record.appendOnly, `${label}.appendOnly`);
+  if (record.mode !== "commitment-only") {
+    throw new Error(`${label}.mode must be commitment-only`);
+  }
+  if (record.rawPayloadPolicy !== "reject") {
+    throw new Error(`${label}.rawPayloadPolicy must be reject`);
+  }
+  return {
+    schemaVersion: 1,
+    id: requireSafeShortIdentifier(record.id, `${label}.id`),
+    projectId: requireExpectedProjectId(record.projectId, expectedProjectId, label),
+    mode: "commitment-only",
+    allowedSources,
+    requiredEpisodeFields,
+    privacyReceiptContractRef: requireSafeShortIdentifier(
+      record.privacyReceiptContractRef,
+      `${label}.privacyReceiptContractRef`,
+    ),
+    appendOnly: true,
+    rawPayloadPolicy: "reject",
+    sideEffectBudget: parseEvolutionSideEffectCounters(
+      record.sideEffectBudget,
+      true,
+      `${label}.sideEffectBudget`,
+    ),
+  };
+}
+
+export function parseMaturityGateContract(
+  value: unknown,
+  expectedProjectId: string,
+  expectedPack: EvolutionPackV1,
+  label = "maturityGateContract",
+): MaturityGateContract {
+  const record = strictObject(value, [
+    "schemaVersion",
+    "id",
+    "projectId",
+    "packRef",
+    "currentMaturity",
+    "allowedTransitions",
+    "forbiddenTransitions",
+    "requireIndependentReceiptForEveryTransition",
+    "stages",
+  ], label);
+  requireSchemaVersion(record.schemaVersion, `${label}.schemaVersion`);
+  const packRef = strictObject(record.packRef, ["id", "version", "contentSha256"], `${label}.packRef`);
+  const normalizedPackRef = {
+    id: requireSafeShortIdentifier(packRef.id, `${label}.packRef.id`),
+    version: requirePositiveInteger(packRef.version, `${label}.packRef.version`),
+    contentSha256: requireSha256(packRef.contentSha256, `${label}.packRef.contentSha256`),
+  };
+  const expectedPackSha256 = canonicalEvolutionValueSha256(expectedPack);
+  if (
+    normalizedPackRef.id !== expectedPack.id
+    || normalizedPackRef.version !== expectedPack.version
+    || normalizedPackRef.contentSha256 !== expectedPackSha256
+  ) {
+    throw new Error(`${label}.packRef must exactly bind the normalized evolutionPack`);
+  }
+  if (record.currentMaturity !== "designed") {
+    throw new Error(`${label}.currentMaturity must remain designed`);
+  }
+  const allowedTransitions = requireExactOrderedStrings(
+    record.allowedTransitions,
+    REQUIRED_MATURITY_TRANSITIONS,
+    `${label}.allowedTransitions`,
+  ) as MaturityGateContract["allowedTransitions"];
+  const forbiddenTransitions = requireExactStringSet(
+    record.forbiddenTransitions,
+    REQUIRED_FORBIDDEN_MATURITY_TRANSITIONS,
+    `${label}.forbiddenTransitions`,
+  ) as MaturityGateContract["forbiddenTransitions"];
+  requireTrue(
+    record.requireIndependentReceiptForEveryTransition,
+    `${label}.requireIndependentReceiptForEveryTransition`,
+  );
+  const stages = requireArray(record.stages, `${label}.stages`, MATURITY_STAGE_IDS.length).map(
+    (entry, index) => {
+      const stageLabel = `${label}.stages[${index}]`;
+      const stage = strictObject(entry, [
+        "id",
+        "requiredEvidenceRefs",
+        "guardMetrics",
+        "allowedOperations",
+        "failureMaturity",
+      ], stageLabel);
+      return {
+        id: requireEnum(stage.id, MATURITY_STAGE_ID_SET, `${stageLabel}.id`),
+        requiredEvidenceRefs: requireEvidenceRefs(stage.requiredEvidenceRefs, `${stageLabel}.requiredEvidenceRefs`),
+        guardMetrics: requireUniqueNonEmptyStringArray(
+          stage.guardMetrics,
+          `${stageLabel}.guardMetrics`,
+          TARGET_EVOLUTION_LIMITS.maxArrayItems,
+        ).map((item, itemIndex) => requireNonSensitiveText(
+          item,
+          `${stageLabel}.guardMetrics[${itemIndex}]`,
+        )),
+        allowedOperations: requireUniqueNonEmptyStringArray(
+          stage.allowedOperations,
+          `${stageLabel}.allowedOperations`,
+          TARGET_EVOLUTION_LIMITS.maxArrayItems,
+        ).map((item, itemIndex) => requireNonSensitiveText(
+          item,
+          `${stageLabel}.allowedOperations[${itemIndex}]`,
+        )),
+        failureMaturity: requireEnum(stage.failureMaturity, MATURITY_FAILURES, `${stageLabel}.failureMaturity`),
+      };
+    },
+  );
+  if (
+    stages.length !== MATURITY_STAGE_IDS.length
+    || stages.some((stage, index) => stage.id !== MATURITY_STAGE_IDS[index])
+  ) {
+    throw new Error(`${label}.stages must contain designed, instrumented, and shadowing in order`);
+  }
+  const expectedFailureMaturities = ["designed", "designed", "instrumented"] as const;
+  if (stages.some((stage, index) => stage.failureMaturity !== expectedFailureMaturities[index])) {
+    throw new Error(`${label}.stages failureMaturity must fail closed to the preceding verified maturity`);
+  }
+  return {
+    schemaVersion: 1,
+    id: requireSafeShortIdentifier(record.id, `${label}.id`),
+    projectId: requireExpectedProjectId(record.projectId, expectedProjectId, label),
+    packRef: normalizedPackRef,
+    currentMaturity: "designed",
+    allowedTransitions,
+    forbiddenTransitions,
+    requireIndependentReceiptForEveryTransition: true,
+    stages,
+  };
+}
+
+export function parseProductionEpisodePrivacyReceiptContract(
+  value: unknown,
+  expectedProjectId: string,
+  label = "productionEpisodePrivacyReceiptContract",
+): ProductionEpisodePrivacyReceiptContract {
+  const record = strictObject(value, [
+    "schemaVersion",
+    "id",
+    "projectId",
+    "mode",
+    "privacyReview",
+    "snapshotBinding",
+    "rawPayloadPolicy",
+    "appendOnly",
+    "rejectionConditions",
+  ], label);
+  requireSchemaVersion(record.schemaVersion, `${label}.schemaVersion`);
+  const privacyReview = strictObject(record.privacyReview, [
+    "requiredStatus",
+    "policySha256",
+    "reviewerRef",
+    "dataClassification",
+    "retentionPolicyRef",
+    "evidenceRefs",
+  ], `${label}.privacyReview`);
+  if (record.mode !== "requirements-only") {
+    throw new Error(`${label}.mode must be requirements-only`);
+  }
+  if (privacyReview.requiredStatus !== "approved") {
+    throw new Error(`${label}.privacyReview.requiredStatus must be approved`);
+  }
+  const snapshotBinding = strictObject(record.snapshotBinding, [
+    "inputSnapshotSha256Required",
+    "outcomeSnapshotSha256Required",
+    "mustMatchEpisode",
+  ], `${label}.snapshotBinding`);
+  requireTrue(snapshotBinding.inputSnapshotSha256Required, `${label}.snapshotBinding.inputSnapshotSha256Required`);
+  requireTrue(snapshotBinding.outcomeSnapshotSha256Required, `${label}.snapshotBinding.outcomeSnapshotSha256Required`);
+  requireTrue(snapshotBinding.mustMatchEpisode, `${label}.snapshotBinding.mustMatchEpisode`);
+  if (record.rawPayloadPolicy !== "reject") {
+    throw new Error(`${label}.rawPayloadPolicy must be reject`);
+  }
+  requireTrue(record.appendOnly, `${label}.appendOnly`);
+  return {
+    schemaVersion: 1,
+    id: requireSafeShortIdentifier(record.id, `${label}.id`),
+    projectId: requireExpectedProjectId(record.projectId, expectedProjectId, label),
+    mode: "requirements-only",
+    privacyReview: {
+      requiredStatus: "approved",
+      policySha256: requireSha256(privacyReview.policySha256, `${label}.privacyReview.policySha256`),
+      reviewerRef: requireOpaqueRef(privacyReview.reviewerRef, `${label}.privacyReview.reviewerRef`),
+      dataClassification: requireEnum(
+        privacyReview.dataClassification,
+        DATA_CLASSIFICATIONS,
+        `${label}.privacyReview.dataClassification`,
+      ),
+      retentionPolicyRef: requireOpaqueRef(
+        privacyReview.retentionPolicyRef,
+        `${label}.privacyReview.retentionPolicyRef`,
+      ),
+      evidenceRefs: requireEvidenceRefs(privacyReview.evidenceRefs, `${label}.privacyReview.evidenceRefs`),
+    },
+    snapshotBinding: {
+      inputSnapshotSha256Required: true,
+      outcomeSnapshotSha256Required: true,
+      mustMatchEpisode: true,
+    },
+    rawPayloadPolicy: "reject",
+    appendOnly: true,
+    rejectionConditions: requireUniqueNonEmptyStringArray(
+      record.rejectionConditions,
+      `${label}.rejectionConditions`,
+      TARGET_EVOLUTION_LIMITS.maxArrayItems,
+    ).map((item, index) => requireNonSensitiveText(
+      item,
+      `${label}.rejectionConditions[${index}]`,
+    )),
+  };
+}
+
+export function parsePromotionReceiptContract(
+  value: unknown,
+  expectedProjectId: string,
+  label = "promotionReceiptContract",
+): PromotionReceiptContract {
+  const record = strictObject(value, [
+    "schemaVersion",
+    "id",
+    "mode",
+    "projectId",
+    "authorizedDecisionRef",
+    "fromVariantId",
+    "toVariantId",
+    "exactTargetRef",
+    "readbackEvidenceRefs",
+    "canaryEvidenceRefs",
+    "observationWindow",
+    "rollbackPlanRef",
+    "rollbackReceiptId",
+    "issuerRef",
+    "issuedAtRequired",
+  ], label);
+  requireSchemaVersion(record.schemaVersion, `${label}.schemaVersion`);
+  if (record.mode !== "draft-only") {
+    throw new Error(`${label}.mode must be draft-only`);
+  }
+  const fromVariantId = requireEvolutionRecordRef(record.fromVariantId, "variant", `${label}.fromVariantId`);
+  const toVariantId = requireEvolutionRecordRef(record.toVariantId, "variant", `${label}.toVariantId`);
+  if (fromVariantId === toVariantId) {
+    throw new Error(`${label}.fromVariantId and ${label}.toVariantId must be different`);
+  }
+  const observationWindow = strictObject(
+    record.observationWindow,
+    ["matchedRuns", "startsAfterMaturity"],
+    `${label}.observationWindow`,
+  );
+  if (observationWindow.startsAfterMaturity !== "instrumented") {
+    throw new Error(`${label}.observationWindow.startsAfterMaturity must be instrumented`);
+  }
+  requireTrue(record.issuedAtRequired, `${label}.issuedAtRequired`);
+  return {
+    schemaVersion: 1,
+    id: requireSafeShortIdentifier(record.id, `${label}.id`),
+    mode: "draft-only",
+    projectId: requireExpectedProjectId(record.projectId, expectedProjectId, label),
+    authorizedDecisionRef: requireOpaqueRef(record.authorizedDecisionRef, `${label}.authorizedDecisionRef`),
+    fromVariantId,
+    toVariantId,
+    exactTargetRef: requireExactEvolutionRef(record.exactTargetRef, `${label}.exactTargetRef`),
+    readbackEvidenceRefs: requireEvidenceRefs(record.readbackEvidenceRefs, `${label}.readbackEvidenceRefs`),
+    canaryEvidenceRefs: requireEvidenceRefs(record.canaryEvidenceRefs, `${label}.canaryEvidenceRefs`),
+    observationWindow: {
+      matchedRuns: requirePositiveInteger(observationWindow.matchedRuns, `${label}.observationWindow.matchedRuns`),
+      startsAfterMaturity: "instrumented",
+    },
+    rollbackPlanRef: requireExactEvolutionRef(record.rollbackPlanRef, `${label}.rollbackPlanRef`),
+    rollbackReceiptId: requireNullableEvolutionRecordRef(
+      record.rollbackReceiptId,
+      "receipt",
+      `${label}.rollbackReceiptId`,
+    ),
+    issuerRef: requireOpaqueRef(record.issuerRef, `${label}.issuerRef`),
+    issuedAtRequired: true,
+  };
+}
+
+export function parseRollbackContract(
+  value: unknown,
+  expectedProjectId: string,
+  label = "rollbackContract",
+): RollbackContract {
+  const record = strictObject(value, [
+    "schemaVersion",
+    "id",
+    "projectId",
+    "exactTargetRef",
+    "lastKnownGoodRef",
+    "idempotencyKey",
+    "rollbackPlanRef",
+    "rollbackReceiptId",
+    "triggers",
+    "readbackEvidenceRefs",
+    "canaryEvidenceRefs",
+    "appendOnly",
+    "deleteOrRewriteHistory",
+    "forbiddenScopes",
+  ], label);
+  requireSchemaVersion(record.schemaVersion, `${label}.schemaVersion`);
+  requireTrue(record.appendOnly, `${label}.appendOnly`);
+  if (record.deleteOrRewriteHistory !== false) {
+    throw new Error(`${label}.deleteOrRewriteHistory must be false`);
+  }
+  const triggers = requireArray(record.triggers, `${label}.triggers`, TARGET_EVOLUTION_LIMITS.maxArrayItems).map(
+    (entry, index) => {
+      const triggerLabel = `${label}.triggers[${index}]`;
+      const trigger = strictObject(entry, ["id", "condition"], triggerLabel);
+      return {
+        id: requireSafeShortIdentifier(trigger.id, `${triggerLabel}.id`),
+        condition: requireNonSensitiveText(trigger.condition, `${triggerLabel}.condition`),
+      };
+    },
+  );
+  requireNonEmpty(triggers, `${label}.triggers`);
+  requireUniqueIds(triggers, `${label}.triggers`);
+  return {
+    schemaVersion: 1,
+    id: requireSafeShortIdentifier(record.id, `${label}.id`),
+    projectId: requireExpectedProjectId(record.projectId, expectedProjectId, label),
+    exactTargetRef: requireExactEvolutionRef(record.exactTargetRef, `${label}.exactTargetRef`),
+    lastKnownGoodRef: requireExactEvolutionRef(record.lastKnownGoodRef, `${label}.lastKnownGoodRef`),
+    idempotencyKey: requireExactEvolutionRef(record.idempotencyKey, `${label}.idempotencyKey`),
+    rollbackPlanRef: requireExactEvolutionRef(record.rollbackPlanRef, `${label}.rollbackPlanRef`),
+    rollbackReceiptId: requireNullableEvolutionRecordRef(
+      record.rollbackReceiptId,
+      "receipt",
+      `${label}.rollbackReceiptId`,
+    ),
+    triggers,
+    readbackEvidenceRefs: requireEvidenceRefs(record.readbackEvidenceRefs, `${label}.readbackEvidenceRefs`),
+    canaryEvidenceRefs: requireEvidenceRefs(record.canaryEvidenceRefs, `${label}.canaryEvidenceRefs`),
+    appendOnly: true,
+    deleteOrRewriteHistory: false,
+    forbiddenScopes: requireUniqueNonEmptyStringArray(
+      record.forbiddenScopes,
+      `${label}.forbiddenScopes`,
+      TARGET_EVOLUTION_LIMITS.maxArrayItems,
+    ).map((item, index) => requireNonSensitiveText(
+      item,
+      `${label}.forbiddenScopes[${index}]`,
+    )),
+  };
+}
+
+export function parseEvolutionDeliveryContracts(
+  value: unknown,
+  expectedProjectId: string,
+  expectedPack: EvolutionPackV1,
+  label = "target evolution proposal",
+): EvolutionDeliveryContracts | null {
+  const record = requirePlainJsonObject(value, label);
+  const keys = [
+    "episodeCollectionContract",
+    "maturityGateContract",
+    "productionEpisodePrivacyReceiptContract",
+    "promotionReceiptContract",
+    "rollbackContract",
+  ] as const;
+  const present = keys.filter((key) => record[key] !== undefined);
+  if (
+    (present.length > 0 && present.length < keys.length)
+    || (expectedPack.version >= 4 && present.length !== keys.length)
+  ) {
+    throw new Error(
+      `${label} delivery contracts must include episodeCollectionContract, maturityGateContract, productionEpisodePrivacyReceiptContract, promotionReceiptContract, and rollbackContract as one complete group`,
+    );
+  }
+  if (present.length === 0) {
+    return null;
+  }
+  const contracts: EvolutionDeliveryContracts = {
+    episodeCollectionContract: parseEpisodeCollectionContract(
+      record.episodeCollectionContract,
+      expectedProjectId,
+      `${label}.episodeCollectionContract`,
+    ),
+    maturityGateContract: parseMaturityGateContract(
+      record.maturityGateContract,
+      expectedProjectId,
+      expectedPack,
+      `${label}.maturityGateContract`,
+    ),
+    productionEpisodePrivacyReceiptContract: parseProductionEpisodePrivacyReceiptContract(
+      record.productionEpisodePrivacyReceiptContract,
+      expectedProjectId,
+      `${label}.productionEpisodePrivacyReceiptContract`,
+    ),
+    promotionReceiptContract: parsePromotionReceiptContract(
+      record.promotionReceiptContract,
+      expectedProjectId,
+      `${label}.promotionReceiptContract`,
+    ),
+    rollbackContract: parseRollbackContract(
+      record.rollbackContract,
+      expectedProjectId,
+      `${label}.rollbackContract`,
+    ),
+  };
+  if (
+    contracts.episodeCollectionContract.privacyReceiptContractRef
+    !== contracts.productionEpisodePrivacyReceiptContract.id
+  ) {
+    throw new Error(`${label}.episodeCollectionContract.privacyReceiptContractRef must equal productionEpisodePrivacyReceiptContract.id`);
+  }
+  if (contracts.promotionReceiptContract.exactTargetRef !== contracts.rollbackContract.exactTargetRef) {
+    throw new Error(`${label} promotionReceiptContract and rollbackContract must bind the same exactTargetRef`);
+  }
+  if (contracts.promotionReceiptContract.rollbackPlanRef !== contracts.rollbackContract.rollbackPlanRef) {
+    throw new Error(`${label} promotionReceiptContract and rollbackContract must bind the same rollbackPlanRef`);
+  }
+  if (contracts.promotionReceiptContract.rollbackReceiptId !== contracts.rollbackContract.rollbackReceiptId) {
+    throw new Error(`${label} promotionReceiptContract and rollbackContract must bind the same rollbackReceiptId`);
+  }
+  if (contracts.rollbackContract.lastKnownGoodRef === contracts.rollbackContract.exactTargetRef) {
+    throw new Error(`${label}.rollbackContract.lastKnownGoodRef must differ from exactTargetRef`);
+  }
+  return contracts;
 }
 
 export function canonicalEvolutionValueSha256(value: unknown): string {
@@ -1186,6 +1681,71 @@ function requireOpaqueRef(value: unknown, label: string): string {
   return ref;
 }
 
+function requireExactEvolutionRef(value: unknown, label: string): string {
+  const ref = requireOpaqueRef(value, label);
+  const normalized = ref.toLowerCase();
+  const [kind, ...payloadParts] = normalized.split(":");
+  const payload = payloadParts.join(":");
+  const payloadSegments = payload.split(/[\/:_-]+/).filter(Boolean);
+  const mutableKinds = new Set(["branch", "ref", "head", "tag"]);
+  const versionedKinds = new Set(["artifact", "plan", "rollback", "snapshot", "content"]);
+  const mutableNames = new Set(["main", "master", "trunk", "head", "latest"]);
+  const contentAddressed = /(?:^|[\/:_-])[0-9a-f]{40,64}$/.test(normalized);
+  const explicitlyVersioned = /(?:^|[\/_-])v[1-9]\d*(?:$|[\/_-])/.test(payload);
+  const exactGitCommit = /^git:commit:[0-9a-f]{40,64}$/.test(normalized);
+  const supportedExactKind = exactGitCommit
+    || (versionedKinds.has(kind ?? "") && (contentAddressed || explicitlyVersioned));
+  if (
+    !TYPED_OPAQUE_REF_PATTERN.test(ref)
+    || mutableKinds.has(kind ?? "")
+    || normalized.includes("refs/heads/")
+    || payloadSegments.some((segment) => mutableNames.has(segment))
+    || GLOB_META_PATTERN.test(ref)
+    || !supportedExactKind
+  ) {
+    throw new Error(`${label} must identify one exact immutable typed target using a content address or explicit version, without a branch, HEAD, latest, tag, or glob syntax`);
+  }
+  return ref;
+}
+
+function requireNullableEvolutionRecordRef(
+  value: unknown,
+  kind: EvolutionRecordKind,
+  label: string,
+): string | null {
+  if (value === null) {
+    return null;
+  }
+  return requireEvolutionRecordRef(value, kind, label);
+}
+
+function requireExactStringSet<T extends string>(
+  value: unknown,
+  expected: readonly T[],
+  label: string,
+): T[] {
+  const items = requireArray(value, label, expected.length).map((entry, index) =>
+    requireEnum(entry, new Set(expected), `${label}[${index}]`),
+  );
+  requireUniqueStrings(items, label);
+  if (items.length !== expected.length || expected.some((entry) => !items.includes(entry))) {
+    throw new Error(`${label} must contain exactly ${expected.join(", ")}`);
+  }
+  return items;
+}
+
+function requireExactOrderedStrings<T extends string>(
+  value: unknown,
+  expected: readonly T[],
+  label: string,
+): T[] {
+  const items = requireExactStringSet(value, expected, label);
+  if (items.some((entry, index) => entry !== expected[index])) {
+    throw new Error(`${label} must preserve the required order ${expected.join(", ")}`);
+  }
+  return items;
+}
+
 function requireSafeShortIdentifier(value: unknown, label: string): string {
   const identifier = requireString(value, label, TARGET_EVOLUTION_LIMITS.maxIdentifierLength);
   if (!SAFE_SHORT_REF_PATTERN.test(identifier)) {
@@ -1199,6 +1759,38 @@ function requireNoSensitiveRefText(value: string, label: string): void {
   if (SENSITIVE_REF_TEXT_PATTERN.test(value)) {
     throw new Error(`${label} must not contain credential-like or sensitive text`);
   }
+}
+
+function requireNonSensitiveText(
+  value: unknown,
+  label: string,
+  maxLength = TARGET_EVOLUTION_LIMITS.maxTextLength,
+): string {
+  const text = requireString(value, label, maxLength);
+  if (redactCredentialLikeText(text) !== text) {
+    throw new Error(`${label} must not contain credential-like or sensitive text`);
+  }
+  return text;
+}
+
+function redactCredentialLikeText(value: string): string {
+  return value
+    .replace(/(https?:\/\/)[^\s/@]+(?::[^\s/@]*)?@/gi, "$1[REDACTED]@")
+    .replace(/\b(?:ghp|gho|ghu|ghs|ghr|github_pat|glpat|lin_api|lin_oauth)[_-][A-Za-z0-9._-]+\b/gi, "[REDACTED]")
+    .replace(
+      /(\bauthorization\b\s*[:=]\s*)(?:(?:Bearer|Basic)\s+)?[^\s,;}\])]+/gi,
+      "$1[REDACTED]",
+    )
+    .replace(/\bBearer\s+\S+/gi, "Bearer [REDACTED]")
+    .replace(/(x-access-token\s*:\s*)[^@\s]+/gi, "$1[REDACTED]")
+    .replace(
+      /(\b(?:api[\s_-]*key|access[\s_-]*token|refresh[\s_-]*token|token|secret|password|credential)\b\s*[:=]\s*)(?:"[^"\r\n]*"|'[^'\r\n]*'|[^\s,;}\])]+)/gi,
+      "$1[REDACTED]",
+    )
+    .replace(
+      /(\b(?:access[\s_-]*token|refresh[\s_-]*token|token|secret|password|credential)\b\s+)(?=[^\s,;}\])]*[._~+\/-])[^\s,;}\])]+/gi,
+      "$1[REDACTED]",
+    );
 }
 
 function requireUniqueNonEmptyStringArray(

@@ -2,6 +2,7 @@ import {
   optionalStrictIsoTimestamp,
   parseEvolutionCausalHypothesis,
   parseEvolutionComparison,
+  parseEvolutionDeliveryContracts,
   parseEvolutionPackV1,
   requireStrictIsoTimestamp,
 } from "@ouroboros/harness";
@@ -402,8 +403,26 @@ function parseDesignProposalData(
   const hasEvolutionPack = record.evolutionPack !== undefined;
   const hasCausalHypothesis = record.causalHypothesis !== undefined;
   const hasComparison = evaluationContract.comparison !== undefined;
+  const deliveryContractKeys = [
+    "episodeCollectionContract",
+    "maturityGateContract",
+    "productionEpisodePrivacyReceiptContract",
+    "promotionReceiptContract",
+    "rollbackContract",
+  ] as const;
+  const hasDeliveryContract = deliveryContractKeys.some((key) => record[key] !== undefined);
+  for (const alias of [
+    "projectIdentityContract",
+    "evolutionIdentityContract",
+    "privacyReceiptContract",
+    "equalBudgetComparisonContract",
+  ]) {
+    if (record[alias] !== undefined) {
+      throw new Error(`${label}.${alias} is an unsupported target evolution contract alias`);
+    }
+  }
   const evolutionBlockCount = Number(hasEvolutionPack) + Number(hasCausalHypothesis) + Number(hasComparison);
-  if (evolutionBlockCount > 0 && evolutionBlockCount < 3) {
+  if ((evolutionBlockCount > 0 || hasDeliveryContract) && evolutionBlockCount < 3) {
     throw new Error(
       `${label} target evolution data must include evolutionPack, causalHypothesis, and evaluationContract.comparison as one complete group`,
     );
@@ -414,6 +433,9 @@ function parseDesignProposalData(
   const causalHypothesis = hasCausalHypothesis
     ? parseEvolutionCausalHypothesis(record.causalHypothesis, `${label}.causalHypothesis`)
     : undefined;
+  const deliveryContracts = evolutionPack === undefined
+    ? null
+    : parseEvolutionDeliveryContracts(record, expectedProjectId, evolutionPack, label);
   const investment = parseDesignInvestment(record.investment, `${label}.investment`);
   const experiment = record.experiment === undefined ? undefined : parseDesignExperiment(record.experiment, `${label}.experiment`);
   const additions = optionalStringArray(record.additions, `${label}.additions`);
@@ -437,6 +459,7 @@ function parseDesignProposalData(
   if (uncertainty !== undefined) data.uncertainty = uncertainty;
   if (evolutionPack !== undefined) data.evolutionPack = evolutionPack;
   if (causalHypothesis !== undefined) data.causalHypothesis = causalHypothesis;
+  if (deliveryContracts !== null) Object.assign(data, deliveryContracts);
   return data;
 }
 

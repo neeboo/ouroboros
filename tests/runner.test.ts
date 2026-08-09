@@ -728,6 +728,38 @@ describe("runner", () => {
           },
           designProposal: {
             ...proposal,
+            episodeCollectionContract: {
+              id: "episode-collection-visible",
+              requiredEpisodeFields: ["privacyReview"],
+            },
+            maturityGateContract: {
+              id: "maturity-gate-visible",
+              currentMaturity: "designed",
+            },
+            productionEpisodePrivacyReceiptContract: {
+              id: "privacy-receipt-visible",
+              privacyReview: {
+                policySha256: "d".repeat(64),
+                reviewerRef: "reviewer:visible",
+                dataClassification: "confidential",
+                retentionPolicyRef: "policy:visible",
+              },
+            },
+            promotionReceiptContract: {
+              id: "promotion-receipt-visible",
+              exactTargetRef: "artifact:visible-target",
+              readbackEvidenceRefs: ["evidence:visible-readback"],
+              canaryEvidenceRefs: ["evidence:visible-canary"],
+            },
+            rollbackContract: {
+              id: "rollback-visible",
+              lastKnownGoodRef: "artifact:visible-control",
+              idempotencyKey: "rollback:visible-target",
+              triggers: [{
+                id: "sensitive-condition",
+                condition: "Authorization: Bearer DOWNSTREAM_SECRET",
+              }],
+            },
             evaluationContract: {
               ...proposal.evaluationContract,
               holdoutContents: ["DO_NOT_LEAK_HELDOUT_CONTENT"],
@@ -767,6 +799,19 @@ describe("runner", () => {
       expect(prompt).toContain("Causal hypothesis");
       expect(prompt).toContain("Matched comparison protocol");
       expect(prompt).toContain("Evolution instance identity");
+      expect(prompt).toContain("Frozen delivery contracts");
+      expect(prompt).toContain("episode-collection-visible");
+      expect(prompt).toContain("maturity-gate-visible");
+      expect(prompt).toContain("privacy-receipt-visible");
+      expect(prompt).toContain("promotion-receipt-visible");
+      expect(prompt).toContain("rollback-visible");
+      expect(prompt).toContain("policySha256");
+      expect(prompt).toContain("reviewerRef");
+      expect(prompt).toContain("dataClassification");
+      expect(prompt).toContain("retentionPolicyRef");
+      expect(prompt).toContain("exactTargetRef");
+      expect(prompt).toContain("lastKnownGoodRef");
+      expect(prompt).toContain("idempotencyKey");
       expect(prompt).toContain("pack_delivery_v1");
       expect(prompt).toContain("domain-hypothesis");
       expect(prompt).toContain("development:1");
@@ -787,6 +832,7 @@ describe("runner", () => {
       expect(prompt).not.toContain("DO_NOT_LEAK_HELDOUT_CONTENT");
       expect(prompt).not.toContain('"holdoutResults"');
       expect(prompt).not.toContain("DO_NOT_LEAK_EVALUATION_SECRET");
+      expect(prompt).not.toContain("DOWNSTREAM_SECRET");
       expect(prompt).not.toContain('"secret"');
     },
   );

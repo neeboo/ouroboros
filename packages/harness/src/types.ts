@@ -901,6 +901,135 @@ export interface EvolutionComparison {
   maximumGuardRegression: number;
 }
 
+export interface EpisodeCollectionContract {
+  schemaVersion: 1;
+  id: string;
+  projectId: string;
+  mode: "commitment-only";
+  allowedSources: Array<"host-owned-production-observation" | "host-owned-fixture-replay">;
+  requiredEpisodeFields: Array<
+    | "profileId"
+    | "sourceRef"
+    | "leakageGroupId"
+    | "observedAt"
+    | "inputSnapshotSha256"
+    | "outcomeSnapshotSha256"
+    | "policyRef"
+    | "metrics"
+    | "sideEffectCounters"
+    | "evidenceRefs"
+    | "privacyReview"
+  >;
+  privacyReceiptContractRef: string;
+  appendOnly: true;
+  rawPayloadPolicy: "reject";
+  sideEffectBudget: {
+    paidUsd: 0;
+    realProviderCalls: 0;
+    pancatWrites: 0;
+    productionPublishes: 0;
+    realAssetDeletes: 0;
+    crossProjectMemoryReads: 0;
+    crossProjectMemoryWrites: 0;
+  };
+}
+
+export interface MaturityGateContract {
+  schemaVersion: 1;
+  id: string;
+  projectId: string;
+  packRef: {
+    id: string;
+    version: number;
+    contentSha256: string;
+  };
+  currentMaturity: "designed";
+  allowedTransitions: ["designed->instrumented", "instrumented->shadowing"];
+  forbiddenTransitions: Array<
+    | "designed->shadowing"
+    | "designed->autonomous"
+    | "instrumented->autonomous"
+    | "shadowing->autonomous"
+  >;
+  requireIndependentReceiptForEveryTransition: true;
+  stages: Array<{
+    id: "designed" | "instrumented" | "shadowing";
+    requiredEvidenceRefs: string[];
+    guardMetrics: string[];
+    allowedOperations: string[];
+    failureMaturity: "designed" | "instrumented";
+  }>;
+}
+
+export interface ProductionEpisodePrivacyReceiptContract {
+  schemaVersion: 1;
+  id: string;
+  projectId: string;
+  mode: "requirements-only";
+  privacyReview: {
+    requiredStatus: "approved";
+    policySha256: string;
+    reviewerRef: string;
+    dataClassification: "public" | "internal" | "confidential" | "restricted";
+    retentionPolicyRef: string;
+    evidenceRefs: string[];
+  };
+  snapshotBinding: {
+    inputSnapshotSha256Required: true;
+    outcomeSnapshotSha256Required: true;
+    mustMatchEpisode: true;
+  };
+  rawPayloadPolicy: "reject";
+  appendOnly: true;
+  rejectionConditions: string[];
+}
+
+export interface PromotionReceiptContract {
+  schemaVersion: 1;
+  id: string;
+  mode: "draft-only";
+  projectId: string;
+  authorizedDecisionRef: string;
+  fromVariantId: string;
+  toVariantId: string;
+  exactTargetRef: string;
+  readbackEvidenceRefs: string[];
+  canaryEvidenceRefs: string[];
+  observationWindow: {
+    matchedRuns: number;
+    startsAfterMaturity: "instrumented";
+  };
+  rollbackPlanRef: string;
+  rollbackReceiptId: string | null;
+  issuerRef: string;
+  issuedAtRequired: true;
+}
+
+export interface RollbackContract {
+  schemaVersion: 1;
+  id: string;
+  projectId: string;
+  exactTargetRef: string;
+  lastKnownGoodRef: string;
+  idempotencyKey: string;
+  rollbackPlanRef: string;
+  rollbackReceiptId: string | null;
+  triggers: Array<{ id: string; condition: string }>;
+  readbackEvidenceRefs: string[];
+  canaryEvidenceRefs: string[];
+  appendOnly: true;
+  deleteOrRewriteHistory: false;
+  forbiddenScopes: string[];
+}
+
+export interface EvolutionDeliveryContracts {
+  episodeCollectionContract: EpisodeCollectionContract;
+  maturityGateContract: MaturityGateContract;
+  productionEpisodePrivacyReceiptContract: ProductionEpisodePrivacyReceiptContract;
+  promotionReceiptContract: PromotionReceiptContract;
+  rollbackContract: RollbackContract;
+}
+
 export type EvolutionRecordKind = "profile" | "episode" | "variant" | "experiment" | "receipt";
 export type EvolutionRuntimeMaturity = "declared";
 
@@ -1058,6 +1187,11 @@ export interface DesignProposalData {
   uncertainty?: string[];
   evolutionPack?: EvolutionPackV1;
   causalHypothesis?: EvolutionCausalHypothesis;
+  episodeCollectionContract?: EpisodeCollectionContract;
+  maturityGateContract?: MaturityGateContract;
+  productionEpisodePrivacyReceiptContract?: ProductionEpisodePrivacyReceiptContract;
+  promotionReceiptContract?: PromotionReceiptContract;
+  rollbackContract?: RollbackContract;
   evaluationContract: DesignEvaluationContract;
   investment: DesignInvestment;
   experiment?: DesignExperiment;
