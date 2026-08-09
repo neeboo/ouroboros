@@ -8,6 +8,82 @@ const MAX_LESSON_SUMMARY_CHARS = 320;
 const MAX_ACTIVE_GUARDRAILS = 8;
 const FROZEN_LINEAR_EVIDENCE_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 const RFC3339_WITH_TIMEZONE = /^(\d{4})-(\d{2})-(\d{2})T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/;
+const TARGET_EVOLUTION_PROPOSAL_EXTENSION = {
+  evolutionPack: {
+    schemaVersion: 1,
+    id: "target-evolution-pack",
+    targetSystemId: "target-system",
+    version: 1,
+    knowledgeScope: "project:<project_id>",
+    objective: {
+      charterId: "<charter_id>",
+      domainOutcomes: ["measurable domain outcome"],
+      nonGoals: ["production side effect outside the experiment"],
+    },
+    observation: {
+      signalSources: [{ id: "run-evidence", kind: "run-evidence" }],
+    },
+    mutationSurfaces: [
+      {
+        id: "bounded-policy-artifact",
+        evolutionTarget: "artifact",
+        layer: "policy",
+        projectId: "<project_id>",
+        allowedPaths: ["config/evolution/**"],
+        forbiddenPaths: ["db/**"],
+        owner: "target",
+      },
+    ],
+    experimentPolicy: {
+      controlRequired: true,
+      holdoutRequired: true,
+      unrelatedRegressionRequired: true,
+      equalBudgetRequired: true,
+      maxCandidates: 2,
+    },
+    promotionPolicy: {
+      guardMetrics: ["zero unintended writes"],
+      observationWindow: "three matched runs",
+      rollback: "restore the frozen control artifact",
+    },
+    handoff: {
+      maturity: "designed",
+      targetOwner: "target-system",
+      requiredCapabilities: ["frozen evidence replay"],
+    },
+    portability: {
+      projectLocalRules: ["keep domain semantics project-local"],
+      genericizationEvidence: [],
+    },
+  },
+  causalHypothesis: {
+    failureClass: "domain-hypothesis",
+    mechanism: "one bounded policy causes the measured gap",
+    predictedEffects: ["candidate improves the primary metric under the same budget"],
+    disconfirmingEvidence: ["holdout metric does not improve"],
+  },
+  evaluationContract: {
+    comparison: {
+      controlRef: "control_<id>",
+      developmentEvidenceRefs: ["development_evidence_<id>"],
+      holdoutEvidenceRefs: ["holdout_evidence_<id>"],
+      unrelatedEvidenceRefs: ["unrelated_evidence_<id>"],
+      corpusSnapshotSha256: "0".repeat(64),
+      equalBudget: {
+        model: "<model>",
+        reasoningEffort: "high",
+        wallClockMs: 300_000,
+        maxAttempts: 2,
+        maxTokens: 20_000,
+        toolPolicySha256: "1".repeat(64),
+        concurrency: 1,
+      },
+      primaryMetric: "primary outcome metric",
+      minimumUplift: 0,
+      maximumGuardRegression: 0,
+    },
+  },
+} as const;
 
 export function buildTaskPrompt(input: PromptInput) {
   const compactRecentLessons = compactLessons(input.lessons ?? []);
@@ -55,6 +131,10 @@ function renderTargetEvolutionProposalContract(role: string): string {
     "- causalHypothesis must state a supported failureClass, mechanism, predictedEffects, and disconfirmingEvidence.",
     "- comparison must freeze non-empty development, holdout, and unrelated evidence refs plus a corpus hash, controlRef, primary metric, thresholds, and the same equal budget for control and candidate.",
     "- Candidate generation may cite frozen holdoutEvidenceRefs, but must not receive or reproduce holdout contents or results. Tests alone do not replace the matched baseline or unrelated-regression evidence.",
+    "Merge this exact optional extension fragment into the single proposeDesign proposal shown below. Do not emit another proposeDesign action:",
+    "```json",
+    prettyJson(TARGET_EVOLUTION_PROPOSAL_EXTENSION),
+    "```",
     "",
   ].join("\n");
 }

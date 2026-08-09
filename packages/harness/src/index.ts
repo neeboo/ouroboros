@@ -32,6 +32,7 @@ export { acceptGuardrailProposal, proposeGuardrailsFromLessons, refreshGuardrail
 export { diagnoseRunOverview } from "./overseer";
 export { readableList, readableValue } from "./readable";
 export {
+  TARGET_EVOLUTION_LIMITS,
   parseEvolutionCausalHypothesis,
   parseEvolutionComparison,
   parseEvolutionInstance,

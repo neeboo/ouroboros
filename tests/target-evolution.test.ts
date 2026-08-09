@@ -152,6 +152,47 @@ function parser(name: string): (...args: unknown[]) => unknown {
   return candidate as (...args: unknown[]) => unknown;
 }
 
+function designerPrompt(): string {
+  return buildTaskPrompt({
+    run: {
+      id: "run_1",
+      projectId: PROJECT_ID,
+      projectRoot: "/tmp/hodor",
+      goal: "Design Hodor evolution",
+      status: "todo",
+      context: {},
+    },
+    task: {
+      id: "task_1",
+      runId: "run_1",
+      parentId: null,
+      cycleId: "cycle_1",
+      status: "todo",
+      role: "designer",
+      goal: "Propose a bounded evolution pack",
+      prompt: "Use evidence.",
+      dependsOn: [],
+      doneWhen: [],
+      worktreePath: null,
+      sessionRef: null,
+      contextVersion: 1,
+    },
+    dependencyAttempts: [],
+  });
+}
+
+function jsonFenceAfter(prompt: string, heading: string): Record<string, unknown> {
+  const section = prompt.split(heading)[1];
+  if (!section) {
+    throw new Error(`prompt is missing ${heading}`);
+  }
+  const match = /```json\n([\s\S]*?)\n```/.exec(section);
+  if (!match) {
+    throw new Error(`${heading} is missing a JSON fence`);
+  }
+  return JSON.parse(match[1]!) as Record<string, unknown>;
+}
+
 describe("target-system evolution contracts", () => {
   test("keeps ordinary design proposals backward compatible", () => {
     const action = proposeDesignAction({
@@ -397,33 +438,219 @@ describe("target-system evolution contracts", () => {
     expect(() => parser("parseEvolutionInstance")(value)).toThrow();
   });
 
-  test("keeps the Designer prompt compact and explicit about matched evolution evidence", () => {
-    const prompt = buildTaskPrompt({
-      run: {
-        id: "run_1",
+  test.each([
+    [
+      "split reference with surrounding whitespace",
+      {
+        comparison: {
+          ...validComparison(),
+          holdoutEvidenceRefs: [" episode_development_1"],
+        },
+      },
+    ],
+    [
+      "causal mechanism with surrounding whitespace",
+      { causalHypothesis: { ...validCausalHypothesis(), mechanism: " padded mechanism " } },
+    ],
+    [
+      "mutation identity with surrounding whitespace",
+      {
+        pack: {
+          ...validEvolutionPack(),
+          mutationSurfaces: [
+            { ...validEvolutionPack().mutationSurfaces[0], id: " padded-id " },
+          ],
+        },
+      },
+    ],
+  ])("rejects whitespace-polluted target-evolution identity: %s", (_name, overrides) => {
+    const record = overrides as Record<string, Record<string, unknown>>;
+    const comparison = record.comparison ?? validComparison();
+    const causalHypothesis = record.causalHypothesis ?? validCausalHypothesis();
+    const evolutionPack = record.pack ?? validEvolutionPack();
+    expect(() =>
+      proposeDesignAction({
         projectId: PROJECT_ID,
-        projectRoot: "/tmp/hodor",
-        goal: "Design Hodor evolution",
-        status: "todo",
-        context: {},
+        title: "Whitespace-polluted evolution proposal",
+        proposal: {
+          ...ordinaryProposal(),
+          evolutionPack,
+          causalHypothesis,
+          evaluationContract: {
+            ...ordinaryProposal().evaluationContract,
+            comparison,
+          },
+        } as unknown as DesignProposalData,
+      }),
+    ).toThrow(/whitespace|non-empty string/i);
+  });
+
+  test("rejects whitespace-polluted EvolutionInstance identities", () => {
+    expect(() =>
+      parser("parseEvolutionInstance")({
+        schemaVersion: 1,
+        mode: "design-target",
+        kernelProjectId: " project_ouroboros",
+        targetProjectId: PROJECT_ID,
+        cycle: { kind: "bootstrap", index: 0 },
+      }),
+    ).toThrow(/whitespace/i);
+  });
+
+  test.each([
+    [
+      "development split",
+      { developmentEvidenceRefs: Array.from({ length: 201 }, (_, index) => `dev_${index}`) },
+    ],
+    ["wall clock", { equalBudget: { ...validComparison().equalBudget, wallClockMs: 86_400_001 } }],
+    ["attempts", { equalBudget: { ...validComparison().equalBudget, maxAttempts: 21 } }],
+    ["tokens", { equalBudget: { ...validComparison().equalBudget, maxTokens: 2_000_001 } }],
+    ["concurrency", { equalBudget: { ...validComparison().equalBudget, concurrency: 33 } }],
+  ])("rejects oversized comparison data: %s", (_name, override) => {
+    const comparison = { ...validComparison(), ...override };
+    expect(() => parser("parseEvolutionComparison")(comparison)).toThrow(/at most|maximum/i);
+  });
+
+  test.each([
+    [
+      "signal sources",
+      {
+        observation: {
+          signalSources: Array.from({ length: 101 }, (_, index) => ({
+            id: `signal_${index}`,
+            kind: "repository",
+          })),
+        },
       },
-      task: {
-        id: "task_1",
-        runId: "run_1",
-        parentId: null,
-        cycleId: "cycle_1",
-        status: "todo",
-        role: "designer",
-        goal: "Propose a bounded evolution pack",
-        prompt: "Use evidence.",
-        dependsOn: [],
-        doneWhen: [],
-        worktreePath: null,
-        sessionRef: null,
-        contextVersion: 1,
+    ],
+    [
+      "mutation surfaces",
+      {
+        mutationSurfaces: Array.from({ length: 101 }, (_, index) => ({
+          ...validEvolutionPack().mutationSurfaces[0],
+          id: `surface_${index}`,
+        })),
       },
-      dependencyAttempts: [],
+    ],
+    [
+      "allowed paths",
+      {
+        mutationSurfaces: [
+          {
+            ...validEvolutionPack().mutationSurfaces[0],
+            allowedPaths: Array.from({ length: 201 }, (_, index) => `src/${index}.ts`),
+          },
+        ],
+      },
+    ],
+    [
+      "forbidden paths",
+      {
+        mutationSurfaces: [
+          {
+            ...validEvolutionPack().mutationSurfaces[0],
+            forbiddenPaths: Array.from({ length: 201 }, (_, index) => `private/${index}.json`),
+          },
+        ],
+      },
+    ],
+    [
+      "objective items",
+      {
+        objective: {
+          ...validEvolutionPack().objective,
+          nonGoals: Array.from({ length: 101 }, (_, index) => `non-goal ${index}`),
+        },
+      },
+    ],
+    [
+      "major text",
+      {
+        objective: {
+          ...validEvolutionPack().objective,
+          domainOutcomes: ["x".repeat(4_001)],
+        },
+      },
+    ],
+  ])("rejects oversized evolution pack data: %s", (_name, override) => {
+    const pack = { ...validEvolutionPack(), ...override };
+    expect(() => parser("parseEvolutionPackV1")(pack, PROJECT_ID)).toThrow(/at most|maximum/i);
+  });
+
+  test.each([
+    ["absolute path", "/etc/passwd"],
+    ["parent traversal", "src/../secrets.json"],
+    ["backslash", "src\\policy.json"],
+    ["NUL byte", "src/\0policy.json"],
+    ["empty segment", "src//policy.json"],
+    ["current-directory segment", "./src/policy.json"],
+    ["overlong path", `src/${"x".repeat(509)}`],
+  ])("rejects unsafe project-relative mutation scope: %s", (_name, unsafePath) => {
+    const pack = {
+      ...validEvolutionPack(),
+      mutationSurfaces: [
+        {
+          ...validEvolutionPack().mutationSurfaces[0],
+          allowedPaths: [unsafePath],
+        },
+      ],
+    };
+    expect(() => parser("parseEvolutionPackV1")(pack, PROJECT_ID)).toThrow(/project-relative|path/i);
+  });
+
+  test("accepts a normal relative glob mutation scope", () => {
+    expect(
+      parser("parseEvolutionPackV1")(
+        {
+          ...validEvolutionPack(),
+          mutationSurfaces: [
+            {
+              ...validEvolutionPack().mutationSurfaces[0],
+              allowedPaths: ["src/**"],
+            },
+          ],
+        },
+        PROJECT_ID,
+      ),
+    ).toMatchObject({ mutationSurfaces: [{ allowedPaths: ["src/**"] }] });
+  });
+
+  test.each([
+    ["artifact workflow", "artifact", "workflow"],
+    ["harness artifact", "harness", "artifact"],
+  ])("rejects invalid evolution target/layer combination: %s", (_name, evolutionTarget, layer) => {
+    const pack = {
+      ...validEvolutionPack(),
+      mutationSurfaces: [
+        {
+          ...validEvolutionPack().mutationSurfaces[0],
+          evolutionTarget,
+          layer,
+        },
+      ],
+    };
+    expect(() => parser("parseEvolutionPackV1")(pack, PROJECT_ID)).toThrow(/layer.*evolutionTarget|combination/i);
+  });
+
+  test("exports conservative target-evolution capacity limits", () => {
+    expect((harnessModule as unknown as Record<string, unknown>).TARGET_EVOLUTION_LIMITS).toEqual({
+      maxIdentifierLength: 256,
+      maxTextLength: 4_000,
+      maxArrayItems: 100,
+      maxEvidenceRefsPerSplit: 200,
+      maxSignalSources: 100,
+      maxMutationSurfaces: 100,
+      maxPathsPerSurface: 200,
+      maxPathLength: 512,
+      maxWallClockMs: 86_400_000,
+      maxAttempts: 20,
+      maxTokens: 2_000_000,
+      maxConcurrency: 32,
     });
+  });
+
+  test("keeps the Designer prompt compact and explicit about matched evolution evidence", () => {
+    const prompt = designerPrompt();
 
     expect(prompt).toContain("evolutionPack");
     expect(prompt).toContain("causalHypothesis");
@@ -436,5 +663,39 @@ describe("target-system evolution contracts", () => {
     expect(prompt).toContain("prohibited");
     expect(prompt).not.toContain("episode_holdout_1");
     expect(prompt.length).toBeLessThan(20_000);
+  });
+
+  test("provides one standalone exact evolution extension fragment accepted by the parser", () => {
+    const prompt = designerPrompt();
+    const extension = jsonFenceAfter(prompt, "## Target System Evolution Proposal Contract");
+    const requiredOutput = jsonFenceAfter(prompt, "## Required Output");
+    const actions = requiredOutput.actions as Array<Record<string, unknown>>;
+    const proposals = actions.filter((action) => action.type === "proposeDesign");
+    expect(proposals).toHaveLength(1);
+    expect(extension.type).toBeUndefined();
+
+    const basePayload = proposals[0]!.payload as Record<string, unknown>;
+    const baseProposal = basePayload.proposal as Record<string, unknown>;
+    const extensionEvaluation = extension.evaluationContract as Record<string, unknown>;
+    const proposal = {
+      ...baseProposal,
+      ...extension,
+      evaluationContract: {
+        ...(baseProposal.evaluationContract as Record<string, unknown>),
+        ...extensionEvaluation,
+      },
+    };
+
+    expect(() =>
+      proposeDesignAction({
+        projectId: basePayload.projectId as string,
+        title: basePayload.title as string,
+        proposal: proposal as unknown as DesignProposalData,
+      }),
+    ).not.toThrow();
+    const serializedExtension = JSON.stringify(extension).toLowerCase();
+    expect(serializedExtension).toContain("holdoutevidencerefs");
+    expect(serializedExtension).not.toContain("holdout content");
+    expect(serializedExtension).not.toContain("holdout result");
   });
 });

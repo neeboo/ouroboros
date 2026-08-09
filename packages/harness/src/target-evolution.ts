@@ -10,6 +10,21 @@ import type {
   EvolutionTarget,
 } from "./types";
 
+export const TARGET_EVOLUTION_LIMITS = Object.freeze({
+  maxIdentifierLength: 256,
+  maxTextLength: 4_000,
+  maxArrayItems: 100,
+  maxEvidenceRefsPerSplit: 200,
+  maxSignalSources: 100,
+  maxMutationSurfaces: 100,
+  maxPathsPerSurface: 200,
+  maxPathLength: 512,
+  maxWallClockMs: 86_400_000,
+  maxAttempts: 20,
+  maxTokens: 2_000_000,
+  maxConcurrency: 32,
+});
+
 const SHA256_PATTERN = /^[0-9a-f]{64}$/;
 const EVOLUTION_MODES = new Set<EvolutionMode>(["self", "design-target", "target-cycle"]);
 const CYCLE_KINDS = new Set<EvolutionCycleKind>(["design", "bootstrap", "operate", "assess-handoff"]);
@@ -34,6 +49,8 @@ const REASONING_EFFORTS = new Set<EvolutionComparison["equalBudget"]["reasoningE
   "max",
   "ultra",
 ]);
+const ARTIFACT_LAYERS = new Set<EvolutionMutationLayer>(["artifact", "code", "policy"]);
+const HARNESS_LAYERS = new Set<EvolutionMutationLayer>(["workflow", "prompt", "tool", "policy", "code"]);
 
 export function parseEvolutionInstance(
   value: unknown,
@@ -53,8 +70,16 @@ export function parseEvolutionInstance(
   return {
     schemaVersion: 1,
     mode: requireEnum(record.mode, EVOLUTION_MODES, `${label}.mode`),
-    kernelProjectId: requireString(record.kernelProjectId, `${label}.kernelProjectId`),
-    targetProjectId: requireString(record.targetProjectId, `${label}.targetProjectId`),
+    kernelProjectId: requireString(
+      record.kernelProjectId,
+      `${label}.kernelProjectId`,
+      TARGET_EVOLUTION_LIMITS.maxIdentifierLength,
+    ),
+    targetProjectId: requireString(
+      record.targetProjectId,
+      `${label}.targetProjectId`,
+      TARGET_EVOLUTION_LIMITS.maxIdentifierLength,
+    ),
     cycle: {
       kind: requireEnum(cycle.kind, CYCLE_KINDS, `${label}.cycle.kind`),
       index: requireNonNegativeInteger(cycle.index, `${label}.cycle.index`),
@@ -68,7 +93,11 @@ export function parseEvolutionPackV1(
   expectedProjectId: string,
   label = "evolutionPack",
 ): EvolutionPackV1 {
-  requireString(expectedProjectId, `${label} expected projectId`);
+  requireString(
+    expectedProjectId,
+    `${label} expected projectId`,
+    TARGET_EVOLUTION_LIMITS.maxIdentifierLength,
+  );
   const record = strictObject(
     value,
     [
@@ -89,7 +118,11 @@ export function parseEvolutionPackV1(
   );
   requireSchemaVersion(record.schemaVersion, `${label}.schemaVersion`);
 
-  const knowledgeScope = requireString(record.knowledgeScope, `${label}.knowledgeScope`);
+  const knowledgeScope = requireString(
+    record.knowledgeScope,
+    `${label}.knowledgeScope`,
+    TARGET_EVOLUTION_LIMITS.maxTextLength,
+  );
   const expectedKnowledgeScope = `project:${expectedProjectId}` as const;
   if (knowledgeScope !== expectedKnowledgeScope) {
     throw new Error(`${label}.knowledgeScope must equal ${expectedKnowledgeScope}`);
@@ -101,14 +134,22 @@ export function parseEvolutionPackV1(
     `${label}.objective`,
   );
   const observation = strictObject(record.observation, ["signalSources"], `${label}.observation`);
-  const signalSources = requireArray(observation.signalSources, `${label}.observation.signalSources`).map(
-    (source, index) => parseSignalSource(source, `${label}.observation.signalSources[${index}]`),
+  const signalSources = requireArray(
+    observation.signalSources,
+    `${label}.observation.signalSources`,
+    TARGET_EVOLUTION_LIMITS.maxSignalSources,
+  ).map((source, index) =>
+    parseSignalSource(source, `${label}.observation.signalSources[${index}]`),
   );
   requireNonEmpty(signalSources, `${label}.observation.signalSources`);
   requireUniqueIds(signalSources, `${label}.observation.signalSources`);
 
-  const mutationSurfaces = requireArray(record.mutationSurfaces, `${label}.mutationSurfaces`).map(
-    (surface, index) => parseMutationSurface(surface, expectedProjectId, `${label}.mutationSurfaces[${index}]`),
+  const mutationSurfaces = requireArray(
+    record.mutationSurfaces,
+    `${label}.mutationSurfaces`,
+    TARGET_EVOLUTION_LIMITS.maxMutationSurfaces,
+  ).map((surface, index) =>
+    parseMutationSurface(surface, expectedProjectId, `${label}.mutationSurfaces[${index}]`),
   );
   requireNonEmpty(mutationSurfaces, `${label}.mutationSurfaces`);
   requireUniqueIds(mutationSurfaces, `${label}.mutationSurfaces`);
@@ -155,17 +196,30 @@ export function parseEvolutionPackV1(
 
   return {
     schemaVersion: 1,
-    id: requireString(record.id, `${label}.id`),
-    targetSystemId: requireString(record.targetSystemId, `${label}.targetSystemId`),
+    id: requireString(record.id, `${label}.id`, TARGET_EVOLUTION_LIMITS.maxIdentifierLength),
+    targetSystemId: requireString(
+      record.targetSystemId,
+      `${label}.targetSystemId`,
+      TARGET_EVOLUTION_LIMITS.maxIdentifierLength,
+    ),
     version: requirePositiveInteger(record.version, `${label}.version`),
     knowledgeScope: expectedKnowledgeScope,
     objective: {
-      charterId: requireString(objective.charterId, `${label}.objective.charterId`),
+      charterId: requireString(
+        objective.charterId,
+        `${label}.objective.charterId`,
+        TARGET_EVOLUTION_LIMITS.maxIdentifierLength,
+      ),
       domainOutcomes: requireNonEmptyStringArray(
         objective.domainOutcomes,
         `${label}.objective.domainOutcomes`,
+        TARGET_EVOLUTION_LIMITS.maxArrayItems,
       ),
-      nonGoals: requireNonEmptyStringArray(objective.nonGoals, `${label}.objective.nonGoals`),
+      nonGoals: requireNonEmptyStringArray(
+        objective.nonGoals,
+        `${label}.objective.nonGoals`,
+        TARGET_EVOLUTION_LIMITS.maxArrayItems,
+      ),
     },
     observation: { signalSources },
     mutationSurfaces,
@@ -180,29 +234,42 @@ export function parseEvolutionPackV1(
       guardMetrics: requireNonEmptyStringArray(
         promotionPolicy.guardMetrics,
         `${label}.promotionPolicy.guardMetrics`,
+        TARGET_EVOLUTION_LIMITS.maxArrayItems,
       ),
       observationWindow: requireString(
         promotionPolicy.observationWindow,
         `${label}.promotionPolicy.observationWindow`,
+        TARGET_EVOLUTION_LIMITS.maxTextLength,
       ),
-      rollback: requireString(promotionPolicy.rollback, `${label}.promotionPolicy.rollback`),
+      rollback: requireString(
+        promotionPolicy.rollback,
+        `${label}.promotionPolicy.rollback`,
+        TARGET_EVOLUTION_LIMITS.maxTextLength,
+      ),
     },
     handoff: {
       maturity,
-      targetOwner: requireString(handoff.targetOwner, `${label}.handoff.targetOwner`),
+      targetOwner: requireString(
+        handoff.targetOwner,
+        `${label}.handoff.targetOwner`,
+        TARGET_EVOLUTION_LIMITS.maxIdentifierLength,
+      ),
       requiredCapabilities: requireNonEmptyStringArray(
         handoff.requiredCapabilities,
         `${label}.handoff.requiredCapabilities`,
+        TARGET_EVOLUTION_LIMITS.maxArrayItems,
       ),
     },
     portability: {
       projectLocalRules: requireNonEmptyStringArray(
         portability.projectLocalRules,
         `${label}.portability.projectLocalRules`,
+        TARGET_EVOLUTION_LIMITS.maxArrayItems,
       ),
       genericizationEvidence: requireStringArray(
         portability.genericizationEvidence,
         `${label}.portability.genericizationEvidence`,
+        TARGET_EVOLUTION_LIMITS.maxArrayItems,
       ),
     },
   };
@@ -219,11 +286,20 @@ export function parseEvolutionCausalHypothesis(
   );
   return {
     failureClass: requireEnum(record.failureClass, FAILURE_CLASSES, `${label}.failureClass`),
-    mechanism: requireString(record.mechanism, `${label}.mechanism`),
-    predictedEffects: requireNonEmptyStringArray(record.predictedEffects, `${label}.predictedEffects`),
+    mechanism: requireString(
+      record.mechanism,
+      `${label}.mechanism`,
+      TARGET_EVOLUTION_LIMITS.maxTextLength,
+    ),
+    predictedEffects: requireNonEmptyStringArray(
+      record.predictedEffects,
+      `${label}.predictedEffects`,
+      TARGET_EVOLUTION_LIMITS.maxArrayItems,
+    ),
     disconfirmingEvidence: requireNonEmptyStringArray(
       record.disconfirmingEvidence,
       `${label}.disconfirmingEvidence`,
+      TARGET_EVOLUTION_LIMITS.maxArrayItems,
     ),
   };
 }
@@ -250,14 +326,17 @@ export function parseEvolutionComparison(
   const developmentEvidenceRefs = requireNonEmptyStringArray(
     record.developmentEvidenceRefs,
     `${label}.developmentEvidenceRefs`,
+    TARGET_EVOLUTION_LIMITS.maxEvidenceRefsPerSplit,
   );
   const holdoutEvidenceRefs = requireNonEmptyStringArray(
     record.holdoutEvidenceRefs,
     `${label}.holdoutEvidenceRefs`,
+    TARGET_EVOLUTION_LIMITS.maxEvidenceRefsPerSplit,
   );
   const unrelatedEvidenceRefs = requireNonEmptyStringArray(
     record.unrelatedEvidenceRefs,
     `${label}.unrelatedEvidenceRefs`,
+    TARGET_EVOLUTION_LIMITS.maxEvidenceRefsPerSplit,
   );
   requireGloballyUniqueEvidence(
     [developmentEvidenceRefs, holdoutEvidenceRefs, unrelatedEvidenceRefs],
@@ -271,10 +350,18 @@ export function parseEvolutionComparison(
   );
   const maxTokens = equalBudget.maxTokens === undefined
     ? undefined
-    : requirePositiveInteger(equalBudget.maxTokens, `${label}.equalBudget.maxTokens`);
+    : requirePositiveIntegerAtMost(
+        equalBudget.maxTokens,
+        TARGET_EVOLUTION_LIMITS.maxTokens,
+        `${label}.equalBudget.maxTokens`,
+      );
 
   return {
-    controlRef: requireString(record.controlRef, `${label}.controlRef`),
+    controlRef: requireString(
+      record.controlRef,
+      `${label}.controlRef`,
+      TARGET_EVOLUTION_LIMITS.maxTextLength,
+    ),
     developmentEvidenceRefs,
     holdoutEvidenceRefs,
     unrelatedEvidenceRefs,
@@ -283,18 +370,24 @@ export function parseEvolutionComparison(
       `${label}.corpusSnapshotSha256`,
     ),
     equalBudget: {
-      model: requireString(equalBudget.model, `${label}.equalBudget.model`),
+      model: requireString(
+        equalBudget.model,
+        `${label}.equalBudget.model`,
+        TARGET_EVOLUTION_LIMITS.maxIdentifierLength,
+      ),
       reasoningEffort: requireEnum(
         equalBudget.reasoningEffort,
         REASONING_EFFORTS,
         `${label}.equalBudget.reasoningEffort`,
       ),
-      wallClockMs: requirePositiveInteger(
+      wallClockMs: requirePositiveIntegerAtMost(
         equalBudget.wallClockMs,
+        TARGET_EVOLUTION_LIMITS.maxWallClockMs,
         `${label}.equalBudget.wallClockMs`,
       ),
-      maxAttempts: requirePositiveInteger(
+      maxAttempts: requirePositiveIntegerAtMost(
         equalBudget.maxAttempts,
+        TARGET_EVOLUTION_LIMITS.maxAttempts,
         `${label}.equalBudget.maxAttempts`,
       ),
       ...(maxTokens === undefined ? {} : { maxTokens }),
@@ -302,12 +395,17 @@ export function parseEvolutionComparison(
         equalBudget.toolPolicySha256,
         `${label}.equalBudget.toolPolicySha256`,
       ),
-      concurrency: requirePositiveInteger(
+      concurrency: requirePositiveIntegerAtMost(
         equalBudget.concurrency,
+        TARGET_EVOLUTION_LIMITS.maxConcurrency,
         `${label}.equalBudget.concurrency`,
       ),
     },
-    primaryMetric: requireString(record.primaryMetric, `${label}.primaryMetric`),
+    primaryMetric: requireString(
+      record.primaryMetric,
+      `${label}.primaryMetric`,
+      TARGET_EVOLUTION_LIMITS.maxTextLength,
+    ),
     minimumUplift: requireNonNegativeFinite(record.minimumUplift, `${label}.minimumUplift`),
     maximumGuardRegression: requireNonNegativeFinite(
       record.maximumGuardRegression,
@@ -319,7 +417,7 @@ export function parseEvolutionComparison(
 function parseEvolutionInstancePack(value: unknown, label: string): NonNullable<EvolutionInstance["pack"]> {
   const record = strictObject(value, ["id", "version", "contentSha256"], label);
   return {
-    id: requireString(record.id, `${label}.id`),
+    id: requireString(record.id, `${label}.id`, TARGET_EVOLUTION_LIMITS.maxIdentifierLength),
     version: requirePositiveInteger(record.version, `${label}.version`),
     contentSha256: requireSha256(record.contentSha256, `${label}.contentSha256`),
   };
@@ -331,7 +429,7 @@ function parseSignalSource(value: unknown, label: string): EvolutionPackV1["obse
     ? undefined
     : requirePositiveInteger(record.freshnessMs, `${label}.freshnessMs`);
   return {
-    id: requireString(record.id, `${label}.id`),
+    id: requireString(record.id, `${label}.id`, TARGET_EVOLUTION_LIMITS.maxIdentifierLength),
     kind: requireEnum(record.kind, SIGNAL_SOURCE_KINDS, `${label}.kind`),
     ...(freshnessMs === undefined ? {} : { freshnessMs }),
   };
@@ -351,17 +449,26 @@ function parseMutationSurface(
   if (evolutionTarget === "model") {
     throw new Error(`${label}.evolutionTarget model is prohibited in milestone one`);
   }
-  const projectId = requireString(record.projectId, `${label}.projectId`);
+  const layer = requireEnum(record.layer, MUTATION_LAYERS, `${label}.layer`);
+  const allowedLayers = evolutionTarget === "artifact" ? ARTIFACT_LAYERS : HARNESS_LAYERS;
+  if (!allowedLayers.has(layer)) {
+    throw new Error(`${label}.layer ${layer} is not allowed for evolutionTarget ${evolutionTarget}`);
+  }
+  const projectId = requireString(
+    record.projectId,
+    `${label}.projectId`,
+    TARGET_EVOLUTION_LIMITS.maxIdentifierLength,
+  );
   if (projectId !== expectedProjectId) {
     throw new Error(`${label}.projectId must equal proposal projectId ${expectedProjectId}`);
   }
   return {
-    id: requireString(record.id, `${label}.id`),
+    id: requireString(record.id, `${label}.id`, TARGET_EVOLUTION_LIMITS.maxIdentifierLength),
     evolutionTarget,
-    layer: requireEnum(record.layer, MUTATION_LAYERS, `${label}.layer`),
+    layer,
     projectId,
-    allowedPaths: requireNonEmptyStringArray(record.allowedPaths, `${label}.allowedPaths`),
-    forbiddenPaths: requireNonEmptyStringArray(record.forbiddenPaths, `${label}.forbiddenPaths`),
+    allowedPaths: requireProjectRelativePaths(record.allowedPaths, `${label}.allowedPaths`),
+    forbiddenPaths: requireProjectRelativePaths(record.forbiddenPaths, `${label}.forbiddenPaths`),
     owner: requireEnum(record.owner, MUTATION_OWNERS, `${label}.owner`),
   };
 }
@@ -385,28 +492,79 @@ function requireSchemaVersion(value: unknown, label: string): asserts value is 1
   }
 }
 
-function requireString(value: unknown, label: string): string {
+function requireString(
+  value: unknown,
+  label: string,
+  maxLength: number = TARGET_EVOLUTION_LIMITS.maxTextLength,
+): string {
   if (typeof value !== "string" || value.trim().length === 0) {
     throw new Error(`${label} must be a non-empty string`);
   }
-  return value;
-}
-
-function requireArray(value: unknown, label: string): unknown[] {
-  if (!Array.isArray(value)) {
-    throw new Error(`${label} must be an array`);
+  if (value !== value.trim()) {
+    throw new Error(`${label} must not contain surrounding whitespace`);
+  }
+  if (value.length > maxLength) {
+    throw new Error(`${label} must contain at most ${maxLength} characters`);
   }
   return value;
 }
 
-function requireStringArray(value: unknown, label: string): string[] {
-  return requireArray(value, label).map((item, index) => requireString(item, `${label}[${index}]`));
+function requireArray(value: unknown, label: string, maxItems?: number): unknown[] {
+  if (!Array.isArray(value)) {
+    throw new Error(`${label} must be an array`);
+  }
+  if (maxItems !== undefined && value.length > maxItems) {
+    throw new Error(`${label} must contain at most ${maxItems} items`);
+  }
+  return value;
 }
 
-function requireNonEmptyStringArray(value: unknown, label: string): string[] {
-  const result = requireStringArray(value, label);
+function requireStringArray(
+  value: unknown,
+  label: string,
+  maxItems: number,
+  maxItemLength: number = TARGET_EVOLUTION_LIMITS.maxTextLength,
+): string[] {
+  return requireArray(value, label, maxItems).map((item, index) =>
+    requireString(item, `${label}[${index}]`, maxItemLength),
+  );
+}
+
+function requireNonEmptyStringArray(
+  value: unknown,
+  label: string,
+  maxItems: number,
+  maxItemLength: number = TARGET_EVOLUTION_LIMITS.maxTextLength,
+): string[] {
+  const result = requireStringArray(value, label, maxItems, maxItemLength);
   requireNonEmpty(result, label);
   return result;
+}
+
+function requireProjectRelativePaths(value: unknown, label: string): string[] {
+  const paths = requireArray(value, label, TARGET_EVOLUTION_LIMITS.maxPathsPerSurface).map(
+    (path, index) => requireProjectRelativePath(path, `${label}[${index}]`),
+  );
+  requireNonEmpty(paths, label);
+  return paths;
+}
+
+function requireProjectRelativePath(value: unknown, label: string): string {
+  const path = requireString(value, label, TARGET_EVOLUTION_LIMITS.maxPathLength);
+  if (
+    path.startsWith("/")
+    || path.includes("\\")
+    || path.includes("\0")
+    || /^[A-Za-z]:/.test(path)
+    || /^[A-Za-z][A-Za-z0-9+.-]*:/.test(path)
+  ) {
+    throw new Error(`${label} must be a project-relative path or glob`);
+  }
+  const segments = path.split("/");
+  if (segments.some((segment) => segment === "" || segment === "." || segment === "..")) {
+    throw new Error(`${label} must be a canonical project-relative path or glob`);
+  }
+  return path;
 }
 
 function requireNonEmpty<T>(value: T[], label: string): void {
@@ -427,6 +585,14 @@ function requirePositiveInteger(value: unknown, label: string): number {
     throw new Error(`${label} must be a positive integer`);
   }
   return value;
+}
+
+function requirePositiveIntegerAtMost(value: unknown, maximum: number, label: string): number {
+  const result = requirePositiveInteger(value, label);
+  if (result > maximum) {
+    throw new Error(`${label} must be at most ${maximum}`);
+  }
+  return result;
 }
 
 function requireNonNegativeInteger(value: unknown, label: string): number {
