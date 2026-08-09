@@ -1,0 +1,178 @@
+{
+  "projectId": "project_hodor_reference",
+  "evolutionPack": {
+    "schemaVersion": 1,
+    "id": "hodor-evolution-pack-v0",
+    "targetSystemId": "hodor",
+    "version": 1,
+    "knowledgeScope": "project:project_hodor_reference",
+    "objective": {
+      "charterId": "charter_hodor_reference_v0",
+      "domainOutcomes": [
+        "Reduce spatial-risk false positives without weakening blocking safety",
+        "Establish replayable evidence for later Hodor evolution cycles"
+      ],
+      "nonGoals": [
+        "Invoke paid generation or incur monetary spend",
+        "Call a real image, video, audio, or language-model provider",
+        "Write to Pancat or any other production control plane",
+        "Publish to production",
+        "Delete real production assets or source materials",
+        "Read or write cross-project memory",
+        "Train, fine-tune, replace, or mutate model weights"
+      ]
+    },
+    "observation": {
+      "signalSources": [
+        {
+          "id": "hodor-production-episode-fixtures",
+          "kind": "domain-metric",
+          "freshnessMs": 2592000000
+        },
+        {
+          "id": "hodor-spatial-risk-policy-snapshot",
+          "kind": "repository"
+        },
+        {
+          "id": "hodor-evolution-run-evidence",
+          "kind": "run-evidence"
+        }
+      ]
+    },
+    "mutationSurfaces": [
+      {
+        "id": "hodor-spatial-risk-policy-artifact",
+        "evolutionTarget": "artifact",
+        "layer": "policy",
+        "projectId": "project_hodor_reference",
+        "allowedPaths": [
+          "config/evolution/spatial-risk/**"
+        ],
+        "forbiddenPaths": [
+          "production/**",
+          "providers/**",
+          "credentials/**",
+          "assets/production/**",
+          "memory/cross-project/**"
+        ],
+        "owner": "target"
+      },
+      {
+        "id": "hodor-spatial-risk-evaluation-harness",
+        "evolutionTarget": "harness",
+        "layer": "workflow",
+        "projectId": "project_hodor_reference",
+        "allowedPaths": [
+          "evals/evolution/spatial-risk/**"
+        ],
+        "forbiddenPaths": [
+          "production/**",
+          "providers/**",
+          "credentials/**",
+          "assets/production/**",
+          "memory/cross-project/**"
+        ],
+        "owner": "ouroboros"
+      }
+    ],
+    "experimentPolicy": {
+      "controlRequired": true,
+      "holdoutRequired": true,
+      "unrelatedRegressionRequired": true,
+      "equalBudgetRequired": true,
+      "maxCandidates": 1
+    },
+    "promotionPolicy": {
+      "guardMetrics": [
+        "zero paid generation",
+        "zero real provider calls",
+        "zero Pancat writes",
+        "zero production publishes",
+        "zero real asset deletions",
+        "zero cross-project memory access"
+      ],
+      "observationWindow": "Not active at designed maturity; freeze a window before shadow execution",
+      "rollback": "Not executable at designed maturity; a future PromotionReceipt must name exact restore and readback evidence"
+    },
+    "handoff": {
+      "maturity": "designed",
+      "targetOwner": "hodor",
+      "requiredCapabilities": [
+        "Versioned EvolutionProfile activation",
+        "Immutable ProductionEpisode capture",
+        "Content-addressed HarnessVariant identity",
+        "MatchedExperiment execution without holdout leakage",
+        "PromotionReceipt with exact readback and rollback evidence"
+      ]
+    },
+    "portability": {
+      "projectLocalRules": [
+        "Hodor spatial-risk semantics and episode evidence remain project-local",
+        "Heldout contents and results are unavailable to candidate generation",
+        "A Hodor result cannot become kernel knowledge without evidence from another project"
+      ],
+      "genericizationEvidence": []
+    }
+  },
+  "causalHypothesis": {
+    "failureClass": "domain-hypothesis",
+    "mechanism": "The current spatial-risk policy may over-block safe layouts because a fixed rule cannot distinguish local obstruction from unrelated scene complexity",
+    "predictedEffects": [
+      "The candidate lowers spatial-risk false positives on development and heldout episodes under the frozen equal budget",
+      "Blocking safety and unrelated episode quality do not regress"
+    ],
+    "disconfirmingEvidence": [
+      "Heldout spatial-risk false positives fail to improve by the required margin",
+      "Any blocking-safety or unrelated guard regression exceeds zero",
+      "Any side-effect budget counter exceeds zero"
+    ]
+  },
+  "comparison": {
+    "controlRef": "hodor-spatial-risk-policy-baseline-v0",
+    "developmentEvidenceRefs": [
+      "episode:hodor-reference:development:001",
+      "episode:hodor-reference:development:002"
+    ],
+    "holdoutEvidenceRefs": [
+      "episode:hodor-reference:heldout:001",
+      "episode:hodor-reference:heldout:002"
+    ],
+    "unrelatedEvidenceRefs": [
+      "episode:hodor-reference:unrelated:001",
+      "episode:hodor-reference:unrelated:002"
+    ],
+    "corpusSnapshotSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "equalBudget": {
+      "model": "fixture-replay-no-provider",
+      "reasoningEffort": "high",
+      "wallClockMs": 120000,
+      "maxAttempts": 1,
+      "maxTokens": 20000,
+      "toolPolicySha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "concurrency": 1
+    },
+    "primaryMetric": "spatial-risk false-positive rate",
+    "minimumUplift": 0.05,
+    "maximumGuardRegression": 0
+  },
+  "firstCandidate": {
+    "id": "hodor-spatial-risk-shadow-v0",
+    "mode": "shadow",
+    "allowedEvolutionTargets": [
+      "artifact",
+      "harness"
+    ],
+    "prohibitedEvolutionTargets": [
+      "model"
+    ],
+    "sideEffectBudget": {
+      "paidUsd": 0,
+      "realProviderCalls": 0,
+      "pancatWrites": 0,
+      "productionPublishes": 0,
+      "realAssetDeletes": 0,
+      "crossProjectMemoryReads": 0,
+      "crossProjectMemoryWrites": 0
+    }
+  }
+}

@@ -9,8 +9,29 @@ import type {
 import { buildTaskPrompt, proposeDesignAction } from "../packages/runner/src";
 
 const PROJECT_ID = "project_hodor";
+const HODOR_REFERENCE_PROJECT_ID = "project_hodor_reference";
 const SHA_A = "a".repeat(64);
 const SHA_B = "b".repeat(64);
+
+interface HodorEvolutionReference {
+  projectId: string;
+  evolutionPack: EvolutionPackV1;
+  causalHypothesis: EvolutionCausalHypothesis;
+  comparison: EvolutionComparison;
+  firstCandidate: {
+    id: string;
+    mode: string;
+    sideEffectBudget: Record<string, number>;
+    allowedEvolutionTargets: string[];
+    prohibitedEvolutionTargets: string[];
+  };
+}
+
+async function hodorEvolutionReference(): Promise<HodorEvolutionReference> {
+  return JSON.parse(
+    await Bun.file(new URL("./fixtures/hodor-evolution-pack-v0.json", import.meta.url)).text(),
+  ) as HodorEvolutionReference;
+}
 
 function ordinaryProposal(): DesignProposalData {
   return {
@@ -194,6 +215,95 @@ function jsonFenceAfter(prompt: string, heading: string): Record<string, unknown
 }
 
 describe("target-system evolution contracts", () => {
+  test("accepts the checked-in Hodor designed-state reference through production parsers", async () => {
+    const reference = await hodorEvolutionReference();
+    const pack = parser("parseEvolutionPackV1")(
+      reference.evolutionPack,
+      reference.projectId,
+    ) as EvolutionPackV1;
+    const hypothesis = parser("parseEvolutionCausalHypothesis")(
+      reference.causalHypothesis,
+    );
+    const comparison = parser("parseEvolutionComparison")(
+      reference.comparison,
+    ) as EvolutionComparison;
+
+    expect(reference.projectId).toBe(HODOR_REFERENCE_PROJECT_ID);
+    expect(pack).toEqual(reference.evolutionPack);
+    expect(hypothesis).toEqual(reference.causalHypothesis);
+    expect(comparison).toEqual(reference.comparison);
+    expect(pack.targetSystemId).toBe("hodor");
+    expect(pack.knowledgeScope).toBe(`project:${HODOR_REFERENCE_PROJECT_ID}`);
+    expect(pack.handoff).toMatchObject({ maturity: "designed", targetOwner: "hodor" });
+
+    const optimizationTargets = new Set(
+      pack.mutationSurfaces.map((surface) => surface.evolutionTarget),
+    );
+    expect(optimizationTargets).toEqual(new Set(["artifact", "harness"]));
+    expect(optimizationTargets.has("model")).toBeFalse();
+    expect(reference.firstCandidate).toMatchObject({
+      mode: "shadow",
+      allowedEvolutionTargets: ["artifact", "harness"],
+      prohibitedEvolutionTargets: ["model"],
+      sideEffectBudget: {
+        paidUsd: 0,
+        realProviderCalls: 0,
+        pancatWrites: 0,
+        productionPublishes: 0,
+        realAssetDeletes: 0,
+        crossProjectMemoryReads: 0,
+        crossProjectMemoryWrites: 0,
+      },
+    });
+
+    const splitRefs = [
+      comparison.developmentEvidenceRefs,
+      comparison.holdoutEvidenceRefs,
+      comparison.unrelatedEvidenceRefs,
+    ];
+    expect(splitRefs.every((split) => split.length > 0)).toBeTrue();
+    expect(new Set(splitRefs.flat()).size).toBe(splitRefs.flat().length);
+    expect(comparison.equalBudget).toEqual({
+      model: "fixture-replay-no-provider",
+      reasoningEffort: "high",
+      wallClockMs: 120_000,
+      maxAttempts: 1,
+      maxTokens: 20_000,
+      toolPolicySha256: "b".repeat(64),
+      concurrency: 1,
+    });
+
+    const forbiddenPaths = new Set(
+      pack.mutationSurfaces.flatMap((surface) => surface.forbiddenPaths),
+    );
+    expect(forbiddenPaths).toEqual(new Set([
+      "production/**",
+      "providers/**",
+      "credentials/**",
+      "assets/production/**",
+      "memory/cross-project/**",
+    ]));
+  });
+
+  test.each([
+    ["model optimization", (reference: HodorEvolutionReference) => {
+      reference.evolutionPack.mutationSurfaces[0]!.evolutionTarget = "model";
+    }],
+    ["cross-project surface", (reference: HodorEvolutionReference) => {
+      reference.evolutionPack.mutationSurfaces[0]!.projectId = "project_other";
+    }],
+    ["path escape", (reference: HodorEvolutionReference) => {
+      reference.evolutionPack.mutationSurfaces[0]!.allowedPaths = ["../Hodor/hodor-web/**"];
+    }],
+  ])("rejects unsafe Hodor reference mutations: %s", async (_name, mutate) => {
+    const reference = await hodorEvolutionReference();
+    mutate(reference);
+
+    expect(() =>
+      parser("parseEvolutionPackV1")(reference.evolutionPack, reference.projectId),
+    ).toThrow();
+  });
+
   test("keeps ordinary design proposals backward compatible", () => {
     const action = proposeDesignAction({
       projectId: PROJECT_ID,
