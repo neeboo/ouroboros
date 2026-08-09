@@ -47,10 +47,14 @@ export function resolveAgentBackend(input: {
   cliAgentBackend?: string | null;
   cliExecutor?: string | null;
 }): ResolvedAgentBackend {
+  const frozenCodexExecutor = input.cliExecutor === "codex-resumable";
   const candidates: Array<{ id: string | null; source: AgentBackendSource }> = [
     { id: stringOrNull(input.task.config?.agentBackend), source: "task" },
     { id: roleDefault(input.run.context, input.task.role), source: "role-default" },
-    { id: runDefault(input.run.context), source: "run-default" },
+    // A daemon started with the frozen Codex executor must not inherit a stale
+    // run-wide Claude fallback. Task and role selections remain explicit, but
+    // legacy global defaults are migrated to the daemon's executor boundary.
+    { id: frozenCodexExecutor ? null : runDefault(input.run.context), source: "run-default" },
     { id: stringOrNull(input.cliAgentBackend), source: "cli-agent-backend" },
     { id: stringOrNull(input.cliExecutor), source: "cli-executor" },
   ];
