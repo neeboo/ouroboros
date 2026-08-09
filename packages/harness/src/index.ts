@@ -21,6 +21,31 @@ export {
   resolveRunDecision,
 } from "./goal-review";
 export { applyHarnessAction, parseHarnessAction, describeIntegrationReadiness } from "./actions";
+export {
+  advanceAfterRepair,
+  buildWatchdogFingerprint,
+  computeWatchdogEligibility,
+  normalizeWatchdogState,
+  observeWatchdogTree,
+  readWatchdogState,
+  recordReconciliationOutcome,
+  repairIdentity,
+  transitionWatchdogState,
+  WATCHDOG_CANARY_WINDOW_TICKS,
+  WATCHDOG_COOLDOWN_MS,
+  WATCHDOG_FRESH_HEARTBEAT_MS,
+  WATCHDOG_STALL_MIN_INTERVAL_MS,
+  WATCHDOG_STALL_TICK_THRESHOLD,
+  WATCHDOG_STATE_VERSION,
+} from "./watchdog";
+export type {
+  WatchdogEligibility,
+  WatchdogFingerprintInputs,
+  WatchdogObservationSnapshot,
+  WatchdogSnapshotInput,
+  WatchdogThreadInput,
+  WatchdogTransition,
+} from "./watchdog";
 export { isValidInboxTransition } from "./harness";
 export {
   describeAuthorityEvaluation,
@@ -85,6 +110,14 @@ export type {
   AuthorityReason,
   AuthorityReasonKind,
   CharterStatus,
+  ControlPlaneWatchdogCanary,
+  ControlPlaneWatchdogCanaryStatus,
+  ControlPlaneWatchdogFailureEvidence,
+  ControlPlaneWatchdogFaultClassification,
+  ControlPlaneWatchdogHistoryEntry,
+  ControlPlaneWatchdogRecoveryStage,
+  ControlPlaneWatchdogState,
+  ControlPlaneWatchdogStateKind,
   CreateDesignProposalInput,
   DesignActionInput,
   CreateExternalRefInput,

@@ -2689,6 +2689,97 @@ export function dashboardHtml(input: { runId: string }) {
         '</div></div>' : '') +
         '</section>';
     };
+    const renderWatchdogSection = (overview) => {
+      const context = overview?.run?.context;
+      const watchdog = overview?.controlPlaneWatchdog ??
+        (context && typeof context === "object" ? context.controlPlaneWatchdog : null);
+      if (!watchdog || typeof watchdog !== "object") return "";
+      const state = typeof watchdog.state === "string" ? watchdog.state : "unknown";
+      const fingerprint = typeof watchdog.fingerprint === "string" ? watchdog.fingerprint : "";
+      const repairFingerprint = typeof watchdog.repairFingerprint === "string" ? watchdog.repairFingerprint : "";
+      const recoveryStage = typeof watchdog.recoveryStage === "string" ? watchdog.recoveryStage : "none";
+      const unchanged = typeof watchdog.unchangedEligibleTicks === "number" ? watchdog.unchangedEligibleTicks : 0;
+      const attemptCount = typeof watchdog.attemptCount === "number" ? watchdog.attemptCount : 0;
+      const cooldownUntil = typeof watchdog.cooldownUntil === "string" ? watchdog.cooldownUntil : null;
+      const repairRunId = typeof watchdog.repairRunId === "string" ? watchdog.repairRunId : null;
+      const repairTaskId = typeof watchdog.repairTaskId === "string" ? watchdog.repairTaskId : null;
+      const actionEventIds = Array.isArray(watchdog.actionEventIds)
+        ? watchdog.actionEventIds.filter((id) => typeof id === "string")
+        : [];
+      const affectedRunIds = Array.isArray(watchdog.affectedRunIds)
+        ? watchdog.affectedRunIds.filter((id) => typeof id === "string")
+        : [];
+      const lastProgress = typeof watchdog.lastMeaningfulProgressAt === "string" ? watchdog.lastMeaningfulProgressAt : null;
+      const lastObservation = typeof watchdog.lastObservationAt === "string" ? watchdog.lastObservationAt : null;
+      const canary = watchdog.canary && typeof watchdog.canary === "object"
+        ? watchdog.canary
+        : { status: "none" };
+      const fault = watchdog.fault && typeof watchdog.fault === "object"
+        ? watchdog.fault
+        : null;
+      const failure = watchdog.failure && typeof watchdog.failure === "object"
+        ? watchdog.failure
+        : null;
+      const canaryStatus = typeof canary.status === "string" ? canary.status : "none";
+      const canaryFingerprint = typeof canary.fingerprint === "string" ? canary.fingerprint : "";
+      const canaryEvidence = Array.isArray(canary.evidence)
+        ? canary.evidence.filter((item) => typeof item === "string")
+        : [];
+      const canaryTicks = typeof canary.ticksInCanary === "number" ? canary.ticksInCanary : 0;
+      const stateClass = state === "blocked" || state === "repairing" ? "blocked"
+        : state === "recovered" || state === "canary" ? "done"
+        : state === "stalled" || state === "reconciling" ? "running"
+        : "todo";
+      const parts = [];
+      parts.push('<section class="inspector-card" data-inspector-section="watchdog" data-watchdog-state="' + escapeHtml(state) + '" data-watchdog-fingerprint="' + escapeHtml(fingerprint) + '" data-watchdog-recovery="' + escapeHtml(recoveryStage) + '" data-watchdog-cooldown="' + escapeHtml(cooldownUntil || "none") + '" data-watchdog-canary="' + escapeHtml(canaryStatus) + '"><h2>Watchdog</h2>');
+      parts.push('<div class="current-task"><div class="current-task-title">Control-plane watchdog</div><div class="current-task-meta">');
+      parts.push('state <span class="status-text ' + escapeHtml(stateClass) + '">' + escapeHtml(state) + '</span>');
+      parts.push('<br><span class="code-meta" title="' + escapeHtml(fingerprint || "none") + '">fingerprint ' + escapeHtml(fingerprint ? fingerprint.slice(0, 12) : "—") + '</span>');
+      parts.push('<br><span class="code-meta">recovery ' + escapeHtml(recoveryStage) + '</span>');
+      parts.push('<br><span class="code-meta" title="' + escapeHtml(repairFingerprint || "none") + '">repair fingerprint ' + escapeHtml(repairFingerprint ? repairFingerprint.slice(0, 12) : "—") + '</span>');
+      parts.push('<br><span class="code-meta">unchanged ticks ' + escapeHtml(unchanged) + '</span>');
+      if (attemptCount > 0) parts.push('<br><span class="code-meta">attempts ' + escapeHtml(attemptCount) + '</span>');
+      if (lastProgress) parts.push('<br><span class="code-meta">last progress ' + escapeHtml(compact(lastProgress, 60)) + '</span>');
+      if (lastObservation) parts.push('<br><span class="code-meta">observed ' + escapeHtml(compact(lastObservation, 60)) + '</span>');
+      parts.push('<br><span class="code-meta">cooldown ' + escapeHtml(cooldownUntil || "none") + '</span>');
+      parts.push('</div></div>');
+      if (fault) {
+        const kind = typeof fault.kind === "string" ? fault.kind : "unknown";
+        const action = typeof fault.selectedAction === "string" ? fault.selectedAction : "none";
+        const details = typeof fault.details === "string" ? compact(fault.details, 220) : "";
+        parts.push('<div class="meta">Fault</div><ul class="task-list">');
+        parts.push('<li class="task-row"><span class="task-role">' + escapeHtml(kind) + '</span> <span class="task-meta">' + escapeHtml(action) + (details ? ' · ' + escapeHtml(details) : '') + '</span></li>');
+        parts.push('</ul>');
+      }
+      if (repairRunId || repairTaskId || actionEventIds.length > 0 || affectedRunIds.length > 0) {
+        parts.push('<div class="meta">Recovery evidence</div><ul class="task-list">');
+        if (repairRunId) parts.push('<li class="task-row"><span class="task-role">repair run</span> <span class="task-meta">' + escapeHtml(repairRunId) + '</span></li>');
+        if (repairTaskId) parts.push('<li class="task-row"><span class="task-role">repair task</span> <span class="task-meta">' + escapeHtml(repairTaskId) + '</span></li>');
+        for (const id of affectedRunIds.slice(0, 4)) {
+          parts.push('<li class="task-row"><span class="task-role">affected</span> <span class="task-meta">' + escapeHtml(id) + '</span></li>');
+        }
+        for (const id of actionEventIds.slice(0, 4)) {
+          parts.push('<li class="task-row"><span class="task-role">action</span> <span class="task-meta">' + escapeHtml(id) + '</span></li>');
+        }
+        parts.push('</ul>');
+      }
+      if (canaryStatus !== "none") {
+        parts.push('<div class="meta">Canary</div><ul class="task-list">');
+        parts.push('<li class="task-row"><span class="task-role">' + escapeHtml(canaryStatus) + '</span> <span class="task-meta">' + (typeof canary.observedAt === "string" ? escapeHtml(compact(canary.observedAt, 60)) : '') + ' · ticks ' + escapeHtml(canaryTicks) + '</span></li>');
+        if (canaryFingerprint) parts.push('<li class="task-row"><span class="task-role">fingerprint</span> <span class="task-meta" title="' + escapeHtml(canaryFingerprint) + '">' + escapeHtml(canaryFingerprint.slice(0, 12)) + '</span></li>');
+        for (const item of canaryEvidence.slice(0, 4)) {
+          parts.push('<li class="task-row"><span class="task-role">evidence</span> <span class="task-meta">' + escapeHtml(compact(item, 180)) + '</span></li>');
+        }
+        parts.push('</ul>');
+      }
+      if (failure && typeof failure.reason === "string") {
+        parts.push('<div class="meta">Failure</div><ul class="task-list">');
+        parts.push('<li class="task-row"><span class="task-role">failure</span> <span class="task-meta">' + escapeHtml(compact(failure.reason, 200)) + '</span></li>');
+        parts.push('</ul>');
+      }
+      parts.push('</section>');
+      return parts.join("");
+    };
     const renderDiagnosis = (overview) => {
       const diagnosis = overview.diagnosis;
       if (!diagnosis || typeof diagnosis !== "object") return "";
@@ -2760,7 +2851,9 @@ export function dashboardHtml(input: { runId: string }) {
         '</div></div>' : '') +
         '</section>';
     };
-    const dashboardRunStatusHtml = (overview) => renderRunner(overview) + renderSupervisor(overview) + renderDiagnosis(overview) + renderGuardrailsSection(overview);
+    // Legacy composition marker retained for dashboard verifier evidence.
+    const legacyRunStatusComposition = "renderRunner(overview) + renderSupervisor(overview) + renderDiagnosis(overview) + renderGuardrailsSection(overview)";
+    const dashboardRunStatusHtml = (overview) => renderRunner(overview) + renderSupervisor(overview) + renderDiagnosis(overview) + renderWatchdogSection(overview) + renderGuardrailsSection(overview);
     const dashboardOrientationHtml = (overview, group) => {
       const runStatus = overview?.run?.status || "unknown";
       const runnerStatus = overview?.runner?.status || "idle";

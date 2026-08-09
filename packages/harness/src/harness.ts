@@ -145,6 +145,7 @@ import {
 } from "./target-evolution";
 import { basename, resolve } from "node:path";
 import { readableList, readableValue } from "./readable";
+import { readWatchdogState } from "./watchdog";
 
 const ATTEMPT_EVENT_BUSY_RETRIES = 5;
 
@@ -196,6 +197,13 @@ export class Harness {
   // mutation or child run behind.
   runInTransaction<T>(callback: (db: HarnessDatabase) => T): T {
     return withDatabase(this.dbPath, (db) => db.transaction(callback)(db));
+  }
+
+  // Acquire the SQLite write reservation before reading mutable coordination
+  // state. This avoids deferred-transaction snapshot upgrades when multiple
+  // daemon processes claim the same watchdog fingerprint concurrently.
+  runInImmediateTransaction<T>(callback: (db: HarnessDatabase) => T): T {
+    return withDatabase(this.dbPath, (db) => db.transaction(callback).immediate(db));
   }
 
   createProject(input: CreateProjectInput) {
@@ -1261,6 +1269,12 @@ export class Harness {
   }
 
   recordAttempt(input: RecordAttemptInput) {
+    return withDatabase(this.dbPath, (db) =>
+      db.transaction(() => this.recordAttemptWithDb(db, input))(),
+    );
+  }
+
+  recordAttemptWithDb(db: HarnessDatabase, input: RecordAttemptInput) {
     const output = normalizeAttemptOutput(input.output);
     if (output.status !== "done" && output.status !== "blocked") {
       throw new Error("attempt output status must be 'done' or 'blocked'");
@@ -1268,66 +1282,62 @@ export class Harness {
 
     const id = input.id ?? makeId("attempt");
     const problems = output.problems ?? [];
-    return withDatabase(this.dbPath, (db) => {
-      db.transaction(() => {
-        db.query(
-          `
-          insert into attempts (
-            id, task_id, status, input_json, output_json,
-            checks_json, artifacts_json, error, finished_at
-          )
-          values (
-            $id, $taskId, $status, $inputJson, $outputJson,
-            $checksJson, $artifactsJson, $error, current_timestamp
-          )
-          `,
-        ).run({
-          $id: id,
-          $taskId: input.taskId,
-          $status: output.status,
-          $inputJson: toJson(input.input),
-          $outputJson: toJson(output),
-          $checksJson: toJson(output.checks ?? []),
-          $artifactsJson: toJson(output.artifacts ?? []),
-          $error: problems.length > 0 ? problems.join("\n") : null,
-        });
-        db.query(
-          `
-          update tasks
-          set status = $status, updated_at = current_timestamp
-          where id = $taskId
-          `,
-        ).run({
-          $status: output.status,
-          $taskId: input.taskId,
-        });
-        const taskRow = db.query("select * from tasks where id = $taskId").get({ $taskId: input.taskId }) as
-          | TaskRow
-          | null;
-        if (taskRow) {
-          const lesson = lessonForAttempt(output);
-          db.query(
-            `
-            insert into lessons (
-              id, run_id, task_id, attempt_id, kind, summary, evidence_json
-            )
-            values (
-              $id, $runId, $taskId, $attemptId, $kind, $summary, $evidenceJson
-            )
-            `,
-          ).run({
-            $id: makeId("lesson"),
-            $runId: taskRow.run_id,
-            $taskId: input.taskId,
-            $attemptId: id,
-            $kind: lesson.kind,
-            $summary: lesson.summary,
-            $evidenceJson: toJson(lesson.evidence),
-          });
-        }
-      })();
-      return id;
+    db.query(
+      `
+      insert into attempts (
+        id, task_id, status, input_json, output_json,
+        checks_json, artifacts_json, error, finished_at
+      )
+      values (
+        $id, $taskId, $status, $inputJson, $outputJson,
+        $checksJson, $artifactsJson, $error, current_timestamp
+      )
+      `,
+    ).run({
+      $id: id,
+      $taskId: input.taskId,
+      $status: output.status,
+      $inputJson: toJson(input.input),
+      $outputJson: toJson(output),
+      $checksJson: toJson(output.checks ?? []),
+      $artifactsJson: toJson(output.artifacts ?? []),
+      $error: problems.length > 0 ? problems.join("\n") : null,
     });
+    db.query(
+      `
+      update tasks
+      set status = $status, updated_at = current_timestamp
+      where id = $taskId
+      `,
+    ).run({
+      $status: output.status,
+      $taskId: input.taskId,
+    });
+    const taskRow = db.query("select * from tasks where id = $taskId").get({ $taskId: input.taskId }) as
+      | TaskRow
+      | null;
+    if (taskRow) {
+      const lesson = lessonForAttempt(output);
+      db.query(
+        `
+        insert into lessons (
+          id, run_id, task_id, attempt_id, kind, summary, evidence_json
+        )
+        values (
+          $id, $runId, $taskId, $attemptId, $kind, $summary, $evidenceJson
+        )
+        `,
+      ).run({
+        $id: makeId("lesson"),
+        $runId: taskRow.run_id,
+        $taskId: input.taskId,
+        $attemptId: id,
+        $kind: lesson.kind,
+        $summary: lesson.summary,
+        $evidenceJson: toJson(lesson.evidence),
+      });
+    }
+    return id;
   }
 
   startAttempt(input: StartAttemptInput) {
@@ -1563,7 +1573,7 @@ export class Harness {
   recordHarnessActionEvent(input: RecordHarnessActionEventInput) {
     const id = input.id ?? makeId("action");
     return withDatabase(this.dbPath, (db) =>
-      db.transaction(() => this.recordHarnessActionEventWithDb(db, { ...input, id }))(),
+      db.transaction(() => this.recordHarnessActionEventWithDb(db, { ...input, id })).immediate(),
     );
   }
 
@@ -1591,6 +1601,41 @@ export class Harness {
 
   listHarnessActionEvents(input: ListHarnessActionEventsInput = {}) {
     return withDatabase(this.dbPath, (db) => this.listHarnessActionEventsWithDb(db, input));
+  }
+
+  listHarnessActionEventsForRunIds(runIds: string[]) {
+    const uniqueRunIds = [...new Set(runIds)].sort();
+    if (uniqueRunIds.length === 0) {
+      return [];
+    }
+    return withDatabase(this.dbPath, (db) => {
+      ensureHarnessActionEvents(db);
+      const events = new Map<string, ReturnType<typeof harnessActionEventFromRow>>();
+      for (let offset = 0; offset < uniqueRunIds.length; offset += 100) {
+        const chunk = uniqueRunIds.slice(offset, offset + 100);
+        const placeholders = chunk.map((_, index) => `$runId${index}`);
+        const bindings = Object.fromEntries(chunk.map((runId, index) => [`$runId${index}`, runId]));
+        const rows = db.query(
+          `
+          select distinct event.*
+          from harness_action_events event
+          where json_extract(event.request_json, '$.runId') in (${placeholders.join(", ")})
+             or json_extract(event.request_json, '$.rootRunId') in (${placeholders.join(", ")})
+             or exists (
+               select 1
+               from json_each(event.result_json, '$.artifacts') artifact
+               where json_extract(artifact.value, '$.runId') in (${placeholders.join(", ")})
+             )
+          order by event.rowid desc
+          `,
+        ).all(bindings) as HarnessActionEventRow[];
+        for (const row of rows) {
+          const event = harnessActionEventFromRow(row);
+          events.set(event.id, event);
+        }
+      }
+      return [...events.values()];
+    });
   }
 
   listHarnessActionEventsWithDb(db: HarnessDatabase, input: ListHarnessActionEventsWithDbInput = {}) {
@@ -1661,12 +1706,12 @@ export class Harness {
         insert into execution_threads (
           id, run_id, task_id, attempt_id, parent_thread_id,
           owner_type, owner_id, role, status, pid,
-          session_name, agent_session_id, worktree_path, interrupt_reason
+          session_name, agent_session_id, worktree_path, heartbeat_at, interrupt_reason
         )
         values (
           $id, $runId, $taskId, $attemptId, $parentThreadId,
           $ownerType, $ownerId, $role, $status, $pid,
-          $sessionName, $agentSessionId, $worktreePath, $interruptReason
+          $sessionName, $agentSessionId, $worktreePath, coalesce($heartbeatAt, current_timestamp), $interruptReason
         )
         on conflict(id) do update set
           run_id = excluded.run_id,
@@ -1681,7 +1726,7 @@ export class Harness {
           session_name = excluded.session_name,
           agent_session_id = excluded.agent_session_id,
           worktree_path = excluded.worktree_path,
-          heartbeat_at = current_timestamp,
+          heartbeat_at = coalesce(excluded.heartbeat_at, execution_threads.heartbeat_at, current_timestamp),
           interrupt_reason = excluded.interrupt_reason,
           updated_at = current_timestamp
         `,
@@ -1699,6 +1744,7 @@ export class Harness {
         $sessionName: input.sessionName ?? null,
         $agentSessionId: input.agentSessionId ?? null,
         $worktreePath: input.worktreePath ?? null,
+        $heartbeatAt: input.heartbeatAt ?? null,
         $interruptReason: input.interruptReason ?? null,
       });
       return id;
@@ -1870,6 +1916,7 @@ export class Harness {
         sessions,
         threads: threadRows.map(executionThreadFromRow),
         lessons: lessonRows.map(lessonFromRow),
+        controlPlaneWatchdog: runRow ? readWatchdogState(runFromRow(runRow).context) ?? undefined : undefined,
       };
     });
   }

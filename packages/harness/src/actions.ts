@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, realpathSync, rmSync, unlinkSync } from "node:fs";
-import { dirname, isAbsolute, join } from "node:path";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { acceptGuardrailProposal, proposeGuardrailsFromLessons } from "./guardrails";
 import type { HarnessDatabase } from "./database";
@@ -15,6 +15,22 @@ import { Harness } from "./harness";
 import { makeId } from "./ids";
 import { filterOuroborosRuntimePaths, isOuroborosRuntimePath } from "./runtime-paths";
 import {
+  advanceAfterRepair,
+  blockAfterRepair,
+  normalizeWatchdogState,
+  observeWatchdogTree,
+  readWatchdogState,
+  recordReconciliationOutcome,
+  repairIdentity,
+  transitionWatchdogState,
+  WATCHDOG_COOLDOWN_MS,
+  WATCHDOG_RECONCILE_LEASE_MS,
+  WATCHDOG_STALL_MIN_INTERVAL_MS,
+  WATCHDOG_STALL_TICK_THRESHOLD,
+  WATCHDOG_STATE_VERSION,
+} from "./watchdog";
+import type { WatchdogObservationSnapshot, WatchdogSnapshotInput } from "./watchdog";
+import {
   canonicalEvolutionRecordSha256,
   canonicalEvolutionValueSha256,
   parseEvolutionCausalHypothesis,
@@ -28,17 +44,23 @@ import {
 } from "./target-evolution";
 import type {
   AttemptOutput,
+  ControlPlaneWatchdogState,
   EvolutionComparison,
   EvolutionPackV1,
   EvolutionProfile,
   ExecutionThread,
   HarnessVariant,
+  HarnessActionEvent,
   MatchedExperiment,
   ProductionEpisode,
   ReclaimedRunningTask,
+  Run,
   RunOverview,
   Task,
 } from "./types";
+
+type WatchdogSnapshotInboxEvents = WatchdogSnapshotInput["inboxEvents"];
+type WatchdogSnapshotScheduledReviews = WatchdogSnapshotInput["scheduledReviews"];
 
 export interface UnintegratedVerifiedWorker {
   taskId: string;
@@ -177,6 +199,15 @@ export type HarnessAction =
       parentTaskId: string;
       threadIds?: string[];
       reason: string;
+    }
+  | {
+      type: "runWatchdogPass";
+      rootRunId: string;
+      now?: number;
+      daemonIntervalMs?: number;
+      inboxEvents?: Array<{ id: string; status: string; provider: string; eventType: string }>;
+      scheduledReviews?: Array<{ runId: string; reviewAt: string | null }>;
+      reason?: string;
     };
 
 export type ExecutionThreadStatusFilter = "running" | "done" | "blocked" | "interrupted" | "orphaned";
@@ -560,8 +591,19 @@ export function parseHarnessAction(value: unknown): HarnessAction {
       reason: stringField(record, "reason"),
     };
   }
+  if (type === "runWatchdogPass") {
+    return {
+      type,
+      rootRunId: stringField(record, "rootRunId"),
+      now: optionalPositiveInteger(record, "now") ?? undefined,
+      daemonIntervalMs: optionalPositiveInteger(record, "daemonIntervalMs") ?? undefined,
+      inboxEvents: optionalWatchdogEventsField(record["inboxEvents"]),
+      scheduledReviews: optionalWatchdogReviewsField(record["scheduledReviews"]),
+      reason: optionalStringField(record, "reason"),
+    };
+  }
   throw new Error(
-    "harness action type must be reclaimRunningTasks, retryTask, markRunTodo, updateRunContext, amendRunContract, retireRun, prepareRunDrain, completeSystemTask, integrateVerifiedRun, pushExactGitRef, createExactGitRef, commitExactGitIndex, registerEvolutionProfile, recordProductionEpisode, registerHarnessVariant, freezeMatchedExperiment, interruptAttemptAndCreateTask, interruptRunningAttemptsAndCreateTask, acceptGuardrailProposal, startSubsession, collectSubsessions, or cancelSubsessions",
+    "harness action type must be reclaimRunningTasks, retryTask, markRunTodo, updateRunContext, amendRunContract, retireRun, prepareRunDrain, completeSystemTask, integrateVerifiedRun, pushExactGitRef, createExactGitRef, commitExactGitIndex, registerEvolutionProfile, recordProductionEpisode, registerHarnessVariant, freezeMatchedExperiment, interruptAttemptAndCreateTask, interruptRunningAttemptsAndCreateTask, acceptGuardrailProposal, startSubsession, collectSubsessions, cancelSubsessions, or runWatchdogPass",
   );
 }
 
@@ -1597,6 +1639,10 @@ function applyParsedHarnessAction(
 
   if (action.type === "amendRunContract") {
     return amendRunContract(harness, action);
+  }
+
+  if (action.type === "runWatchdogPass") {
+    return runWatchdogPass(harness, action);
   }
 
   return prepareRunDrain(harness, action);
@@ -5123,6 +5169,961 @@ function prepareRunDrain(harness: Harness, action: Extract<HarnessAction, { type
   return doneResult(action.type, review.summary, checks, artifacts);
 }
 
+function runWatchdogPass(
+  harness: Harness,
+  action: Extract<HarnessAction, { type: "runWatchdogPass" }>,
+): HarnessActionResult {
+  const rootRun = harness.getRun(action.rootRunId);
+  if (!rootRun) {
+    return blockedResult(action.type, `Run not found: ${action.rootRunId}`, [
+      `run not found: ${action.rootRunId}`,
+    ]);
+  }
+  const now = action.now ?? Date.now();
+  const daemonIntervalMs = action.daemonIntervalMs ?? 1500;
+  const overview = harness.getRunOverview({ runId: action.rootRunId, eventLimit: 0 });
+  const observation = observeWatchdogTree({
+    rootRunId: action.rootRunId,
+    rootRun,
+    overview,
+    harness,
+    now,
+    daemonIntervalMs,
+    inboxEvents: action.inboxEvents ?? [],
+    scheduledReviews: action.scheduledReviews ?? [],
+  });
+  const previousState = readWatchdogState(rootRun.context);
+  const { nextState, transition } = transitionWatchdogState({
+    previous: previousState,
+    observation,
+    now,
+    daemonIntervalMs,
+  });
+
+  const checks: HarnessActionResult["checks"] = [
+    { name: "root run", status: "passed", evidence: action.rootRunId },
+    { name: "fingerprint observed", status: "passed", evidence: observation.fingerprint.slice(0, 12) },
+    {
+      name: "eligibility",
+      status: "passed",
+      evidence: observation.eligibility.eligible
+        ? "eligible"
+        : observation.eligibility.reasons.join(",") || "ineligible",
+    },
+    {
+      name: "watchdog state",
+      status: "passed",
+      evidence: nextState.state,
+    },
+  ];
+
+  const artifacts: HarnessActionResult["artifacts"] = [
+    {
+      kind: "watchdog_observation",
+      runId: action.rootRunId,
+      fingerprint: observation.fingerprint,
+      eligible: observation.eligibility.eligible,
+      eligibilityReasons: observation.eligibility.reasons,
+      state: nextState.state,
+      recoveryStage: nextState.recoveryStage,
+      unchangedEligibleTicks: nextState.unchangedEligibleTicks,
+      attemptCount: nextState.attemptCount,
+    },
+  ];
+
+  // Staged dispatch protocol. The frozen contract requires that the watchdog
+  // never invokes a nested SQLite transaction: the fixed-action dispatch
+  // opens its own transaction via applyHarnessAction, so it must run outside
+  // any outer transaction. Phase 1 reserves the deterministic repair identity
+  // and persists the pre-dispatch state inside a single transaction. Phase 2
+  // dispatches the classified fixed action with applyHarnessAction outside
+  // any transaction. Phase 3 records the linked completeSystemTask evidence
+  // and advances the persisted watchdog state inside a final transaction.
+  // Concurrent ticks and reopened Harness instances still produce exactly one
+  // repair run and one repair action sequence per fingerprint because the
+  // reservation re-checks the live state under the transaction and skips
+  // dispatch when another caller has already advanced.
+  let repairRunId: string | null = null;
+  let repairTaskId: string | null = null;
+  let persistedEventIds: string[] = [];
+  let blockedSummary: string | null = null;
+  let raceAdvanced = false;
+  let raceTerminalBlocked = false;
+
+  if (transition.kind === "reconcile" || previousState?.reconcileClaim) {
+    // Claim the fingerprint before dispatch. The immediate transaction makes
+    // the claim cross-process atomic; the fixed action still runs outside the
+    // transaction so its own database work cannot nest. A stable reason lets
+    // a restarted process recover a completed action event after response
+    // loss without dispatching a second recovery chain.
+    const reconcileReservation = claimWatchdogReconcile({
+      harness,
+      rootRunId: action.rootRunId,
+      previousState,
+      overview,
+      now,
+      daemonIntervalMs,
+      inboxEvents: action.inboxEvents ?? [],
+      scheduledReviews: action.scheduledReviews ?? [],
+    });
+    if (reconcileReservation.kind === "missing") {
+      blockedSummary = reconcileReservation.summary;
+    } else if (reconcileReservation.kind === "raced") {
+      raceAdvanced = true;
+      raceTerminalBlocked = reconcileReservation.terminalBlocked;
+    } else {
+      const claimed = reconcileReservation.claim;
+      const reconcileReason = watchdogReconcileReason(
+        action.rootRunId,
+        claimed.fingerprint,
+        claimed.fault.selectedAction,
+      );
+      let outcome: WatchdogReconcileOutcome;
+      if (claimed.fault.selectedAction === "none") {
+        outcome = {
+          kind: "unsupported",
+          actionEventId: null,
+          summary: `unsupported fault: ${claimed.fault.kind}`,
+        };
+      } else {
+        const applied = applyWatchdogReconcileAction(harness, {
+          actionType: claimed.fault.selectedAction,
+          targetRunId: claimed.targetRunId,
+          reason: reconcileReason,
+          actionEventId: claimed.actionEventId,
+        });
+        outcome = applied.status === "blocked"
+          ? {
+              kind: "blocked",
+              actionEventId: applied.eventId,
+              summary: applied.summary,
+            }
+          : {
+              kind: "done",
+              actionEventId: applied.eventId,
+              summary: applied.summary,
+            };
+      }
+      const finalized = finalizeWatchdogReconcile({
+        harness,
+        rootRunId: action.rootRunId,
+        ownerId: claimed.ownerId,
+        fingerprint: claimed.fingerprint,
+        outcome,
+        now,
+      });
+      if (finalized.kind === "missing") {
+        blockedSummary = finalized.summary;
+      } else {
+        persistedEventIds = finalized.linkedEventIds;
+        raceTerminalBlocked = finalized.terminalBlocked;
+      }
+    }
+  } else if (transition.kind === "repair") {
+    // Phase 1: reserve deterministic repair identity under a transaction.
+    const reservationResult = reserveWatchdogRepair({
+      harness,
+      rootRunId: action.rootRunId,
+      previousState,
+      overview,
+      now,
+      daemonIntervalMs,
+      inboxEvents: action.inboxEvents ?? [],
+      scheduledReviews: action.scheduledReviews ?? [],
+      reason: action.reason ?? "watchdog pass",
+    });
+    if (reservationResult.kind === "missing") {
+      blockedSummary = reservationResult.summary;
+    } else if (reservationResult.kind === "raced") {
+      raceAdvanced = true;
+      raceTerminalBlocked = reservationResult.terminalBlocked;
+    } else if (reservationResult.kind === "reserved") {
+      const reserved = reservationResult.reservation;
+      // Phase 3: record the linked completeSystemTask evidence and advance
+      // state inside a final transaction. The fixed action was already
+      // dispatched during the prior reconcile transition; the repair run is
+      // completed from that recorded evidence rather than dispatching a
+      // second fixed action.
+      const phase3 = finalizeWatchdogRepair({
+        harness,
+        rootRunId: action.rootRunId,
+        reserved,
+        fixedResult: null,
+        observation,
+        now,
+      });
+      if (phase3.kind === "missing") {
+        blockedSummary = phase3.summary;
+      } else {
+        repairRunId = reserved.identity.runId;
+        repairTaskId = reserved.identity.taskId;
+        persistedEventIds = phase3.linkedEventIds;
+      }
+    }
+  } else {
+    harness.runInTransaction((db) => {
+      const transactionRoot = harness.getRunWithDb(db, action.rootRunId);
+      if (!transactionRoot) {
+        blockedSummary = `Run not found: ${action.rootRunId}`;
+        return;
+      }
+      persistWatchdogStateWithDb(harness, db, action.rootRunId, nextState);
+    });
+  }
+
+  if (blockedSummary) {
+    return blockedResult(action.type, blockedSummary, [blockedSummary]);
+  }
+
+  // Reload the persisted state so checks, artifacts, and the return result
+  // reflect the post-dispatch watchdog (e.g., canary after a successful
+  // repair or blocked after a failed/unsupported recovery).
+  const reloadedRoot = harness.getRun(action.rootRunId);
+  const reloadedState = reloadedRoot ? readWatchdogState(reloadedRoot.context) : null;
+  const effectiveState = reloadedState ?? nextState;
+
+  if (raceTerminalBlocked || effectiveState.state === "blocked" || transition.kind === "block") {
+    checks.push({ name: "watchdog terminal", status: "passed", evidence: "blocked" });
+    artifacts.push({
+      kind: "watchdog_blocked",
+      runId: action.rootRunId,
+      fingerprint: observation.fingerprint,
+      affectedRunIds: effectiveState.affectedRunIds,
+      repairRunId: effectiveState.repairRunId ?? repairRunId,
+      repairTaskId: effectiveState.repairTaskId ?? repairTaskId,
+      actionEventIds: effectiveState.actionEventIds.length > 0 ? effectiveState.actionEventIds : persistedEventIds,
+      cooldownUntil: effectiveState.cooldownUntil,
+      failure: effectiveState.failure,
+      canary: effectiveState.canary,
+    });
+    return {
+      status: "blocked",
+      actionType: action.type,
+      summary: `Watchdog blocked for ${action.rootRunId} fingerprint ${observation.fingerprint.slice(0, 12)}.`,
+      checks,
+      artifacts,
+      problems: [effectiveState.failure?.reason ?? "watchdog blocked"].filter(
+        (value): value is string => Boolean(value),
+      ),
+    };
+  }
+
+  if (transition.kind === "repair" || repairRunId) {
+    checks.push({ name: "repair run", status: "passed", evidence: repairRunId ?? "pending" });
+  }
+  artifacts.push({
+    kind: "watchdog_state",
+    runId: action.rootRunId,
+    state: effectiveState.state,
+    fingerprint: observation.fingerprint,
+    firstSeenAt: effectiveState.firstSeenAt,
+    lastMeaningfulProgressAt: effectiveState.lastMeaningfulProgressAt,
+    lastObservationAt: effectiveState.lastObservationAt,
+    unchangedEligibleTicks: effectiveState.unchangedEligibleTicks,
+    recoveryStage: effectiveState.recoveryStage,
+    repairFingerprint: effectiveState.repairFingerprint,
+    repairRunId: effectiveState.repairRunId ?? repairRunId,
+    repairTaskId: effectiveState.repairTaskId ?? repairTaskId,
+    actionEventIds: effectiveState.actionEventIds.length > 0 ? effectiveState.actionEventIds : persistedEventIds,
+    attemptCount: effectiveState.attemptCount,
+    cooldownUntil: effectiveState.cooldownUntil,
+    affectedRunIds: effectiveState.affectedRunIds,
+    fault: effectiveState.fault,
+    canary: effectiveState.canary,
+    failure: effectiveState.failure,
+    transition: transition.kind,
+  });
+
+  return doneResult(
+    action.type,
+    `Watchdog ${effectiveState.state} for ${action.rootRunId} (${transition.kind}).`,
+    checks,
+    artifacts,
+  );
+}
+
+function persistWatchdogStateWithDb(
+  harness: Harness,
+  db: HarnessDatabase,
+  rootRunId: string,
+  state: ControlPlaneWatchdogState,
+) {
+  const existing = harness.getRunWithDb(db, rootRunId);
+  if (!existing) {
+    return;
+  }
+  const nextContext = { ...existing.context, controlPlaneWatchdog: normalizeWatchdogState(state) };
+  db.query(
+    `
+    update runs
+    set context_json = $contextJson, updated_at = current_timestamp
+    where id = $runId
+    `,
+  ).run({
+    $contextJson: JSON.stringify(nextContext),
+    $runId: rootRunId,
+  });
+}
+
+interface WatchdogRepairReservation {
+  identity: { runId: string; taskId: string; attemptId: string; actionEventId: string };
+  fault: NonNullable<ControlPlaneWatchdogState["fault"]>;
+  preDispatchState: ControlPlaneWatchdogState;
+  observationFingerprint: string;
+}
+
+type WatchdogReservationResult =
+  | { kind: "missing"; summary: string }
+  | { kind: "raced"; terminalBlocked: boolean }
+  | { kind: "reserved"; reservation: WatchdogRepairReservation };
+
+type WatchdogReconcileOutcome =
+  | { kind: "done"; actionEventId: string; summary: string }
+  | { kind: "blocked"; actionEventId: string; summary: string }
+  | { kind: "unsupported"; actionEventId: null; summary: string };
+
+interface WatchdogReconcileClaim {
+  ownerId: string;
+  fingerprint: string;
+  targetRunId: string;
+  actionEventId: string;
+  fault: NonNullable<ControlPlaneWatchdogState["fault"]>;
+}
+
+type WatchdogReconcileClaimResult =
+  | { kind: "missing"; summary: string }
+  | { kind: "raced"; terminalBlocked: boolean }
+  | { kind: "claimed"; claim: WatchdogReconcileClaim };
+
+type WatchdogReconcileFinalizeResult =
+  | { kind: "missing"; summary: string }
+  | { kind: "advanced"; linkedEventIds: string[]; terminalBlocked: boolean };
+
+/**
+ * Reserve the reconcile fingerprint before a fixed action is dispatched.
+ * BEGIN IMMEDIATE serializes competing writers before they read the live
+ * watchdog state, preventing SQLITE_BUSY_SNAPSHOT and duplicate dispatch.
+ */
+function claimWatchdogReconcile(input: {
+  harness: Harness;
+  rootRunId: string;
+  previousState: ControlPlaneWatchdogState | null;
+  overview: RunOverview;
+  now: number;
+  daemonIntervalMs: number;
+  inboxEvents: WatchdogSnapshotInboxEvents;
+  scheduledReviews: WatchdogSnapshotScheduledReviews;
+}): WatchdogReconcileClaimResult {
+  interface Mutable {
+    result: WatchdogReconcileClaimResult;
+  }
+  const mutable: Mutable = {
+    result: { kind: "missing", summary: `Run not found: ${input.rootRunId}` },
+  };
+  input.harness.runInImmediateTransaction((db) => {
+    const transactionRoot = input.harness.getRunWithDb(db, input.rootRunId);
+    if (!transactionRoot) {
+      mutable.result = { kind: "missing", summary: `Run not found: ${input.rootRunId}` };
+      return;
+    }
+    const transactionPrevious = readWatchdogState(transactionRoot.context) ?? input.previousState;
+    const liveObservation = observeWatchdogTree({
+      rootRunId: input.rootRunId,
+      rootRun: transactionRoot,
+      overview: input.overview,
+      harness: input.harness,
+      now: input.now,
+      daemonIntervalMs: input.daemonIntervalMs,
+      inboxEvents: input.inboxEvents,
+      scheduledReviews: input.scheduledReviews,
+    });
+    const priorClaim = transactionPrevious?.reconcileClaim ?? null;
+    if (priorClaim) {
+      const existingEvent = input.harness.getHarnessActionEventWithDb(db, {
+        id: priorClaim.actionEventId,
+      });
+      if (existingEvent) {
+        mutable.result = {
+          kind: "claimed",
+          claim: {
+            ownerId: priorClaim.ownerId,
+            fingerprint: priorClaim.fingerprint,
+            targetRunId: priorClaim.targetRunId,
+            actionEventId: priorClaim.actionEventId,
+            fault: transactionPrevious?.fault ?? liveObservation.fault ?? unsupportedFaultForWatchdog(input.rootRunId),
+          },
+        };
+        return;
+      }
+      if (
+        priorClaim.fingerprint !== liveObservation.fingerprint ||
+        Date.parse(priorClaim.leaseUntil) <= input.now
+      ) {
+        const blocked = recordReconciliationOutcome({
+          previous: transactionPrevious!,
+          outcome: {
+            kind: "unsupported",
+            actionEventId: null,
+            summary: "reconcile dispatch outcome ambiguous without an action receipt",
+          },
+          now: input.now,
+        });
+        blocked.reconcileClaim = null;
+        persistWatchdogStateWithDb(input.harness, db, input.rootRunId, blocked);
+        mutable.result = { kind: "raced", terminalBlocked: true };
+        return;
+      }
+      mutable.result = {
+        kind: "raced",
+        terminalBlocked: transactionPrevious?.state === "blocked",
+      };
+      return;
+    }
+    const live = transitionWatchdogState({
+      previous: transactionPrevious,
+      observation: liveObservation,
+      now: input.now,
+      daemonIntervalMs: input.daemonIntervalMs,
+    });
+    if (live.transition.kind !== "reconcile") {
+      persistWatchdogStateWithDb(input.harness, db, input.rootRunId, live.nextState);
+      mutable.result = {
+        kind: "raced",
+        terminalBlocked: live.nextState.state === "blocked" || live.transition.kind === "block",
+      };
+      return;
+    }
+    const fault = live.transition.fault;
+    if (!fault) {
+      mutable.result = { kind: "raced", terminalBlocked: false };
+      return;
+    }
+    const ownerId = makeId("watchdog_claim");
+    const targetRunId = [...fault.affectedRunIds]
+      .sort((left, right) => left.localeCompare(right))[0] ?? input.rootRunId;
+    const actionEventId = watchdogReconcileActionEventId(
+      input.rootRunId,
+      liveObservation.fingerprint,
+      targetRunId,
+      fault.selectedAction,
+    );
+    const claimedAt = new Date(input.now).toISOString();
+    const leaseUntil = new Date(input.now + WATCHDOG_RECONCILE_LEASE_MS).toISOString();
+    const claimedState: ControlPlaneWatchdogState = {
+      ...live.nextState,
+      state: "reconciling",
+      recoveryStage: "reconcile",
+      repairFingerprint: liveObservation.fingerprint,
+      fault,
+      reconcileClaim: {
+        fingerprint: liveObservation.fingerprint,
+        ownerId,
+        actionType: fault.selectedAction,
+        targetRunId,
+        actionEventId,
+        claimedAt,
+        leaseUntil,
+      },
+    };
+    persistWatchdogStateWithDb(input.harness, db, input.rootRunId, claimedState);
+    mutable.result = {
+      kind: "claimed",
+      claim: { ownerId, fingerprint: liveObservation.fingerprint, targetRunId, actionEventId, fault },
+    };
+  });
+  return mutable.result;
+}
+
+function watchdogReconcileReason(
+  rootRunId: string,
+  fingerprint: string,
+  actionType: NonNullable<ControlPlaneWatchdogState["fault"]>["selectedAction"],
+) {
+  return `watchdog reconcile ${rootRunId}:${fingerprint}:${actionType}`;
+}
+
+function watchdogReconcileActionEventId(
+  rootRunId: string,
+  fingerprint: string,
+  targetRunId: string,
+  actionType: NonNullable<ControlPlaneWatchdogState["fault"]>["selectedAction"],
+) {
+  const digest = createHash("sha256")
+    .update(`watchdog-reconcile:${WATCHDOG_STATE_VERSION}:${rootRunId}:${fingerprint}:${targetRunId}:${actionType}`)
+    .digest("hex");
+  return `action_watchdog_reconcile_${digest.slice(0, 24)}`;
+}
+
+function unsupportedFaultForWatchdog(
+  rootRunId: string,
+): NonNullable<ControlPlaneWatchdogState["fault"]> {
+  return {
+    kind: "unsupported",
+    affectedRunIds: [rootRunId],
+    selectedAction: "none",
+    details: "reconcile claim lost its frozen fault classification",
+  };
+}
+
+function applyWatchdogReconcileAction(
+  harness: Harness,
+  input: {
+    actionType: Exclude<NonNullable<ControlPlaneWatchdogState["fault"]>["selectedAction"], "none">;
+    targetRunId: string;
+    reason: string;
+    actionEventId: string;
+  },
+): { status: "done" | "blocked"; eventId: string; summary: string; problems: string[] } {
+  const existing = harness.getHarnessActionEvent({ id: input.actionEventId });
+  if (existing) {
+    const request = existing.request as Record<string, unknown>;
+    if (
+      existing.actionType !== input.actionType ||
+      request.runId !== input.targetRunId ||
+      request.reason !== input.reason
+    ) {
+      return {
+        status: "blocked",
+        eventId: existing.id,
+        summary: `Watchdog reconcile event ${existing.id} readback mismatch.`,
+        problems: ["deterministic watchdog reconcile event readback mismatch"],
+      };
+    }
+    return watchdogAppliedEvent(existing, input.actionType);
+  }
+  const action = {
+    type: input.actionType,
+    runId: input.targetRunId,
+    reason: input.reason,
+  } as Extract<HarnessAction, { type: "reclaimRunningTasks" | "integrateVerifiedRun" | "prepareRunDrain" }>;
+  const result = applyParsedHarnessAction(harness, action, {});
+  const eventId = harness.recordHarnessActionEvent({
+    id: input.actionEventId,
+    actionType: action.type,
+    status: result.status,
+    request: safeRequest(action),
+    result: resultToRecord(result),
+  });
+  return { status: result.status, eventId, summary: result.summary, problems: result.problems };
+}
+
+function watchdogAppliedEvent(
+  event: HarnessActionEvent,
+  actionType: string,
+) {
+  const result = event.result as Record<string, unknown>;
+  return {
+    status: event.status,
+    eventId: event.id,
+    summary: typeof result.summary === "string" ? result.summary : `${actionType} replayed`,
+    problems: Array.isArray(result.problems)
+      ? result.problems.filter((problem): problem is string => typeof problem === "string")
+      : [],
+  };
+}
+
+function finalizeWatchdogReconcile(input: {
+  harness: Harness;
+  rootRunId: string;
+  ownerId: string;
+  fingerprint: string;
+  outcome: WatchdogReconcileOutcome;
+  now: number;
+}): WatchdogReconcileFinalizeResult {
+  let result: WatchdogReconcileFinalizeResult = {
+    kind: "missing",
+    summary: `Run not found: ${input.rootRunId}`,
+  };
+  input.harness.runInImmediateTransaction((db) => {
+    const transactionRoot = input.harness.getRunWithDb(db, input.rootRunId);
+    if (!transactionRoot) return;
+    const current = readWatchdogState(transactionRoot.context);
+    if (!current) {
+      result = { kind: "missing", summary: `Watchdog state missing: ${input.rootRunId}` };
+      return;
+    }
+    if (
+      current.reconcileClaim?.ownerId !== input.ownerId ||
+      current.reconcileClaim.fingerprint !== input.fingerprint
+    ) {
+      result = {
+        kind: "advanced",
+        linkedEventIds: current.actionEventIds,
+        terminalBlocked: current.state === "blocked",
+      };
+      return;
+    }
+    const advancedState = recordReconciliationOutcome({
+      previous: current,
+      outcome: input.outcome,
+      now: input.now,
+    });
+    advancedState.reconcileClaim = null;
+    persistWatchdogStateWithDb(input.harness, db, input.rootRunId, advancedState);
+    result = {
+      kind: "advanced",
+      linkedEventIds: advancedState.actionEventIds,
+      terminalBlocked: advancedState.state === "blocked",
+    };
+  });
+  return result;
+}
+
+/**
+ * Phase 1 of the staged watchdog dispatch protocol. Reserve the deterministic
+ * repair identity (run + task) and persist the pre-dispatch state inside a
+ * single transaction. The reservation re-checks the live state under the
+ * transaction so concurrent ticks and reopened Harness instances still produce
+ * exactly one repair run per fingerprint. The fixed-action dispatch happens
+ * OUTSIDE this transaction in Phase 2 because applyHarnessAction opens its
+ * own transaction.
+ */
+function reserveWatchdogRepair(input: {
+  harness: Harness;
+  rootRunId: string;
+  previousState: ControlPlaneWatchdogState | null;
+  overview: RunOverview;
+  now: number;
+  daemonIntervalMs: number;
+  inboxEvents: WatchdogSnapshotInboxEvents;
+  scheduledReviews: WatchdogSnapshotScheduledReviews;
+  reason: string;
+}): WatchdogReservationResult {
+  interface Mutable {
+    result: WatchdogReservationResult;
+  }
+  const mutable: Mutable = {
+    result: { kind: "missing", summary: `Run not found: ${input.rootRunId}` },
+  };
+  input.harness.runInImmediateTransaction((db) => {
+    const transactionRoot = input.harness.getRunWithDb(db, input.rootRunId);
+    if (!transactionRoot) {
+      mutable.result = { kind: "missing", summary: `Run not found: ${input.rootRunId}` };
+      return;
+    }
+    const transactionPrevious = readWatchdogState(transactionRoot.context) ?? input.previousState;
+    const liveObservation = observeWatchdogTree({
+      rootRunId: input.rootRunId,
+      rootRun: transactionRoot,
+      overview: input.overview,
+      harness: input.harness,
+      now: input.now,
+      daemonIntervalMs: input.daemonIntervalMs,
+      inboxEvents: input.inboxEvents,
+      scheduledReviews: input.scheduledReviews,
+    });
+    const live = transitionWatchdogState({
+      previous: transactionPrevious,
+      observation: liveObservation,
+      now: input.now,
+      daemonIntervalMs: input.daemonIntervalMs,
+    });
+    if (live.transition.kind !== "repair") {
+      persistWatchdogStateWithDb(input.harness, db, input.rootRunId, live.nextState);
+      const terminalBlocked = live.transition.kind === "block" || live.nextState.state === "blocked";
+      mutable.result = { kind: "raced", terminalBlocked };
+      return;
+    }
+    const liveFault = live.transition.fault;
+    const recoveryFingerprint = live.nextState.repairFingerprint ?? liveObservation.fingerprint;
+    const identity = repairIdentity(input.rootRunId, recoveryFingerprint);
+    ensureWatchdogRepairRunWithDb({
+      harness: input.harness,
+      db,
+      rootRun: transactionRoot,
+      identity,
+      fault: liveFault,
+      reason: input.reason,
+    });
+    const reservedState: ControlPlaneWatchdogState = {
+      ...live.nextState,
+      repairRunId: identity.runId,
+      repairTaskId: identity.taskId,
+    };
+    persistWatchdogStateWithDb(input.harness, db, input.rootRunId, reservedState);
+    mutable.result = {
+      kind: "reserved",
+      reservation: {
+        identity,
+        fault: liveFault,
+        preDispatchState: reservedState,
+        observationFingerprint: liveObservation.fingerprint,
+      },
+    };
+  });
+  return mutable.result;
+}
+
+type WatchdogFinalizeResult =
+  | { kind: "missing"; summary: string }
+  | { kind: "advanced"; linkedEventIds: string[] };
+
+/**
+ * Phase 3 of the staged watchdog dispatch protocol. Record the linked
+ * completeSystemTask evidence and advance the persisted watchdog state inside
+ * a final transaction. A failed fixed action (status === "blocked") or an
+ * unsupported fault converges directly to blocked with the reserved repair
+ * run, one action sequence, and the 15-minute cooldown.
+ */
+function finalizeWatchdogRepair(input: {
+  harness: Harness;
+  rootRunId: string;
+  reserved: WatchdogRepairReservation;
+  fixedResult: { status: "done" | "blocked"; eventId: string; summary: string; problems: string[] } | null;
+  observation: WatchdogObservationSnapshot;
+  now: number;
+}): WatchdogFinalizeResult {
+  interface Mutable {
+    result: WatchdogFinalizeResult;
+  }
+  const mutable: Mutable = {
+    result: { kind: "missing", summary: `Run not found: ${input.rootRunId}` },
+  };
+  input.harness.runInImmediateTransaction((db) => {
+    const transactionRoot = input.harness.getRunWithDb(db, input.rootRunId);
+    if (!transactionRoot) {
+      mutable.result = { kind: "missing", summary: `Run not found: ${input.rootRunId}` };
+      return;
+    }
+    const reserved = input.reserved;
+    const fixedResult = input.fixedResult;
+    // The fixed action was dispatched during the prior reconcile transition.
+    // Prefer the freshly-dispatched event id when provided (legacy callers),
+    // otherwise fall back to the most recent reconcile action event id recorded
+    // in the reserved pre-dispatch state.
+    const priorReconcileEventId =
+      reserved.preDispatchState.actionEventIds.length > 0
+        ? reserved.preDispatchState.actionEventIds[reserved.preDispatchState.actionEventIds.length - 1]
+        : null;
+    const actionEventId = fixedResult?.eventId ?? priorReconcileEventId ?? null;
+    const sourceEvent = actionEventId
+      ? input.harness.getHarnessActionEventWithDb(db, { id: actionEventId })
+      : null;
+    const sourceResult = sourceEvent?.result as Record<string, unknown> | undefined;
+    const sourceSummary = typeof sourceResult?.summary === "string"
+      ? sourceResult.summary
+      : `watchdog reconcile ${sourceEvent?.status ?? "blocked"}`;
+    const sourceProblems = Array.isArray(sourceResult?.problems)
+      ? sourceResult.problems.filter((problem): problem is string => typeof problem === "string")
+      : [];
+    const systemStatus: "done" | "blocked" = sourceEvent?.status ?? fixedResult?.status ?? "blocked";
+    const systemOutput: AttemptOutput = {
+      status: systemStatus,
+      summary: `System task completed from watchdog action ${actionEventId ?? "none"}: ${sourceSummary}`,
+      changedFiles: [],
+      checks: [
+        { name: "watchdog action event", status: actionEventId ? "passed" : "failed", evidence: actionEventId ?? "missing" },
+        { name: "watchdog action type", status: sourceEvent ? "passed" : "failed", evidence: sourceEvent?.actionType ?? "missing" },
+      ],
+      artifacts: [
+        {
+          kind: "watchdog_repair_complete",
+          runId: input.rootRunId,
+          taskId: reserved.identity.taskId,
+          actionEventId,
+          fixedActionStatus: systemStatus,
+        },
+      ],
+      problems: systemStatus === "blocked"
+        ? sourceProblems.length > 0 ? sourceProblems : [sourceSummary]
+        : [],
+    };
+    const existingAttempt = db
+      .query("select id from attempts where id = $id")
+      .get({ $id: reserved.identity.attemptId }) as { id: string } | null;
+    if (!existingAttempt) {
+      input.harness.recordAttemptWithDb(db, {
+        id: reserved.identity.attemptId,
+        taskId: reserved.identity.taskId,
+        input: {
+          executor: "harness-action",
+          actionType: "completeSystemTask",
+          actionEventId,
+          reason: "watchdog deterministic repair completion",
+        },
+        output: systemOutput,
+      });
+    }
+    input.harness.updateRunStatusWithDb(db, {
+      runId: reserved.identity.runId,
+      status: systemStatus,
+    });
+    const existingCompleteEvent = input.harness.getHarnessActionEventWithDb(db, {
+      id: reserved.identity.actionEventId,
+    });
+    const completeEventId = existingCompleteEvent?.id ?? input.harness.recordHarnessActionEventWithDb(db, {
+      actionType: "completeSystemTask",
+      status: "done",
+      request: {
+        type: "completeSystemTask",
+        taskId: reserved.identity.taskId,
+        actionEventId,
+        reason: "watchdog deterministic repair completion",
+      },
+      result: {
+        status: "done",
+        actionType: "completeSystemTask",
+        summary: `Recorded ${systemStatus} system attempt ${reserved.identity.attemptId} for task ${reserved.identity.taskId}.`,
+        checks: [
+          { name: "task", status: "passed", evidence: reserved.identity.taskId },
+          { name: "attempt", status: "passed", evidence: reserved.identity.attemptId },
+          { name: "action", status: actionEventId ? "passed" : "failed", evidence: actionEventId ?? "missing" },
+        ],
+        artifacts: [
+          {
+            kind: "watchdog_repair_complete",
+            runId: input.rootRunId,
+            taskId: reserved.identity.taskId,
+            attemptId: reserved.identity.attemptId,
+            actionEventId,
+            fixedActionStatus: systemStatus,
+          },
+        ],
+        problems: [],
+      },
+      id: reserved.identity.actionEventId,
+    });
+    const linkedEventIds = Array.from(
+      new Set(
+        [
+          ...reserved.preDispatchState.actionEventIds,
+          ...(actionEventId ? [actionEventId] : []),
+          completeEventId,
+        ].filter((value): value is string => typeof value === "string" && value.length > 0),
+      ),
+    );
+    const failed = systemStatus === "blocked" || reserved.fault?.selectedAction === "none";
+    const terminalObservation: WatchdogObservationSnapshot = {
+      ...input.observation,
+      fingerprint: reserved.observationFingerprint,
+    };
+    const advanced = failed
+      ? blockAfterRepair({
+          previous: reserved.preDispatchState,
+          repairRunId: reserved.identity.runId,
+          repairTaskId: reserved.identity.taskId,
+          actionEventIds: linkedEventIds,
+          observation: terminalObservation,
+          failureReason:
+            reserved.fault?.selectedAction === "none"
+              ? `unsupported fault: ${reserved.fault?.kind ?? "unknown"}`
+              : `fixed action ${reserved.fault?.selectedAction ?? "unknown"} returned blocked`,
+          now: input.now,
+        })
+      : advanceAfterRepair({
+          previous: reserved.preDispatchState,
+          repairRunId: reserved.identity.runId,
+          repairTaskId: reserved.identity.taskId,
+          actionEventIds: linkedEventIds,
+          now: input.now,
+        });
+    persistWatchdogStateWithDb(input.harness, db, input.rootRunId, advanced);
+    mutable.result = { kind: "advanced", linkedEventIds };
+  });
+  return mutable.result;
+}
+
+function ensureWatchdogRepairRunWithDb(input: {
+  harness: Harness;
+  db: HarnessDatabase;
+  rootRun: Run;
+  identity: { runId: string; taskId: string };
+  fault: NonNullable<ControlPlaneWatchdogState["fault"]>;
+  reason: string;
+}) {
+  const { harness, db, rootRun, identity, fault, reason } = input;
+  const existingRun = harness.getRunWithDb(db, identity.runId);
+  if (!existingRun) {
+    harness.createRunWithDb(db, {
+      id: identity.runId,
+      goal: `Watchdog repair for ${rootRun.id}: ${fault.kind}`,
+      context: {
+        parentRunId: rootRun.id,
+        source: "watchdog-repair",
+        watchdogFingerprintKind: fault.kind,
+        watchdogAffectedRunIds: fault.affectedRunIds,
+        watchdogSelectedAction: fault.selectedAction,
+        watchdogDetails: fault.details,
+        watchdogReason: reason,
+        watchdogFrozenContract: WATCHDOG_FROZEN_CONTRACT,
+      },
+    });
+  }
+  const existingTask = db
+    .query("select id from tasks where id = $id")
+    .get({ $id: identity.taskId }) as { id: string } | null;
+  if (!existingTask) {
+    harness.createTaskWithDb(db, {
+      id: identity.taskId,
+      runId: identity.runId,
+      role: "watchdog-repair",
+      goal: `Apply fixed recovery ${fault.selectedAction} for ${fault.kind}`,
+      prompt: buildWatchdogRepairPrompt(fault, reason),
+      doneWhen: [
+        "the selected fixed action is recorded as a harness action event",
+        "the system task is completed from recorded fixed-action evidence",
+        "no agent diagnosis or open-ended implementation is required",
+      ],
+      config: {
+        verifierContract: {
+          successCriteria: [
+            "exactly one repair run and one repair action sequence exist for this fingerprint",
+            "the frozen recovery order was honored",
+          ],
+          deterministicChecks: [],
+          requiredArtifacts: [
+            "watchdog_repair_complete event linked to the deterministic action event",
+          ],
+        },
+        watchdog: {
+          kind: fault.kind,
+          selectedAction: fault.selectedAction,
+          affectedRunIds: fault.affectedRunIds,
+          details: fault.details,
+          frozenContract: WATCHDOG_FROZEN_CONTRACT,
+        },
+      },
+      worktreePath: null,
+      parentId: null,
+    });
+  }
+}
+
+function buildWatchdogRepairPrompt(
+  fault: NonNullable<ControlPlaneWatchdogState["fault"]>,
+  reason: string,
+): string {
+  return [
+    "Watchdog deterministic repair (no agent diagnosis is performed).",
+    `Fault kind: ${fault.kind}`,
+    `Selected fixed action: ${fault.selectedAction}`,
+    `Affected run ids: ${fault.affectedRunIds.join(",") || "none"}`,
+    `Details: ${fault.details}`,
+    `Reason: ${reason}`,
+    "This task is completed from recorded fixed-action evidence through completeSystemTask.",
+    "It must never invoke an open-ended implementation agent or alter the frozen contract.",
+  ].join("\n");
+}
+
+const WATCHDOG_FROZEN_CONTRACT = {
+  contractVersion: WATCHDOG_STATE_VERSION,
+  stallThreshold: WATCHDOG_STALL_TICK_THRESHOLD,
+  stallMinIntervalMs: WATCHDOG_STALL_MIN_INTERVAL_MS,
+  cooldownMs: WATCHDOG_COOLDOWN_MS,
+  recoveryOrder: [
+    "reclaim orphaned leases",
+    "preserve/resume valid resumable work through existing supervision",
+    "integrate pending verified work",
+    "prepareRunDrain for an empty nonterminal run",
+  ],
+  constraints: [
+    "no database schema changes",
+    "no new dependencies or external services",
+    "no agent diagnosis or open-ended repair prompt",
+    "watchdog writes and heartbeat-only events never count as meaningful progress",
+  ],
+};
+
 function amendRunContract(
   harness: Harness,
   action: Extract<HarnessAction, { type: "amendRunContract" }>,
@@ -5638,7 +6639,15 @@ function resolveWorktreePath(repoPath: string, worktreePath: string | null) {
   if (!worktreePath) {
     return null;
   }
-  return isAbsolute(worktreePath) ? worktreePath : join(repoPath, worktreePath);
+  if (isAbsolute(worktreePath)) {
+    return worktreePath;
+  }
+  const repositoryRelativePath = join(repoPath, worktreePath);
+  if (existsSync(repositoryRelativePath)) {
+    return repositoryRelativePath;
+  }
+  const supervisorRelativePath = resolve(worktreePath);
+  return existsSync(supervisorRelativePath) ? supervisorRelativePath : repositoryRelativePath;
 }
 
 function defaultGitRunner(input: GitCommandInput): GitCommandResult {
@@ -6377,10 +7386,13 @@ function blockedCommand(
   checks: HarnessActionResult["checks"],
   result: ReturnType<typeof runGitStep>,
 ): HarnessActionResult {
+  const safeSummary = sanitizeEvolutionErrorText(summary);
+  const safeStdout = sanitizeEvolutionErrorText(result.stdout);
+  const safeStderr = sanitizeEvolutionErrorText(result.stderr);
   return {
     status: "blocked",
     actionType,
-    summary,
+    summary: safeSummary,
     checks: [
       ...checks,
       { name: "git command", status: "failed", evidence: `${result.command} in ${result.cwd}` },
@@ -6391,11 +7403,11 @@ function blockedCommand(
         command: result.command,
         cwd: result.cwd,
         exitCode: result.exitCode,
-        stdout: result.stdout,
-        stderr: result.stderr,
+        stdout: safeStdout,
+        stderr: safeStderr,
       },
     ],
-    problems: [result.stderr.trim() || result.stdout.trim() || summary],
+    problems: [safeStderr.trim() || safeStdout.trim() || safeSummary],
   };
 }
 
@@ -6730,6 +7742,54 @@ function optionalStringArrayField(record: Record<string, unknown>, key: string) 
       throw new Error(`${key}[${index}] must be a non-empty string`);
     }
     return item.trim();
+  });
+}
+
+function optionalWatchdogEventsField(value: unknown) {
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+  if (!Array.isArray(value)) {
+    throw new Error("inboxEvents must be an array");
+  }
+  return value.map((item, index) => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) {
+      throw new Error(`inboxEvents[${index}] must be an object`);
+    }
+    const record = item as Record<string, unknown>;
+    return {
+      id: stringField(record, "id"),
+      status: stringField(record, "status"),
+      provider: stringField(record, "provider"),
+      eventType: stringField(record, "eventType"),
+    };
+  });
+}
+
+function optionalWatchdogReviewsField(value: unknown) {
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+  if (!Array.isArray(value)) {
+    throw new Error("scheduledReviews must be an array");
+  }
+  return value.map((item, index) => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) {
+      throw new Error(`scheduledReviews[${index}] must be an object`);
+    }
+    const record = item as Record<string, unknown>;
+    const reviewAtRaw = record.reviewAt;
+    return {
+      runId: stringField(record, "runId"),
+      reviewAt:
+        typeof reviewAtRaw === "string"
+          ? reviewAtRaw
+          : reviewAtRaw === null || reviewAtRaw === undefined
+            ? null
+            : (() => {
+                throw new Error(`scheduledReviews[${index}].reviewAt must be a string or null`);
+              })(),
+    };
   });
 }
 

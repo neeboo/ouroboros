@@ -1182,6 +1182,115 @@ describe("dashboard", () => {
     expect(html).not.toContain("setHtmlIfChanged(");
   });
 
+  test("refreshes watchdog state, fingerprint, recovery, cooldown, and canary from overview payloads", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "ouroboros-dashboard-watchdog-"));
+    const harness = new Harness(join(dir, "ouroboros.db"));
+    harness.init();
+    const runId = "run_dashboard_watchdog_refresh";
+    const fingerprint = "d".repeat(64);
+    harness.createRun({
+      id: runId,
+      goal: "Refresh watchdog",
+      context: {
+        controlPlaneWatchdog: {
+          version: 1,
+          state: "reconciling",
+          fingerprint,
+          firstSeenAt: "2026-08-09T10:00:00.000Z",
+          unchangedEligibleTicks: 4,
+          lastMeaningfulProgressAt: "2026-08-09T09:59:00.000Z",
+          lastObservationAt: "2026-08-09T10:04:00.000Z",
+          recoveryStage: "reconcile",
+          repairFingerprint: "e".repeat(64),
+          repairRunId: "run_watchdog_repair_refresh",
+          repairTaskId: "task_watchdog_repair_refresh",
+          actionEventIds: ["action_watchdog_reconcile_refresh"],
+          attemptCount: 1,
+          cooldownUntil: "2026-08-09T10:19:00.000Z",
+          affectedRunIds: [runId],
+          fault: {
+            kind: "empty-nonterminal-run",
+            affectedRunIds: [runId],
+            selectedAction: "prepareRunDrain",
+            details: "empty run",
+          },
+          canary: { status: "pending", observedAt: null, fingerprint: null, evidence: [], ticksInCanary: 0 },
+          failure: null,
+          history: [],
+        },
+      },
+    });
+    const input = {
+      runId,
+      overview: () => harness.getRunOverview({ runId, eventLimit: 0 }),
+      renderTaskPrompt: () => "",
+    };
+
+    try {
+      const firstResponse = await handleDashboardRequest(
+        new Request(`http://localhost/api/runs/${runId}/overview`),
+        input,
+      );
+      const first = await firstResponse.json();
+      expect(first.controlPlaneWatchdog).toMatchObject({
+        state: "reconciling",
+        fingerprint,
+        recoveryStage: "reconcile",
+        cooldownUntil: "2026-08-09T10:19:00.000Z",
+        canary: { status: "pending" },
+      });
+
+      harness.updateRun({
+        runId,
+        contextPatch: {
+          controlPlaneWatchdog: {
+            ...first.controlPlaneWatchdog,
+            state: "canary",
+            recoveryStage: "canary",
+            cooldownUntil: null,
+            canary: {
+              status: "progressing",
+              observedAt: "2026-08-09T10:06:00.000Z",
+              fingerprint: "f".repeat(64),
+              evidence: ["target run changed"],
+              ticksInCanary: 1,
+            },
+          },
+        },
+      });
+      const refreshedResponse = await handleDashboardRequest(
+        new Request(`http://localhost/api/runs/${runId}/overview`),
+        input,
+      );
+      const refreshed = await refreshedResponse.json();
+      expect(refreshed.controlPlaneWatchdog).toMatchObject({
+        state: "canary",
+        recoveryStage: "canary",
+        cooldownUntil: null,
+        canary: {
+          status: "progressing",
+          fingerprint: "f".repeat(64),
+          evidence: ["target run changed"],
+          ticksInCanary: 1,
+        },
+      });
+
+      const html = dashboardHtml({ runId });
+      expect(html).toContain("overview?.controlPlaneWatchdog");
+      expect(html).toContain('data-inspector-section="watchdog"');
+      expect(html).toContain('data-watchdog-state="');
+      expect(html).toContain('data-watchdog-fingerprint="');
+      expect(html).toContain('data-watchdog-recovery="');
+      expect(html).toContain('data-watchdog-cooldown="');
+      expect(html).toContain('data-watchdog-canary="');
+      expect(html).toContain("repair fingerprint");
+      expect(html).toContain("canaryEvidence");
+      expect(html).toContain("patchInspectorPanel");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   test("renders harness-managed subsession threads inside the inspector panel", () => {
     const html = dashboardHtml({ runId: "run_123" });
     const styles = dashboardCss();

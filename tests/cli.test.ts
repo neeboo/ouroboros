@@ -10695,6 +10695,50 @@ describe("CLI", () => {
     expect(result.stderr).toContain("run not found: run_missing");
   });
 
+  test("run-evidence CLI surfaces the durable watchdog projection after a stall and repair", async () => {
+    await runCli("init");
+    const run = await runCliJson("create-run", "--goal", "Validate watchdog run-evidence output");
+    // Prime the frozen sequence healthy -> suspect -> suspect -> stalled ->
+    // reconciling -> repairing -> canary through fake-clock ticks.
+    const base = 1_700_000_000_000;
+    for (let tick = 0; tick < 5; tick += 1) {
+      await runCliJson(
+        "run-watchdog-pass",
+        "--root-run-id",
+        run.id,
+        "--now",
+        String(base + tick * 90_000),
+        "--daemon-interval-ms",
+        "1500",
+        "--reason",
+        `prime ${tick}`,
+      );
+    }
+    // Tick 5: reconciling -> repair dispatch (creates repair run, advances
+    // to canary from the prior reconcile evidence).
+    await runCliJson(
+      "run-watchdog-pass",
+      "--root-run-id",
+      run.id,
+      "--now",
+      String(base + 5 * 90_000),
+      "--daemon-interval-ms",
+      "1500",
+      "--reason",
+      "repair",
+    );
+
+    const stdout = await runCli("run-evidence", "--run-id", run.id);
+
+    expect(stdout).toContain("Control-plane watchdog");
+    expect(stdout).toContain("state: canary");
+    expect(stdout).toContain("recovery stage: canary");
+    expect(stdout).toContain("repair run: run_watchdog_repair_");
+    expect(stdout).toContain("repair task: task_watchdog_repair_");
+    expect(stdout).toContain("canary: progressing");
+    expect(stdout).toContain("affected runs:");
+  });
+
   test("formatRunEvidence surfaces verifier and harness-action evidence in the Run evidence section", async () => {
     await runCli("init");
     const run = await runCliJson("create-run", "--goal", "Validate run-evidence evidence section");

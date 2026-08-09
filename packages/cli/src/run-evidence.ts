@@ -41,6 +41,8 @@ export function formatRunEvidence(overview: RunOverview, options: { lessonLimit?
 
   appendOverseerDiagnosisLines(lines, diagnoseRunOverview(overview));
 
+  appendWatchdogLines(lines, overview.run?.context);
+
   const decision = latestGoalReviewDecision(overview);
   if (decision) {
     lines.push("");
@@ -100,6 +102,126 @@ export function formatRunEvidence(overview: RunOverview, options: { lessonLimit?
   }
 
   return lines.join("\n");
+}
+
+interface ControlPlaneWatchdogProjection {
+  state: string;
+  fingerprint: string | null;
+  unchangedEligibleTicks: number;
+  lastMeaningfulProgressAt: string | null;
+  lastObservationAt: string | null;
+  recoveryStage: string;
+  repairFingerprint: string | null;
+  repairRunId: string | null;
+  repairTaskId: string | null;
+  actionEventIds: string[];
+  attemptCount: number;
+  cooldownUntil: string | null;
+  affectedRunIds: string[];
+  fault: { kind: string; selectedAction: string; details: string } | null;
+  canary: { status: string; observedAt: string | null; fingerprint: string | null; evidence: string[] };
+  failure: { reason: string; recordedAt: string } | null;
+}
+
+function readWatchdogProjection(context: unknown): ControlPlaneWatchdogProjection | null {
+  if (!context || typeof context !== "object" || Array.isArray(context)) return null;
+  const record = (context as Record<string, unknown>).controlPlaneWatchdog;
+  if (!record || typeof record !== "object" || Array.isArray(record)) return null;
+  const value = record as Record<string, unknown>;
+  if (typeof value.state !== "string") return null;
+  return {
+    state: typeof value.state === "string" ? value.state : "unknown",
+    fingerprint: typeof value.fingerprint === "string" ? value.fingerprint : null,
+    unchangedEligibleTicks: typeof value.unchangedEligibleTicks === "number" ? value.unchangedEligibleTicks : 0,
+    lastMeaningfulProgressAt:
+      typeof value.lastMeaningfulProgressAt === "string" ? value.lastMeaningfulProgressAt : null,
+    lastObservationAt: typeof value.lastObservationAt === "string" ? value.lastObservationAt : null,
+    recoveryStage: typeof value.recoveryStage === "string" ? value.recoveryStage : "none",
+    repairFingerprint: typeof value.repairFingerprint === "string" ? value.repairFingerprint : null,
+    repairRunId: typeof value.repairRunId === "string" ? value.repairRunId : null,
+    repairTaskId: typeof value.repairTaskId === "string" ? value.repairTaskId : null,
+    actionEventIds: Array.isArray(value.actionEventIds)
+      ? value.actionEventIds.filter((id): id is string => typeof id === "string")
+      : [],
+    attemptCount: typeof value.attemptCount === "number" ? value.attemptCount : 0,
+    cooldownUntil: typeof value.cooldownUntil === "string" ? value.cooldownUntil : null,
+    affectedRunIds: Array.isArray(value.affectedRunIds)
+      ? value.affectedRunIds.filter((id): id is string => typeof id === "string")
+      : [],
+    fault: value.fault && typeof value.fault === "object"
+      ? (value.fault as Record<string, unknown> as { kind: string; selectedAction: string; details: string })
+      : null,
+    canary: value.canary && typeof value.canary === "object"
+      ? (value.canary as Record<string, unknown> as {
+          status: string;
+          observedAt: string | null;
+          fingerprint: string | null;
+          evidence: string[];
+        })
+      : { status: "none", observedAt: null, fingerprint: null, evidence: [] },
+    failure: value.failure && typeof value.failure === "object"
+      ? (value.failure as Record<string, unknown> as { reason: string; recordedAt: string })
+      : null,
+  };
+}
+
+function appendWatchdogLines(lines: string[], context: unknown): void {
+  const watchdog = readWatchdogProjection(context);
+  if (!watchdog) {
+    lines.push("");
+    lines.push("Control-plane watchdog: (no observations yet)");
+    return;
+  }
+  lines.push("");
+  lines.push("Control-plane watchdog");
+  lines.push(`  state: ${watchdog.state}`);
+  if (watchdog.fingerprint) {
+    lines.push(`  fingerprint: ${watchdog.fingerprint.slice(0, 16)}`);
+  }
+  lines.push(`  recovery stage: ${watchdog.recoveryStage}`);
+  lines.push(`  unchanged eligible ticks: ${watchdog.unchangedEligibleTicks}`);
+  if (watchdog.lastMeaningfulProgressAt) {
+    lines.push(`  last meaningful progress: ${watchdog.lastMeaningfulProgressAt}`);
+  }
+  if (watchdog.lastObservationAt) {
+    lines.push(`  last observation: ${watchdog.lastObservationAt}`);
+  }
+  if (watchdog.attemptCount > 0) {
+    lines.push(`  attempts: ${watchdog.attemptCount}`);
+  }
+  if (watchdog.cooldownUntil) {
+    lines.push(`  cooldown until: ${watchdog.cooldownUntil}`);
+  }
+  if (watchdog.repairRunId) {
+    lines.push(`  repair run: ${watchdog.repairRunId}`);
+  }
+  if (watchdog.repairTaskId) {
+    lines.push(`  repair task: ${watchdog.repairTaskId}`);
+  }
+  if (watchdog.affectedRunIds.length > 0) {
+    lines.push(`  affected runs: ${watchdog.affectedRunIds.join(", ")}`);
+  }
+  if (watchdog.actionEventIds.length > 0) {
+    lines.push(`  action events: ${watchdog.actionEventIds.slice(0, 5).join(", ")}`);
+  }
+  if (watchdog.fault) {
+    lines.push(`  fault: ${watchdog.fault.kind} (${watchdog.fault.selectedAction})`);
+    if (watchdog.fault.details) {
+      lines.push(`  fault details: ${clamp(watchdog.fault.details, 160)}`);
+    }
+  }
+  if (watchdog.canary.status !== "none") {
+    lines.push(`  canary: ${watchdog.canary.status}`);
+    if (watchdog.canary.fingerprint) {
+      lines.push(`  canary fingerprint: ${watchdog.canary.fingerprint.slice(0, 16)}`);
+    }
+    if (watchdog.canary.observedAt) {
+      lines.push(`  canary observed: ${watchdog.canary.observedAt}`);
+    }
+  }
+  if (watchdog.failure) {
+    lines.push(`  failure: ${clamp(watchdog.failure.reason, 160)} (at ${watchdog.failure.recordedAt})`);
+  }
 }
 
 function countTasksByStatus(tasks: RunOverview["tasks"]): Record<Status, number> {
