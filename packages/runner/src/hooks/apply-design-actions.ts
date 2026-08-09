@@ -361,6 +361,7 @@ function applyProposeDesignWithDb(
   if (!evidenceRefs || evidenceRefs.length === 0) {
     throw new Error("proposeDesign payload.proposal.evidenceRefs must reference at least one signal or observation");
   }
+  assertEvidenceSignalProjects(harness, db, evidenceRefs, projectId);
   const contract = proposalData.evaluationContract as Record<string, unknown> | undefined;
   if (!contract) {
     throw new Error("proposeDesign payload.proposal.evaluationContract must be present");
@@ -1384,6 +1385,14 @@ function applyCreateRunsFromDesignWithDb(
           `createRunsFromDesign child run ${childRunId} belongs to project ${existingRun.projectId ?? "<null>"}; expected ${proposalProjectId}`,
         );
       }
+      if (
+        existingRun.context.projectId !== undefined
+        && existingRun.context.projectId !== proposalProjectId
+      ) {
+        throw new Error(
+          `createRunsFromDesign child run ${childRunId} context.projectId is ${String(existingRun.context.projectId)}; expected ${proposalProjectId}`,
+        );
+      }
       if (linearIntake) {
         verifyExistingRunIntakeProvenance(existingRun.context, {
           parent: linearIntake,
@@ -1541,6 +1550,22 @@ function assertProposalCharterProjects(
   }
   for (const charterId of charterIds) {
     assertCharterProject(harness, db, charterId, projectId, "proposeDesign");
+  }
+}
+
+function assertEvidenceSignalProjects(
+  harness: Harness,
+  db: HarnessDatabase,
+  evidenceRefs: string[],
+  projectId: string,
+) {
+  for (const evidenceRef of evidenceRefs) {
+    const signal = harness.getStrategySignalWithDb(db, { id: evidenceRef });
+    if (signal && signal.projectId !== projectId) {
+      throw new Error(
+        `proposeDesign cross-project strategy signal ${evidenceRef} belongs to project ${signal.projectId ?? "<null>"}; expected ${projectId}`,
+      );
+    }
   }
 }
 

@@ -7562,6 +7562,101 @@ describe("runner", () => {
     expect(harness.listStrategySignals({ projectId })).toHaveLength(0);
   });
 
+  test("apply-design-actions hook rejects a proposal that cites a strategy signal from another project", async () => {
+    const projectId = harness.createProject({ name: "ouroboros", rootPath: dir });
+    const otherProjectId = harness.createProject({ name: "other", rootPath: join(dir, "other") });
+    seedActiveCharter(projectId);
+    const foreignSignalId = seedLowRiskSignal(otherProjectId);
+    const runId = harness.createRun({ goal: "project-bound design run", projectId });
+    const taskId = harness.createTask({
+      runId,
+      role: "designer",
+      goal: "design",
+      prompt: "design",
+    });
+    const hook = createApplyDesignActionsHook({ harness });
+
+    const result = await hook({
+      run: harness.getRun(runId)!,
+      task: harness.getTask(taskId)!,
+      sessionName: "session",
+      prompt: "design",
+      output: {
+        status: "done",
+        summary: "cross-project evidence",
+        designActions: [{
+          type: "proposeDesign",
+          payload: {
+            projectId,
+            title: "Foreign evidence proposal",
+            proposal: lowRiskProposalEnvelope(foreignSignalId),
+          },
+        }],
+      } as AttemptOutput,
+    });
+
+    expect(result.problems?.[0]).toContain("cross-project strategy signal");
+    expect(harness.listDesignProposals({ projectId })).toHaveLength(0);
+  });
+
+  test("createRunsFromDesign rejects an existing child run with polluted project context", async () => {
+    const projectId = harness.createProject({ name: "ouroboros", rootPath: dir });
+    const otherProjectId = harness.createProject({ name: "other", rootPath: join(dir, "other") });
+    const runId = harness.createRun({ goal: "project-bound design run", projectId });
+    const taskId = harness.createTask({
+      runId,
+      role: "designer",
+      goal: "design",
+      prompt: "design",
+    });
+    const proposal = harness.createDesignProposal({
+      projectId,
+      title: "Bound child run",
+      problem: "A child run must preserve project identity",
+      recommendation: "Create one project-bound child run",
+      proposal: validProposal as never,
+      status: "accepted",
+    });
+    harness.recordDesignDecision({
+      proposalId: proposal.id,
+      decision: "approved",
+      actorKind: "human",
+      actorRef: "founder@example.com",
+      reasons: ["bounded test fixture"],
+    });
+    const childRunId = `run_${createHash("sha1")
+      .update(`design-child|${runId}|${taskId}|0|${proposal.id}|0`, "utf8")
+      .digest("hex")}`;
+    harness.createRun({
+      id: childRunId,
+      goal: "Existing polluted child",
+      projectId,
+      context: { projectId: otherProjectId },
+    });
+    const hook = createApplyDesignActionsHook({ harness });
+
+    const result = await hook({
+      run: harness.getRun(runId)!,
+      task: harness.getTask(taskId)!,
+      sessionName: "session",
+      prompt: "design",
+      output: {
+        status: "done",
+        summary: "reuse child",
+        designActions: [{
+          type: "createRunsFromDesign",
+          payload: {
+            proposalId: proposal.id,
+            runs: [{ goal: "Existing polluted child", prompt: "Plan safely." }],
+          },
+        }],
+      } as AttemptOutput,
+    });
+
+    expect(result.problems?.[0]).toContain("context.projectId");
+    expect(harness.getRunOverview({ runId: childRunId }).tasks).toHaveLength(0);
+  });
+
   test("apply-design-actions hook records proposal, decision, outcome, and runs", async () => {
     const runId = harness.createRun({ goal: "design run" });
     const taskId = harness.createTask({
