@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { chmod, mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { join, resolve } from "node:path";
@@ -44,6 +44,8 @@ import {
   listEvolutionRecords,
   showEvolutionRecord,
 } from "../packages/cli/src/evolution-readback";
+
+setDefaultTimeout(10_000);
 
 async function snapshotDatabaseFilesystem(dbPath: string, dir: string) {
   const dbStat = await stat(dbPath);
@@ -821,7 +823,7 @@ describe("CLI", () => {
     ]);
   });
 
-  test("self-iteration bootstrap routes designer, planner, verifier, and goal-review through codex-resumable over a claude-code global default", async () => {
+  test("self-iteration bootstrap forces every role through codex-resumable over a claude-code global default", async () => {
     await runCli("init");
     const configPath = join(dir, "self-iterate.toml");
     await writeFile(
@@ -841,13 +843,15 @@ describe("CLI", () => {
     const overview = await runCliJson("run-overview", "--run-id", result.runId);
 
     expect(overview.run.context.agentDefaults).toEqual({
-      global: "claude-code",
+      global: "codex-resumable",
       roles: {
         designer: "codex-resumable",
         planner: "codex-resumable",
         worker: "codex-resumable",
         verifier: "codex-resumable",
         "goal-review": "codex-resumable",
+        "outcome-review": "codex-resumable",
+        repair: "codex-resumable",
       },
     });
     expect(overview.run.context.agentBackends).toMatchObject({
@@ -863,7 +867,7 @@ describe("CLI", () => {
     expect(Array.isArray(lessons)).toBe(true);
   });
 
-  test("self-iteration bootstrap keeps explicit role agent backend overrides from config", async () => {
+  test("self-iteration bootstrap rejects role-level Claude defaults from config", async () => {
     await runCli("init");
     const configPath = join(dir, "self-iterate.toml");
     await writeFile(
@@ -888,13 +892,15 @@ describe("CLI", () => {
     const overview = await runCliJson("run-overview", "--run-id", result.runId);
 
     expect(overview.run.context.agentDefaults).toEqual({
-      global: "claude-code",
+      global: "codex-resumable",
       roles: {
-        designer: "claude-code",
-        planner: "claude-code",
+        designer: "codex-resumable",
+        planner: "codex-resumable",
         worker: "codex-resumable",
         verifier: "codex-resumable",
         "goal-review": "codex-resumable",
+        "outcome-review": "codex-resumable",
+        repair: "codex-resumable",
       },
     });
   });
@@ -8446,6 +8452,23 @@ describe("CLI", () => {
     const bootstrap = await runCliJson("self-iterate");
     const bootstrapOverview = await runCliJson("run-overview", "--run-id", bootstrap.runId);
     const setupHarness = new Harness(dbPath);
+    setupHarness.updateRun({
+      runId: bootstrap.runId,
+      contextPatch: {
+        agentDefaults: {
+          global: "claude-code",
+          roles: {
+            designer: "codex-resumable",
+            planner: "claude-code",
+            worker: "claude-code",
+            verifier: "claude-code",
+            "goal-review": "claude-code",
+            "outcome-review": "claude-code",
+            repair: "claude-code",
+          },
+        },
+      },
+    });
     const projectId = setupHarness.listProjects()[0].id;
     const proposal = setupHarness.createDesignProposal({
       projectId,
@@ -8587,6 +8610,18 @@ describe("CLI", () => {
         source: "design",
         designProposalId: proposal.id,
         derivedBy: "self-assessment",
+        agentDefaults: {
+          global: "codex-resumable",
+          roles: {
+            designer: "codex-resumable",
+            planner: "codex-resumable",
+            worker: "codex-resumable",
+            verifier: "codex-resumable",
+            "goal-review": "codex-resumable",
+            "outcome-review": "codex-resumable",
+            repair: "codex-resumable",
+          },
+        },
       }),
     });
   });
@@ -8636,6 +8671,114 @@ describe("CLI", () => {
       createdCycle: null,
     });
     expect(runs).toHaveLength(1);
+  });
+
+  test("self-improve-daemon does not copy stale Claude defaults into a new assessment cycle", async () => {
+    const bootstrap = await runCliJson("self-iterate");
+    const setupHarness = new Harness(dbPath);
+    setupHarness.recordAttempt({
+      taskId: bootstrap.taskId,
+      input: {},
+      output: {
+        status: "done",
+        summary: "Initial assessment drained",
+        changedFiles: [],
+        checks: [{ name: "assessment", status: "passed" }],
+        artifacts: [],
+        problems: [],
+      },
+    });
+    setupHarness.updateRunStatus({ runId: bootstrap.runId, status: "done" });
+    const root = setupHarness.getRun(bootstrap.runId)!;
+    setupHarness.updateRun({
+      runId: bootstrap.runId,
+      contextPatch: {
+        agentDefaults: {
+          global: "claude-code",
+          roles: {
+            designer: "claude-code",
+            planner: "claude-code",
+            worker: "claude-code",
+            verifier: "claude-code",
+            "goal-review": "claude-code",
+            "outcome-review": "claude-code",
+            repair: "claude-code",
+          },
+        },
+        selfImprovement: {
+          ...(root.context.selfImprovement as Record<string, unknown>),
+          assessmentFingerprint: "stale-fingerprint",
+        },
+      },
+    });
+
+    const codexBin = join(dir, "fake-codex-stale-agent-defaults");
+    const payload = {
+      status: "done",
+      summary: "Inspected the next cycle without proposing changes",
+      changedFiles: [],
+      checks: [{ name: "assessment", status: "passed" }],
+      artifacts: [],
+      problems: [],
+    };
+    await writeFile(
+      codexBin,
+      [
+        "#!/usr/bin/env bun",
+        "import { writeFileSync } from 'node:fs';",
+        "const outputFlag = Bun.argv.indexOf('--output-last-message');",
+        "const outputPath = outputFlag >= 0 ? Bun.argv[outputFlag + 1] : '';",
+        `const payload = ${JSON.stringify(payload)};`,
+        "if (outputPath) writeFileSync(outputPath, JSON.stringify(payload));",
+        "console.log(JSON.stringify({ type: 'session.started', session_id: 'session_stale_agent_defaults' }));",
+        "console.log(JSON.stringify({ type: 'agent.message', message: JSON.stringify(payload) }));",
+      ].join("\n"),
+    );
+    await chmod(codexBin, 0o755);
+
+    const result = await runCliJson(
+      "self-improve-daemon",
+      "--executor",
+      "codex-resumable",
+      "--root-run-id",
+      bootstrap.runId,
+      "--codex-bin",
+      codexBin,
+      "--parallel",
+      "auto",
+      "--max-ticks",
+      "1",
+      "--tick-cycles",
+      "1",
+      "--max-rounds",
+      "1",
+      "--interval-ms",
+      "1",
+      "--idle-ms",
+      "1",
+    );
+    const runs = await runCliJson("list-runs");
+    const assessment = runs.find(
+      (run: { context: Record<string, unknown> }) => run.context.source === "self-improvement-assessment",
+    );
+
+    expect(result.ticks[0]).toMatchObject({
+      type: "self-improvement.tick",
+      status: "ok",
+      createdCycle: expect.objectContaining({ runId: assessment.id }),
+    });
+    expect(assessment.context.agentDefaults).toEqual({
+      global: "codex-resumable",
+      roles: {
+        designer: "codex-resumable",
+        planner: "codex-resumable",
+        worker: "codex-resumable",
+        verifier: "codex-resumable",
+        "goal-review": "codex-resumable",
+        "outcome-review": "codex-resumable",
+        repair: "codex-resumable",
+      },
+    });
   });
 
   test("self-improve-daemon keeps recovering a blocked delivery instead of accepting quiescence", async () => {

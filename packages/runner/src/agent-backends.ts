@@ -15,6 +15,32 @@ export interface ResolvedAgentBackend {
   env?: Record<string, string>;
 }
 
+const CODEX_ONLY_AGENT_ROLES = [
+  "designer",
+  "planner",
+  "worker",
+  "verifier",
+  "goal-review",
+  "outcome-review",
+  "repair",
+] as const;
+
+// Self-iteration is a Codex-owned control loop. Normalize both known roles and
+// any configured extension roles so a stale run or local config cannot route a
+// newly derived cycle back to Claude through either role or global fallback.
+export function codexOnlyAgentDefaults(value: unknown) {
+  const defaults = objectOrNull(value) ?? {};
+  const configuredRoles = objectOrNull(defaults.roles) ?? {};
+  const roles = Object.fromEntries(
+    [...new Set([...CODEX_ONLY_AGENT_ROLES, ...Object.keys(configuredRoles)])]
+      .map((role) => [role, "codex-resumable"]),
+  );
+  return {
+    global: "codex-resumable",
+    roles,
+  };
+}
+
 export function resolveAgentBackend(input: {
   run: Run;
   task: Task;
