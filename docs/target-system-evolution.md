@@ -8,6 +8,21 @@ The checked-in Hodor reference is a **designed-state contract only**. It proves 
 
 The machine-readable reference is [the Hodor evolution pack v0](examples/hodor-evolution-pack-v0.json). Tests parse its `evolutionPack`, `causalHypothesis`, and `comparison` fields with the production target-evolution parsers.
 
+## Create a target-system design run
+
+Register the Evolution Kernel and target as separate projects, and activate a founder charter for the target. Then create the target-bound Designer root:
+
+```bash
+orbs design-target-system \
+  --kernel-project-id <kernel_project_id> \
+  --target-project-id <target_project_id> \
+  --goal "Design the target's bounded self-evolution system"
+```
+
+The command fails before creating a run when either project is missing, both identities are equal, or the target has no active founder charter. Its run belongs to the target project and freezes the target charter plus a `design-target` evolution identity. It creates one Designer task and prints a safe `codex-resumable` runner command; it does not start the runner, dashboard, or daemon.
+
+The Designer may return a justified quiescent result or use the fixed `proposeDesign` action. A target-evolution proposal must carry the target project identity and the complete `evolutionPack`, `causalHypothesis`, and matched `comparison` contract. Delivery remains behind the authority decision and the fixed `createRunsFromDesign` action.
+
 ## Three responsibility layers
 
 The platform has three organizational layers. Each layer answers who owns a decision or action.

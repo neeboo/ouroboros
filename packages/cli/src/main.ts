@@ -185,6 +185,13 @@ const SELF_ITERATION_ROLE_AGENT_DEFAULTS: Record<"designer" | "planner" | "worke
   "goal-review": "codex-resumable",
 };
 const SELF_ITERATION_DESIGN_DOC = "docs/designer-control-plane.md";
+const TARGET_SYSTEM_EVOLUTION_DOC = "docs/target-system-evolution.md";
+const TARGET_SYSTEM_DESIGN_DONE_WHEN = [
+  "The target founder charter, target-scoped strategy signals, and target-scoped evidence have been inspected",
+  "The result is either one evidence-backed proposeDesign action or a justified quiescent decision",
+  "Any proposal uses the target project id and includes a complete evolutionPack, causalHypothesis, and comparison",
+  "No delivery task or run bypasses the authority gate or the fixed createRunsFromDesign action",
+];
 const SELF_ITERATION_DEFAULT_PROJECT_NAME = "ouroboros";
 const SELF_ITERATION_CHARTER_POLICY_VERSION = 2;
 const SELF_ITERATION_DEFAULT_CHARTER = {
@@ -320,6 +327,45 @@ switch (parsed.command) {
         DEFAULT_SELF_ITERATION_WORKTREE_ROOT,
         "--start-hook",
         "git-worktree",
+      ),
+    });
+    break;
+  }
+  case "design-target-system": {
+    const kernelProjectId = required(parsed, "kernel-project-id");
+    const targetProjectId = required(parsed, "target-project-id");
+    const goal = required(parsed, "goal");
+    if (flag(parsed, "context-json") !== undefined) {
+      fail("--context-json is not supported by design-target-system");
+    }
+    const codexBin = flag(parsed, "codex-bin") ?? defaultCodexBin();
+    const result = await createTargetSystemDesignBootstrap({ kernelProjectId, targetProjectId, goal });
+    printJson({
+      ...result,
+      runnerCommand: cliCommand(
+        "run-loop",
+        "--run-id",
+        result.runId,
+        "--executor",
+        "codex-resumable",
+        "--cwd",
+        result.targetProject.rootPath,
+        "--sandbox",
+        "workspace-write",
+        "--codex-bin",
+        codexBin,
+        "--stop-hook",
+        DEFAULT_STOP_HOOKS,
+        "--tasks",
+        "auto",
+        "--worktree-root",
+        join(result.targetProject.rootPath, DEFAULT_SELF_ITERATION_WORKTREE_ROOT),
+        "--start-hook",
+        "git-worktree",
+        "--max-rounds",
+        "8",
+        "--max-tries",
+        String(DEFAULT_MAX_TRIES),
       ),
     });
     break;
@@ -1217,6 +1263,7 @@ function printHelp() {
     "  init                 Initialize the local SQLite database",
     "  create-project       Register a project root",
     "  create-run           Create a goal run",
+    "  design-target-system Create a target-bound Designer root run from a separate kernel project",
     "  create-task          Create a task in a run",
     "  run-loop             Drain ready tasks for one run",
     "  supervise-runs       Drain multiple runnable runs",
@@ -1250,6 +1297,7 @@ function printHelp() {
     "Examples:",
     "  orbs init",
     "  orbs create-run --goal 'Refactor platform admin' --project-root $(pwd)",
+    "  orbs design-target-system --kernel-project-id <kernel_project_id> --target-project-id <target_project_id> --goal 'Design bounded target evolution'",
     "  orbs run-loop --run-id <run_id> --executor codex-resumable --cwd $(pwd)",
     "  orbs supervise-daemon --executor codex-resumable --parallel auto",
     "  orbs self-iterate-launch --parallel auto",
@@ -1350,6 +1398,29 @@ function selfIterationDesignerPrompt() {
     "Planning begins only from an accepted proposal. Never create a delivery run for an unaccepted proposal, and never bypass the authority gate by adding `nextRuns` for a design conclusion.",
     "",
     "Record a justified quiescent decision (no actions, summary explains the absence of evidence-backed work) when the current signals, run evidence, repository state, and due outcomes do not justify a new proposal or a delivery run. The controller will wait for repository state to change.",
+  ].join("\n");
+}
+
+function targetSystemDesignerPrompt(input: {
+  kernelProject: NonNullable<ReturnType<Harness["getProject"]>>;
+  targetProject: NonNullable<ReturnType<Harness["getProject"]>>;
+  charterId: string;
+}) {
+  return [
+    `Act as the Ouroboros Evolution Kernel Designer for target project ${input.targetProject.name} (${input.targetProject.id}).`,
+    `The kernel project is ${input.kernelProject.name} (${input.kernelProject.id}); it supplies the reusable control lifecycle but does not own the target's domain decisions.`,
+    "",
+    "Before deciding, inspect only target-owned design inputs:",
+    `- the active target charter ${input.charterId}`,
+    `- target-scoped strategy signals for project ${input.targetProject.id}`,
+    "- target-scoped evidence, lessons, repository state, and due outcomes",
+    `- the target-system contract in ${TARGET_SYSTEM_EVOLUTION_DOC}`,
+    "",
+    "Return either a justified quiescent result with no actions, or one fixed proposeDesign action.",
+    `For proposeDesign, payload.projectId must equal ${input.targetProject.id}. The proposal must include the complete target-evolution group: evolutionPack, causalHypothesis, and evaluationContract.comparison.`,
+    "The evolutionPack must keep knowledge, mutation surfaces, evidence, and evaluation scoped to the target project and must name maintenance cost and removals.",
+    "Do not create delivery tasks or runs from this design step. Do not use createTasks, createRuns, or generic nextRuns to bypass authority.",
+    "Only an accepted stored proposal with an approved authority decision may later create delivery runs through the fixed createRunsFromDesign action.",
   ].join("\n");
 }
 
@@ -1738,6 +1809,67 @@ async function createSelfIterationBootstrap() {
     doneWhen: SELF_ITERATION_PLANNER_DONE_WHEN,
   });
   return { runId, taskId };
+}
+
+async function createTargetSystemDesignBootstrap(input: {
+  kernelProjectId: string;
+  targetProjectId: string;
+  goal: string;
+}) {
+  harness.init();
+  const kernelProject = harness.getProject(input.kernelProjectId);
+  if (!kernelProject) {
+    fail(`kernel project not found: ${input.kernelProjectId}`);
+  }
+  const targetProject = harness.getProject(input.targetProjectId);
+  if (!targetProject) {
+    fail(`target project not found: ${input.targetProjectId}`);
+  }
+  if (kernelProject.id === targetProject.id) {
+    fail("kernel and target projects must be different");
+  }
+  const targetCharter = harness.getActiveFounderCharter({ projectId: targetProject.id });
+  if (!targetCharter) {
+    fail(`active founder charter not found for target project: ${targetProject.id}`);
+  }
+  const config = await loadCliConfig();
+  const runId = harness.createRun({
+    goal: input.goal,
+    projectId: targetProject.id,
+    context: withConfigDefaults({
+      source: "target-system-design",
+      founderCharterId: targetCharter.id,
+      designCharterId: targetCharter.id,
+      evolutionInstance: {
+        schemaVersion: 1,
+        mode: "design-target",
+        kernelProjectId: kernelProject.id,
+        targetProjectId: targetProject.id,
+        cycle: { kind: "design", index: 0 },
+      },
+    }, config),
+  });
+  const taskId = harness.createTask({
+    runId,
+    role: "designer",
+    goal: `Design a bounded self-evolution system for ${targetProject.name}`,
+    prompt: targetSystemDesignerPrompt({ kernelProject, targetProject, charterId: targetCharter.id }),
+    doneWhen: TARGET_SYSTEM_DESIGN_DONE_WHEN,
+  });
+  return {
+    runId,
+    taskId,
+    kernelProject: {
+      id: kernelProject.id,
+      name: kernelProject.name,
+      rootPath: kernelProject.rootPath,
+    },
+    targetProject: {
+      id: targetProject.id,
+      name: targetProject.name,
+      rootPath: targetProject.rootPath,
+    },
+  };
 }
 
 function ensureSelfIterationProject() {
