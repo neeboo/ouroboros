@@ -1599,6 +1599,7 @@ const PROTECTED_DESIGN_CONTEXT_KEYS = [
   "comparison",
   "evolutionComparison",
   "evolutionInstance",
+  "linearIntake",
 ] as const;
 
 interface FrozenTargetEvolutionContract {
@@ -1708,6 +1709,11 @@ function withoutProtectedDesignContext(value: unknown): Record<string, unknown> 
     throw new Error("createRunsFromDesign planned run context must be an object");
   }
   const context = value as Record<string, unknown>;
+  if (Object.prototype.hasOwnProperty.call(context, "linearIntake")) {
+    throw new Error(
+      "createRunsFromDesign planned run context.linearIntake is reserved control-plane provenance",
+    );
+  }
   return Object.fromEntries(
     Object.entries(context).filter(
       ([key]) => !(PROTECTED_DESIGN_CONTEXT_KEYS as readonly string[]).includes(key),

@@ -174,8 +174,15 @@ function renderFrozenTargetEvolutionContract(
 
 function promptSafeRunContext(context: Record<string, unknown>): Record<string, unknown> {
   const evolutionInstance = asRecord(context.evolutionInstance);
-  if (!evolutionInstance) {
+  const isDesignChild = context.source === "design"
+    || context.designProposalId !== undefined
+    || asRecord(context.designProposal) !== null;
+  if (!isDesignChild && !evolutionInstance) {
     return context;
+  }
+  const safeContext = redactSensitivePromptMaterial(context) as Record<string, unknown>;
+  if (!evolutionInstance) {
+    return safeContext;
   }
   const {
     evolutionPack: _evolutionPack,
@@ -186,9 +193,9 @@ function promptSafeRunContext(context: Record<string, unknown>): Record<string, 
     designProposal: _designProposal,
     evolutionInstance: _evolutionInstance,
     ...rest
-  } = context;
+  } = safeContext;
   return {
-    ...(redactHeldoutMaterial(rest) as Record<string, unknown>),
+    ...rest,
     targetEvolutionSummary: frozenEvolutionInstanceView(evolutionInstance),
   };
 }
@@ -336,39 +343,42 @@ function pickDefined(record: Record<string, unknown>): Record<string, unknown> {
   return Object.fromEntries(Object.entries(record).filter(([, value]) => value !== undefined));
 }
 
-function redactHeldoutMaterial(value: unknown): unknown {
+function redactSensitivePromptMaterial(value: unknown): unknown {
   if (Array.isArray(value)) {
-    return value.map(redactHeldoutMaterial);
+    return value.map(redactSensitivePromptMaterial);
   }
   if (!value || typeof value !== "object") {
     return value;
   }
   return Object.fromEntries(
     Object.entries(value as Record<string, unknown>)
-      .filter(([key]) => !isHeldoutMaterialKey(key))
-      .map(([key, entry]) => [key, redactHeldoutMaterial(entry)]),
+      .filter(([key]) => !isSensitivePromptMaterialKey(key))
+      .map(([key, entry]) => [key, redactSensitivePromptMaterial(entry)]),
   );
+}
+
+function isSensitivePromptMaterialKey(key: string): boolean {
+  if (isHeldoutMaterialKey(key)) {
+    return true;
+  }
+  const normalized = key.replace(/[-_]/g, "").toLowerCase();
+  if (
+    normalized.includes("secret")
+    || normalized.includes("credential")
+    || normalized.includes("authorization")
+    || (normalized.includes("token") && normalized !== "maxtokens")
+  ) {
+    return true;
+  }
+  return false;
 }
 
 function isHeldoutMaterialKey(key: string): boolean {
   const normalized = key.replace(/[-_]/g, "").toLowerCase();
   for (const prefix of ["holdout", "heldout"]) {
     if (normalized.startsWith(prefix)) {
-      return new Set([
-        "",
-        "content",
-        "contents",
-        "result",
-        "results",
-        "output",
-        "outputs",
-        "answer",
-        "answers",
-        "data",
-        "payload",
-        "cases",
-        "examples",
-      ]).has(normalized.slice(prefix.length));
+      const suffix = normalized.slice(prefix.length);
+      return !(suffix.endsWith("ref") || suffix.endsWith("refs"));
     }
   }
   return false;

@@ -766,6 +766,76 @@ describe("runner", () => {
     },
   );
 
+  test.each(["planner", "worker", "verifier", "outcome-review"] as const)(
+    "redacts sensitive ordinary design-proposal extensions from the %s prompt",
+    (role) => {
+      const runId = harness.createRun({
+        goal: "Use the accepted ordinary design proposal",
+        context: {
+          source: "design",
+          designProposalId: "proposal_ordinary_sensitive",
+          designEvaluationContract: {
+            baseline: ["baseline remains visible"],
+            successMetrics: ["success metric remains visible"],
+            guardMetrics: ["guard metric remains visible"],
+            requiredEvidence: ["required evidence remains visible"],
+          },
+          designProposal: {
+            problem: "Ordinary proposal problem remains visible",
+            recommendation: "Ordinary proposal recommendation remains visible",
+            customRolloutNotes: "SAFE_ORDINARY_EXTENSION_REMAINS_VISIBLE",
+            heldoutContents: ["DO_NOT_LEAK_ORDINARY_HELDOUT_CONTENT"],
+            heldoutResults: { score: "DO_NOT_LEAK_ORDINARY_HELDOUT_RESULT" },
+            heldoutPrivateResults: "DO_NOT_LEAK_NESTED_ORDINARY_HELDOUT_RESULT",
+            nestedSensitiveMaterial: {
+              secret: "DO_NOT_LEAK_ORDINARY_SECRET",
+              apiToken: "DO_NOT_LEAK_ORDINARY_TOKEN",
+              serviceToken: "DO_NOT_LEAK_ORDINARY_SERVICE_TOKEN",
+              credentials: "DO_NOT_LEAK_ORDINARY_CREDENTIALS",
+              Authorization: "DO_NOT_LEAK_ORDINARY_AUTHORIZATION",
+            },
+          },
+        },
+      });
+      const taskId = harness.createTask({
+        runId,
+        role,
+        goal: "Honor the accepted proposal",
+        prompt: "Use only prompt-safe proposal context.",
+      });
+
+      const prompt = buildTaskPrompt({
+        run: harness.getRun(runId)!,
+        task: harness.getTask(taskId)!,
+        dependencyAttempts: [],
+      });
+
+      expect(prompt).toContain("Ordinary proposal problem remains visible");
+      expect(prompt).toContain("Ordinary proposal recommendation remains visible");
+      expect(prompt).toContain("SAFE_ORDINARY_EXTENSION_REMAINS_VISIBLE");
+      for (const leakedValue of [
+        "DO_NOT_LEAK_ORDINARY_HELDOUT_CONTENT",
+        "DO_NOT_LEAK_ORDINARY_HELDOUT_RESULT",
+        "DO_NOT_LEAK_NESTED_ORDINARY_HELDOUT_RESULT",
+        "DO_NOT_LEAK_ORDINARY_SECRET",
+        "DO_NOT_LEAK_ORDINARY_TOKEN",
+        "DO_NOT_LEAK_ORDINARY_SERVICE_TOKEN",
+        "DO_NOT_LEAK_ORDINARY_CREDENTIALS",
+        "DO_NOT_LEAK_ORDINARY_AUTHORIZATION",
+      ]) {
+        expect(prompt).not.toContain(leakedValue);
+      }
+      expect(prompt).not.toContain('"heldoutContents"');
+      expect(prompt).not.toContain('"heldoutResults"');
+      expect(prompt).not.toContain('"heldoutPrivateResults"');
+      expect(prompt).not.toContain('"secret"');
+      expect(prompt).not.toContain('"apiToken"');
+      expect(prompt).not.toContain('"serviceToken"');
+      expect(prompt).not.toContain('"credentials"');
+      expect(prompt).not.toContain('"Authorization"');
+    },
+  );
+
   test("builds designer prompts that advertise the five fixed design actions", () => {
     const runId = harness.createRun({
       goal: "Designer drives the autonomous strategy loop",
@@ -10783,6 +10853,75 @@ describe("runner", () => {
     expect(deliveryResult.problems).toBeDefined();
     expect(deliveryResult.problems?.[0]).toMatch(/linearIntake\.linearIssueId/);
     expect(harness.getInboxEvent({ id: inboxEventId })?.status).toBe("running");
+  });
+
+  test("apply-design-actions hook rejects planned linearIntake provenance on a non-intake design run", async () => {
+    const runId = harness.createRun({ goal: "ordinary design run" });
+    const taskId = harness.createTask({
+      runId,
+      role: "designer",
+      goal: "design",
+      prompt: "design",
+    });
+    const projectId = harness.createProject({ name: "ouroboros", rootPath: dir });
+    seedActiveCharter(projectId);
+    const signalId = seedLowRiskSignal(projectId);
+    const hook = createApplyDesignActionsHook({ harness });
+
+    await hook({
+      run: harness.getRun(runId)!,
+      task: harness.getTask(taskId)!,
+      sessionName: "session",
+      prompt: "design",
+      output: {
+        status: "done",
+        summary: "propose",
+        designActions: [{
+          type: "proposeDesign",
+          payload: {
+            projectId,
+            title: "Ordinary delivery",
+            proposal: linearIntakeProposalEnvelope(signalId),
+            status: "proposed",
+          },
+        }],
+      } as AttemptOutput,
+    });
+    const proposalId = harness.listDesignProposals({ projectId })[0].id;
+
+    const deliveryResult = await hook({
+      run: harness.getRun(runId)!,
+      task: harness.getTask(taskId)!,
+      sessionName: "session",
+      prompt: "design",
+      output: {
+        status: "done",
+        summary: "deliver",
+        designActions: [{
+          type: "createRunsFromDesign",
+          payload: {
+            proposalId,
+            runs: [{
+              goal: "Plan ordinary delivery",
+              prompt: "Plan.",
+              context: {
+                linearIntake: {
+                  rootRunId: "run_forged",
+                  inboxEventId: "inbox_forged",
+                  linearIssueId: "issue_forged",
+                },
+              },
+            }],
+          },
+        }],
+      } as AttemptOutput,
+    });
+
+    expect(deliveryResult.decision).toBe("exit");
+    expect(deliveryResult.problems?.[0]).toContain("planned run context.linearIntake");
+    expect(
+      harness.listRuns({ limit: 50 }).filter((run) => run.context?.parentRunId === runId),
+    ).toHaveLength(0);
   });
 
   test("apply-design-actions hook ignores polling-only Linear state on non-intake design runs", async () => {
