@@ -1,4 +1,11 @@
 import { parseJson } from "./json";
+import {
+  canonicalEvolutionRecordSha256,
+  parseEvolutionProfile,
+  parseHarnessVariant,
+  parseMatchedExperiment,
+  parseProductionEpisode,
+} from "./target-evolution";
 import type {
   Attempt,
   AttemptEvent,
@@ -8,14 +15,18 @@ import type {
   DesignProposal,
   DesignProposalData,
   ExecutionThread,
+  EvolutionProfile,
   ExternalRef,
   FounderCharter,
   FounderCharterData,
   HarnessActionEvent,
+  HarnessVariant,
   InboxEvent,
   Lesson,
+  MatchedExperiment,
   Project,
   PromptTemplate,
+  ProductionEpisode,
   Run,
   Status,
   StrategySignal,
@@ -29,13 +40,17 @@ import type {
   DesignOutcomeRow,
   DesignProposalRow,
   ExecutionThreadRow,
+  EvolutionProfileRow,
   ExternalRefRow,
   FounderCharterRow,
   HarnessActionEventRow,
+  HarnessVariantRow,
   InboxEventRow,
   LessonRow,
+  MatchedExperimentRow,
   ProjectRow,
   PromptTemplateRow,
+  ProductionEpisodeRow,
   RunRow,
   StrategySignalRow,
   TaskRow,
@@ -275,6 +290,81 @@ export function designOutcomeFromRow(row: DesignOutcomeRow): DesignOutcome {
     payload: parseJson<Record<string, unknown>>(row.payload_json),
     createdAt: row.created_at,
   };
+}
+
+export function evolutionProfileFromRow(row: EvolutionProfileRow): EvolutionProfile {
+  const record = parseEvolutionProfile(
+    parseJson<unknown>(row.record_json),
+    row.project_id,
+    `evolution_profiles.${row.id}.record_json`,
+  );
+  if (
+    record.id !== row.id ||
+    record.schemaVersion !== row.schema_version ||
+    record.runtimeMaturity !== row.runtime_maturity
+    || record.registeredAt !== row.registered_at
+    || canonicalEvolutionRecordSha256(record) !== row.record_sha256
+  ) {
+    throw new Error(`evolution profile readback mismatch: ${row.id}`);
+  }
+  return record;
+}
+
+export function productionEpisodeFromRow(row: ProductionEpisodeRow): ProductionEpisode {
+  const record = parseProductionEpisode(
+    parseJson<unknown>(row.record_json),
+    row.project_id,
+    `production_episodes.${row.id}.record_json`,
+  );
+  if (
+    record.id !== row.id ||
+    record.schemaVersion !== row.schema_version ||
+    record.profileId !== row.profile_id ||
+    record.sourceRef !== row.source_ref ||
+    record.leakageGroupId !== row.leakage_group_id
+    || canonicalEvolutionRecordSha256(record) !== row.record_sha256
+  ) {
+    throw new Error(`production episode readback mismatch: ${row.id}`);
+  }
+  return record;
+}
+
+export function harnessVariantFromRow(row: HarnessVariantRow): HarnessVariant {
+  const record = parseHarnessVariant(
+    parseJson<unknown>(row.record_json),
+    row.project_id,
+    `harness_variants.${row.id}.record_json`,
+  );
+  if (
+    record.id !== row.id ||
+    record.schemaVersion !== row.schema_version ||
+    record.profileId !== row.profile_id ||
+    record.role !== row.role
+    || canonicalEvolutionRecordSha256(record) !== row.record_sha256
+  ) {
+    throw new Error(`harness variant readback mismatch: ${row.id}`);
+  }
+  return record;
+}
+
+export function matchedExperimentFromRow(row: MatchedExperimentRow): MatchedExperiment {
+  const record = parseMatchedExperiment(
+    parseJson<unknown>(row.record_json),
+    row.project_id,
+    `matched_experiments.${row.id}.record_json`,
+  );
+  if (
+    record.id !== row.id ||
+    record.schemaVersion !== row.schema_version ||
+    record.profileId !== row.profile_id ||
+    record.controlVariantId !== row.control_variant_id ||
+    record.candidateVariantId !== row.candidate_variant_id ||
+    record.outcome !== row.outcome
+    || canonicalEvolutionRecordSha256(record) !== row.record_sha256
+  ) {
+    throw new Error(`matched experiment readback mismatch: ${row.id}`);
+  }
+  return record;
 }
 
 function stringOrNull(value: unknown) {

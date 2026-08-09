@@ -1,4 +1,7 @@
+import { createHash } from "node:crypto";
+import { requireStrictIsoTimestamp } from "./iso-timestamp";
 import type {
+  DraftPromotionReceipt,
   EvolutionCausalHypothesis,
   EvolutionComparison,
   EvolutionCycleKind,
@@ -8,7 +11,14 @@ import type {
   EvolutionMutationLayer,
   EvolutionPackMaturity,
   EvolutionPackV1,
+  EvolutionProfile,
+  EvolutionRecordKind,
+  EvolutionRuntimeMaturity,
+  EvolutionSideEffectCounters,
   EvolutionTarget,
+  HarnessVariant,
+  MatchedExperiment,
+  ProductionEpisode,
 } from "./types";
 
 export const TARGET_EVOLUTION_LIMITS = Object.freeze({
@@ -27,6 +37,10 @@ export const TARGET_EVOLUTION_LIMITS = Object.freeze({
 });
 
 const SHA256_PATTERN = /^[0-9a-f]{64}$/;
+const SAFE_SHORT_REF_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+const TYPED_OPAQUE_REF_PATTERN = /^[a-z][a-z0-9-]{0,31}:[A-Za-z0-9][A-Za-z0-9._:/-]*$/;
+const SENSITIVE_REF_TEXT_PATTERN = /credential|authorization|bearer|token|secret|password|api[-_.]?key/i;
+const GLOB_META_PATTERN = /[*?\[\]{}!]/;
 const EVOLUTION_MODES = new Set<EvolutionMode>(["self", "design-target", "target-cycle"]);
 const CYCLE_KINDS = new Set<EvolutionCycleKind>(["design", "bootstrap", "operate", "assess-handoff"]);
 const SIGNAL_SOURCE_KINDS = new Set(["run-evidence", "repository", "external-ref", "domain-metric"] as const);
@@ -57,6 +71,33 @@ const FIRST_CANDIDATE_TARGETS = new Set<EvolutionFirstCandidate["allowedEvolutio
   "artifact",
   "harness",
 ]);
+const HARNESS_VARIANT_ROLES = new Set<HarnessVariant["role"]>(["control", "candidate"]);
+const HARNESS_VARIANT_TARGETS = new Set<HarnessVariant["evolutionTargets"][number]>([
+  "artifact",
+  "harness",
+]);
+const MATCHED_EXPERIMENT_OUTCOMES = new Set<MatchedExperiment["outcome"]>([
+  "pending",
+  "candidate_wins",
+  "control_wins",
+  "inconclusive",
+  "invalid",
+]);
+const DATA_CLASSIFICATIONS = new Set<ProductionEpisode["privacyReview"]["dataClassification"]>([
+  "public",
+  "internal",
+  "confidential",
+  "restricted",
+]);
+const EVOLUTION_RUNTIME_MATURITIES = new Set<EvolutionRuntimeMaturity>(["declared"]);
+const PROMOTION_RECEIPT_ACTIONS = new Set<DraftPromotionReceipt["action"]>(["promote", "rollback"]);
+const EVOLUTION_RECORD_KINDS = new Set<EvolutionRecordKind>([
+  "profile",
+  "episode",
+  "variant",
+  "experiment",
+  "receipt",
+]);
 const SIDE_EFFECT_BUDGET_KEYS = [
   "paidUsd",
   "realProviderCalls",
@@ -65,7 +106,7 @@ const SIDE_EFFECT_BUDGET_KEYS = [
   "realAssetDeletes",
   "crossProjectMemoryReads",
   "crossProjectMemoryWrites",
-] as const satisfies ReadonlyArray<keyof EvolutionFirstCandidate["sideEffectBudget"]>;
+] as const satisfies ReadonlyArray<keyof EvolutionSideEffectCounters>;
 
 export function parseEvolutionInstance(
   value: unknown,
@@ -285,7 +326,7 @@ export function parseEvolutionPackV1(
         `${label}.portability.projectLocalRules`,
         TARGET_EVOLUTION_LIMITS.maxArrayItems,
       ),
-      genericizationEvidence: requireStringArray(
+      genericizationEvidence: requireOpaqueRefArray(
         portability.genericizationEvidence,
         `${label}.portability.genericizationEvidence`,
         TARGET_EVOLUTION_LIMITS.maxArrayItems,
@@ -343,17 +384,17 @@ export function parseEvolutionComparison(
     ],
     label,
   );
-  const developmentEvidenceRefs = requireNonEmptyStringArray(
+  const developmentEvidenceRefs = requireNonEmptyOpaqueRefArray(
     record.developmentEvidenceRefs,
     `${label}.developmentEvidenceRefs`,
     TARGET_EVOLUTION_LIMITS.maxEvidenceRefsPerSplit,
   );
-  const holdoutEvidenceRefs = requireNonEmptyStringArray(
+  const holdoutEvidenceRefs = requireNonEmptyOpaqueRefArray(
     record.holdoutEvidenceRefs,
     `${label}.holdoutEvidenceRefs`,
     TARGET_EVOLUTION_LIMITS.maxEvidenceRefsPerSplit,
   );
-  const unrelatedEvidenceRefs = requireNonEmptyStringArray(
+  const unrelatedEvidenceRefs = requireNonEmptyOpaqueRefArray(
     record.unrelatedEvidenceRefs,
     `${label}.unrelatedEvidenceRefs`,
     TARGET_EVOLUTION_LIMITS.maxEvidenceRefsPerSplit,
@@ -363,24 +404,12 @@ export function parseEvolutionComparison(
     label,
   );
 
-  const equalBudget = strictObject(
-    record.equalBudget,
-    ["model", "reasoningEffort", "wallClockMs", "maxAttempts", "maxTokens", "toolPolicySha256", "concurrency"],
-    `${label}.equalBudget`,
-  );
-  const maxTokens = equalBudget.maxTokens === undefined
-    ? undefined
-    : requirePositiveIntegerAtMost(
-        equalBudget.maxTokens,
-        TARGET_EVOLUTION_LIMITS.maxTokens,
-        `${label}.equalBudget.maxTokens`,
-      );
+  const equalBudget = parseEvolutionEqualBudget(record.equalBudget, `${label}.equalBudget`);
 
   return {
-    controlRef: requireString(
+    controlRef: requireOpaqueRef(
       record.controlRef,
       `${label}.controlRef`,
-      TARGET_EVOLUTION_LIMITS.maxTextLength,
     ),
     developmentEvidenceRefs,
     holdoutEvidenceRefs,
@@ -389,38 +418,7 @@ export function parseEvolutionComparison(
       record.corpusSnapshotSha256,
       `${label}.corpusSnapshotSha256`,
     ),
-    equalBudget: {
-      model: requireString(
-        equalBudget.model,
-        `${label}.equalBudget.model`,
-        TARGET_EVOLUTION_LIMITS.maxIdentifierLength,
-      ),
-      reasoningEffort: requireEnum(
-        equalBudget.reasoningEffort,
-        REASONING_EFFORTS,
-        `${label}.equalBudget.reasoningEffort`,
-      ),
-      wallClockMs: requirePositiveIntegerAtMost(
-        equalBudget.wallClockMs,
-        TARGET_EVOLUTION_LIMITS.maxWallClockMs,
-        `${label}.equalBudget.wallClockMs`,
-      ),
-      maxAttempts: requirePositiveIntegerAtMost(
-        equalBudget.maxAttempts,
-        TARGET_EVOLUTION_LIMITS.maxAttempts,
-        `${label}.equalBudget.maxAttempts`,
-      ),
-      ...(maxTokens === undefined ? {} : { maxTokens }),
-      toolPolicySha256: requireSha256(
-        equalBudget.toolPolicySha256,
-        `${label}.equalBudget.toolPolicySha256`,
-      ),
-      concurrency: requirePositiveIntegerAtMost(
-        equalBudget.concurrency,
-        TARGET_EVOLUTION_LIMITS.maxConcurrency,
-        `${label}.equalBudget.concurrency`,
-      ),
-    },
+    equalBudget,
     primaryMetric: requireString(
       record.primaryMetric,
       `${label}.primaryMetric`,
@@ -432,6 +430,367 @@ export function parseEvolutionComparison(
       `${label}.maximumGuardRegression`,
     ),
   };
+}
+
+export function canonicalEvolutionValueSha256(value: unknown): string {
+  const canonical = canonicalEvolutionValue(value, "evolution value", new Set<object>());
+  return createHash("sha256").update(JSON.stringify(canonical), "utf8").digest("hex");
+}
+
+export function canonicalEvolutionRecordSha256(value: unknown): string {
+  const record = requirePlainJsonObject(value, "evolution record");
+  const { id: _ignored, ...recordWithoutId } = record;
+  return canonicalEvolutionValueSha256(recordWithoutId);
+}
+
+export function expectedEvolutionRecordId(
+  kind: EvolutionRecordKind,
+  value: unknown,
+): string {
+  const parsedKind = requireEnum(kind, EVOLUTION_RECORD_KINDS, "evolution record kind");
+  return `${parsedKind}_${canonicalEvolutionRecordSha256(value)}`;
+}
+
+export function parseEvolutionProfile(
+  value: unknown,
+  expectedProjectId: string,
+  label = "evolutionProfile",
+): EvolutionProfile {
+  const record = strictObject(
+    value,
+    [
+      "schemaVersion",
+      "id",
+      "projectId",
+      "pack",
+      "charter",
+      "runtimeMaturity",
+      "allowedSurfaceIds",
+      "registeredAt",
+    ],
+    label,
+  );
+  requireSchemaVersion(record.schemaVersion, `${label}.schemaVersion`);
+  const normalized: EvolutionProfile = {
+    schemaVersion: 1,
+    id: requireString(record.id, `${label}.id`, TARGET_EVOLUTION_LIMITS.maxIdentifierLength),
+    projectId: requireExpectedProjectId(record.projectId, expectedProjectId, label),
+    pack: parseVersionedContentRef(record.pack, `${label}.pack`),
+    charter: parseVersionedContentRef(record.charter, `${label}.charter`),
+    runtimeMaturity: requireEnum(
+      record.runtimeMaturity,
+      EVOLUTION_RUNTIME_MATURITIES,
+      `${label}.runtimeMaturity`,
+    ),
+    allowedSurfaceIds: requireUniqueNonEmptyStringArray(
+      record.allowedSurfaceIds,
+      `${label}.allowedSurfaceIds`,
+      TARGET_EVOLUTION_LIMITS.maxMutationSurfaces,
+      TARGET_EVOLUTION_LIMITS.maxIdentifierLength,
+    ),
+    registeredAt: requireEvolutionTimestamp(record.registeredAt, `${label}.registeredAt`),
+  };
+  requireMatchingEvolutionRecordId("profile", normalized, label);
+  return normalized;
+}
+
+export function parseProductionEpisode(
+  value: unknown,
+  expectedProjectId: string,
+  label = "productionEpisode",
+): ProductionEpisode {
+  const record = strictObject(
+    value,
+    [
+      "schemaVersion",
+      "id",
+      "projectId",
+      "profileId",
+      "sourceRef",
+      "leakageGroupId",
+      "observedAt",
+      "inputSnapshotSha256",
+      "outcomeSnapshotSha256",
+      "policyRef",
+      "metrics",
+      "sideEffectCounters",
+      "evidenceRefs",
+      "privacyReview",
+    ],
+    label,
+  );
+  requireSchemaVersion(record.schemaVersion, `${label}.schemaVersion`);
+  const inputSnapshotSha256 = requireSha256(
+    record.inputSnapshotSha256,
+    `${label}.inputSnapshotSha256`,
+  );
+  const outcomeSnapshotSha256 = requireSha256(
+    record.outcomeSnapshotSha256,
+    `${label}.outcomeSnapshotSha256`,
+  );
+  const privacyReview = parseProductionEpisodePrivacyReview(
+    record.privacyReview,
+    inputSnapshotSha256,
+    outcomeSnapshotSha256,
+    `${label}.privacyReview`,
+  );
+  const normalized: ProductionEpisode = {
+    schemaVersion: 1,
+    id: requireString(record.id, `${label}.id`, TARGET_EVOLUTION_LIMITS.maxIdentifierLength),
+    projectId: requireExpectedProjectId(record.projectId, expectedProjectId, label),
+    profileId: requireEvolutionRecordRef(record.profileId, "profile", `${label}.profileId`),
+    sourceRef: requireOpaqueRef(record.sourceRef, `${label}.sourceRef`),
+    leakageGroupId: requireOpaqueRef(
+      record.leakageGroupId,
+      `${label}.leakageGroupId`,
+    ),
+    observedAt: requireEvolutionTimestamp(record.observedAt, `${label}.observedAt`),
+    inputSnapshotSha256,
+    outcomeSnapshotSha256,
+    policyRef: requireOpaqueRef(record.policyRef, `${label}.policyRef`),
+    metrics: parseFiniteMetrics(record.metrics, `${label}.metrics`),
+    sideEffectCounters: parseEvolutionSideEffectCounters(
+      record.sideEffectCounters,
+      false,
+      `${label}.sideEffectCounters`,
+    ),
+    evidenceRefs: requireEvidenceRefs(record.evidenceRefs, `${label}.evidenceRefs`),
+    privacyReview,
+  };
+  requireMatchingEvolutionRecordId("episode", normalized, label);
+  return normalized;
+}
+
+export function parseHarnessVariant(
+  value: unknown,
+  expectedProjectId: string,
+  label = "harnessVariant",
+): HarnessVariant {
+  const record = strictObject(
+    value,
+    [
+      "schemaVersion",
+      "id",
+      "projectId",
+      "profileId",
+      "role",
+      "evolutionTargets",
+      "contentSha256",
+      "mutationSurfaceIds",
+      "changedPaths",
+      "toolPolicySha256",
+      "createdFromEvidenceRefs",
+    ],
+    label,
+  );
+  requireSchemaVersion(record.schemaVersion, `${label}.schemaVersion`);
+  const evolutionTargets = requireArray(
+    record.evolutionTargets,
+    `${label}.evolutionTargets`,
+    TARGET_EVOLUTION_LIMITS.maxArrayItems,
+  ).map((target, index) =>
+    requireEnum(target, HARNESS_VARIANT_TARGETS, `${label}.evolutionTargets[${index}]`),
+  );
+  requireNonEmpty(evolutionTargets, `${label}.evolutionTargets`);
+  requireUniqueStrings(evolutionTargets, `${label}.evolutionTargets`);
+  const normalized: HarnessVariant = {
+    schemaVersion: 1,
+    id: requireString(record.id, `${label}.id`, TARGET_EVOLUTION_LIMITS.maxIdentifierLength),
+    projectId: requireExpectedProjectId(record.projectId, expectedProjectId, label),
+    profileId: requireEvolutionRecordRef(record.profileId, "profile", `${label}.profileId`),
+    role: requireEnum(record.role, HARNESS_VARIANT_ROLES, `${label}.role`),
+    evolutionTargets,
+    contentSha256: requireSha256(record.contentSha256, `${label}.contentSha256`),
+    mutationSurfaceIds: requireUniqueNonEmptyStringArray(
+      record.mutationSurfaceIds,
+      `${label}.mutationSurfaceIds`,
+      TARGET_EVOLUTION_LIMITS.maxMutationSurfaces,
+      TARGET_EVOLUTION_LIMITS.maxIdentifierLength,
+    ),
+    changedPaths: requireUniqueExactProjectRelativePaths(record.changedPaths, `${label}.changedPaths`),
+    toolPolicySha256: requireSha256(record.toolPolicySha256, `${label}.toolPolicySha256`),
+    createdFromEvidenceRefs: requireEvidenceRefs(
+      record.createdFromEvidenceRefs,
+      `${label}.createdFromEvidenceRefs`,
+    ),
+  };
+  requireMatchingEvolutionRecordId("variant", normalized, label);
+  return normalized;
+}
+
+export function parseMatchedExperiment(
+  value: unknown,
+  expectedProjectId: string,
+  label = "matchedExperiment",
+): MatchedExperiment {
+  const record = strictObject(
+    value,
+    [
+      "schemaVersion",
+      "id",
+      "projectId",
+      "profileId",
+      "controlVariantId",
+      "candidateVariantId",
+      "developmentEpisodeRefs",
+      "heldoutEpisodeRefs",
+      "unrelatedEpisodeRefs",
+      "corpusSnapshotSha256",
+      "equalBudget",
+      "primaryMetric",
+      "guardMetrics",
+      "sideEffectCounters",
+      "outcome",
+      "evidenceRefs",
+    ],
+    label,
+  );
+  requireSchemaVersion(record.schemaVersion, `${label}.schemaVersion`);
+  const controlVariantId = requireEvolutionRecordRef(
+    record.controlVariantId,
+    "variant",
+    `${label}.controlVariantId`,
+  );
+  const candidateVariantId = requireEvolutionRecordRef(
+    record.candidateVariantId,
+    "variant",
+    `${label}.candidateVariantId`,
+  );
+  if (controlVariantId === candidateVariantId) {
+    throw new Error(`${label}.controlVariantId and ${label}.candidateVariantId must be different`);
+  }
+  const developmentEpisodeRefs = requireEvolutionRecordRefs(
+    record.developmentEpisodeRefs,
+    "episode",
+    `${label}.developmentEpisodeRefs`,
+  );
+  const heldoutEpisodeRefs = requireEvolutionRecordRefs(
+    record.heldoutEpisodeRefs,
+    "episode",
+    `${label}.heldoutEpisodeRefs`,
+  );
+  const unrelatedEpisodeRefs = requireEvolutionRecordRefs(
+    record.unrelatedEpisodeRefs,
+    "episode",
+    `${label}.unrelatedEpisodeRefs`,
+  );
+  requireGloballyUniqueEvidence(
+    [developmentEpisodeRefs, heldoutEpisodeRefs, unrelatedEpisodeRefs],
+    label,
+  );
+  const normalized: MatchedExperiment = {
+    schemaVersion: 1,
+    id: requireString(record.id, `${label}.id`, TARGET_EVOLUTION_LIMITS.maxIdentifierLength),
+    projectId: requireExpectedProjectId(record.projectId, expectedProjectId, label),
+    profileId: requireEvolutionRecordRef(record.profileId, "profile", `${label}.profileId`),
+    controlVariantId,
+    candidateVariantId,
+    developmentEpisodeRefs,
+    heldoutEpisodeRefs,
+    unrelatedEpisodeRefs,
+    corpusSnapshotSha256: requireSha256(
+      record.corpusSnapshotSha256,
+      `${label}.corpusSnapshotSha256`,
+    ),
+    equalBudget: parseEvolutionEqualBudget(record.equalBudget, `${label}.equalBudget`),
+    primaryMetric: requireString(
+      record.primaryMetric,
+      `${label}.primaryMetric`,
+      TARGET_EVOLUTION_LIMITS.maxTextLength,
+    ),
+    guardMetrics: requireUniqueNonEmptyStringArray(
+      record.guardMetrics,
+      `${label}.guardMetrics`,
+      TARGET_EVOLUTION_LIMITS.maxArrayItems,
+    ),
+    sideEffectCounters: parseEvolutionSideEffectCounters(
+      record.sideEffectCounters,
+      true,
+      `${label}.sideEffectCounters`,
+    ),
+    outcome: requireEnum(record.outcome, MATCHED_EXPERIMENT_OUTCOMES, `${label}.outcome`),
+    evidenceRefs: requireEvidenceRefs(record.evidenceRefs, `${label}.evidenceRefs`),
+  };
+  requireMatchingEvolutionRecordId("experiment", normalized, label);
+  return normalized;
+}
+
+/** @internal Draft evidence parser only. No promotion execution chain exists. */
+export function parseDraftPromotionReceipt(
+  value: unknown,
+  expectedProjectId: string,
+  label = "draftPromotionReceipt",
+): DraftPromotionReceipt {
+  const record = strictObject(
+    value,
+    [
+      "schemaVersion",
+      "id",
+      "projectId",
+      "profileId",
+      "experimentId",
+      "action",
+      "fromVariantId",
+      "toVariantId",
+      "authorizedDecisionRef",
+      "appliedAt",
+      "exactTargetRef",
+      "readbackEvidenceRefs",
+      "canaryEvidenceRefs",
+      "rollbackPlanRef",
+      "rollbackReceiptId",
+    ],
+    label,
+  );
+  requireSchemaVersion(record.schemaVersion, `${label}.schemaVersion`);
+  const fromVariantId = requireEvolutionRecordRef(
+    record.fromVariantId,
+    "variant",
+    `${label}.fromVariantId`,
+  );
+  const toVariantId = requireEvolutionRecordRef(
+    record.toVariantId,
+    "variant",
+    `${label}.toVariantId`,
+  );
+  if (fromVariantId === toVariantId) {
+    throw new Error(`${label}.fromVariantId and ${label}.toVariantId must be different`);
+  }
+  const rollbackReceiptId = record.rollbackReceiptId === undefined
+    ? undefined
+    : requireEvolutionRecordRef(record.rollbackReceiptId, "receipt", `${label}.rollbackReceiptId`);
+  const normalized: DraftPromotionReceipt = {
+    schemaVersion: 1,
+    id: requireString(record.id, `${label}.id`, TARGET_EVOLUTION_LIMITS.maxIdentifierLength),
+    projectId: requireExpectedProjectId(record.projectId, expectedProjectId, label),
+    profileId: requireEvolutionRecordRef(record.profileId, "profile", `${label}.profileId`),
+    experimentId: requireEvolutionRecordRef(
+      record.experimentId,
+      "experiment",
+      `${label}.experimentId`,
+    ),
+    action: requireEnum(record.action, PROMOTION_RECEIPT_ACTIONS, `${label}.action`),
+    fromVariantId,
+    toVariantId,
+    authorizedDecisionRef: requireOpaqueRef(
+      record.authorizedDecisionRef,
+      `${label}.authorizedDecisionRef`,
+    ),
+    appliedAt: requireEvolutionTimestamp(record.appliedAt, `${label}.appliedAt`),
+    exactTargetRef: requireOpaqueRef(record.exactTargetRef, `${label}.exactTargetRef`),
+    readbackEvidenceRefs: requireEvidenceRefs(
+      record.readbackEvidenceRefs,
+      `${label}.readbackEvidenceRefs`,
+    ),
+    canaryEvidenceRefs: requireEvidenceRefs(
+      record.canaryEvidenceRefs,
+      `${label}.canaryEvidenceRefs`,
+    ),
+    rollbackPlanRef: requireOpaqueRef(record.rollbackPlanRef, `${label}.rollbackPlanRef`),
+    ...(rollbackReceiptId === undefined ? {} : { rollbackReceiptId }),
+  };
+  requireMatchingEvolutionRecordId("receipt", normalized, label);
+  return normalized;
 }
 
 function parseEvolutionInstancePack(value: unknown, label: string): NonNullable<EvolutionInstance["pack"]> {
@@ -449,7 +808,7 @@ function parseSignalSource(value: unknown, label: string): EvolutionPackV1["obse
     ? undefined
     : requirePositiveInteger(record.freshnessMs, `${label}.freshnessMs`);
   return {
-    id: requireString(record.id, `${label}.id`, TARGET_EVOLUTION_LIMITS.maxIdentifierLength),
+    id: requireOpaqueRef(record.id, `${label}.id`),
     kind: requireEnum(record.kind, SIGNAL_SOURCE_KINDS, `${label}.kind`),
     ...(freshnessMs === undefined ? {} : { freshnessMs }),
   };
@@ -560,6 +919,366 @@ function parseFirstCandidate(value: unknown, label: string): EvolutionFirstCandi
     prohibitedEvolutionTargets: ["model"],
     sideEffectBudget: normalizedSideEffectBudget,
   };
+}
+
+function parseEvolutionEqualBudget(
+  value: unknown,
+  label: string,
+): EvolutionComparison["equalBudget"] {
+  const equalBudget = strictObject(
+    value,
+    ["model", "reasoningEffort", "wallClockMs", "maxAttempts", "maxTokens", "toolPolicySha256", "concurrency"],
+    label,
+  );
+  const maxTokens = equalBudget.maxTokens === undefined
+    ? undefined
+    : requirePositiveIntegerAtMost(
+        equalBudget.maxTokens,
+        TARGET_EVOLUTION_LIMITS.maxTokens,
+        `${label}.maxTokens`,
+      );
+  return {
+    model: requireString(
+      equalBudget.model,
+      `${label}.model`,
+      TARGET_EVOLUTION_LIMITS.maxIdentifierLength,
+    ),
+    reasoningEffort: requireEnum(
+      equalBudget.reasoningEffort,
+      REASONING_EFFORTS,
+      `${label}.reasoningEffort`,
+    ),
+    wallClockMs: requirePositiveIntegerAtMost(
+      equalBudget.wallClockMs,
+      TARGET_EVOLUTION_LIMITS.maxWallClockMs,
+      `${label}.wallClockMs`,
+    ),
+    maxAttempts: requirePositiveIntegerAtMost(
+      equalBudget.maxAttempts,
+      TARGET_EVOLUTION_LIMITS.maxAttempts,
+      `${label}.maxAttempts`,
+    ),
+    ...(maxTokens === undefined ? {} : { maxTokens }),
+    toolPolicySha256: requireSha256(equalBudget.toolPolicySha256, `${label}.toolPolicySha256`),
+    concurrency: requirePositiveIntegerAtMost(
+      equalBudget.concurrency,
+      TARGET_EVOLUTION_LIMITS.maxConcurrency,
+      `${label}.concurrency`,
+    ),
+  };
+}
+
+function parseVersionedContentRef(
+  value: unknown,
+  label: string,
+): EvolutionProfile["pack"] {
+  const record = strictObject(value, ["id", "version", "contentSha256"], label);
+  return {
+    id: requireString(record.id, `${label}.id`, TARGET_EVOLUTION_LIMITS.maxIdentifierLength),
+    version: requirePositiveInteger(record.version, `${label}.version`),
+    contentSha256: requireSha256(record.contentSha256, `${label}.contentSha256`),
+  };
+}
+
+function parseProductionEpisodePrivacyReview(
+  value: unknown,
+  expectedInputSnapshotSha256: string,
+  expectedOutcomeSnapshotSha256: string,
+  label: string,
+): ProductionEpisode["privacyReview"] {
+  const record = strictObject(
+    value,
+    [
+      "status",
+      "policySha256",
+      "reviewerRef",
+      "dataClassification",
+      "retentionPolicyRef",
+      "inputSnapshotSha256",
+      "outcomeSnapshotSha256",
+      "evidenceRefs",
+    ],
+    label,
+  );
+  if (record.status !== "approved") {
+    throw new Error(`${label}.status must be approved`);
+  }
+  const inputSnapshotSha256 = requireSha256(
+    record.inputSnapshotSha256,
+    `${label}.inputSnapshotSha256`,
+  );
+  const outcomeSnapshotSha256 = requireSha256(
+    record.outcomeSnapshotSha256,
+    `${label}.outcomeSnapshotSha256`,
+  );
+  if (inputSnapshotSha256 !== expectedInputSnapshotSha256) {
+    throw new Error(`${label}.inputSnapshotSha256 must match the episode inputSnapshotSha256`);
+  }
+  if (outcomeSnapshotSha256 !== expectedOutcomeSnapshotSha256) {
+    throw new Error(`${label}.outcomeSnapshotSha256 must match the episode outcomeSnapshotSha256`);
+  }
+  return {
+    status: "approved",
+    policySha256: requireSha256(record.policySha256, `${label}.policySha256`),
+    reviewerRef: requireOpaqueRef(record.reviewerRef, `${label}.reviewerRef`),
+    dataClassification: requireEnum(
+      record.dataClassification,
+      DATA_CLASSIFICATIONS,
+      `${label}.dataClassification`,
+    ),
+    retentionPolicyRef: requireOpaqueRef(record.retentionPolicyRef, `${label}.retentionPolicyRef`),
+    inputSnapshotSha256,
+    outcomeSnapshotSha256,
+    evidenceRefs: requireEvidenceRefs(record.evidenceRefs, `${label}.evidenceRefs`),
+  };
+}
+
+function parseEvolutionSideEffectCounters(
+  value: unknown,
+  requireZero: true,
+  label: string,
+): MatchedExperiment["sideEffectCounters"];
+function parseEvolutionSideEffectCounters(
+  value: unknown,
+  requireZero: false,
+  label: string,
+): EvolutionSideEffectCounters;
+function parseEvolutionSideEffectCounters(
+  value: unknown,
+  requireZero: boolean,
+  label: string,
+): EvolutionSideEffectCounters | MatchedExperiment["sideEffectCounters"] {
+  const record = strictObject(value, SIDE_EFFECT_BUDGET_KEYS, label);
+  return Object.fromEntries(
+    SIDE_EFFECT_BUDGET_KEYS.map((key) => [
+      key,
+      requireZero
+        ? requireLiteralZero(record[key], `${label}.${key}`)
+        : key === "paidUsd"
+          ? requireNonNegativeFinite(record[key], `${label}.${key}`)
+          : requireNonNegativeInteger(record[key], `${label}.${key}`),
+    ]),
+  ) as EvolutionSideEffectCounters | MatchedExperiment["sideEffectCounters"];
+}
+
+function parseFiniteMetrics(value: unknown, label: string): Record<string, number> {
+  const record = requirePlainJsonObject(value, label);
+  const entries = Object.entries(record);
+  if (entries.length > TARGET_EVOLUTION_LIMITS.maxArrayItems) {
+    throw new Error(`${label} must contain at most ${TARGET_EVOLUTION_LIMITS.maxArrayItems} metrics`);
+  }
+  return Object.fromEntries(entries.map(([key, metric]) => [
+    requireSafeShortIdentifier(key, `${label} metric name`),
+    requireFiniteNumber(metric, `${label}.${key}`),
+  ]));
+}
+
+function requireEvolutionTimestamp(value: unknown, label: string): string {
+  const timestamp = requireStrictIsoTimestamp(value, label);
+  const parts = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?Z$/.exec(timestamp);
+  if (!parts) {
+    throw new Error(`${label} must be a strict ISO 8601 UTC timestamp`);
+  }
+  const instant = new Date(timestamp);
+  const expectedParts = parts.slice(1, 7).map(Number);
+  const actualParts = [
+    instant.getUTCFullYear(),
+    instant.getUTCMonth() + 1,
+    instant.getUTCDate(),
+    instant.getUTCHours(),
+    instant.getUTCMinutes(),
+    instant.getUTCSeconds(),
+  ];
+  if (expectedParts.some((part, index) => part !== actualParts[index])) {
+    throw new Error(`${label} must be a valid ISO 8601 UTC timestamp`);
+  }
+  return timestamp;
+}
+
+function requireExpectedProjectId(
+  value: unknown,
+  expectedProjectId: string,
+  label: string,
+): string {
+  const expected = requireString(
+    expectedProjectId,
+    `${label} expected projectId`,
+    TARGET_EVOLUTION_LIMITS.maxIdentifierLength,
+  );
+  const projectId = requireString(
+    value,
+    `${label}.projectId`,
+    TARGET_EVOLUTION_LIMITS.maxIdentifierLength,
+  );
+  if (projectId !== expected) {
+    throw new Error(`${label}.projectId must equal expected projectId ${expected}`);
+  }
+  return projectId;
+}
+
+function requireMatchingEvolutionRecordId(
+  kind: EvolutionRecordKind,
+  value: { id: string },
+  label: string,
+): void {
+  const expectedId = expectedEvolutionRecordId(kind, value);
+  if (value.id !== expectedId) {
+    throw new Error(`${label}.id must equal content-addressed ID ${expectedId}`);
+  }
+}
+
+function requireEvolutionRecordRef(
+  value: unknown,
+  kind: EvolutionRecordKind,
+  label: string,
+): string {
+  const reference = requireString(value, label, TARGET_EVOLUTION_LIMITS.maxIdentifierLength);
+  const pattern = new RegExp(`^${kind}_[0-9a-f]{64}$`);
+  if (!pattern.test(reference)) {
+    throw new Error(`${label} must be a content-addressed ${kind} ID`);
+  }
+  return reference;
+}
+
+function requireEvolutionRecordRefs(
+  value: unknown,
+  kind: EvolutionRecordKind,
+  label: string,
+): string[] {
+  const refs = requireArray(
+    value,
+    label,
+    TARGET_EVOLUTION_LIMITS.maxEvidenceRefsPerSplit,
+  ).map((item, index) => requireEvolutionRecordRef(item, kind, `${label}[${index}]`));
+  requireNonEmpty(refs, label);
+  requireUniqueStrings(refs, label);
+  return refs;
+}
+
+function requireEvidenceRefs(value: unknown, label: string): string[] {
+  return requireNonEmptyOpaqueRefArray(
+    value,
+    label,
+    TARGET_EVOLUTION_LIMITS.maxEvidenceRefsPerSplit,
+  );
+}
+
+function requireOpaqueRefArray(value: unknown, label: string, maxItems: number): string[] {
+  const refs = requireArray(value, label, maxItems).map((item, index) =>
+    requireOpaqueRef(item, `${label}[${index}]`),
+  );
+  requireUniqueStrings(refs, label);
+  return refs;
+}
+
+function requireNonEmptyOpaqueRefArray(value: unknown, label: string, maxItems: number): string[] {
+  const refs = requireOpaqueRefArray(value, label, maxItems);
+  requireNonEmpty(refs, label);
+  return refs;
+}
+
+function requireOpaqueRef(value: unknown, label: string): string {
+  const ref = requireString(value, label, TARGET_EVOLUTION_LIMITS.maxIdentifierLength);
+  if (!SAFE_SHORT_REF_PATTERN.test(ref) && !TYPED_OPAQUE_REF_PATTERN.test(ref)) {
+    throw new Error(`${label} must be an opaque ref or a safe short ID`);
+  }
+  requireNoSensitiveRefText(ref, label);
+  return ref;
+}
+
+function requireSafeShortIdentifier(value: unknown, label: string): string {
+  const identifier = requireString(value, label, TARGET_EVOLUTION_LIMITS.maxIdentifierLength);
+  if (!SAFE_SHORT_REF_PATTERN.test(identifier)) {
+    throw new Error(`${label} must be a safe short identifier`);
+  }
+  requireNoSensitiveRefText(identifier, label);
+  return identifier;
+}
+
+function requireNoSensitiveRefText(value: string, label: string): void {
+  if (SENSITIVE_REF_TEXT_PATTERN.test(value)) {
+    throw new Error(`${label} must not contain credential-like or sensitive text`);
+  }
+}
+
+function requireUniqueNonEmptyStringArray(
+  value: unknown,
+  label: string,
+  maxItems: number,
+  maxItemLength: number = TARGET_EVOLUTION_LIMITS.maxTextLength,
+): string[] {
+  const result = requireNonEmptyStringArray(value, label, maxItems, maxItemLength);
+  requireUniqueStrings(result, label);
+  return result;
+}
+
+function requireUniqueProjectRelativePaths(value: unknown, label: string): string[] {
+  const paths = requireProjectRelativePaths(value, label);
+  requireUniqueStrings(paths, label);
+  return paths;
+}
+
+function requireUniqueExactProjectRelativePaths(value: unknown, label: string): string[] {
+  const paths = requireUniqueProjectRelativePaths(value, label);
+  for (const path of paths) {
+    if (GLOB_META_PATTERN.test(path)) {
+      throw new Error(`${label} must contain exact project-relative file paths without glob syntax`);
+    }
+  }
+  return paths;
+}
+
+function requirePlainJsonObject(value: unknown, label: string): Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error(`${label} must be a JSON object`);
+  }
+  const prototype = Object.getPrototypeOf(value);
+  if (prototype !== Object.prototype && prototype !== null) {
+    throw new Error(`${label} must be a plain JSON object`);
+  }
+  if (Reflect.ownKeys(value).some((key) => typeof key !== "string")) {
+    throw new Error(`${label} must contain only JSON object keys`);
+  }
+  return value as Record<string, unknown>;
+}
+
+function canonicalEvolutionValue(
+  value: unknown,
+  label: string,
+  ancestors: Set<object>,
+): unknown {
+  if (value === null || typeof value === "string" || typeof value === "boolean") {
+    return value;
+  }
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) {
+      throw new Error(`${label} numbers must be finite JSON numbers`);
+    }
+    return value;
+  }
+  if (typeof value !== "object") {
+    throw new Error(`${label} must contain only JSON-compatible values`);
+  }
+  if (ancestors.has(value)) {
+    throw new Error(`${label} must not contain circular JSON values`);
+  }
+  ancestors.add(value);
+  try {
+    if (Array.isArray(value)) {
+      return value.map((item, index) => canonicalEvolutionValue(item, `${label}[${index}]`, ancestors));
+    }
+    const record = requirePlainJsonObject(value, label);
+    const keys = Object.keys(record).sort();
+    if (keys.length !== Reflect.ownKeys(record).length) {
+      throw new Error(`${label} must not contain hidden non-JSON fields`);
+    }
+    return Object.fromEntries(keys.map((key) => [
+      key,
+      canonicalEvolutionValue(record[key], `${label}.${key}`, ancestors),
+    ]));
+  } finally {
+    ancestors.delete(value);
+  }
 }
 
 function strictObject(value: unknown, allowedKeys: readonly string[], label: string): Record<string, unknown> {
@@ -694,6 +1413,13 @@ function requireNonNegativeInteger(value: unknown, label: string): number {
 function requireNonNegativeFinite(value: unknown, label: string): number {
   if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
     throw new Error(`${label} must be a non-negative finite number`);
+  }
+  return value;
+}
+
+function requireFiniteNumber(value: unknown, label: string): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    throw new Error(`${label} must be a finite number`);
   }
   return value;
 }

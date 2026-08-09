@@ -1,4 +1,10 @@
-import { initDatabase, normalizeDatabasePath, withDatabase, withReadOnlyDatabase } from "./database";
+import {
+  ensureEvolutionRuntimeTables,
+  initDatabase,
+  normalizeDatabasePath,
+  withDatabase,
+  withReadOnlyDatabase,
+} from "./database";
 import type { HarnessDatabase } from "./database";
 import {
   DEFAULT_CONTEXT_SUMMARY_PROMPT_TEMPLATE,
@@ -16,13 +22,17 @@ import {
   designOutcomeFromRow,
   designProposalFromRow,
   executionThreadFromRow,
+  evolutionProfileFromRow,
   externalRefFromRow,
   founderCharterFromRow,
   harnessActionEventFromRow,
+  harnessVariantFromRow,
   inboxEventFromRow,
   lessonFromRow,
+  matchedExperimentFromRow,
   projectFromRow,
   promptTemplateFromRow,
+  productionEpisodeFromRow,
   runFromRow,
   strategySignalFromRow,
   taskFromRow,
@@ -34,13 +44,17 @@ import type {
   DesignOutcomeRow,
   DesignProposalRow,
   ExecutionThreadRow,
+  EvolutionProfileRow,
   ExternalRefRow,
   FounderCharterRow,
   HarnessActionEventRow,
+  HarnessVariantRow,
   InboxEventRow,
   LessonRow,
+  MatchedExperimentRow,
   ProjectRow,
   PromptTemplateRow,
+  ProductionEpisodeRow,
   RunRow,
   StrategySignalRow,
   TaskRow,
@@ -67,6 +81,7 @@ import type {
   AttemptEvent,
   DesignProposal,
   DesignProposalStatus,
+  EvolutionProfile,
   FinishAttemptInput,
   FounderCharterData,
   GetActiveFounderCharterInput,
@@ -79,6 +94,7 @@ import type {
   LeaseReadyTasksInput,
   LinkProposalOutcomeReviewInput,
   LinkProposalOutcomeReviewResult,
+  HarnessVariant,
   ListDesignDecisionsInput,
   ListDesignOutcomesInput,
   ListDesignProposalsInput,
@@ -92,6 +108,7 @@ import type {
   ListLessonsInput,
   ListRunsInput,
   ListStrategySignalsInput,
+  MatchedExperiment,
   BlockedDependencyTask,
   BlockTasksWithBlockedDependenciesInput,
   BlockTasksWithSharedRootCauseInput,
@@ -102,6 +119,7 @@ import type {
   RecordDesignDecisionInput,
   RecordDesignOutcomeInput,
   RecordHarnessActionEventInput,
+  ProductionEpisode,
   BlockedUnfinishedTask,
   BlockUnfinishedTasksForRunInput,
   ReclaimedRunningTask,
@@ -118,6 +136,13 @@ import type {
   UpdateExecutionThreadInput,
   UpsertExecutionThreadInput,
 } from "./types";
+import {
+  canonicalEvolutionRecordSha256,
+  parseEvolutionProfile,
+  parseHarnessVariant,
+  parseMatchedExperiment,
+  parseProductionEpisode,
+} from "./target-evolution";
 import { basename, resolve } from "node:path";
 import { readableList, readableValue } from "./readable";
 
@@ -131,6 +156,25 @@ interface ListHarnessActionEventsWithDbInput extends ListHarnessActionEventsInpu
   requestType?: string;
   requestRunId?: string;
   requestTaskId?: string;
+}
+
+interface ListEvolutionRecordsInput {
+  projectId: string;
+  profileId?: string;
+}
+
+interface GetEvolutionRecordInput {
+  projectId: string;
+  id: string;
+}
+
+interface ListHarnessVariantsInput extends ListEvolutionRecordsInput {
+  role?: HarnessVariant["role"];
+}
+
+interface EvolutionRecordWriteResult<T> {
+  record: T;
+  reused: boolean;
 }
 
 export class Harness {
@@ -190,6 +234,336 @@ export class Harness {
     return withReadOnlyDatabase(this.dbPath, (db) => {
       const rows = db.query("select * from projects order by created_at, id").all() as ProjectRow[];
       return rows.map(projectFromRow);
+    });
+  }
+
+  recordEvolutionProfile(value: unknown): EvolutionRecordWriteResult<EvolutionProfile> {
+    return withDatabase(this.dbPath, (db) =>
+      db.transaction(() => this.recordEvolutionProfileWithDb(db, value))(),
+    );
+  }
+
+  recordEvolutionProfileWithDb(
+    db: HarnessDatabase,
+    value: unknown,
+  ): EvolutionRecordWriteResult<EvolutionProfile> {
+    ensureEvolutionRuntimeTables(db);
+    const projectId = evolutionRecordProjectId(value, "EvolutionProfile");
+    const record = parseEvolutionProfile(value, projectId);
+    requireProjectWithDb(db, record.projectId);
+    const recordJson = toJson(record);
+    const existing = db
+      .query("select * from evolution_profiles where id = $id")
+      .get({ $id: record.id }) as EvolutionProfileRow | null;
+    if (existing) {
+      requireIdenticalEvolutionRecord(existing.record_json, recordJson, "EvolutionProfile", record.id);
+      const stored = evolutionProfileFromRow(existing);
+      requireEvolutionReadback(stored, recordJson, "EvolutionProfile", record.id);
+      return { record: stored, reused: true };
+    }
+
+    db.query(
+      `
+      insert into evolution_profiles (
+        id, schema_version, project_id, runtime_maturity, registered_at, record_sha256, record_json
+      ) values (
+        $id, $schemaVersion, $projectId, $runtimeMaturity, $registeredAt, $recordSha256, $recordJson
+      )
+      `,
+    ).run({
+      $id: record.id,
+      $schemaVersion: record.schemaVersion,
+      $projectId: record.projectId,
+      $runtimeMaturity: record.runtimeMaturity,
+      $registeredAt: record.registeredAt,
+      $recordSha256: canonicalEvolutionRecordSha256(record),
+      $recordJson: recordJson,
+    });
+    const inserted = this.getEvolutionProfileWithDb(db, { projectId: record.projectId, id: record.id });
+    requireEvolutionReadback(inserted, recordJson, "EvolutionProfile", record.id);
+    return { record: inserted, reused: false };
+  }
+
+  getEvolutionProfile(input: GetEvolutionRecordInput): EvolutionProfile | null {
+    return withReadOnlyDatabase(this.dbPath, (db) => this.getEvolutionProfileWithDb(db, input));
+  }
+
+  getEvolutionProfileWithDb(db: HarnessDatabase, input: GetEvolutionRecordInput): EvolutionProfile | null {
+    const row = db
+      .query("select * from evolution_profiles where project_id = $projectId and id = $id")
+      .get({ $projectId: input.projectId, $id: input.id }) as EvolutionProfileRow | null;
+    return row ? evolutionProfileFromRow(row) : null;
+  }
+
+  listEvolutionProfiles(input: Pick<ListEvolutionRecordsInput, "projectId">): EvolutionProfile[] {
+    return withReadOnlyDatabase(this.dbPath, (db) => {
+      const query = db.query(
+        `
+        select * from evolution_profiles
+        ${input.projectId ? "where project_id = $projectId" : ""}
+        order by created_at, id
+        `,
+      );
+      const rows = (input.projectId
+        ? query.all({ $projectId: input.projectId })
+        : query.all()) as EvolutionProfileRow[];
+      return rows.map(evolutionProfileFromRow);
+    });
+  }
+
+  recordProductionEpisode(value: unknown): EvolutionRecordWriteResult<ProductionEpisode> {
+    return withDatabase(this.dbPath, (db) =>
+      db.transaction(() => this.recordProductionEpisodeWithDb(db, value))(),
+    );
+  }
+
+  recordProductionEpisodeWithDb(
+    db: HarnessDatabase,
+    value: unknown,
+  ): EvolutionRecordWriteResult<ProductionEpisode> {
+    ensureEvolutionRuntimeTables(db);
+    const projectId = evolutionRecordProjectId(value, "ProductionEpisode");
+    const record = parseProductionEpisode(value, projectId);
+    requireProjectWithDb(db, record.projectId);
+    const profile = requireEvolutionProfileWithDb(db, record.projectId, record.profileId, "ProductionEpisode");
+    requireSameEvolutionScope(record, profile, "ProductionEpisode", record.id);
+    const recordJson = toJson(record);
+    const existing = db
+      .query("select * from production_episodes where id = $id")
+      .get({ $id: record.id }) as ProductionEpisodeRow | null;
+    if (existing) {
+      requireIdenticalEvolutionRecord(existing.record_json, recordJson, "ProductionEpisode", record.id);
+      const stored = productionEpisodeFromRow(existing);
+      requireEvolutionReadback(stored, recordJson, "ProductionEpisode", record.id);
+      return { record: stored, reused: true };
+    }
+
+    db.query(
+      `
+      insert into production_episodes (
+        id, schema_version, project_id, profile_id, source_ref,
+        leakage_group_id, record_sha256, record_json
+      ) values (
+        $id, $schemaVersion, $projectId, $profileId, $sourceRef,
+        $leakageGroupId, $recordSha256, $recordJson
+      )
+      `,
+    ).run({
+      $id: record.id,
+      $schemaVersion: record.schemaVersion,
+      $projectId: record.projectId,
+      $profileId: record.profileId,
+      $sourceRef: record.sourceRef,
+      $leakageGroupId: record.leakageGroupId,
+      $recordSha256: canonicalEvolutionRecordSha256(record),
+      $recordJson: recordJson,
+    });
+    const inserted = this.getProductionEpisodeWithDb(db, { projectId: record.projectId, id: record.id });
+    requireEvolutionReadback(inserted, recordJson, "ProductionEpisode", record.id);
+    return { record: inserted, reused: false };
+  }
+
+  getProductionEpisode(input: GetEvolutionRecordInput): ProductionEpisode | null {
+    return withReadOnlyDatabase(this.dbPath, (db) => this.getProductionEpisodeWithDb(db, input));
+  }
+
+  getProductionEpisodeWithDb(db: HarnessDatabase, input: GetEvolutionRecordInput): ProductionEpisode | null {
+    const row = db
+      .query("select * from production_episodes where project_id = $projectId and id = $id")
+      .get({ $projectId: input.projectId, $id: input.id }) as ProductionEpisodeRow | null;
+    return row ? productionEpisodeFromRow(row) : null;
+  }
+
+  listProductionEpisodes(input: ListEvolutionRecordsInput): ProductionEpisode[] {
+    return withReadOnlyDatabase(this.dbPath, (db) => {
+      const filters = evolutionScopeFilters(input);
+      const rows = db
+        .query(
+          `select * from production_episodes ${filters.sql}
+           order by created_at, id`,
+        )
+        .all(filters.params) as ProductionEpisodeRow[];
+      return rows.map(productionEpisodeFromRow);
+    });
+  }
+
+  recordHarnessVariant(value: unknown): EvolutionRecordWriteResult<HarnessVariant> {
+    return withDatabase(this.dbPath, (db) =>
+      db.transaction(() => this.recordHarnessVariantWithDb(db, value))(),
+    );
+  }
+
+  recordHarnessVariantWithDb(
+    db: HarnessDatabase,
+    value: unknown,
+  ): EvolutionRecordWriteResult<HarnessVariant> {
+    ensureEvolutionRuntimeTables(db);
+    const projectId = evolutionRecordProjectId(value, "HarnessVariant");
+    const record = parseHarnessVariant(value, projectId);
+    requireProjectWithDb(db, record.projectId);
+    const profile = requireEvolutionProfileWithDb(db, record.projectId, record.profileId, "HarnessVariant");
+    requireSameEvolutionScope(record, profile, "HarnessVariant", record.id);
+    const allowedSurfaces = new Set(profile.allowedSurfaceIds);
+    for (const surfaceId of record.mutationSurfaceIds) {
+      if (!allowedSurfaces.has(surfaceId)) {
+        throw new Error(
+          `HarnessVariant ${record.id} mutation surface is not allowed by profile ${profile.id}: ${surfaceId}`,
+        );
+      }
+    }
+    const recordJson = toJson(record);
+    const existing = db
+      .query("select * from harness_variants where id = $id")
+      .get({ $id: record.id }) as HarnessVariantRow | null;
+    if (existing) {
+      requireIdenticalEvolutionRecord(existing.record_json, recordJson, "HarnessVariant", record.id);
+      const stored = harnessVariantFromRow(existing);
+      requireEvolutionReadback(stored, recordJson, "HarnessVariant", record.id);
+      return { record: stored, reused: true };
+    }
+
+    db.query(
+      `
+      insert into harness_variants (
+        id, schema_version, project_id, profile_id, role, record_sha256, record_json
+      ) values (
+        $id, $schemaVersion, $projectId, $profileId, $role, $recordSha256, $recordJson
+      )
+      `,
+    ).run({
+      $id: record.id,
+      $schemaVersion: record.schemaVersion,
+      $projectId: record.projectId,
+      $profileId: record.profileId,
+      $role: record.role,
+      $recordSha256: canonicalEvolutionRecordSha256(record),
+      $recordJson: recordJson,
+    });
+    const inserted = this.getHarnessVariantWithDb(db, { projectId: record.projectId, id: record.id });
+    requireEvolutionReadback(inserted, recordJson, "HarnessVariant", record.id);
+    return { record: inserted, reused: false };
+  }
+
+  getHarnessVariant(input: GetEvolutionRecordInput): HarnessVariant | null {
+    return withReadOnlyDatabase(this.dbPath, (db) => this.getHarnessVariantWithDb(db, input));
+  }
+
+  getHarnessVariantWithDb(db: HarnessDatabase, input: GetEvolutionRecordInput): HarnessVariant | null {
+    const row = db
+      .query("select * from harness_variants where project_id = $projectId and id = $id")
+      .get({ $projectId: input.projectId, $id: input.id }) as HarnessVariantRow | null;
+    return row ? harnessVariantFromRow(row) : null;
+  }
+
+  listHarnessVariants(input: ListHarnessVariantsInput): HarnessVariant[] {
+    return withReadOnlyDatabase(this.dbPath, (db) => {
+      const filters = evolutionScopeFilters(input, input.role);
+      const rows = db
+        .query(
+          `select * from harness_variants ${filters.sql}
+           order by created_at, id`,
+        )
+        .all(filters.params) as HarnessVariantRow[];
+      return rows.map(harnessVariantFromRow);
+    });
+  }
+
+  recordMatchedExperiment(value: unknown): EvolutionRecordWriteResult<MatchedExperiment> {
+    return withDatabase(this.dbPath, (db) =>
+      db.transaction(() => this.recordMatchedExperimentWithDb(db, value))(),
+    );
+  }
+
+  recordMatchedExperimentWithDb(
+    db: HarnessDatabase,
+    value: unknown,
+  ): EvolutionRecordWriteResult<MatchedExperiment> {
+    ensureEvolutionRuntimeTables(db);
+    const projectId = evolutionRecordProjectId(value, "MatchedExperiment");
+    const record = parseMatchedExperiment(value, projectId);
+    if (record.outcome !== "pending") {
+      throw new Error(`MatchedExperiment ${record.id} must be recorded with pending outcome`);
+    }
+    requireProjectWithDb(db, record.projectId);
+    const profile = requireEvolutionProfileWithDb(db, record.projectId, record.profileId, "MatchedExperiment");
+    requireSameEvolutionScope(record, profile, "MatchedExperiment", record.id);
+
+    const control = requireHarnessVariantWithDb(
+      db,
+      record.projectId,
+      record.profileId,
+      record.controlVariantId,
+      "control",
+    );
+    const candidate = requireHarnessVariantWithDb(
+      db,
+      record.projectId,
+      record.profileId,
+      record.candidateVariantId,
+      "candidate",
+    );
+    requireVariantForExperiment(control, record, "control");
+    requireVariantForExperiment(candidate, record, "candidate");
+    requireExperimentEpisodesWithDb(db, record);
+
+    const recordJson = toJson(record);
+    const existing = db
+      .query("select * from matched_experiments where id = $id")
+      .get({ $id: record.id }) as MatchedExperimentRow | null;
+    if (existing) {
+      requireIdenticalEvolutionRecord(existing.record_json, recordJson, "MatchedExperiment", record.id);
+      const stored = matchedExperimentFromRow(existing);
+      requireEvolutionReadback(stored, recordJson, "MatchedExperiment", record.id);
+      return { record: stored, reused: true };
+    }
+
+    db.query(
+      `
+      insert into matched_experiments (
+        id, schema_version, project_id, profile_id, control_variant_id,
+        candidate_variant_id, outcome, record_sha256, record_json
+      ) values (
+        $id, $schemaVersion, $projectId, $profileId, $controlVariantId,
+        $candidateVariantId, $outcome, $recordSha256, $recordJson
+      )
+      `,
+    ).run({
+      $id: record.id,
+      $schemaVersion: record.schemaVersion,
+      $projectId: record.projectId,
+      $profileId: record.profileId,
+      $controlVariantId: record.controlVariantId,
+      $candidateVariantId: record.candidateVariantId,
+      $outcome: record.outcome,
+      $recordSha256: canonicalEvolutionRecordSha256(record),
+      $recordJson: recordJson,
+    });
+    const inserted = this.getMatchedExperimentWithDb(db, { projectId: record.projectId, id: record.id });
+    requireEvolutionReadback(inserted, recordJson, "MatchedExperiment", record.id);
+    return { record: inserted, reused: false };
+  }
+
+  getMatchedExperiment(input: GetEvolutionRecordInput): MatchedExperiment | null {
+    return withReadOnlyDatabase(this.dbPath, (db) => this.getMatchedExperimentWithDb(db, input));
+  }
+
+  getMatchedExperimentWithDb(db: HarnessDatabase, input: GetEvolutionRecordInput): MatchedExperiment | null {
+    const row = db
+      .query("select * from matched_experiments where project_id = $projectId and id = $id")
+      .get({ $projectId: input.projectId, $id: input.id }) as MatchedExperimentRow | null;
+    return row ? matchedExperimentFromRow(row) : null;
+  }
+
+  listMatchedExperiments(input: ListEvolutionRecordsInput): MatchedExperiment[] {
+    return withReadOnlyDatabase(this.dbPath, (db) => {
+      const filters = evolutionScopeFilters(input);
+      const rows = db
+        .query(
+          `select * from matched_experiments ${filters.sql}
+           order by created_at, id`,
+        )
+        .all(filters.params) as MatchedExperimentRow[];
+      return rows.map(matchedExperimentFromRow);
     });
   }
 
@@ -1188,7 +1562,9 @@ export class Harness {
 
   recordHarnessActionEvent(input: RecordHarnessActionEventInput) {
     const id = input.id ?? makeId("action");
-    return withDatabase(this.dbPath, (db) => this.recordHarnessActionEventWithDb(db, { ...input, id }));
+    return withDatabase(this.dbPath, (db) =>
+      db.transaction(() => this.recordHarnessActionEventWithDb(db, { ...input, id }))(),
+    );
   }
 
   recordHarnessActionEventWithDb(db: HarnessDatabase, input: RecordHarnessActionEventInput) {
@@ -2538,6 +2914,216 @@ export class Harness {
       }
     });
   }
+}
+
+function evolutionRecordProjectId(value: unknown, label: string): string {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error(`${label} must be an object`);
+  }
+  const projectId = (value as { projectId?: unknown }).projectId;
+  if (typeof projectId !== "string" || projectId.length === 0) {
+    throw new Error(`${label}.projectId must be a non-empty string`);
+  }
+  return projectId;
+}
+
+function requireProjectWithDb(db: HarnessDatabase, projectId: string): void {
+  const row = db
+    .query("select id from projects where id = $projectId")
+    .get({ $projectId: projectId }) as { id: string } | null;
+  if (!row) {
+    throw new Error(`project not found: ${projectId}`);
+  }
+}
+
+function requireEvolutionProfileWithDb(
+  db: HarnessDatabase,
+  projectId: string,
+  profileId: string,
+  ownerLabel: string,
+): EvolutionProfile {
+  const row = db
+    .query("select * from evolution_profiles where project_id = $projectId and id = $profileId")
+    .get({ $projectId: projectId, $profileId: profileId }) as EvolutionProfileRow | null;
+  if (!row) {
+    throw new Error(`${ownerLabel} profile not found: ${profileId}`);
+  }
+  return evolutionProfileFromRow(row);
+}
+
+function requireSameEvolutionScope(
+  record: { projectId: string; profileId: string },
+  profile: EvolutionProfile,
+  label: string,
+  id: string,
+): void {
+  if (record.projectId !== profile.projectId || record.profileId !== profile.id) {
+    throw new Error(
+      `${label} ${id} must use the same project and profile as ${profile.id}`,
+    );
+  }
+}
+
+function requireIdenticalEvolutionRecord(
+  storedJson: string,
+  candidateJson: string,
+  label: string,
+  id: string,
+): void {
+  if (storedJson !== candidateJson) {
+    throw new Error(`${label} conflict: ${id} already exists with different record_json`);
+  }
+}
+
+function requireEvolutionReadback<T>(
+  stored: T | null,
+  candidateJson: string,
+  label: string,
+  id: string,
+): asserts stored is T {
+  if (!stored || toJson(stored) !== candidateJson) {
+    throw new Error(`${label} readback mismatch: ${id}`);
+  }
+}
+
+function evolutionScopeFilters(
+  input: ListEvolutionRecordsInput,
+  role?: HarnessVariant["role"],
+): { sql: string; params: Record<string, string> } {
+  const where: string[] = [];
+  const params: Record<string, string> = {};
+  if (input.projectId) {
+    where.push("project_id = $projectId");
+    params.$projectId = input.projectId;
+  }
+  if (input.profileId) {
+    where.push("profile_id = $profileId");
+    params.$profileId = input.profileId;
+  }
+  if (role) {
+    where.push("role = $role");
+    params.$role = role;
+  }
+  return {
+    sql: where.length > 0 ? `where ${where.join(" and ")}` : "",
+    params,
+  };
+}
+
+function requireHarnessVariantWithDb(
+  db: HarnessDatabase,
+  projectId: string,
+  profileId: string,
+  variantId: string,
+  expectedRole: HarnessVariant["role"],
+): HarnessVariant {
+  const row = db
+    .query(
+      `select * from harness_variants
+       where project_id = $projectId and profile_id = $profileId and id = $variantId`,
+    )
+    .get({ $projectId: projectId, $profileId: profileId, $variantId: variantId }) as HarnessVariantRow | null;
+  if (!row) {
+    throw new Error(`MatchedExperiment ${expectedRole} variant not found: ${variantId}`);
+  }
+  return harnessVariantFromRow(row);
+}
+
+function requireVariantForExperiment(
+  variant: HarnessVariant,
+  experiment: MatchedExperiment,
+  expectedRole: HarnessVariant["role"],
+): void {
+  if (variant.role !== expectedRole) {
+    throw new Error(
+      `MatchedExperiment ${experiment.id} ${expectedRole} variant has ${variant.role} role: ${variant.id}`,
+    );
+  }
+  if (variant.projectId !== experiment.projectId || variant.profileId !== experiment.profileId) {
+    throw new Error(
+      `MatchedExperiment ${experiment.id} ${expectedRole} variant must use the same project and profile`,
+    );
+  }
+}
+
+function requireExperimentEpisodesWithDb(
+  db: HarnessDatabase,
+  experiment: MatchedExperiment,
+): void {
+  const sourceSplit = new Map<string, string>();
+  const leakageGroupSplit = new Map<string, string>();
+  const snapshotSplit = new Map<string, string>();
+  const splits = [
+    ["development", experiment.developmentEpisodeRefs],
+    ["heldout", experiment.heldoutEpisodeRefs],
+    ["unrelated", experiment.unrelatedEpisodeRefs],
+  ] as const;
+
+  for (const [split, episodeIds] of splits) {
+    for (const episodeId of episodeIds) {
+      const row = db
+        .query(
+          `select * from production_episodes
+           where project_id = $projectId and profile_id = $profileId and id = $episodeId`,
+        )
+        .get({
+          $projectId: experiment.projectId,
+          $profileId: experiment.profileId,
+          $episodeId: episodeId,
+        }) as ProductionEpisodeRow | null;
+      if (!row) {
+        throw new Error(`MatchedExperiment ${experiment.id} episode not found: ${episodeId}`);
+      }
+      const episode = productionEpisodeFromRow(row);
+      if (
+        episode.id !== episodeId ||
+        episode.projectId !== experiment.projectId ||
+        episode.profileId !== experiment.profileId
+      ) {
+        throw new Error(
+          `MatchedExperiment ${experiment.id} episode must use the same project and profile: ${episodeId}`,
+        );
+      }
+      requireSplitIsolation(sourceSplit, episode.sourceRef, split, "sourceRef", experiment.id);
+      requireSplitIsolation(
+        leakageGroupSplit,
+        episode.leakageGroupId,
+        split,
+        "leakageGroupId",
+        experiment.id,
+      );
+      requireSplitIsolation(
+        snapshotSplit,
+        episode.inputSnapshotSha256,
+        split,
+        "snapshot hash",
+        experiment.id,
+      );
+      requireSplitIsolation(
+        snapshotSplit,
+        episode.outcomeSnapshotSha256,
+        split,
+        "snapshot hash",
+        experiment.id,
+      );
+    }
+  }
+}
+
+function requireSplitIsolation(
+  observedSplit: Map<string, string>,
+  value: string,
+  split: string,
+  label: string,
+  experimentId: string,
+): void {
+  const priorSplit = observedSplit.get(value);
+  if (priorSplit && priorSplit !== split) {
+    throw new Error(
+      `MatchedExperiment ${experimentId} ${label} crosses ${priorSplit} and ${split} splits: ${value}`,
+    );
+  }
+  observedSplit.set(value, split);
 }
 
 function readReviewAt(proposal: DesignProposal): string | null {

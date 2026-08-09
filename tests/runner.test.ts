@@ -696,7 +696,7 @@ describe("runner", () => {
   });
 
   test.each(["planner", "worker", "verifier", "outcome-review"] as const)(
-    "renders the frozen evolution identity and comparison for %s without holdout contents",
+    "renders the frozen evolution identity and sealed holdout commitment for %s without holdout references or contents",
     (role) => {
       const projectId = harness.createProject({ name: `prompt-${role}`, rootPath: dir });
       const proposal = targetEvolutionProposal(projectId);
@@ -735,13 +735,24 @@ describe("runner", () => {
             holdoutContents: ["DO_NOT_LEAK_HELDOUT_CONTENT"],
             holdoutResults: { score: 1 },
           },
+          ordinaryNotes: "Do not query holdout:1 during candidate generation",
+          arbitraryMetadata: {
+            exactValue: "holdout:1",
+            nestedValues: [
+              "development:1",
+              { embeddedValue: "sealed reference is holdout:1 and must stay hidden" },
+            ],
+          },
         },
       });
       const taskId = harness.createTask({
         runId,
         role,
         goal: "Honor the frozen experiment",
-        prompt: "Use only authorized evidence.",
+        prompt: "Use only authorized evidence; never query holdout:1.",
+        config: {
+          ordinaryTaskContext: "task context also hides holdout:1",
+        },
       });
 
       const prompt = buildTaskPrompt({
@@ -757,7 +768,20 @@ describe("runner", () => {
       expect(prompt).toContain("Evolution instance identity");
       expect(prompt).toContain("pack_delivery_v1");
       expect(prompt).toContain("domain-hypothesis");
-      expect(prompt).toContain("holdout:1");
+      expect(prompt).toContain("development:1");
+      expect(prompt).toContain("unrelated:1");
+      const expectedHoldoutCommitment = createHash("sha256")
+        .update(JSON.stringify(["holdout:1"]), "utf8")
+        .digest("hex");
+      expect(prompt).toContain('"holdoutEvidenceCommitment"');
+      expect(prompt).toContain('"algorithm": "sha256"');
+      expect(prompt).toContain('"count": 1');
+      expect(prompt).toContain(`"refsSha256": "${expectedHoldoutCommitment}"`);
+      expect(prompt).not.toContain('"holdoutEvidenceRefs"');
+      expect(prompt).not.toContain("holdout:1");
+      expect(prompt).toContain("[SEALED_HOLDOUT_REFERENCE]");
+      expect(prompt).not.toContain("Do not query holdout:1 during candidate generation");
+      expect(prompt).not.toContain("sealed reference is holdout:1 and must stay hidden");
       expect(prompt).toContain("project_kernel");
       expect(prompt).not.toContain("DO_NOT_LEAK_HELDOUT_CONTENT");
       expect(prompt).not.toContain('"holdoutResults"');
@@ -784,6 +808,10 @@ describe("runner", () => {
             problem: "Ordinary proposal problem remains visible",
             recommendation: "Ordinary proposal recommendation remains visible",
             customRolloutNotes: "SAFE_ORDINARY_EXTENSION_REMAINS_VISIBLE",
+            heldoutEvidenceRefs: ["DO_NOT_LEAK_ORDINARY_HELDOUT_REF"],
+            nestedHeldoutMetadata: {
+              holdoutEvidenceRefs: ["DO_NOT_LEAK_NESTED_ORDINARY_HELDOUT_REF"],
+            },
             heldoutContents: ["DO_NOT_LEAK_ORDINARY_HELDOUT_CONTENT"],
             heldoutResults: { score: "DO_NOT_LEAK_ORDINARY_HELDOUT_RESULT" },
             heldoutPrivateResults: "DO_NOT_LEAK_NESTED_ORDINARY_HELDOUT_RESULT",
@@ -814,6 +842,8 @@ describe("runner", () => {
       expect(prompt).toContain("Ordinary proposal recommendation remains visible");
       expect(prompt).toContain("SAFE_ORDINARY_EXTENSION_REMAINS_VISIBLE");
       for (const leakedValue of [
+        "DO_NOT_LEAK_ORDINARY_HELDOUT_REF",
+        "DO_NOT_LEAK_NESTED_ORDINARY_HELDOUT_REF",
         "DO_NOT_LEAK_ORDINARY_HELDOUT_CONTENT",
         "DO_NOT_LEAK_ORDINARY_HELDOUT_RESULT",
         "DO_NOT_LEAK_NESTED_ORDINARY_HELDOUT_RESULT",
@@ -826,6 +856,9 @@ describe("runner", () => {
         expect(prompt).not.toContain(leakedValue);
       }
       expect(prompt).not.toContain('"heldoutContents"');
+      expect(prompt).not.toContain('"heldoutEvidenceRefs"');
+      expect(prompt).not.toContain('"holdoutEvidenceRefs"');
+      expect(prompt).not.toContain('"nestedHeldoutMetadata"');
       expect(prompt).not.toContain('"heldoutResults"');
       expect(prompt).not.toContain('"heldoutPrivateResults"');
       expect(prompt).not.toContain('"secret"');

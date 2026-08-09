@@ -1,5 +1,6 @@
 import { DEFAULT_TASK_PROMPT_TEMPLATE } from "@ouroboros/harness";
 import type { Lesson } from "@ouroboros/harness";
+import { createHash } from "node:crypto";
 import type { PromptInput } from "./types";
 import { prettyJson, renderPromptTemplate } from "./template";
 
@@ -64,10 +65,10 @@ const TARGET_EVOLUTION_PROPOSAL_EXTENSION = {
   },
   evaluationContract: {
     comparison: {
-      controlRef: "control_<id>",
-      developmentEvidenceRefs: ["development_evidence_<id>"],
-      holdoutEvidenceRefs: ["holdout_evidence_<id>"],
-      unrelatedEvidenceRefs: ["unrelated_evidence_<id>"],
+      controlRef: "control_example",
+      developmentEvidenceRefs: ["development_evidence_example"],
+      holdoutEvidenceRefs: ["holdout_evidence_example"],
+      unrelatedEvidenceRefs: ["unrelated_evidence_example"],
       corpusSnapshotSha256: "0".repeat(64),
       equalBudget: {
         model: "<model>",
@@ -88,10 +89,14 @@ const TARGET_EVOLUTION_PROPOSAL_EXTENSION = {
 export function buildTaskPrompt(input: PromptInput) {
   const compactRecentLessons = compactLessons(input.lessons ?? []);
   const template = input.template ?? DEFAULT_TASK_PROMPT_TEMPLATE;
-  const frozenLinearImplementationGate = renderFrozenLinearImplementationGate(
-    input.run.context,
-    input.task.config,
-    input.task.role,
+  const sealedHoldoutRefs = frozenHoldoutEvidenceRefs(input.run.context);
+  const sealText = (value: string) => redactSealedPromptText(value, sealedHoldoutRefs);
+  const frozenLinearImplementationGate = sealText(
+    renderFrozenLinearImplementationGate(
+      input.run.context,
+      input.task.config,
+      input.task.role,
+    ),
   );
   const frozenTargetEvolutionContract = renderFrozenTargetEvolutionContract(
     input.run.context,
@@ -102,24 +107,33 @@ export function buildTaskPrompt(input: PromptInput) {
     frozenTargetEvolutionContract,
   ].filter(Boolean);
   const prompt = renderPromptTemplate(template, {
-    runGoal: input.run.goal,
-    runContextJson: prettyJson(promptSafeRunContext(input.run.context)),
+    runGoal: sealText(input.run.goal),
+    runContextJson: prettyJson(promptSafeRunContext(input.run.context, sealedHoldoutRefs)),
     taskId: input.task.id,
     taskRole: input.task.role,
-    taskGoal: input.task.goal,
-    taskConfigJson: prettyJson(input.task.config ?? {}),
-    taskPrompt: input.task.prompt,
-    doneWhenMarkdown: input.task.doneWhen.map((item) => `- ${item}`).join("\n"),
-    dependencyAttemptsJson: prettyJson(input.dependencyAttempts),
+    taskGoal: sealText(input.task.goal),
+    taskConfigJson: prettyJson(redactSealedPromptValues(input.task.config ?? {}, sealedHoldoutRefs)),
+    taskPrompt: sealText(input.task.prompt),
+    doneWhenMarkdown: input.task.doneWhen.map((item) => `- ${sealText(item)}`).join("\n"),
+    dependencyAttemptsJson: prettyJson(
+      redactSealedPromptValues(input.dependencyAttempts, sealedHoldoutRefs),
+    ),
     activeGuardrailsMarkdown: [
       ...protectedSections,
       renderTargetEvolutionProposalContract(input.task.role),
-      renderActiveGuardrails(input.run.context, input.task.role),
+      sealText(renderActiveGuardrails(input.run.context, input.task.role)),
     ].filter(Boolean).join("\n"),
-    candidateGuardrailsMarkdown: renderCandidateGuardrails(compactRecentLessons),
-    reusableExperienceEvidenceMarkdown: renderReusableExperienceEvidence(compactRecentLessons),
-    runLessonsJson: prettyJson(compactRecentLessons),
-    requiredOutputJson: prettyJson(requiredOutputForRole(input.task.role, input.task.config)),
+    candidateGuardrailsMarkdown: sealText(renderCandidateGuardrails(compactRecentLessons)),
+    reusableExperienceEvidenceMarkdown: sealText(
+      renderReusableExperienceEvidence(compactRecentLessons),
+    ),
+    runLessonsJson: prettyJson(redactSealedPromptValues(compactRecentLessons, sealedHoldoutRefs)),
+    requiredOutputJson: prettyJson(
+      redactSealedPromptValues(
+        requiredOutputForRole(input.task.role, input.task.config),
+        sealedHoldoutRefs,
+      ),
+    ),
   });
   const omittedProtectedSections = protectedSections.filter((section) => !prompt.includes(section));
   if (omittedProtectedSections.length > 0) {
@@ -143,18 +157,21 @@ function renderFrozenTargetEvolutionContract(
   if (!evolutionInstance || !evolutionPack || !causalHypothesis || !comparison || !evaluationContract) {
     return "";
   }
+  const sealedHoldoutRefs = frozenHoldoutEvidenceRefs(runContext);
   const safeComparison = frozenComparisonView(comparison);
   return [
     "## Frozen Target Evolution Contract",
     "This task may implement or evaluate the accepted design, but it must not weaken, replace, or amend these frozen values.",
-    "Holdout evidence references identify the sealed split. Do not request, infer, reproduce, or expose holdout contents or results during candidate generation.",
+    "The holdout split is sealed. Ordinary roles receive only its commitment and count; do not request, infer, reproduce, expose, or query its references, contents, or results.",
     "### Optimization target pack",
     "```json",
-    prettyJson(frozenEvolutionPackView(evolutionPack)),
+    prettyJson(redactSealedPromptValues(frozenEvolutionPackView(evolutionPack), sealedHoldoutRefs)),
     "```",
     "### Causal hypothesis",
     "```json",
-    prettyJson(frozenCausalHypothesisView(causalHypothesis)),
+    prettyJson(
+      redactSealedPromptValues(frozenCausalHypothesisView(causalHypothesis), sealedHoldoutRefs),
+    ),
     "```",
     "### Matched comparison protocol",
     "```json",
@@ -162,25 +179,35 @@ function renderFrozenTargetEvolutionContract(
     "```",
     "### Frozen evaluation contract",
     "```json",
-    prettyJson(frozenEvaluationContractView(evaluationContract, safeComparison)),
+    prettyJson(
+      frozenEvaluationContractView(evaluationContract, safeComparison, sealedHoldoutRefs),
+    ),
     "```",
     "### Evolution instance identity",
     "```json",
-    prettyJson(frozenEvolutionInstanceView(evolutionInstance)),
+    prettyJson(
+      redactSealedPromptValues(frozenEvolutionInstanceView(evolutionInstance), sealedHoldoutRefs),
+    ),
     "```",
     "",
   ].join("\n");
 }
 
-function promptSafeRunContext(context: Record<string, unknown>): Record<string, unknown> {
+function promptSafeRunContext(
+  context: Record<string, unknown>,
+  sealedHoldoutRefs: string[] = frozenHoldoutEvidenceRefs(context),
+): Record<string, unknown> {
   const evolutionInstance = asRecord(context.evolutionInstance);
   const isDesignChild = context.source === "design"
     || context.designProposalId !== undefined
     || asRecord(context.designProposal) !== null;
-  if (!isDesignChild && !evolutionInstance) {
+  if (!isDesignChild && !evolutionInstance && sealedHoldoutRefs.length === 0) {
     return context;
   }
-  const safeContext = redactSensitivePromptMaterial(context) as Record<string, unknown>;
+  const safeContext = redactSealedPromptValues(
+    redactSensitivePromptMaterial(context),
+    sealedHoldoutRefs,
+  ) as Record<string, unknown>;
   if (!evolutionInstance) {
     return safeContext;
   }
@@ -196,30 +223,89 @@ function promptSafeRunContext(context: Record<string, unknown>): Record<string, 
   } = safeContext;
   return {
     ...rest,
-    targetEvolutionSummary: frozenEvolutionInstanceView(evolutionInstance),
+    targetEvolutionSummary: redactSealedPromptValues(
+      frozenEvolutionInstanceView(evolutionInstance),
+      sealedHoldoutRefs,
+    ),
   };
+}
+
+function frozenHoldoutEvidenceRefs(context: Record<string, unknown>): string[] {
+  const designEvaluationContract = asRecord(context.designEvaluationContract);
+  const designProposal = asRecord(context.designProposal);
+  const proposalEvaluationContract = asRecord(designProposal?.evaluationContract);
+  const comparisons = [
+    asRecord(context.evolutionComparison),
+    asRecord(context.comparison),
+    asRecord(designEvaluationContract?.comparison),
+    asRecord(proposalEvaluationContract?.comparison),
+  ];
+  const refs: string[] = [];
+  for (const comparison of comparisons) {
+    const candidateRefs = comparison?.holdoutEvidenceRefs;
+    if (
+      Array.isArray(candidateRefs)
+      && candidateRefs.every((entry) => typeof entry === "string" && entry.length > 0)
+    ) {
+      refs.push(...candidateRefs);
+    }
+  }
+  return [...new Set(refs)];
+}
+
+function redactSealedPromptText(value: string, sealedValues: string[]): string {
+  let redacted = value;
+  for (const sealedValue of [...sealedValues].sort((left, right) => right.length - left.length)) {
+    redacted = redacted.split(sealedValue).join("[SEALED_HOLDOUT_REFERENCE]");
+  }
+  return redacted;
+}
+
+function redactSealedPromptValues(value: unknown, sealedValues: string[]): unknown {
+  if (typeof value === "string") {
+    return redactSealedPromptText(value, sealedValues);
+  }
+  if (Array.isArray(value)) {
+    return value.map((entry) => redactSealedPromptValues(entry, sealedValues));
+  }
+  if (!value || typeof value !== "object") {
+    return value;
+  }
+  return Object.fromEntries(
+    Object.entries(value as Record<string, unknown>).map(([key, entry]) => [
+      key,
+      redactSealedPromptValues(entry, sealedValues),
+    ]),
+  );
 }
 
 function frozenEvaluationContractView(
   contract: Record<string, unknown>,
   comparison: Record<string, unknown>,
+  sealedHoldoutRefs: string[] = [],
 ): Record<string, unknown> {
-  return pickDefined({
+  const visibleContract = redactSealedPromptValues(pickDefined({
     baseline: contract.baseline,
     successMetrics: contract.successMetrics,
     guardMetrics: contract.guardMetrics,
     requiredEvidence: contract.requiredEvidence,
     reviewAt: contract.reviewAt,
+  }), sealedHoldoutRefs) as Record<string, unknown>;
+  return {
+    ...visibleContract,
     comparison,
-  });
+  };
 }
 
 function frozenComparisonView(comparison: Record<string, unknown>): Record<string, unknown> {
   const equalBudget = asRecord(comparison.equalBudget);
-  return pickDefined({
+  const sealedHoldoutRefs = Array.isArray(comparison.holdoutEvidenceRefs)
+    && comparison.holdoutEvidenceRefs.every((entry) => typeof entry === "string")
+    ? comparison.holdoutEvidenceRefs
+    : [];
+  const visible = redactSealedPromptValues(pickDefined({
     controlRef: comparison.controlRef,
     developmentEvidenceRefs: comparison.developmentEvidenceRefs,
-    holdoutEvidenceRefs: comparison.holdoutEvidenceRefs,
     unrelatedEvidenceRefs: comparison.unrelatedEvidenceRefs,
     corpusSnapshotSha256: comparison.corpusSnapshotSha256,
     equalBudget: equalBudget
@@ -236,7 +322,23 @@ function frozenComparisonView(comparison: Record<string, unknown>): Record<strin
     primaryMetric: comparison.primaryMetric,
     minimumUplift: comparison.minimumUplift,
     maximumGuardRegression: comparison.maximumGuardRegression,
-  });
+  }), sealedHoldoutRefs) as Record<string, unknown>;
+  const commitment = sealedHoldoutEvidenceCommitment(comparison.holdoutEvidenceRefs);
+  return {
+    ...visible,
+    ...(commitment ? { holdoutEvidenceCommitment: commitment } : {}),
+  };
+}
+
+function sealedHoldoutEvidenceCommitment(value: unknown): Record<string, unknown> | undefined {
+  if (!Array.isArray(value) || !value.every((entry) => typeof entry === "string")) {
+    return undefined;
+  }
+  return {
+    algorithm: "sha256",
+    count: value.length,
+    refsSha256: createHash("sha256").update(JSON.stringify(value), "utf8").digest("hex"),
+  };
 }
 
 function frozenCausalHypothesisView(hypothesis: Record<string, unknown>): Record<string, unknown> {
@@ -375,13 +477,7 @@ function isSensitivePromptMaterialKey(key: string): boolean {
 
 function isHeldoutMaterialKey(key: string): boolean {
   const normalized = key.replace(/[-_]/g, "").toLowerCase();
-  for (const prefix of ["holdout", "heldout"]) {
-    if (normalized.startsWith(prefix)) {
-      const suffix = normalized.slice(prefix.length);
-      return !(suffix.endsWith("ref") || suffix.endsWith("refs"));
-    }
-  }
-  return false;
+  return normalized.includes("holdout") || normalized.includes("heldout");
 }
 
 function renderTargetEvolutionProposalContract(role: string): string {
@@ -395,7 +491,7 @@ function renderTargetEvolutionProposalContract(role: string): string {
     "- Artifacts, Harness, and Model are optimization targets; the meta-kernel, project pack, and delivery path are responsibility layers. Milestone-one model mutation is prohibited.",
     "- causalHypothesis must state a supported failureClass, mechanism, predictedEffects, and disconfirmingEvidence.",
     "- comparison must freeze non-empty development, holdout, and unrelated evidence refs plus a corpus hash, controlRef, primary metric, thresholds, and the same equal budget for control and candidate.",
-    "- Candidate generation may cite frozen holdoutEvidenceRefs, but must not receive or reproduce holdout contents or results. Tests alone do not replace the matched baseline or unrelated-regression evidence.",
+    "- Candidate generation receives only a sealed holdout commitment, hash, and count. It must not receive, cite, query, or reproduce holdout refs, contents, or results. Tests alone do not replace the matched baseline or unrelated-regression evidence.",
     "Merge this exact optional extension fragment into the single proposeDesign proposal shown below. Do not emit another proposeDesign action:",
     "```json",
     prettyJson(TARGET_EVOLUTION_PROPOSAL_EXTENSION),

@@ -2,6 +2,7 @@ import { Database } from "bun:sqlite";
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
+import { EVOLUTION_ACTION_RECEIPTS_SCHEMA_SQL } from "./schema";
 
 export type HarnessDatabase = Database;
 
@@ -16,6 +17,7 @@ export function initDatabase(dbPath: string) {
     ensureHarnessActionEvents(db);
     ensureRunLifecycleGuards(db);
     ensureStrategyTables(db);
+    ensureEvolutionRuntimeTables(db);
   }, { allowMissingSchema });
 }
 
@@ -394,6 +396,136 @@ function ensureStrategyTables(db: Database) {
     create index if not exists idx_design_outcomes_review
       on design_outcomes(review_at);
   `);
+}
+
+export function ensureEvolutionRuntimeTables(db: Pick<Database, "exec">) {
+  db.exec(`
+    create table if not exists evolution_profiles (
+      id text primary key,
+      schema_version integer not null check (schema_version = 1),
+      project_id text not null,
+      runtime_maturity text not null check (runtime_maturity = 'declared'),
+      registered_at text not null,
+      record_sha256 text not null check (length(record_sha256) = 64),
+      record_json text not null,
+      created_at text not null default current_timestamp,
+      unique (project_id, id),
+      unique (project_id, record_sha256),
+      foreign key (project_id) references projects(id) on delete restrict
+    );
+
+    create index if not exists idx_evolution_profiles_project_created
+      on evolution_profiles(project_id, created_at, id);
+
+    create table if not exists production_episodes (
+      id text primary key,
+      schema_version integer not null check (schema_version = 1),
+      project_id text not null,
+      profile_id text not null,
+      source_ref text not null,
+      leakage_group_id text not null,
+      record_sha256 text not null check (length(record_sha256) = 64),
+      record_json text not null,
+      created_at text not null default current_timestamp,
+      unique (project_id, profile_id, id),
+      unique (project_id, record_sha256),
+      foreign key (project_id) references projects(id) on delete restrict,
+      foreign key (project_id, profile_id)
+        references evolution_profiles(project_id, id) on delete restrict
+    );
+
+    create index if not exists idx_production_episodes_profile_created
+      on production_episodes(project_id, profile_id, created_at, id);
+    create index if not exists idx_production_episodes_source
+      on production_episodes(project_id, profile_id, source_ref);
+    create index if not exists idx_production_episodes_leakage_group
+      on production_episodes(project_id, profile_id, leakage_group_id);
+
+    create table if not exists harness_variants (
+      id text primary key,
+      schema_version integer not null check (schema_version = 1),
+      project_id text not null,
+      profile_id text not null,
+      role text not null check (role in ('control', 'candidate')),
+      record_sha256 text not null check (length(record_sha256) = 64),
+      record_json text not null,
+      created_at text not null default current_timestamp,
+      unique (project_id, profile_id, id),
+      unique (project_id, record_sha256),
+      foreign key (project_id) references projects(id) on delete restrict,
+      foreign key (project_id, profile_id)
+        references evolution_profiles(project_id, id) on delete restrict
+    );
+
+    create index if not exists idx_harness_variants_profile_role_created
+      on harness_variants(project_id, profile_id, role, created_at, id);
+
+    create table if not exists matched_experiments (
+      id text primary key,
+      schema_version integer not null check (schema_version = 1),
+      project_id text not null,
+      profile_id text not null,
+      control_variant_id text not null,
+      candidate_variant_id text not null,
+      outcome text not null check (
+        outcome in ('pending', 'candidate_wins', 'control_wins', 'inconclusive', 'invalid')
+      ),
+      record_sha256 text not null check (length(record_sha256) = 64),
+      record_json text not null,
+      created_at text not null default current_timestamp,
+      unique (project_id, profile_id, id),
+      unique (project_id, record_sha256),
+      foreign key (project_id) references projects(id) on delete restrict,
+      foreign key (project_id, profile_id)
+        references evolution_profiles(project_id, id) on delete restrict,
+      foreign key (project_id, profile_id, control_variant_id)
+        references harness_variants(project_id, profile_id, id) on delete restrict,
+      foreign key (project_id, profile_id, candidate_variant_id)
+        references harness_variants(project_id, profile_id, id) on delete restrict,
+      check (control_variant_id <> candidate_variant_id)
+    );
+
+    create index if not exists idx_matched_experiments_profile_created
+      on matched_experiments(project_id, profile_id, created_at, id);
+    create index if not exists idx_matched_experiments_control_variant
+      on matched_experiments(control_variant_id);
+    create index if not exists idx_matched_experiments_candidate_variant
+      on matched_experiments(candidate_variant_id);
+
+    create trigger if not exists prevent_evolution_profiles_update
+    before update on evolution_profiles begin
+      select raise(abort, 'evolution_profiles are immutable');
+    end;
+    create trigger if not exists prevent_evolution_profiles_delete
+    before delete on evolution_profiles begin
+      select raise(abort, 'evolution_profiles are immutable');
+    end;
+    create trigger if not exists prevent_production_episodes_update
+    before update on production_episodes begin
+      select raise(abort, 'production_episodes are immutable');
+    end;
+    create trigger if not exists prevent_production_episodes_delete
+    before delete on production_episodes begin
+      select raise(abort, 'production_episodes are immutable');
+    end;
+    create trigger if not exists prevent_harness_variants_update
+    before update on harness_variants begin
+      select raise(abort, 'harness_variants are immutable');
+    end;
+    create trigger if not exists prevent_harness_variants_delete
+    before delete on harness_variants begin
+      select raise(abort, 'harness_variants are immutable');
+    end;
+    create trigger if not exists prevent_matched_experiments_update
+    before update on matched_experiments begin
+      select raise(abort, 'matched_experiments are immutable');
+    end;
+    create trigger if not exists prevent_matched_experiments_delete
+    before delete on matched_experiments begin
+      select raise(abort, 'matched_experiments are immutable');
+    end;
+  `);
+  db.exec(EVOLUTION_ACTION_RECEIPTS_SCHEMA_SQL);
 }
 
 function ensureRunLifecycleGuards(db: Database) {

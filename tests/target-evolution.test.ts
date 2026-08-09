@@ -1,5 +1,7 @@
 import { describe, expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 import * as harnessModule from "../packages/harness/src";
+import * as targetEvolutionModule from "../packages/harness/src/target-evolution";
 import type {
   DesignProposalData,
   EvolutionCausalHypothesis,
@@ -13,6 +15,7 @@ const PROJECT_ID = "project_hodor";
 const HODOR_REFERENCE_PROJECT_ID = "project_hodor_reference";
 const SHA_A = "a".repeat(64);
 const SHA_B = "b".repeat(64);
+const SHA_C = "c".repeat(64);
 
 interface HodorEvolutionReference {
   projectId: string;
@@ -185,6 +188,153 @@ function parser(name: string): (...args: unknown[]) => unknown {
   const candidate = (harnessModule as unknown as Record<string, unknown>)[name];
   expect(candidate, `${name} must be exported by @ouroboros/harness`).toBeFunction();
   return candidate as (...args: unknown[]) => unknown;
+}
+
+function draftParser(name: string): (...args: unknown[]) => unknown {
+  const candidate = (targetEvolutionModule as unknown as Record<string, unknown>)[name];
+  expect(candidate, `${name} must remain available only from the internal target-evolution module`).toBeFunction();
+  return candidate as (...args: unknown[]) => unknown;
+}
+
+function runtimeRecordParser(name: string): (...args: unknown[]) => unknown {
+  return name === "parseDraftPromotionReceipt" ? draftParser(name) : parser(name);
+}
+
+type EvolutionRecordKind = "profile" | "episode" | "variant" | "experiment" | "receipt";
+
+function canonicalTestValue(value: unknown): unknown {
+  if (value === null || typeof value !== "object") {
+    return value;
+  }
+  if (Array.isArray(value)) {
+    return value.map(canonicalTestValue);
+  }
+  const record = value as Record<string, unknown>;
+  return Object.fromEntries(
+    Object.keys(record)
+      .sort()
+      .map((key) => [key, canonicalTestValue(record[key])]),
+  );
+}
+
+function testEvolutionRecordId(
+  kind: EvolutionRecordKind,
+  value: Record<string, unknown>,
+): string {
+  const { id: _ignored, ...recordWithoutId } = value;
+  const digest = createHash("sha256")
+    .update(JSON.stringify(canonicalTestValue(recordWithoutId)), "utf8")
+    .digest("hex");
+  return `${kind}_${digest}`;
+}
+
+function addressedRecord<T extends Record<string, unknown>>(
+  kind: EvolutionRecordKind,
+  value: T,
+): T & { id: string } {
+  return { ...value, id: testEvolutionRecordId(kind, value) };
+}
+
+function validEvolutionProfile() {
+  return addressedRecord("profile", {
+    schemaVersion: 1,
+    projectId: PROJECT_ID,
+    pack: { id: "hodor-evolution-pack", version: 1, contentSha256: SHA_A },
+    charter: { id: "charter_hodor", version: 2, contentSha256: SHA_B },
+    runtimeMaturity: "declared",
+    allowedSurfaceIds: ["risk-policy-artifact", "evaluation-harness"],
+    registeredAt: "2026-08-09T01:02:03.456Z",
+  });
+}
+
+function validProductionEpisode(sourceRef = "evidence:episode-development-1") {
+  const profile = validEvolutionProfile();
+  return addressedRecord("episode", {
+    schemaVersion: 1,
+    projectId: PROJECT_ID,
+    profileId: profile.id,
+    sourceRef,
+    leakageGroupId: "leakage_group_development_1",
+    observedAt: "2026-08-09T02:03:04Z",
+    inputSnapshotSha256: SHA_A,
+    outcomeSnapshotSha256: SHA_B,
+    policyRef: "policy:spatial-risk-v1",
+    metrics: { quality: 0.95, signedDelta: -0.25 },
+    sideEffectCounters: { ...ZERO_SIDE_EFFECT_BUDGET, realProviderCalls: 1 },
+    evidenceRefs: ["evidence:episode-1"],
+    privacyReview: {
+      status: "approved",
+      policySha256: SHA_C,
+      reviewerRef: "reviewer:privacy-1",
+      dataClassification: "confidential",
+      retentionPolicyRef: "retention:policy-1",
+      inputSnapshotSha256: SHA_A,
+      outcomeSnapshotSha256: SHA_B,
+      evidenceRefs: ["evidence:privacy-review-1"],
+    },
+  });
+}
+
+function validHarnessVariant(role: "control" | "candidate" = "control") {
+  const profile = validEvolutionProfile();
+  return addressedRecord("variant", {
+    schemaVersion: 1,
+    projectId: PROJECT_ID,
+    profileId: profile.id,
+    role,
+    evolutionTargets: role === "control" ? ["artifact"] : ["artifact", "harness"],
+    contentSha256: role === "control" ? SHA_A : SHA_C,
+    mutationSurfaceIds: ["risk-policy-artifact"],
+    changedPaths: role === "control" ? ["config/spatial-risk.json"] : ["tests/evolution/policy.test.ts"],
+    toolPolicySha256: SHA_B,
+    createdFromEvidenceRefs: [role === "control" ? "evidence:baseline" : "evidence:candidate"],
+  });
+}
+
+function validMatchedExperiment() {
+  return addressedRecord("experiment", {
+    schemaVersion: 1,
+    projectId: PROJECT_ID,
+    profileId: validEvolutionProfile().id,
+    controlVariantId: validHarnessVariant("control").id,
+    candidateVariantId: validHarnessVariant("candidate").id,
+    developmentEpisodeRefs: [validProductionEpisode("evidence:episode-development-1").id],
+    heldoutEpisodeRefs: [validProductionEpisode("evidence:episode-heldout-1").id],
+    unrelatedEpisodeRefs: [validProductionEpisode("evidence:episode-unrelated-1").id],
+    corpusSnapshotSha256: SHA_C,
+    equalBudget: { ...validComparison().equalBudget },
+    primaryMetric: "spatial-risk false-positive rate",
+    guardMetrics: ["zero production publishes"],
+    sideEffectCounters: { ...ZERO_SIDE_EFFECT_BUDGET },
+    outcome: "pending",
+    evidenceRefs: ["evidence:experiment-1"],
+  });
+}
+
+function validPromotionReceipt() {
+  return addressedRecord("receipt", {
+    schemaVersion: 1,
+    projectId: PROJECT_ID,
+    profileId: validEvolutionProfile().id,
+    experimentId: validMatchedExperiment().id,
+    action: "promote",
+    fromVariantId: validHarnessVariant("control").id,
+    toVariantId: validHarnessVariant("candidate").id,
+    authorizedDecisionRef: "decision:promote-1",
+    appliedAt: "2026-08-09T03:04:05Z",
+    exactTargetRef: "git:commit:0123456789abcdef",
+    readbackEvidenceRefs: ["evidence:readback-1"],
+    canaryEvidenceRefs: ["evidence:canary-1"],
+    rollbackPlanRef: "rollback:plan-1",
+  });
+}
+
+function readdress(
+  kind: EvolutionRecordKind,
+  value: Record<string, unknown>,
+): Record<string, unknown> {
+  const { id: _ignored, ...withoutId } = value;
+  return addressedRecord(kind, withoutId);
 }
 
 function designerPrompt(): string {
@@ -633,6 +783,44 @@ describe("target-system evolution contracts", () => {
     ).toThrow();
   });
 
+  test.each([
+    ["control credential", { controlRef: "authorization_bearer_secret" }],
+    ["development api key", { developmentEvidenceRefs: ["evidence_api_key_prod"] }],
+    ["development dotted api key", { developmentEvidenceRefs: ["evidence:api.key-prod"] }],
+    ["holdout token", { holdoutEvidenceRefs: ["evidence:token-prod"] }],
+    ["unrelated password", { unrelatedEvidenceRefs: ["password_prod"] }],
+    ["non-opaque syntax", { controlRef: "control@example.com" }],
+  ])("rejects unsafe EvolutionComparison ref: %s", (_name, override) => {
+    expect(() => parser("parseEvolutionComparison")({ ...validComparison(), ...override })).toThrow(
+      /opaque|credential|sensitive|ref/i,
+    );
+  });
+
+  test.each([
+    [
+      "signal source credential",
+      {
+        observation: {
+          signalSources: [{ id: "source_api_key_prod", kind: "repository" }],
+        },
+      },
+    ],
+    [
+      "portability secret",
+      {
+        portability: {
+          ...validEvolutionPack().portability,
+          genericizationEvidence: ["evidence:secret-prod"],
+        },
+      },
+    ],
+  ])("rejects unsafe prompt-visible evolution pack ref: %s", (_name, override) => {
+    const pack = { ...validEvolutionPack(), ...override };
+    expect(() => parser("parseEvolutionPackV1")(pack, PROJECT_ID)).toThrow(
+      /opaque|credential|sensitive|ref/i,
+    );
+  });
+
   test("parses a clean EvolutionInstance", () => {
     const value = {
       schemaVersion: 1,
@@ -924,5 +1112,490 @@ describe("target-system evolution contracts", () => {
     expect(serializedExtension).toContain("holdoutevidencerefs");
     expect(serializedExtension).not.toContain("holdout content");
     expect(serializedExtension).not.toContain("holdout result");
+  });
+});
+
+describe("target-system evolution runtime records", () => {
+  test("exports content-address helpers with stable canonical key ordering", () => {
+    const hashValue = parser("canonicalEvolutionValueSha256");
+    const hashRecord = parser("canonicalEvolutionRecordSha256");
+    const expectedId = parser("expectedEvolutionRecordId");
+    const left = { z: [3, { b: 2, a: 1 }], a: "value" };
+    const right = { a: "value", z: [3, { a: 1, b: 2 }] };
+    const localHash = createHash("sha256")
+      .update(JSON.stringify(canonicalTestValue(left)), "utf8")
+      .digest("hex");
+
+    expect(hashValue(left)).toBe(localHash);
+    expect(hashValue(right)).toBe(localHash);
+    expect(hashRecord({ id: "ignored_a", ...left })).toBe(localHash);
+    expect(hashRecord({ ...right, id: "ignored_b" })).toBe(localHash);
+    expect(expectedId("profile", { id: "ignored", ...left })).toBe(`profile_${localHash}`);
+    expect(expectedId("episode", left)).toBe(`episode_${localHash}`);
+    expect(expectedId("variant", left)).toBe(`variant_${localHash}`);
+    expect(expectedId("experiment", left)).toBe(`experiment_${localHash}`);
+    expect(expectedId("receipt", left)).toBe(`receipt_${localHash}`);
+  });
+
+  test.each([
+    ["array root", []],
+    ["undefined value", { value: undefined }],
+    ["non-finite value", { value: Number.POSITIVE_INFINITY }],
+    ["non-JSON value", { value: 1n }],
+  ])("rejects invalid canonical evolution hash input: %s", (_name, value) => {
+    expect(() => parser("canonicalEvolutionRecordSha256")(value)).toThrow(/JSON|object|finite/i);
+  });
+
+  test("parses valid project-bound content-addressed runtime records", () => {
+    expect(parser("parseEvolutionProfile")(validEvolutionProfile(), PROJECT_ID)).toEqual(
+      validEvolutionProfile(),
+    );
+    expect(parser("parseProductionEpisode")(validProductionEpisode(), PROJECT_ID)).toEqual(
+      validProductionEpisode(),
+    );
+    expect(parser("parseHarnessVariant")(validHarnessVariant("candidate"), PROJECT_ID)).toEqual(
+      validHarnessVariant("candidate"),
+    );
+    expect(parser("parseMatchedExperiment")(validMatchedExperiment(), PROJECT_ID)).toEqual(
+      validMatchedExperiment(),
+    );
+    expect(draftParser("parseDraftPromotionReceipt")(validPromotionReceipt(), PROJECT_ID)).toEqual(
+      validPromotionReceipt(),
+    );
+  });
+
+  test("keeps PromotionReceipt draft-only and off the harness package surface", () => {
+    expect(
+      (harnessModule as unknown as Record<string, unknown>).parsePromotionReceipt,
+    ).toBeUndefined();
+    expect(
+      (targetEvolutionModule as unknown as Record<string, unknown>).parseDraftPromotionReceipt,
+    ).toBeFunction();
+  });
+
+  test("registers only declared runtime maturity without activation placeholders", () => {
+    expect(() => parser("parseEvolutionProfile")(validEvolutionProfile(), PROJECT_ID)).not.toThrow();
+    for (const unsafeMaturity of [
+      { runtimeMaturity: "prepared" },
+      { runtimeMaturity: "instrumented" },
+      { maturity: "instrumented" },
+      { activatedAt: "2026-08-09T01:02:03Z" },
+      { activatedByReceipt: `receipt_${"a".repeat(64)}` },
+    ]) {
+      const profile = readdress("profile", { ...validEvolutionProfile(), ...unsafeMaturity });
+      expect(() => parser("parseEvolutionProfile")(profile, PROJECT_ID)).toThrow(
+        /runtimeMaturity|unsupported fields/i,
+      );
+    }
+  });
+
+  test.each([
+    ["non-opaque source ref", () => ({ ...validProductionEpisode(), sourceRef: "ref@example.com" }), "episode"],
+    ["authorization ref", () => ({ ...validProductionEpisode(), policyRef: "authorization:bearer-secret" }), "episode"],
+    ["token evidence", () => ({ ...validProductionEpisode(), evidenceRefs: ["evidence:token-prod"] }), "episode"],
+    [
+      "credential reviewer",
+      () => ({
+        ...validProductionEpisode(),
+        privacyReview: {
+          ...validProductionEpisode().privacyReview,
+          reviewerRef: "reviewer:credential-prod",
+        },
+      }),
+      "episode",
+    ],
+    [
+      "password retention ref",
+      () => ({
+        ...validProductionEpisode(),
+        privacyReview: {
+          ...validProductionEpisode().privacyReview,
+          retentionPolicyRef: "retention:password-prod",
+        },
+      }),
+      "episode",
+    ],
+    [
+      "api key privacy evidence",
+      () => ({
+        ...validProductionEpisode(),
+        privacyReview: {
+          ...validProductionEpisode().privacyReview,
+          evidenceRefs: ["evidence:api-key-prod"],
+        },
+      }),
+      "episode",
+    ],
+    [
+      "secret variant evidence",
+      () => ({
+        ...validHarnessVariant("candidate"),
+        createdFromEvidenceRefs: ["evidence:secret-prod"],
+      }),
+      "variant",
+    ],
+    [
+      "bearer experiment evidence",
+      () => ({ ...validMatchedExperiment(), evidenceRefs: ["evidence:bearer-prod"] }),
+      "experiment",
+    ],
+  ])("rejects non-opaque or credential-like runtime ref: %s", (_name, makeRecord, kind) => {
+    const record = readdress(kind as EvolutionRecordKind, makeRecord() as Record<string, unknown>);
+    const parse = kind === "episode" ? "parseProductionEpisode"
+      : kind === "variant" ? "parseHarnessVariant"
+        : "parseMatchedExperiment";
+    expect(() => parser(parse)(record, PROJECT_ID)).toThrow(/opaque|credential|sensitive|ref/i);
+  });
+
+  test.each(["src/**", "src/file?.ts", "src/[ab].ts", "src/{a,b}.ts", "!src/file.ts"])(
+    "rejects glob-like HarnessVariant changedPath %s",
+    (changedPath) => {
+      const variant = readdress("variant", {
+        ...validHarnessVariant("candidate"),
+        changedPaths: [changedPath],
+      });
+      expect(() => parser("parseHarnessVariant")(variant, PROJECT_ID)).toThrow(/exact|glob|path/i);
+    },
+  );
+
+  test.each([
+    ["profile", "parseEvolutionProfile", validEvolutionProfile],
+    ["episode", "parseProductionEpisode", validProductionEpisode],
+    ["variant", "parseHarnessVariant", () => validHarnessVariant("candidate")],
+    ["experiment", "parseMatchedExperiment", validMatchedExperiment],
+    ["receipt", "parseDraftPromotionReceipt", validPromotionReceipt],
+  ])("rejects unknown fields and mismatched content IDs on %s", (kind, parserName, makeRecord) => {
+    const record = makeRecord() as Record<string, unknown>;
+    expect(() => runtimeRecordParser(parserName)({ ...record, surprise: true }, PROJECT_ID)).toThrow(
+      /unsupported fields/i,
+    );
+    expect(() => runtimeRecordParser(parserName)({ ...record, id: `${kind}_${"f".repeat(64)}` }, PROJECT_ID)).toThrow(
+      /content-addressed|id/i,
+    );
+  });
+
+  test.each([
+    ["profile", "parseEvolutionProfile", validEvolutionProfile],
+    ["episode", "parseProductionEpisode", validProductionEpisode],
+    ["variant", "parseHarnessVariant", () => validHarnessVariant("candidate")],
+    ["experiment", "parseMatchedExperiment", validMatchedExperiment],
+    ["receipt", "parseDraftPromotionReceipt", validPromotionReceipt],
+  ])("requires schemaVersion 1 and strict identity text on %s", (kind, parserName, makeRecord) => {
+    const record = makeRecord() as Record<string, unknown>;
+    const wrongVersion = readdress(kind as EvolutionRecordKind, { ...record, schemaVersion: 2 });
+    expect(() => runtimeRecordParser(parserName)(wrongVersion, PROJECT_ID)).toThrow(/schemaVersion/i);
+    const paddedProject = readdress(kind as EvolutionRecordKind, {
+      ...record,
+      projectId: ` ${PROJECT_ID}`,
+    });
+    expect(() => runtimeRecordParser(parserName)(paddedProject, ` ${PROJECT_ID}`)).toThrow(/whitespace/i);
+  });
+
+  test("requires a non-empty unpadded ProductionEpisode sourceRef", () => {
+    for (const sourceRef of ["", " episode_development_1 "]) {
+      const episode = readdress("episode", { ...validProductionEpisode(), sourceRef });
+      expect(() => parser("parseProductionEpisode")(episode, PROJECT_ID)).toThrow(
+        /non-empty|whitespace/i,
+      );
+    }
+  });
+
+  test.each([
+    ["profile", "parseEvolutionProfile", validEvolutionProfile],
+    ["episode", "parseProductionEpisode", validProductionEpisode],
+    ["variant", "parseHarnessVariant", () => validHarnessVariant("candidate")],
+    ["experiment", "parseMatchedExperiment", validMatchedExperiment],
+    ["receipt", "parseDraftPromotionReceipt", validPromotionReceipt],
+  ])("rejects cross-project %s records", (_kind, parserName, makeRecord) => {
+    const record = makeRecord() as Record<string, unknown>;
+    expect(() => runtimeRecordParser(parserName)(record, "project_other")).toThrow(/projectId/i);
+    expect(() => runtimeRecordParser(parserName)({ ...record, targetProjectId: PROJECT_ID }, PROJECT_ID)).toThrow(
+      /unsupported fields/i,
+    );
+  });
+
+  test.each(["input", "output", "rawInput", "rawOutput", "prompt", "response"])(
+    "rejects raw episode content field %s",
+    (field) => {
+      expect(() =>
+        parser("parseProductionEpisode")(
+          { ...validProductionEpisode(), [field]: "private raw content" },
+          PROJECT_ID,
+        ),
+      ).toThrow(/unsupported fields/i);
+    },
+  );
+
+  test.each(["heldoutContents", "heldoutResults", "holdoutContent", "holdoutResult"])(
+    "rejects heldout content or result field %s",
+    (field) => {
+      expect(() =>
+        parser("parseMatchedExperiment")(
+          { ...validMatchedExperiment(), [field]: "leaked heldout material" },
+          PROJECT_ID,
+        ),
+      ).toThrow(/unsupported fields/i);
+    },
+  );
+
+  test.each([
+    ["NaN metric", { metrics: { score: Number.NaN } }],
+    ["infinite metric", { metrics: { score: Number.POSITIVE_INFINITY } }],
+    [
+      "negative side-effect counter",
+      { sideEffectCounters: { ...ZERO_SIDE_EFFECT_BUDGET, pancatWrites: -1 } },
+    ],
+    [
+      "infinite side-effect counter",
+      { sideEffectCounters: { ...ZERO_SIDE_EFFECT_BUDGET, paidUsd: Number.POSITIVE_INFINITY } },
+    ],
+  ])("rejects invalid ProductionEpisode numeric data: %s", (_name, override) => {
+    const episode = readdress("episode", { ...validProductionEpisode(), ...override });
+    expect(() => parser("parseProductionEpisode")(episode, PROJECT_ID)).toThrow(/finite|non-negative/i);
+  });
+
+  test.each([
+    "realProviderCalls",
+    "pancatWrites",
+    "productionPublishes",
+    "realAssetDeletes",
+    "crossProjectMemoryReads",
+    "crossProjectMemoryWrites",
+  ])("rejects fractional ProductionEpisode count: %s", (counter) => {
+    const episode = readdress("episode", {
+      ...validProductionEpisode(),
+      sideEffectCounters: { ...ZERO_SIDE_EFFECT_BUDGET, [counter]: 0.5 },
+    });
+    expect(() => parser("parseProductionEpisode")(episode, PROJECT_ID)).toThrow(/integer/i);
+  });
+
+  test("allows fractional paidUsd on a ProductionEpisode", () => {
+    const episode = readdress("episode", {
+      ...validProductionEpisode(),
+      sideEffectCounters: { ...ZERO_SIDE_EFFECT_BUDGET, paidUsd: 0.5 },
+    });
+    expect(() => parser("parseProductionEpisode")(episode, PROJECT_ID)).not.toThrow();
+  });
+
+  test.each(Object.keys(ZERO_SIDE_EFFECT_BUDGET))(
+    "requires zero MatchedExperiment side-effect counter: %s",
+    (counter) => {
+      const experiment = readdress("experiment", {
+        ...validMatchedExperiment(),
+        sideEffectCounters: { ...ZERO_SIDE_EFFECT_BUDGET, [counter]: 1 },
+      });
+      expect(() => parser("parseMatchedExperiment")(experiment, PROJECT_ID)).toThrow(/zero/i);
+    },
+  );
+
+  test.each([
+    ["empty development", { developmentEpisodeRefs: [] }],
+    ["empty heldout", { heldoutEpisodeRefs: [] }],
+    ["empty unrelated", { unrelatedEpisodeRefs: [] }],
+    [
+      "overlapping splits",
+      { heldoutEpisodeRefs: validMatchedExperiment().developmentEpisodeRefs },
+    ],
+    [
+      "same variants",
+      { candidateVariantId: validMatchedExperiment().controlVariantId },
+    ],
+  ])("rejects invalid MatchedExperiment partitions: %s", (_name, override) => {
+    const experiment = readdress("experiment", { ...validMatchedExperiment(), ...override });
+    expect(() => parser("parseMatchedExperiment")(experiment, PROJECT_ID)).toThrow();
+  });
+
+  test.each(["promote", "reject", "rollback"])(
+    "rejects executable MatchedExperiment outcome %s",
+    (outcome) => {
+      const experiment = readdress("experiment", { ...validMatchedExperiment(), outcome });
+      expect(() => parser("parseMatchedExperiment")(experiment, PROJECT_ID)).toThrow(/outcome/i);
+    },
+  );
+
+  test("accepts all non-executing MatchedExperiment outcomes", () => {
+    for (const outcome of [
+      "pending",
+      "candidate_wins",
+      "control_wins",
+      "inconclusive",
+      "invalid",
+    ]) {
+      const experiment = readdress("experiment", { ...validMatchedExperiment(), outcome });
+      expect(() => parser("parseMatchedExperiment")(experiment, PROJECT_ID)).not.toThrow();
+    }
+  });
+
+  test("rejects model targets and escaping HarnessVariant paths", () => {
+    const modelVariant = readdress("variant", {
+      ...validHarnessVariant("candidate"),
+      evolutionTargets: ["artifact", "model"],
+    });
+    const escapingVariant = readdress("variant", {
+      ...validHarnessVariant("candidate"),
+      changedPaths: ["../production/policy.json"],
+    });
+    expect(() => parser("parseHarnessVariant")(modelVariant, PROJECT_ID)).toThrow(/model|target/i);
+    expect(() => parser("parseHarnessVariant")(escapingVariant, PROJECT_ID)).toThrow(
+      /project-relative|path/i,
+    );
+  });
+
+  test.each([
+    ["profile", "registeredAt", "parseEvolutionProfile", validEvolutionProfile],
+    ["episode", "observedAt", "parseProductionEpisode", validProductionEpisode],
+    ["receipt", "appliedAt", "parseDraftPromotionReceipt", validPromotionReceipt],
+  ])("requires strict UTC ISO time on %s", (kind, field, parserName, makeRecord) => {
+    for (const timestamp of [
+      "2026-08-09 01:02:03Z",
+      "2026-08-09T01:02:03+08:00",
+      "2026-02-30T01:02:03Z",
+      " padded ",
+    ]) {
+      const record = readdress(kind as EvolutionRecordKind, {
+        ...(makeRecord() as Record<string, unknown>),
+        [field]: timestamp,
+      });
+      expect(() => runtimeRecordParser(parserName)(record, PROJECT_ID)).toThrow(/UTC|ISO|timestamp/i);
+    }
+  });
+
+  test("binds privacy review hashes to the exact ProductionEpisode snapshots", () => {
+    const episode = validProductionEpisode();
+    const mismatched = readdress("episode", {
+      ...episode,
+      privacyReview: {
+        ...(episode.privacyReview as Record<string, unknown>),
+        inputSnapshotSha256: SHA_C,
+      },
+    });
+    expect(() => parser("parseProductionEpisode")(mismatched, PROJECT_ID)).toThrow(
+      /privacyReview.*inputSnapshotSha256|match/i,
+    );
+    for (const privacyMutation of [
+      { status: "pending" },
+      { surprise: true },
+      { evidenceRefs: [] },
+    ]) {
+      const invalid = readdress("episode", {
+        ...episode,
+        privacyReview: {
+          ...(episode.privacyReview as Record<string, unknown>),
+          ...privacyMutation,
+        },
+      });
+      expect(() => parser("parseProductionEpisode")(invalid, PROJECT_ID)).toThrow();
+    }
+  });
+
+  test.each(["derived-confidential", "private", "restricted-secret"])(
+    "rejects unsupported privacy data classification %s",
+    (dataClassification) => {
+      const episode = validProductionEpisode();
+      const invalid = readdress("episode", {
+        ...episode,
+        privacyReview: { ...episode.privacyReview, dataClassification },
+      });
+      expect(() => parser("parseProductionEpisode")(invalid, PROJECT_ID)).toThrow(
+        /dataClassification/i,
+      );
+    },
+  );
+
+  test.each(["public", "internal", "confidential", "restricted"])(
+    "accepts privacy data classification %s",
+    (dataClassification) => {
+      const episode = validProductionEpisode();
+      const classified = readdress("episode", {
+        ...episode,
+        privacyReview: { ...episode.privacyReview, dataClassification },
+      });
+      expect(() => parser("parseProductionEpisode")(classified, PROJECT_ID)).not.toThrow();
+    },
+  );
+
+  test.each(["api_key_count", "secret-score", "score@raw"])(
+    "rejects unsafe ProductionEpisode metric key %s",
+    (metricKey) => {
+      const episode = readdress("episode", {
+        ...validProductionEpisode(),
+        metrics: { [metricKey]: 1 },
+      });
+      expect(() => parser("parseProductionEpisode")(episode, PROJECT_ID)).toThrow(
+        /metric|opaque|sensitive/i,
+      );
+    },
+  );
+
+  test.each(["secret_group", "group@raw"])(
+    "rejects unsafe ProductionEpisode leakageGroupId %s",
+    (leakageGroupId) => {
+      const episode = readdress("episode", {
+        ...validProductionEpisode(),
+        leakageGroupId,
+      });
+      expect(() => parser("parseProductionEpisode")(episode, PROJECT_ID)).toThrow(
+        /leakageGroupId|sensitive|identifier/i,
+      );
+    },
+  );
+
+  test("requires receipt readback, canary evidence, and distinct variants", () => {
+    const receipt = validPromotionReceipt();
+    for (const override of [
+      { readbackEvidenceRefs: [] },
+      { canaryEvidenceRefs: [] },
+      { toVariantId: receipt.fromVariantId },
+    ]) {
+      const invalid = readdress("receipt", { ...receipt, ...override });
+      expect(() => draftParser("parseDraftPromotionReceipt")(invalid, PROJECT_ID)).toThrow();
+    }
+  });
+
+  test.each([
+    { authorizedDecisionRef: "decision:authorization-prod" },
+    { exactTargetRef: "target@production" },
+    { readbackEvidenceRefs: ["evidence:credential-prod"] },
+    { canaryEvidenceRefs: ["evidence:bearer-prod"] },
+    { rollbackPlanRef: "rollback:password-prod" },
+  ])("rejects unsafe refs in the internal draft PromotionReceipt", (override) => {
+    const receipt = readdress("receipt", { ...validPromotionReceipt(), ...override });
+    expect(() => draftParser("parseDraftPromotionReceipt")(receipt, PROJECT_ID)).toThrow(
+      /opaque|credential|sensitive|ref/i,
+    );
+  });
+
+  test("enforces runtime record capacity boundaries", () => {
+    const surfacesAtLimit = Array.from({ length: 100 }, (_, index) => `surface_${index}`);
+    const profileAtLimit = readdress("profile", {
+      ...validEvolutionProfile(),
+      allowedSurfaceIds: surfacesAtLimit,
+    });
+    expect(() => parser("parseEvolutionProfile")(profileAtLimit, PROJECT_ID)).not.toThrow();
+
+    const profileOverLimit = readdress("profile", {
+      ...validEvolutionProfile(),
+      allowedSurfaceIds: [...surfacesAtLimit, "surface_100"],
+    });
+    expect(() => parser("parseEvolutionProfile")(profileOverLimit, PROJECT_ID)).toThrow(/at most/i);
+
+    const episodeAtLimit = readdress("episode", {
+      ...validProductionEpisode(),
+      sourceRef: `e:${"x".repeat(254)}`,
+      metrics: Object.fromEntries(Array.from({ length: 100 }, (_, index) => [`metric_${index}`, index])),
+    });
+    expect(() => parser("parseProductionEpisode")(episodeAtLimit, PROJECT_ID)).not.toThrow();
+
+    const episodeOverRefLimit = readdress("episode", {
+      ...validProductionEpisode(),
+      sourceRef: `e:${"x".repeat(255)}`,
+    });
+    expect(() => parser("parseProductionEpisode")(episodeOverRefLimit, PROJECT_ID)).toThrow(/at most/i);
+
+    const episodeOverMetricsLimit = readdress("episode", {
+      ...validProductionEpisode(),
+      metrics: Object.fromEntries(Array.from({ length: 101 }, (_, index) => [`metric_${index}`, index])),
+    });
+    expect(() => parser("parseProductionEpisode")(episodeOverMetricsLimit, PROJECT_ID)).toThrow(/at most/i);
   });
 });

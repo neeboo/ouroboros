@@ -5,12 +5,18 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
   applyHarnessAction,
+  canonicalEvolutionValueSha256,
   describeAuthorityEvaluation,
   describeIntegrationReadiness,
   evaluateAuthority,
+  expectedEvolutionRecordId,
   Harness,
   HARD_AUTHORITY_RULES,
   isHardAuthorityReason,
+  parseEvolutionProfile,
+  parseHarnessVariant,
+  parseMatchedExperiment,
+  parseProductionEpisode,
   withDatabase,
   type HarnessDatabase,
   type SubsessionRunner,
@@ -3596,6 +3602,53 @@ describe("Harness actions", () => {
     });
   });
 
+  test("redacts sensitive values from a parsed blocked generic action audit", () => {
+    const runId = harness.createRun({
+      goal: "Reject a stale sensitive amendment",
+      context: { goalContract: { version: 1 } },
+    });
+    const result = applyHarnessAction(harness, {
+      type: "amendRunContract",
+      runId,
+      contractKey: "goalContract",
+      value: {
+        Authorization: "Bearer authorization-secret",
+        token: "token-secret",
+        api_key: "api-key-secret",
+        diagnostic: "Bearer embedded-secret",
+        ordinary: "preserve this audit detail",
+      },
+      version: 1,
+      expectedVersion: 1,
+      reason: "retain ordinary amendment reason",
+    });
+    const event = harness.getHarnessActionEvent({ id: result.eventId });
+    const serializedEvent = JSON.stringify(event);
+
+    expect(result.status).toBe("blocked");
+    expect(event).toMatchObject({
+      actionType: "amendRunContract",
+      status: "blocked",
+      request: {
+        type: "amendRunContract",
+        runId,
+        contractKey: "goalContract",
+        reason: "retain ordinary amendment reason",
+        value: {
+          Authorization: "[REDACTED]",
+          token: "[REDACTED]",
+          api_key: "[REDACTED]",
+          diagnostic: expect.stringContaining("[REDACTED]"),
+          ordinary: "preserve this audit detail",
+        },
+      },
+    });
+    for (const secret of ["authorization-secret", "token-secret", "api-key-secret", "embedded-secret"]) {
+      expect(serializedEvent).not.toContain(secret);
+    }
+    expect(harness.getRun(runId)?.context.goalContract).toEqual({ version: 1 });
+  });
+
   test("rejects a non-monotonic contract amendment version", () => {
     const runId = harness.createRun({
       goal: "Reject non-monotonic amendment",
@@ -4065,13 +4118,14 @@ describe("Harness actions", () => {
       },
     };
 
+    const sensitivePrompt = "Inspect the protocol docs. Authorization: Bearer subsession-secret";
     const result = applyHarnessAction(
       harness,
       {
         type: "startSubsession",
         parentTaskId: taskId,
         purpose: "Research API contracts",
-        prompt: "Inspect the protocol docs and summarize the harness-managed subsession contract.",
+        prompt: sensitivePrompt,
         backend: "codex-resumable",
       },
       { subsessionRunner: runner },
@@ -4095,6 +4149,15 @@ describe("Harness actions", () => {
       kind: "subsession_thread",
       threadId: recordedThreadId,
     }));
+    expect(calls[0]?.prompt).toBe(sensitivePrompt);
+    const event = harness.getHarnessActionEvent({ id: result.eventId });
+    expect(event?.request).toMatchObject({
+      parentTaskId: taskId,
+      purpose: "Research API contracts",
+      prompt: expect.stringContaining("[REDACTED]"),
+      backend: "codex-resumable",
+    });
+    expect(JSON.stringify(event)).not.toContain("subsession-secret");
   });
 
   test("collectSubsessions and cancelSubsessions update recorded child thread evidence", () => {
@@ -5377,6 +5440,844 @@ describe("Founder charter authority evaluator", () => {
     // plain JSON-serializable data. The evaluator can be transported across a
     // process boundary without losing fidelity.
     expect(() => JSON.stringify(sample)).not.toThrow();
+  });
+});
+
+describe("Evolution runtime fixed actions", () => {
+  const SHA_A = "a".repeat(64);
+  const SHA_B = "b".repeat(64);
+  const SHA_C = "c".repeat(64);
+  const ZERO_SIDE_EFFECTS = {
+    paidUsd: 0,
+    realProviderCalls: 0,
+    pancatWrites: 0,
+    productionPublishes: 0,
+    realAssetDeletes: 0,
+    crossProjectMemoryReads: 0,
+    crossProjectMemoryWrites: 0,
+  } as const;
+
+  let dir: string;
+  let harness: Harness;
+
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), "ouroboros-evolution-actions-"));
+    harness = new Harness(join(dir, "ouroboros.db"));
+    harness.init();
+  });
+
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  function addressed<T extends Record<string, unknown>>(
+    kind: "profile" | "episode" | "variant" | "experiment",
+    value: T,
+  ): T & { id: string } {
+    const { id: _ignored, ...body } = value;
+    return { ...body, id: expectedEvolutionRecordId(kind, body) } as T & { id: string };
+  }
+
+  function fixture() {
+    const projectId = harness.createProject({
+      id: "project_hodor_evolution_actions",
+      name: "Hodor",
+      rootPath: join(dir, "hodor"),
+    });
+    const charter = harness.createFounderCharter({
+      id: "charter_hodor_evolution_actions",
+      projectId,
+      mission: "Improve Hodor from bounded replay evidence.",
+      charter: {
+        mission: "Improve Hodor from bounded replay evidence.",
+        principles: ["No production side effects during shadow design."],
+        nonGoals: ["No model mutation."],
+      },
+      activate: true,
+    });
+    const pack = {
+      schemaVersion: 1 as const,
+      id: "pack_hodor_evolution_actions",
+      targetSystemId: "hodor",
+      version: 1,
+      knowledgeScope: `project:${projectId}` as const,
+      objective: {
+        charterId: charter.id,
+        domainOutcomes: ["Reduce spatial-risk false positives."],
+        nonGoals: ["No production mutation."],
+      },
+      observation: {
+        signalSources: [{ id: "hodor_replay", kind: "domain-metric" as const }],
+      },
+      mutationSurfaces: [
+        {
+          id: "surface_policy",
+          evolutionTarget: "artifact" as const,
+          layer: "policy" as const,
+          projectId,
+          allowedPaths: ["config/evolution/**"],
+          forbiddenPaths: ["config/evolution/forbidden/**"],
+          owner: "target" as const,
+        },
+        {
+          id: "surface_harness",
+          evolutionTarget: "harness" as const,
+          layer: "workflow" as const,
+          projectId,
+          allowedPaths: ["evals/evolution/**"],
+          forbiddenPaths: ["evals/evolution/secrets/**"],
+          owner: "ouroboros" as const,
+        },
+      ],
+      experimentPolicy: {
+        controlRequired: true as const,
+        holdoutRequired: true as const,
+        unrelatedRegressionRequired: true as const,
+        equalBudgetRequired: true as const,
+        maxCandidates: 1,
+      },
+      promotionPolicy: {
+        guardMetrics: ["blocking-safety regressions"],
+        observationWindow: "Frozen before any later shadow execution.",
+        rollback: "A later authorized receipt must name exact rollback evidence.",
+      },
+      handoff: {
+        maturity: "designed" as const,
+        targetOwner: "hodor",
+        requiredCapabilities: ["Immutable replay evidence."],
+      },
+      portability: {
+        projectLocalRules: ["Hodor evidence remains project local."],
+        genericizationEvidence: [],
+      },
+    };
+    const comparison = {
+      controlRef: "hodor_policy_control_v1",
+      developmentEvidenceRefs: ["episode:hodor:development:001"],
+      holdoutEvidenceRefs: ["episode:hodor:heldout:001"],
+      unrelatedEvidenceRefs: ["episode:hodor:unrelated:001"],
+      corpusSnapshotSha256: SHA_A,
+      equalBudget: {
+        model: "fixture-replay-no-provider",
+        reasoningEffort: "high" as const,
+        wallClockMs: 120_000,
+        maxAttempts: 1,
+        maxTokens: 20_000,
+        toolPolicySha256: SHA_B,
+        concurrency: 1,
+      },
+      primaryMetric: "spatial-risk false-positive rate",
+      minimumUplift: 0.05,
+      maximumGuardRegression: 0,
+    };
+    const packHash = canonicalEvolutionValueSha256(pack);
+    const proposal = harness.createDesignProposal({
+      id: "design_hodor_evolution_actions",
+      projectId,
+      charterId: charter.id,
+      title: "Instrument Hodor evolution evidence",
+      problem: "Hodor lacks immutable matched evolution evidence.",
+      recommendation: "Activate an instrumented profile and freeze a shadow experiment specification.",
+      status: "accepted",
+      proposal: {
+        problem: "Hodor lacks immutable matched evolution evidence.",
+        recommendation: "Activate an instrumented profile and freeze a shadow experiment specification.",
+        evolutionPack: pack,
+        causalHypothesis: {
+          failureClass: "domain-hypothesis",
+          mechanism: "A bounded policy and harness variant can reduce replay false positives.",
+          predictedEffects: ["Development replay improves."],
+          disconfirmingEvidence: ["Heldout or unrelated guards regress."],
+        },
+        evaluationContract: {
+          baseline: [comparison.controlRef],
+          successMetrics: [comparison.primaryMetric],
+          guardMetrics: [...pack.promotionPolicy.guardMetrics],
+          requiredEvidence: ["transactional readback"],
+          comparison,
+        },
+        investment: { reversibility: "easy", portfolio: "exploration", oneTimeCost: 0, recurringCost: 0 },
+      },
+    });
+    const authorityDecision = harness.recordDesignDecision({
+      id: "decision_hodor_evolution_actions",
+      proposalId: proposal.id,
+      charterId: charter.id,
+      decision: "approved",
+      actorKind: "auto",
+      actorRef: "authority-evaluator",
+      reasons: ["Zero-spend bounded instrumentation."],
+      authority: { disposition: "automatic" },
+    });
+    const runId = harness.createRun({
+      id: "run_hodor_evolution_actions",
+      projectId,
+      goal: "Freeze Hodor instrumented evolution evidence.",
+      context: {
+        source: "design",
+        designProposalId: proposal.id,
+        designDecisionId: authorityDecision.id,
+        designCharterId: charter.id,
+        designProposal: proposal.proposal,
+        designEvaluationContract: proposal.proposal.evaluationContract,
+        evolutionPack: pack,
+        causalHypothesis: proposal.proposal.causalHypothesis,
+        comparison,
+        evolutionInstance: {
+          schemaVersion: 1,
+          mode: "design-target",
+          kernelProjectId: "project_ouroboros_kernel",
+          targetProjectId: projectId,
+          cycle: { kind: "bootstrap", index: 1 },
+          pack: { id: pack.id, version: pack.version, contentSha256: packHash },
+        },
+        evolutionComparison: comparison,
+      },
+    });
+    const profile = parseEvolutionProfile(addressed("profile", {
+      schemaVersion: 1 as const,
+      projectId,
+      pack: { id: pack.id, version: pack.version, contentSha256: packHash },
+      charter: {
+        id: charter.id,
+        version: charter.version,
+        contentSha256: canonicalEvolutionValueSha256(charter.charter),
+      },
+      runtimeMaturity: "declared",
+      allowedSurfaceIds: pack.mutationSurfaces.map((surface) => surface.id),
+      registeredAt: "2026-08-09T08:00:00.000Z",
+    }), projectId);
+    const episode = (
+      split: "development" | "heldout" | "unrelated",
+      marker: string = split,
+      override: Record<string, unknown> = {},
+    ) => {
+      const sourceRefs = {
+        development: comparison.developmentEvidenceRefs,
+        heldout: comparison.holdoutEvidenceRefs,
+        unrelated: comparison.unrelatedEvidenceRefs,
+      };
+      const inputSnapshotSha256 = typeof override.inputSnapshotSha256 === "string"
+        ? override.inputSnapshotSha256
+        : canonicalEvolutionValueSha256({ input: marker });
+      const outcomeSnapshotSha256 = typeof override.outcomeSnapshotSha256 === "string"
+        ? override.outcomeSnapshotSha256
+        : canonicalEvolutionValueSha256({ outcome: marker });
+      const {
+        inputSnapshotSha256: _inputOverride,
+        outcomeSnapshotSha256: _outcomeOverride,
+        privacyReview: _privacyOverride,
+        ...otherOverrides
+      } = override;
+      const privacyTaskId = harness.createTask({
+        runId,
+        role: "verifier",
+        goal: `Review privacy for ${marker}`,
+        prompt: "Verify the hashed replay episode without exposing raw content.",
+      });
+      const privacyAttemptId = harness.recordAttempt({
+        taskId: privacyTaskId,
+        input: { executor: "test" },
+        output: {
+          status: "done",
+          summary: `Approved privacy review for ${marker}`,
+          checks: [{ name: "privacy policy", status: "passed" }],
+          artifacts: [{
+            kind: "privacy_review",
+            status: "approved",
+            policySha256: SHA_C,
+            dataClassification: "confidential",
+            retentionPolicyRef: "retention:test-only",
+            inputSnapshotSha256,
+            outcomeSnapshotSha256,
+          }],
+          problems: [],
+        },
+      });
+      const privacyReceiptRef = `attempt:${privacyAttemptId}`;
+      return parseProductionEpisode(addressed("episode", {
+        schemaVersion: 1 as const,
+        projectId,
+        profileId: profile.id,
+        sourceRef: sourceRefs[split][0],
+        leakageGroupId: `leakage_${marker}`,
+        observedAt: "2026-08-09T08:01:00.000Z",
+        policyRef: "policy_hodor_replay_v1",
+        metrics: split === "heldout" ? {} : { falsePositiveRate: 0.1 },
+        sideEffectCounters: ZERO_SIDE_EFFECTS,
+        evidenceRefs: split === "heldout" ? [privacyReceiptRef] : [`evidence:${marker}`],
+        privacyReview: {
+          status: "approved",
+          policySha256: SHA_C,
+          reviewerRef: privacyReceiptRef,
+          dataClassification: "confidential",
+          retentionPolicyRef: "retention:test-only",
+          inputSnapshotSha256,
+          outcomeSnapshotSha256,
+          evidenceRefs: split === "heldout" ? [privacyReceiptRef] : [`privacy:${marker}`],
+        },
+        ...otherOverrides,
+        inputSnapshotSha256,
+        outcomeSnapshotSha256,
+      }), projectId);
+    };
+    const control = parseHarnessVariant(addressed("variant", {
+      schemaVersion: 1 as const,
+      projectId,
+      profileId: profile.id,
+      role: "control",
+      evolutionTargets: ["artifact"],
+      contentSha256: SHA_A,
+      mutationSurfaceIds: ["surface_policy"],
+      changedPaths: ["config/evolution/control.json"],
+      toolPolicySha256: SHA_B,
+      createdFromEvidenceRefs: [comparison.controlRef],
+    }), projectId);
+    const candidate = parseHarnessVariant(addressed("variant", {
+      schemaVersion: 1 as const,
+      projectId,
+      profileId: profile.id,
+      role: "candidate",
+      evolutionTargets: ["harness"],
+      contentSha256: SHA_C,
+      mutationSurfaceIds: ["surface_harness"],
+      changedPaths: ["evals/evolution/candidate.test.ts"],
+      toolPolicySha256: SHA_B,
+      createdFromEvidenceRefs: [...comparison.developmentEvidenceRefs],
+    }), projectId);
+    const development = episode("development");
+    const heldout = episode("heldout");
+    const unrelated = episode("unrelated");
+    const experiment = parseMatchedExperiment(addressed("experiment", {
+      schemaVersion: 1 as const,
+      projectId,
+      profileId: profile.id,
+      controlVariantId: control.id,
+      candidateVariantId: candidate.id,
+      developmentEpisodeRefs: [development.id],
+      heldoutEpisodeRefs: [heldout.id],
+      unrelatedEpisodeRefs: [unrelated.id],
+      corpusSnapshotSha256: comparison.corpusSnapshotSha256,
+      equalBudget: comparison.equalBudget,
+      primaryMetric: comparison.primaryMetric,
+      guardMetrics: pack.promotionPolicy.guardMetrics,
+      sideEffectCounters: ZERO_SIDE_EFFECTS,
+      outcome: "pending",
+      evidenceRefs: ["evidence:experiment-spec"],
+    }), projectId);
+    return {
+      projectId,
+      charter,
+      proposal,
+      authorityDecision,
+      pack,
+      comparison,
+      runId,
+      profile,
+      episode,
+      development,
+      heldout,
+      unrelated,
+      control,
+      candidate,
+      experiment,
+    };
+  }
+
+  function applyDeclaredGraph(graph: ReturnType<typeof fixture>) {
+    const results = [
+      applyHarnessAction(harness, { type: "registerEvolutionProfile", runId: graph.runId, profile: graph.profile }),
+      applyHarnessAction(harness, { type: "registerHarnessVariant", runId: graph.runId, variant: graph.control }),
+      applyHarnessAction(harness, { type: "registerHarnessVariant", runId: graph.runId, variant: graph.candidate }),
+    ];
+    for (const result of results) {
+      expect(result.status, result.summary).toBe("done");
+      expect(result.artifacts[0]).toMatchObject({
+        externalEffectsApplied: false,
+        promotionApplied: false,
+        replayed: false,
+      });
+    }
+    return results;
+  }
+
+  function createEquivalentDesignRun(graph: ReturnType<typeof fixture>, marker: string) {
+    const proposal = harness.createDesignProposal({
+      id: `design_hodor_evolution_actions_${marker}`,
+      projectId: graph.projectId,
+      charterId: graph.charter.id,
+      title: `Equivalent evolution design ${marker}`,
+      problem: graph.proposal.problem,
+      recommendation: graph.proposal.recommendation,
+      status: "accepted",
+      proposal: graph.proposal.proposal,
+    });
+    const decision = harness.recordDesignDecision({
+      id: `decision_hodor_evolution_actions_${marker}`,
+      proposalId: proposal.id,
+      charterId: graph.charter.id,
+      decision: "approved",
+      actorKind: "auto",
+      actorRef: "authority-evaluator",
+      reasons: ["Equivalent content still requires independent authority provenance."],
+      authority: { disposition: "automatic" },
+    });
+    const sourceRun = harness.getRun(graph.runId)!;
+    const runId = harness.createRun({
+      id: `run_hodor_evolution_actions_${marker}`,
+      projectId: graph.projectId,
+      goal: `Exercise equivalent design ${marker}.`,
+      context: {
+        ...sourceRun.context,
+        designProposalId: proposal.id,
+        designDecisionId: decision.id,
+        designProposal: proposal.proposal,
+      },
+    });
+    return { proposal, decision, runId };
+  }
+
+  test("records the declared profile and variants with exact provenance and same-design replay", () => {
+    const graph = fixture();
+    applyDeclaredGraph(graph);
+
+    expect(harness.getEvolutionProfile({ projectId: graph.projectId, id: graph.profile.id })).toEqual(graph.profile);
+    expect(harness.getHarnessVariant({ projectId: graph.projectId, id: graph.candidate.id })).toEqual(graph.candidate);
+    expect(harness.getProductionEpisode({ projectId: graph.projectId, id: graph.development.id })).toBeNull();
+    expect(harness.getMatchedExperiment({ projectId: graph.projectId, id: graph.experiment.id })).toBeNull();
+
+    const replay = applyHarnessAction(harness, {
+      type: "registerHarnessVariant",
+      runId: graph.runId,
+      variant: graph.candidate,
+    });
+    expect(replay).toMatchObject({ status: "done", actionType: "registerHarnessVariant" });
+    expect(replay.artifacts[0]).toMatchObject({
+      replayed: true,
+      externalEffectsApplied: false,
+      promotionApplied: false,
+    });
+    const event = harness.getHarnessActionEvent({ id: replay.eventId });
+    expect(event).toMatchObject({
+      actionType: "registerHarnessVariant",
+      status: "done",
+      request: {
+        type: "registerHarnessVariant",
+        runId: graph.runId,
+        entityKind: "variant",
+        recordId: graph.candidate.id,
+        recordSha256: canonicalEvolutionValueSha256(
+          Object.fromEntries(Object.entries(graph.candidate).filter(([key]) => key !== "id")),
+        ),
+      },
+      result: expect.objectContaining({ summary: replay.summary }),
+    });
+    expect(event?.request).not.toHaveProperty("variant");
+
+    const receipts = withDatabase(harness.dbPath, (db) => db.query(`
+      select record_kind, design_proposal_id, design_decision_id, design_charter_id
+      from evolution_action_receipts
+      where project_id = $projectId
+      order by created_at, action_event_id
+    `).all({ $projectId: graph.projectId })) as Array<Record<string, unknown>>;
+    expect(receipts).toHaveLength(4);
+    for (const receipt of receipts) {
+      expect(receipt).toMatchObject({
+        design_proposal_id: graph.proposal.id,
+        design_decision_id: graph.authorityDecision.id,
+        design_charter_id: graph.charter.id,
+      });
+    }
+  });
+
+  test("blocks episode and variant references to a profile recorded without a fixed-action receipt", () => {
+    const graph = fixture();
+    harness.recordEvolutionProfile(graph.profile);
+
+    const episode = applyHarnessAction(harness, {
+      type: "recordProductionEpisode",
+      runId: graph.runId,
+      episode: graph.development,
+    });
+    const variant = applyHarnessAction(harness, {
+      type: "registerHarnessVariant",
+      runId: graph.runId,
+      variant: graph.control,
+    });
+
+    expect(episode.status, episode.summary).toBe("blocked");
+    expect(variant.status, variant.summary).toBe("blocked");
+    expect(episode.problems.join(" ")).toMatch(/receipt/i);
+    expect(variant.problems.join(" ")).toMatch(/receipt/i);
+    expect(harness.getProductionEpisode({ projectId: graph.projectId, id: graph.development.id })).toBeNull();
+    expect(harness.getHarnessVariant({ projectId: graph.projectId, id: graph.control.id })).toBeNull();
+  });
+
+  test("accepts multiple consistent profile receipts from sequential replay", () => {
+    const graph = fixture();
+    for (let index = 0; index < 2; index += 1) {
+      expect(applyHarnessAction(harness, {
+        type: "registerEvolutionProfile",
+        runId: graph.runId,
+        profile: graph.profile,
+      }).status).toBe("done");
+    }
+    const receiptCount = withDatabase(harness.dbPath, (db) => db.query(`
+      select count(*) as count
+      from evolution_action_receipts
+      where project_id = $projectId and record_kind = 'profile' and record_id = $recordId
+    `).get({
+      $projectId: graph.projectId,
+      $recordId: graph.profile.id,
+    }) as { count: number });
+    expect(receiptCount.count).toBe(2);
+
+    const result = applyHarnessAction(harness, {
+      type: "registerHarnessVariant",
+      runId: graph.runId,
+      variant: graph.control,
+    });
+    expect(result.status, result.summary).toBe("done");
+  });
+
+  test("rejects cross-design reuse of an identical record while preserving same-design replay", () => {
+    const graph = fixture();
+    expect(applyHarnessAction(harness, {
+      type: "registerEvolutionProfile",
+      runId: graph.runId,
+      profile: graph.profile,
+    }).status).toBe("done");
+    expect(applyHarnessAction(harness, {
+      type: "registerEvolutionProfile",
+      runId: graph.runId,
+      profile: graph.profile,
+    })).toMatchObject({
+      status: "done",
+      artifacts: [expect.objectContaining({ replayed: true })],
+    });
+
+    const secondDesign = createEquivalentDesignRun(graph, "second");
+    const profileReuse = applyHarnessAction(harness, {
+      type: "registerEvolutionProfile",
+      runId: secondDesign.runId,
+      profile: graph.profile,
+    });
+    expect(profileReuse.status).toBe("blocked");
+    expect(profileReuse.problems.join(" ")).toMatch(/proposal|decision|charter|provenance|receipt/i);
+
+    const episodeReuse = applyHarnessAction(harness, {
+      type: "recordProductionEpisode",
+      runId: secondDesign.runId,
+      episode: graph.development,
+    });
+    expect(episodeReuse.status).toBe("blocked");
+    expect(episodeReuse.problems.join(" ")).toMatch(/proposal|decision|charter|provenance|receipt/i);
+  });
+
+  test("blocks an experiment that references episodes recorded without fixed-action receipts", () => {
+    const graph = fixture();
+    expect(applyHarnessAction(harness, {
+      type: "registerEvolutionProfile", runId: graph.runId, profile: graph.profile,
+    }).status).toBe("done");
+    for (const episode of [graph.development, graph.heldout, graph.unrelated]) {
+      harness.recordProductionEpisode(episode);
+    }
+    for (const variant of [graph.control, graph.candidate]) {
+      expect(applyHarnessAction(harness, {
+        type: "registerHarnessVariant", runId: graph.runId, variant,
+      }).status).toBe("done");
+    }
+
+    const result = applyHarnessAction(harness, {
+      type: "freezeMatchedExperiment", runId: graph.runId, experiment: graph.experiment,
+    });
+    expect(result.status).toBe("blocked");
+    expect(result.problems.join(" ")).toMatch(/episode.*receipt|receipt.*episode/i);
+    expect(harness.getMatchedExperiment({ projectId: graph.projectId, id: graph.experiment.id })).toBeNull();
+  });
+
+  test("blocks an experiment that references variants recorded without fixed-action receipts", () => {
+    const graph = fixture();
+    expect(applyHarnessAction(harness, {
+      type: "registerEvolutionProfile", runId: graph.runId, profile: graph.profile,
+    }).status).toBe("done");
+    for (const episode of [graph.development, graph.heldout, graph.unrelated]) {
+      harness.recordProductionEpisode(episode);
+    }
+    harness.recordHarnessVariant(graph.control);
+    harness.recordHarnessVariant(graph.candidate);
+
+    const result = applyHarnessAction(harness, {
+      type: "freezeMatchedExperiment", runId: graph.runId, experiment: graph.experiment,
+    });
+    expect(result.status).toBe("blocked");
+    expect(result.problems.join(" ")).toMatch(/variant.*receipt|receipt.*variant/i);
+    expect(harness.getMatchedExperiment({ projectId: graph.projectId, id: graph.experiment.id })).toBeNull();
+  });
+
+  test("blocks when mutable run context duplicates drift from the accepted proposal", () => {
+    const graph = fixture();
+    harness.updateRun({
+      runId: graph.runId,
+      contextPatch: {
+        evolutionPack: { attacker: "context must not authorize actions" },
+        evolutionComparison: { attacker: "context must not authorize actions" },
+        evolutionInstance: { attacker: "context must not authorize actions" },
+      },
+    });
+    expect(applyHarnessAction(harness, {
+      type: "registerEvolutionProfile",
+      runId: graph.runId,
+      profile: graph.profile,
+    }).status).toBe("blocked");
+  });
+
+  test("requires design source, accepted proposal, matching frozen charter, and latest approved authority decision", () => {
+    const graph = fixture();
+    const scenarios = [
+      [{ source: "manual" }, { source: "design" }],
+      [{ designProposalId: "design_missing" }, { designProposalId: graph.proposal.id }],
+      [{ designCharterId: "charter_wrong" }, { designCharterId: graph.charter.id }],
+    ];
+    for (const [contextPatch, restorePatch] of scenarios) {
+      harness.updateRun({ runId: graph.runId, contextPatch });
+      const result = applyHarnessAction(harness, {
+        type: "registerEvolutionProfile",
+        runId: graph.runId,
+        profile: graph.profile,
+      });
+      expect(result.status, result.summary).toBe("blocked");
+      harness.updateRun({ runId: graph.runId, contextPatch: restorePatch });
+    }
+
+    harness.recordDesignDecision({
+      proposalId: graph.proposal.id,
+      charterId: graph.charter.id,
+      decision: "rejected",
+      actorKind: "governance",
+      actorRef: "governance-test",
+    });
+    const rejected = applyHarnessAction(harness, {
+      type: "registerEvolutionProfile",
+      runId: graph.runId,
+      profile: graph.profile,
+    });
+    expect(rejected.status).toBe("blocked");
+    expect(rejected.problems.join(" ")).toMatch(/decision|approved/i);
+  });
+
+  test("prevents context updates and contract amendments from replacing frozen design and evolution bindings", () => {
+    const graph = fixture();
+    for (const key of [
+      "source",
+      "projectId",
+      "designProposalId",
+      "designDecisionId",
+      "designProposal",
+      "designCharterId",
+      "evolutionPack",
+      "causalHypothesis",
+      "evolutionComparison",
+      "comparison",
+      "evolutionInstance",
+      "evaluationContract",
+      "designEvaluationContract",
+      "linearIntake",
+    ]) {
+      const result = applyHarnessAction(harness, {
+        type: "updateRunContext",
+        runId: graph.runId,
+        contextPatch: { [key]: "tampered" },
+      });
+      expect(result.status, key).toBe("blocked");
+      expect(harness.getRun(graph.runId)?.context[key]).not.toBe("tampered");
+
+      const amendment = applyHarnessAction(harness, {
+        type: "amendRunContract",
+        runId: graph.runId,
+        contractKey: key,
+        value: "tampered",
+        version: 1,
+        expectedVersion: 0,
+      });
+      expect(amendment.status, key).toBe("blocked");
+      expect(harness.getRun(graph.runId)?.context[key]).not.toBe("tampered");
+    }
+  });
+
+  test("rejects extra action fields and redacts credentials in the blocked audit", () => {
+    const graph = fixture();
+    const result = applyHarnessAction(harness, {
+      type: "registerEvolutionProfile",
+      runId: graph.runId,
+      profile: graph.profile,
+      authorization: "Bearer should-never-appear",
+    });
+    expect(result.status).toBe("blocked");
+    expect(result.actionType).toBe("invalid");
+    expect(harness.getEvolutionProfile({ projectId: graph.projectId, id: graph.profile.id })).toBeNull();
+    const event = harness.getHarnessActionEvent({ id: result.eventId });
+    expect(event?.request).toMatchObject({ authorization: "[REDACTED]" });
+    expect(JSON.stringify(event)).not.toContain("should-never-appear");
+  });
+
+  test("fails closed when the run is unbound or profile disagrees with frozen pack, instance, charter, or surfaces", () => {
+    const graph = fixture();
+    const unboundRunId = harness.createRun({ goal: "Unbound evolution run" });
+    const unbound = applyHarnessAction(harness, {
+      type: "registerEvolutionProfile",
+      runId: unboundRunId,
+      profile: graph.profile,
+    });
+    expect(unbound.status).toBe("blocked");
+    const foreignProjectId = harness.createProject({
+      id: "project_foreign_evolution_action",
+      name: "Foreign",
+      rootPath: join(dir, "foreign"),
+    });
+    const foreignRunId = harness.createRun({
+      projectId: foreignProjectId,
+      goal: "Must not record Hodor evolution state.",
+      context: harness.getRun(graph.runId)?.context,
+    });
+    const crossProject = applyHarnessAction(harness, {
+      type: "registerEvolutionProfile",
+      runId: foreignRunId,
+      profile: graph.profile,
+    });
+    expect(crossProject.status).toBe("blocked");
+
+    const invalidProfiles = [
+      addressed("profile", { ...graph.profile, runtimeMaturity: "prepared" }),
+      addressed("profile", {
+        ...graph.profile,
+        pack: { ...graph.profile.pack, contentSha256: SHA_C },
+      }),
+      addressed("profile", {
+        ...graph.profile,
+        charter: { ...graph.profile.charter, contentSha256: SHA_C },
+      }),
+      addressed("profile", { ...graph.profile, allowedSurfaceIds: ["surface_policy"] }),
+    ];
+    for (const profile of invalidProfiles) {
+      const result = applyHarnessAction(harness, {
+        type: "registerEvolutionProfile",
+        runId: graph.runId,
+        profile,
+      });
+      expect(result.status, result.summary).toBe("blocked");
+      expect(harness.getEvolutionProfile({ projectId: graph.projectId, id: profile.id })).toBeNull();
+    }
+  });
+
+  test("rejects episode sources outside the frozen comparison before any record write", () => {
+    const graph = fixture();
+    expect(applyHarnessAction(harness, {
+      type: "registerEvolutionProfile",
+      runId: graph.runId,
+      profile: graph.profile,
+    }).status).toBe("done");
+
+    const foreign = graph.episode("development", "foreign", {
+      sourceRef: "episode:foreign:development:999",
+    });
+    const rejected = applyHarnessAction(harness, {
+      type: "recordProductionEpisode",
+      runId: graph.runId,
+      episode: foreign,
+    });
+    expect(rejected.status).toBe("blocked");
+    expect(harness.getProductionEpisode({ projectId: graph.projectId, id: foreign.id })).toBeNull();
+  });
+
+  test("blocks perfect verifier artifacts through direct and HTTP actions until host-owned privacy receipts exist", async () => {
+    const graph = fixture();
+    expect(applyHarnessAction(harness, {
+      type: "registerEvolutionProfile",
+      runId: graph.runId,
+      profile: graph.profile,
+    }).status).toBe("done");
+
+    const direct = applyHarnessAction(harness, {
+      type: "recordProductionEpisode",
+      runId: graph.runId,
+      episode: graph.development,
+    });
+    expect(direct.status).toBe("blocked");
+    expect(direct.problems.join(" ")).toMatch(/host-owned privacy receipt capability.*not implemented/i);
+
+    const response = await handleHarnessActionRequest(
+      new Request("http://127.0.0.1/actions", {
+        method: "POST",
+        headers: { authorization: "Bearer evolution-test" },
+        body: JSON.stringify({
+          type: "recordProductionEpisode",
+          runId: graph.runId,
+          episode: graph.development,
+        }),
+      }),
+      { harness, token: "evolution-test" },
+    );
+    const body = await response.json() as { status: string; problems: string[] };
+    expect(response.status).toBe(422);
+    expect(body.status).toBe("blocked");
+    expect(body.problems.join(" ")).toMatch(/host-owned privacy receipt capability.*not implemented/i);
+
+    expect(harness.getProductionEpisode({ projectId: graph.projectId, id: graph.development.id })).toBeNull();
+    const episodeReceipts = withDatabase(harness.dbPath, (db) => db.query(`
+      select count(*) as count
+      from evolution_action_receipts
+      where project_id = $projectId and record_kind = 'episode'
+    `).get({ $projectId: graph.projectId }) as { count: number });
+    expect(episodeReceipts.count).toBe(0);
+    expect(harness.listHarnessActionEvents({ limit: 50 }).filter((event) =>
+      event.actionType === "recordProductionEpisode" && event.status === "done"
+    )).toHaveLength(0);
+  });
+
+  test("confines variants to frozen surfaces, paths, targets, and development-only candidate evidence", () => {
+    const graph = fixture();
+    expect(applyHarnessAction(harness, {
+      type: "registerEvolutionProfile",
+      runId: graph.runId,
+      profile: graph.profile,
+    }).status).toBe("done");
+
+    const invalidVariants = [
+      addressed("variant", { ...graph.candidate, mutationSurfaceIds: ["surface_missing"] }),
+      addressed("variant", { ...graph.candidate, changedPaths: ["src/escape.ts"] }),
+      addressed("variant", { ...graph.candidate, changedPaths: ["evals/evolution/secrets/token.json"] }),
+      addressed("variant", { ...graph.candidate, evolutionTargets: ["artifact"] }),
+      addressed("variant", {
+        ...graph.candidate,
+        createdFromEvidenceRefs: [...graph.comparison.holdoutEvidenceRefs],
+      }),
+    ];
+    for (const variant of invalidVariants) {
+      const result = applyHarnessAction(harness, {
+        type: "registerHarnessVariant",
+        runId: graph.runId,
+        variant,
+      });
+      expect(result.status, result.summary).toBe("blocked");
+      expect(harness.getHarnessVariant({ projectId: graph.projectId, id: variant.id })).toBeNull();
+    }
+  });
+
+  test("keeps matched experiments blocked while trusted production episode receipts are unavailable", () => {
+    const graph = fixture();
+    applyDeclaredGraph(graph);
+    for (const episode of [graph.development, graph.heldout, graph.unrelated]) {
+      harness.recordProductionEpisode(episode);
+    }
+    const result = applyHarnessAction(harness, {
+      type: "freezeMatchedExperiment",
+      runId: graph.runId,
+      experiment: graph.experiment,
+    });
+    expect(result.status).toBe("blocked");
+    expect(result.problems.join(" ")).toMatch(/episode.*receipt|receipt.*episode/i);
+    expect(harness.getMatchedExperiment({ projectId: graph.projectId, id: graph.experiment.id })).toBeNull();
   });
 });
 

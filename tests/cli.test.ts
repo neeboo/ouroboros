@@ -3,7 +3,15 @@ import { chmod, mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "n
 import { existsSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { homedir, tmpdir } from "node:os";
-import { checkpointDatabase, Harness, parseEvolutionInstance } from "../packages/harness/src";
+import {
+  applyHarnessAction,
+  canonicalEvolutionRecordSha256,
+  canonicalEvolutionValueSha256,
+  checkpointDatabase,
+  expectedEvolutionRecordId,
+  Harness,
+  parseEvolutionInstance,
+} from "../packages/harness/src";
 import { formatRunEvidence } from "../packages/cli/src/run-evidence";
 import { formatAttemptExplanation } from "../packages/cli/src/explain-attempt";
 import { formatRunGraph } from "../packages/cli/src/run-graph";
@@ -32,6 +40,10 @@ import {
 } from "../packages/cli/src/linear-intake";
 import { Database } from "bun:sqlite";
 import { defaultCodexBin } from "../packages/runner/src/executors/codex-bin";
+import {
+  listEvolutionRecords,
+  showEvolutionRecord,
+} from "../packages/cli/src/evolution-readback";
 
 async function snapshotDatabaseFilesystem(dbPath: string, dir: string) {
   const dbStat = await stat(dbPath);
@@ -64,6 +76,156 @@ describe("CLI", () => {
   afterEach(async () => {
     await rm(dir, { recursive: true, force: true });
   });
+
+  function createAcceptedEvolutionDesignSource(input: {
+    harness: Harness;
+    projectId: string;
+    charterId: string;
+    suffix: string;
+  }) {
+    const toolPolicySha256 = canonicalEvolutionValueSha256({
+      fixture: "evolution-readback-tool-policy",
+      suffix: input.suffix,
+    });
+    const pack = {
+      schemaVersion: 1 as const,
+      id: `pack_evolution_readback_${input.suffix}`,
+      targetSystemId: `target_evolution_readback_${input.suffix}`,
+      version: 1,
+      knowledgeScope: `project:${input.projectId}` as const,
+      objective: {
+        charterId: input.charterId,
+        domainOutcomes: ["Keep evolution evidence attributable."],
+        nonGoals: ["No production mutation."],
+      },
+      observation: {
+        signalSources: [{ id: "readback_fixture", kind: "domain-metric" as const }],
+      },
+      mutationSurfaces: [{
+        id: "surface.runtime",
+        evolutionTarget: "harness" as const,
+        layer: "workflow" as const,
+        projectId: input.projectId,
+        allowedPaths: ["runtime/**"],
+        forbiddenPaths: ["runtime/forbidden/**"],
+        owner: "ouroboros" as const,
+      }],
+      experimentPolicy: {
+        controlRequired: true as const,
+        holdoutRequired: true as const,
+        unrelatedRegressionRequired: true as const,
+        equalBudgetRequired: true as const,
+        maxCandidates: 1,
+      },
+      promotionPolicy: {
+        guardMetrics: ["no raw heldout references disclosed"],
+        observationWindow: "Frozen before shadow evaluation.",
+        rollback: "Retain the prior immutable profile receipt.",
+      },
+      handoff: {
+        maturity: "designed" as const,
+        targetOwner: "fixture",
+        requiredCapabilities: ["Read-only receipt verification."],
+      },
+      portability: {
+        projectLocalRules: ["Evidence remains project-local."],
+        genericizationEvidence: [],
+      },
+    };
+    const comparison = {
+      controlRef: `control:${input.suffix}`,
+      developmentEvidenceRefs: [`episode:${input.suffix}:development`],
+      holdoutEvidenceRefs: [`episode:${input.suffix}:heldout`],
+      unrelatedEvidenceRefs: [`episode:${input.suffix}:unrelated`],
+      corpusSnapshotSha256: canonicalEvolutionValueSha256({ corpus: input.suffix }),
+      equalBudget: {
+        model: "fixture-no-provider",
+        reasoningEffort: "high" as const,
+        wallClockMs: 120_000,
+        maxAttempts: 1,
+        maxTokens: 10_000,
+        toolPolicySha256,
+        concurrency: 1,
+      },
+      primaryMetric: "readback-integrity",
+      minimumUplift: 0,
+      maximumGuardRegression: 0,
+    };
+    const causalHypothesis = {
+      failureClass: "contract-mismatch" as const,
+      mechanism: "A frozen action receipt binds runtime evidence to its design authority.",
+      predictedEffects: ["Readback rejects unaudited records."],
+      disconfirmingEvidence: ["A manual event is accepted without a receipt."],
+    };
+    const proposal = input.harness.createDesignProposal({
+      id: `design_evolution_readback_${input.suffix}`,
+      projectId: input.projectId,
+      charterId: input.charterId,
+      title: `Evolution readback ${input.suffix}`,
+      problem: "Evolution records need an immutable design source.",
+      recommendation: "Bind the record receipt to the frozen design context.",
+      status: "accepted",
+      proposal: {
+        problem: "Evolution records need an immutable design source.",
+        recommendation: "Bind the record receipt to the frozen design context.",
+        evolutionPack: pack,
+        causalHypothesis,
+        evaluationContract: {
+          baseline: ["no immutable source receipt"],
+          successMetrics: ["source receipt readback is exact"],
+          guardMetrics: ["no raw heldout references disclosed"],
+          requiredEvidence: ["read-only receipt verification"],
+          comparison,
+        },
+        investment: {
+          reversibility: "easy",
+          portfolio: "core",
+          oneTimeCost: 0,
+          recurringCost: 0,
+        },
+      },
+    });
+    const decision = input.harness.recordDesignDecision({
+      id: `decision_evolution_readback_${input.suffix}`,
+      proposalId: proposal.id,
+      charterId: input.charterId,
+      decision: "approved",
+      actorKind: "auto",
+      actorRef: "authority-evaluator",
+      reasons: ["Zero-spend read-only evidence contract."],
+      authority: { disposition: "automatic" },
+    });
+    const packSha256 = canonicalEvolutionValueSha256(pack);
+    return {
+      designSource: {
+        designProposalId: proposal.id,
+        designDecisionId: decision.id,
+        designCharterId: input.charterId,
+      },
+      runContext: {
+        source: "design",
+        designProposalId: proposal.id,
+        designDecisionId: decision.id,
+        designCharterId: input.charterId,
+        designProposal: proposal.proposal,
+        designEvaluationContract: proposal.proposal.evaluationContract,
+        evolutionPack: pack,
+        causalHypothesis,
+        comparison,
+        evolutionComparison: comparison,
+        evolutionInstance: {
+          schemaVersion: 1,
+          mode: "design-target",
+          kernelProjectId: "project_ouroboros_kernel",
+          targetProjectId: input.projectId,
+          cycle: { kind: "bootstrap", index: 1 },
+          pack: { id: pack.id, version: pack.version, contentSha256: packSha256 },
+        },
+      },
+      pack,
+      comparison,
+    };
+  }
 
   test("creates a run, creates a task, and prints the next ready task", async () => {
     await runCli("init");
@@ -11739,6 +11901,829 @@ describe("CLI", () => {
     expect(overview.run.status).toBe("blocked");
     expect(overview.tasks[0].status).toBe("blocked");
     expect(todoRuns.some((todoRun: { id: string }) => todoRun.id === run.id)).toBe(false);
+  });
+
+  test("evolution record inspection reads trusted records and rejects unreceipted sensitive records without mutation", async () => {
+    const harness = new Harness(dbPath);
+    harness.init();
+    const project = {
+      id: harness.createProject({
+        name: "Evolution Readback Project",
+        rootPath: dir,
+      }),
+    };
+    const charter = harness.createFounderCharter({
+      id: "charter_evolution_readback_primary",
+      projectId: project.id,
+      mission: "Keep target evolution evidence bounded and attributable.",
+      charter: {
+        mission: "Keep target evolution evidence bounded and attributable.",
+        principles: ["Every runtime record has an immutable design source."],
+      },
+      activate: true,
+    });
+    const design = createAcceptedEvolutionDesignSource({
+      harness,
+      projectId: project.id,
+      charterId: charter.id,
+      suffix: "primary",
+    });
+    const { designSource, runContext, pack, comparison } = design;
+    const sourceRunId = harness.createRun({
+      projectId: project.id,
+      goal: "Record bounded evolution evidence",
+      context: runContext,
+    });
+    const retrySourceRunId = harness.createRun({
+      projectId: project.id,
+      goal: "Retry the same bounded evolution evidence",
+      context: runContext,
+    });
+    const sha = (digit: string) => digit.repeat(64);
+    const address = <T extends Record<string, unknown>>(
+      kind: "profile" | "episode" | "variant" | "experiment",
+      record: T,
+    ) => ({ ...record, id: expectedEvolutionRecordId(kind, record) });
+    const zeroSideEffects = {
+      paidUsd: 0,
+      realProviderCalls: 0,
+      pancatWrites: 0,
+      productionPublishes: 0,
+      realAssetDeletes: 0,
+      crossProjectMemoryReads: 0,
+      crossProjectMemoryWrites: 0,
+    };
+
+    const profile = address("profile", {
+      schemaVersion: 1,
+      projectId: project.id,
+      pack: { id: pack.id, version: pack.version, contentSha256: canonicalEvolutionValueSha256(pack) },
+      charter: {
+        id: charter.id,
+        version: charter.version,
+        contentSha256: canonicalEvolutionValueSha256(charter.charter),
+      },
+      runtimeMaturity: "declared",
+      allowedSurfaceIds: ["surface.runtime"],
+      registeredAt: "2026-08-09T08:00:00Z",
+    });
+    expect(applyHarnessAction(harness, {
+      type: "registerEvolutionProfile",
+      runId: sourceRunId,
+      profile,
+    }).status).toBe("done");
+
+    const makeEpisode = (
+      suffix: "development" | "heldout" | "unrelated",
+      snapshotDigit: string,
+    ) => address("episode", {
+      schemaVersion: 1,
+      projectId: project.id,
+      profileId: profile.id,
+      sourceRef: {
+        development: comparison.developmentEvidenceRefs[0],
+        heldout: comparison.holdoutEvidenceRefs[0],
+        unrelated: comparison.unrelatedEvidenceRefs[0],
+      }[suffix],
+      leakageGroupId: `hodor-${suffix}`,
+      observedAt: "2026-08-09T08:01:00Z",
+      inputSnapshotSha256: sha(snapshotDigit),
+      outcomeSnapshotSha256: sha(String(Number(snapshotDigit) + 1)),
+      policyRef: "policy:hodor-production-observation:v1",
+      metrics: { [`${suffix}CompletionRate`]: 0.75 },
+      sideEffectCounters: zeroSideEffects,
+      evidenceRefs: [`evidence:hodor:${suffix}`],
+      privacyReview: {
+        status: "approved",
+        policySha256: sha("9"),
+        reviewerRef: "privacy-review:local:v1",
+        dataClassification: "confidential",
+        retentionPolicyRef: "retention:30d",
+        inputSnapshotSha256: sha(snapshotDigit),
+        outcomeSnapshotSha256: sha(String(Number(snapshotDigit) + 1)),
+        evidenceRefs: [`privacy-evidence:hodor:${suffix}`],
+      },
+    });
+    const developmentEpisode = makeEpisode("development", "3");
+    const heldoutEpisode = makeEpisode("heldout", "5");
+    const unrelatedEpisode = makeEpisode("unrelated", "7");
+    for (const episode of [developmentEpisode, heldoutEpisode, unrelatedEpisode]) {
+      harness.recordProductionEpisode(episode);
+    }
+
+    const makeVariant = (role: "control" | "candidate", contentDigit: string) => address("variant", {
+      schemaVersion: 1,
+      projectId: project.id,
+      profileId: profile.id,
+      role,
+      evolutionTargets: ["harness"],
+      contentSha256: sha(contentDigit),
+      mutationSurfaceIds: ["surface.runtime"],
+      changedPaths: [`runtime/${role}.json`],
+      toolPolicySha256: comparison.equalBudget.toolPolicySha256,
+      createdFromEvidenceRefs: [developmentEpisode.sourceRef],
+    });
+    const controlVariant = makeVariant("control", "b");
+    const candidateVariant = makeVariant("candidate", "c");
+    for (const variant of [controlVariant, candidateVariant]) {
+      expect(applyHarnessAction(harness, {
+        type: "registerHarnessVariant",
+        runId: sourceRunId,
+        variant,
+      }).status).toBe("done");
+    }
+
+    const experiment = address("experiment", {
+      schemaVersion: 1,
+      projectId: project.id,
+      profileId: profile.id,
+      controlVariantId: controlVariant.id,
+      candidateVariantId: candidateVariant.id,
+      developmentEpisodeRefs: [developmentEpisode.id],
+      heldoutEpisodeRefs: [heldoutEpisode.id],
+      unrelatedEpisodeRefs: [unrelatedEpisode.id],
+      corpusSnapshotSha256: comparison.corpusSnapshotSha256,
+      equalBudget: comparison.equalBudget,
+      primaryMetric: comparison.primaryMetric,
+      guardMetrics: pack.promotionPolicy.guardMetrics,
+      sideEffectCounters: zeroSideEffects,
+      outcome: "pending",
+      evidenceRefs: ["experiment-spec:hodor:v1"],
+    });
+    harness.recordMatchedExperiment(experiment);
+    const actionFixtures = [
+      ["registerEvolutionProfile", "profile", "evolution_profile", profile],
+      ["registerHarnessVariant", "variant", "harness_variant", controlVariant],
+      ["registerHarnessVariant", "variant", "harness_variant", candidateVariant],
+    ] as const;
+    expect(applyHarnessAction(harness, {
+      type: "registerEvolutionProfile",
+      runId: retrySourceRunId,
+      profile,
+    }).status).toBe("done");
+
+    checkpointDatabase(dbPath);
+    await rm(`${dbPath}-wal`).catch(() => undefined);
+    await rm(`${dbPath}-shm`).catch(() => undefined);
+    await rm(`${dbPath}-journal`).catch(() => undefined);
+    await chmod(dir, 0o555);
+    await chmod(dbPath, 0o444);
+    try {
+      const before = await snapshotDatabaseFilesystem(dbPath, dir);
+      const records = [
+        ["profile", profile],
+        ["variant", candidateVariant],
+      ] as const;
+      const shownRecords = records.map(([kind, record]) => showEvolutionRecord({
+        harness,
+        dbPath,
+        kind,
+        projectId: project.id,
+        id: record.id,
+      }));
+      for (const [[kind, record], shown] of records.map((entry, index) => [entry, shownRecords[index]] as const)) {
+        expect(shown).toMatchObject({
+          kind,
+          projectId: project.id,
+          id: record.id,
+          record,
+          recordSha256: canonicalEvolutionRecordSha256(record),
+          actionAudit: {
+            actionType: actionFixtures.find((fixture) => fixture[1] === kind)?.[0],
+            status: "done",
+            sourceRunId: kind === "profile"
+              ? expect.stringMatching(new RegExp(`^(${sourceRunId}|${retrySourceRunId})$`))
+              : sourceRunId,
+            recordId: record.id,
+            projectId: project.id,
+            recordSha256: canonicalEvolutionRecordSha256(record),
+            receiptCount: kind === "profile" ? 2 : 1,
+            ...designSource,
+          },
+        });
+        expect(shown.actionAudit).not.toHaveProperty("request");
+        expect(shown.actionAudit).not.toHaveProperty("result");
+      }
+
+      let shownHeldoutText = "";
+      try {
+        showEvolutionRecord({
+          harness,
+          dbPath,
+          kind: "episode",
+          projectId: project.id,
+          id: heldoutEpisode.id,
+        });
+      } catch (error) {
+        shownHeldoutText = (error as Error).message;
+      }
+      expect(shownHeldoutText).toContain("evolution action audit receipt not found");
+      let shownExperimentError = "";
+      try {
+        showEvolutionRecord({
+          harness,
+          dbPath,
+          kind: "experiment",
+          projectId: project.id,
+          id: experiment.id,
+        });
+      } catch (error) {
+        shownExperimentError = (error as Error).message;
+      }
+      expect(shownHeldoutText).not.toContain(heldoutEpisode.sourceRef);
+      expect(shownHeldoutText).not.toContain(heldoutEpisode.leakageGroupId);
+      expect(shownHeldoutText).not.toContain("heldoutCompletionRate");
+      expect(shownHeldoutText).not.toContain(heldoutEpisode.evidenceRefs[0]);
+      expect(shownHeldoutText).not.toContain(heldoutEpisode.privacyReview.reviewerRef);
+      expect(shownHeldoutText).not.toContain(heldoutEpisode.privacyReview.retentionPolicyRef);
+      expect(shownHeldoutText).not.toContain(heldoutEpisode.privacyReview.evidenceRefs[0]);
+
+      expect(shownExperimentError).toContain("evolution action audit receipt not found");
+      expect(shownExperimentError).not.toContain(developmentEpisode.id);
+      expect(shownExperimentError).not.toContain(heldoutEpisode.id);
+      expect(shownExperimentError).not.toContain(unrelatedEpisode.id);
+      expect(shownExperimentError).not.toContain(experiment.evidenceRefs[0]);
+
+      const listKinds = ["profile", "variant"] as const;
+      const listedRecords = listKinds.map((kind) => listEvolutionRecords({
+        harness,
+        dbPath,
+        kind,
+        projectId: project.id,
+        profileId: kind === "profile" ? undefined : profile.id,
+      }));
+      for (const [index, kind] of listKinds.entries()) {
+        const listed = listedRecords[index];
+        expect(listed).toMatchObject({
+          kind,
+          projectId: project.id,
+          profileId: kind === "profile" ? null : profile.id,
+          totalCount: kind === "variant" ? 2 : 1,
+        });
+        expect(listed.records.every(
+          (entry: {
+            actionAudit?: {
+              status?: string;
+              receiptCount?: number;
+              designProposalId?: string;
+              designDecisionId?: string;
+              designCharterId?: string;
+            };
+          }) =>
+            entry.actionAudit?.status === "done"
+            && (entry.actionAudit.receiptCount === 1
+              || (kind === "profile" && entry.actionAudit.receiptCount === 2))
+            && entry.actionAudit.designProposalId === designSource.designProposalId
+            && entry.actionAudit.designDecisionId === designSource.designDecisionId
+            && entry.actionAudit.designCharterId === designSource.designCharterId,
+        )).toBe(true);
+      }
+      let listedEpisodesError = "";
+      try {
+        listEvolutionRecords({
+          harness,
+          dbPath,
+          kind: "episode",
+          projectId: project.id,
+          profileId: profile.id,
+        });
+      } catch (error) {
+        listedEpisodesError = (error as Error).message;
+      }
+      expect(listedEpisodesError).toContain("evolution action audit receipt not found");
+      expect(listedEpisodesError).not.toContain(heldoutEpisode.sourceRef);
+      let listedExperimentsError = "";
+      try {
+        listEvolutionRecords({
+          harness,
+          dbPath,
+          kind: "experiment",
+          projectId: project.id,
+          profileId: profile.id,
+        });
+      } catch (error) {
+        listedExperimentsError = (error as Error).message;
+      }
+      expect(listedExperimentsError).toContain("evolution action audit receipt not found");
+      expect(listedExperimentsError).not.toContain(developmentEpisode.id);
+      expect(listedExperimentsError).not.toContain(heldoutEpisode.id);
+      expect(listedExperimentsError).not.toContain(unrelatedEpisode.id);
+      const after = await snapshotDatabaseFilesystem(dbPath, dir);
+      expect(after.size).toBe(before.size);
+      expect(after.mtimeMs).toBe(before.mtimeMs);
+      expect(after.ctimeMs).toBe(before.ctimeMs);
+      expect(after.parentMode).toBe(before.parentMode);
+      expect(after.sidecars).toEqual(before.sidecars);
+      expect(after.dirEntries).toEqual(before.dirEntries);
+    } finally {
+      await chmod(dir, 0o755).catch(() => undefined);
+      await chmod(dbPath, 0o644).catch(() => undefined);
+    }
+  });
+
+  test("evolution fixed actions prevent cross-design receipts for one record", async () => {
+    const harness = new Harness(dbPath);
+    harness.init();
+    const projectId = harness.createProject({
+      name: "Cross-design Evolution Receipt Project",
+      rootPath: dir,
+    });
+    const charter = harness.createFounderCharter({
+      id: "charter_evolution_readback_cross_design",
+      projectId,
+      mission: "Keep evolution records bound to one design source.",
+      charter: { mission: "Keep evolution records bound to one design source." },
+      activate: true,
+    });
+    const firstDesign = createAcceptedEvolutionDesignSource({
+      harness,
+      projectId,
+      charterId: charter.id,
+      suffix: "cross_design_first",
+    });
+    const secondDesign = createAcceptedEvolutionDesignSource({
+      harness,
+      projectId,
+      charterId: charter.id,
+      suffix: "cross_design_second",
+    });
+    const firstRunId = harness.createRun({
+      projectId,
+      goal: "Record the first design receipt",
+      context: firstDesign.runContext,
+    });
+    const secondRunId = harness.createRun({
+      projectId,
+      goal: "Attempt a receipt from another design",
+      context: secondDesign.runContext,
+    });
+    const profileBody = {
+      schemaVersion: 1,
+      projectId,
+      pack: {
+        id: firstDesign.pack.id,
+        version: firstDesign.pack.version,
+        contentSha256: canonicalEvolutionValueSha256(firstDesign.pack),
+      },
+      charter: {
+        id: charter.id,
+        version: charter.version,
+        contentSha256: canonicalEvolutionValueSha256(charter.charter),
+      },
+      runtimeMaturity: "declared",
+      allowedSurfaceIds: firstDesign.pack.mutationSurfaces.map((surface) => surface.id),
+      registeredAt: "2026-08-09T10:00:00Z",
+    };
+    const profile = {
+      ...profileBody,
+      id: expectedEvolutionRecordId("profile", profileBody),
+    };
+    const firstResult = applyHarnessAction(harness, {
+      type: "registerEvolutionProfile",
+      runId: firstRunId,
+      profile,
+    });
+    expect(firstResult.status).toBe("done");
+    const secondResult = applyHarnessAction(harness, {
+      type: "registerEvolutionProfile",
+      runId: secondRunId,
+      profile,
+    });
+    expect(secondResult.status).toBe("blocked");
+    expect(secondResult.problems.join(" ")).toContain("authorization provenance mismatch");
+    checkpointDatabase(dbPath);
+
+    expect(showEvolutionRecord({
+      harness,
+      dbPath,
+      kind: "profile",
+      projectId,
+      id: profile.id,
+    }).actionAudit).toMatchObject({
+      ...firstDesign.designSource,
+      receiptCount: 1,
+    });
+    expect(listEvolutionRecords({
+      harness,
+      dbPath,
+      kind: "profile",
+      projectId,
+    }).records[0].actionAudit).toMatchObject({
+      ...firstDesign.designSource,
+      receiptCount: 1,
+    });
+  });
+
+  test("evolution record inspection rejects a receipt after its source run design context drifts", async () => {
+    const harness = new Harness(dbPath);
+    harness.init();
+    const projectId = harness.createProject({
+      name: "Drifted Evolution Receipt Project",
+      rootPath: dir,
+    });
+    const charter = harness.createFounderCharter({
+      id: "charter_evolution_readback_drift",
+      projectId,
+      mission: "Keep receipt source context immutable in meaning.",
+      charter: { mission: "Keep receipt source context immutable in meaning." },
+      activate: true,
+    });
+    const originalDesign = createAcceptedEvolutionDesignSource({
+      harness,
+      projectId,
+      charterId: charter.id,
+      suffix: "drift_original",
+    });
+    const replacementDesign = createAcceptedEvolutionDesignSource({
+      harness,
+      projectId,
+      charterId: charter.id,
+      suffix: "drift_replacement",
+    });
+    const runId = harness.createRun({
+      projectId,
+      goal: "Record one trusted profile receipt",
+      context: originalDesign.runContext,
+    });
+    const profileBody = {
+      schemaVersion: 1,
+      projectId,
+      pack: {
+        id: originalDesign.pack.id,
+        version: originalDesign.pack.version,
+        contentSha256: canonicalEvolutionValueSha256(originalDesign.pack),
+      },
+      charter: {
+        id: charter.id,
+        version: charter.version,
+        contentSha256: canonicalEvolutionValueSha256(charter.charter),
+      },
+      runtimeMaturity: "declared",
+      allowedSurfaceIds: originalDesign.pack.mutationSurfaces.map((surface) => surface.id),
+      registeredAt: "2026-08-09T10:01:00Z",
+    };
+    const profile = {
+      ...profileBody,
+      id: expectedEvolutionRecordId("profile", profileBody),
+    };
+    expect(applyHarnessAction(harness, {
+      type: "registerEvolutionProfile",
+      runId,
+      profile,
+    }).status).toBe("done");
+    harness.updateRun({ runId, contextPatch: replacementDesign.designSource });
+    checkpointDatabase(dbPath);
+
+    expect(() => showEvolutionRecord({
+      harness,
+      dbPath,
+      kind: "profile",
+      projectId,
+      id: profile.id,
+    })).toThrow("receipt design source does not match source run frozen context");
+    expect(() => listEvolutionRecords({
+      harness,
+      dbPath,
+      kind: "profile",
+      projectId,
+    })).toThrow("receipt design source does not match source run frozen context");
+  });
+
+  test("evolution record inspection fails closed for unknown kinds, records, and invalid profile filters", async () => {
+    const harness = new Harness(dbPath);
+    harness.init();
+    const project = {
+      id: harness.createProject({
+        name: "Evolution Validation Project",
+        rootPath: dir,
+      }),
+    };
+    const otherProject = {
+      id: harness.createProject({
+        name: "Other Evolution Project",
+        rootPath: join(dir, "other-project"),
+      }),
+    };
+    const missingReceiptProject = {
+      id: harness.createProject({
+        name: "Missing Evolution Receipt Project",
+        rootPath: join(dir, "missing-receipt-project"),
+      }),
+    };
+    const validSourceRunId = harness.createRun({ projectId: project.id, goal: "Valid audit source" });
+    const otherProjectRunId = harness.createRun({ projectId: otherProject.id, goal: "Foreign audit source" });
+    const profileBody = {
+      schemaVersion: 1,
+      projectId: project.id,
+      pack: { id: "pack_scope_v1", version: 1, contentSha256: "4".repeat(64) },
+      charter: { id: "charter_scope_v1", version: 1, contentSha256: "5".repeat(64) },
+      runtimeMaturity: "declared",
+      allowedSurfaceIds: ["surface.scope"],
+      registeredAt: "2026-08-09T09:00:00Z",
+    };
+    const profile = {
+      ...profileBody,
+      id: expectedEvolutionRecordId("profile", profileBody),
+    };
+    harness.recordEvolutionProfile(profile);
+    const missingRunProfileBody = {
+      ...profileBody,
+      registeredAt: "2026-08-09T09:01:00Z",
+    };
+    const missingRunProfile = {
+      ...missingRunProfileBody,
+      id: expectedEvolutionRecordId("profile", missingRunProfileBody),
+    };
+    harness.recordEvolutionProfile(missingRunProfile);
+    const foreignRunProfileBody = {
+      ...profileBody,
+      registeredAt: "2026-08-09T09:02:00Z",
+    };
+    const foreignRunProfile = {
+      ...foreignRunProfileBody,
+      id: expectedEvolutionRecordId("profile", foreignRunProfileBody),
+    };
+    harness.recordEvolutionProfile(foreignRunProfile);
+    const missingReceiptProfileBody = {
+      ...profileBody,
+      projectId: missingReceiptProject.id,
+      registeredAt: "2026-08-09T09:03:00Z",
+    };
+    const missingReceiptProfile = {
+      ...missingReceiptProfileBody,
+      id: expectedEvolutionRecordId("profile", missingReceiptProfileBody),
+    };
+    harness.recordEvolutionProfile(missingReceiptProfile);
+    const missingReceiptCharter = harness.createFounderCharter({
+      id: "charter_evolution_readback_missing_receipt",
+      projectId: missingReceiptProject.id,
+      mission: "Reject unaudited manual evolution events.",
+      charter: { mission: "Reject unaudited manual evolution events." },
+      activate: true,
+    });
+    const missingReceiptDesign = createAcceptedEvolutionDesignSource({
+      harness,
+      projectId: missingReceiptProject.id,
+      charterId: missingReceiptCharter.id,
+      suffix: "missing_receipt",
+    });
+    const missingReceiptRunId = harness.createRun({
+      projectId: missingReceiptProject.id,
+      goal: "Attempt a manual done event without a trusted receipt",
+      context: missingReceiptDesign.runContext,
+    });
+    const missingReceiptSha256 = canonicalEvolutionRecordSha256(missingReceiptProfile);
+    harness.recordHarnessActionEvent({
+      actionType: "registerEvolutionProfile",
+      status: "done",
+      request: {
+        type: "registerEvolutionProfile",
+        runId: missingReceiptRunId,
+        entityKind: "profile",
+        recordId: missingReceiptProfile.id,
+        recordSha256: missingReceiptSha256,
+      },
+      result: {
+        status: "done",
+        actionType: "registerEvolutionProfile",
+        artifacts: [{
+          kind: "evolution_profile",
+          entityKind: "profile",
+          recordId: missingReceiptProfile.id,
+          recordSha256: missingReceiptSha256,
+          projectId: missingReceiptProject.id,
+          sourceRunId: missingReceiptRunId,
+          externalEffectsApplied: false,
+          promotionApplied: false,
+          replayed: false,
+        }],
+      },
+    });
+    const insertForgedProfileActionEvent = (input: {
+      id: string;
+      runId: string;
+      profileId: string;
+      recordSha256: string;
+    }) => {
+      const database = new Database(dbPath);
+      try {
+        const request = {
+          type: "registerEvolutionProfile",
+          runId: input.runId,
+          entityKind: "profile",
+          recordId: input.profileId,
+          recordSha256: input.recordSha256,
+        };
+        const result = {
+          status: "done",
+          actionType: "registerEvolutionProfile",
+          artifacts: [{
+            kind: "evolution_profile",
+            entityKind: "profile",
+            recordId: input.profileId,
+            recordSha256: input.recordSha256,
+            projectId: project.id,
+            sourceRunId: input.runId,
+            externalEffectsApplied: false,
+            promotionApplied: false,
+            replayed: false,
+          }],
+        };
+        database.query(
+          `insert into harness_action_events
+           (id, action_type, status, request_json, result_json)
+           values ($id, 'registerEvolutionProfile', 'done', $requestJson, $resultJson)`,
+        ).run({
+          $id: input.id,
+          $requestJson: JSON.stringify(request),
+          $resultJson: JSON.stringify(result),
+        });
+      } finally {
+        database.close();
+      }
+    };
+    insertForgedProfileActionEvent({
+      id: "action_tampered_evolution_hash",
+      runId: validSourceRunId,
+      profileId: profile.id,
+      recordSha256: "f".repeat(64),
+    });
+    insertForgedProfileActionEvent({
+      id: "action_missing_evolution_run",
+      runId: "run_missing_audit_source",
+      profileId: missingRunProfile.id,
+      recordSha256: canonicalEvolutionRecordSha256(missingRunProfile),
+    });
+    insertForgedProfileActionEvent({
+      id: "action_foreign_evolution_run",
+      runId: otherProjectRunId,
+      profileId: foreignRunProfile.id,
+      recordSha256: canonicalEvolutionRecordSha256(foreignRunProfile),
+    });
+    checkpointDatabase(dbPath);
+    const unknownKindPromise = runCliRaw(
+      "show-evolution-record",
+      "--kind",
+      "receipt",
+      "--project-id",
+      project.id,
+      "--id",
+      `receipt_${"1".repeat(64)}`,
+      "--json",
+      "true",
+    );
+
+    const unknownRecordPromise = runCliRaw(
+      "show-evolution-record",
+      "--kind",
+      "profile",
+      "--project-id",
+      project.id,
+      "--id",
+      `profile_${"2".repeat(64)}`,
+      "--json",
+      "true",
+    );
+
+    const wrongProjectPromise = runCliRaw(
+      "show-evolution-record",
+      "--kind",
+      "profile",
+      "--project-id",
+      otherProject.id,
+      "--id",
+      profile.id,
+      "--json",
+      "true",
+    );
+
+    const tamperedAuditPromise = runCliRaw(
+      "show-evolution-record",
+      "--kind",
+      "profile",
+      "--project-id",
+      project.id,
+      "--id",
+      profile.id,
+      "--json",
+      "true",
+    );
+
+    const missingRunAuditPromise = runCliRaw(
+      "show-evolution-record",
+      "--kind",
+      "profile",
+      "--project-id",
+      project.id,
+      "--id",
+      missingRunProfile.id,
+      "--json",
+      "true",
+    );
+
+    const foreignRunAuditPromise = runCliRaw(
+      "show-evolution-record",
+      "--kind",
+      "profile",
+      "--project-id",
+      project.id,
+      "--id",
+      foreignRunProfile.id,
+      "--json",
+      "true",
+    );
+
+    const missingReceiptAuditPromise = runCliRaw(
+      "show-evolution-record",
+      "--kind",
+      "profile",
+      "--project-id",
+      missingReceiptProject.id,
+      "--id",
+      missingReceiptProfile.id,
+      "--json",
+      "true",
+    );
+
+    const missingReceiptListPromise = runCliRaw(
+      "list-evolution-records",
+      "--kind",
+      "profile",
+      "--project-id",
+      missingReceiptProject.id,
+      "--json",
+      "true",
+    );
+
+    const invalidFilterPromise = runCliRaw(
+      "list-evolution-records",
+      "--kind",
+      "profile",
+      "--project-id",
+      project.id,
+      "--profile-id",
+      `profile_${"3".repeat(64)}`,
+      "--json",
+      "true",
+    );
+
+    const missingJsonPromise = runCliRaw(
+      "list-evolution-records",
+      "--kind",
+      "profile",
+      "--project-id",
+      project.id,
+    );
+    const [
+      unknownKind,
+      unknownRecord,
+      wrongProject,
+      tamperedAudit,
+      missingRunAudit,
+      foreignRunAudit,
+      missingReceiptAudit,
+      missingReceiptList,
+      invalidFilter,
+      missingJson,
+    ] =
+      await Promise.all([
+        unknownKindPromise,
+        unknownRecordPromise,
+        wrongProjectPromise,
+        tamperedAuditPromise,
+        missingRunAuditPromise,
+        foreignRunAuditPromise,
+        missingReceiptAuditPromise,
+        missingReceiptListPromise,
+        invalidFilterPromise,
+        missingJsonPromise,
+      ]);
+    expect(unknownKind.exitCode).not.toBe(0);
+    expect(unknownKind.stderr).toContain("--kind must be profile, episode, variant, or experiment");
+    expect(unknownRecord.exitCode).not.toBe(0);
+    expect(unknownRecord.stderr).toContain("evolution profile record not found");
+    expect(wrongProject.exitCode).not.toBe(0);
+    expect(wrongProject.stderr).toContain(
+      `evolution profile record not found: ${profile.id} for project ${otherProject.id}`,
+    );
+    expect(tamperedAudit.exitCode).not.toBe(0);
+    expect(tamperedAudit.stderr).toContain("evolution action audit readback mismatch");
+    expect(missingRunAudit.exitCode).not.toBe(0);
+    expect(missingRunAudit.stderr).toContain("evolution action audit source run not found");
+    expect(foreignRunAudit.exitCode).not.toBe(0);
+    expect(foreignRunAudit.stderr).toContain("evolution action audit source run project mismatch");
+    expect(missingReceiptAudit.exitCode).not.toBe(0);
+    expect(missingReceiptAudit.stderr).toContain(
+      "matching done action event is missing its immutable evolution receipt",
+    );
+    expect(missingReceiptList.exitCode).not.toBe(0);
+    expect(missingReceiptList.stderr).toContain(
+      "matching done action event is missing its immutable evolution receipt",
+    );
+    expect(invalidFilter.exitCode).not.toBe(0);
+    expect(invalidFilter.stderr).toContain("--profile-id is not valid for profile records");
+    expect(missingJson.exitCode).not.toBe(0);
+    expect(missingJson.stderr).toContain("--json is required for evolution record inspection");
   });
 
   test("design-status prints concise charter, proposal, and outcome summaries", async () => {
