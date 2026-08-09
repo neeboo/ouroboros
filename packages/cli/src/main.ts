@@ -1034,6 +1034,24 @@ if (parsed.command === "help" || flag(parsed, "help") !== undefined) {
     );
     break;
   }
+  case "run-watchdog-pass": {
+    const nowFlag = flag(parsed, "now");
+    const rootRunId = required(parsed, "root-run-id");
+    const result = applyHarnessAction(harness, {
+      type: "runWatchdogPass",
+      rootRunId,
+      daemonIntervalMs: parsePositiveInteger(
+        flag(parsed, "daemon-interval-ms") ?? flag(parsed, "interval-ms") ?? "1500",
+        "--daemon-interval-ms",
+      ),
+      inboxEvents: readInboxEventsForWatchdog(),
+      scheduledReviews: readScheduledReviewsForWatchdog(rootRunId),
+      reason: flag(parsed, "reason") ?? "cli run-watchdog-pass",
+      ...(nowFlag ? { now: parsePositiveInteger(nowFlag, "--now") } : {}),
+    });
+    printJson(result);
+    break;
+  }
   case "run-evidence": {
     const runId = required(parsed, "run-id");
     const overview = harness.getRunOverview({
@@ -1308,6 +1326,7 @@ function printHelp() {
     "Inspection:",
     "  list-runs            List recent runs",
     "  run-overview         Print run state as JSON",
+    "  run-watchdog-pass    Run one durable control-plane watchdog pass for a root run",
     "  run-evidence         Print readable run evidence",
     "  run-graph            Print a compact task graph",
     "  run-threads          Print harness-managed subsession threads grouped by parent task",
@@ -2075,6 +2094,19 @@ async function superviseSelfImprovementDaemon(input: SelfImprovementDaemonInput)
           createdAt: new Date().toISOString(),
         };
       }
+      try {
+        const watchdogResult = applyHarnessAction(harness, {
+          type: "runWatchdogPass",
+          rootRunId: input.rootRunId,
+          daemonIntervalMs: input.intervalMs,
+          inboxEvents: readInboxEventsForWatchdog(),
+          scheduledReviews: readScheduledReviewsForWatchdog(input.rootRunId),
+          reason: "self-improvement.tick",
+        });
+        tick = { ...tick, watchdog: watchdogResult };
+      } catch (error) {
+        tick = { ...tick, watchdog: { error: cliErrorMessage(error) } };
+      }
       ticks.push(tick);
       input.onTick?.(tick);
       index += 1;
@@ -2726,6 +2758,29 @@ function selfImprovementRuns(rootRunId: string) {
     }
   }
   return allRuns.filter((run) => included.has(run.id));
+}
+
+function readInboxEventsForWatchdog() {
+  return harness.listInboxEvents({ limit: 50 }).map((event) => ({
+    id: event.id,
+    status: event.status,
+    provider: event.provider,
+    eventType: event.eventType,
+  }));
+}
+
+function readScheduledReviewsForWatchdog(rootRunId: string) {
+  const scoped = selfImprovementRuns(rootRunId);
+  const reviews: Array<{ runId: string; reviewAt: string | null }> = [];
+  for (const run of scoped) {
+    const proposalIdRaw = run.context?.designProposalId;
+    if (typeof proposalIdRaw !== "string" || proposalIdRaw.length === 0) continue;
+    const proposal = harness.getDesignProposal({ id: proposalIdRaw });
+    if (!proposal || proposal.status !== "measuring") continue;
+    const linked = harness.linkProposalOutcomeReview({ runId: run.id });
+    if (linked.reviewAt) reviews.push({ runId: run.id, reviewAt: linked.reviewAt });
+  }
+  return reviews;
 }
 
 // Surfaces measuring proposals tied to scoped runs whose outcome review is now

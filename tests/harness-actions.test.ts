@@ -13,6 +13,7 @@ import {
   Harness,
   HARD_AUTHORITY_RULES,
   isHardAuthorityReason,
+  observeWatchdogTree,
   parseEvolutionProfile,
   parseHarnessVariant,
   parseMatchedExperiment,
@@ -915,6 +916,36 @@ describe("Harness actions", () => {
     expect(result.artifacts).toHaveLength(0);
     expect(git(scenario.repoPath, ["show", "--format=", "--name-only", "HEAD"]).stdout).toContain("operator-drift.txt");
     expect(harness.listHarnessActionEvents({ limit: 10 }).filter((event) => event.status === "done")).toHaveLength(0);
+  });
+
+  test("redacts Git credential echoes from blocked integration results and audits", async () => {
+    const scenario = await createDisjointBranchIntegrationScenario(harness, dir);
+    const secret = "watchdog-integration-secret";
+    const runGit = (input: { cwd: string; args: string[] }) => {
+      if (input.cwd === scenario.repoPath && input.args.join(" ") === "branch --show-current") {
+        return {
+          exitCode: 1,
+          stdout: `token=${secret}`,
+          stderr: `Authorization: Bearer ${secret}`,
+        };
+      }
+      return rawGit(input.cwd, input.args);
+    };
+
+    const result = applyHarnessAction(harness, {
+      type: "integrateVerifiedRun",
+      runId: scenario.runId,
+      workerTaskId: scenario.workerTaskId,
+      repoPath: scenario.repoPath,
+      targetBranch: "main",
+      push: false,
+    }, { runGit });
+    const event = harness.getHarnessActionEvent({ id: result.eventId });
+
+    expect(result).toMatchObject({ status: "blocked", actionType: "integrateVerifiedRun" });
+    expect(JSON.stringify(result)).not.toContain(secret);
+    expect(JSON.stringify(event)).not.toContain(secret);
+    expect(JSON.stringify(event)).toContain("[REDACTED]");
   });
 
   test("blocks when independent preserved-path readback fails", async () => {
@@ -6645,6 +6676,937 @@ async function createDisjointBranchIntegrationScenario(harness: Harness, dir: st
   });
   return { repoPath, runId, workerTaskId };
 }
+describe("Control-plane watchdog contract", () => {
+  let dir: string;
+  let harness: Harness;
+
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), "ouroboros-watchdog-actions-"));
+    harness = new Harness(join(dir, "ouroboros.db"));
+    harness.init();
+  });
+
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  function createWatchedRun() {
+    const runId = harness.createRun({ goal: "Watched run" });
+    return runId;
+  }
+
+  function createEmptyNonterminalRun() {
+    const runId = harness.createRun({ goal: "Empty nonterminal" });
+    return runId;
+  }
+
+  test("keeps a terminal root eligible when an unfinished descendant still has work", () => {
+    const rootRunId = harness.createRun({ goal: "Completed parent" });
+    const childRunId = harness.createRun({
+      goal: "Unfinished child",
+      context: { parentRunId: rootRunId },
+    });
+    harness.createTask({ runId: childRunId, role: "worker", goal: "Finish child", prompt: "do work" });
+    harness.updateRunStatus({ runId: rootRunId, status: "done" });
+
+    const base = 1_700_000_000_000;
+    for (let tick = 0; tick < 10; tick += 1) {
+      const result = applyHarnessAction(harness, {
+        type: "runWatchdogPass",
+        rootRunId,
+        now: base + tick * 90_000,
+        daemonIntervalMs: 1500,
+        inboxEvents: [],
+        scheduledReviews: [],
+        reason: `descendant liveness ${tick}`,
+      });
+      expect(result.status).toMatch(/^(done|blocked)$/);
+    }
+
+    const watchdog = harness.getRun(rootRunId)?.context.controlPlaneWatchdog as
+      | { state?: string }
+      | undefined;
+    expect(watchdog?.state).not.toBe("healthy");
+  });
+
+  test("dispatches classified recovery against the affected descendant run", () => {
+    const rootRunId = harness.createRun({ goal: "Completed parent" });
+    const childRunId = harness.createRun({
+      goal: "Empty child",
+      context: { parentRunId: rootRunId },
+    });
+    harness.updateRunStatus({ runId: rootRunId, status: "done" });
+
+    const base = 1_700_000_000_000;
+    for (let tick = 0; tick < 5; tick += 1) {
+      applyHarnessAction(harness, {
+        type: "runWatchdogPass",
+        rootRunId,
+        now: base + tick * 90_000,
+        daemonIntervalMs: 1500,
+        inboxEvents: [],
+        scheduledReviews: [],
+        reason: `descendant recovery ${tick}`,
+      });
+    }
+
+    const reconcile = harness.listHarnessActionEvents({ limit: 200 }).find(
+      (event) => event.actionType === "prepareRunDrain",
+    );
+    expect(reconcile).toBeDefined();
+    expect((reconcile?.request as Record<string, unknown>).runId).toBe(childRunId);
+    expect(harness.getRunOverview({ runId: childRunId, eventLimit: 0 }).tasks.length).toBeGreaterThan(0);
+  });
+
+  test("canonical fingerprint is deterministic across row iteration orders", () => {
+    const runId = createWatchedRun();
+    // Insert multiple tasks; their row order in SQLite is insertion order, but
+    // the fingerprint must sort by id deterministically so re-observing the
+    // same tree always yields the same value.
+    harness.createTask({ runId, role: "worker", goal: "Do work A", prompt: "x" });
+    harness.createTask({ runId, role: "worker", goal: "Do work B", prompt: "x" });
+    harness.createTask({ runId, role: "verifier", goal: "Verify work", prompt: "y" });
+    const overviewA = harness.getRunOverview({ runId, eventLimit: 0 });
+    const overviewB = harness.getRunOverview({ runId, eventLimit: 0 });
+    const observationA = observeWatchdogTree({
+      rootRunId: runId,
+      rootRun: harness.getRun(runId),
+      overview: overviewA,
+      harness,
+      now: 1_000_000,
+      daemonIntervalMs: 1500,
+      inboxEvents: [],
+      scheduledReviews: [],
+    });
+    const observationB = observeWatchdogTree({
+      rootRunId: runId,
+      rootRun: harness.getRun(runId),
+      overview: overviewB,
+      harness,
+      now: 1_000_000,
+      daemonIntervalMs: 1500,
+      inboxEvents: [],
+      scheduledReviews: [],
+    });
+    expect(observationA.fingerprint).toBe(observationB.fingerprint);
+    expect(observationA.fingerprint.length).toBe(64);
+  });
+
+  test("fingerprint changes only for meaningful run, task, attempt, thread, integration, or non-watchdog action state", () => {
+    const runId = createWatchedRun();
+    const taskId = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "First goal",
+      prompt: "do work",
+    });
+    const before = observeWatchdogTree({
+      rootRunId: runId,
+      rootRun: harness.getRun(runId),
+      overview: harness.getRunOverview({ runId, eventLimit: 0 }),
+      harness,
+      now: 1,
+      daemonIntervalMs: 1500,
+      inboxEvents: [],
+      scheduledReviews: [],
+    });
+    // A meaningful change: task status transition.
+    harness.updateRunStatus({ runId, status: "running" });
+    const after = observeWatchdogTree({
+      rootRunId: runId,
+      rootRun: harness.getRun(runId),
+      overview: harness.getRunOverview({ runId, eventLimit: 0 }),
+      harness,
+      now: 2,
+      daemonIntervalMs: 1500,
+      inboxEvents: [],
+      scheduledReviews: [],
+    });
+    expect(before.fingerprint).not.toBe(after.fingerprint);
+    expect(taskId).toBeDefined();
+  });
+
+  test("ten-tick false-positive matrix creates zero repair runs for every excluded fixture", () => {
+    const fixtures: Array<{ name: string; setup: () => string }> = [
+      {
+        name: "paused",
+        setup: () => {
+          const runId = harness.createRun({ goal: "Paused", context: { runPause: { reason: "user" } } });
+          harness.createTask({ runId, role: "worker", goal: "x", prompt: "x" });
+          return runId;
+        },
+      },
+      {
+        name: "human-checkpoint",
+        setup: () => {
+          const runId = harness.createRun({ goal: "Human", context: { pauseForHumanReason: "approval" } });
+          harness.createTask({ runId, role: "worker", goal: "x", prompt: "x" });
+          return runId;
+        },
+      },
+      {
+        name: "quiescent",
+        setup: () => {
+          const runId = harness.createRun({ goal: "Quiescent", context: { selfImprovement: { assessmentFingerprint: "abc", quiescent: true } } });
+          harness.createTask({ runId, role: "worker", goal: "x", prompt: "x" });
+          return runId;
+        },
+      },
+      {
+        name: "scheduled-review",
+        setup: () => {
+          const runId = harness.createRun({ goal: "Review pending" });
+          harness.createTask({ runId, role: "worker", goal: "x", prompt: "x" });
+          return runId;
+        },
+      },
+      {
+        name: "fresh-heartbeat",
+        setup: () => {
+          const runId = harness.createRun({ goal: "Heartbeat" });
+          const taskId = harness.createTask({ runId, role: "worker", goal: "x", prompt: "x" });
+          harness.upsertExecutionThread({
+            runId,
+            taskId,
+            ownerType: "attempt",
+            role: "worker",
+            status: "running",
+            heartbeatAt: new Date().toISOString(),
+          });
+          return runId;
+        },
+      },
+      {
+        name: "terminal",
+        setup: () => {
+          const runId = harness.createRun({ goal: "Done" });
+          harness.updateRunStatus({ runId, status: "done" });
+          return runId;
+        },
+      },
+    ];
+    const fixtureStart = 1_700_000_000_000;
+    for (const fixture of fixtures) {
+      const runId = fixture.setup();
+      // Advancing fake clock values: each tick is 90 seconds later so the
+      // 60-second stall minimum is satisfied across all ten ticks. This
+      // proves the watchdog would not falsely dispatch a repair even when
+      // enough time has elapsed for a real stall.
+      for (let tick = 0; tick < 10; tick += 1) {
+        const result = applyHarnessAction(harness, {
+          type: "runWatchdogPass",
+          rootRunId: runId,
+          now: fixtureStart + tick * 90_000,
+          daemonIntervalMs: 1500,
+          inboxEvents: [],
+          scheduledReviews: fixture.name === "scheduled-review"
+            ? [{ runId, reviewAt: new Date(fixtureStart + tick * 90_000 + 60_000).toISOString() }]
+            : [],
+          reason: `false-positive ${fixture.name} ${tick}`,
+        });
+        expect(result.status).toBe("done");
+      }
+      const events = harness.listHarnessActionEvents({ limit: 500 });
+      const repairEvents = events.filter(
+        (event) => event.actionType === "completeSystemTask" &&
+          typeof event.request === "object" &&
+          event.request !== null &&
+          "taskId" in (event.request as Record<string, unknown>) &&
+          typeof (event.request as Record<string, unknown>).taskId === "string" &&
+          ((event.request as Record<string, unknown>).taskId as string).startsWith("task_watchdog_repair_"),
+      );
+      expect(repairEvents.length).toBe(0);
+      const root = harness.getRun(runId);
+      const watchdog = root?.context.controlPlaneWatchdog as { state?: string } | undefined;
+      expect(watchdog?.state ?? "healthy").not.toBe("repairing");
+      expect(watchdog?.state ?? "healthy").not.toBe("blocked");
+    }
+  });
+
+  test("fingerprint excludes heartbeat-only and watchdog-write events", () => {
+    const runId = harness.createRun({ goal: "Heartbeat invariance" });
+    const taskId = harness.createTask({ runId, role: "worker", goal: "x", prompt: "x" });
+    // Establish an existing thread with no heartbeat so adding the heartbeat
+    // later is the only change (a heartbeat-only update).
+    const threadId = "thread_heartbeat_invariance";
+    harness.upsertExecutionThread({
+      id: threadId,
+      runId,
+      taskId,
+      ownerType: "attempt",
+      role: "worker",
+      status: "running",
+      heartbeatAt: null,
+    });
+    const before = observeWatchdogTree({
+      rootRunId: runId,
+      rootRun: harness.getRun(runId),
+      overview: harness.getRunOverview({ runId, eventLimit: 0 }),
+      harness,
+      now: 1_000_000,
+      daemonIntervalMs: 1500,
+      inboxEvents: [],
+      scheduledReviews: [],
+    });
+    // Heartbeat-only update: thread heartbeatAt changes but no other state.
+    harness.upsertExecutionThread({
+      id: threadId,
+      runId,
+      taskId,
+      ownerType: "attempt",
+      role: "worker",
+      status: "running",
+      heartbeatAt: new Date(2_000_000).toISOString(),
+    });
+    const afterHeartbeat = observeWatchdogTree({
+      rootRunId: runId,
+      rootRun: harness.getRun(runId),
+      overview: harness.getRunOverview({ runId, eventLimit: 0 }),
+      harness,
+      now: 1_500_000,
+      daemonIntervalMs: 1500,
+      inboxEvents: [],
+      scheduledReviews: [],
+    });
+    expect(afterHeartbeat.fingerprint).toBe(before.fingerprint);
+    // Watchdog write: persisting watchdog state must not count as progress.
+    applyHarnessAction(harness, {
+      type: "runWatchdogPass",
+      rootRunId: runId,
+      now: 1_500_000,
+      daemonIntervalMs: 1500,
+      inboxEvents: [],
+      scheduledReviews: [],
+      reason: "watchdog write invariance",
+    });
+    const afterWatchdog = observeWatchdogTree({
+      rootRunId: runId,
+      rootRun: harness.getRun(runId),
+      overview: harness.getRunOverview({ runId, eventLimit: 0 }),
+      harness,
+      now: 1_600_000,
+      daemonIntervalMs: 1500,
+      inboxEvents: [],
+      scheduledReviews: [],
+    });
+    expect(afterWatchdog.fingerprint).toBe(before.fingerprint);
+  });
+
+  test("PAN-1223 empty-round replay advances suspect to stalled to reconciling to repair to canary", () => {
+    const runId = createEmptyNonterminalRun();
+    const base = 1_700_000_000_000;
+    // Tick 0: first observation is always healthy (no previous fingerprint to
+    // compare against, so meaningfulChange is true).
+    applyHarnessAction(harness, {
+      type: "runWatchdogPass",
+      rootRunId: runId,
+      now: base,
+      daemonIntervalMs: 1500,
+      inboxEvents: [],
+      scheduledReviews: [],
+      reason: "pan-1223 prime 0",
+    });
+    expect(
+      (harness.getRun(runId)?.context.controlPlaneWatchdog as { state?: string }).state,
+    ).toBe("healthy");
+    // Tick 1: first unchanged eligible tick -> suspect.
+    applyHarnessAction(harness, {
+      type: "runWatchdogPass",
+      rootRunId: runId,
+      now: base + 90_000,
+      daemonIntervalMs: 1500,
+      inboxEvents: [],
+      scheduledReviews: [],
+      reason: "pan-1223 prime 1",
+    });
+    expect(
+      (harness.getRun(runId)?.context.controlPlaneWatchdog as { state?: string }).state,
+    ).toBe("suspect");
+    // Tick 2: still suspect (threshold count not yet met).
+    applyHarnessAction(harness, {
+      type: "runWatchdogPass",
+      rootRunId: runId,
+      now: base + 180_000,
+      daemonIntervalMs: 1500,
+      inboxEvents: [],
+      scheduledReviews: [],
+      reason: "pan-1223 prime 2",
+    });
+    expect(
+      (harness.getRun(runId)?.context.controlPlaneWatchdog as { state?: string }).state,
+    ).toBe("suspect");
+    // Tick 3: threshold met (3 unchanged ticks, elapsed >= 60s) -> stalled.
+    // The stalled state is persisted before any reconcile dispatch so
+    // observers can surface a deterministic stalled signal.
+    applyHarnessAction(harness, {
+      type: "runWatchdogPass",
+      rootRunId: runId,
+      now: base + 270_000,
+      daemonIntervalMs: 1500,
+      inboxEvents: [],
+      scheduledReviews: [],
+      reason: "pan-1223 stall",
+    });
+    expect(
+      (harness.getRun(runId)?.context.controlPlaneWatchdog as { state?: string }).state,
+    ).toBe("stalled");
+    // Tick 4: stalled -> reconciling. The fixed-action reconcile event is
+    // persisted BEFORE any linked repair run is created.
+    const reconcileTick = applyHarnessAction(harness, {
+      type: "runWatchdogPass",
+      rootRunId: runId,
+      now: base + 360_000,
+      daemonIntervalMs: 1500,
+      inboxEvents: [],
+      scheduledReviews: [],
+      reason: "pan-1223 reconcile",
+    });
+    expect(reconcileTick.status).toBe("done");
+    expect(
+      (harness.getRun(runId)?.context.controlPlaneWatchdog as { state?: string }).state,
+    ).toBe("reconciling");
+    const eventsAfterReconcile = harness.listHarnessActionEvents({ limit: 200 });
+    const reconcileActionEvents = eventsAfterReconcile.filter(
+      (event) => event.actionType === "prepareRunDrain",
+    );
+    expect(reconcileActionEvents.length).toBeGreaterThanOrEqual(1);
+    const eventsBeforeRepair = harness.listHarnessActionEvents({ limit: 200 });
+    const repairRunExistsBefore = eventsBeforeRepair.some(
+      (event) => event.actionType === "completeSystemTask",
+    );
+    expect(repairRunExistsBefore).toBe(false);
+    // Tick 5: still unchanged from reconciling -> repair dispatch (creates
+    // repair run, completes the system task from reconcile evidence, and
+    // advances to canary).
+    const repairTick = applyHarnessAction(harness, {
+      type: "runWatchdogPass",
+      rootRunId: runId,
+      now: base + 450_000,
+      daemonIntervalMs: 1500,
+      inboxEvents: [],
+      scheduledReviews: [],
+      reason: "pan-1223 repair",
+    });
+    expect(repairTick.status).toBe("done");
+    const afterRepair = harness.getRun(runId)?.context.controlPlaneWatchdog as
+      | { state?: string; repairRunId?: string; recoveryStage?: string; canary?: { status?: string } }
+      | undefined;
+    expect(afterRepair?.state).toBe("canary");
+    expect(typeof afterRepair?.repairRunId).toBe("string");
+    expect(afterRepair?.recoveryStage).toBe("canary");
+    expect(afterRepair?.canary?.status).toBe("progressing");
+    // Tick 6: watchdog-owned repair bookkeeping is excluded from the
+    // fingerprint. With no new target-run progress, canary evidence stays
+    // empty instead of approving its own writes.
+    const canaryTick = applyHarnessAction(harness, {
+      type: "runWatchdogPass",
+      rootRunId: runId,
+      now: base + 540_000,
+      daemonIntervalMs: 1500,
+      inboxEvents: [],
+      scheduledReviews: [],
+      reason: "pan-1223 canary",
+    });
+    expect(canaryTick.status).toBe("done");
+    const afterCanary = harness.getRun(runId)?.context.controlPlaneWatchdog as
+      | { state?: string; canary?: { status?: string; evidence?: string[] } }
+      | undefined;
+    expect(afterCanary?.canary?.status).toBe("progressing");
+    expect((afterCanary?.canary?.evidence?.length ?? 0)).toBe(0);
+    // Repair run and action evidence are durable.
+    const events = harness.listHarnessActionEvents({ limit: 200 });
+    const completeEvents = events.filter(
+      (event) => event.actionType === "completeSystemTask" &&
+        typeof event.request === "object" &&
+        event.request !== null &&
+        "taskId" in (event.request as Record<string, unknown>) &&
+        typeof (event.request as Record<string, unknown>).taskId === "string" &&
+        ((event.request as Record<string, unknown>).taskId as string).startsWith("task_watchdog_repair_"),
+    );
+    expect(completeEvents.length).toBe(1);
+  });
+
+  test("successful two-tick canary converges to recovered after continued meaningful progress", () => {
+    const runId = harness.createRun({ goal: "Canary success" });
+    // Set up an empty nonterminal run so the watchdog dispatches prepareRunDrain.
+    const base = 1_700_000_000_000;
+    // 4 primes: healthy -> suspect -> suspect -> stalled.
+    for (let tick = 0; tick < 4; tick += 1) {
+      applyHarnessAction(harness, {
+        type: "runWatchdogPass",
+        rootRunId: runId,
+        now: base + tick * 90_000,
+        daemonIntervalMs: 1500,
+        inboxEvents: [],
+        scheduledReviews: [],
+        reason: `canary prime ${tick}`,
+      });
+    }
+    expect(
+      (harness.getRun(runId)?.context.controlPlaneWatchdog as { state?: string }).state,
+    ).toBe("stalled");
+    // Tick 4: stalled -> reconciling (prepareRunDrain dispatched, persists
+    // the reconcile action event id).
+    applyHarnessAction(harness, {
+      type: "runWatchdogPass",
+      rootRunId: runId,
+      now: base + 4 * 90_000,
+      daemonIntervalMs: 1500,
+      inboxEvents: [],
+      scheduledReviews: [],
+      reason: "canary reconcile",
+    });
+    expect(
+      (harness.getRun(runId)?.context.controlPlaneWatchdog as { state?: string }).state,
+    ).toBe("reconciling");
+    // Tick 5: reconciling -> repair -> canary (creates linked repair run,
+    // completes the system task from the reconcile evidence).
+    applyHarnessAction(harness, {
+      type: "runWatchdogPass",
+      rootRunId: runId,
+      now: base + 5 * 90_000,
+      daemonIntervalMs: 1500,
+      inboxEvents: [],
+      scheduledReviews: [],
+      reason: "canary repair",
+    });
+    expect(
+      (harness.getRun(runId)?.context.controlPlaneWatchdog as { state?: string }).state,
+    ).toBe("canary");
+    // Tick 6: internal repair bookkeeping alone is not target progress.
+    applyHarnessAction(harness, {
+      type: "runWatchdogPass",
+      rootRunId: runId,
+      now: base + 6 * 90_000,
+      daemonIntervalMs: 1500,
+      inboxEvents: [],
+      scheduledReviews: [],
+      reason: "canary progress 1",
+    });
+    const after1 = harness.getRun(runId)?.context.controlPlaneWatchdog as
+      | { state?: string; canary?: { evidence?: string[]; status?: string } }
+      | undefined;
+    expect(after1?.state).toBe("canary");
+    expect((after1?.canary?.evidence?.length ?? 0)).toBe(0);
+    // Inject the first real target change for tick 7: record an attempt on the
+    // goal-review task so the latest-attempt identity changes the fingerprint.
+    const overview = harness.getRunOverview({ runId, eventLimit: 0 });
+    const goalReviewTask = overview.tasks.find((task) => task.role === "goal-review");
+    expect(goalReviewTask).toBeDefined();
+    harness.recordAttempt({
+      taskId: goalReviewTask!.id,
+      input: { prompt: "go" },
+      output: { status: "done", summary: "canary progress", changedFiles: [], checks: [], problems: [] },
+    });
+    // Tick 7: first meaningful target progress.
+    applyHarnessAction(harness, {
+      type: "runWatchdogPass",
+      rootRunId: runId,
+      now: base + 7 * 90_000,
+      daemonIntervalMs: 1500,
+      inboxEvents: [],
+      scheduledReviews: [],
+      reason: "canary progress 2",
+    });
+    const afterTargetProgress = harness.getRun(runId)?.context.controlPlaneWatchdog as
+      | { state?: string; canary?: { evidence?: string[] } }
+      | undefined;
+    expect(afterTargetProgress?.state).toBe("canary");
+    expect((afterTargetProgress?.canary?.evidence?.length ?? 0)).toBe(1);
+
+    // A second independent target change satisfies the two-tick canary.
+    harness.updateRun({ runId, goal: "Canary success after verified progress" });
+    applyHarnessAction(harness, {
+      type: "runWatchdogPass",
+      rootRunId: runId,
+      now: base + 8 * 90_000,
+      daemonIntervalMs: 1500,
+      inboxEvents: [],
+      scheduledReviews: [],
+      reason: "canary progress 2",
+    });
+    const recovered = harness.getRun(runId)?.context.controlPlaneWatchdog as
+      | { state?: string; canary?: { evidence?: string[] } }
+      | undefined;
+    expect(recovered?.state).toBe("recovered");
+    expect((recovered?.canary?.evidence?.length ?? 0)).toBe(2);
+  });
+
+  test("concurrent process claims dispatch one reconcile action and reuse it after restart", async () => {
+    const runId = createEmptyNonterminalRun();
+    const now = 1_700_000_000_000;
+    // Prime only to stalled. The next pass is the unsafe boundary where the
+    // fixed reconcile action must be claimed before it is dispatched.
+    for (let tick = 0; tick < 4; tick += 1) {
+      applyHarnessAction(harness, {
+        type: "runWatchdogPass",
+        rootRunId: runId,
+        now: now + tick * 90_000,
+        daemonIntervalMs: 1500,
+        inboxEvents: [],
+        scheduledReviews: [],
+        reason: `prime ${tick}`,
+      });
+    }
+    expect(
+      (harness.getRun(runId)?.context.controlPlaneWatchdog as { state?: string }).state,
+    ).toBe("stalled");
+
+    const mainEntry = join(import.meta.dir, "..", "packages", "cli", "src", "main.ts");
+    const command = [
+      "bun",
+      mainEntry,
+      "--db",
+      join(dir, "ouroboros.db"),
+      "--config",
+      join(dir, "missing-config.toml"),
+      "run-watchdog-pass",
+      "--root-run-id",
+      runId,
+      "--now",
+      String(now + 4 * 90_000),
+      "--daemon-interval-ms",
+      "1500",
+      "--reason",
+      "concurrent atomic replay",
+    ];
+    const processes = Array.from({ length: 4 }, () =>
+      Bun.spawn({
+        cmd: command,
+        cwd: join(import.meta.dir, ".."),
+        env: { ...process.env },
+        stdin: "ignore",
+        stdout: "pipe",
+        stderr: "pipe",
+      }),
+    );
+    const results = await Promise.all(processes.map(async (process) => {
+      const [stdout, stderr, exitCode] = await Promise.all([
+        new Response(process.stdout).text(),
+        new Response(process.stderr).text(),
+        process.exited,
+      ]);
+      return { stdout, stderr, exitCode };
+    }));
+    for (const result of results) {
+      expect(result.exitCode, `${result.stdout}\n${result.stderr}`).toBe(0);
+      expect(`${result.stdout}\n${result.stderr}`).not.toMatch(/SQLITE_(?:BUSY|LOCKED)|database is locked/i);
+    }
+
+    const reopened = new Harness(join(dir, "ouroboros.db"));
+    const reconcileEvents = reopened.listHarnessActionEvents({ limit: 200 }).filter(
+      (event) =>
+        event.actionType === "prepareRunDrain" &&
+        (event.request as Record<string, unknown>).runId === runId,
+    );
+    expect(reconcileEvents).toHaveLength(1);
+
+    // Reopening the harness and replaying the same tick must reuse the durable
+    // claim. It must not create a second fixed action event.
+    applyHarnessAction(reopened, {
+      type: "runWatchdogPass",
+      rootRunId: runId,
+      now: now + 4 * 90_000,
+      daemonIntervalMs: 1500,
+      inboxEvents: [],
+      scheduledReviews: [],
+      reason: "restart replay",
+    });
+    const afterRestart = reopened.listHarnessActionEvents({ limit: 200 }).filter(
+      (event) =>
+        event.actionType === "prepareRunDrain" &&
+        (event.request as Record<string, unknown>).runId === runId,
+    );
+    expect(afterRestart).toHaveLength(1);
+
+    applyHarnessAction(reopened, {
+      type: "runWatchdogPass",
+      rootRunId: runId,
+      now: now + 5 * 90_000,
+      daemonIntervalMs: 1500,
+      inboxEvents: [],
+      scheduledReviews: [],
+      reason: "restart repair finalization",
+    });
+    const watchdog = reopened.getRun(runId)?.context.controlPlaneWatchdog as
+      | { repairRunId?: string; repairTaskId?: string }
+      | undefined;
+    expect(watchdog?.repairRunId).toMatch(/^run_watchdog_repair_/);
+    expect(watchdog?.repairTaskId).toMatch(/^task_watchdog_repair_/);
+    const repairOverview = reopened.getRunOverview({
+      runId: watchdog?.repairRunId ?? "missing",
+      eventLimit: 0,
+    });
+    expect(repairOverview.run?.status).toBe("done");
+    expect(repairOverview.tasks).toHaveLength(1);
+    expect(repairOverview.tasks[0]?.status).toBe("done");
+    expect(repairOverview.sessions).toHaveLength(1);
+    expect(repairOverview.sessions[0]?.attemptId).toMatch(/^attempt_watchdog_repair_/);
+    expect(repairOverview.threads).toHaveLength(0);
+    const completeEvents = reopened.listHarnessActionEvents({ limit: 200 }).filter(
+      (event) =>
+        event.actionType === "completeSystemTask" &&
+        (event.request as Record<string, unknown>).taskId === watchdog?.repairTaskId,
+    );
+    expect(completeEvents).toHaveLength(1);
+  });
+
+  test("unrelated action volume cannot evict supervised action evidence from the fingerprint", () => {
+    const runId = createEmptyNonterminalRun();
+    harness.recordHarnessActionEvent({
+      actionType: "prepareRunDrain",
+      status: "done",
+      request: { type: "prepareRunDrain", runId, reason: "supervised evidence" },
+      result: { status: "done", artifacts: [] },
+    });
+    const before = observeWatchdogTree({
+      rootRunId: runId,
+      rootRun: harness.getRun(runId),
+      overview: harness.getRunOverview({ runId, eventLimit: 0 }),
+      harness,
+      now: 1_700_000_000_000,
+      daemonIntervalMs: 1500,
+      inboxEvents: [],
+      scheduledReviews: [],
+    });
+
+    for (let index = 0; index < 250; index += 1) {
+      harness.recordHarnessActionEvent({
+        actionType: "prepareRunDrain",
+        status: "done",
+        request: { type: "prepareRunDrain", runId: `run_unrelated_${index}`, reason: "unrelated volume" },
+        result: { status: "done", artifacts: [] },
+      });
+    }
+
+    const after = observeWatchdogTree({
+      rootRunId: runId,
+      rootRun: harness.getRun(runId),
+      overview: harness.getRunOverview({ runId, eventLimit: 0 }),
+      harness,
+      now: 1_700_000_090_000,
+      daemonIntervalMs: 1500,
+      inboxEvents: [],
+      scheduledReviews: [],
+    });
+    expect(after.fingerprint).toBe(before.fingerprint);
+  });
+
+  test("restart after an expired claim without an action receipt blocks instead of redispatching", () => {
+    const runId = createEmptyNonterminalRun();
+    const base = 1_700_000_000_000;
+    for (let tick = 0; tick < 4; tick += 1) {
+      applyHarnessAction(harness, {
+        type: "runWatchdogPass",
+        rootRunId: runId,
+        now: base + tick * 90_000,
+        daemonIntervalMs: 1500,
+        inboxEvents: [],
+        scheduledReviews: [],
+        reason: `expired claim prime ${tick}`,
+      });
+    }
+    const stalled = harness.getRun(runId)?.context.controlPlaneWatchdog as
+      | Record<string, unknown>
+      | undefined;
+    expect(stalled?.state).toBe("stalled");
+    const fingerprint = String(stalled?.fingerprint);
+    harness.updateRun({
+      runId,
+      contextPatch: {
+        controlPlaneWatchdog: {
+          ...stalled,
+          state: "reconciling",
+          recoveryStage: "reconcile",
+          repairFingerprint: fingerprint,
+          reconcileClaim: {
+            fingerprint,
+            ownerId: "watchdog_claim_crashed",
+            actionType: "prepareRunDrain",
+            targetRunId: runId,
+            actionEventId: "action_watchdog_reconcile_missing",
+            claimedAt: new Date(base + 4 * 90_000).toISOString(),
+            leaseUntil: new Date(base + 4 * 90_000 + 1_000).toISOString(),
+          },
+        },
+      },
+    });
+
+    const reopened = new Harness(join(dir, "ouroboros.db"));
+    const first = applyHarnessAction(reopened, {
+      type: "runWatchdogPass",
+      rootRunId: runId,
+      now: base + 5 * 90_000,
+      daemonIntervalMs: 1500,
+      inboxEvents: [],
+      scheduledReviews: [],
+      reason: "expired claim restart",
+    });
+    expect(first.status).toBe("blocked");
+    const blocked = reopened.getRun(runId)?.context.controlPlaneWatchdog as
+      | { state?: string; cooldownUntil?: string | null; reconcileClaim?: unknown }
+      | undefined;
+    expect(blocked?.state).toBe("blocked");
+    expect(blocked?.cooldownUntil).toBeString();
+    expect(blocked?.reconcileClaim).toBeNull();
+    expect(
+      reopened.listHarnessActionEvents({ limit: 200 }).filter((event) => event.actionType === "prepareRunDrain"),
+    ).toHaveLength(0);
+
+    applyHarnessAction(reopened, {
+      type: "runWatchdogPass",
+      rootRunId: runId,
+      now: base + 6 * 90_000,
+      daemonIntervalMs: 1500,
+      inboxEvents: [],
+      scheduledReviews: [],
+      reason: "expired claim sequential replay",
+    });
+    expect(
+      reopened.listHarnessActionEvents({ limit: 200 }).filter((event) => event.actionType === "prepareRunDrain"),
+    ).toHaveLength(0);
+  });
+
+  test("restart after reconcile response loss finalizes the deterministic action receipt", () => {
+    const runId = createEmptyNonterminalRun();
+    const base = 1_700_000_000_000;
+    for (let tick = 0; tick < 4; tick += 1) {
+      applyHarnessAction(harness, {
+        type: "runWatchdogPass",
+        rootRunId: runId,
+        now: base + tick * 90_000,
+        daemonIntervalMs: 1500,
+        inboxEvents: [],
+        scheduledReviews: [],
+        reason: `response loss prime ${tick}`,
+      });
+    }
+    const stalled = harness.getRun(runId)?.context.controlPlaneWatchdog as
+      | Record<string, unknown>
+      | undefined;
+    applyHarnessAction(harness, {
+      type: "runWatchdogPass",
+      rootRunId: runId,
+      now: base + 4 * 90_000,
+      daemonIntervalMs: 1500,
+      inboxEvents: [],
+      scheduledReviews: [],
+      reason: "response loss dispatch",
+    });
+    const fixedEvent = harness.listHarnessActionEvents({ limit: 200 }).find(
+      (event) => event.actionType === "prepareRunDrain",
+    );
+    expect(fixedEvent?.id).toMatch(/^action_watchdog_reconcile_/);
+    const fingerprint = String(stalled?.fingerprint);
+    harness.updateRun({
+      runId,
+      contextPatch: {
+        controlPlaneWatchdog: {
+          ...stalled,
+          state: "reconciling",
+          recoveryStage: "reconcile",
+          repairFingerprint: fingerprint,
+          actionEventIds: [],
+          reconcileClaim: {
+            fingerprint,
+            ownerId: "watchdog_claim_response_lost",
+            actionType: "prepareRunDrain",
+            targetRunId: runId,
+            actionEventId: fixedEvent?.id,
+            claimedAt: new Date(base + 4 * 90_000).toISOString(),
+            leaseUntil: new Date(base + 5 * 90_000).toISOString(),
+          },
+        },
+      },
+    });
+
+    const reopened = new Harness(join(dir, "ouroboros.db"));
+    const replay = applyHarnessAction(reopened, {
+      type: "runWatchdogPass",
+      rootRunId: runId,
+      now: base + 4 * 90_000 + 1,
+      daemonIntervalMs: 1500,
+      inboxEvents: [],
+      scheduledReviews: [],
+      reason: "response loss readback",
+    });
+    expect(replay.status).toBe("done");
+    const recovered = reopened.getRun(runId)?.context.controlPlaneWatchdog as
+      | { state?: string; reconcileClaim?: unknown; actionEventIds?: string[] }
+      | undefined;
+    expect(recovered?.state).toBe("reconciling");
+    expect(recovered?.reconcileClaim).toBeNull();
+    expect(recovered?.actionEventIds).toEqual([fixedEvent!.id]);
+    expect(
+      reopened.listHarnessActionEvents({ limit: 200 }).filter((event) => event.actionType === "prepareRunDrain"),
+    ).toHaveLength(1);
+  });
+
+  test("deterministic repair identity reuses the same repair run and persists retry count and cooldown after failure", () => {
+    const runId = createEmptyNonterminalRun();
+    const now = 1_700_000_000_000;
+    for (let tick = 0; tick < 3; tick += 1) {
+      applyHarnessAction(harness, {
+        type: "runWatchdogPass",
+        rootRunId: runId,
+        now: now + tick * 90_000,
+        daemonIntervalMs: 1500,
+        inboxEvents: [],
+        scheduledReviews: [],
+        reason: `prime ${tick}`,
+      });
+    }
+    // Force a failed/unsupported recovery by leaving the run empty so the
+    // canary never progresses; the watchdog should converge to blocked with
+    // a cooldown.
+    let blockedSeen = false;
+    let attemptCount = 0;
+    for (let tick = 4; tick < 12; tick += 1) {
+      const result = applyHarnessAction(harness, {
+        type: "runWatchdogPass",
+        rootRunId: runId,
+        now: now + tick * 90_000,
+        daemonIntervalMs: 1500,
+        inboxEvents: [],
+        scheduledReviews: [],
+        reason: `cooldown ${tick}`,
+      });
+      const root = harness.getRun(runId);
+      const watchdog = root?.context.controlPlaneWatchdog as
+        | { attemptCount?: number; cooldownUntil?: string | null; state?: string }
+        | undefined;
+      attemptCount = Math.max(attemptCount, watchdog?.attemptCount ?? 0);
+      if (watchdog?.state === "blocked") {
+        blockedSeen = true;
+        break;
+      }
+      expect(result.status).toMatch(/^(done|blocked)$/);
+    }
+    expect(blockedSeen).toBe(true);
+    expect(attemptCount).toBeGreaterThanOrEqual(1);
+    const finalRoot = harness.getRun(runId);
+    const finalWatchdog = finalRoot?.context.controlPlaneWatchdog as
+      | { cooldownUntil?: string | null; attemptCount?: number; repairRunId?: string; failure?: { reason: string } }
+      | undefined;
+    expect(finalWatchdog?.cooldownUntil).toBeTruthy();
+    expect(finalWatchdog?.failure?.reason).toBeTruthy();
+    // No second repair during cooldown.
+    const repairRunIdBefore = finalWatchdog?.repairRunId;
+    applyHarnessAction(harness, {
+      type: "runWatchdogPass",
+      rootRunId: runId,
+      now: now + 12 * 90_000,
+      daemonIntervalMs: 1500,
+      inboxEvents: [],
+      scheduledReviews: [],
+      reason: "second repair attempt",
+    });
+    const rootAgain = harness.getRun(runId);
+    const watchdogAgain = rootAgain?.context.controlPlaneWatchdog as { repairRunId?: string } | undefined;
+    expect(watchdogAgain?.repairRunId).toBe(repairRunIdBefore);
+  });
+});
+
 
 function rawGit(cwd: string, args: string[]) {
   const result = Bun.spawnSync({ cmd: ["git", ...args], cwd, stdout: "pipe", stderr: "pipe" });

@@ -183,4 +183,94 @@ describe("dashboard diagnostics stream", () => {
     expect(Array.isArray(sharedRoots[0]?.descendantTaskIds)).toBe(true);
     expect((sharedRoots[0]?.descendantTaskIds as string[]).length).toBe(5);
   });
+
+  test("watchdog diagnostics expose normalized coordination and canary evidence", () => {
+    const fingerprint = "a".repeat(64);
+    const repairFingerprint = "b".repeat(64);
+    const runId = "run_dashboard_watchdog";
+    harness.createRun({
+      id: runId,
+      goal: "Surface watchdog diagnostics",
+      context: {
+        controlPlaneWatchdog: {
+          version: 1,
+          state: "reconciling",
+          fingerprint,
+          firstSeenAt: "2026-08-09T10:00:00.000Z",
+          unchangedEligibleTicks: 4,
+          lastMeaningfulProgressAt: "2026-08-09T09:59:00.000Z",
+          lastObservationAt: "2026-08-09T10:04:00.000Z",
+          recoveryStage: "reconcile",
+          repairFingerprint,
+          repairRunId: "run_watchdog_repair_example",
+          repairTaskId: "task_watchdog_repair_example",
+          actionEventIds: ["action_watchdog_reconcile_example"],
+          attemptCount: 1,
+          cooldownUntil: "2026-08-09T10:19:00.000Z",
+          affectedRunIds: [runId],
+          fault: {
+            kind: "empty-nonterminal-run",
+            affectedRunIds: [runId],
+            selectedAction: "prepareRunDrain",
+            details: "empty run",
+          },
+          canary: {
+            status: "pending",
+            observedAt: "2026-08-09T10:04:00.000Z",
+            fingerprint: repairFingerprint,
+            evidence: [],
+            ticksInCanary: 0,
+          },
+          failure: null,
+          history: [],
+        },
+      },
+    });
+
+    const overview = harness.getRunOverview({ runId, eventLimit: 0 });
+    expect(overview.controlPlaneWatchdog).toMatchObject({
+      state: "reconciling",
+      fingerprint,
+      recoveryStage: "reconcile",
+      repairFingerprint,
+      cooldownUntil: "2026-08-09T10:19:00.000Z",
+      actionEventIds: ["action_watchdog_reconcile_example"],
+      canary: {
+        status: "pending",
+        fingerprint: repairFingerprint,
+        ticksInCanary: 0,
+      },
+    });
+
+    harness.updateRun({
+      runId,
+      contextPatch: {
+        controlPlaneWatchdog: {
+          ...overview.controlPlaneWatchdog,
+          state: "canary",
+          recoveryStage: "canary",
+          cooldownUntil: null,
+          canary: {
+            status: "progressing",
+            observedAt: "2026-08-09T10:05:00.000Z",
+            fingerprint: "c".repeat(64),
+            evidence: ["target task reached done"],
+            ticksInCanary: 1,
+          },
+        },
+      },
+    });
+    const refreshed = harness.getRunOverview({ runId, eventLimit: 0 });
+    expect(refreshed.controlPlaneWatchdog).toMatchObject({
+      state: "canary",
+      recoveryStage: "canary",
+      cooldownUntil: null,
+      canary: {
+        status: "progressing",
+        fingerprint: "c".repeat(64),
+        evidence: ["target task reached done"],
+        ticksInCanary: 1,
+      },
+    });
+  });
 });

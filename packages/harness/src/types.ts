@@ -284,6 +284,102 @@ export interface RunOverview {
   sessions: ObservableSession[];
   threads: ExecutionThread[];
   lessons: Lesson[];
+  controlPlaneWatchdog?: ControlPlaneWatchdogState;
+}
+export type ControlPlaneWatchdogStateKind =
+  | "healthy"
+  | "suspect"
+  | "stalled"
+  | "reconciling"
+  | "repairing"
+  | "canary"
+  | "recovered"
+  | "blocked";
+
+export type ControlPlaneWatchdogRecoveryStage =
+  | "none"
+  | "reconcile"
+  | "reclaim-leases"
+  | "resume-codex"
+  | "integrate-verified"
+  | "prepare-run-drain"
+  | "repair-run"
+  | "canary"
+  | "blocked";
+
+export type ControlPlaneWatchdogCanaryStatus =
+  | "none"
+  | "pending"
+  | "progressing"
+  | "failed";
+
+export interface ControlPlaneWatchdogCanary {
+  status: ControlPlaneWatchdogCanaryStatus;
+  observedAt: string | null;
+  fingerprint: string | null;
+  evidence: string[];
+  ticksInCanary: number;
+}
+
+export interface ControlPlaneWatchdogFailureEvidence {
+  reason: string;
+  details: string[];
+  recordedAt: string;
+}
+
+export interface ControlPlaneWatchdogFaultClassification {
+  kind:
+    | "orphaned-leases"
+    | "interrupted-codex"
+    | "unintegrated-verified"
+    | "empty-nonterminal-run"
+    | "unsupported";
+  affectedRunIds: string[];
+  selectedAction:
+    | "reclaimRunningTasks"
+    | "integrateVerifiedRun"
+    | "prepareRunDrain"
+    | "none";
+  details: string;
+}
+
+export interface ControlPlaneWatchdogState {
+  version: number;
+  state: ControlPlaneWatchdogStateKind;
+  fingerprint: string | null;
+  firstSeenAt: string | null;
+  unchangedEligibleTicks: number;
+  lastMeaningfulProgressAt: string | null;
+  lastObservationAt: string | null;
+  recoveryStage: ControlPlaneWatchdogRecoveryStage;
+  repairFingerprint: string | null;
+  repairRunId: string | null;
+  repairTaskId: string | null;
+  actionEventIds: string[];
+  attemptCount: number;
+  cooldownUntil: string | null;
+  affectedRunIds: string[];
+  fault: ControlPlaneWatchdogFaultClassification | null;
+  canary: ControlPlaneWatchdogCanary;
+  failure: ControlPlaneWatchdogFailureEvidence | null;
+  reconcileClaim?: {
+    fingerprint: string;
+    ownerId: string;
+    actionType: ControlPlaneWatchdogFaultClassification["selectedAction"];
+    targetRunId: string;
+    actionEventId: string;
+    claimedAt: string;
+    leaseUntil: string;
+  } | null;
+  history: ControlPlaneWatchdogHistoryEntry[];
+}
+
+export interface ControlPlaneWatchdogHistoryEntry {
+  state: ControlPlaneWatchdogStateKind;
+  fingerprint: string | null;
+  recoveryStage: ControlPlaneWatchdogRecoveryStage;
+  observedAt: string;
+  reason: string;
 }
 
 export interface PlannedRun {
@@ -486,6 +582,7 @@ export interface UpsertExecutionThreadInput {
   sessionName?: string | null;
   agentSessionId?: string | null;
   worktreePath?: string | null;
+  heartbeatAt?: string | null;
   interruptReason?: string | null;
 }
 
