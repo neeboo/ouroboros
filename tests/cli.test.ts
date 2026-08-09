@@ -3,7 +3,7 @@ import { chmod, mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "n
 import { existsSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { homedir, tmpdir } from "node:os";
-import { checkpointDatabase, Harness } from "../packages/harness/src";
+import { checkpointDatabase, Harness, parseEvolutionInstance } from "../packages/harness/src";
 import { formatRunEvidence } from "../packages/cli/src/run-evidence";
 import { formatAttemptExplanation } from "../packages/cli/src/explain-attempt";
 import { formatRunGraph } from "../packages/cli/src/run-graph";
@@ -358,6 +358,200 @@ describe("CLI", () => {
     });
   });
 
+  test("creates a target-system Designer root with frozen project identity and target charter", async () => {
+    await runCli("init");
+    const setupHarness = new Harness(dbPath);
+    const kernelRoot = join(dir, "kernel");
+    const targetRoot = join(dir, "target");
+    await mkdir(kernelRoot, { recursive: true });
+    await mkdir(targetRoot, { recursive: true });
+    const kernelProjectId = setupHarness.createProject({ name: "Evolution Kernel", rootPath: kernelRoot });
+    const targetProjectId = setupHarness.createProject({ name: "Target System", rootPath: targetRoot });
+    const charter = setupHarness.createFounderCharter({
+      projectId: targetProjectId,
+      mission: "Evolve the target within explicit evidence and authority boundaries.",
+      charter: {
+        mission: "Evolve the target within explicit evidence and authority boundaries.",
+        authority: { autoResearch: true, autoReversibleExperiments: true },
+      },
+      activate: true,
+    });
+    const configPath = join(dir, "target-system.toml");
+    await writeFile(
+      configPath,
+      [
+        "[models.roles.designer]",
+        'model = "gpt-5.6-sol"',
+        'reasoning_effort = "high"',
+        "",
+        "[agentDefaults.roles]",
+        'designer = "codex-resumable"',
+      ].join("\n"),
+    );
+
+    const result = await runCliJson(
+      "design-target-system",
+      "--kernel-project-id",
+      kernelProjectId,
+      "--target-project-id",
+      targetProjectId,
+      "--goal",
+      "Design the target's bounded self-evolution system",
+      "--config",
+      configPath,
+    );
+    const overview = await runCliJson("run-overview", "--run-id", result.runId);
+
+    expect(typeof result.runId).toBe("string");
+    expect(typeof result.taskId).toBe("string");
+    expect(typeof result.runnerCommand).toBe("string");
+    expect(result).toMatchObject({
+      kernelProject: { id: kernelProjectId, name: "Evolution Kernel", rootPath: kernelRoot },
+      targetProject: { id: targetProjectId, name: "Target System", rootPath: targetRoot },
+    });
+    expect(result.runnerCommand).toContain(`run-loop --run-id ${result.runId}`);
+    expect(result.runnerCommand).toContain("--executor codex-resumable");
+    expect(result.runnerCommand).toContain("--sandbox workspace-write");
+    expect(result.runnerCommand).toContain("--tasks auto");
+    expect(result.runnerCommand).toContain(`--worktree-root ${join(targetRoot, ".ouroboros/worktrees")}`);
+    expect(result.runnerCommand).toContain("--start-hook git-worktree");
+    expect(result.runnerCommand).toContain("--stop-hook create-runs,create-tasks,create-verifier,create-repair,apply-design-actions,context-summary");
+    expect(result.runnerCommand).toContain(targetRoot);
+
+    expect(overview.run).toMatchObject({
+      id: result.runId,
+      projectId: targetProjectId,
+      projectRoot: targetRoot,
+      goal: "Design the target's bounded self-evolution system",
+      context: {
+        source: "target-system-design",
+        founderCharterId: charter.id,
+        designCharterId: charter.id,
+        modelDefaults: {
+          roles: { designer: { model: "gpt-5.6-sol", reasoning_effort: "high" } },
+        },
+        agentDefaults: { roles: { designer: "codex-resumable" } },
+      },
+    });
+    expect(parseEvolutionInstance(overview.run.context.evolutionInstance)).toEqual({
+      schemaVersion: 1,
+      mode: "design-target",
+      kernelProjectId,
+      targetProjectId,
+      cycle: { kind: "design", index: 0 },
+    });
+    expect(overview.tasks).toHaveLength(1);
+    expect(overview.tasks[0]).toMatchObject({
+      id: result.taskId,
+      runId: result.runId,
+      role: "designer",
+      status: "todo",
+    });
+    expect(overview.tasks[0].prompt).toContain(charter.id);
+    expect(overview.tasks[0].prompt).toContain(targetProjectId);
+    expect(overview.tasks[0].prompt).toContain("target charter");
+    expect(overview.tasks[0].prompt).toContain("target-scoped strategy signals");
+    expect(overview.tasks[0].prompt).toContain("target-scoped evidence");
+    expect(overview.tasks[0].prompt).toContain("proposeDesign");
+    expect(overview.tasks[0].prompt).toContain("evolutionPack");
+    expect(overview.tasks[0].prompt).toContain("causalHypothesis");
+    expect(overview.tasks[0].prompt).toContain("comparison");
+    expect(overview.tasks[0].prompt).toContain("createRunsFromDesign");
+    expect(overview.tasks[0].prompt).toContain("quiescent");
+  });
+
+  test("design-target-system fails closed for invalid project identity without creating runs", async () => {
+    await runCli("init");
+    const setupHarness = new Harness(dbPath);
+    const kernelProjectId = setupHarness.createProject({ name: "Kernel", rootPath: join(dir, "kernel") });
+    const targetProjectId = setupHarness.createProject({ name: "Target", rootPath: join(dir, "target") });
+    setupHarness.createFounderCharter({
+      projectId: targetProjectId,
+      mission: "Target charter",
+      activate: true,
+    });
+    const before = setupHarness.listRuns().length;
+    const cases = [
+      {
+        name: "missing required target flag",
+        args: ["--kernel-project-id", kernelProjectId, "--goal", "Design target"],
+        error: "--target-project-id is required",
+      },
+      {
+        name: "missing kernel project",
+        args: ["--kernel-project-id", "project_missing", "--target-project-id", targetProjectId, "--goal", "Design target"],
+        error: "kernel project not found: project_missing",
+      },
+      {
+        name: "missing target project",
+        args: ["--kernel-project-id", kernelProjectId, "--target-project-id", "project_missing", "--goal", "Design target"],
+        error: "target project not found: project_missing",
+      },
+      {
+        name: "same kernel and target project",
+        args: ["--kernel-project-id", targetProjectId, "--target-project-id", targetProjectId, "--goal", "Design target"],
+        error: "kernel and target projects must be different",
+      },
+      {
+        name: "caller context cannot override frozen identity",
+        args: [
+          "--kernel-project-id",
+          kernelProjectId,
+          "--target-project-id",
+          targetProjectId,
+          "--goal",
+          "Design target",
+          "--context-json",
+          '{"source":"polluted","founderCharterId":"charter_polluted","evolutionInstance":{"mode":"self"}}',
+        ],
+        error: "--context-json is not supported by design-target-system",
+      },
+    ];
+
+    for (const testCase of cases) {
+      const result = await runCliRaw("design-target-system", ...testCase.args);
+      expect(result.exitCode, testCase.name).toBe(1);
+      expect(result.stderr, testCase.name).toContain(testCase.error);
+      expect(setupHarness.listRuns().length, testCase.name).toBe(before);
+    }
+  });
+
+  test("design-target-system fails closed when the target has no active founder charter", async () => {
+    await runCli("init");
+    const setupHarness = new Harness(dbPath);
+    const kernelProjectId = setupHarness.createProject({ name: "Kernel", rootPath: join(dir, "kernel") });
+    const targetProjectId = setupHarness.createProject({ name: "Target", rootPath: join(dir, "target") });
+    setupHarness.createFounderCharter({
+      projectId: targetProjectId,
+      mission: "Inactive target charter",
+      activate: false,
+    });
+    const before = setupHarness.listRuns().length;
+
+    const result = await runCliRaw(
+      "design-target-system",
+      "--kernel-project-id",
+      kernelProjectId,
+      "--target-project-id",
+      targetProjectId,
+      "--goal",
+      "Design target",
+    );
+
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain(`active founder charter not found for target project: ${targetProjectId}`);
+    expect(setupHarness.listRuns().length).toBe(before);
+  });
+
+  test("help documents the design-target-system command and example", async () => {
+    const help = await runCliRaw("--help");
+
+    expect(help.exitCode).toBe(0);
+    expect(help.stdout).toContain("design-target-system");
+    expect(help.stdout).toContain("--kernel-project-id <kernel_project_id>");
+    expect(help.stdout).toContain("--target-project-id <target_project_id>");
+  });
+
   test("bootstraps a self-iteration planning run", async () => {
     const result = await runCliJson("self-iterate");
     const overview = await runCliJson("run-overview", "--run-id", result.runId);
@@ -630,6 +824,8 @@ describe("CLI", () => {
     const projects = harness.listProjects();
     expect(projects.length).toBe(1);
     const project = projects[0];
+    expect(firstOverview.run.projectId).toBe(project.id);
+    expect(secondOverview.run.projectId).toBe(project.id);
     const charter = harness.getActiveFounderCharter({ projectId: project.id });
     expect(charter?.id).toBe(firstCharterId);
     expect(charter?.mission).toContain("reliable");
@@ -8525,6 +8721,10 @@ describe("CLI", () => {
 
     expect(result.ticks[0].recovery).toBeUndefined();
     expect(result.ticks[0].createdCycle).toBeDefined();
+    const createdCycleRun = setupHarness.getRun(result.ticks[0].createdCycle.runId);
+    const selfIterationProjectId = setupHarness.listProjects()[0].id;
+    expect(setupHarness.getRun(bootstrap.runId)?.projectId).toBe(selfIterationProjectId);
+    expect(createdCycleRun?.projectId).toBe(selfIterationProjectId);
     expect(recoveryTasks).toHaveLength(0);
     expect(overview.run.status).toBe("blocked");
     expect(overview.run.context.automaticRecoveryExhausted).toMatchObject({

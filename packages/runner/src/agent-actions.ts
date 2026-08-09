@@ -1,5 +1,8 @@
 import {
   optionalStrictIsoTimestamp,
+  parseEvolutionCausalHypothesis,
+  parseEvolutionComparison,
+  parseEvolutionPackV1,
   requireStrictIsoTimestamp,
 } from "@ouroboros/harness";
 import type {
@@ -356,7 +359,11 @@ export function parseProposeDesignPayload(payload: unknown): ProposeDesignAction
   const record = requireObject(payload, "proposeDesign payload");
   const projectId = requireNonEmptyString(record.projectId, "proposeDesign payload.projectId");
   const title = requireNonEmptyString(record.title, "proposeDesign payload.title");
-  const proposal = parseDesignProposalData(record.proposal, "proposeDesign payload.proposal");
+  const proposal = parseDesignProposalData(
+    record.proposal,
+    "proposeDesign payload.proposal",
+    projectId,
+  );
   const status = optionalEnumValue<"draft" | "proposed" | "experimenting">(
     record.status,
     DESIGN_PROPOSAL_STATUSES,
@@ -372,7 +379,11 @@ export function parseProposeDesignPayload(payload: unknown): ProposeDesignAction
   };
 }
 
-function parseDesignProposalData(value: unknown, label: string): DesignProposalData {
+function parseDesignProposalData(
+  value: unknown,
+  label: string,
+  expectedProjectId: string,
+): DesignProposalData {
   const record = requireObject(value, label);
   const problem = requireNonEmptyString(record.problem, `${label}.problem`);
   const recommendation = requireNonEmptyString(record.recommendation, `${label}.recommendation`);
@@ -388,6 +399,21 @@ function parseDesignProposalData(value: unknown, label: string): DesignProposalD
     throw new Error(`${label}.options must include at least one alternative`);
   }
   const evaluationContract = parseDesignEvaluationContract(record.evaluationContract, `${label}.evaluationContract`);
+  const hasEvolutionPack = record.evolutionPack !== undefined;
+  const hasCausalHypothesis = record.causalHypothesis !== undefined;
+  const hasComparison = evaluationContract.comparison !== undefined;
+  const evolutionBlockCount = Number(hasEvolutionPack) + Number(hasCausalHypothesis) + Number(hasComparison);
+  if (evolutionBlockCount > 0 && evolutionBlockCount < 3) {
+    throw new Error(
+      `${label} target evolution data must include evolutionPack, causalHypothesis, and evaluationContract.comparison as one complete group`,
+    );
+  }
+  const evolutionPack = hasEvolutionPack
+    ? parseEvolutionPackV1(record.evolutionPack, expectedProjectId, `${label}.evolutionPack`)
+    : undefined;
+  const causalHypothesis = hasCausalHypothesis
+    ? parseEvolutionCausalHypothesis(record.causalHypothesis, `${label}.causalHypothesis`)
+    : undefined;
   const investment = parseDesignInvestment(record.investment, `${label}.investment`);
   const experiment = record.experiment === undefined ? undefined : parseDesignExperiment(record.experiment, `${label}.experiment`);
   const additions = optionalStringArray(record.additions, `${label}.additions`);
@@ -409,6 +435,8 @@ function parseDesignProposalData(value: unknown, label: string): DesignProposalD
   if (targetOutcome !== undefined) data.targetOutcome = targetOutcome;
   if (assumptions !== undefined) data.assumptions = assumptions;
   if (uncertainty !== undefined) data.uncertainty = uncertainty;
+  if (evolutionPack !== undefined) data.evolutionPack = evolutionPack;
+  if (causalHypothesis !== undefined) data.causalHypothesis = causalHypothesis;
   return data;
 }
 
@@ -438,16 +466,13 @@ function parseDesignEvaluationContract(value: unknown, label: string) {
   const guardMetrics = optionalStringArray(record.guardMetrics, `${label}.guardMetrics`);
   const requiredEvidence = optionalStringArray(record.requiredEvidence, `${label}.requiredEvidence`);
   const reviewAtRaw = optionalIsoTimestamp(record.reviewAt, `${label}.reviewAt`);
+  const comparison = record.comparison === undefined
+    ? undefined
+    : parseEvolutionComparison(record.comparison, `${label}.comparison`);
   if ((!successMetrics || successMetrics.length === 0) && (!requiredEvidence || requiredEvidence.length === 0)) {
     throw new Error(`${label} must define successMetrics or requiredEvidence`);
   }
-  const contract: {
-    baseline: string[];
-    successMetrics: string[];
-    guardMetrics: string[];
-    requiredEvidence: string[];
-    reviewAt?: string;
-  } = {
+  const contract: DesignProposalData["evaluationContract"] = {
     baseline: baseline ?? [],
     successMetrics: successMetrics ?? [],
     guardMetrics: guardMetrics ?? [],
@@ -455,6 +480,9 @@ function parseDesignEvaluationContract(value: unknown, label: string) {
   };
   if (reviewAtRaw !== undefined && reviewAtRaw !== null) {
     contract.reviewAt = reviewAtRaw;
+  }
+  if (comparison !== undefined) {
+    contract.comparison = comparison;
   }
   return contract;
 }

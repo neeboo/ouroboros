@@ -8,6 +8,82 @@ const MAX_LESSON_SUMMARY_CHARS = 320;
 const MAX_ACTIVE_GUARDRAILS = 8;
 const FROZEN_LINEAR_EVIDENCE_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 const RFC3339_WITH_TIMEZONE = /^(\d{4})-(\d{2})-(\d{2})T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/;
+const TARGET_EVOLUTION_PROPOSAL_EXTENSION = {
+  evolutionPack: {
+    schemaVersion: 1,
+    id: "target-evolution-pack",
+    targetSystemId: "target-system",
+    version: 1,
+    knowledgeScope: "project:<project_id>",
+    objective: {
+      charterId: "<charter_id>",
+      domainOutcomes: ["measurable domain outcome"],
+      nonGoals: ["production side effect outside the experiment"],
+    },
+    observation: {
+      signalSources: [{ id: "run-evidence", kind: "run-evidence" }],
+    },
+    mutationSurfaces: [
+      {
+        id: "bounded-policy-artifact",
+        evolutionTarget: "artifact",
+        layer: "policy",
+        projectId: "<project_id>",
+        allowedPaths: ["config/evolution/**"],
+        forbiddenPaths: ["db/**"],
+        owner: "target",
+      },
+    ],
+    experimentPolicy: {
+      controlRequired: true,
+      holdoutRequired: true,
+      unrelatedRegressionRequired: true,
+      equalBudgetRequired: true,
+      maxCandidates: 2,
+    },
+    promotionPolicy: {
+      guardMetrics: ["zero unintended writes"],
+      observationWindow: "three matched runs",
+      rollback: "restore the frozen control artifact",
+    },
+    handoff: {
+      maturity: "designed",
+      targetOwner: "target-system",
+      requiredCapabilities: ["frozen evidence replay"],
+    },
+    portability: {
+      projectLocalRules: ["keep domain semantics project-local"],
+      genericizationEvidence: [],
+    },
+  },
+  causalHypothesis: {
+    failureClass: "domain-hypothesis",
+    mechanism: "one bounded policy causes the measured gap",
+    predictedEffects: ["candidate improves the primary metric under the same budget"],
+    disconfirmingEvidence: ["holdout metric does not improve"],
+  },
+  evaluationContract: {
+    comparison: {
+      controlRef: "control_<id>",
+      developmentEvidenceRefs: ["development_evidence_<id>"],
+      holdoutEvidenceRefs: ["holdout_evidence_<id>"],
+      unrelatedEvidenceRefs: ["unrelated_evidence_<id>"],
+      corpusSnapshotSha256: "0".repeat(64),
+      equalBudget: {
+        model: "<model>",
+        reasoningEffort: "high",
+        wallClockMs: 300_000,
+        maxAttempts: 2,
+        maxTokens: 20_000,
+        toolPolicySha256: "1".repeat(64),
+        concurrency: 1,
+      },
+      primaryMetric: "primary outcome metric",
+      minimumUplift: 0,
+      maximumGuardRegression: 0,
+    },
+  },
+} as const;
 
 export function buildTaskPrompt(input: PromptInput) {
   const compactRecentLessons = compactLessons(input.lessons ?? []);
@@ -17,9 +93,17 @@ export function buildTaskPrompt(input: PromptInput) {
     input.task.config,
     input.task.role,
   );
+  const frozenTargetEvolutionContract = renderFrozenTargetEvolutionContract(
+    input.run.context,
+    input.task.role,
+  );
+  const protectedSections = [
+    frozenLinearImplementationGate,
+    frozenTargetEvolutionContract,
+  ].filter(Boolean);
   const prompt = renderPromptTemplate(template, {
     runGoal: input.run.goal,
-    runContextJson: prettyJson(input.run.context),
+    runContextJson: prettyJson(promptSafeRunContext(input.run.context)),
     taskId: input.task.id,
     taskRole: input.task.role,
     taskGoal: input.task.goal,
@@ -28,7 +112,8 @@ export function buildTaskPrompt(input: PromptInput) {
     doneWhenMarkdown: input.task.doneWhen.map((item) => `- ${item}`).join("\n"),
     dependencyAttemptsJson: prettyJson(input.dependencyAttempts),
     activeGuardrailsMarkdown: [
-      frozenLinearImplementationGate,
+      ...protectedSections,
+      renderTargetEvolutionProposalContract(input.task.role),
       renderActiveGuardrails(input.run.context, input.task.role),
     ].filter(Boolean).join("\n"),
     candidateGuardrailsMarkdown: renderCandidateGuardrails(compactRecentLessons),
@@ -36,10 +121,287 @@ export function buildTaskPrompt(input: PromptInput) {
     runLessonsJson: prettyJson(compactRecentLessons),
     requiredOutputJson: prettyJson(requiredOutputForRole(input.task.role, input.task.config)),
   });
-  if (frozenLinearImplementationGate && !template.includes("{{activeGuardrailsMarkdown}}")) {
-    return `${prompt}\n\n${frozenLinearImplementationGate}`;
+  const omittedProtectedSections = protectedSections.filter((section) => !prompt.includes(section));
+  if (omittedProtectedSections.length > 0) {
+    return `${prompt}\n\n${omittedProtectedSections.join("\n")}`;
   }
   return prompt;
+}
+
+function renderFrozenTargetEvolutionContract(
+  runContext: Record<string, unknown>,
+  role: string,
+): string {
+  if (!new Set(["planner", "worker", "verifier", "outcome-review"]).has(role)) {
+    return "";
+  }
+  const evolutionInstance = asRecord(runContext.evolutionInstance);
+  const evolutionPack = asRecord(runContext.evolutionPack);
+  const causalHypothesis = asRecord(runContext.causalHypothesis);
+  const comparison = asRecord(runContext.evolutionComparison) ?? asRecord(runContext.comparison);
+  const evaluationContract = asRecord(runContext.designEvaluationContract);
+  if (!evolutionInstance || !evolutionPack || !causalHypothesis || !comparison || !evaluationContract) {
+    return "";
+  }
+  const safeComparison = frozenComparisonView(comparison);
+  return [
+    "## Frozen Target Evolution Contract",
+    "This task may implement or evaluate the accepted design, but it must not weaken, replace, or amend these frozen values.",
+    "Holdout evidence references identify the sealed split. Do not request, infer, reproduce, or expose holdout contents or results during candidate generation.",
+    "### Optimization target pack",
+    "```json",
+    prettyJson(frozenEvolutionPackView(evolutionPack)),
+    "```",
+    "### Causal hypothesis",
+    "```json",
+    prettyJson(frozenCausalHypothesisView(causalHypothesis)),
+    "```",
+    "### Matched comparison protocol",
+    "```json",
+    prettyJson(safeComparison),
+    "```",
+    "### Frozen evaluation contract",
+    "```json",
+    prettyJson(frozenEvaluationContractView(evaluationContract, safeComparison)),
+    "```",
+    "### Evolution instance identity",
+    "```json",
+    prettyJson(frozenEvolutionInstanceView(evolutionInstance)),
+    "```",
+    "",
+  ].join("\n");
+}
+
+function promptSafeRunContext(context: Record<string, unknown>): Record<string, unknown> {
+  const evolutionInstance = asRecord(context.evolutionInstance);
+  const isDesignChild = context.source === "design"
+    || context.designProposalId !== undefined
+    || asRecord(context.designProposal) !== null;
+  if (!isDesignChild && !evolutionInstance) {
+    return context;
+  }
+  const safeContext = redactSensitivePromptMaterial(context) as Record<string, unknown>;
+  if (!evolutionInstance) {
+    return safeContext;
+  }
+  const {
+    evolutionPack: _evolutionPack,
+    causalHypothesis: _causalHypothesis,
+    comparison: _comparison,
+    evolutionComparison: _evolutionComparison,
+    designEvaluationContract: _designEvaluationContract,
+    designProposal: _designProposal,
+    evolutionInstance: _evolutionInstance,
+    ...rest
+  } = safeContext;
+  return {
+    ...rest,
+    targetEvolutionSummary: frozenEvolutionInstanceView(evolutionInstance),
+  };
+}
+
+function frozenEvaluationContractView(
+  contract: Record<string, unknown>,
+  comparison: Record<string, unknown>,
+): Record<string, unknown> {
+  return pickDefined({
+    baseline: contract.baseline,
+    successMetrics: contract.successMetrics,
+    guardMetrics: contract.guardMetrics,
+    requiredEvidence: contract.requiredEvidence,
+    reviewAt: contract.reviewAt,
+    comparison,
+  });
+}
+
+function frozenComparisonView(comparison: Record<string, unknown>): Record<string, unknown> {
+  const equalBudget = asRecord(comparison.equalBudget);
+  return pickDefined({
+    controlRef: comparison.controlRef,
+    developmentEvidenceRefs: comparison.developmentEvidenceRefs,
+    holdoutEvidenceRefs: comparison.holdoutEvidenceRefs,
+    unrelatedEvidenceRefs: comparison.unrelatedEvidenceRefs,
+    corpusSnapshotSha256: comparison.corpusSnapshotSha256,
+    equalBudget: equalBudget
+      ? pickDefined({
+          model: equalBudget.model,
+          reasoningEffort: equalBudget.reasoningEffort,
+          wallClockMs: equalBudget.wallClockMs,
+          maxAttempts: equalBudget.maxAttempts,
+          maxTokens: equalBudget.maxTokens,
+          toolPolicySha256: equalBudget.toolPolicySha256,
+          concurrency: equalBudget.concurrency,
+        })
+      : undefined,
+    primaryMetric: comparison.primaryMetric,
+    minimumUplift: comparison.minimumUplift,
+    maximumGuardRegression: comparison.maximumGuardRegression,
+  });
+}
+
+function frozenCausalHypothesisView(hypothesis: Record<string, unknown>): Record<string, unknown> {
+  return pickDefined({
+    failureClass: hypothesis.failureClass,
+    mechanism: hypothesis.mechanism,
+    predictedEffects: hypothesis.predictedEffects,
+    disconfirmingEvidence: hypothesis.disconfirmingEvidence,
+  });
+}
+
+function frozenEvolutionInstanceView(instance: Record<string, unknown>): Record<string, unknown> {
+  const cycle = asRecord(instance.cycle);
+  const pack = asRecord(instance.pack);
+  return pickDefined({
+    schemaVersion: instance.schemaVersion,
+    mode: instance.mode,
+    kernelProjectId: instance.kernelProjectId,
+    targetProjectId: instance.targetProjectId,
+    cycle: cycle ? pickDefined({ kind: cycle.kind, index: cycle.index }) : undefined,
+    pack: pack
+      ? pickDefined({ id: pack.id, version: pack.version, contentSha256: pack.contentSha256 })
+      : undefined,
+  });
+}
+
+function frozenEvolutionPackView(pack: Record<string, unknown>): Record<string, unknown> {
+  const objective = asRecord(pack.objective);
+  const observation = asRecord(pack.observation);
+  const experimentPolicy = asRecord(pack.experimentPolicy);
+  const promotionPolicy = asRecord(pack.promotionPolicy);
+  const handoff = asRecord(pack.handoff);
+  const portability = asRecord(pack.portability);
+  const signalSources = Array.isArray(observation?.signalSources)
+    ? observation.signalSources.map((value) => {
+        const source = asRecord(value);
+        return source ? pickDefined({ id: source.id, kind: source.kind, freshnessMs: source.freshnessMs }) : {};
+      })
+    : undefined;
+  const mutationSurfaces = Array.isArray(pack.mutationSurfaces)
+    ? pack.mutationSurfaces.map((value) => {
+        const surface = asRecord(value);
+        return surface
+          ? pickDefined({
+              id: surface.id,
+              evolutionTarget: surface.evolutionTarget,
+              layer: surface.layer,
+              projectId: surface.projectId,
+              allowedPaths: surface.allowedPaths,
+              forbiddenPaths: surface.forbiddenPaths,
+              owner: surface.owner,
+            })
+          : {};
+      })
+    : undefined;
+  return pickDefined({
+    schemaVersion: pack.schemaVersion,
+    id: pack.id,
+    targetSystemId: pack.targetSystemId,
+    version: pack.version,
+    knowledgeScope: pack.knowledgeScope,
+    objective: objective
+      ? pickDefined({
+          charterId: objective.charterId,
+          domainOutcomes: objective.domainOutcomes,
+          nonGoals: objective.nonGoals,
+        })
+      : undefined,
+    observation: observation ? pickDefined({ signalSources }) : undefined,
+    mutationSurfaces,
+    experimentPolicy: experimentPolicy
+      ? pickDefined({
+          controlRequired: experimentPolicy.controlRequired,
+          holdoutRequired: experimentPolicy.holdoutRequired,
+          unrelatedRegressionRequired: experimentPolicy.unrelatedRegressionRequired,
+          equalBudgetRequired: experimentPolicy.equalBudgetRequired,
+          maxCandidates: experimentPolicy.maxCandidates,
+        })
+      : undefined,
+    promotionPolicy: promotionPolicy
+      ? pickDefined({
+          guardMetrics: promotionPolicy.guardMetrics,
+          observationWindow: promotionPolicy.observationWindow,
+          rollback: promotionPolicy.rollback,
+        })
+      : undefined,
+    handoff: handoff
+      ? pickDefined({
+          maturity: handoff.maturity,
+          targetOwner: handoff.targetOwner,
+          requiredCapabilities: handoff.requiredCapabilities,
+        })
+      : undefined,
+    portability: portability
+      ? pickDefined({
+          projectLocalRules: portability.projectLocalRules,
+          genericizationEvidence: portability.genericizationEvidence,
+        })
+      : undefined,
+  });
+}
+
+function pickDefined(record: Record<string, unknown>): Record<string, unknown> {
+  return Object.fromEntries(Object.entries(record).filter(([, value]) => value !== undefined));
+}
+
+function redactSensitivePromptMaterial(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map(redactSensitivePromptMaterial);
+  }
+  if (!value || typeof value !== "object") {
+    return value;
+  }
+  return Object.fromEntries(
+    Object.entries(value as Record<string, unknown>)
+      .filter(([key]) => !isSensitivePromptMaterialKey(key))
+      .map(([key, entry]) => [key, redactSensitivePromptMaterial(entry)]),
+  );
+}
+
+function isSensitivePromptMaterialKey(key: string): boolean {
+  if (isHeldoutMaterialKey(key)) {
+    return true;
+  }
+  const normalized = key.replace(/[-_]/g, "").toLowerCase();
+  if (
+    normalized.includes("secret")
+    || normalized.includes("credential")
+    || normalized.includes("authorization")
+    || (normalized.includes("token") && normalized !== "maxtokens")
+  ) {
+    return true;
+  }
+  return false;
+}
+
+function isHeldoutMaterialKey(key: string): boolean {
+  const normalized = key.replace(/[-_]/g, "").toLowerCase();
+  for (const prefix of ["holdout", "heldout"]) {
+    if (normalized.startsWith(prefix)) {
+      const suffix = normalized.slice(prefix.length);
+      return !(suffix.endsWith("ref") || suffix.endsWith("refs"));
+    }
+  }
+  return false;
+}
+
+function renderTargetEvolutionProposalContract(role: string): string {
+  if (role !== "designer") {
+    return "";
+  }
+  return [
+    "## Target System Evolution Proposal Contract",
+    "A normal proposeDesign may omit target-evolution data. An evolution proposal must include all three blocks together: proposal.evolutionPack, proposal.causalHypothesis, and proposal.evaluationContract.comparison.",
+    "- evolutionPack schemaVersion is 1. It names the project-local objective, observation sources, mutation surfaces, experiment and promotion policy, designed handoff, and portability boundary.",
+    "- Artifacts, Harness, and Model are optimization targets; the meta-kernel, project pack, and delivery path are responsibility layers. Milestone-one model mutation is prohibited.",
+    "- causalHypothesis must state a supported failureClass, mechanism, predictedEffects, and disconfirmingEvidence.",
+    "- comparison must freeze non-empty development, holdout, and unrelated evidence refs plus a corpus hash, controlRef, primary metric, thresholds, and the same equal budget for control and candidate.",
+    "- Candidate generation may cite frozen holdoutEvidenceRefs, but must not receive or reproduce holdout contents or results. Tests alone do not replace the matched baseline or unrelated-regression evidence.",
+    "Merge this exact optional extension fragment into the single proposeDesign proposal shown below. Do not emit another proposeDesign action:",
+    "```json",
+    prettyJson(TARGET_EVOLUTION_PROPOSAL_EXTENSION),
+    "```",
+    "",
+  ].join("\n");
 }
 
 interface LinearDeliveryScope {

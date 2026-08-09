@@ -695,6 +695,147 @@ describe("runner", () => {
     expect(rawLessonsSection).not.toContain("candidateGuardrail");
   });
 
+  test.each(["planner", "worker", "verifier", "outcome-review"] as const)(
+    "renders the frozen evolution identity and comparison for %s without holdout contents",
+    (role) => {
+      const projectId = harness.createProject({ name: `prompt-${role}`, rootPath: dir });
+      const proposal = targetEvolutionProposal(projectId);
+      const runId = harness.createRun({
+        goal: "Use the frozen target-evolution contract",
+        projectId,
+        context: {
+          projectId,
+          evolutionPack: proposal.evolutionPack,
+          causalHypothesis: proposal.causalHypothesis,
+          evolutionComparison: proposal.evaluationContract.comparison,
+          designEvaluationContract: {
+            ...proposal.evaluationContract,
+            holdoutContents: ["DO_NOT_LEAK_HELDOUT_CONTENT"],
+            secret: "DO_NOT_LEAK_EVALUATION_SECRET",
+          },
+          evolutionInstance: {
+            schemaVersion: 1,
+            mode: "design-target",
+            kernelProjectId: "project_kernel",
+            targetProjectId: projectId,
+            cycle: { kind: "bootstrap", index: 0 },
+            pack: {
+              id: proposal.evolutionPack.id,
+              version: proposal.evolutionPack.version,
+              contentSha256: "c".repeat(64),
+            },
+          },
+          designProposal: {
+            ...proposal,
+            evaluationContract: {
+              ...proposal.evaluationContract,
+              holdoutContents: ["DO_NOT_LEAK_HELDOUT_CONTENT"],
+              secret: "DO_NOT_LEAK_EVALUATION_SECRET",
+            },
+            holdoutContents: ["DO_NOT_LEAK_HELDOUT_CONTENT"],
+            holdoutResults: { score: 1 },
+          },
+        },
+      });
+      const taskId = harness.createTask({
+        runId,
+        role,
+        goal: "Honor the frozen experiment",
+        prompt: "Use only authorized evidence.",
+      });
+
+      const prompt = buildTaskPrompt({
+        run: harness.getRun(runId)!,
+        task: harness.getTask(taskId)!,
+        dependencyAttempts: [],
+      });
+
+      expect(prompt).toContain("## Frozen Target Evolution Contract");
+      expect(prompt).toContain("Optimization target pack");
+      expect(prompt).toContain("Causal hypothesis");
+      expect(prompt).toContain("Matched comparison protocol");
+      expect(prompt).toContain("Evolution instance identity");
+      expect(prompt).toContain("pack_delivery_v1");
+      expect(prompt).toContain("domain-hypothesis");
+      expect(prompt).toContain("holdout:1");
+      expect(prompt).toContain("project_kernel");
+      expect(prompt).not.toContain("DO_NOT_LEAK_HELDOUT_CONTENT");
+      expect(prompt).not.toContain('"holdoutResults"');
+      expect(prompt).not.toContain("DO_NOT_LEAK_EVALUATION_SECRET");
+      expect(prompt).not.toContain('"secret"');
+    },
+  );
+
+  test.each(["planner", "worker", "verifier", "outcome-review"] as const)(
+    "redacts sensitive ordinary design-proposal extensions from the %s prompt",
+    (role) => {
+      const runId = harness.createRun({
+        goal: "Use the accepted ordinary design proposal",
+        context: {
+          source: "design",
+          designProposalId: "proposal_ordinary_sensitive",
+          designEvaluationContract: {
+            baseline: ["baseline remains visible"],
+            successMetrics: ["success metric remains visible"],
+            guardMetrics: ["guard metric remains visible"],
+            requiredEvidence: ["required evidence remains visible"],
+          },
+          designProposal: {
+            problem: "Ordinary proposal problem remains visible",
+            recommendation: "Ordinary proposal recommendation remains visible",
+            customRolloutNotes: "SAFE_ORDINARY_EXTENSION_REMAINS_VISIBLE",
+            heldoutContents: ["DO_NOT_LEAK_ORDINARY_HELDOUT_CONTENT"],
+            heldoutResults: { score: "DO_NOT_LEAK_ORDINARY_HELDOUT_RESULT" },
+            heldoutPrivateResults: "DO_NOT_LEAK_NESTED_ORDINARY_HELDOUT_RESULT",
+            nestedSensitiveMaterial: {
+              secret: "DO_NOT_LEAK_ORDINARY_SECRET",
+              apiToken: "DO_NOT_LEAK_ORDINARY_TOKEN",
+              serviceToken: "DO_NOT_LEAK_ORDINARY_SERVICE_TOKEN",
+              credentials: "DO_NOT_LEAK_ORDINARY_CREDENTIALS",
+              Authorization: "DO_NOT_LEAK_ORDINARY_AUTHORIZATION",
+            },
+          },
+        },
+      });
+      const taskId = harness.createTask({
+        runId,
+        role,
+        goal: "Honor the accepted proposal",
+        prompt: "Use only prompt-safe proposal context.",
+      });
+
+      const prompt = buildTaskPrompt({
+        run: harness.getRun(runId)!,
+        task: harness.getTask(taskId)!,
+        dependencyAttempts: [],
+      });
+
+      expect(prompt).toContain("Ordinary proposal problem remains visible");
+      expect(prompt).toContain("Ordinary proposal recommendation remains visible");
+      expect(prompt).toContain("SAFE_ORDINARY_EXTENSION_REMAINS_VISIBLE");
+      for (const leakedValue of [
+        "DO_NOT_LEAK_ORDINARY_HELDOUT_CONTENT",
+        "DO_NOT_LEAK_ORDINARY_HELDOUT_RESULT",
+        "DO_NOT_LEAK_NESTED_ORDINARY_HELDOUT_RESULT",
+        "DO_NOT_LEAK_ORDINARY_SECRET",
+        "DO_NOT_LEAK_ORDINARY_TOKEN",
+        "DO_NOT_LEAK_ORDINARY_SERVICE_TOKEN",
+        "DO_NOT_LEAK_ORDINARY_CREDENTIALS",
+        "DO_NOT_LEAK_ORDINARY_AUTHORIZATION",
+      ]) {
+        expect(prompt).not.toContain(leakedValue);
+      }
+      expect(prompt).not.toContain('"heldoutContents"');
+      expect(prompt).not.toContain('"heldoutResults"');
+      expect(prompt).not.toContain('"heldoutPrivateResults"');
+      expect(prompt).not.toContain('"secret"');
+      expect(prompt).not.toContain('"apiToken"');
+      expect(prompt).not.toContain('"serviceToken"');
+      expect(prompt).not.toContain('"credentials"');
+      expect(prompt).not.toContain('"Authorization"');
+    },
+  );
+
   test("builds designer prompts that advertise the five fixed design actions", () => {
     const runId = harness.createRun({
       goal: "Designer drives the autonomous strategy loop",
@@ -7082,6 +7223,85 @@ describe("runner", () => {
     },
   };
 
+  function targetEvolutionProposal(projectId: string) {
+    return {
+      ...validProposal,
+      evolutionPack: {
+        schemaVersion: 1 as const,
+        id: "pack_delivery_v1",
+        targetSystemId: "target-system",
+        version: 1,
+        knowledgeScope: `project:${projectId}` as const,
+        objective: {
+          charterId: "charter_target",
+          domainOutcomes: ["matched delivery quality improves"],
+          nonGoals: ["no production publishing"],
+        },
+        observation: {
+          signalSources: [{ id: "run-evidence", kind: "run-evidence" as const }],
+        },
+        mutationSurfaces: [{
+          id: "bounded-policy",
+          evolutionTarget: "artifact" as const,
+          layer: "policy" as const,
+          projectId,
+          allowedPaths: ["config/evolution/**"],
+          forbiddenPaths: ["db/**"],
+          owner: "target" as const,
+        }],
+        experimentPolicy: {
+          controlRequired: true as const,
+          holdoutRequired: true as const,
+          unrelatedRegressionRequired: true as const,
+          equalBudgetRequired: true as const,
+          maxCandidates: 2,
+        },
+        promotionPolicy: {
+          guardMetrics: ["no unrelated regressions"],
+          observationWindow: "three matched runs",
+          rollback: "restore the frozen control",
+        },
+        handoff: {
+          maturity: "designed" as const,
+          targetOwner: "target-team",
+          requiredCapabilities: ["frozen replay"],
+        },
+        portability: {
+          projectLocalRules: ["keep domain rules local"],
+          genericizationEvidence: [],
+        },
+      },
+      causalHypothesis: {
+        failureClass: "domain-hypothesis" as const,
+        mechanism: "the bounded policy causes the measured gap",
+        predictedEffects: ["candidate improves the primary metric"],
+        disconfirmingEvidence: ["holdout does not improve"],
+      },
+      evaluationContract: {
+        ...validProposal.evaluationContract,
+        comparison: {
+          controlRef: "control_v1",
+          developmentEvidenceRefs: ["development:1"],
+          holdoutEvidenceRefs: ["holdout:1"],
+          unrelatedEvidenceRefs: ["unrelated:1"],
+          corpusSnapshotSha256: "a".repeat(64),
+          equalBudget: {
+            model: "gpt-5.6-sol",
+            reasoningEffort: "high" as const,
+            wallClockMs: 300_000,
+            maxAttempts: 2,
+            maxTokens: 20_000,
+            toolPolicySha256: "b".repeat(64),
+            concurrency: 1,
+          },
+          primaryMetric: "verified completion rate",
+          minimumUplift: 0.05,
+          maximumGuardRegression: 0,
+        },
+      },
+    };
+  }
+
   test("parses valid recordSignal designer action", () => {
     const output = parseAttemptOutput(
       JSON.stringify({
@@ -7416,6 +7636,442 @@ describe("runner", () => {
     expect(events[0].result).toMatchObject({ signalId: signals[0].id });
   });
 
+  test("apply-design-actions hook rejects recordSignal when a project-bound run names another project", async () => {
+    const projectId = harness.createProject({ name: "ouroboros", rootPath: dir });
+    const otherProjectId = harness.createProject({ name: "other", rootPath: join(dir, "other") });
+    const runId = harness.createRun({ goal: "project-bound design run", projectId });
+    const taskId = harness.createTask({
+      runId,
+      role: "designer",
+      goal: "design",
+      prompt: "design",
+    });
+    const hook = createApplyDesignActionsHook({ harness });
+
+    const result = await hook({
+      run: harness.getRun(runId)!,
+      task: harness.getTask(taskId)!,
+      sessionName: "session",
+      prompt: "design",
+      output: {
+        status: "done",
+        summary: "cross-project signal",
+        designActions: [
+          {
+            type: "recordSignal",
+            payload: {
+              projectId: otherProjectId,
+              signalClass: "delivery",
+              source: "tests",
+              title: "cross-project",
+              summary: "must fail closed",
+              observationTime: "2026-08-02T00:00:00Z",
+              confidence: 0.5,
+            },
+          },
+        ],
+      } as AttemptOutput,
+    });
+
+    expect(result.decision).toBe("exit");
+    expect(result.problems?.[0]).toContain("does not match source run project");
+    expect(harness.listStrategySignals({ projectId: otherProjectId })).toHaveLength(0);
+  });
+
+  test("apply-design-actions hook rejects proposeDesign when the source run or charter belongs to another project", async () => {
+    const projectId = harness.createProject({ name: "ouroboros", rootPath: dir });
+    const otherProjectId = harness.createProject({ name: "other", rootPath: join(dir, "other") });
+    const otherCharter = harness.createFounderCharter({
+      projectId: otherProjectId,
+      mission: "Other project mission",
+      charter: { mission: "Other project mission" },
+      activate: true,
+    });
+    const hook = createApplyDesignActionsHook({ harness });
+
+    const mismatchedRunId = harness.createRun({ goal: "bound elsewhere", projectId: otherProjectId });
+    const mismatchedTaskId = harness.createTask({
+      runId: mismatchedRunId,
+      role: "designer",
+      goal: "design",
+      prompt: "design",
+    });
+    const runMismatch = await hook({
+      run: harness.getRun(mismatchedRunId)!,
+      task: harness.getTask(mismatchedTaskId)!,
+      sessionName: "session",
+      prompt: "design",
+      output: {
+        status: "done",
+        summary: "cross-project proposal",
+        designActions: [{
+          type: "proposeDesign",
+          payload: { projectId, title: "Cross-project proposal", proposal: validProposal },
+        }],
+      } as AttemptOutput,
+    });
+    expect(runMismatch.problems?.[0]).toContain("does not match source run project");
+    expect(harness.listDesignProposals({ projectId })).toHaveLength(0);
+
+    const runId = harness.createRun({ goal: "project-bound design run", projectId });
+    const taskId = harness.createTask({
+      runId,
+      role: "designer",
+      goal: "design",
+      prompt: "design",
+    });
+    const charterMismatch = await hook({
+      run: harness.getRun(runId)!,
+      task: harness.getTask(taskId)!,
+      sessionName: "session",
+      prompt: "design",
+      output: {
+        status: "done",
+        summary: "cross-project charter",
+        designActions: [{
+          type: "proposeDesign",
+          payload: {
+            projectId,
+            charterId: otherCharter.id,
+            title: "Cross-project charter proposal",
+            proposal: validProposal,
+          },
+        }],
+      } as AttemptOutput,
+    });
+    expect(charterMismatch.problems?.[0]).toContain("belongs to project");
+    expect(harness.listDesignProposals({ projectId })).toHaveLength(0);
+  });
+
+  test("apply-design-actions hook rejects a source task that does not belong to the source run", async () => {
+    const projectId = harness.createProject({ name: "ouroboros", rootPath: dir });
+    const runId = harness.createRun({ goal: "source run", projectId });
+    const otherRunId = harness.createRun({ goal: "other run", projectId });
+    const otherTaskId = harness.createTask({
+      runId: otherRunId,
+      role: "designer",
+      goal: "design",
+      prompt: "design",
+    });
+    const hook = createApplyDesignActionsHook({ harness });
+
+    const result = await hook({
+      run: harness.getRun(runId)!,
+      task: harness.getTask(otherTaskId)!,
+      sessionName: "session",
+      prompt: "design",
+      output: {
+        status: "done",
+        summary: "mismatched source task",
+        designActions: [{
+          type: "recordSignal",
+          payload: {
+            projectId,
+            signalClass: "delivery",
+            source: "tests",
+            title: "mismatched task",
+            summary: "must fail closed",
+            observationTime: "2026-08-02T00:00:00Z",
+            confidence: 0.5,
+          },
+        }],
+      } as AttemptOutput,
+    });
+
+    expect(result.problems?.[0]).toContain("does not belong to source run");
+    expect(harness.listStrategySignals({ projectId })).toHaveLength(0);
+  });
+
+  test("apply-design-actions hook rejects a proposal that cites a strategy signal from another project", async () => {
+    const projectId = harness.createProject({ name: "ouroboros", rootPath: dir });
+    const otherProjectId = harness.createProject({ name: "other", rootPath: join(dir, "other") });
+    seedActiveCharter(projectId);
+    const foreignSignalId = seedLowRiskSignal(otherProjectId);
+    const runId = harness.createRun({ goal: "project-bound design run", projectId });
+    const taskId = harness.createTask({
+      runId,
+      role: "designer",
+      goal: "design",
+      prompt: "design",
+    });
+    const hook = createApplyDesignActionsHook({ harness });
+
+    const result = await hook({
+      run: harness.getRun(runId)!,
+      task: harness.getTask(taskId)!,
+      sessionName: "session",
+      prompt: "design",
+      output: {
+        status: "done",
+        summary: "cross-project evidence",
+        designActions: [{
+          type: "proposeDesign",
+          payload: {
+            projectId,
+            title: "Foreign evidence proposal",
+            proposal: lowRiskProposalEnvelope(foreignSignalId),
+          },
+        }],
+      } as AttemptOutput,
+    });
+
+    expect(result.problems?.[0]).toContain("cross-project strategy signal");
+    expect(harness.listDesignProposals({ projectId })).toHaveLength(0);
+  });
+
+  test("createRunsFromDesign rejects an existing child run with polluted project context", async () => {
+    const projectId = harness.createProject({ name: "ouroboros", rootPath: dir });
+    const otherProjectId = harness.createProject({ name: "other", rootPath: join(dir, "other") });
+    const runId = harness.createRun({ goal: "project-bound design run", projectId });
+    const taskId = harness.createTask({
+      runId,
+      role: "designer",
+      goal: "design",
+      prompt: "design",
+    });
+    const proposal = harness.createDesignProposal({
+      projectId,
+      title: "Bound child run",
+      problem: "A child run must preserve project identity",
+      recommendation: "Create one project-bound child run",
+      proposal: validProposal as never,
+      status: "accepted",
+    });
+    harness.recordDesignDecision({
+      proposalId: proposal.id,
+      decision: "approved",
+      actorKind: "human",
+      actorRef: "founder@example.com",
+      reasons: ["bounded test fixture"],
+    });
+    const childRunId = `run_${createHash("sha1")
+      .update(`design-child|${runId}|${taskId}|0|${proposal.id}|0`, "utf8")
+      .digest("hex")}`;
+    harness.createRun({
+      id: childRunId,
+      goal: "Existing polluted child",
+      projectId,
+      context: { projectId: otherProjectId },
+    });
+    const hook = createApplyDesignActionsHook({ harness });
+
+    const result = await hook({
+      run: harness.getRun(runId)!,
+      task: harness.getTask(taskId)!,
+      sessionName: "session",
+      prompt: "design",
+      output: {
+        status: "done",
+        summary: "reuse child",
+        designActions: [{
+          type: "createRunsFromDesign",
+          payload: {
+            proposalId: proposal.id,
+            runs: [{ goal: "Existing polluted child", prompt: "Plan safely." }],
+          },
+        }],
+      } as AttemptOutput,
+    });
+
+    expect(result.problems?.[0]).toContain("context.projectId");
+    expect(harness.getRunOverview({ runId: childRunId }).tasks).toHaveLength(0);
+  });
+
+  test("createRunsFromDesign freezes a normalized target-evolution contract and derives stable self/design-target identities", async () => {
+    const targetProjectId = harness.createProject({ name: "target", rootPath: dir });
+    const kernelProjectId = harness.createProject({ name: "kernel", rootPath: join(dir, "kernel") });
+    const hook = createApplyDesignActionsHook({ harness });
+
+    const deliver = async (input: {
+      sourceContext?: Record<string, unknown>;
+      proposalData: ReturnType<typeof targetEvolutionProposal>;
+      plannedContext?: Record<string, unknown>;
+    }) => {
+      const runId = harness.createRun({
+        goal: "design target evolution",
+        projectId: targetProjectId,
+        context: input.sourceContext ?? {},
+      });
+      const taskId = harness.createTask({
+        runId,
+        role: "designer",
+        goal: "deliver frozen design",
+        prompt: "deliver",
+      });
+      const proposal = harness.createDesignProposal({
+        projectId: targetProjectId,
+        title: "Freeze target evolution",
+        problem: input.proposalData.problem,
+        recommendation: input.proposalData.recommendation,
+        proposal: input.proposalData as never,
+        status: "accepted",
+      });
+      harness.recordDesignDecision({
+        proposalId: proposal.id,
+        decision: "approved",
+        actorKind: "human",
+        actorRef: "founder@example.com",
+        reasons: ["bounded fixture"],
+      });
+      const result = await hook({
+        run: harness.getRun(runId)!,
+        task: harness.getTask(taskId)!,
+        sessionName: "session",
+        prompt: "deliver",
+        output: {
+          status: "done",
+          summary: "deliver",
+          designActions: [{
+            type: "createRunsFromDesign",
+            payload: {
+              proposalId: proposal.id,
+              runs: [{ goal: "Plan frozen evolution", prompt: "Plan it.", context: input.plannedContext }],
+            },
+          }],
+        } as AttemptOutput,
+      });
+      const artifact = (result.artifacts ?? []).find(
+        (entry) => (entry as { kind?: string }).kind === "created_run",
+      ) as { runId: string } | undefined;
+      return {
+        result,
+        child: artifact ? harness.getRun(artifact.runId) : null,
+      };
+    };
+
+    const selfProposal = targetEvolutionProposal(targetProjectId);
+    (selfProposal.evaluationContract as Record<string, unknown>).holdoutContents = [
+      "DO_NOT_LEAK_CHILD_HELDOUT_CONTENT",
+    ];
+    (selfProposal.evaluationContract as Record<string, unknown>).secret =
+      "DO_NOT_LEAK_EVALUATION_SECRET";
+    const selfDelivery = await deliver({
+      proposalData: selfProposal,
+      plannedContext: {
+        projectId: "project_polluted",
+        evolutionPack: { id: "pack_polluted" },
+        causalHypothesis: { mechanism: "polluted" },
+        comparison: { controlRef: "polluted" },
+        evolutionComparison: { controlRef: "polluted" },
+        designEvaluationContract: { successMetrics: ["polluted"] },
+        evolutionInstance: { schemaVersion: 999, kernelProjectId: "project_polluted" },
+      },
+    });
+    expect(selfDelivery.result.decision).toBe("continue");
+    const selfChild = selfDelivery.child!;
+    const canonicalize = (value: unknown): unknown => {
+      if (value === null || typeof value !== "object") return value;
+      if (Array.isArray(value)) return value.map(canonicalize);
+      const record = value as Record<string, unknown>;
+      return Object.fromEntries(Object.keys(record).sort().map((key) => [key, canonicalize(record[key])]));
+    };
+    const expectedHash = createHash("sha256")
+      .update(JSON.stringify(canonicalize(selfProposal.evolutionPack)), "utf8")
+      .digest("hex");
+
+    expect(selfChild.projectId).toBe(targetProjectId);
+    const expectedEvaluationContract = {
+      baseline: validProposal.evaluationContract.baseline,
+      successMetrics: validProposal.evaluationContract.successMetrics,
+      guardMetrics: validProposal.evaluationContract.guardMetrics,
+      requiredEvidence: validProposal.evaluationContract.requiredEvidence,
+      comparison: selfProposal.evaluationContract.comparison,
+    };
+    expect(selfChild.context).toMatchObject({
+      projectId: targetProjectId,
+      evolutionPack: selfProposal.evolutionPack,
+      causalHypothesis: selfProposal.causalHypothesis,
+      comparison: selfProposal.evaluationContract.comparison,
+      evolutionComparison: selfProposal.evaluationContract.comparison,
+      designEvaluationContract: expectedEvaluationContract,
+      evolutionInstance: {
+        schemaVersion: 1,
+        mode: "self",
+        kernelProjectId: targetProjectId,
+        targetProjectId,
+        cycle: { kind: "bootstrap", index: 0 },
+        pack: {
+          id: selfProposal.evolutionPack.id,
+          version: selfProposal.evolutionPack.version,
+          contentSha256: expectedHash,
+        },
+      },
+    });
+    expect(selfChild.context.designEvaluationContract).not.toHaveProperty("holdoutContents");
+    expect(selfChild.context.designEvaluationContract).not.toHaveProperty("secret");
+    expect(
+      (selfChild.context.designProposal as { evaluationContract: Record<string, unknown> })
+        .evaluationContract,
+    ).toEqual(expectedEvaluationContract);
+    const selfPlanner = harness.getRunOverview({ runId: selfChild.id }).tasks.find(
+      (task) => task.role === "planner",
+    )!;
+    const selfPlannerPrompt = buildTaskPrompt({
+      run: selfChild,
+      task: selfPlanner,
+      dependencyAttempts: [],
+    });
+    expect(selfPlannerPrompt).not.toContain("DO_NOT_LEAK_CHILD_HELDOUT_CONTENT");
+    expect(selfPlannerPrompt).not.toContain("DO_NOT_LEAK_EVALUATION_SECRET");
+    expect(selfPlannerPrompt).not.toContain('"secret"');
+
+    const reordered = targetEvolutionProposal(targetProjectId);
+    reordered.evolutionPack = {
+      portability: reordered.evolutionPack.portability,
+      handoff: reordered.evolutionPack.handoff,
+      promotionPolicy: reordered.evolutionPack.promotionPolicy,
+      experimentPolicy: reordered.evolutionPack.experimentPolicy,
+      mutationSurfaces: reordered.evolutionPack.mutationSurfaces,
+      observation: reordered.evolutionPack.observation,
+      objective: reordered.evolutionPack.objective,
+      knowledgeScope: reordered.evolutionPack.knowledgeScope,
+      version: reordered.evolutionPack.version,
+      targetSystemId: reordered.evolutionPack.targetSystemId,
+      id: reordered.evolutionPack.id,
+      schemaVersion: reordered.evolutionPack.schemaVersion,
+    } as typeof reordered.evolutionPack;
+    const designTargetDelivery = await deliver({
+      proposalData: reordered,
+      sourceContext: {
+        evolutionInstance: {
+          schemaVersion: 1,
+          mode: "design-target",
+          kernelProjectId,
+          targetProjectId,
+          cycle: { kind: "design", index: 4 },
+        },
+      },
+    });
+    expect(designTargetDelivery.result.decision).toBe("continue");
+    const designTargetChild = designTargetDelivery.child!;
+    expect(designTargetChild.context.evolutionInstance).toMatchObject({
+      schemaVersion: 1,
+      mode: "design-target",
+      kernelProjectId,
+      targetProjectId,
+      cycle: { kind: "bootstrap", index: 0 },
+      pack: { contentSha256: expectedHash },
+    });
+
+    const invalidSourceDelivery = await deliver({
+      proposalData: targetEvolutionProposal(targetProjectId),
+      sourceContext: {
+        evolutionInstance: {
+          schemaVersion: 1,
+          mode: "design-target",
+          kernelProjectId,
+          targetProjectId,
+          // Deliberately missing cycle: present-but-invalid identity must fail.
+        },
+      },
+    });
+    expect(invalidSourceDelivery.result.decision).toBe("exit");
+    expect(invalidSourceDelivery.result.problems?.[0]).toContain(
+      "source run evolutionInstance",
+    );
+    expect(invalidSourceDelivery.child).toBeNull();
+  });
+
   test("apply-design-actions hook records proposal, decision, outcome, and runs", async () => {
     const runId = harness.createRun({ goal: "design run" });
     const taskId = harness.createTask({
@@ -7489,6 +8145,7 @@ describe("runner", () => {
               {
                 goal: "Plan pre-warm",
                 prompt: "Plan the change.",
+                context: { projectId: "project_untrusted_override" },
               },
             ],
           },
@@ -7511,7 +8168,13 @@ describe("runner", () => {
     expect(createdRunArtifacts).toHaveLength(1);
     const childRunId = (createdRunArtifacts[0] as { runId: string }).runId;
     const childRun = harness.getRun(childRunId);
+    expect(childRun?.projectId).toBe(projectId);
+    expect(childRun?.context.evolutionPack).toBeUndefined();
+    expect(childRun?.context.causalHypothesis).toBeUndefined();
+    expect(childRun?.context.evolutionComparison).toBeUndefined();
+    expect(childRun?.context.evolutionInstance).toBeUndefined();
     expect(childRun?.context).toMatchObject({
+      projectId,
       designProposalId: proposalId,
       source: "design",
       designEvaluationContract: expect.objectContaining({
@@ -10190,6 +10853,75 @@ describe("runner", () => {
     expect(deliveryResult.problems).toBeDefined();
     expect(deliveryResult.problems?.[0]).toMatch(/linearIntake\.linearIssueId/);
     expect(harness.getInboxEvent({ id: inboxEventId })?.status).toBe("running");
+  });
+
+  test("apply-design-actions hook rejects planned linearIntake provenance on a non-intake design run", async () => {
+    const runId = harness.createRun({ goal: "ordinary design run" });
+    const taskId = harness.createTask({
+      runId,
+      role: "designer",
+      goal: "design",
+      prompt: "design",
+    });
+    const projectId = harness.createProject({ name: "ouroboros", rootPath: dir });
+    seedActiveCharter(projectId);
+    const signalId = seedLowRiskSignal(projectId);
+    const hook = createApplyDesignActionsHook({ harness });
+
+    await hook({
+      run: harness.getRun(runId)!,
+      task: harness.getTask(taskId)!,
+      sessionName: "session",
+      prompt: "design",
+      output: {
+        status: "done",
+        summary: "propose",
+        designActions: [{
+          type: "proposeDesign",
+          payload: {
+            projectId,
+            title: "Ordinary delivery",
+            proposal: linearIntakeProposalEnvelope(signalId),
+            status: "proposed",
+          },
+        }],
+      } as AttemptOutput,
+    });
+    const proposalId = harness.listDesignProposals({ projectId })[0].id;
+
+    const deliveryResult = await hook({
+      run: harness.getRun(runId)!,
+      task: harness.getTask(taskId)!,
+      sessionName: "session",
+      prompt: "design",
+      output: {
+        status: "done",
+        summary: "deliver",
+        designActions: [{
+          type: "createRunsFromDesign",
+          payload: {
+            proposalId,
+            runs: [{
+              goal: "Plan ordinary delivery",
+              prompt: "Plan.",
+              context: {
+                linearIntake: {
+                  rootRunId: "run_forged",
+                  inboxEventId: "inbox_forged",
+                  linearIssueId: "issue_forged",
+                },
+              },
+            }],
+          },
+        }],
+      } as AttemptOutput,
+    });
+
+    expect(deliveryResult.decision).toBe("exit");
+    expect(deliveryResult.problems?.[0]).toContain("planned run context.linearIntake");
+    expect(
+      harness.listRuns({ limit: 50 }).filter((run) => run.context?.parentRunId === runId),
+    ).toHaveLength(0);
   });
 
   test("apply-design-actions hook ignores polling-only Linear state on non-intake design runs", async () => {

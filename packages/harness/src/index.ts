@@ -31,6 +31,13 @@ export {
 export { acceptGuardrailProposal, proposeGuardrailsFromLessons, refreshGuardrailProposalsForRun } from "./guardrails";
 export { diagnoseRunOverview } from "./overseer";
 export { readableList, readableValue } from "./readable";
+export {
+  TARGET_EVOLUTION_LIMITS,
+  parseEvolutionCausalHypothesis,
+  parseEvolutionComparison,
+  parseEvolutionInstance,
+  parseEvolutionPackV1,
+} from "./target-evolution";
 export type {
   ContractAmendmentEntry,
   ExecutionThreadStatusFilter,
@@ -101,6 +108,16 @@ export type {
   DesignProposalData,
   DesignProposalOption,
   DesignProposalStatus,
+  EvolutionCausalHypothesis,
+  EvolutionComparison,
+  EvolutionCycleKind,
+  EvolutionFirstCandidate,
+  EvolutionInstance,
+  EvolutionMode,
+  EvolutionMutationLayer,
+  EvolutionPackMaturity,
+  EvolutionPackV1,
+  EvolutionTarget,
   ExecutionThread,
   ExecutionThreadStatus,
   ExternalRef,

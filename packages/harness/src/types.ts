@@ -682,12 +682,135 @@ export interface DesignProposalOption {
   [key: string]: unknown;
 }
 
+export type EvolutionMode = "self" | "design-target" | "target-cycle";
+export type EvolutionCycleKind = "design" | "bootstrap" | "operate" | "assess-handoff";
+export type EvolutionTarget = "artifact" | "harness" | "model";
+export type EvolutionMutationLayer = "artifact" | "workflow" | "prompt" | "tool" | "policy" | "code";
+export type EvolutionPackMaturity = "designed" | "instrumented" | "shadowing" | "autonomous" | "retired";
+
+export interface EvolutionInstance {
+  schemaVersion: 1;
+  mode: EvolutionMode;
+  kernelProjectId: string;
+  targetProjectId: string;
+  cycle: {
+    kind: EvolutionCycleKind;
+    index: number;
+  };
+  pack?: {
+    id: string;
+    version: number;
+    contentSha256: string;
+  };
+}
+
+export interface EvolutionFirstCandidate {
+  id: string;
+  mode: "shadow";
+  allowedEvolutionTargets: Array<"artifact" | "harness">;
+  prohibitedEvolutionTargets: ["model"];
+  sideEffectBudget: {
+    paidUsd: 0;
+    realProviderCalls: 0;
+    pancatWrites: 0;
+    productionPublishes: 0;
+    realAssetDeletes: 0;
+    crossProjectMemoryReads: 0;
+    crossProjectMemoryWrites: 0;
+  };
+}
+
+export interface EvolutionPackV1 {
+  schemaVersion: 1;
+  id: string;
+  targetSystemId: string;
+  version: number;
+  knowledgeScope: `project:${string}`;
+  objective: {
+    charterId: string;
+    domainOutcomes: string[];
+    nonGoals: string[];
+  };
+  observation: {
+    signalSources: Array<{
+      id: string;
+      kind: "run-evidence" | "repository" | "external-ref" | "domain-metric";
+      freshnessMs?: number;
+    }>;
+  };
+  mutationSurfaces: Array<{
+    id: string;
+    evolutionTarget: EvolutionTarget;
+    layer: EvolutionMutationLayer;
+    projectId: string;
+    allowedPaths: string[];
+    forbiddenPaths: string[];
+    owner: "ouroboros" | "target";
+  }>;
+  experimentPolicy: {
+    controlRequired: true;
+    holdoutRequired: true;
+    unrelatedRegressionRequired: true;
+    equalBudgetRequired: true;
+    maxCandidates: number;
+  };
+  promotionPolicy: {
+    guardMetrics: string[];
+    observationWindow: string;
+    rollback: string;
+  };
+  handoff: {
+    maturity: EvolutionPackMaturity;
+    targetOwner: string;
+    requiredCapabilities: string[];
+  };
+  portability: {
+    projectLocalRules: string[];
+    genericizationEvidence: string[];
+  };
+  firstCandidate?: EvolutionFirstCandidate;
+}
+
+export interface EvolutionCausalHypothesis {
+  failureClass:
+    | "environment"
+    | "control-lifecycle"
+    | "contract-mismatch"
+    | "agent-capability"
+    | "evaluation-defect"
+    | "domain-hypothesis";
+  mechanism: string;
+  predictedEffects: string[];
+  disconfirmingEvidence: string[];
+}
+
+export interface EvolutionComparison {
+  controlRef: string;
+  developmentEvidenceRefs: string[];
+  holdoutEvidenceRefs: string[];
+  unrelatedEvidenceRefs: string[];
+  corpusSnapshotSha256: string;
+  equalBudget: {
+    model: string;
+    reasoningEffort: "low" | "medium" | "high" | "xhigh" | "max" | "ultra";
+    wallClockMs: number;
+    maxAttempts: number;
+    maxTokens?: number;
+    toolPolicySha256: string;
+    concurrency: number;
+  };
+  primaryMetric: string;
+  minimumUplift: number;
+  maximumGuardRegression: number;
+}
+
 export interface DesignEvaluationContract {
   baseline: string[];
   successMetrics: string[];
   guardMetrics: string[];
   requiredEvidence: string[];
   reviewAt?: string;
+  comparison?: EvolutionComparison;
   [key: string]: unknown;
 }
 
@@ -718,6 +841,8 @@ export interface DesignProposalData {
   removals?: string[];
   assumptions?: string[];
   uncertainty?: string[];
+  evolutionPack?: EvolutionPackV1;
+  causalHypothesis?: EvolutionCausalHypothesis;
   evaluationContract: DesignEvaluationContract;
   investment: DesignInvestment;
   experiment?: DesignExperiment;
