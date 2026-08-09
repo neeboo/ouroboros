@@ -4,6 +4,7 @@ import {
   type Harness,
   type RunOverview,
 } from "@ouroboros/harness";
+import { dirname, isAbsolute, resolve } from "node:path";
 import { DEFAULT_REPAIR_REPLAN_BUDGET_LIMIT } from "./hooks/create-repair";
 import { chargeRepairBudget, readRepairBudget } from "./hooks/repair-budget";
 
@@ -99,11 +100,15 @@ export function reconcileTerminalDesignDeliveries(input: {
         proposalId,
         workerTaskId: candidate.taskId,
       });
+      const repoPath = terminalIntegrationRepoPath({
+        run,
+        sourceWorktreePath: input.harness.getTask(candidate.taskId)?.worktreePath ?? null,
+      });
       const action = applyHarnessAction(input.harness, {
         type: "integrateVerifiedRun",
         runId: run.id,
         workerTaskId: candidate.taskId,
-        ...(run.projectRoot ? { repoPath: run.projectRoot } : {}),
+        ...(repoPath ? { repoPath } : {}),
         targetBranch: integrationTargetBranch(run.context),
         push: false,
         immediateOutcomeReview: true,
@@ -522,6 +527,44 @@ function reconciliationContracts(context: Record<string, unknown>) {
 
 function integrationTargetBranch(context: Record<string, unknown>) {
   return "main";
+}
+
+function terminalIntegrationRepoPath(input: {
+  run: ScopedRun;
+  sourceWorktreePath: string | null;
+}) {
+  if (input.run.projectRoot) {
+    return resolve(input.run.projectRoot);
+  }
+  const boundaryRepoPath = recordValue(input.run.context.integrationBoundary).repoPath;
+  if (typeof boundaryRepoPath === "string" && isAbsolute(boundaryRepoPath)) {
+    return resolve(boundaryRepoPath);
+  }
+  if (!input.sourceWorktreePath) {
+    return null;
+  }
+
+  const worktreePath = resolve(input.sourceWorktreePath);
+  const commonDir = strictGitLine(worktreePath, ["rev-parse", "--path-format=absolute", "--git-common-dir"]);
+  if (!commonDir || commonDir.split(/[\\/]/).at(-1) !== ".git") {
+    return null;
+  }
+  const repoPath = dirname(commonDir);
+  const topLevel = strictGitLine(repoPath, ["rev-parse", "--path-format=absolute", "--show-toplevel"]);
+  return topLevel && resolve(topLevel) === resolve(repoPath) ? resolve(repoPath) : null;
+}
+
+function strictGitLine(cwd: string, args: string[]) {
+  const result = Bun.spawnSync({
+    cmd: ["git", "-C", cwd, ...args],
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  if (result.exitCode !== 0) {
+    return null;
+  }
+  const lines = result.stdout.toString().trim().split(/\r?\n/).filter(Boolean);
+  return lines.length === 1 ? lines[0]! : null;
 }
 
 function recordValue(value: unknown): Record<string, unknown> {

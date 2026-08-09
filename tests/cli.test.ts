@@ -6784,7 +6784,7 @@ describe("CLI", () => {
     expect(attempt.input.cwd).toBe("/repo");
   });
 
-  test("run-loop dispatches role backend workers through acpx even with codex-resumable fallback", async () => {
+  test("run-loop migrates a stale global Claude default to the frozen codex-resumable executor", async () => {
     await runCli("init");
     const run = await runCliJson(
       "create-run",
@@ -6800,13 +6800,14 @@ describe("CLI", () => {
       "--role",
       "worker",
       "--goal",
-      "Run through Claude Code",
+      "Run through Codex",
       "--prompt",
-      "Use the fake Claude Code executor.",
+      "Use the frozen Codex executor.",
     );
     const binDir = join(dir, "bin-resumable-agent-backend");
-    const logPath = join(dir, "acpx-resumable-args.jsonl");
-    const browserPolicyPath = join(dir, "acpx-resumable-browser-policy.txt");
+    const acpxLogPath = join(dir, "acpx-resumable-args.jsonl");
+    const codexLogPath = join(dir, "codex-resumable-args.jsonl");
+    const codexBin = join(binDir, "codex");
     await mkdir(binDir);
     await writeFile(
       join(binDir, "acpx"),
@@ -6814,13 +6815,27 @@ describe("CLI", () => {
         "#!/usr/bin/env bun",
         "const { appendFileSync } = await import('node:fs');",
         "const args = Bun.argv.slice(2);",
-        `appendFileSync(${JSON.stringify(logPath)}, JSON.stringify(args) + '\\n');`,
-        `await Bun.write(${JSON.stringify(browserPolicyPath)}, process.env.ORBS_BROWSER_PROCESS_POLICY ?? 'unset');`,
-        "await new Response(Bun.stdin.stream()).text();",
-        "console.log(JSON.stringify({ status: 'done', summary: 'claude selected', changedFiles: [], checks: [], artifacts: [], problems: [] }));",
+        `appendFileSync(${JSON.stringify(acpxLogPath)}, JSON.stringify(args) + '\\n');`,
+        "process.exit(91);",
       ].join("\n"),
     );
     await chmod(join(binDir, "acpx"), 0o755);
+    await writeFile(
+      codexBin,
+      [
+        "#!/usr/bin/env bun",
+        "const { appendFileSync, writeFileSync } = await import('node:fs');",
+        "const args = Bun.argv.slice(2);",
+        `appendFileSync(${JSON.stringify(codexLogPath)}, JSON.stringify(args) + '\\n');`,
+        "const outputFlag = args.indexOf('--output-last-message');",
+        "const outputPath = outputFlag >= 0 ? args[outputFlag + 1] : '';",
+        "const payload = { status: 'done', summary: 'codex selected', changedFiles: [], checks: [], artifacts: [], problems: [] };",
+        "if (outputPath) writeFileSync(outputPath, JSON.stringify(payload));",
+        "console.log(JSON.stringify({ type: 'session.started', session_id: 'session_stale_global_default' }));",
+        "console.log(JSON.stringify({ type: 'agent.message', message: JSON.stringify(payload) }));",
+      ].join("\n"),
+    );
+    await chmod(codexBin, 0o755);
 
     const result = await runCliJson(
       "run-loop",
@@ -6828,6 +6843,8 @@ describe("CLI", () => {
       run.id,
       "--executor",
       "codex-resumable",
+      "--codex-bin",
+      codexBin,
       "--cwd",
       "/repo",
       "--browser-process-policy",
@@ -6838,33 +6855,24 @@ describe("CLI", () => {
     );
     const attemptId = result.rounds[0].tasks[0].attemptId;
     const attempt = new Harness(dbPath).getAttempt(attemptId)!;
-    const loggedCalls = (await Bun.file(logPath).text()).trim().split("\n").map((line) => JSON.parse(line));
-    const promptCall = loggedCalls.find(
-      (args: string[]) =>
-        args.includes("claude") && args.includes("prompt") && args.includes("-s") && args.includes("-f"),
-    );
+    const codexCalls = (await Bun.file(codexLogPath).text()).trim().split("\n").map((line) => JSON.parse(line));
 
     expect(result.rounds[0].tasks[0].taskId).toBe(task.id);
     expect(result.rounds[0].tasks[0].status).toBe("done");
-    expect(promptCall).toContain("--approve-all");
-    expect(promptCall).toContain("claude");
-    expect(promptCall).toContain("-");
-    expect(promptCall).not.toContain("--model");
-    expect(promptCall).not.toContain("gpt-5.4-mini");
-    expect(await Bun.file(browserPolicyPath).text()).toBe("deny");
+    expect(existsSync(acpxLogPath)).toBe(false);
+    expect(codexCalls[0]).toContain("exec");
+    expect(codexCalls[0]).toContain("gpt-5.4-mini");
     expect(attempt.input.backend).toMatchObject({
-      id: "claude-code",
-      kind: "acpx",
-      agent: "claude",
-      approval: "approve-all",
-      source: "run-default",
+      id: "codex-resumable",
+      kind: "codex-resumable",
+      source: "cli-executor",
     });
-    expect(attempt.input.model).toBeNull();
-    expect(attempt.input.executor).toBe("acpx");
-    expect(attempt.output.summary).toBe("claude selected");
+    expect(attempt.input.model).toMatchObject({ model: "gpt-5.4-mini", source: "role-default" });
+    expect(attempt.input.executor).toBe("codex-resumable");
+    expect(attempt.output.summary).toBe("codex selected");
     expect(new Harness(dbPath).listExecutionThreads({ runId: run.id })[0]).toMatchObject({
       attemptId,
-      agentSessionId: `task-${task.id}`,
+      agentSessionId: "session_stale_global_default",
       sessionName: `task-${task.id}`,
     });
     expect(
@@ -6873,10 +6881,9 @@ describe("CLI", () => {
         .some(
           (event) =>
             event.stream === "system" &&
-            event.payload.type === "acpx.attempt.started" &&
-            event.payload.idleTimeoutMs === 300000,
+            event.payload.type === "acpx.attempt.started",
         ),
-    ).toBe(true);
+    ).toBe(false);
   });
 
   test("records a structured attempt from JSON", async () => {

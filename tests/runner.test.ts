@@ -2350,6 +2350,7 @@ describe("runner", () => {
       context: {
         agentDefaults: {
           global: "claude-code",
+          roles: { worker: "claude-code" },
         },
         agentBackends: {
           "claude-code": {
@@ -2451,6 +2452,7 @@ describe("runner", () => {
         context: {
           agentDefaults: {
             global: "claude-code",
+            roles: { worker: "claude-code" },
           },
           agentBackends: {
             "claude-code": {
@@ -2521,6 +2523,7 @@ describe("runner", () => {
       context: {
         agentDefaults: {
           global: "claude-code",
+          roles: { worker: "claude-code" },
         },
         agentBackends: {
           "claude-code": {
@@ -5480,12 +5483,40 @@ describe("runner", () => {
 
     expect(resolveExecutionRoute({ run, task, cliExecutor: "codex-resumable" })).toMatchObject({
       role: "worker",
+      executionMode: "codex-resumable",
+      backend: {
+        id: "codex-resumable",
+        kind: "codex-resumable",
+        source: "cli-executor",
+      },
+      model: {
+        model: "gpt-5.4-mini",
+        reason: "cheap worker",
+        source: "role-default",
+        role: "worker",
+      },
+    });
+    expect(resolveExecutionRoute({
+      run: {
+        ...run,
+        context: {
+          ...run.context,
+          agentDefaults: {
+            global: "claude-code",
+            roles: { worker: "claude-code" },
+          },
+        },
+      },
+      task,
+      cliExecutor: "codex-resumable",
+    })).toMatchObject({
+      role: "worker",
       executionMode: "generic",
       backend: {
         id: "claude-code",
         kind: "acpx",
         agent: "claude",
-        source: "run-default",
+        source: "role-default",
       },
       model: null,
     });

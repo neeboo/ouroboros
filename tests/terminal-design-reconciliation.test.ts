@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
+import { join, relative } from "node:path";
 import { tmpdir } from "node:os";
 import { Harness } from "../packages/harness/src";
 import {
@@ -169,6 +169,89 @@ describe("terminal design delivery reconciliation", () => {
     }
   });
 
+  test("derives the integration repository from a verified worker linked worktree", async () => {
+    const repoPath = join(dir, "legacy-repo");
+    const worktreePath = join(dir, "legacy-worker-tree");
+    await initializeRepository(repoPath);
+    git(repoPath, ["worktree", "add", "-b", "legacy-worker", worktreePath, "main"]);
+    const recordedWorktreePath = relative(process.cwd(), worktreePath);
+    await mkdir(join(worktreePath, "src"), { recursive: true });
+    await writeFile(join(worktreePath, "src", "legacy.ts"), "export const recovered = true;\n");
+
+    const { rootRunId, deliveryRunId } = createDesignDelivery({
+      repoPath,
+      bindDeliveryProject: false,
+    });
+    const workerTaskId = harness.createTask({
+      runId: deliveryRunId,
+      role: "worker",
+      goal: "Implement the legacy delivery",
+      prompt: "Create src/legacy.ts.",
+      worktreePath: recordedWorktreePath,
+    });
+    harness.recordAttempt({
+      taskId: workerTaskId,
+      input: { executor: "test" },
+      output: {
+        status: "done",
+        summary: "Implemented the legacy delivery",
+        changedFiles: ["src/legacy.ts"],
+        checks: [{ name: "worker", status: "passed" }],
+        artifacts: [],
+        problems: [],
+      },
+    });
+    const verifierTaskId = harness.createTask({
+      runId: deliveryRunId,
+      role: "verifier",
+      goal: "Verify the legacy delivery",
+      prompt: "Verify src/legacy.ts.",
+      dependsOn: [workerTaskId],
+      worktreePath: recordedWorktreePath,
+    });
+    harness.recordAttempt({
+      taskId: verifierTaskId,
+      input: { executor: "test" },
+      output: {
+        status: "done",
+        summary: "Verified the legacy delivery",
+        changedFiles: [],
+        checks: [{ name: "verification", status: "passed" }],
+        artifacts: [],
+        problems: [],
+      },
+    });
+    harness.updateRunStatus({ runId: deliveryRunId, status: "done" });
+
+    const first = reconcileTerminalDesignDeliveries({
+      harness,
+      rootRunId,
+      runs: harness.listRuns({ limit: 100 }),
+    });
+    const integrationEvents = harness.listHarnessActionEvents({ limit: 100 }).filter(
+      (event) => event.actionType === "integrateVerifiedRun",
+    );
+
+    expect(first).toMatchObject({ state: "integrated", deliveryRunId });
+    expect(integrationEvents).toHaveLength(1);
+    expect(integrationEvents[0]?.request).toMatchObject({
+      repoPath: await realpath(repoPath),
+      workerTaskId,
+      push: false,
+    });
+    expect(await Bun.file(join(repoPath, "src", "legacy.ts")).text()).toContain("recovered = true");
+
+    const replay = reconcileTerminalDesignDeliveries({
+      harness,
+      rootRunId,
+      runs: harness.listRuns({ limit: 100 }),
+    });
+    expect(replay).toMatchObject({ state: "clear", blocksAssessment: false });
+    expect(harness.listHarnessActionEvents({ limit: 100 }).filter(
+      (event) => event.actionType === "integrateVerifiedRun",
+    )).toHaveLength(1);
+  });
+
   test("creates only one bounded repair for a terminal delivery without valid integration evidence", () => {
     const { rootRunId, deliveryRunId, proposalId } = createDesignDelivery({
       repairReplanBudget: { limit: 2, used: 0, entries: [] },
@@ -209,6 +292,66 @@ describe("terminal design delivery reconciliation", () => {
       repairTaskId: first.repairTaskId,
       failureEvidence: expect.objectContaining({ sourceAttemptId: expect.any(String) }),
     });
+  });
+
+  test("records one auditable failure when a legacy worker repository cannot be resolved", () => {
+    const { rootRunId, deliveryRunId } = createDesignDelivery({
+      bindDeliveryProject: false,
+      repairReplanBudget: { limit: 2, used: 0, entries: [] },
+    });
+    const missingWorktreePath = join(dir, "missing-worker-tree");
+    const workerTaskId = harness.createTask({
+      runId: deliveryRunId,
+      role: "worker",
+      goal: "Implement a legacy delivery",
+      prompt: "Return the frozen change.",
+      worktreePath: missingWorktreePath,
+    });
+    harness.recordAttempt({
+      taskId: workerTaskId,
+      input: { executor: "test" },
+      output: {
+        status: "done",
+        summary: "Implemented in a worktree that is no longer available",
+        changedFiles: ["src/legacy.ts"],
+        checks: [{ name: "worker", status: "passed" }],
+        artifacts: [],
+        problems: [],
+      },
+    });
+    const verifierTaskId = harness.createTask({
+      runId: deliveryRunId,
+      role: "verifier",
+      goal: "Verify the legacy delivery",
+      prompt: "Verify the frozen checks.",
+      dependsOn: [workerTaskId],
+      worktreePath: missingWorktreePath,
+    });
+    harness.recordAttempt({
+      taskId: verifierTaskId,
+      input: { executor: "test" },
+      output: {
+        status: "done",
+        summary: "Verified before the source worktree disappeared",
+        changedFiles: [],
+        checks: [{ name: "verification", status: "passed" }],
+        artifacts: [],
+        problems: [],
+      },
+    });
+    harness.updateRunStatus({ runId: deliveryRunId, status: "done" });
+
+    const first = reconcileTerminalDesignDeliveries({ harness, rootRunId, runs: harness.listRuns({ limit: 100 }) });
+    const second = reconcileTerminalDesignDeliveries({ harness, rootRunId, runs: harness.listRuns({ limit: 100 }) });
+    const blockedIntegrationEvents = harness.listHarnessActionEvents({ limit: 100 }).filter(
+      (event) => event.status === "blocked" && event.request.type === "integrateVerifiedRun",
+    );
+
+    expect(first).toMatchObject({ state: "repairing", deliveryRunId });
+    expect(second).toMatchObject({ state: "repairing", repairTaskId: first.repairTaskId });
+    expect(blockedIntegrationEvents).toHaveLength(1);
+    expect(JSON.stringify(blockedIntegrationEvents[0]?.result.problems)).toContain("repoPath");
+    expect(harness.getRun(deliveryRunId)?.context.repairReplanBudget).toMatchObject({ limit: 2, used: 1 });
   });
 
   test("blocks equivalent goal-review verification and records a terminal disposition after repair exhaustion", async () => {
@@ -299,6 +442,7 @@ describe("terminal design delivery reconciliation", () => {
 
   function createDesignDelivery(input: {
     repoPath?: string;
+    bindDeliveryProject?: boolean;
     repairReplanBudget?: { limit: number; used: number; entries: unknown[] };
     targetBranch?: string;
   } = {}) {
@@ -329,8 +473,8 @@ describe("terminal design delivery reconciliation", () => {
       status: "accepted",
     });
     const deliveryRunId = harness.createRun({
-      projectId,
-      projectRoot: input.repoPath ?? dir,
+      projectId: input.bindDeliveryProject === false ? null : projectId,
+      projectRoot: input.bindDeliveryProject === false ? null : input.repoPath ?? dir,
       goal: "Deliver the accepted design",
       context: {
         parentRunId: rootRunId,
