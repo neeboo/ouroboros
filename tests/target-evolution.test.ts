@@ -19,7 +19,6 @@ interface HodorEvolutionReference {
   evolutionPack: EvolutionPackV1;
   causalHypothesis: EvolutionCausalHypothesis;
   comparison: EvolutionComparison;
-  firstCandidate: EvolutionFirstCandidate;
 }
 
 const ZERO_SIDE_EFFECT_BUDGET = {
@@ -243,13 +242,16 @@ describe("target-system evolution contracts", () => {
     const reference = references[0]!;
     for (const candidateReference of references) {
       const parsedPack = parser("parseEvolutionPackV1")(
-        {
-          ...candidateReference.evolutionPack,
-          firstCandidate: candidateReference.firstCandidate,
-        },
+        candidateReference.evolutionPack,
         candidateReference.projectId,
       ) as EvolutionPackV1;
-      expect(parsedPack.firstCandidate).toEqual(candidateReference.firstCandidate);
+      expect(parsedPack.firstCandidate).toEqual({
+        id: "hodor-spatial-risk-shadow-v0",
+        mode: "shadow",
+        allowedEvolutionTargets: ["artifact", "harness"],
+        prohibitedEvolutionTargets: ["model"],
+        sideEffectBudget: ZERO_SIDE_EFFECT_BUDGET,
+      });
     }
     const pack = parser("parseEvolutionPackV1")(
       reference.evolutionPack,
@@ -275,7 +277,7 @@ describe("target-system evolution contracts", () => {
     );
     expect(optimizationTargets).toEqual(new Set(["artifact", "harness"]));
     expect(optimizationTargets.has("model")).toBeFalse();
-    expect(reference.firstCandidate).toMatchObject({
+    expect(pack.firstCandidate).toMatchObject({
       mode: "shadow",
       allowedEvolutionTargets: ["artifact", "harness"],
       prohibitedEvolutionTargets: ["model"],

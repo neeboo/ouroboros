@@ -4,7 +4,7 @@
 
 Ouroboros can describe how another project may evolve while keeping delivery, evidence, and authority boundaries explicit. The first reference target is Hodor.
 
-The checked-in Hodor reference is a **designed-state contract only**. It proves that the current production parsers accept a bounded pack, causal hypothesis, and matched comparison. It does not claim that Hodor emits production episodes, runs shadow experiments, promotes variants, rolls them back, or operates autonomously.
+The checked-in Hodor reference is a **designed-state contract only**. It proves that the current production parsers accept a bounded pack, causal hypothesis, and matched comparison. It does not claim that Hodor has an experiment executor, emits production episodes, runs shadow experiments, promotes variants, rolls them back, or operates autonomously.
 
 The machine-readable reference is [the Hodor evolution pack v0](examples/hodor-evolution-pack-v0.json). Tests parse its `evolutionPack`, `causalHypothesis`, and `comparison` fields with the production target-evolution parsers.
 
@@ -49,13 +49,13 @@ For example, the Delivery Plane may implement either an `artifact` policy candid
 
 The current runtime validates three existing contracts:
 
-- `EvolutionPackV1`: target objective, observations, mutation surfaces, experiment policy, promotion placeholders, handoff maturity, and project-local knowledge boundary;
+- `EvolutionPackV1`: target objective, observations, mutation surfaces, experiment policy, promotion placeholders, handoff maturity, project-local knowledge boundary, and an optional strict `firstCandidate`;
 - `EvolutionCausalHypothesis`: the proposed failure mechanism, predicted effects, and disconfirming evidence;
 - `EvolutionComparison`: mutually exclusive development, heldout, and unrelated evidence references under one frozen equal budget.
 
-Milestone one fails closed for cross-project mutation surfaces, non-canonical or escaping paths, a `model` optimization target, incomplete evidence splits, overlapping split references, invalid budgets, and any maturity beyond `designed`.
+Milestone one fails closed for cross-project mutation surfaces, non-canonical or escaping paths, a `model` optimization target, incomplete evidence splits, overlapping split references, invalid budgets, and any maturity beyond `designed`. When present inside `EvolutionPackV1`, `firstCandidate` is also parsed strictly: its only mode is `shadow`, its allowed optimization targets are limited to `artifact` and `harness`, `model` must remain prohibited, and every declared side-effect budget must equal zero.
 
-The Hodor JSON uses the stable example identity `project_hodor_reference`. Its outer object is a reference envelope; the three fields above are independently passed to their production parsers. `firstCandidate` records additional design intent that later runtime contracts must enforce.
+The Hodor JSON uses the stable example identity `project_hodor_reference`. Its outer object is a reference envelope containing the three production-parsed contract blocks: `evolutionPack`, `causalHypothesis`, and `comparison`. `firstCandidate` is a strict field inside `evolutionPack`, so the production pack parser enforces its shadow-only shape and zero-side-effect budget without test-side assembly.
 
 ## Hodor domain contracts for later milestones
 
@@ -196,13 +196,13 @@ The first candidate is a zero-side-effect shadow experiment for Hodor's spatial-
 - allowed paths are limited to the reference spatial-risk policy and evaluation areas;
 - production, provider, credential, production-asset, and cross-project-memory paths remain forbidden.
 
-At `designed` maturity this candidate is a contract example only. Reaching `shadowing` requires real `EvolutionProfile`, `ProductionEpisode`, `HarnessVariant`, and `MatchedExperiment` support plus deterministic proof that no side-effect counter can exceed zero.
+The production parser now enforces this candidate's static declaration: shadow mode only, `artifact` and `harness` targets only, explicit `model` prohibition, and zero for every side-effect budget counter. At `designed` maturity this remains a contract example. Ouroboros does not yet provide the Hodor experiment executor that could prove those counters stayed at zero during a run. Reaching `shadowing` requires real `EvolutionProfile`, `ProductionEpisode`, `HarnessVariant`, and `MatchedExperiment` support. Promotion, canary readback, and rollback execution remain later capabilities.
 
 ## Maturity gates
 
 | Maturity | Required evidence | May do |
 | --- | --- | --- |
-| `designed` | Production parsers accept the static pack, hypothesis, and comparison; boundary tests reject unsafe variants | Design and review only |
+| `designed` | Production parsers accept the static pack, strict first candidate, hypothesis, and comparison; boundary tests reject unsafe variants | Design and review only |
 | `instrumented` | Immutable profile, episode, and variant identities with readback | Capture and replay observations |
 | `shadowing` | Matched experiments with sealed heldout data and zero-side-effect proof | Evaluate without promotion |
 | `autonomous` | Authority-gated promotion receipts, exact readback, canary observation, and tested rollback | Promote and roll back within the frozen charter |

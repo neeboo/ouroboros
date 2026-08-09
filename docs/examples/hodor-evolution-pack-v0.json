@@ -112,6 +112,26 @@
         "A Hodor result cannot become kernel knowledge without evidence from another project"
       ],
       "genericizationEvidence": []
+    },
+    "firstCandidate": {
+      "id": "hodor-spatial-risk-shadow-v0",
+      "mode": "shadow",
+      "allowedEvolutionTargets": [
+        "artifact",
+        "harness"
+      ],
+      "prohibitedEvolutionTargets": [
+        "model"
+      ],
+      "sideEffectBudget": {
+        "paidUsd": 0,
+        "realProviderCalls": 0,
+        "pancatWrites": 0,
+        "productionPublishes": 0,
+        "realAssetDeletes": 0,
+        "crossProjectMemoryReads": 0,
+        "crossProjectMemoryWrites": 0
+      }
     }
   },
   "causalHypothesis": {
@@ -154,25 +174,5 @@
     "primaryMetric": "spatial-risk false-positive rate",
     "minimumUplift": 0.05,
     "maximumGuardRegression": 0
-  },
-  "firstCandidate": {
-    "id": "hodor-spatial-risk-shadow-v0",
-    "mode": "shadow",
-    "allowedEvolutionTargets": [
-      "artifact",
-      "harness"
-    ],
-    "prohibitedEvolutionTargets": [
-      "model"
-    ],
-    "sideEffectBudget": {
-      "paidUsd": 0,
-      "realProviderCalls": 0,
-      "pancatWrites": 0,
-      "productionPublishes": 0,
-      "realAssetDeletes": 0,
-      "crossProjectMemoryReads": 0,
-      "crossProjectMemoryWrites": 0
-    }
   }
 }
