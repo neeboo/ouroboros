@@ -50,7 +50,7 @@ export function createRunsFromOutputHook(options: { harness: Harness }): StopHoo
 
 function inheritedControlContext(context: Record<string, unknown>) {
   return Object.fromEntries(
-    ["modelDefaults", "agentDefaults", "agentBackends", "guardrails"]
+    ["modelDefaults", "agentDefaults", "agentBackends", "guardrails", "controlPlaneRuntime"]
       .filter((key) => context[key] !== undefined)
       .map((key) => [key, context[key]]),
   );

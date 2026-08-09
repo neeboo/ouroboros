@@ -1576,6 +1576,7 @@ function inheritedControlContext(context: Record<string, unknown>) {
       "agentBackends",
       "guardrails",
       "integrationBoundary",
+      "controlPlaneRuntime",
       "goalContract",
       "founderCharterId",
     ]

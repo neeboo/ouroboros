@@ -777,7 +777,8 @@ describe("CLI", () => {
       launchHead: expect.any(String),
       observedDirtyStateFingerprint: expect.any(String),
       promptContractHash: expect.stringMatching(/^[a-f0-9]{64}$/),
-      processIdentity: expect.any(String),
+      processIdentity: "supervisor-pending",
+      attestedProcessIdentity: "supervisor-pending",
       startedAt: expect.any(String),
       attestedAt: expect.any(String),
     }));
@@ -1030,6 +1031,7 @@ if (args.includes("self-improve-daemon")) {
     const replayedRuntime = replayed.run!.context.controlPlaneRuntime as Record<string, unknown>;
     expect(replayedRuntime.handoffReceipt).toEqual(runtime.handoffReceipt);
     expect(replayed.sessions.filter((session) => session.taskId === taskId)).toHaveLength(1);
+    expect(replayed.tasks.filter((task) => task.role === "goal-review")).toHaveLength(0);
   });
 
   test("runs a real two-process handoff from commit A to commit B", async () => {
@@ -1209,6 +1211,56 @@ if (args.includes("self-improve-daemon")) {
       newProcessId = Number(runtime.processIdentity);
 
       await stopProcesses();
+
+      const restart = Bun.spawn({
+        cmd: [
+          "bun",
+          mainPath,
+          "--db",
+          dbPath,
+          "self-improve-daemon",
+          "--root-run-id",
+          bootstrap.runId,
+          "--executor",
+          "codex-resumable",
+          "--cwd",
+          sourceRoot,
+          "--codex-bin",
+          codexBin,
+          "--max-ticks",
+          "1",
+          "--tick-cycles",
+          "1",
+          "--max-rounds",
+          "1",
+          "--interval-ms",
+          "1",
+          "--idle-ms",
+          "1",
+          "--start-hook",
+          "none",
+        ],
+        cwd: sourceRoot,
+        env: { ...process.env },
+        stdin: "ignore",
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      const [restartStdout, restartStderr, restartExitCode] = await Promise.all([
+        new Response(restart.stdout).text(),
+        new Response(restart.stderr).text(),
+        restart.exited,
+      ]);
+      expect(restartExitCode, `${restartStdout}\n${restartStderr}`).toBe(0);
+      const restartedRuntime = new Harness(dbPath).getRun(bootstrap.runId)!.context.controlPlaneRuntime as Record<string, unknown>;
+      expect(restartedRuntime).toMatchObject({
+        state: "current",
+        generation: 2,
+        launchHead: headB,
+        promptContractHash: promptB,
+        handoffReceipt: runtime.handoffReceipt,
+      });
+      expect(restartedRuntime.attestedProcessIdentity).not.toBe(runtime.attestedProcessIdentity);
 
       const overviewEvidence = await runCliJson("run-overview", "--run-id", bootstrap.runId);
       expect(overviewEvidence.controlPlaneRuntime).toMatchObject({
@@ -8395,7 +8447,33 @@ if (args.includes("self-improve-daemon")) {
       cycleId: review.id,
     });
     expect(overview.run.status).toBe("blocked");
+    expect(overview.run.context.goalReviewTerminalDisposition).toMatchObject({
+      kind: "max-tries",
+      tries: 3,
+      maxTries: 3,
+      taskId: review.id,
+    });
     expect(overview.sessions.filter((session: { taskId: string }) => session.taskId === review.id)).toHaveLength(3);
+
+    const replay = await runCliJson(
+      "run-loop",
+      "--run-id",
+      run.id,
+      "--executor",
+      "codex-resumable",
+      "--codex-bin",
+      "/should/not/run",
+      "--cwd",
+      "/repo",
+      "--max-rounds",
+      "1",
+      "--max-tries",
+      "3",
+    );
+    const replayed = await runCliJson("run-overview", "--run-id", run.id);
+    expect(replay.rounds).toEqual([]);
+    expect(replayed.sessions.filter((session: { taskId: string }) => session.taskId === review.id)).toHaveLength(3);
+    expect(replayed.run.context.goalReviewTerminalDisposition).toEqual(overview.run.context.goalReviewTerminalDisposition);
   });
 
   test("run-loop blocks a run after too many non-terminal goal reviews", async () => {

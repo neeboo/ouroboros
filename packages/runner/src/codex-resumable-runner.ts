@@ -11,11 +11,12 @@ import {
   type ExecutionThreadStatus,
   type Harness,
   type HarnessActionResult,
+  type Run,
   type RunOverview,
   type Task,
 } from "@ouroboros/harness";
 import { randomUUID } from "node:crypto";
-import { buildTaskPrompt } from "./prompt";
+import { buildTaskPrompt, protectedPromptContractFingerprintForSource } from "./prompt";
 import { applyStartHooks } from "./runner";
 import { createCodexResumableClient, sessionIdFromEvents } from "./executors/codex-resumable";
 import type { CodexResumableClientOptions, CodexResumableResult } from "./executors/codex-resumable";
@@ -61,6 +62,22 @@ export interface CodexResumableOrchestrationInput {
   shouldStop?: () => boolean;
 }
 
+type RuntimeGenerationState = "current" | "stale" | "draining-for-reload" | "reloaded" | "reload-failed";
+
+interface RuntimeGenerationContext {
+  state?: RuntimeGenerationState;
+  generation?: number;
+  sourceRoot?: string;
+  launchHead?: string;
+  observedHead?: string;
+  promptContractHash?: string;
+  attestedGeneration?: number;
+  attestedHead?: string;
+  attestedPromptContractHash?: string;
+  processIdentity?: string;
+  attestedProcessIdentity?: string;
+}
+
 export interface RunCodexResumableLoopInput extends CodexResumableOrchestrationInput {
   runId: string;
   maxRounds: number;
@@ -87,6 +104,10 @@ export async function runCodexResumableLoop(input: RunCodexResumableLoopInput) {
         break;
       }
       continue;
+    }
+
+    if (!orchestrator.canLeaseReadyWork(input.runId)) {
+      break;
     }
 
     const started = await orchestrator.startReadyAttempts({ runId: input.runId, limit: input.limit });
@@ -316,6 +337,9 @@ class CodexResumableOrchestrator {
   async startAttempt(taskId: string) {
     const task = this.taskOrThrow(taskId);
     const run = this.runOrThrow(task.runId);
+    if (!runtimeGenerationAllowsLeasing(run, this.cwd, this.harness)) {
+      throw new Error(`runtime generation ${String((run.context.controlPlaneRuntime as Record<string, unknown> | undefined)?.state ?? "unknown")} cannot start new work`);
+    }
     this.harness.clearRunPause(run.id);
     const sessionName = task.sessionRef ?? `task-${task.id}`;
     const prompt = this.promptForTask(run, task);
@@ -601,8 +625,15 @@ class CodexResumableOrchestrator {
     return tasks.filter((task) => task !== null);
   }
 
+  canLeaseReadyWork(runId: string) {
+    return runtimeGenerationAllowsLeasing(this.harness.getRun(runId), this.cwd, this.harness);
+  }
+
   async startReadyAttempts(input: { runId: string; limit: number }) {
     const run = this.runOrThrow(input.runId);
+    if (!runtimeGenerationAllowsLeasing(run, this.cwd, this.harness)) {
+      return [];
+    }
     this.harness.clearRunPause(run.id);
     const leased = this.harness.leaseReadyTasks({
       runId: input.runId,
@@ -1611,4 +1642,69 @@ function unrefTimer(timer: ReturnType<typeof setInterval>) {
 
 function errorMessage(error: unknown) {
   return error instanceof Error ? error.message : String(error);
+}
+
+/**
+ * The resume path intentionally calls this only after existing attempts have
+ * been resumed. A stale generation may drain those attempts, but it cannot
+ * claim a new task until a fresh process has attested its source.
+ */
+export function runtimeGenerationAllowsLeasing(run: Run | null, cwd: string, harness?: Harness): boolean {
+  const runtimeRun = runtimeGenerationRun(run, harness);
+  const raw = runtimeRun?.context.controlPlaneRuntime;
+  if (raw === undefined) {
+    return true;
+  }
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    return false;
+  }
+  const runtime = raw as RuntimeGenerationContext;
+  if (runtime.state !== "current" && runtime.state !== "reloaded") {
+    return false;
+  }
+  if (
+    typeof runtime.generation !== "number" || !Number.isInteger(runtime.generation) || runtime.generation < 1
+    || typeof runtime.sourceRoot !== "string" || runtime.sourceRoot.length === 0
+    || typeof runtime.launchHead !== "string" || runtime.launchHead.length === 0
+    || typeof runtime.promptContractHash !== "string" || runtime.promptContractHash.length === 0
+    || runtime.attestedGeneration !== runtime.generation
+    || runtime.attestedHead !== runtime.launchHead
+    || runtime.attestedPromptContractHash !== runtime.promptContractHash
+    || runtime.processIdentity !== String(process.pid)
+    || runtime.attestedProcessIdentity !== String(process.pid)
+  ) {
+    return false;
+  }
+  const observedHead = gitHead(runtime.sourceRoot || cwd);
+  return observedHead === runtime.launchHead
+    && protectedPromptContractFingerprintForSource(runtime.sourceRoot) === runtime.promptContractHash;
+}
+
+function runtimeGenerationRun(run: Run | null, harness?: Harness): Run | null {
+  if (!run || !harness) {
+    return run;
+  }
+  const chain: Run[] = [];
+  const visited = new Set<string>();
+  let current: Run | null = run;
+  while (current && !visited.has(current.id)) {
+    visited.add(current.id);
+    chain.push(current);
+    const parentRunId: string | null = typeof current.context.parentRunId === "string"
+      ? current.context.parentRunId
+      : null;
+    current = parentRunId ? harness.getRun(parentRunId) : null;
+  }
+  return [...chain].reverse().find((candidate) => candidate.context.controlPlaneRuntime !== undefined) ?? run;
+}
+
+function gitHead(cwd: string): string | null {
+  try {
+    const result = Bun.spawnSync({ cmd: ["git", "rev-parse", "HEAD"], cwd, stdout: "pipe", stderr: "ignore" });
+    if (result.exitCode !== 0) return null;
+    const head = new TextDecoder().decode(result.stdout).trim();
+    return head.length > 0 ? head : null;
+  } catch {
+    return null;
+  }
 }

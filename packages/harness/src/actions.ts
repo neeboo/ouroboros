@@ -4964,6 +4964,24 @@ function prepareRunDrain(harness: Harness, action: Extract<HarnessAction, { type
   const initialReviewSessions = currentGoalReviewSessions(initialOverview, initialGoalReviewInvalidated);
   const initialLatestReview = initialReviewSessions[initialReviewSessions.length - 1];
   const initialCompletedReview = initialGoalReviewInvalidated ? null : selectCompletedGoalReview(initialOverview);
+  const terminalDisposition = currentGoalReviewTerminalDisposition(initialOverview);
+  if (!initialGoalReviewInvalidated && terminalDisposition) {
+    if (run.status !== "blocked") {
+      harness.updateRunStatus({ runId: action.runId, status: "blocked" });
+    }
+    return {
+      status: "blocked",
+      actionType: action.type,
+      summary: `Run ${action.runId} retains its terminal goal-review disposition.`,
+      checks: [{
+        name: "goal review terminal disposition",
+        status: "failed",
+        evidence: `${terminalDisposition.tries}/${terminalDisposition.maxTries}`,
+      }],
+      artifacts: [{ ...terminalDisposition, kind: "goal_review", status: "blocked" }],
+      problems: [`goal-review terminal disposition already recorded for ${action.runId}`],
+    };
+  }
   const initialNonTerminalReviews = initialReviewSessions.filter((session) => {
     const decision = resolveRunDecision(session.output);
     return decision === "continue" || decision === "verify";
@@ -5150,6 +5168,7 @@ function prepareRunDrain(harness: Harness, action: Extract<HarnessAction, { type
         goalReviewInvalidatedByIntegration: false,
         invalidatedGoalReviewTaskIds: [...existingInvalidated],
         goalReviewRefreshedAt: new Date().toISOString(),
+        goalReviewTerminalDisposition: null,
       },
     });
     checks.push({ name: "goal review invalidation consumed", status: "passed", evidence: "integration" });
@@ -6307,7 +6326,11 @@ function ensureGoalReviewTask(
       };
     }
     if (blockedTries >= maxTries) {
-      harness.updateRunStatus({ runId, status: "blocked" });
+      recordGoalReviewTerminalDisposition(harness, overview, {
+        tries: blockedTries,
+        maxTries,
+        taskId: blockedReview.id,
+      });
       return {
         status: "blocked" as const,
         summary: `Goal-review task ${blockedReview.id} already reached max tries.`,
@@ -6357,9 +6380,9 @@ function currentGoalReviewSessions(
 }
 
 function goalReviewContinueLimitResult(harness: Harness, runId: string, tries: number, maxTries: number) {
-  if (harness.getRun(runId)?.status !== "blocked") {
-    harness.updateRunStatus({ runId, status: "blocked" });
-  }
+  const overview = harness.getRunOverview({ runId, eventLimit: 0 });
+  const latestReviewTaskId = [...overview.tasks].reverse().find((task) => task.role === "goal-review")?.id ?? null;
+  recordGoalReviewTerminalDisposition(harness, overview, { tries, maxTries, taskId: latestReviewTaskId });
   return {
     status: "blocked" as const,
     summary: `Run ${runId} reached ${tries}/${maxTries} non-terminal goal-review decisions.`,
@@ -6367,6 +6390,68 @@ function goalReviewContinueLimitResult(harness: Harness, runId: string, tries: n
     artifacts: [{ kind: "goal_review", tries, maxTries, status: "blocked" }],
     problems: [`goal-review continue/verify limit reached for ${runId}`],
   };
+}
+
+function currentGoalReviewTerminalDisposition(overview: ReturnType<Harness["getRunOverview"]>) {
+  const raw = overview.run?.context.goalReviewTerminalDisposition;
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    return null;
+  }
+  const disposition = raw as Record<string, unknown>;
+  if (
+    disposition.kind !== "max-tries"
+    || typeof disposition.tries !== "number"
+    || typeof disposition.maxTries !== "number"
+    || typeof disposition.recordedAt !== "string"
+  ) {
+    return null;
+  }
+  const latestProgressAttemptId = latestGoalReviewProgressAttemptId(overview);
+  if ((disposition.progressAttemptId ?? null) !== latestProgressAttemptId) {
+    return null;
+  }
+  return {
+    kind: "max-tries" as const,
+    tries: disposition.tries,
+    maxTries: disposition.maxTries,
+    taskId: typeof disposition.taskId === "string" ? disposition.taskId : null,
+    progressAttemptId: typeof disposition.progressAttemptId === "string" ? disposition.progressAttemptId : null,
+    recordedAt: disposition.recordedAt,
+  };
+}
+
+function recordGoalReviewTerminalDisposition(
+  harness: Harness,
+  overview: ReturnType<Harness["getRunOverview"]>,
+  input: { tries: number; maxTries: number; taskId: string | null },
+) {
+  const existing = currentGoalReviewTerminalDisposition(overview);
+  if (existing && existing.tries === input.tries && existing.maxTries === input.maxTries && existing.taskId === input.taskId) {
+    if (overview.run?.status !== "blocked") {
+      harness.updateRunStatus({ runId: overview.run!.id, status: "blocked" });
+    }
+    return existing;
+  }
+  const disposition = {
+    kind: "max-tries" as const,
+    tries: input.tries,
+    maxTries: input.maxTries,
+    taskId: input.taskId,
+    progressAttemptId: latestGoalReviewProgressAttemptId(overview),
+    recordedAt: new Date().toISOString(),
+  };
+  harness.updateRun({
+    runId: overview.run!.id,
+    status: "blocked",
+    contextPatch: { goalReviewTerminalDisposition: disposition },
+  });
+  return disposition;
+}
+
+function latestGoalReviewProgressAttemptId(overview: ReturnType<Harness["getRunOverview"]>) {
+  return [...overview.sessions].reverse().find(
+    (session) => session.role !== "goal-review" && session.role !== "verifier" && session.status === "done",
+  )?.attemptId ?? null;
 }
 
 function createGoalReviewTask(

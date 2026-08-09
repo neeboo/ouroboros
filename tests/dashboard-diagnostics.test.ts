@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { afterEach, beforeEach } from "bun:test";
 import { Harness, applyHarnessAction } from "../packages/harness/src";
+import { handleDashboardRequest } from "../packages/cli/src/dashboard";
 
 describe("dashboard diagnostics stream", () => {
   let dir: string;
@@ -272,5 +273,25 @@ describe("dashboard diagnostics stream", () => {
         ticksInCanary: 1,
       },
     });
+  });
+
+  test("overview polling exposes the persisted runtime generation without rewriting it", async () => {
+    const runtime = {
+      state: "draining-for-reload",
+      generation: 3,
+      launchHead: "head-a",
+      observedHead: "head-b",
+      promptContractHash: "a".repeat(64),
+      handoffReceipt: { oldHead: "head-a", newHead: "head-b" },
+    };
+    const runId = harness.createRun({ goal: "Runtime provenance", context: { controlPlaneRuntime: runtime } });
+    const response = await handleDashboardRequest(
+      new Request(`http://localhost/api/runs/${runId}/overview`),
+      { runId, overview: () => harness.getRunOverview({ runId, eventLimit: 0 }), renderTaskPrompt: () => "" },
+    );
+    const body = await response.json();
+
+    expect(body.run.context.controlPlaneRuntime).toEqual(runtime);
+    expect(new Harness(join(dir, "ouroboros.db")).getRun(runId)?.context.controlPlaneRuntime).toEqual(runtime);
   });
 });

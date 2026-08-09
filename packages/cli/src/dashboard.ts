@@ -955,6 +955,29 @@ export function dashboardEventLineForTest(event: { text?: string | null; stream?
   return null;
 }
 
+export function runtimeGenerationProjectionForTest(overview: unknown) {
+  const root = overview && typeof overview === "object" ? overview as Record<string, unknown> : {};
+  const run = root.run && typeof root.run === "object" ? root.run as Record<string, unknown> : {};
+  const context = run.context && typeof run.context === "object" ? run.context as Record<string, unknown> : {};
+  const runtime = context.controlPlaneRuntime && typeof context.controlPlaneRuntime === "object" && !Array.isArray(context.controlPlaneRuntime)
+    ? context.controlPlaneRuntime as Record<string, unknown>
+    : {};
+  const states = new Set(["current", "stale", "draining-for-reload", "reload-failed", "reloaded"]);
+  const state = typeof runtime.state === "string" && states.has(runtime.state) ? runtime.state : "unknown";
+  const receipt = runtime.handoffReceipt && typeof runtime.handoffReceipt === "object" && !Array.isArray(runtime.handoffReceipt)
+    ? runtime.handoffReceipt as Record<string, unknown>
+    : null;
+  return {
+    state,
+    generation: typeof runtime.generation === "number" ? runtime.generation : null,
+    oldHead: typeof receipt?.oldHead === "string" ? receipt.oldHead : null,
+    newHead: typeof receipt?.newHead === "string" ? receipt.newHead : typeof runtime.observedHead === "string" ? runtime.observedHead : null,
+    oldProcess: typeof receipt?.oldProcessIdentity === "string" ? receipt.oldProcessIdentity : null,
+    newProcess: typeof receipt?.newProcessIdentity === "string" ? receipt.newProcessIdentity : typeof runtime.processIdentity === "string" ? runtime.processIdentity : null,
+    promptHash: typeof runtime.promptContractHash === "string" ? runtime.promptContractHash : null,
+  };
+}
+
 export function dashboardHtml(input: { runId: string }) {
   return `<!doctype html>
 <html lang="en">
@@ -2670,6 +2693,16 @@ export function dashboardHtml(input: { runId: string }) {
       const todoRuns = globalRuns.todo || 0;
       const runningRuns = globalRuns.running || 0;
       const output = String(supervisor?.lastOutput || "").trim();
+      const runtime = overview?.run?.context?.controlPlaneRuntime;
+      const runtimeState = runtime && typeof runtime === "object" && typeof runtime.state === "string"
+        ? runtime.state
+        : null;
+      const runtimeGeneration = runtime && typeof runtime === "object" && typeof runtime.generation === "number"
+        ? runtime.generation
+        : null;
+      const runtimeHead = runtime && typeof runtime === "object" && typeof runtime.observedHead === "string"
+        ? runtime.observedHead
+        : null;
       const canStart = status !== "running" && (todoRuns > 0 || runningRuns > 0);
       const canStop = status === "running" && !supervisor?.externallyManaged;
       const statusClass = status === "running" ? "running" : todoRuns || runningRuns ? "todo" : "done";
@@ -2681,6 +2714,7 @@ export function dashboardHtml(input: { runId: string }) {
         (supervisor?.pid ? '<br><span class="code-meta">pid ' + escapeHtml(supervisor.pid) + '</span>' : '') +
         (supervisor?.externallyManaged ? '<br><span class="code-meta">external supervisor observed</span>' : '') +
         (supervisor?.exitCode !== undefined && supervisor?.exitCode !== null ? '<br><span class="code-meta">exit ' + escapeHtml(supervisor.exitCode) + '</span>' : '') +
+        (runtimeState ? '<br><span class="code-meta">runtime generation ' + escapeHtml(runtimeGeneration ?? "?") + ' · ' + escapeHtml(runtimeState) + (runtimeHead ? ' · HEAD ' + escapeHtml(runtimeHead.slice(0, 12)) : '') + '</span>' : '') +
         '</div></div>' +
         (output ? '<div class="stream-output">' + escapeHtml(compact(output, 900)) + '</div>' : '') +
         (canStart || canStop ? '<div class="action-group"><div class="action-title">Runner actions</div><div class="action-help">These controls affect the run-level runner or supervisor process.</div><div class="action-buttons">' +
@@ -2688,6 +2722,43 @@ export function dashboardHtml(input: { runId: string }) {
           (canStop ? '<button class="plain-button danger" data-stop-supervisor>Stop supervisor</button>' : '') +
         '</div></div>' : '') +
         '</section>';
+    };
+    const renderRuntimeGeneration = (overview) => {
+      const runtime = overview?.run?.context?.controlPlaneRuntime;
+      const value = runtime && typeof runtime === "object" && !Array.isArray(runtime) ? runtime : {};
+      const runtimeStates = ["current", "stale", "draining-for-reload", "reload-failed", "reloaded"];
+      const state = typeof value.state === "string" && runtimeStates.includes(value.state) ? value.state : "unknown";
+      const generation = typeof value.generation === "number" ? value.generation : "?";
+      const processIdentity = typeof value.processIdentity === "string" ? value.processIdentity : "—";
+      const attestedProcessIdentity = typeof value.attestedProcessIdentity === "string" ? value.attestedProcessIdentity : "—";
+      const launchHead = typeof value.launchHead === "string" ? value.launchHead : "—";
+      const observedHead = typeof value.observedHead === "string" ? value.observedHead : "—";
+      const promptHash = typeof value.promptContractHash === "string" ? value.promptContractHash : "—";
+      const attempt = value.reloadAttempt && typeof value.reloadAttempt === "object" && !Array.isArray(value.reloadAttempt) ? value.reloadAttempt : {};
+      const receipt = value.handoffReceipt && typeof value.handoffReceipt === "object" && !Array.isArray(value.handoffReceipt) ? value.handoffReceipt : null;
+      const stateClass = state === "reload-failed" ? "blocked" : state === "current" || state === "reloaded" ? "done" : "running";
+      const row = (label, item) => item === undefined || item === null || item === "" ? "" : '<div class="runtime-generation-row"><span>' + escapeHtml(label) + '</span><span>' + escapeHtml(item) + '</span></div>';
+      const receiptRows = receipt ? [
+        row("old generation", receipt.oldGeneration),
+        row("new generation", receipt.newGeneration),
+        row("old HEAD", receipt.oldHead),
+        row("new HEAD", receipt.newHead),
+        row("old prompt contract", receipt.oldPromptContractHash),
+        row("new prompt contract", receipt.newPromptContractHash),
+        row("old process", receipt.oldProcessIdentity),
+        row("new process", receipt.newProcessIdentity),
+        row("claim at", receipt.claimAt),
+        row("start at", receipt.startAt),
+        row("attestation at", receipt.attestationAt),
+      ].join("") : '<div class="empty">No handoff receipt recorded.</div>';
+      return '<section class="inspector-card" data-inspector-section="runtime-generation" data-runtime-generation="' + escapeHtml(generation) + '" data-runtime-state="' + escapeHtml(state) + '" data-runtime-old-head="' + escapeHtml(receipt?.oldHead || "") + '" data-runtime-new-head="' + escapeHtml(receipt?.newHead || observedHead) + '" data-runtime-old-process="' + escapeHtml(receipt?.oldProcessIdentity || "") + '" data-runtime-new-process="' + escapeHtml(receipt?.newProcessIdentity || processIdentity) + '" data-runtime-prompt-hash="' + escapeHtml(promptHash) + '">' +
+        '<h2>Runtime generation</h2><div class="current-task"><div class="current-task-title">Control-plane provenance</div><div class="current-task-meta">state <span class="status-text ' + escapeHtml(stateClass) + '">' + escapeHtml(state) + '</span> · generation ' + escapeHtml(generation) + '<br><span class="code-meta">process ' + escapeHtml(processIdentity) + ' · attested ' + escapeHtml(attestedProcessIdentity) + '</span></div></div>' +
+        '<div class="runtime-generation-details">' +
+          row("launch HEAD", launchHead) + row("observed HEAD", observedHead) + row("prompt contract", promptHash) +
+          row("started at", value.startedAt) + row("attested at", value.attestedAt) +
+          row("reload attempt", attempt.status ? String(attempt.status) + (typeof attempt.count === "number" ? " · " + attempt.count : "") : "none") +
+          row("cooldown until", attempt.cooldownUntil) + row("reload failure", attempt.error) +
+        '</div><div class="runtime-generation-receipt"><div class="runtime-generation-title">Handoff receipt</div>' + receiptRows + '</div></section>';
     };
     const renderWatchdogSection = (overview) => {
       const context = overview?.run?.context;
@@ -2853,7 +2924,7 @@ export function dashboardHtml(input: { runId: string }) {
     };
     // Legacy composition marker retained for dashboard verifier evidence.
     const legacyRunStatusComposition = "renderRunner(overview) + renderSupervisor(overview) + renderDiagnosis(overview) + renderGuardrailsSection(overview)";
-    const dashboardRunStatusHtml = (overview) => renderRunner(overview) + renderSupervisor(overview) + renderDiagnosis(overview) + renderWatchdogSection(overview) + renderGuardrailsSection(overview);
+    const dashboardRunStatusHtml = (overview) => renderRunner(overview) + renderSupervisor(overview) + renderRuntimeGeneration(overview) + renderDiagnosis(overview) + renderWatchdogSection(overview) + renderGuardrailsSection(overview);
     const dashboardOrientationHtml = (overview, group) => {
       const runStatus = overview?.run?.status || "unknown";
       const runnerStatus = overview?.runner?.status || "idle";

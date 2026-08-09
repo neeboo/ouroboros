@@ -633,6 +633,10 @@ describe("Harness actions", () => {
     });
 
     const first = applyHarnessAction(harness, { type: "prepareRunDrain", runId, maxTries: 1 });
+    const firstDisposition = harness.getRun(runId)?.context.goalReviewTerminalDisposition;
+    const firstTerminalUpdatedAt = withDatabase(harness.dbPath, (db) =>
+      (db.query("select updated_at as updatedAt from runs where id = $runId").get({ $runId: runId }) as { updatedAt: string }).updatedAt,
+    );
     const second = applyHarnessAction(harness, { type: "prepareRunDrain", runId, maxTries: 1 });
     const overview = harness.getRunOverview({ runId });
     const terminalUpdatedAt = withDatabase(harness.dbPath, (db) =>
@@ -645,10 +649,12 @@ describe("Harness actions", () => {
     });
     expect(second).toMatchObject({
       status: "blocked",
-      summary: expect.stringContaining("3/1 non-terminal goal-review decisions"),
+      summary: expect.stringContaining("terminal goal-review disposition"),
     });
+    expect(firstDisposition).toMatchObject({ kind: "max-tries", tries: 3, maxTries: 1 });
+    expect(harness.getRun(runId)?.context.goalReviewTerminalDisposition).toEqual(firstDisposition);
     expect(overview.run?.status).toBe("blocked");
-    expect(terminalUpdatedAt).toBe("2000-01-01 00:00:00");
+    expect(terminalUpdatedAt).toBe(firstTerminalUpdatedAt);
     expect(overview.tasks.some((task) => task.status === "todo" || task.status === "running")).toBe(false);
   });
 

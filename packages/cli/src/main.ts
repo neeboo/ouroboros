@@ -51,6 +51,7 @@ import {
   startCodexResumableAttempt,
   superviseCodexDaemon,
   superviseCodexRuns,
+  protectedPromptContractFingerprintForSource,
   terminateProcessTreeSync,
   DEFAULT_REPAIR_REPLAN_BUDGET_LIMIT,
 } from "@ouroboros/runner";
@@ -103,6 +104,7 @@ import { buildAgentMatrix, doctorAgent } from "../../../scripts/acpx-agent-smoke
 import { join, resolve } from "node:path";
 import { cpus, totalmem } from "node:os";
 import { createHash } from "node:crypto";
+import { realpathSync } from "node:fs";
 import type { Task } from "@ouroboros/harness";
 
 const parsed = parseArgs(Bun.argv.slice(2));
@@ -372,6 +374,20 @@ if (parsed.command === "help" || flag(parsed, "help") !== undefined) {
   case "self-iterate-launch": {
     const codexBin = flag(parsed, "codex-bin") ?? defaultCodexBin();
     const { runId, taskId } = await createSelfIterationBootstrap();
+    const launchRoot = harness.getRun(runId);
+    const launchRuntime = launchRoot?.context.controlPlaneRuntime;
+    if (launchRuntime && typeof launchRuntime === "object" && !Array.isArray(launchRuntime)) {
+      harness.updateRun({
+        runId,
+        contextPatch: {
+          controlPlaneRuntime: {
+            ...(launchRuntime as Record<string, unknown>),
+            processIdentity: "supervisor-pending",
+            attestedProcessIdentity: "supervisor-pending",
+          },
+        },
+      });
+    }
     const port = parsePositiveInteger(flag(parsed, "port") ?? "7331", "--port");
     const selfIterationWorktreeArgs = defaultSelfIterationWorktreeArgs();
     const dashboard = createDashboardRuntime({
@@ -1026,11 +1042,15 @@ if (parsed.command === "help" || flag(parsed, "help") !== undefined) {
     break;
   }
   case "run-overview": {
+    const overview = harness.getRunOverview({
+      runId: required(parsed, "run-id"),
+      eventLimit: parsePositiveInteger(flag(parsed, "event-limit") ?? "25", "--event-limit"),
+    });
+    const runtime = overview.run?.context?.controlPlaneRuntime;
     printJson(
-      harness.getRunOverview({
-        runId: required(parsed, "run-id"),
-        eventLimit: parsePositiveInteger(flag(parsed, "event-limit") ?? "25", "--event-limit"),
-      }),
+      runtime && typeof runtime === "object" && !Array.isArray(runtime)
+        ? { ...overview, controlPlaneRuntime: runtime }
+        : overview,
     );
     break;
   }
@@ -1836,7 +1856,8 @@ function createdTaskIdFromActionResult(result: { artifacts: Array<Record<string,
 async function createSelfIterationBootstrap() {
   harness.init();
   const config = await loadCliConfig();
-  const assessmentFingerprint = repositoryFingerprint(runnerCwd());
+  const sourceRoot = resolve(runnerCwd());
+  const assessmentFingerprint = repositoryFingerprint(sourceRoot);
   const projectId = ensureSelfIterationProject();
   const charterId = ensureSelfIterationFounderCharter(projectId);
   const runId = harness.createRun({
@@ -1853,6 +1874,7 @@ async function createSelfIterationBootstrap() {
         cycleIndex: 0,
         assessmentFingerprint,
       },
+      controlPlaneRuntime: initialControlPlaneRuntime(sourceRoot),
     }, config),
   });
   const taskId = harness.createTask({
@@ -2029,59 +2051,110 @@ async function superviseSelfImprovementDaemon(input: SelfImprovementDaemonInput)
             },
           });
         }
-        const authorityReconciliation = reconcileDeferredDesignAuthority({
-          harness,
-          projectId,
+        const runtime = ensureControlPlaneRuntime(input.rootRunId, input.cwd ?? process.cwd(), {
+          maxTicks: input.maxTicks,
         });
-        const cycle = ensureSelfImprovementCycle(input.rootRunId, input.cwd ?? process.cwd());
-        if (cycle.state === "quiescent") {
-          waitMs = input.idleMs;
-          tick = {
-            type: "self-improvement.tick",
-            index,
-            status: "quiescent",
-            createdCycle: null,
-            authorityReconciliation,
-            repositoryFingerprint: cycle.repositoryFingerprint,
-            runCounts: harness.countRunsByStatus(),
-            ...linearIntakePump.tickFields(),
-            createdAt: new Date().toISOString(),
-          };
-        } else if (cycle.state === "reconciliation") {
-          waitMs = input.idleMs;
-          tick = {
-            type: "self-improvement.tick",
-            index,
-            status: "ok",
-            createdCycle: null,
-            reconciliation: cycle.reconciliation,
-            authorityReconciliation,
-            runCounts: harness.countRunsByStatus(),
-            ...linearIntakePump.tickFields(),
-            createdAt: new Date().toISOString(),
-          };
-        } else {
-          const result = await superviseCodexRuns({
+        if (runtime.state === "stale" || runtime.state === "draining-for-reload") {
+          const drainResult = await superviseCodexRuns({
             ...input,
             rootRunId: input.rootRunId,
             maxCycles: input.tickCycles,
             shouldStop: () => stopping || input.shouldStop?.() === true,
           });
-          waitMs = result.status === "idle" ? input.idleMs : input.intervalMs;
+          waitMs = input.idleMs;
           tick = {
             type: "self-improvement.tick",
             index,
-            status: "ok",
-            createdCycle: cycle.createdCycle,
-            ...(cycle.state === "recovery"
-              ? { recovery: cycle.recovery, recoveries: cycle.recoveries }
-              : {}),
-            authorityReconciliation,
-            result,
+            status: "draining-for-reload",
+            createdCycle: null,
+            runtime,
+            result: drainResult,
             runCounts: harness.countRunsByStatus(),
             ...linearIntakePump.tickFields(),
             createdAt: new Date().toISOString(),
           };
+        } else if (runtime.state === "reloaded" || runtime.state === "reload-failed") {
+          if (runtime.handoffLaunched) {
+            stopping = true;
+          }
+          waitMs = input.idleMs;
+          tick = {
+            type: "self-improvement.tick",
+            index,
+            status: runtime.state,
+            createdCycle: null,
+            runtime,
+            runCounts: harness.countRunsByStatus(),
+            ...linearIntakePump.tickFields(),
+            createdAt: new Date().toISOString(),
+          };
+        } else if (runtime.leaseAllowed === false) {
+          waitMs = input.idleMs;
+          tick = {
+            type: "self-improvement.tick",
+            index,
+            status: "current-owner-active",
+            createdCycle: null,
+            runtime,
+            runCounts: harness.countRunsByStatus(),
+            ...linearIntakePump.tickFields(),
+            createdAt: new Date().toISOString(),
+          };
+        } else {
+          const authorityReconciliation = reconcileDeferredDesignAuthority({
+            harness,
+            projectId,
+          });
+          const cycle = ensureSelfImprovementCycle(input.rootRunId, input.cwd ?? process.cwd());
+          if (cycle.state === "quiescent") {
+            waitMs = input.idleMs;
+            tick = {
+              type: "self-improvement.tick",
+              index,
+              status: "quiescent",
+              createdCycle: null,
+              authorityReconciliation,
+              repositoryFingerprint: cycle.repositoryFingerprint,
+              runCounts: harness.countRunsByStatus(),
+              ...linearIntakePump.tickFields(),
+              createdAt: new Date().toISOString(),
+            };
+          } else if (cycle.state === "reconciliation") {
+            waitMs = input.idleMs;
+            tick = {
+              type: "self-improvement.tick",
+              index,
+              status: "ok",
+              createdCycle: null,
+              reconciliation: cycle.reconciliation,
+              authorityReconciliation,
+              runCounts: harness.countRunsByStatus(),
+              ...linearIntakePump.tickFields(),
+              createdAt: new Date().toISOString(),
+            };
+          } else {
+            const result = await superviseCodexRuns({
+              ...input,
+              rootRunId: input.rootRunId,
+              maxCycles: input.tickCycles,
+              shouldStop: () => stopping || input.shouldStop?.() === true,
+            });
+            waitMs = result.status === "idle" ? input.idleMs : input.intervalMs;
+            tick = {
+              type: "self-improvement.tick",
+              index,
+              status: "ok",
+              createdCycle: cycle.createdCycle,
+              ...(cycle.state === "recovery"
+                ? { recovery: cycle.recovery, recoveries: cycle.recoveries }
+                : {}),
+              authorityReconciliation,
+              result,
+              runCounts: harness.countRunsByStatus(),
+              ...linearIntakePump.tickFields(),
+              createdAt: new Date().toISOString(),
+            };
+          }
         }
       } catch (error) {
         tick = {
@@ -2812,7 +2885,7 @@ function linkDueOutcomeReviews(runs: ReturnType<typeof selfImprovementRuns>) {
 function selfImprovementControlContext(context: Record<string, unknown>) {
   return {
     ...Object.fromEntries(
-      ["modelDefaults", "agentBackends", "guardrails", "integrationBoundary"]
+      ["modelDefaults", "agentBackends", "guardrails", "integrationBoundary", "controlPlaneRuntime"]
         .filter((key) => context[key] !== undefined)
         .map((key) => [key, context[key]]),
     ),
@@ -2832,6 +2905,365 @@ function repositoryFingerprint(cwd: string) {
   const head = git(["rev-parse", "HEAD"]);
   const status = git(["status", "--porcelain=v1", "--untracked-files=all"]);
   return createHash("sha256").update(`${cwd}\n${head || "no-head"}\n${status}`).digest("hex");
+}
+
+type ControlPlaneRuntimeState = "current" | "stale" | "draining-for-reload" | "reloaded" | "reload-failed";
+
+type ControlPlaneRuntime = {
+  canonicalEntrypoint: string;
+  sourceRoot: string;
+  launchHead: string;
+  observedHead: string;
+  observedDirtyStateFingerprint: string;
+  promptContractHash: string;
+  generation: number;
+  processIdentity: string;
+  startedAt: string;
+  attestedAt: string;
+  state: ControlPlaneRuntimeState;
+  reloadAttempt: Record<string, unknown>;
+  handoffReceipt: Record<string, unknown> | null;
+  attestedGeneration: number;
+  attestedHead: string;
+  attestedPromptContractHash: string;
+  attestedProcessIdentity: string;
+};
+
+function ensureControlPlaneRuntime(
+  rootRunId: string,
+  cwd: string,
+  input: { maxTicks: number },
+): ControlPlaneRuntime & { handoffLaunched?: boolean; leaseAllowed?: boolean } {
+  const root = harness.getRun(rootRunId);
+  if (!root) {
+    fail(`run not found: ${rootRunId}`);
+  }
+  const observation = repositoryObservation(resolve(cwd));
+  const currentPromptHash = protectedPromptContractFingerprintForSource(resolve(cwd));
+  const raw = root.context.controlPlaneRuntime;
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    const initial = initialControlPlaneRuntime(resolve(cwd));
+    const claimed = updateControlPlaneRuntimeIf(rootRunId, null, initial);
+    return (claimed ?? initial) as ControlPlaneRuntime;
+  }
+  let runtime = raw as ControlPlaneRuntime;
+
+  if (
+    runtime.state === "current"
+    && runtime.launchHead === observation.head
+    && runtime.promptContractHash === currentPromptHash
+    && runtime.processIdentity !== String(process.pid)
+  ) {
+    if (processIdentityIsAlive(runtime.processIdentity)) {
+      return { ...runtime, leaseAllowed: false };
+    }
+    if (!processCanAttestRuntimeGeneration(runtime)) {
+      return { ...runtime, leaseAllowed: false };
+    }
+    const now = new Date().toISOString();
+    const next = {
+      ...runtime,
+      processIdentity: String(process.pid),
+      attestedGeneration: runtime.generation,
+      attestedHead: observation.head,
+      attestedPromptContractHash: currentPromptHash,
+      attestedProcessIdentity: String(process.pid),
+      attestedAt: now,
+    };
+    runtime = updateControlPlaneRuntimeIf(rootRunId, runtime, next) ?? runtime;
+    return { ...runtime, leaseAllowed: true };
+  }
+
+  if (
+    runtime.state === "reloaded"
+    && runtime.processIdentity === String(process.pid)
+    && runtime.launchHead === observation.head
+  ) {
+    const now = new Date().toISOString();
+    const next = {
+      ...runtime,
+      state: "current" as const,
+      promptContractHash: currentPromptHash,
+      observedHead: observation.head,
+      observedDirtyStateFingerprint: observation.dirtyStateFingerprint,
+      attestedGeneration: runtime.generation,
+      attestedHead: observation.head,
+      attestedPromptContractHash: currentPromptHash,
+      attestedProcessIdentity: String(process.pid),
+      attestedAt: now,
+      handoffReceipt: runtime.handoffReceipt
+        ? { ...runtime.handoffReceipt, newPromptContractHash: currentPromptHash, attestationAt: now }
+        : null,
+    };
+    runtime = updateControlPlaneRuntimeIf(rootRunId, runtime, next) ?? runtime;
+    return runtime;
+  }
+
+  if (
+    runtime.state === "reload-failed"
+    && runtime.reloadAttempt?.fingerprint === observation.head
+  ) {
+    return runtime;
+  }
+
+  if (
+    (runtime.state === "current" || runtime.state === "reloaded")
+    && runtime.launchHead !== observation.head
+  ) {
+    const next = {
+      ...runtime,
+      observedHead: observation.head,
+      observedDirtyStateFingerprint: observation.dirtyStateFingerprint,
+      state: "draining-for-reload" as const,
+      staleAt: new Date().toISOString(),
+      staleGeneration: runtime.generation,
+      reloadAttempt: {
+        ...runtime.reloadAttempt,
+        fingerprint: observation.head,
+        status: "draining-for-reload",
+        previousState: "stale",
+      },
+    };
+    runtime = updateControlPlaneRuntimeIf(rootRunId, runtime, next) ?? (harness.getRun(rootRunId)?.context.controlPlaneRuntime as ControlPlaneRuntime);
+    return runtime;
+  }
+
+  if (runtime.state === "stale") {
+    const next = { ...runtime, state: "draining-for-reload" as const };
+    runtime = updateControlPlaneRuntimeIf(rootRunId, runtime, next) ?? runtime;
+  }
+  if (runtime.state !== "draining-for-reload") {
+    return { ...runtime, leaseAllowed: runtime.processIdentity === String(process.pid) };
+  }
+
+  // A contender may have launched a child between its CAS claim and the
+  // receipt write. Treat that narrow persisted window as owned; replay must
+  // wait for the claimant instead of launching a second supervisor.
+  if (runtime.reloadAttempt?.status === "claimed") {
+    return runtime;
+  }
+
+  if (selfImprovementRuns(rootRunId).some((run) => harness.listRunningAttempts({ runId: run.id }).length > 0)) {
+    return runtime;
+  }
+
+  const targetHead = observation.head;
+  if (runtime.reloadAttempt?.fingerprint === targetHead && runtime.reloadAttempt?.status === "failed") {
+    return runtime;
+  }
+  const generation = Math.max(0, Number(runtime.generation) || 0) + 1;
+  const claim = {
+    ...runtime,
+    state: "draining-for-reload" as const,
+    observedHead: targetHead,
+    observedDirtyStateFingerprint: observation.dirtyStateFingerprint,
+    reloadAttempt: {
+      ...runtime.reloadAttempt,
+      count: (Number(runtime.reloadAttempt?.count) || 0) + 1,
+      fingerprint: targetHead,
+      status: "claimed",
+      claimedAt: new Date().toISOString(),
+      targetGeneration: generation,
+      targetHead,
+      targetPromptContractHash: currentPromptHash,
+      targetEntrypoint: canonicalSelfIterationEntrypoint(resolve(cwd)),
+    },
+  };
+  const claimed = updateControlPlaneRuntimeIf(rootRunId, runtime, claim);
+  if (!claimed) {
+    return (harness.getRun(rootRunId)?.context.controlPlaneRuntime as ControlPlaneRuntime) ?? runtime;
+  }
+  const entrypoint = canonicalSelfIterationEntrypoint(resolve(cwd));
+  let childPid: number | null = null;
+  try {
+    if (!Bun.file(entrypoint).size) {
+      throw new Error(`canonical self-improvement entrypoint is missing: ${entrypoint}`);
+    }
+    const command = [
+      process.execPath,
+      entrypoint,
+      "--db",
+      parsed.db,
+      "self-improve-daemon",
+      "--root-run-id",
+      rootRunId,
+      "--executor",
+      "codex-resumable",
+      "--stop-hook",
+      flag(parsed, "stop-hook") ?? DEFAULT_STOP_HOOKS,
+      "--cwd",
+      resolve(cwd),
+      ...(flag(parsed, "codex-bin") ? ["--codex-bin", flag(parsed, "codex-bin")!] : []),
+      ...(flag(parsed, "tick-cycles") ? ["--tick-cycles", flag(parsed, "tick-cycles")!] : []),
+      ...(flag(parsed, "max-rounds") ? ["--max-rounds", flag(parsed, "max-rounds")!] : []),
+      ...(flag(parsed, "max-tries") ? ["--max-tries", flag(parsed, "max-tries")!] : []),
+      ...(flag(parsed, "interval-ms") ? ["--interval-ms", flag(parsed, "interval-ms")!] : []),
+      ...(flag(parsed, "idle-ms") ? ["--idle-ms", flag(parsed, "idle-ms")!] : []),
+      ...(input.maxTicks > 0 ? ["--max-ticks", String(input.maxTicks)] : []),
+    ];
+    const child = Bun.spawn({
+      cmd: command,
+      cwd: resolve(cwd),
+      env: childEnvForProcess(),
+      stdin: "ignore",
+      stdout: "ignore",
+      stderr: "ignore",
+    });
+    childPid = child.pid;
+    (child as unknown as { unref?: () => void }).unref?.();
+  } catch (error) {
+    const failedAt = new Date().toISOString();
+    const failed = {
+      ...claim,
+      state: "reload-failed" as const,
+      reloadAttempt: {
+        ...claim.reloadAttempt,
+        status: "failed",
+        failedAt,
+        cooldownUntil: new Date(Date.now() + 60_000).toISOString(),
+        error: cliErrorMessage(error),
+      },
+    };
+    return updateControlPlaneRuntimeIf(rootRunId, claim, failed) ?? failed;
+  }
+  const now = new Date().toISOString();
+  const receipt = {
+    oldGeneration: runtime.generation,
+    newGeneration: generation,
+    oldHead: runtime.launchHead,
+    newHead: targetHead,
+    oldPromptContractHash: runtime.promptContractHash,
+    newPromptContractHash: currentPromptHash,
+    oldProcessIdentity: runtime.processIdentity,
+    newProcessIdentity: String(childPid ?? "unknown"),
+    claimAt: claim.reloadAttempt.claimedAt,
+    startAt: now,
+    attestationAt: null,
+  };
+  const launched = {
+    ...claim,
+    canonicalEntrypoint: entrypoint,
+    sourceRoot: resolve(cwd),
+    launchHead: targetHead,
+    observedHead: targetHead,
+    generation,
+    processIdentity: String(childPid ?? "unknown"),
+    startedAt: now,
+    attestedAt: runtime.attestedAt,
+    state: "reloaded" as const,
+    promptContractHash: currentPromptHash,
+    attestedGeneration: runtime.generation,
+    attestedHead: runtime.launchHead,
+    attestedPromptContractHash: runtime.promptContractHash,
+    attestedProcessIdentity: runtime.processIdentity,
+    reloadAttempt: { ...claim.reloadAttempt, status: "launched", startedAt: now, childPid },
+    handoffReceipt: receipt,
+  };
+  return { ...(updateControlPlaneRuntimeIf(rootRunId, claim, launched) ?? launched), handoffLaunched: true };
+}
+
+function updateControlPlaneRuntimeIf(
+  rootRunId: string,
+  expected: ControlPlaneRuntime | null,
+  next: ControlPlaneRuntime,
+) {
+  return harness.runInImmediateTransaction((db) => {
+    const row = db.query("select context_json from runs where id = $runId").get({ $runId: rootRunId }) as { context_json?: string } | null;
+    if (!row || typeof row.context_json !== "string") return null;
+    const context = JSON.parse(row.context_json) as Record<string, unknown>;
+    const current = context.controlPlaneRuntime as ControlPlaneRuntime | undefined;
+    if (expected && JSON.stringify(current) !== JSON.stringify(expected)) return null;
+    if (!expected && current) return null;
+    db.query(
+      "update runs set context_json = $contextJson, updated_at = current_timestamp where id = $runId",
+    ).run({
+      $runId: rootRunId,
+      $contextJson: JSON.stringify({ ...context, controlPlaneRuntime: next }),
+    });
+    return next;
+  });
+}
+
+function processIdentityIsAlive(identity: string | undefined) {
+  const pid = Number(identity);
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function processCanAttestRuntimeGeneration(runtime: ControlPlaneRuntime) {
+  const processEntrypoint = typeof process.argv[1] === "string" ? canonicalFilesystemPath(process.argv[1]) : "";
+  if (processEntrypoint !== canonicalFilesystemPath(runtime.canonicalEntrypoint)) {
+    return false;
+  }
+  const handoffStartedAt = runtime.handoffReceipt?.startAt;
+  if (typeof handoffStartedAt !== "string") {
+    return true;
+  }
+  const handoffStartedAtMs = Date.parse(handoffStartedAt);
+  return Number.isFinite(handoffStartedAtMs) && performance.timeOrigin >= handoffStartedAtMs;
+}
+
+function canonicalFilesystemPath(value: string) {
+  try {
+    return realpathSync.native(value);
+  } catch {
+    return resolve(value);
+  }
+}
+
+function initialControlPlaneRuntime(sourceRoot: string): ControlPlaneRuntime {
+  const observation = repositoryObservation(sourceRoot);
+  const now = new Date().toISOString();
+  // Bootstrap commands are short-lived and must not advertise their PID as a
+  // lease-owning daemon. The first canonical supervisor replaces this marker
+  // with its attested process identity before it can start work.
+  const processIdentity = "supervisor-pending";
+  return {
+    canonicalEntrypoint: canonicalSelfIterationEntrypoint(sourceRoot),
+    sourceRoot,
+    launchHead: observation.head,
+    observedHead: observation.head,
+    observedDirtyStateFingerprint: observation.dirtyStateFingerprint,
+    promptContractHash: protectedPromptContractFingerprintForSource(sourceRoot),
+    generation: 1,
+    processIdentity,
+    startedAt: now,
+    attestedAt: now,
+    state: "current",
+    reloadAttempt: { count: 0, fingerprint: null, status: "none", cooldownUntil: null },
+    handoffReceipt: null,
+    attestedGeneration: 1,
+    attestedHead: observation.head,
+    attestedPromptContractHash: protectedPromptContractFingerprintForSource(sourceRoot),
+    attestedProcessIdentity: processIdentity,
+  };
+}
+
+function canonicalSelfIterationEntrypoint(sourceRoot: string) {
+  return resolve(sourceRoot, "packages/cli/src/main.ts");
+}
+
+function repositoryObservation(cwd: string) {
+  const git = (args: string[]) => {
+    try {
+      const result = Bun.spawnSync({ cmd: ["git", ...args], cwd, stdout: "pipe", stderr: "pipe" });
+      return result.exitCode === 0 ? new TextDecoder().decode(result.stdout).trim() : "";
+    } catch {
+      return "";
+    }
+  };
+  const head = git(["rev-parse", "HEAD"]) || "no-head";
+  const status = git(["status", "--porcelain=v1", "--untracked-files=all"]);
+  return {
+    head,
+    dirtyStateFingerprint: createHash("sha256").update(status, "utf8").digest("hex"),
+    repositoryFingerprint: createHash("sha256").update(`${cwd}\n${head}\n${status}`, "utf8").digest("hex"),
+  };
 }
 
 async function createIntakeRun(input: { title: string; document: string }) {
@@ -3792,9 +4224,10 @@ function supervisorCommand(
   } = {},
 ) {
   const stopHook = flag(parsed, "stop-hook") ?? DEFAULT_STOP_HOOKS;
+  const selfImproveLaunch = options.commandName === "self-improve-daemon";
   const cmd = [
-    Bun.argv[0],
-    Bun.argv[1],
+    selfImproveLaunch ? process.execPath : Bun.argv[0],
+    selfImproveLaunch ? canonicalSelfIterationEntrypoint(resolve(runnerCwd())) : Bun.argv[1],
     "--db",
     parsed.db,
     options.commandName ?? "supervise-daemon",

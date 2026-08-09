@@ -41,6 +41,7 @@ export function formatRunEvidence(overview: RunOverview, options: { lessonLimit?
 
   appendOverseerDiagnosisLines(lines, diagnoseRunOverview(overview));
 
+  appendRuntimeGenerationLines(lines, run.context);
   appendWatchdogLines(lines, overview.run?.context);
 
   const decision = latestGoalReviewDecision(overview);
@@ -102,6 +103,68 @@ export function formatRunEvidence(overview: RunOverview, options: { lessonLimit?
   }
 
   return lines.join("\n");
+}
+
+function appendRuntimeGenerationLines(lines: string[], context: unknown): void {
+  if (!context || typeof context !== "object" || Array.isArray(context)) return;
+  const runtime = (context as Record<string, unknown>).controlPlaneRuntime;
+  if (!runtime || typeof runtime !== "object" || Array.isArray(runtime)) return;
+  const value = runtime as Record<string, unknown>;
+  lines.push("");
+  lines.push("Control-plane runtime generation");
+  lines.push(`  state: ${typeof value.state === "string" ? value.state : "unknown"}`);
+  if (typeof value.generation === "number") lines.push(`  generation: ${value.generation}`);
+  if (typeof value.processIdentity === "string") lines.push(`  process: ${value.processIdentity}`);
+  if (typeof value.attestedProcessIdentity === "string") lines.push(`  attested process: ${value.attestedProcessIdentity}`);
+  if (typeof value.sourceRoot === "string") lines.push(`  source root: ${value.sourceRoot}`);
+  if (typeof value.canonicalEntrypoint === "string") lines.push(`  canonical entrypoint: ${value.canonicalEntrypoint}`);
+  if (typeof value.launchHead === "string") lines.push(`  launch HEAD: ${value.launchHead}`);
+  if (typeof value.observedHead === "string") lines.push(`  observed HEAD: ${value.observedHead}`);
+  if (typeof value.promptContractHash === "string") lines.push(`  prompt contract: ${value.promptContractHash}`);
+  if (typeof value.attestedHead === "string") lines.push(`  attested HEAD: ${value.attestedHead}`);
+  if (typeof value.attestedPromptContractHash === "string") lines.push(`  attested prompt contract: ${value.attestedPromptContractHash}`);
+  if (typeof value.startedAt === "string") lines.push(`  started at: ${value.startedAt}`);
+  if (typeof value.attestedAt === "string") lines.push(`  attested at: ${value.attestedAt}`);
+
+  const reloadAttempt = value.reloadAttempt;
+  if (reloadAttempt && typeof reloadAttempt === "object" && !Array.isArray(reloadAttempt)) {
+    const attempt = reloadAttempt as Record<string, unknown>;
+    const status = typeof attempt.status === "string" ? attempt.status : "unknown";
+    const count = typeof attempt.count === "number" ? ` · count ${attempt.count}` : "";
+    lines.push(`  reload attempt: ${status}${count}`);
+    for (const [label, key] of [
+      ["claimed at", "claimedAt"],
+      ["started at", "startedAt"],
+      ["failed at", "failedAt"],
+      ["cooldown until", "cooldownUntil"],
+      ["failure", "error"],
+    ] as const) {
+      if (typeof attempt[key] === "string") lines.push(`  ${label}: ${attempt[key]}`);
+    }
+  }
+
+  const receipt = value.handoffReceipt;
+  if (receipt && typeof receipt === "object" && !Array.isArray(receipt)) {
+    const handoff = receipt as Record<string, unknown>;
+    lines.push("  handoff receipt: recorded");
+    for (const [label, key] of [
+      ["old generation", "oldGeneration"],
+      ["new generation", "newGeneration"],
+      ["old HEAD", "oldHead"],
+      ["new HEAD", "newHead"],
+      ["old prompt contract", "oldPromptContractHash"],
+      ["new prompt contract", "newPromptContractHash"],
+      ["old process", "oldProcessIdentity"],
+      ["new process", "newProcessIdentity"],
+      ["claim at", "claimAt"],
+      ["start at", "startAt"],
+      ["attestation at", "attestationAt"],
+    ] as const) {
+      if (typeof handoff[key] === "string" || typeof handoff[key] === "number") {
+        lines.push(`  ${label}: ${handoff[key]}`);
+      }
+    }
+  }
 }
 
 interface ControlPlaneWatchdogProjection {

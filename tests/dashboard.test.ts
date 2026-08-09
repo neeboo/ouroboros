@@ -22,6 +22,7 @@ import {
   dashboardRunHistoryRowsHtmlForTest,
   eventToMessagePartForTest,
   handleDashboardRequest,
+  runtimeGenerationProjectionForTest,
   serveDashboard,
   shouldRetryDashboardBind,
   shouldRouteInterruptForTest,
@@ -3912,6 +3913,58 @@ describe("dashboard", () => {
     expect(html).toContain(
       "renderRunner(overview) + renderSupervisor(overview) + renderDiagnosis(overview) + renderGuardrailsSection(overview)",
     );
+  });
+
+  test("dashboard streams all runtime-generation provenance states with stable diagnostic attributes", () => {
+    const html = dashboardHtml({ runId: "run_runtime_generation" });
+
+    expect(html).toContain("renderRuntimeGeneration(overview)");
+    expect(html).toContain('data-runtime-generation');
+    expect(html).toContain('data-runtime-state');
+    expect(html).toContain('data-runtime-old-head');
+    expect(html).toContain('data-runtime-new-head');
+    expect(html).toContain('data-runtime-old-process');
+    expect(html).toContain('data-runtime-new-process');
+    expect(html).toContain('data-runtime-prompt-hash');
+    expect(html).toContain("current");
+    expect(html).toContain("stale");
+    expect(html).toContain("draining-for-reload");
+    expect(html).toContain("reload-failed");
+    expect(html).toContain("reloaded");
+    expect(html).toContain("patchInspectorPanel");
+    expect(html).toContain("data-conversation-timeline-scroll");
+  });
+
+  test("runtime-generation overview polling preserves provenance through each persisted state", () => {
+    const states = ["current", "stale", "draining-for-reload", "reloaded"] as const;
+    const snapshots = states.map((state, index) => runtimeGenerationProjectionForTest({
+      run: {
+        context: {
+          controlPlaneRuntime: {
+            state,
+            generation: index + 1,
+            observedHead: "head-" + state,
+            processIdentity: "process-" + state,
+            promptContractHash: "hash-" + state,
+            handoffReceipt: index === 0 ? null : {
+              oldHead: "head-old-" + index,
+              newHead: "head-" + state,
+              oldProcessIdentity: "process-old-" + index,
+              newProcessIdentity: "process-" + state,
+            },
+          },
+        },
+      },
+    }));
+    const failed = runtimeGenerationProjectionForTest({
+      run: { context: { controlPlaneRuntime: { state: "reload-failed", generation: 4, observedHead: "head-failed", processIdentity: "process-old" } } },
+    });
+
+    expect(snapshots.map((snapshot) => snapshot.state)).toEqual([...states]);
+    expect(snapshots[0]).toMatchObject({ generation: 1, newHead: "head-current", newProcess: "process-current" });
+    expect(snapshots[2]).toMatchObject({ oldHead: "head-old-2", newHead: "head-draining-for-reload", oldProcess: "process-old-2" });
+    expect(snapshots[3]).toMatchObject({ state: "reloaded", generation: 4, newHead: "head-reloaded" });
+    expect(failed).toMatchObject({ state: "reload-failed", generation: 4, newHead: "head-failed", newProcess: "process-old" });
   });
 
   test("self-iteration run overview exposes active goal, task graph, ready work, runner, and supervisor/diagnosis evidence", async () => {

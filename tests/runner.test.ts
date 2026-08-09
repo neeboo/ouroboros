@@ -10,6 +10,8 @@ import { consumeLinearInbox } from "../packages/cli/src/linear-intake";
 import { ingestLinearEvent } from "../packages/cli/src/linear";
 import {
   buildTaskPrompt,
+  protectedPromptContractFingerprint,
+  protectedPromptContractFingerprintForSource,
   createApplyDesignActionsHook,
   createRunsAction,
   createRunsFromDesignAction,
@@ -39,6 +41,7 @@ import {
   startCodexResumableAttempt,
   runNextReadyTask,
   runReadyTasks,
+  runtimeGenerationAllowsLeasing,
   setRunDecisionAction,
   superviseCodexDaemon,
   superviseCodexRuns,
@@ -225,6 +228,89 @@ describe("runner", () => {
     expect(prompt).toContain("a next task exists");
     expect(prompt).toContain("## Runtime File Guardrail");
     expect(prompt).toContain("Do not modify, delete, recreate, clean, commit, or report these paths as task changedFiles.");
+  });
+
+  test("protected prompt contract fingerprints are deterministic and bind the Designer sentinel", () => {
+    const generationA = protectedPromptContractFingerprint({
+      designer: "Designer contract sentinel A",
+    });
+    const generationAReplay = protectedPromptContractFingerprint({
+      designer: "Designer contract sentinel A",
+    });
+    const generationB = protectedPromptContractFingerprint({
+      designer: "Designer contract sentinel B",
+    });
+
+    expect(generationA).toBe(generationAReplay);
+    expect(generationB).not.toBe(generationA);
+    expect(generationB).toMatch(/^[a-f0-9]{64}$/);
+  });
+
+  test("source prompt fingerprints change when the commit-B Designer text changes", async () => {
+    const sourceRoot = join(dir, "source");
+    await mkdir(join(sourceRoot, "packages/runner/src"), { recursive: true });
+    await mkdir(join(sourceRoot, "packages/cli/src"), { recursive: true });
+    await writeFile(join(sourceRoot, "packages/runner/src/prompt.ts"), "export const prompt = 'A';");
+    await writeFile(join(sourceRoot, "packages/cli/src/main.ts"), "function selfIterationDesignerPrompt() { return 'COMMIT_A_SENTINEL'; }\nfunction next() {}");
+    const generationA = protectedPromptContractFingerprintForSource(sourceRoot);
+    await writeFile(join(sourceRoot, "packages/cli/src/main.ts"), "function selfIterationDesignerPrompt() { return 'COMMIT_B_SENTINEL'; }\nfunction next() {}");
+    const generationB = protectedPromptContractFingerprintForSource(sourceRoot);
+
+    expect(generationB).not.toBe(generationA);
+  });
+
+  test("stale runtime generations cannot lease ready work", async () => {
+    const runId = harness.createRun({
+      goal: "Respect the persisted runtime generation",
+      context: {
+        controlPlaneRuntime: {
+          state: "draining-for-reload",
+          generation: 1,
+          launchHead: "commit-a",
+          observedHead: "commit-b",
+          promptContractHash: protectedPromptContractFingerprint(),
+          attestedPromptContractHash: protectedPromptContractFingerprint(),
+        },
+      },
+    });
+    harness.createTask({
+      runId,
+      role: "designer",
+      goal: "Must remain unleased until generation B attests",
+      prompt: "Inspect the runtime generation.",
+    });
+
+    const result = await runCodexResumableLoop({
+      harness,
+      runId,
+      maxRounds: 1,
+      limit: 1,
+      maxTries: 3,
+    });
+
+    expect(result.rounds).toHaveLength(0);
+    expect(harness.getRunOverview({ runId, eventLimit: 0 }).tasks[0]?.status).toBe("todo");
+  });
+
+  test("stale root runtime generations block descendant leases even when child context is legacy", () => {
+    const rootRunId = harness.createRun({
+      goal: "Self-improvement root",
+      context: {
+        source: "self-improve",
+        controlPlaneRuntime: {
+          state: "draining-for-reload",
+          generation: 1,
+          launchHead: "commit-a",
+          observedHead: "commit-b",
+        },
+      },
+    });
+    const childRunId = harness.createRun({
+      goal: "Legacy design child",
+      context: { parentRunId: rootRunId, source: "design" },
+    });
+
+    expect(runtimeGenerationAllowsLeasing(harness.getRun(childRunId), dir, harness)).toBe(false);
   });
 
   test("builds prompts with run lessons", () => {
@@ -4755,6 +4841,12 @@ describe("runner", () => {
           "codex-resumable": { kind: "codex-resumable" },
         },
         guardrails: [{ id: "guardrail_1", role: "planner", rule: "cite evidence" }],
+        controlPlaneRuntime: {
+          state: "current",
+          generation: 2,
+          launchHead: "commit-b",
+          promptContractHash: "prompt-b",
+        },
       },
     });
     const plannerTask = harness.createTask({
@@ -4812,6 +4904,12 @@ describe("runner", () => {
           "codex-resumable": { kind: "codex-resumable" },
         }),
         guardrails: [{ id: "guardrail_1", role: "planner", rule: "cite evidence" }],
+        controlPlaneRuntime: {
+          state: "current",
+          generation: 2,
+          launchHead: "commit-b",
+          promptContractHash: "prompt-b",
+        },
       }),
     });
     expect(childPlanner).toMatchObject({

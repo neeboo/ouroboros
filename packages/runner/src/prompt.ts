@@ -1,6 +1,8 @@
 import { canonicalEvolutionValueSha256, DEFAULT_TASK_PROMPT_TEMPLATE } from "@ouroboros/harness";
 import type { Lesson } from "@ouroboros/harness";
 import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import type { PromptInput } from "./types";
 import { prettyJson, renderPromptTemplate } from "./template";
 
@@ -9,6 +11,68 @@ const MAX_LESSON_SUMMARY_CHARS = 320;
 const MAX_ACTIVE_GUARDRAILS = 8;
 const FROZEN_LINEAR_EVIDENCE_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 const RFC3339_WITH_TIMEZONE = /^(\d{4})-(\d{2})-(\d{2})T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/;
+
+export type ProtectedPromptContractText = Record<string, string>;
+
+const DEFAULT_PROTECTED_PROMPT_CONTRACTS: ProtectedPromptContractText = {
+  designer: [
+    "Designer must inspect the active charter, current signals, lessons, run evidence, and due outcomes.",
+    "Designer durable conclusions use only recordSignal, proposeDesign, decideDesign, recordDesignOutcome, or createRunsFromDesign.",
+    "Designer may emit one evidence-backed proposal or a mutation-free quiescent decision.",
+  ].join("\n"),
+  planner: [
+    "Planner begins only from an accepted proposal and preserves frozen goal, verifier, budget, and integration contracts.",
+    "Planner creates concrete tasks with files, checks, dependencies, and repair paths.",
+  ].join("\n"),
+  worker: [
+    "Worker implements only the frozen task contract and returns deterministic evidence.",
+    "Worker never weakens the verifier contract or modifies guarded runtime paths.",
+  ].join("\n"),
+  verifier: [
+    "Verifier checks the frozen contract against evidence rather than agent confidence.",
+    "Verifier records failures with a repair path and never silently amends acceptance criteria.",
+  ].join("\n"),
+  "goal-review": [
+    "Goal review marks completion only when the frozen goal contract is satisfied with cited evidence.",
+    "Goal review preserves pause, authority, retry, integration, and outcome-review boundaries.",
+  ].join("\n"),
+};
+
+function canonicalPromptContractValue(value: unknown): string {
+  if (Array.isArray(value)) {
+    return `[${value.map(canonicalPromptContractValue).join(",")}]`;
+  }
+  if (value && typeof value === "object") {
+    return `{${Object.entries(value as Record<string, unknown>)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, entry]) => `${JSON.stringify(key)}:${canonicalPromptContractValue(entry)}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+/** Stable identity for the protected role guidance embedded in task prompts. */
+export function protectedPromptContractFingerprint(
+  overrides: ProtectedPromptContractText = {},
+): string {
+  const contracts = { ...DEFAULT_PROTECTED_PROMPT_CONTRACTS, ...overrides };
+  return createHash("sha256")
+    .update(canonicalPromptContractValue(contracts), "utf8")
+    .digest("hex");
+}
+
+/** Include repository-local protected prompt sources in the attestation. */
+export function protectedPromptContractFingerprintForSource(sourceRoot: string): string {
+  try {
+    const promptSource = readFileSync(join(sourceRoot, "packages/runner/src/prompt.ts"), "utf8");
+    const cliSource = readFileSync(join(sourceRoot, "packages/cli/src/main.ts"), "utf8");
+    const designer = cliSource.match(/function selfIterationDesignerPrompt[\s\S]*?(?=\nfunction |\nconst |\nexport )/)?.[0] ?? "";
+    return protectedPromptContractFingerprint({ designer, runner: promptSource });
+  } catch {
+    return protectedPromptContractFingerprint();
+  }
+}
+
 function targetEvolutionPackExample(projectId: string, charterId: string) {
   return {
   schemaVersion: 1,
