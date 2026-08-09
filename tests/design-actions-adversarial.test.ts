@@ -73,6 +73,83 @@ const validProposal = {
   },
 };
 
+function targetEvolutionEnvelope(projectId: string) {
+  return {
+    ...validProposal,
+    evolutionPack: {
+      schemaVersion: 1 as const,
+      id: "pack_adversarial_v1",
+      targetSystemId: "target-system",
+      version: 1,
+      knowledgeScope: `project:${projectId}` as const,
+      objective: {
+        charterId: "charter_target",
+        domainOutcomes: ["delivery quality improves"],
+        nonGoals: ["no production side effects"],
+      },
+      observation: { signalSources: [{ id: "run-evidence", kind: "run-evidence" as const }] },
+      mutationSurfaces: [{
+        id: "bounded-policy",
+        evolutionTarget: "artifact" as const,
+        layer: "policy" as const,
+        projectId,
+        allowedPaths: ["config/evolution/**"],
+        forbiddenPaths: ["db/**"],
+        owner: "target" as const,
+      }],
+      experimentPolicy: {
+        controlRequired: true as const,
+        holdoutRequired: true as const,
+        unrelatedRegressionRequired: true as const,
+        equalBudgetRequired: true as const,
+        maxCandidates: 2,
+      },
+      promotionPolicy: {
+        guardMetrics: ["no unrelated regressions"],
+        observationWindow: "three matched runs",
+        rollback: "restore control",
+      },
+      handoff: {
+        maturity: "designed" as const,
+        targetOwner: "target-team",
+        requiredCapabilities: ["frozen replay"],
+      },
+      portability: {
+        projectLocalRules: ["keep domain rules local"],
+        genericizationEvidence: [],
+      },
+    },
+    causalHypothesis: {
+      failureClass: "domain-hypothesis" as const,
+      mechanism: "the bounded policy causes the measured gap",
+      predictedEffects: ["candidate improves the primary metric"],
+      disconfirmingEvidence: ["holdout does not improve"],
+    },
+    evaluationContract: {
+      ...validProposal.evaluationContract,
+      comparison: {
+        controlRef: "control_v1",
+        developmentEvidenceRefs: ["development:1"],
+        holdoutEvidenceRefs: ["holdout:1"],
+        unrelatedEvidenceRefs: ["unrelated:1"],
+        corpusSnapshotSha256: "a".repeat(64),
+        equalBudget: {
+          model: "gpt-5.6-sol",
+          reasoningEffort: "high" as const,
+          wallClockMs: 300_000,
+          maxAttempts: 2,
+          maxTokens: 20_000,
+          toolPolicySha256: "b".repeat(64),
+          concurrency: 1,
+        },
+        primaryMetric: "verified completion rate",
+        minimumUplift: 0.05,
+        maximumGuardRegression: 0,
+      },
+    },
+  };
+}
+
 describe("design-action adversarial contract", () => {
   let dir: string;
   let harness: AuditFaultHarness;
@@ -1559,6 +1636,114 @@ describe("design-action transition coordinator (production authority path)", () 
     );
     expect(childRuns).toHaveLength(1);
     expect(childRuns[0].context?.designCharterId).toBe(resolvedCharterId);
+  });
+
+  test("target-evolution replay is idempotent only while the complete frozen contract and instance remain exact", async () => {
+    const exerciseReplay = async (
+      suffix: string,
+      corrupt: (context: Record<string, unknown>) => Record<string, unknown>,
+      expectedProblem: RegExp,
+    ) => {
+      const projectId = harness.createProject({ name: `target-${suffix}`, rootPath: join(dir, suffix) });
+      const runId = harness.createRun({ goal: `design ${suffix}`, projectId });
+      const taskId = harness.createTask({
+        runId,
+        role: "designer",
+        goal: "deliver target evolution",
+        prompt: "deliver",
+      });
+      const proposalData = targetEvolutionEnvelope(projectId);
+      const proposal = harness.createDesignProposal({
+        projectId,
+        title: `Target evolution ${suffix}`,
+        problem: proposalData.problem,
+        recommendation: proposalData.recommendation,
+        proposal: proposalData as never,
+        status: "accepted",
+      });
+      harness.recordDesignDecision({
+        proposalId: proposal.id,
+        decision: "approved",
+        actorKind: "human",
+        actorRef: "founder@example.com",
+        reasons: ["bounded fixture"],
+      });
+      const output = {
+        status: "done",
+        summary: "deliver",
+        designActions: [{
+          type: "createRunsFromDesign",
+          payload: {
+            proposalId: proposal.id,
+            runs: [{ goal: "Plan target evolution", prompt: "Plan it." }],
+          },
+        }],
+      } as AttemptOutput;
+
+      const first = await runHook(output, runId, taskId);
+      expect(first.decision).toBe("continue");
+      const created = createdRunArtifacts(first);
+      expect(created).toHaveLength(1);
+      const childRunId = (created[0] as { runId: string }).runId;
+      const plannerTaskId = (created[0] as { plannerTaskId: string }).plannerTaskId;
+      const runsBeforeReplay = harness.listRuns({ limit: 100 }).length;
+      const tasksBeforeReplay = harness.getRunOverview({ runId: childRunId }).tasks.length;
+      const deliveryEvents = () => harness.listHarnessActionEvents({ limit: 100 }).filter(
+        (event) => event.request.runId === runId
+          && event.request.taskId === taskId
+          && event.request.type === "createRunsFromDesign",
+      );
+      const eventsBeforeReplay = deliveryEvents().length;
+
+      const cleanReplay = await runHook(output, runId, taskId);
+      expect(cleanReplay.decision).toBe("continue");
+      expect((createdRunArtifacts(cleanReplay)[0] as { runId: string }).runId).toBe(childRunId);
+      expect(harness.listRuns({ limit: 100 })).toHaveLength(runsBeforeReplay);
+      expect(harness.getRunOverview({ runId: childRunId }).tasks).toHaveLength(tasksBeforeReplay);
+      expect(harness.getTask(plannerTaskId)).toBeDefined();
+      expect(deliveryEvents()).toHaveLength(eventsBeforeReplay);
+
+      const childContext = harness.getRun(childRunId)!.context;
+      harness.updateRun({ runId: childRunId, contextPatch: corrupt(childContext) });
+      const poisonedReplay = await runHook(output, runId, taskId);
+      expect(poisonedReplay.decision).toBe("exit");
+      expect(poisonedReplay.problems?.[0]).toMatch(expectedProblem);
+      expect(harness.listRuns({ limit: 100 })).toHaveLength(runsBeforeReplay);
+      expect(harness.getRunOverview({ runId: childRunId }).tasks).toHaveLength(tasksBeforeReplay);
+    };
+
+    await exerciseReplay(
+      "instance-pollution",
+      () => ({
+        evolutionInstance: {
+          schemaVersion: 1,
+          mode: "self",
+          kernelProjectId: "project_polluted",
+          targetProjectId: "project_polluted",
+          cycle: { kind: "bootstrap", index: 0 },
+          pack: { id: "polluted", version: 1, contentSha256: "f".repeat(64) },
+        },
+      }),
+      /evolutionInstance/,
+    );
+    await exerciseReplay(
+      "contract-drift",
+      (context) => ({
+        designEvaluationContract: {
+          ...(context.designEvaluationContract as Record<string, unknown>),
+          comparison: {
+            ...((context.designEvaluationContract as Record<string, unknown>).comparison as Record<string, unknown>),
+            controlRef: "drifted-control",
+          },
+        },
+      }),
+      /designEvaluationContract/,
+    );
+    await exerciseReplay(
+      "missing-pack",
+      () => ({ evolutionPack: undefined }),
+      /evolutionPack/,
+    );
   });
 
   test("direct conflict: cited signal that names a conflicting peer routes to human-required checkpoint with no delivery run", async () => {

@@ -93,9 +93,17 @@ export function buildTaskPrompt(input: PromptInput) {
     input.task.config,
     input.task.role,
   );
+  const frozenTargetEvolutionContract = renderFrozenTargetEvolutionContract(
+    input.run.context,
+    input.task.role,
+  );
+  const protectedSections = [
+    frozenLinearImplementationGate,
+    frozenTargetEvolutionContract,
+  ].filter(Boolean);
   const prompt = renderPromptTemplate(template, {
     runGoal: input.run.goal,
-    runContextJson: prettyJson(input.run.context),
+    runContextJson: prettyJson(promptSafeRunContext(input.run.context)),
     taskId: input.task.id,
     taskRole: input.task.role,
     taskGoal: input.task.goal,
@@ -104,7 +112,7 @@ export function buildTaskPrompt(input: PromptInput) {
     doneWhenMarkdown: input.task.doneWhen.map((item) => `- ${item}`).join("\n"),
     dependencyAttemptsJson: prettyJson(input.dependencyAttempts),
     activeGuardrailsMarkdown: [
-      frozenLinearImplementationGate,
+      ...protectedSections,
       renderTargetEvolutionProposalContract(input.task.role),
       renderActiveGuardrails(input.run.context, input.task.role),
     ].filter(Boolean).join("\n"),
@@ -113,10 +121,99 @@ export function buildTaskPrompt(input: PromptInput) {
     runLessonsJson: prettyJson(compactRecentLessons),
     requiredOutputJson: prettyJson(requiredOutputForRole(input.task.role, input.task.config)),
   });
-  if (frozenLinearImplementationGate && !template.includes("{{activeGuardrailsMarkdown}}")) {
-    return `${prompt}\n\n${frozenLinearImplementationGate}`;
+  const omittedProtectedSections = protectedSections.filter((section) => !prompt.includes(section));
+  if (omittedProtectedSections.length > 0) {
+    return `${prompt}\n\n${omittedProtectedSections.join("\n")}`;
   }
   return prompt;
+}
+
+function renderFrozenTargetEvolutionContract(
+  runContext: Record<string, unknown>,
+  role: string,
+): string {
+  if (!new Set(["planner", "worker", "verifier", "outcome-review"]).has(role)) {
+    return "";
+  }
+  const evolutionInstance = asRecord(runContext.evolutionInstance);
+  const evolutionPack = asRecord(runContext.evolutionPack);
+  const causalHypothesis = asRecord(runContext.causalHypothesis);
+  const comparison = asRecord(runContext.evolutionComparison) ?? asRecord(runContext.comparison);
+  const evaluationContract = asRecord(runContext.designEvaluationContract);
+  if (!evolutionInstance || !evolutionPack || !causalHypothesis || !comparison || !evaluationContract) {
+    return "";
+  }
+  return [
+    "## Frozen Target Evolution Contract",
+    "This task may implement or evaluate the accepted design, but it must not weaken, replace, or amend these frozen values.",
+    "Holdout evidence references identify the sealed split. Do not request, infer, reproduce, or expose holdout contents or results during candidate generation.",
+    "### Optimization target pack",
+    "```json",
+    prettyJson(evolutionPack),
+    "```",
+    "### Causal hypothesis",
+    "```json",
+    prettyJson(causalHypothesis),
+    "```",
+    "### Matched comparison protocol",
+    "```json",
+    prettyJson(comparison),
+    "```",
+    "### Frozen evaluation contract",
+    "```json",
+    prettyJson(evaluationContract),
+    "```",
+    "### Evolution instance identity",
+    "```json",
+    prettyJson(evolutionInstance),
+    "```",
+    "",
+  ].join("\n");
+}
+
+function promptSafeRunContext(context: Record<string, unknown>): Record<string, unknown> {
+  if (!asRecord(context.evolutionInstance)) {
+    return context;
+  }
+  return redactHeldoutMaterial(context) as Record<string, unknown>;
+}
+
+function redactHeldoutMaterial(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map(redactHeldoutMaterial);
+  }
+  if (!value || typeof value !== "object") {
+    return value;
+  }
+  return Object.fromEntries(
+    Object.entries(value as Record<string, unknown>)
+      .filter(([key]) => !isHeldoutMaterialKey(key))
+      .map(([key, entry]) => [key, redactHeldoutMaterial(entry)]),
+  );
+}
+
+function isHeldoutMaterialKey(key: string): boolean {
+  const normalized = key.replace(/[-_]/g, "").toLowerCase();
+  for (const prefix of ["holdout", "heldout"]) {
+    if (normalized.startsWith(prefix)) {
+      return new Set([
+        "",
+        "content",
+        "contents",
+        "result",
+        "results",
+        "output",
+        "outputs",
+        "answer",
+        "answers",
+        "data",
+        "payload",
+        "cases",
+        "examples",
+      ]).has(normalized.slice(prefix.length));
+    }
+  }
+  return false;
 }
 
 function renderTargetEvolutionProposalContract(role: string): string {

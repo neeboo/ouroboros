@@ -695,6 +695,66 @@ describe("runner", () => {
     expect(rawLessonsSection).not.toContain("candidateGuardrail");
   });
 
+  test.each(["planner", "worker", "verifier", "outcome-review"] as const)(
+    "renders the frozen evolution identity and comparison for %s without holdout contents",
+    (role) => {
+      const projectId = harness.createProject({ name: `prompt-${role}`, rootPath: dir });
+      const proposal = targetEvolutionProposal(projectId);
+      const runId = harness.createRun({
+        goal: "Use the frozen target-evolution contract",
+        projectId,
+        context: {
+          projectId,
+          evolutionPack: proposal.evolutionPack,
+          causalHypothesis: proposal.causalHypothesis,
+          evolutionComparison: proposal.evaluationContract.comparison,
+          designEvaluationContract: proposal.evaluationContract,
+          evolutionInstance: {
+            schemaVersion: 1,
+            mode: "design-target",
+            kernelProjectId: "project_kernel",
+            targetProjectId: projectId,
+            cycle: { kind: "bootstrap", index: 0 },
+            pack: {
+              id: proposal.evolutionPack.id,
+              version: proposal.evolutionPack.version,
+              contentSha256: "c".repeat(64),
+            },
+          },
+          designProposal: {
+            ...proposal,
+            holdoutContents: ["DO_NOT_LEAK_HELDOUT_CONTENT"],
+            holdoutResults: { score: 1 },
+          },
+        },
+      });
+      const taskId = harness.createTask({
+        runId,
+        role,
+        goal: "Honor the frozen experiment",
+        prompt: "Use only authorized evidence.",
+      });
+
+      const prompt = buildTaskPrompt({
+        run: harness.getRun(runId)!,
+        task: harness.getTask(taskId)!,
+        dependencyAttempts: [],
+      });
+
+      expect(prompt).toContain("## Frozen Target Evolution Contract");
+      expect(prompt).toContain("Optimization target pack");
+      expect(prompt).toContain("Causal hypothesis");
+      expect(prompt).toContain("Matched comparison protocol");
+      expect(prompt).toContain("Evolution instance identity");
+      expect(prompt).toContain("pack_delivery_v1");
+      expect(prompt).toContain("domain-hypothesis");
+      expect(prompt).toContain("holdout:1");
+      expect(prompt).toContain("project_kernel");
+      expect(prompt).not.toContain("DO_NOT_LEAK_HELDOUT_CONTENT");
+      expect(prompt).not.toContain('"holdoutResults"');
+    },
+  );
+
   test("builds designer prompts that advertise the five fixed design actions", () => {
     const runId = harness.createRun({
       goal: "Designer drives the autonomous strategy loop",
@@ -7082,6 +7142,85 @@ describe("runner", () => {
     },
   };
 
+  function targetEvolutionProposal(projectId: string) {
+    return {
+      ...validProposal,
+      evolutionPack: {
+        schemaVersion: 1 as const,
+        id: "pack_delivery_v1",
+        targetSystemId: "target-system",
+        version: 1,
+        knowledgeScope: `project:${projectId}` as const,
+        objective: {
+          charterId: "charter_target",
+          domainOutcomes: ["matched delivery quality improves"],
+          nonGoals: ["no production publishing"],
+        },
+        observation: {
+          signalSources: [{ id: "run-evidence", kind: "run-evidence" as const }],
+        },
+        mutationSurfaces: [{
+          id: "bounded-policy",
+          evolutionTarget: "artifact" as const,
+          layer: "policy" as const,
+          projectId,
+          allowedPaths: ["config/evolution/**"],
+          forbiddenPaths: ["db/**"],
+          owner: "target" as const,
+        }],
+        experimentPolicy: {
+          controlRequired: true as const,
+          holdoutRequired: true as const,
+          unrelatedRegressionRequired: true as const,
+          equalBudgetRequired: true as const,
+          maxCandidates: 2,
+        },
+        promotionPolicy: {
+          guardMetrics: ["no unrelated regressions"],
+          observationWindow: "three matched runs",
+          rollback: "restore the frozen control",
+        },
+        handoff: {
+          maturity: "designed" as const,
+          targetOwner: "target-team",
+          requiredCapabilities: ["frozen replay"],
+        },
+        portability: {
+          projectLocalRules: ["keep domain rules local"],
+          genericizationEvidence: [],
+        },
+      },
+      causalHypothesis: {
+        failureClass: "domain-hypothesis" as const,
+        mechanism: "the bounded policy causes the measured gap",
+        predictedEffects: ["candidate improves the primary metric"],
+        disconfirmingEvidence: ["holdout does not improve"],
+      },
+      evaluationContract: {
+        ...validProposal.evaluationContract,
+        comparison: {
+          controlRef: "control_v1",
+          developmentEvidenceRefs: ["development:1"],
+          holdoutEvidenceRefs: ["holdout:1"],
+          unrelatedEvidenceRefs: ["unrelated:1"],
+          corpusSnapshotSha256: "a".repeat(64),
+          equalBudget: {
+            model: "gpt-5.6-sol",
+            reasoningEffort: "high" as const,
+            wallClockMs: 300_000,
+            maxAttempts: 2,
+            maxTokens: 20_000,
+            toolPolicySha256: "b".repeat(64),
+            concurrency: 1,
+          },
+          primaryMetric: "verified completion rate",
+          minimumUplift: 0.05,
+          maximumGuardRegression: 0,
+        },
+      },
+    };
+  }
+
   test("parses valid recordSignal designer action", () => {
     const output = parseAttemptOutput(
       JSON.stringify({
@@ -7657,6 +7796,158 @@ describe("runner", () => {
     expect(harness.getRunOverview({ runId: childRunId }).tasks).toHaveLength(0);
   });
 
+  test("createRunsFromDesign freezes a normalized target-evolution contract and derives stable self/design-target identities", async () => {
+    const targetProjectId = harness.createProject({ name: "target", rootPath: dir });
+    const kernelProjectId = harness.createProject({ name: "kernel", rootPath: join(dir, "kernel") });
+    const hook = createApplyDesignActionsHook({ harness });
+
+    const deliver = async (input: {
+      sourceContext?: Record<string, unknown>;
+      proposalData: ReturnType<typeof targetEvolutionProposal>;
+      plannedContext?: Record<string, unknown>;
+    }) => {
+      const runId = harness.createRun({
+        goal: "design target evolution",
+        projectId: targetProjectId,
+        context: input.sourceContext ?? {},
+      });
+      const taskId = harness.createTask({
+        runId,
+        role: "designer",
+        goal: "deliver frozen design",
+        prompt: "deliver",
+      });
+      const proposal = harness.createDesignProposal({
+        projectId: targetProjectId,
+        title: "Freeze target evolution",
+        problem: input.proposalData.problem,
+        recommendation: input.proposalData.recommendation,
+        proposal: input.proposalData as never,
+        status: "accepted",
+      });
+      harness.recordDesignDecision({
+        proposalId: proposal.id,
+        decision: "approved",
+        actorKind: "human",
+        actorRef: "founder@example.com",
+        reasons: ["bounded fixture"],
+      });
+      const result = await hook({
+        run: harness.getRun(runId)!,
+        task: harness.getTask(taskId)!,
+        sessionName: "session",
+        prompt: "deliver",
+        output: {
+          status: "done",
+          summary: "deliver",
+          designActions: [{
+            type: "createRunsFromDesign",
+            payload: {
+              proposalId: proposal.id,
+              runs: [{ goal: "Plan frozen evolution", prompt: "Plan it.", context: input.plannedContext }],
+            },
+          }],
+        } as AttemptOutput,
+      });
+      expect(result.decision).toBe("continue");
+      const artifact = (result.artifacts ?? []).find(
+        (entry) => (entry as { kind?: string }).kind === "created_run",
+      ) as { runId: string };
+      return harness.getRun(artifact.runId)!;
+    };
+
+    const selfProposal = targetEvolutionProposal(targetProjectId);
+    const selfChild = await deliver({
+      proposalData: selfProposal,
+      sourceContext: {
+        evolutionInstance: {
+          schemaVersion: 1,
+          mode: "design-target",
+          kernelProjectId,
+          targetProjectId,
+          // Missing cycle makes this inherited instance untrusted. The child
+          // must fall back to the source run's bound project identity.
+        },
+      },
+      plannedContext: {
+        projectId: "project_polluted",
+        evolutionPack: { id: "pack_polluted" },
+        causalHypothesis: { mechanism: "polluted" },
+        comparison: { controlRef: "polluted" },
+        evolutionComparison: { controlRef: "polluted" },
+        designEvaluationContract: { successMetrics: ["polluted"] },
+        evolutionInstance: { schemaVersion: 999, kernelProjectId: "project_polluted" },
+      },
+    });
+    const canonicalize = (value: unknown): unknown => {
+      if (value === null || typeof value !== "object") return value;
+      if (Array.isArray(value)) return value.map(canonicalize);
+      const record = value as Record<string, unknown>;
+      return Object.fromEntries(Object.keys(record).sort().map((key) => [key, canonicalize(record[key])]));
+    };
+    const expectedHash = createHash("sha256")
+      .update(JSON.stringify(canonicalize(selfProposal.evolutionPack)), "utf8")
+      .digest("hex");
+
+    expect(selfChild.projectId).toBe(targetProjectId);
+    expect(selfChild.context).toMatchObject({
+      projectId: targetProjectId,
+      evolutionPack: selfProposal.evolutionPack,
+      causalHypothesis: selfProposal.causalHypothesis,
+      comparison: selfProposal.evaluationContract.comparison,
+      evolutionComparison: selfProposal.evaluationContract.comparison,
+      designEvaluationContract: selfProposal.evaluationContract,
+      evolutionInstance: {
+        schemaVersion: 1,
+        mode: "self",
+        kernelProjectId: targetProjectId,
+        targetProjectId,
+        cycle: { kind: "bootstrap", index: 0 },
+        pack: {
+          id: selfProposal.evolutionPack.id,
+          version: selfProposal.evolutionPack.version,
+          contentSha256: expectedHash,
+        },
+      },
+    });
+
+    const reordered = targetEvolutionProposal(targetProjectId);
+    reordered.evolutionPack = {
+      portability: reordered.evolutionPack.portability,
+      handoff: reordered.evolutionPack.handoff,
+      promotionPolicy: reordered.evolutionPack.promotionPolicy,
+      experimentPolicy: reordered.evolutionPack.experimentPolicy,
+      mutationSurfaces: reordered.evolutionPack.mutationSurfaces,
+      observation: reordered.evolutionPack.observation,
+      objective: reordered.evolutionPack.objective,
+      knowledgeScope: reordered.evolutionPack.knowledgeScope,
+      version: reordered.evolutionPack.version,
+      targetSystemId: reordered.evolutionPack.targetSystemId,
+      id: reordered.evolutionPack.id,
+      schemaVersion: reordered.evolutionPack.schemaVersion,
+    } as typeof reordered.evolutionPack;
+    const designTargetChild = await deliver({
+      proposalData: reordered,
+      sourceContext: {
+        evolutionInstance: {
+          schemaVersion: 1,
+          mode: "design-target",
+          kernelProjectId,
+          targetProjectId,
+          cycle: { kind: "design", index: 4 },
+        },
+      },
+    });
+    expect(designTargetChild.context.evolutionInstance).toMatchObject({
+      schemaVersion: 1,
+      mode: "design-target",
+      kernelProjectId,
+      targetProjectId,
+      cycle: { kind: "bootstrap", index: 0 },
+      pack: { contentSha256: expectedHash },
+    });
+  });
+
   test("apply-design-actions hook records proposal, decision, outcome, and runs", async () => {
     const runId = harness.createRun({ goal: "design run" });
     const taskId = harness.createTask({
@@ -7754,6 +8045,10 @@ describe("runner", () => {
     const childRunId = (createdRunArtifacts[0] as { runId: string }).runId;
     const childRun = harness.getRun(childRunId);
     expect(childRun?.projectId).toBe(projectId);
+    expect(childRun?.context.evolutionPack).toBeUndefined();
+    expect(childRun?.context.causalHypothesis).toBeUndefined();
+    expect(childRun?.context.evolutionComparison).toBeUndefined();
+    expect(childRun?.context.evolutionInstance).toBeUndefined();
     expect(childRun?.context).toMatchObject({
       projectId,
       designProposalId: proposalId,

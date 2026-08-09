@@ -7,6 +7,10 @@ import {
   type AuthorityPortfolioUsage,
   type AuthorityProposalRiskSurface,
   type DesignActionInput,
+  type EvolutionCausalHypothesis,
+  type EvolutionComparison,
+  type EvolutionInstance,
+  type EvolutionPackV1,
   type DesignProposal,
   type FounderCharter,
   type Harness,
@@ -14,6 +18,10 @@ import {
   type Run,
   type StrategySignal,
   type Task,
+  parseEvolutionCausalHypothesis,
+  parseEvolutionComparison,
+  parseEvolutionInstance,
+  parseEvolutionPackV1,
 } from "@ouroboros/harness";
 import { optionalStrictIsoTimestamp } from "@ouroboros/harness";
 import { createHash } from "node:crypto";
@@ -204,6 +212,21 @@ function applyActionAtomically(
     const auditId = stableActionAuditId(context.run.id, context.task.id, context.actionIndex, action);
     const priorEvent = harness.getHarnessActionEventWithDb(db, { id: auditId });
     if (priorEvent && priorEvent.status === "done") {
+      if (action.type === "createRunsFromDesign") {
+        const proposalId = requiredString(
+          action.payload.proposalId,
+          "createRunsFromDesign payload.proposalId",
+        );
+        const proposal = harness.getDesignProposalWithDb(db, { id: proposalId });
+        if (!proposal) {
+          throw new Error(`design proposal not found: ${proposalId}`);
+        }
+        if (proposalHasAnyTargetEvolutionData(proposal)) {
+          return applyCreateRunsFromDesignWithDb(harness, db, action, context, {
+            requireExisting: true,
+          });
+        }
+      }
       return reconstructActionResultFromAudit(action, priorEvent.result);
     }
 
@@ -1082,6 +1105,7 @@ function applyCreateRunsFromDesignWithDb(
   db: HarnessDatabase,
   action: Extract<DesignActionInput, { type: "createRunsFromDesign" }>,
   context: ActionContext,
+  options: { requireExisting?: boolean } = {},
 ): ApplyActionResult {
   const payload = action.payload;
   const proposalId = requiredString(payload.proposalId, "createRunsFromDesign payload.proposalId");
@@ -1095,7 +1119,7 @@ function applyCreateRunsFromDesignWithDb(
     );
   }
   const proposalProjectId = requiredProjectId(proposal.projectId);
-  assertActionSourceProject(harness, db, context, proposalProjectId, "createRunsFromDesign");
+  const sourceRun = assertActionSourceProject(harness, db, context, proposalProjectId, "createRunsFromDesign");
 
   const decisions = harness.listDesignDecisionsWithDb(db, { proposalId });
   const approval = decisions.find((decision) => decision.decision === "approved");
@@ -1285,7 +1309,11 @@ function applyCreateRunsFromDesignWithDb(
     assertCharterProject(harness, db, resolvedCharterId, proposalProjectId, "createRunsFromDesign");
   }
 
-  const frozenContract = { ...proposal.proposal.evaluationContract };
+  const frozenEvolution = freezeTargetEvolutionContract(proposal, sourceRun, proposalProjectId);
+  const frozenContract = {
+    ...proposal.proposal.evaluationContract,
+    ...(frozenEvolution ? { comparison: frozenEvolution.comparison } : {}),
+  };
   // Preserve the complete stored proposal envelope — including any extension
   // fields the designer recorded beyond the canonical contract — so planners,
   // workers, and verifiers inherit a single durable source of truth. The
@@ -1304,6 +1332,13 @@ function applyCreateRunsFromDesignWithDb(
     evidenceRefs: proposal.proposal.evidenceRefs ?? [],
     additions: proposal.proposal.additions ?? [],
     removals: proposal.proposal.removals ?? [],
+    evaluationContract: frozenContract,
+    ...(frozenEvolution
+      ? {
+          evolutionPack: frozenEvolution.pack,
+          causalHypothesis: frozenEvolution.causalHypothesis,
+        }
+      : {}),
   };
   const frozenInvestment: Record<string, unknown> = { ...proposal.proposal.investment };
   const frozenAdditions: string[] = proposal.proposal.additions ?? [];
@@ -1345,33 +1380,48 @@ function applyCreateRunsFromDesignWithDb(
       : stablePlannerTaskId(context.run.id, context.task.id, context.actionIndex, proposalId, runIndex);
     // Idempotent replay: a prior run with the same stable ID already encodes
     // the planned delivery. We never recreate or duplicate the run.
-    const existingRun = harness.getRun(childRunId);
+    const childContext: Record<string, unknown> = {
+      ...withoutProtectedDesignContext(plannedRun.context),
+      ...inheritedControlContext(sourceRun.context),
+      projectId: proposalProjectId,
+      parentRunId: context.run.id,
+      sourceTaskId: linearIntakeSourceDesignerTaskId ?? context.task.id,
+      source: "design",
+      designProposalId: proposal.id,
+      designCharterId: resolvedCharterId,
+      designDecisionId: approval.id,
+      designEvaluationContract: frozenContract,
+      designProposal: frozenProposal,
+      designInvestment: frozenInvestment,
+      designAdditions: frozenAdditions,
+      designRemovals: frozenRemovals,
+      designApprovalAuthority: approvalAuthority,
+      ...(frozenEvolution
+        ? {
+            evolutionPack: frozenEvolution.pack,
+            causalHypothesis: frozenEvolution.causalHypothesis,
+            comparison: frozenEvolution.comparison,
+            evolutionComparison: frozenEvolution.comparison,
+            evolutionInstance: frozenEvolution.instance,
+          }
+        : {}),
+    };
+    if (linearIntake) {
+      childContext.linearIntake = buildChildRunLinearIntakeBlock({
+        parent: linearIntake,
+        proposalId: proposal.id,
+        decisionId: approval.id,
+        sourceDesignerRunId: context.run.id,
+        sourceDesignerTaskId: linearIntakeSourceDesignerTaskId ?? context.task.id,
+      });
+    }
+
+    const existingRun = harness.getRunWithDb(db, childRunId);
     if (!existingRun) {
-      const childContext: Record<string, unknown> = {
-        ...(plannedRun.context ?? {}),
-        ...inheritedControlContext(context.run.context),
-        projectId: proposalProjectId,
-        parentRunId: context.run.id,
-        sourceTaskId: context.task.id,
-        source: "design",
-        designProposalId: proposal.id,
-        designCharterId: resolvedCharterId,
-        designDecisionId: approval.id,
-        designEvaluationContract: frozenContract,
-        designProposal: frozenProposal,
-        designInvestment: frozenInvestment,
-        designAdditions: frozenAdditions,
-        designRemovals: frozenRemovals,
-        designApprovalAuthority: approvalAuthority,
-      };
-      if (linearIntake) {
-        childContext.linearIntake = buildChildRunLinearIntakeBlock({
-          parent: linearIntake,
-          proposalId: proposal.id,
-          decisionId: approval.id,
-          sourceDesignerRunId: context.run.id,
-          sourceDesignerTaskId: linearIntakeSourceDesignerTaskId ?? context.task.id,
-        });
+      if (options.requireExisting) {
+        throw new Error(
+          `createRunsFromDesign replay is missing child run ${childRunId}`,
+        );
       }
       harness.createRunWithDb(db, {
         id: childRunId,
@@ -1403,9 +1453,20 @@ function applyCreateRunsFromDesignWithDb(
           childRunId,
         });
       }
+      if (frozenEvolution) {
+        verifyExistingFrozenDesignRun(existingRun, {
+          goal: plannedRun.goal,
+          expectedContext: childContext,
+        });
+      }
     }
     const existingTask = harness.getTask(plannerTaskId);
     if (!existingTask) {
+      if (options.requireExisting || (existingRun && frozenEvolution)) {
+        throw new Error(
+          `createRunsFromDesign replay is missing planner task ${plannerTaskId}`,
+        );
+      }
       harness.createTaskWithDb(db, {
         id: plannerTaskId,
         runId: childRunId,
@@ -1498,6 +1559,173 @@ function inheritedControlContext(context: Record<string, unknown>) {
     ]
       .filter((key) => context[key] !== undefined)
       .map((key) => [key, context[key]]),
+  );
+}
+
+const PROTECTED_DESIGN_CONTEXT_KEYS = [
+  "projectId",
+  "parentRunId",
+  "sourceTaskId",
+  "source",
+  "designProposalId",
+  "designCharterId",
+  "designDecisionId",
+  "designEvaluationContract",
+  "designProposal",
+  "designInvestment",
+  "designAdditions",
+  "designRemovals",
+  "designApprovalAuthority",
+  "evolutionPack",
+  "causalHypothesis",
+  "comparison",
+  "evolutionComparison",
+  "evolutionInstance",
+] as const;
+
+interface FrozenTargetEvolutionContract {
+  pack: EvolutionPackV1;
+  causalHypothesis: EvolutionCausalHypothesis;
+  comparison: EvolutionComparison;
+  instance: EvolutionInstance;
+}
+
+function proposalHasAnyTargetEvolutionData(proposal: DesignProposal): boolean {
+  return proposal.proposal.evolutionPack !== undefined
+    || proposal.proposal.causalHypothesis !== undefined
+    || proposal.proposal.evaluationContract?.comparison !== undefined;
+}
+
+function freezeTargetEvolutionContract(
+  proposal: DesignProposal,
+  sourceRun: Run,
+  targetProjectId: string,
+): FrozenTargetEvolutionContract | null {
+  const rawPack = proposal.proposal.evolutionPack;
+  const rawCausalHypothesis = proposal.proposal.causalHypothesis;
+  const rawComparison = proposal.proposal.evaluationContract?.comparison;
+  const present = [rawPack, rawCausalHypothesis, rawComparison].map((value) => value !== undefined);
+  if (present.every((value) => !value)) {
+    return null;
+  }
+  if (!present.every(Boolean)) {
+    throw new Error(
+      "createRunsFromDesign target evolution data must include evolutionPack, causalHypothesis, and evaluationContract.comparison as one complete group",
+    );
+  }
+
+  const pack = parseEvolutionPackV1(
+    rawPack,
+    targetProjectId,
+    "createRunsFromDesign proposal.evolutionPack",
+  );
+  const causalHypothesis = parseEvolutionCausalHypothesis(
+    rawCausalHypothesis,
+    "createRunsFromDesign proposal.causalHypothesis",
+  );
+  const comparison = parseEvolutionComparison(
+    rawComparison,
+    "createRunsFromDesign proposal.evaluationContract.comparison",
+  );
+
+  let kernelProjectId = sourceRun.projectId;
+  if (sourceRun.context.evolutionInstance !== undefined) {
+    try {
+      kernelProjectId = parseEvolutionInstance(
+        sourceRun.context.evolutionInstance,
+        "createRunsFromDesign source run evolutionInstance",
+      ).kernelProjectId;
+    } catch {
+      // Only a fully valid source instance is trusted. Invalid inherited
+      // metadata carries no authority and falls back to the bound source run.
+    }
+  }
+  if (!kernelProjectId) {
+    throw new Error(
+      "createRunsFromDesign target evolution requires a project-bound source run",
+    );
+  }
+
+  const instance = parseEvolutionInstance({
+    schemaVersion: 1,
+    mode: kernelProjectId === targetProjectId ? "self" : "design-target",
+    kernelProjectId,
+    targetProjectId,
+    cycle: { kind: "bootstrap", index: 0 },
+    pack: {
+      id: pack.id,
+      version: pack.version,
+      contentSha256: createHash("sha256")
+        .update(stableCanonicalJson(pack), "utf8")
+        .digest("hex"),
+    },
+  }, "createRunsFromDesign evolutionInstance");
+
+  return { pack, causalHypothesis, comparison, instance };
+}
+
+function withoutProtectedDesignContext(value: unknown): Record<string, unknown> {
+  if (value === undefined || value === null) {
+    return {};
+  }
+  if (typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("createRunsFromDesign planned run context must be an object");
+  }
+  const context = value as Record<string, unknown>;
+  return Object.fromEntries(
+    Object.entries(context).filter(
+      ([key]) => !(PROTECTED_DESIGN_CONTEXT_KEYS as readonly string[]).includes(key),
+    ),
+  );
+}
+
+function verifyExistingFrozenDesignRun(
+  existingRun: Run,
+  expected: { goal: string; expectedContext: Record<string, unknown> },
+) {
+  if (existingRun.goal !== expected.goal) {
+    throw new Error(
+      `createRunsFromDesign child run ${existingRun.id} goal drifted; expected ${JSON.stringify(expected.goal)}, found ${JSON.stringify(existingRun.goal)}`,
+    );
+  }
+  for (const key of PROTECTED_DESIGN_CONTEXT_KEYS) {
+    const expectedHasKey = Object.prototype.hasOwnProperty.call(expected.expectedContext, key);
+    const existingHasKey = Object.prototype.hasOwnProperty.call(existingRun.context, key);
+    if (expectedHasKey !== existingHasKey) {
+      throw new Error(
+        `createRunsFromDesign child run ${existingRun.id} frozen context.${key} is ${existingHasKey ? "unexpected" : "missing"}`,
+      );
+    }
+    if (
+      expectedHasKey
+      && stableCanonicalJson(existingRun.context[key]) !== stableCanonicalJson(expected.expectedContext[key])
+    ) {
+      throw new Error(
+        `createRunsFromDesign child run ${existingRun.id} frozen context.${key} drifted from the accepted proposal`,
+      );
+    }
+  }
+}
+
+function stableCanonicalJson(value: unknown): string {
+  return JSON.stringify(canonicalizeJson(value));
+}
+
+function canonicalizeJson(value: unknown): unknown {
+  if (value === undefined) {
+    return null;
+  }
+  if (value === null || typeof value !== "object") {
+    return value;
+  }
+  if (Array.isArray(value)) {
+    return value.map(canonicalizeJson);
+  }
+  const record = value as Record<string, unknown>;
+  return Object.fromEntries(
+    Object.keys(record)
+      .sort()
+      .map((key) => [key, canonicalizeJson(record[key])]),
   );
 }
 
