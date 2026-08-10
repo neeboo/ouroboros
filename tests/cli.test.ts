@@ -9607,7 +9607,7 @@ if (args.includes("self-improve-daemon")) {
       },
     });
     setupHarness.updateRunStatus({ runId: bootstrap.runId, status: "done" });
-    setupHarness.createRun({
+    const deliveryRunId = setupHarness.createRun({
       goal: "Delivery awaiting deterministic drain recovery",
       context: {
         parentRunId: bootstrap.runId,
@@ -9633,9 +9633,17 @@ if (args.includes("self-improve-daemon")) {
 
     expect(result.ticks[0].createdCycle).toBeNull();
     expect(result.ticks[0]).toMatchObject({
-      status: "error",
+      status: "ok",
       createdCycle: null,
+      drain: {
+        runId: deliveryRunId,
+        actionType: "prepareRunDrain",
+        actionStatus: "done",
+      },
     });
+    expect(setupHarness.listHarnessActionEvents({ limit: 100 }).filter(
+      (event) => event.actionType === "prepareRunDrain" && event.request.runId === deliveryRunId,
+    )).toHaveLength(1);
     expect(assessmentRuns).toHaveLength(0);
   });
 
@@ -9712,8 +9720,13 @@ if (args.includes("self-improve-daemon")) {
     );
 
     expect(result.ticks[0]).toMatchObject({
-      status: "error",
+      status: "ok",
       createdCycle: null,
+      drain: {
+        runId: predecessorRunId,
+        actionType: "prepareRunDrain",
+        actionStatus: "done",
+      },
     });
     expect(drainEvents).toHaveLength(1);
     expect(drainEvents[0]).toMatchObject({
