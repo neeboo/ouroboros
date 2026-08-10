@@ -6213,6 +6213,7 @@ describe("runner", () => {
 
     const verifier = harness.nextReadyTask(runId)!;
     const attempt = harness.getAttempt(result!.attemptId)!;
+    expect(verifier.config).toEqual({ verifierContract });
     expect(verifier.prompt).toContain("## Frozen Verifier Contract");
     expect(verifier.prompt).toContain("## Runtime File Guardrail");
     expect(verifier.prompt).toContain(".ouroboros/");

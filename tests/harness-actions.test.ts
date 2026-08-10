@@ -924,6 +924,111 @@ describe("Harness actions", () => {
     expect(harness.listHarnessActionEvents({ limit: 10 }).filter((event) => event.status === "done")).toHaveLength(0);
   });
 
+  test("rejects a closure whose commands replace the verifier task contract before Git mutation", async () => {
+    const repoPath = join(dir, "repo-verifier-command-binding");
+    const worktreePath = join(dir, "worker-verifier-command-binding");
+    await mkdir(repoPath, { recursive: true });
+    await writeFile(join(repoPath, "README.md"), "initial\n");
+    git(repoPath, ["init", "-b", "main"]);
+    git(repoPath, ["config", "user.name", "Ouroboros Test"]);
+    git(repoPath, ["config", "user.email", "test@example.com"]);
+    git(repoPath, ["config", "commit.gpgSign", "false"]);
+    git(repoPath, ["add", "README.md"]);
+    git(repoPath, ["commit", "-m", "Initial commit"]);
+    git(repoPath, ["worktree", "add", "-b", "task-verifier-command-binding", worktreePath, "main"]);
+    await mkdir(join(worktreePath, "src"), { recursive: true });
+    await writeFile(join(worktreePath, "src", "verified.ts"), "export const verified = true;\n");
+
+    const runId = harness.createRun({ goal: "Bind integration to the persisted verifier contract", projectRoot: repoPath });
+    const workerTaskId = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Create the verified file",
+      prompt: "Create src/verified.ts.",
+      worktreePath,
+    });
+    harness.recordAttempt({
+      taskId: workerTaskId,
+      input: { executor: "test" },
+      output: {
+        status: "done",
+        summary: "Created verified file",
+        changedFiles: ["src/verified.ts"],
+        checks: [{ name: "worker", status: "passed" }],
+        artifacts: [],
+        problems: [],
+      },
+    });
+    const verifierTaskId = harness.createTask({
+      runId,
+      role: "verifier",
+      goal: "Verify the file with the frozen failing command",
+      prompt: "Run the persisted verifier contract.",
+      dependsOn: [workerTaskId],
+      config: { verifierContract: { deterministicChecks: ["bun test failing-contract"] } },
+    });
+    harness.recordAttempt({
+      taskId: verifierTaskId,
+      input: { executor: "test" },
+      output: {
+        status: "done",
+        summary: "Verifier evidence recorded",
+        changedFiles: [],
+        checks: [{ name: "verifier", status: "passed" }],
+        artifacts: [],
+        problems: [],
+      },
+    });
+
+    const targetHeadBefore = git(repoPath, ["rev-parse", "HEAD"]).stdout.trim();
+    const targetStatusBefore = git(repoPath, ["status", "--short"]).stdout;
+    const result = applyHarnessAction(harness, {
+      type: "integrateVerifiedRun",
+      runId,
+      workerTaskId,
+      repoPath,
+      targetBranch: "main",
+      integrationClosure: {
+        verifierTaskId,
+        frozenCommands: ["bun test passing-replacement"],
+      },
+    });
+
+    expect(result).toMatchObject({ status: "blocked", actionType: "integrateVerifiedRun" });
+    expect(result.problems.join(" ")).toContain("verifier commands");
+    expect(git(repoPath, ["rev-parse", "HEAD"]).stdout.trim()).toBe(targetHeadBefore);
+    expect(git(repoPath, ["status", "--short"]).stdout).toBe(targetStatusBefore);
+    expect(harness.listHarnessActionEvents({ limit: 10 }).filter((event) => event.status === "done")).toHaveLength(0);
+
+    const exactClosure = {
+      verifierTaskId,
+      frozenCommands: ["bun test failing-contract"],
+    };
+    const first = applyHarnessAction(harness, {
+      type: "integrateVerifiedRun",
+      runId,
+      workerTaskId,
+      repoPath,
+      targetBranch: "main",
+      integrationClosure: exactClosure,
+    });
+    const headAfterFirst = git(repoPath, ["rev-parse", "HEAD"]).stdout.trim();
+    const second = applyHarnessAction(harness, {
+      type: "integrateVerifiedRun",
+      runId,
+      workerTaskId,
+      repoPath,
+      targetBranch: "main",
+      integrationClosure: exactClosure,
+    });
+
+    expect(first).toMatchObject({ status: "done", actionType: "integrateVerifiedRun" });
+    expect(first.checks).toContainEqual(expect.objectContaining({ name: "verifier commands bound", status: "passed" }));
+    expect(second).toMatchObject({ status: "done", actionType: "integrateVerifiedRun" });
+    expect(git(repoPath, ["rev-parse", "HEAD"]).stdout.trim()).toBe(headAfterFirst);
+    expect(harness.listHarnessActionEvents({ limit: 10 }).filter((event) => event.status === "done")).toHaveLength(1);
+  });
+
   test("redacts Git credential echoes from blocked integration results and audits", async () => {
     const scenario = await createDisjointBranchIntegrationScenario(harness, dir);
     const secret = "watchdog-integration-secret";
