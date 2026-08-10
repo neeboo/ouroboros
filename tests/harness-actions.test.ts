@@ -7324,8 +7324,29 @@ describe("Control-plane watchdog contract", () => {
       {
         name: "quiescent",
         setup: () => {
-          const runId = harness.createRun({ goal: "Quiescent", context: { selfImprovement: { assessmentFingerprint: "abc", quiescent: true } } });
-          harness.createTask({ runId, role: "worker", goal: "x", prompt: "x" });
+          const assessmentFingerprint = "b".repeat(64);
+          const runId = harness.createRun({
+            goal: "Quiescent",
+            context: {
+              source: "self-improve",
+              selfImprovement: {
+                assessmentFingerprint,
+                quiescent: true,
+                quiescence: {
+                  version: 1,
+                  assessmentFingerprint,
+                  sourceRunId: "run_quiescent_fixture",
+                  sourceTaskId: "task_quiescent_fixture",
+                  sourceAttemptId: "attempt_quiescent_fixture",
+                  summary: "No evidence-backed work is justified until the scheduled wake.",
+                  decidedAt: "2023-11-14T22:13:20.000Z",
+                  nextWakeAt: "2023-11-16T22:13:20.000Z",
+                  evidence: ["attempt:attempt_quiescent_fixture"],
+                },
+              },
+            },
+          });
+          harness.updateRunStatus({ runId, status: "blocked" });
           return runId;
         },
       },
@@ -7398,6 +7419,101 @@ describe("Control-plane watchdog contract", () => {
       expect(watchdog?.state ?? "healthy").not.toBe("repairing");
       expect(watchdog?.state ?? "healthy").not.toBe("blocked");
     }
+  });
+
+  test("a terminal self-improvement root without a durable wake becomes evolution-stale", () => {
+    const runId = harness.createRun({
+      goal: "Continuously improve Ouroboros from evidence-backed gaps",
+      context: {
+        source: "self-improve",
+        selfImprovement: {
+          cycleIndex: 14,
+          assessmentFingerprint: "frozen-assessment",
+        },
+        controlPlaneRuntime: {
+          state: "current",
+        },
+      },
+    });
+    harness.updateRunStatus({ runId, status: "blocked" });
+
+    applyHarnessAction(harness, {
+      type: "runWatchdogPass",
+      rootRunId: runId,
+      now: 1_700_000_000_000,
+      daemonIntervalMs: 1500,
+      inboxEvents: [],
+      scheduledReviews: [],
+      reason: "terminal self-improvement observation 1",
+    });
+    const result = applyHarnessAction(harness, {
+      type: "runWatchdogPass",
+      rootRunId: runId,
+      now: 1_700_000_090_000,
+      daemonIntervalMs: 1500,
+      inboxEvents: [],
+      scheduledReviews: [],
+      reason: "terminal self-improvement observation 2",
+    });
+
+    const observation = result.artifacts.find((artifact) =>
+      (artifact as Record<string, unknown>).kind === "watchdog_observation"
+    ) as Record<string, unknown>;
+    const watchdog = harness.getRun(runId)?.context.controlPlaneWatchdog as
+      | { state?: string; fault?: { kind?: string }; history?: Array<{ reason?: string }> }
+      | undefined;
+    expect(observation.eligible).toBe(true);
+    expect(watchdog?.state).toBe("suspect");
+    expect(watchdog?.fault?.kind).toBe("terminal-evolution-stall");
+    expect(watchdog?.history?.at(-1)?.reason).not.toBe("not eligible");
+  });
+
+  test("a terminal self-improvement root with a future durable wake stays intentionally quiescent", () => {
+    const assessmentFingerprint = "a".repeat(64);
+    const runId = harness.createRun({
+      goal: "Continuously improve Ouroboros from evidence-backed gaps",
+      context: {
+        source: "self-improve",
+        selfImprovement: {
+          cycleIndex: 3,
+          assessmentFingerprint,
+          quiescent: true,
+          quiescence: {
+            version: 1,
+            assessmentFingerprint,
+            sourceRunId: "run_quiet_source",
+            sourceTaskId: "task_quiet_source",
+            sourceAttemptId: "attempt_quiet_source",
+            summary: "No evidence-backed change is justified.",
+            decidedAt: "2023-11-14T22:13:20.000Z",
+            nextWakeAt: "2023-11-15T22:13:20.000Z",
+            evidence: ["attempt:attempt_quiet_source"],
+          },
+        },
+      },
+    });
+    harness.updateRunStatus({ runId, status: "blocked" });
+
+    const result = applyHarnessAction(harness, {
+      type: "runWatchdogPass",
+      rootRunId: runId,
+      now: 1_700_000_000_000,
+      daemonIntervalMs: 1500,
+      inboxEvents: [],
+      scheduledReviews: [],
+      reason: "durable quiescence observation",
+    });
+
+    const observation = result.artifacts.find((artifact) =>
+      (artifact as Record<string, unknown>).kind === "watchdog_observation"
+    ) as Record<string, unknown>;
+    const watchdog = harness.getRun(runId)?.context.controlPlaneWatchdog as
+      | { state?: string; history?: Array<{ reason?: string }> }
+      | undefined;
+    expect(observation.eligible).toBe(false);
+    expect(observation.eligibilityReasons).toEqual(["intentionally-quiescent"]);
+    expect(watchdog?.state).toBe("healthy");
+    expect(watchdog?.history?.at(-1)?.reason).toBe("not eligible");
   });
 
   test("fingerprint excludes heartbeat-only and watchdog-write events", () => {

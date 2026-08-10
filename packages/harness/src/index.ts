@@ -28,6 +28,7 @@ export {
   normalizeWatchdogState,
   observeWatchdogTree,
   readWatchdogState,
+  readSelfImprovementQuiescence,
   recordReconciliationOutcome,
   repairIdentity,
   transitionWatchdogState,

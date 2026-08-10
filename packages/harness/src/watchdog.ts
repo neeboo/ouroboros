@@ -23,6 +23,18 @@ export const WATCHDOG_FRESH_HEARTBEAT_MS = 90_000;
 export const WATCHDOG_HISTORY_LIMIT = 20;
 export const WATCHDOG_RECONCILE_LEASE_MS = 5 * 60_000;
 
+export interface SelfImprovementQuiescence {
+  version: 1;
+  assessmentFingerprint: string;
+  sourceRunId: string;
+  sourceTaskId: string;
+  sourceAttemptId: string;
+  summary: string;
+  decidedAt: string;
+  nextWakeAt: string;
+  evidence: string[];
+}
+
 export interface WatchdogThreadInput {
   id: string;
   runId: string;
@@ -222,9 +234,6 @@ export function computeWatchdogEligibility(input: {
   if (hasHumanCheckpoint(rootRun.context)) {
     return { eligible: false, reasons: ["human-checkpoint"] };
   }
-  if (isIntentionallyQuiescent(rootRun.context)) {
-    return { eligible: false, reasons: ["intentionally-quiescent"] };
-  }
   if (hasFutureScheduledReview(scheduledReviews, now)) {
     return { eligible: false, reasons: ["scheduled-review-pending"] };
   }
@@ -241,7 +250,18 @@ export function computeWatchdogEligibility(input: {
   // This intentionally includes empty nonterminal PAN-1223 fixtures while
   // excluding drained terminal trees.
   const nonTerminalRuns = runs.filter((run) => run.status !== "done" && run.status !== "blocked");
+  const activeTasks = tasks.filter((task) => task.status === "todo" || task.status === "running");
+  if (
+    nonTerminalRuns.length === 0
+    && activeTasks.length === 0
+    && hasFutureSelfImprovementWake(rootRun.context, now)
+  ) {
+    return { eligible: false, reasons: ["intentionally-quiescent"] };
+  }
   if (nonTerminalRuns.length === 0) {
+    if (isContinuousSelfImprovementRoot(rootRun)) {
+      return { eligible: true, reasons: ["terminal-evolution-without-wake"] };
+    }
     return { eligible: false, reasons: ["drained-terminal"] };
   }
   return { eligible: true, reasons: [] };
@@ -275,14 +295,67 @@ function hasHumanCheckpoint(context: Record<string, unknown>): boolean {
   return false;
 }
 
-function isIntentionallyQuiescent(context: Record<string, unknown>): boolean {
+export function readSelfImprovementQuiescence(
+  context: Record<string, unknown>,
+): SelfImprovementQuiescence | null {
   const selfImprovement = context.selfImprovement;
-  if (!selfImprovement || typeof selfImprovement !== "object") return false;
+  if (!selfImprovement || typeof selfImprovement !== "object" || Array.isArray(selfImprovement)) return null;
   const record = selfImprovement as Record<string, unknown>;
-  if (record.assessmentFingerprint && typeof record.assessmentFingerprint === "string") {
-    return Boolean(record.quiescent) === true;
+  const raw = record.quiescence;
+  if (!raw || typeof raw !== "object" || Array.isArray(raw) || record.quiescent !== true) {
+    return null;
   }
-  return false;
+  const quiescence = raw as Record<string, unknown>;
+  const assessmentFingerprint = quiescence.assessmentFingerprint;
+  const sourceRunId = quiescence.sourceRunId;
+  const sourceTaskId = quiescence.sourceTaskId;
+  const sourceAttemptId = quiescence.sourceAttemptId;
+  const summary = quiescence.summary;
+  const decidedAt = quiescence.decidedAt;
+  const nextWakeAt = quiescence.nextWakeAt;
+  const evidence = quiescence.evidence;
+  if (
+    quiescence.version !== 1
+    || typeof assessmentFingerprint !== "string"
+    || !/^[0-9a-f]{64}$/.test(assessmentFingerprint)
+    || assessmentFingerprint !== record.assessmentFingerprint
+    || typeof sourceRunId !== "string" || sourceRunId.length === 0
+    || typeof sourceTaskId !== "string" || sourceTaskId.length === 0
+    || typeof sourceAttemptId !== "string" || sourceAttemptId.length === 0
+    || typeof summary !== "string" || summary.trim().length === 0
+    || typeof decidedAt !== "string" || !isStrictUtcIso(decidedAt)
+    || typeof nextWakeAt !== "string" || !isStrictUtcIso(nextWakeAt)
+    || Date.parse(nextWakeAt) <= Date.parse(decidedAt)
+    || !Array.isArray(evidence) || evidence.length === 0
+    || evidence.some((entry) => typeof entry !== "string" || entry.length === 0)
+  ) {
+    return null;
+  }
+  return {
+    version: 1,
+    assessmentFingerprint,
+    sourceRunId,
+    sourceTaskId,
+    sourceAttemptId,
+    summary,
+    decidedAt,
+    nextWakeAt,
+    evidence: evidence as string[],
+  };
+}
+
+function hasFutureSelfImprovementWake(context: Record<string, unknown>, now: number): boolean {
+  const quiescence = readSelfImprovementQuiescence(context);
+  return quiescence !== null && Date.parse(quiescence.nextWakeAt) > now;
+}
+
+function isContinuousSelfImprovementRoot(run: Run): boolean {
+  return run.context.source === "self-improve";
+}
+
+function isStrictUtcIso(value: string): boolean {
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) && new Date(parsed).toISOString() === value;
 }
 
 function hasFutureScheduledReview(
@@ -540,6 +613,22 @@ function classifyFault(input: {
         details: `Empty non-terminal run(s): ${emptyNonTerminalRuns.map((entry) => entry.runId).join(",")}`,
       },
       affectedRunIds: [...allRunIds],
+    };
+  }
+
+  const rootRun = runs.find((run) => run.id === rootRunId);
+  if (
+    rootRun?.context.source === "self-improve"
+    && runs.every((run) => run.status === "done" || run.status === "blocked")
+  ) {
+    return {
+      classification: {
+        kind: "terminal-evolution-stall",
+        affectedRunIds: [rootRunId],
+        selectedAction: "none",
+        details: "Continuous self-improvement is terminal without a durable future wake",
+      },
+      affectedRunIds: [rootRunId],
     };
   }
 

@@ -9228,6 +9228,9 @@ if (args.includes("self-improve-daemon")) {
       "1",
     );
     const runs = await runCliJson("list-runs");
+    const durableRoot = new Harness(dbPath).getRun(bootstrap.runId)!;
+    const durableSelfImprovement = durableRoot.context.selfImprovement as Record<string, unknown>;
+    const durableQuiescence = durableSelfImprovement.quiescence as Record<string, unknown>;
 
     expect(result.status).toBe("tick_limit");
     expect(result.ticks[0]).toMatchObject({
@@ -9236,6 +9239,251 @@ if (args.includes("self-improve-daemon")) {
       createdCycle: null,
     });
     expect(runs).toHaveLength(1);
+    expect(durableSelfImprovement.quiescent).toBe(true);
+    expect(durableQuiescence).toMatchObject({
+      version: 1,
+      assessmentFingerprint: durableSelfImprovement.assessmentFingerprint,
+      sourceRunId: bootstrap.runId,
+      sourceTaskId: bootstrap.taskId,
+      summary: "No evidence-backed improvement gap",
+      evidence: [expect.stringMatching(/^attempt:/)],
+    });
+    expect(Date.parse(String(durableQuiescence.nextWakeAt))).toBeGreaterThan(Date.now());
+  });
+
+  test("self-improve-daemon wakes an expired durable quiescence exactly once", async () => {
+    const bootstrap = await runCliJson("self-iterate");
+    const setupHarness = new Harness(dbPath);
+    const initialAttemptId = setupHarness.recordAttempt({
+      taskId: bootstrap.taskId,
+      input: {},
+      output: {
+        status: "done",
+        summary: "No evidence-backed improvement gap",
+        changedFiles: [],
+        checks: [{ name: "assessment", status: "passed" }],
+        artifacts: [],
+        problems: [],
+      },
+    });
+    setupHarness.updateRunStatus({ runId: bootstrap.runId, status: "blocked" });
+    const root = setupHarness.getRun(bootstrap.runId)!;
+    const selfImprovement = root.context.selfImprovement as Record<string, unknown>;
+    setupHarness.updateRun({
+      runId: bootstrap.runId,
+      contextPatch: {
+        selfImprovement: {
+          ...selfImprovement,
+          quiescent: true,
+          quiescence: {
+            version: 1,
+            assessmentFingerprint: selfImprovement.assessmentFingerprint,
+            sourceRunId: bootstrap.runId,
+            sourceTaskId: bootstrap.taskId,
+            sourceAttemptId: initialAttemptId,
+            summary: "No evidence-backed improvement gap",
+            decidedAt: new Date(Date.now() - 86_400_000).toISOString(),
+            nextWakeAt: new Date(Date.now() - 1_000).toISOString(),
+            evidence: [`attempt:${initialAttemptId}`],
+          },
+        },
+      },
+    });
+    const codexBin = join(dir, "fake-codex-expired-quiescence");
+    const output = {
+      status: "done",
+      summary: "No new evidence-backed improvement is justified after the scheduled wake.",
+      changedFiles: [],
+      checks: [{ name: "scheduled assessment", status: "passed" }],
+      artifacts: [],
+      problems: [],
+    };
+    await writeFile(codexBin, [
+      "#!/usr/bin/env bun",
+      "import { writeFileSync } from 'node:fs';",
+      "const flag = Bun.argv.indexOf('--output-last-message');",
+      "const path = flag >= 0 ? Bun.argv[flag + 1] : '';",
+      `const output = ${JSON.stringify(output)};`,
+      "if (path) writeFileSync(path, JSON.stringify(output));",
+      "console.log(JSON.stringify({ type: 'session.started', session_id: 'session_expired_quiescence' }));",
+      "console.log(JSON.stringify({ type: 'agent.message', message: JSON.stringify(output) }));",
+    ].join("\n"));
+    await chmod(codexBin, 0o755);
+
+    const daemonArgs = [
+      "self-improve-daemon",
+      "--executor", "codex-resumable",
+      "--root-run-id", bootstrap.runId,
+      "--codex-bin", codexBin,
+      "--parallel", "auto",
+      "--max-ticks", "1",
+      "--tick-cycles", "1",
+      "--max-rounds", "1",
+      "--interval-ms", "1",
+      "--idle-ms", "1",
+    ];
+    const first = await runCliJson(...daemonArgs);
+    const second = await runCliJson(...daemonArgs);
+    const runs = await runCliJson("list-runs");
+    const scheduled = runs.filter((run: { context: Record<string, unknown> }) =>
+      run.context.source === "self-improvement-assessment"
+    );
+
+    expect(first.ticks[0].createdCycle).toMatchObject({ cycleIndex: 1 });
+    expect(scheduled).toHaveLength(1);
+    expect(second.ticks[0].createdCycle).toBeNull();
+  });
+
+  test("self-improve-daemon creates one successor for a blocked root without a durable wake", async () => {
+    const bootstrap = await runCliJson("self-iterate");
+    const setupHarness = new Harness(dbPath);
+    setupHarness.recordAttempt({
+      taskId: bootstrap.taskId,
+      input: {},
+      output: {
+        status: "blocked",
+        summary: "The root assessment terminated before a durable quiescent decision.",
+        changedFiles: [],
+        checks: [{ name: "root assessment", status: "failed" }],
+        artifacts: [],
+        problems: ["terminal root without wake"],
+      },
+    });
+    setupHarness.updateRunStatus({ runId: bootstrap.runId, status: "blocked" });
+    const codexBin = join(dir, "fake-codex-terminal-root-successor");
+    const output = {
+      status: "done",
+      summary: "Scheduled successor found no new evidence-backed improvement.",
+      changedFiles: [],
+      checks: [{ name: "successor assessment", status: "passed" }],
+      artifacts: [],
+      problems: [],
+    };
+    await writeFile(codexBin, [
+      "#!/usr/bin/env bun",
+      "import { writeFileSync } from 'node:fs';",
+      "const flag = Bun.argv.indexOf('--output-last-message');",
+      "const path = flag >= 0 ? Bun.argv[flag + 1] : '';",
+      `const output = ${JSON.stringify(output)};`,
+      "if (path) writeFileSync(path, JSON.stringify(output));",
+      "console.log(JSON.stringify({ type: 'session.started', session_id: 'session_terminal_successor' }));",
+      "console.log(JSON.stringify({ type: 'agent.message', message: JSON.stringify(output) }));",
+    ].join("\n"));
+    await chmod(codexBin, 0o755);
+
+    const daemonArgs = [
+      "self-improve-daemon",
+      "--executor", "codex-resumable",
+      "--root-run-id", bootstrap.runId,
+      "--codex-bin", codexBin,
+      "--parallel", "auto",
+      "--max-ticks", "1",
+      "--tick-cycles", "1",
+      "--max-rounds", "1",
+      "--interval-ms", "1",
+      "--idle-ms", "1",
+    ];
+    const results = await Promise.all([
+      runCliJson(...daemonArgs),
+      runCliJson(...daemonArgs),
+    ]);
+    const runs = await runCliJson("list-runs");
+    const successors = runs.filter((run: { context: Record<string, unknown> }) =>
+      run.context.source === "self-improvement-assessment"
+    );
+
+    expect(results.some((result) => result.ticks[0].createdCycle?.cycleIndex === 1)).toBe(true);
+    expect(successors).toHaveLength(1);
+  });
+
+  test("self-improve-daemon never derives quiescence from the mutable root after an assessment child exists", async () => {
+    const bootstrap = await runCliJson("self-iterate");
+    const setupHarness = new Harness(dbPath);
+    setupHarness.recordAttempt({
+      taskId: bootstrap.taskId,
+      input: {},
+      output: {
+        status: "done",
+        summary: "Old bootstrap assessment was quiet",
+        changedFiles: [],
+        checks: [{ name: "bootstrap assessment", status: "passed" }],
+        artifacts: [],
+        problems: [],
+      },
+    });
+    setupHarness.updateRunStatus({ runId: bootstrap.runId, status: "done" });
+    const root = setupHarness.getRun(bootstrap.runId)!;
+    const selfImprovement = root.context.selfImprovement as Record<string, unknown>;
+    const assessmentRunId = setupHarness.createRun({
+      id: "run_00000000000000000000000000000000",
+      goal: "A later assessment produced a design action",
+      projectId: root.projectId,
+      context: {
+        parentRunId: bootstrap.runId,
+        source: "self-improvement-assessment",
+        selfImprovement: {
+          cycleIndex: selfImprovement.cycleIndex,
+          assessmentFingerprint: selfImprovement.assessmentFingerprint,
+        },
+      },
+    });
+    const assessmentTaskId = setupHarness.createTask({
+      runId: assessmentRunId,
+      role: "designer",
+      goal: "Record a real design action",
+      prompt: "Return a design action.",
+    });
+    setupHarness.recordAttempt({
+      taskId: assessmentTaskId,
+      input: {},
+      output: {
+        status: "done",
+        summary: "A design action is required",
+        changedFiles: [],
+        checks: [{ name: "design evidence", status: "passed" }],
+        artifacts: [],
+        problems: [],
+        designActions: [{ type: "recordSignal", payload: { projectId: root.projectId } }],
+      },
+    });
+    setupHarness.updateRunStatus({ runId: assessmentRunId, status: "done" });
+    const codexBin = join(dir, "fake-codex-after-action-assessment");
+    const output = {
+      status: "done",
+      summary: "The successor assessment is mutation-free.",
+      changedFiles: [],
+      checks: [{ name: "successor assessment", status: "passed" }],
+      artifacts: [],
+      problems: [],
+    };
+    await writeFile(codexBin, [
+      "#!/usr/bin/env bun",
+      "import { writeFileSync } from 'node:fs';",
+      "const flag = Bun.argv.indexOf('--output-last-message');",
+      "const path = flag >= 0 ? Bun.argv[flag + 1] : '';",
+      `const output = ${JSON.stringify(output)};`,
+      "if (path) writeFileSync(path, JSON.stringify(output));",
+      "console.log(JSON.stringify({ type: 'session.started', session_id: 'session_after_action' }));",
+      "console.log(JSON.stringify({ type: 'agent.message', message: JSON.stringify(output) }));",
+    ].join("\n"));
+    await chmod(codexBin, 0o755);
+
+    const result = await runCliJson(
+      "self-improve-daemon",
+      "--executor", "codex-resumable",
+      "--root-run-id", bootstrap.runId,
+      "--codex-bin", codexBin,
+      "--max-ticks", "1",
+      "--tick-cycles", "1",
+      "--max-rounds", "1",
+      "--interval-ms", "1",
+      "--idle-ms", "1",
+    );
+    const durableRoot = setupHarness.getRun(bootstrap.runId)!;
+    const durableSelfImprovement = durableRoot.context.selfImprovement as Record<string, unknown>;
+
+    expect(result.ticks[0].status).not.toBe("quiescent");
+    expect(durableSelfImprovement.quiescence).toBeNull();
   });
 
   test("self-improve-daemon does not copy stale Claude defaults into a new assessment cycle", async () => {
@@ -10447,7 +10695,7 @@ if (args.includes("self-improve-daemon")) {
       },
     });
     setupHarness.updateDesignProposalStatus({ proposalId: proposal.id, status: "measuring" });
-    setupHarness.updateRunStatus({ runId: integratedRunId, status: "done" });
+    setupHarness.updateRunStatus({ runId: integratedRunId, status: "blocked" });
     setupHarness.recordAttempt({
       taskId: bootstrap.taskId,
       input: {},
@@ -10465,7 +10713,7 @@ if (args.includes("self-improve-daemon")) {
     // Fake codex that records a retain outcome for any outcome-review task it
     // sees, so the daemon tick surfaces outcome-review state and then drains.
     const codexBin = join(dir, "fake-codex-outcome-review");
-    const payloadFor = (taskConfig: { designProposalId?: string }) => ({
+    const payload = {
       status: "done",
       summary: "Outcome review recorded",
       changedFiles: [],
@@ -10476,7 +10724,7 @@ if (args.includes("self-improve-daemon")) {
         {
           type: "recordDesignOutcome",
           payload: {
-            proposalId: taskConfig.designProposalId,
+            proposalId: proposal.id,
             stage: "review",
             recommendation: "retain",
             baseline: { startup: 12 },
@@ -10485,25 +10733,18 @@ if (args.includes("self-improve-daemon")) {
           },
         },
       ],
-    });
+    };
     await writeFile(
       codexBin,
       [
         "#!/usr/bin/env bun",
-        "import { readFileSync, writeFileSync } from 'node:fs';",
-        "const cfgFlag = Bun.argv.indexOf('--config-last-message');",
-        "const cfgPath = cfgFlag >= 0 ? Bun.argv[cfgFlag + 1] : '';",
-        "let taskConfig: { designProposalId?: string } = {};",
-        "try {",
-        "  if (cfgPath) taskConfig = JSON.parse(readFileSync(cfgPath, 'utf8'));",
-        "} catch {}",
-        `const payload = ${JSON.stringify(payloadFor)};`,
-        "const resolved = typeof payload === 'function' ? payload(taskConfig) : payload;",
+        "import { writeFileSync } from 'node:fs';",
+        `const payload = ${JSON.stringify(payload)};`,
         "const outputFlag = Bun.argv.indexOf('--output-last-message');",
         "const outputPath = outputFlag >= 0 ? Bun.argv[outputFlag + 1] : '';",
-        "if (outputPath) writeFileSync(outputPath, JSON.stringify(resolved));",
+        "if (outputPath) writeFileSync(outputPath, JSON.stringify(payload));",
         "console.log(JSON.stringify({ type: 'session.started', session_id: 'session_outcome' }));",
-        "console.log(JSON.stringify({ type: 'agent.message', message: JSON.stringify(resolved) }));",
+        "console.log(JSON.stringify({ type: 'agent.message', message: JSON.stringify(payload) }));",
       ].join("\n"),
     );
     await chmod(codexBin, 0o755);
@@ -10538,6 +10779,12 @@ if (args.includes("self-improve-daemon")) {
     // folds outcome-review into active supervision). Either way, the proposal
     // ends up retained after the retain outcome is recorded.
     const refreshed = setupHarness.getDesignProposal({ id: proposal.id });
+    const integratedOverview = setupHarness.getRunOverview({ runId: integratedRunId, eventLimit: 0 });
+    const outcomeReviewTask = integratedOverview.tasks.find((task) => task.role === "outcome-review");
+    expect(outcomeReviewTask?.status).toBe("done");
+    expect(integratedOverview.sessions.some((session) =>
+      session.taskId === outcomeReviewTask?.id && session.status === "done"
+    )).toBe(true);
     expect(refreshed?.status === "measuring" || refreshed?.status === "retained").toBe(true);
     if (refreshed?.status === "retained") {
       const outcomes = setupHarness.listDesignOutcomes({ proposalId: proposal.id });
@@ -10547,6 +10794,117 @@ if (args.includes("self-improve-daemon")) {
         stage: "review",
       });
     }
+  });
+
+  test("self-improve-daemon does not report a terminal exhausted outcome review as active on every tick", async () => {
+    const bootstrap = await runCliJson("self-iterate");
+    const bootstrapOverview = await runCliJson("run-overview", "--run-id", bootstrap.runId);
+    const setupHarness = new Harness(dbPath);
+    const projectId = setupHarness.listProjects()[0].id;
+    const proposal = setupHarness.createDesignProposal({
+      projectId,
+      charterId: bootstrapOverview.run.context.founderCharterId as string,
+      runId: bootstrap.runId,
+      taskId: bootstrap.taskId,
+      title: "Exhausted outcome review",
+      problem: "A terminal review must not look active forever.",
+      recommendation: "Converge after the bounded review fails.",
+      proposal: {
+        problem: "A terminal review must not look active forever.",
+        recommendation: "Converge after the bounded review fails.",
+        evaluationContract: {
+          baseline: ["review is blocked"],
+          successMetrics: ["daemon advances"],
+          guardMetrics: ["no duplicate review"],
+          requiredEvidence: ["two daemon ticks"],
+        },
+        investment: {
+          reversibility: "easy",
+          portfolio: "core",
+          oneTimeCost: 0,
+          recurringCost: 0,
+          timeBudget: "one hour",
+        },
+      },
+      status: "accepted",
+    });
+    const deliveryRunId = setupHarness.createRun({
+      projectId,
+      goal: "Deliver then review",
+      context: {
+        parentRunId: bootstrap.runId,
+        source: "design",
+        designProposalId: proposal.id,
+        repairReplanBudget: { limit: 1, used: 1, entries: [] },
+      },
+    });
+    setupHarness.updateDesignProposalStatus({ proposalId: proposal.id, status: "measuring" });
+    setupHarness.updateRunStatus({ runId: deliveryRunId, status: "blocked" });
+    const linked = setupHarness.linkProposalOutcomeReview({ runId: deliveryRunId });
+    expect(linked.outcomeReviewTaskId).toBeTruthy();
+    setupHarness.recordAttempt({
+      taskId: linked.outcomeReviewTaskId!,
+      input: {},
+      output: {
+        status: "blocked",
+        summary: "The bounded outcome review failed",
+        changedFiles: [],
+        checks: [{ name: "outcome evidence", status: "failed" }],
+        artifacts: [],
+        problems: ["repair budget exhausted"],
+      },
+    });
+    setupHarness.recordAttempt({
+      taskId: bootstrap.taskId,
+      input: {},
+      output: {
+        status: "done",
+        summary: "Bootstrap assessment drained",
+        changedFiles: [],
+        checks: [{ name: "assessment", status: "passed" }],
+        artifacts: [],
+        problems: [],
+      },
+    });
+    setupHarness.updateRunStatus({ runId: bootstrap.runId, status: "done" });
+    const codexBin = join(dir, "fake-codex-after-exhausted-outcome");
+    const output = {
+      status: "done",
+      summary: "No new evidence-backed improvement is justified.",
+      changedFiles: [],
+      checks: [{ name: "assessment", status: "passed" }],
+      artifacts: [],
+      problems: [],
+    };
+    await writeFile(codexBin, [
+      "#!/usr/bin/env bun",
+      "import { writeFileSync } from 'node:fs';",
+      "const flag = Bun.argv.indexOf('--output-last-message');",
+      "const path = flag >= 0 ? Bun.argv[flag + 1] : '';",
+      `const output = ${JSON.stringify(output)};`,
+      "if (path) writeFileSync(path, JSON.stringify(output));",
+      "console.log(JSON.stringify({ type: 'session.started', session_id: 'session_exhausted_outcome' }));",
+      "console.log(JSON.stringify({ type: 'agent.message', message: JSON.stringify(output) }));",
+    ].join("\n"));
+    await chmod(codexBin, 0o755);
+
+    const result = await runCliJson(
+      "self-improve-daemon",
+      "--executor", "codex-resumable",
+      "--root-run-id", bootstrap.runId,
+      "--codex-bin", codexBin,
+      "--parallel", "auto",
+      "--max-ticks", "2",
+      "--tick-cycles", "1",
+      "--max-rounds", "1",
+      "--interval-ms", "1",
+      "--idle-ms", "1",
+    );
+    const deliveryOverview = setupHarness.getRunOverview({ runId: deliveryRunId, eventLimit: 0 });
+
+    expect(result.ticks.every((tick: { status: string }) => tick.status !== "outcome-review")).toBe(true);
+    expect(deliveryOverview.tasks.filter((task) => task.role === "outcome-review")).toHaveLength(1);
+    expect(deliveryOverview.tasks.find((task) => task.role === "outcome-review")?.status).toBe("blocked");
   });
 
   test("supervise-daemon records failed ticks without crashing", async () => {

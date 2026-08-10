@@ -333,6 +333,7 @@ export interface ControlPlaneWatchdogFaultClassification {
     | "interrupted-codex"
     | "unintegrated-verified"
     | "empty-nonterminal-run"
+    | "terminal-evolution-stall"
     | "unsupported";
   affectedRunIds: string[];
   selectedAction:
