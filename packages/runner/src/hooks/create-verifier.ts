@@ -30,6 +30,7 @@ export function createVerifierTaskHook(options: { harness: Harness; sourceRoles?
         "relevant checks are rerun or explained",
         "verification result is returned as structured JSON",
       ],
+      ...(verifierContract ? { config: { verifierContract } } : {}),
     });
 
     return {

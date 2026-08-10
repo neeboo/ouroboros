@@ -97,6 +97,7 @@ export type HarnessAction =
       targetBranch?: string;
       commitMessage?: string;
       push?: boolean;
+      integrationClosure?: Record<string, unknown>;
       reason?: string;
       /** Treat the linked design proposal's outcome review as due immediately. */
       immediateOutcomeReview?: boolean;
@@ -417,6 +418,7 @@ export function parseHarnessAction(value: unknown): HarnessAction {
       targetBranch: optionalStringField(record, "targetBranch"),
       commitMessage: optionalStringField(record, "commitMessage"),
       push,
+      integrationClosure: optionalObjectField(record, "integrationClosure"),
       reason: optionalStringField(record, "reason"),
       immediateOutcomeReview: optionalBooleanField(record, "immediateOutcomeReview"),
     };
@@ -1610,7 +1612,12 @@ function applyParsedHarnessAction(
   }
 
   if (action.type === "integrateVerifiedRun") {
-    return finalizeIntegrationOutcomeReview(harness, action, integrateVerifiedRun(harness, action, options));
+    const integration = attachVerifierCommandReceipt(
+      harness,
+      action,
+      integrateVerifiedRun(harness, action, options),
+    );
+    return finalizeIntegrationOutcomeReview(harness, action, integration);
   }
 
   if (action.type === "pushExactGitRef") {
@@ -2436,6 +2443,22 @@ function integrateVerifiedRun(
     ]);
   }
   checks.push({ name: "verifier evidence", status: "passed", evidence: verifier.id });
+
+  const verifierBinding = verifyIntegrationVerifierCommands({
+    action,
+    runContext: run.context,
+    verifier,
+  });
+  if (!verifierBinding.ok) {
+    return blockedIntegration(action.type, verifierBinding.reason, checks, [verifierBinding.reason]);
+  }
+  if (verifierBinding.commands) {
+    checks.push({
+      name: "verifier commands bound",
+      status: "passed",
+      evidence: `${verifier.id}:${stableFingerprint(verifierBinding.commands)}`,
+    });
+  }
 
   const goalReview = isPreCompletionIntegration ? null : selectCompletedGoalReview(overview);
   if (!isPreCompletionIntegration && !goalReview) {
@@ -6676,6 +6699,101 @@ function latestSessionForTask(overview: RunOverview, taskId: string) {
   return [...overview.sessions].reverse().find((session) => session.taskId === taskId && session.status === "done") ?? null;
 }
 
+function verifyIntegrationVerifierCommands(input: {
+  action: Extract<HarnessAction, { type: "integrateVerifiedRun" }>;
+  runContext: Record<string, unknown>;
+  verifier: Task;
+}): { ok: true; commands?: string[] } | { ok: false; reason: string } {
+  const contextClosure = optionalRecordValue(input.runContext.integrationClosure);
+  const requestClosure = input.action.integrationClosure;
+  const persistedContract = input.verifier.config?.verifierContract;
+  if (persistedContract === undefined) {
+    // Older verifier tasks have no persisted contract. Preserve their existing
+    // integration behavior, but never accept an unbound caller-supplied
+    // closure that has no persisted contract to anchor it.
+    if (contextClosure || requestClosure) {
+      return { ok: false, reason: "integration closure cannot be verified without a persisted verifierContract" };
+    }
+    return { ok: true };
+  }
+  if (!persistedContract || typeof persistedContract !== "object" || Array.isArray(persistedContract)) {
+    return { ok: false, reason: "referenced verifier task has no valid persisted verifierContract" };
+  }
+
+  const deterministicChecks = (persistedContract as Record<string, unknown>).deterministicChecks;
+  if (!Array.isArray(deterministicChecks)) {
+    return { ok: false, reason: "referenced verifier task verifierContract is missing deterministicChecks" };
+  }
+  const commands: string[] = [];
+  for (const [index, check] of deterministicChecks.entries()) {
+    if (typeof check === "string") {
+      if (check.length === 0) {
+        return { ok: false, reason: `referenced verifier task deterministicChecks[${index}] is empty` };
+      }
+      commands.push(check);
+      continue;
+    }
+    if (!check || typeof check !== "object" || Array.isArray(check)) {
+      return { ok: false, reason: `referenced verifier task deterministicChecks[${index}] has no command` };
+    }
+    const command = (check as Record<string, unknown>).command;
+    if (typeof command !== "string" || command.length === 0) {
+      return { ok: false, reason: `referenced verifier task deterministicChecks[${index}] has no command` };
+    }
+    commands.push(command);
+  }
+
+  if (contextClosure && requestClosure && !sameCanonicalValue(contextClosure, requestClosure)) {
+    return { ok: false, reason: "integration closure request differs from the frozen run integrationClosure" };
+  }
+  const closure = requestClosure ?? contextClosure;
+  if (!closure) {
+    return { ok: false, reason: "integration closure is required for a persisted verifier contract" };
+  }
+  if (closure.verifierTaskId !== input.verifier.id) {
+    return { ok: false, reason: "integration closure verifierTaskId does not match the referenced verifier task" };
+  }
+  if (!Array.isArray(closure.frozenCommands) || closure.frozenCommands.some((command) => typeof command !== "string")) {
+    return { ok: false, reason: "integration closure frozenCommands must be an array of strings" };
+  }
+  if (!sameCanonicalValue(commands, closure.frozenCommands)) {
+    return { ok: false, reason: "integration closure verifier commands do not exactly match the persisted verifier contract" };
+  }
+  return { ok: true, commands };
+}
+
+function attachVerifierCommandReceipt(
+  harness: Harness,
+  action: Extract<HarnessAction, { type: "integrateVerifiedRun" }>,
+  result: HarnessActionResult,
+): HarnessActionResult {
+  if (result.status !== "done") {
+    return result;
+  }
+  const run = harness.getRun(action.runId);
+  const closure = action.integrationClosure ?? optionalRecordValue(run?.context.integrationClosure);
+  if (!closure || !Array.isArray(closure.frozenCommands)) {
+    return result;
+  }
+  const frozenCommands = closure.frozenCommands as unknown[];
+  return {
+    ...result,
+    artifacts: result.artifacts.map((artifact) => artifact.kind === "integration"
+      ? {
+          ...artifact,
+          frozenCommands: [...frozenCommands],
+          verifierCommandsSha256: stableFingerprint(frozenCommands),
+        }
+      : artifact),
+  };
+}
+
+function optionalRecordValue(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
+
 function selectVerifierForWorker(overview: RunOverview, workerTaskId: string): Task | null {
   const latest = [...overview.tasks].reverse().find(
     (task) => task.role === "verifier" && task.dependsOn.includes(workerTaskId),
@@ -7398,6 +7516,7 @@ function integrationOperationKey(
         repoPath,
         targetBranch: action.targetBranch ?? "main",
         push: action.push ?? false,
+        integrationClosure: action.integrationClosure ?? overview.run.context.integrationClosure ?? null,
       },
       workerTaskId: worker?.id ?? null,
       workerAttemptId: latestWorkerAttempt,
@@ -7527,6 +7646,14 @@ function objectRecord(value: unknown, label: string) {
     throw new Error(`${label} must be an object`);
   }
   return value as Record<string, unknown>;
+}
+
+function optionalObjectField(record: Record<string, unknown>, key: string) {
+  const value = record[key];
+  if (value === undefined) {
+    return undefined;
+  }
+  return objectRecord(value, key);
 }
 
 function stringField(record: Record<string, unknown>, key: string) {
