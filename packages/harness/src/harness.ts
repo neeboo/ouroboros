@@ -1516,40 +1516,42 @@ export class Harness {
   }
 
   listRuns(input: ListRunsInput = {}) {
-    return withDatabase(this.dbPath, (db) => {
-      const limit = input.limit && input.limit > 0 ? Math.floor(input.limit) : 100;
-      const statuses = input.statuses?.filter((status) =>
-        status === "todo" || status === "running" || status === "done" || status === "blocked"
-      ) ?? [];
-      const rows = statuses.length > 0
-        ? db
-          .query(
-            `
-            select runs.*, projects.root_path as project_root
-            from runs
-            left join projects on projects.id = runs.project_id
-            where runs.status in (${statuses.map((_, index) => `$status${index}`).join(", ")})
-            order by runs.created_at, runs.id
-            limit $limit
-            `,
-          )
-          .all(Object.fromEntries([
-            ...statuses.map((status, index) => [`$status${index}`, status]),
-            ["$limit", limit],
-          ])) as RunRow[]
-        : db
-          .query(
-            `
-            select runs.*, projects.root_path as project_root
-            from runs
-            left join projects on projects.id = runs.project_id
-            order by runs.created_at, runs.id
-            limit $limit
-            `,
-          )
-          .all({ $limit: limit }) as RunRow[];
-      return rows.map(runFromRow);
-    });
+    return withDatabase(this.dbPath, (db) => this.listRunsWithDb(db, input));
+  }
+
+  listRunsWithDb(db: HarnessDatabase, input: ListRunsInput = {}) {
+    const limit = input.limit && input.limit > 0 ? Math.floor(input.limit) : 100;
+    const statuses = input.statuses?.filter((status) =>
+      status === "todo" || status === "running" || status === "done" || status === "blocked"
+    ) ?? [];
+    const rows = statuses.length > 0
+      ? db
+        .query(
+          `
+          select runs.*, projects.root_path as project_root
+          from runs
+          left join projects on projects.id = runs.project_id
+          where runs.status in (${statuses.map((_, index) => `$status${index}`).join(", ")})
+          order by runs.created_at, runs.id
+          limit $limit
+          `,
+        )
+        .all(Object.fromEntries([
+          ...statuses.map((status, index) => [`$status${index}`, status]),
+          ["$limit", limit],
+        ])) as RunRow[]
+      : db
+        .query(
+          `
+          select runs.*, projects.root_path as project_root
+          from runs
+          left join projects on projects.id = runs.project_id
+          order by runs.created_at, runs.id
+          limit $limit
+          `,
+        )
+        .all({ $limit: limit }) as RunRow[];
+    return rows.map(runFromRow);
   }
 
   countRunsByStatus() {
