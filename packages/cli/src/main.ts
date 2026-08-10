@@ -2445,7 +2445,16 @@ function ensureSelfImprovementCycle(rootRunId: string, cwd: string) {
   }
   scopedRuns = selfImprovementRuns(rootRunId);
 
-  const active = scopedRuns.some((run) => run.status === "todo" || run.status === "running");
+  const active = scopedRuns.some((run) => {
+    const overview = harness.getRunOverview({ runId: run.id, eventLimit: 0 });
+    const activeTaskOrSession = overview.tasks.some(
+      (task) => task.status === "todo" || task.status === "running",
+    ) || overview.sessions.some((session) => session.status === "running");
+    if (activeTaskOrSession) return true;
+    const assessmentRun = run.id === rootRunId
+      || run.context.source === "self-improvement-assessment";
+    return !assessmentRun && run.status !== "done" && run.status !== "blocked";
+  });
   if (active) {
     return { state: "active" as const, createdCycle: null };
   }
@@ -2506,6 +2515,7 @@ function ensureSelfImprovementCycle(rootRunId: string, cwd: string) {
       const persisted = persistSelfImprovementQuiescence({
         rootRunId,
         assessmentFingerprint: assessmentState,
+        reviewCadenceDays,
         quiescence: derivedQuiescence,
       });
       if (persisted) {
@@ -2625,12 +2635,11 @@ function latestQuiescentAssessmentDecision(input: {
   );
   const candidates = input.runs
     .filter((run) => {
-      if (run.status !== "done") return false;
       if (run.context.source === "self-improvement-assessment") return true;
       // The bootstrap root owns the first Designer assessment. Once a real
       // assessment child exists, the mutable root context must never be used
       // as evidence for a later cycle.
-      return assessmentRuns.length === 0 && run.id === input.rootRunId;
+      return assessmentRuns.length === 0 && run.id === input.rootRunId && run.status === "done";
     })
     .filter((run) =>
       recordValue(run.context.selfImprovement).assessmentFingerprint === input.assessmentFingerprint
@@ -2643,10 +2652,32 @@ function latestQuiescentAssessmentDecision(input: {
   const sourceRun = candidates.at(-1);
   if (!sourceRun) return null;
   const overview = harness.getRunOverview({ runId: sourceRun.id, eventLimit: 0 });
-  const designerSessions = overview.sessions.filter((session) => session.role === "designer");
-  if (designerSessions.length === 0 || designerSessions.some((session) => session.status !== "done")) {
+  return quiescenceFromAssessmentOverview({
+    sourceRun,
+    overview,
+    assessmentFingerprint: input.assessmentFingerprint,
+    reviewCadenceDays: input.reviewCadenceDays,
+  });
+}
+
+function quiescenceFromAssessmentOverview(input: {
+  sourceRun: NonNullable<RunOverview["run"]>;
+  overview: RunOverview;
+  assessmentFingerprint: string;
+  reviewCadenceDays: number;
+}) {
+  const { sourceRun, overview } = input;
+  if (
+    (sourceRun.status !== "done" && sourceRun.status !== "todo")
+    || recordValue(sourceRun.context.selfImprovement).assessmentFingerprint !== input.assessmentFingerprint
+    || overview.tasks.length === 0
+    || overview.tasks.some((task) => task.role !== "designer" || task.status !== "done")
+    || overview.sessions.length === 0
+    || overview.sessions.some((session) => session.role !== "designer" || session.status !== "done")
+  ) {
     return null;
   }
+  const designerSessions = overview.sessions.filter((session) => session.role === "designer");
   const hasDesignAction = designerSessions.some((session) => {
     const output = recordValue(session.output);
     const designActions = Array.isArray(output.designActions) ? output.designActions : [];
@@ -2681,6 +2712,7 @@ function latestQuiescentAssessmentDecision(input: {
 function persistSelfImprovementQuiescence(input: {
   rootRunId: string;
   assessmentFingerprint: string;
+  reviewCadenceDays: number;
   quiescence: NonNullable<ReturnType<typeof latestQuiescentAssessmentDecision>>;
 }) {
   return harness.runInImmediateTransaction((db) => {
@@ -2691,7 +2723,25 @@ function persistSelfImprovementQuiescence(input: {
       return null;
     }
     const existing = readSelfImprovementQuiescence(root.context);
-    const quiescence = existing ?? input.quiescence;
+    if (existing) return existing;
+    const sourceOverview = harness.getRunOverviewWithDb(db, {
+      runId: input.quiescence.sourceRunId,
+      eventLimit: 0,
+    });
+    if (!sourceOverview.run) return null;
+    const quiescence = quiescenceFromAssessmentOverview({
+      sourceRun: sourceOverview.run,
+      overview: sourceOverview,
+      assessmentFingerprint: input.assessmentFingerprint,
+      reviewCadenceDays: input.reviewCadenceDays,
+    });
+    if (!quiescence || JSON.stringify(quiescence) !== JSON.stringify(input.quiescence)) {
+      return null;
+    }
+    harness.updateRunWithDb(db, {
+      runId: sourceOverview.run.id,
+      status: "done",
+    });
     harness.updateRunWithDb(db, {
       runId: input.rootRunId,
       contextPatch: {

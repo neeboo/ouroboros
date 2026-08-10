@@ -1811,7 +1811,10 @@ export class Harness {
   }
 
   getRunOverview(input: GetRunOverviewInput) {
-    return withDatabase(this.dbPath, (db) => {
+    return withDatabase(this.dbPath, (db) => this.getRunOverviewWithDb(db, input));
+  }
+
+  getRunOverviewWithDb(db: HarnessDatabase, input: GetRunOverviewInput) {
       const runRow = db
         .query(
           `
@@ -1920,7 +1923,6 @@ export class Harness {
         lessons: lessonRows.map(lessonFromRow),
         controlPlaneWatchdog: runRow ? readWatchdogState(runFromRow(runRow).context) ?? undefined : undefined,
       };
-    });
   }
 
   retryTask(input: RetryTaskInput) {

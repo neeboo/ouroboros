@@ -9486,6 +9486,137 @@ if (args.includes("self-improve-daemon")) {
     expect(durableSelfImprovement.quiescence).toBeNull();
   });
 
+  test("self-improve-daemon never turns a blocked assessment with failed follow-up work into quiescence", async () => {
+    const bootstrap = await runCliJson("self-iterate");
+    const setupHarness = new Harness(dbPath);
+    setupHarness.recordAttempt({
+      taskId: bootstrap.taskId,
+      input: {},
+      output: {
+        status: "done",
+        summary: "Bootstrap assessment drained",
+        changedFiles: [],
+        checks: [],
+        artifacts: [],
+        problems: [],
+      },
+    });
+    setupHarness.updateRunStatus({ runId: bootstrap.runId, status: "done" });
+    const root = setupHarness.getRun(bootstrap.runId)!;
+    const selfImprovement = root.context.selfImprovement as Record<string, unknown>;
+    const assessmentRunId = setupHarness.createRun({
+      goal: "Assessment with failed follow-up verification",
+      projectId: root.projectId,
+      context: {
+        parentRunId: bootstrap.runId,
+        source: "self-improvement-assessment",
+        selfImprovement: {
+          cycleIndex: 1,
+          assessmentFingerprint: selfImprovement.assessmentFingerprint,
+        },
+        repairReplanBudget: { limit: 1, used: 1, entries: [] },
+      },
+    });
+    const designerTaskId = setupHarness.createTask({
+      runId: assessmentRunId,
+      role: "designer",
+      goal: "Assess quietly",
+      prompt: "Assess the current evidence.",
+    });
+    setupHarness.recordAttempt({
+      taskId: designerTaskId,
+      input: {},
+      output: {
+        status: "done",
+        summary: "Designer itself found no action",
+        changedFiles: [],
+        checks: [],
+        artifacts: [],
+        problems: [],
+      },
+    });
+    const verifierTaskId = setupHarness.createTask({
+      runId: assessmentRunId,
+      role: "verifier",
+      goal: "Verify the assessment evidence",
+      prompt: "Fail the incomplete evidence.",
+    });
+    setupHarness.recordAttempt({
+      taskId: verifierTaskId,
+      input: {},
+      output: {
+        status: "blocked",
+        summary: "Assessment evidence is incomplete",
+        changedFiles: [],
+        checks: [{ name: "assessment evidence", status: "failed" }],
+        artifacts: [],
+        problems: ["verification failed"],
+      },
+    });
+    setupHarness.updateRunStatus({ runId: assessmentRunId, status: "blocked" });
+
+    await runCliJson(
+      "self-improve-daemon",
+      "--executor", "codex-resumable",
+      "--root-run-id", bootstrap.runId,
+      "--codex-bin", join(dir, "missing-codex-blocked-assessment"),
+      "--max-ticks", "1",
+      "--tick-cycles", "1",
+      "--max-rounds", "1",
+      "--interval-ms", "1",
+      "--idle-ms", "1",
+    );
+    const durableAssessment = setupHarness.getRun(assessmentRunId)!;
+    const durableRoot = setupHarness.getRun(bootstrap.runId)!;
+
+    expect(durableAssessment.status).toBe("blocked");
+    expect((durableRoot.context.selfImprovement as Record<string, unknown>).quiescence).toBeFalsy();
+  });
+
+  test("self-improve-daemon does not skip an empty nonterminal delivery to create a new assessment", async () => {
+    const bootstrap = await runCliJson("self-iterate");
+    const setupHarness = new Harness(dbPath);
+    setupHarness.recordAttempt({
+      taskId: bootstrap.taskId,
+      input: {},
+      output: {
+        status: "done",
+        summary: "Bootstrap assessment drained",
+        changedFiles: [],
+        checks: [],
+        artifacts: [],
+        problems: [],
+      },
+    });
+    setupHarness.updateRunStatus({ runId: bootstrap.runId, status: "done" });
+    setupHarness.createRun({
+      goal: "Delivery awaiting deterministic drain recovery",
+      context: {
+        parentRunId: bootstrap.runId,
+        source: "design",
+      },
+    });
+
+    const result = await runCliJson(
+      "self-improve-daemon",
+      "--executor", "codex-resumable",
+      "--root-run-id", bootstrap.runId,
+      "--codex-bin", join(dir, "missing-codex-empty-delivery"),
+      "--max-ticks", "1",
+      "--tick-cycles", "1",
+      "--max-rounds", "1",
+      "--interval-ms", "1",
+      "--idle-ms", "1",
+    );
+    const assessmentRuns = setupHarness.listRuns({ limit: 100 }).filter((run) =>
+      run.context.parentRunId === bootstrap.runId
+      && run.context.source === "self-improvement-assessment"
+    );
+
+    expect(result.ticks[0].createdCycle).toBeNull();
+    expect(assessmentRuns).toHaveLength(0);
+  });
+
   test("self-improve-daemon does not copy stale Claude defaults into a new assessment cycle", async () => {
     const bootstrap = await runCliJson("self-iterate");
     const setupHarness = new Harness(dbPath);
@@ -10901,10 +11032,15 @@ if (args.includes("self-improve-daemon")) {
       "--idle-ms", "1",
     );
     const deliveryOverview = setupHarness.getRunOverview({ runId: deliveryRunId, eventLimit: 0 });
+    const assessmentRuns = setupHarness.listRuns({ limit: 100 }).filter((run) =>
+      run.context.parentRunId === bootstrap.runId
+      && run.context.source === "self-improvement-assessment"
+    );
 
     expect(result.ticks.every((tick: { status: string }) => tick.status !== "outcome-review")).toBe(true);
     expect(deliveryOverview.tasks.filter((task) => task.role === "outcome-review")).toHaveLength(1);
     expect(deliveryOverview.tasks.find((task) => task.role === "outcome-review")?.status).toBe("blocked");
+    expect(assessmentRuns).toHaveLength(1);
   });
 
   test("supervise-daemon records failed ticks without crashing", async () => {
