@@ -260,6 +260,32 @@ describe("Harness", () => {
     });
   });
 
+  test("lists runs from the transaction snapshot alongside its run overview", () => {
+    harness.createRun({ id: "run_001", goal: "Existing run" });
+
+    const transactionResult = harness.runInImmediateTransaction((db) => {
+      const transactionRunId = harness.createRunWithDb(db, {
+        id: "run_002",
+        goal: "Transaction-local run",
+      });
+      const runs = harness.listRunsWithDb(db, { limit: 100 });
+      const overview = harness.getRunOverviewWithDb(db, { runId: transactionRunId });
+
+      return { runs, overview };
+    });
+
+    expect(transactionResult.runs.map((run) => run.id)).toEqual(["run_001", "run_002"]);
+    expect(transactionResult.runs.map((run) => run.goal)).toEqual([
+      "Existing run",
+      "Transaction-local run",
+    ]);
+    expect(transactionResult.overview.run).toMatchObject({
+      id: "run_002",
+      goal: "Transaction-local run",
+    });
+    expect(harness.listRuns({ limit: 100 })).toEqual(transactionResult.runs);
+  });
+
   test("creates or reuses a project when creating a run from project root", () => {
     const runId = harness.createRun({
       goal: "Bind by root",
