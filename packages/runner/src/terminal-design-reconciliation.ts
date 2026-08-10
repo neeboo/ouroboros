@@ -4,6 +4,8 @@ import {
   type Harness,
   type RunOverview,
 } from "@ouroboros/harness";
+import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { dirname, isAbsolute, resolve } from "node:path";
 import { DEFAULT_REPAIR_REPLAN_BUDGET_LIMIT } from "./hooks/create-repair";
 import { chargeRepairBudget, readRepairBudget } from "./hooks/repair-budget";
@@ -104,6 +106,23 @@ export function reconcileTerminalDesignDeliveries(input: {
         run,
         sourceWorktreePath: input.harness.getTask(candidate.taskId)?.worktreePath ?? null,
       });
+      const integrationClosure = repoPath
+        ? terminalIntegrationClosure({ harness: input.harness, run, workerTaskId: candidate.taskId, repoPath })
+        : null;
+      if (!integrationClosure && repoPath) {
+        const failure = reconciliationFailureEvidence(overview, null, null);
+        return createRepairOrTerminalDisposition({
+          harness: input.harness,
+          run,
+          proposalId,
+          reconciliationTaskId: reconciliationTask.id,
+          failure: {
+            ...failure,
+            summary: "Terminal design integration requires a complete integration closure.",
+            problems: ["integration closure is missing or cannot be constructed from the frozen verifier evidence"],
+          },
+        });
+      }
       const action = applyHarnessAction(input.harness, {
         type: "integrateVerifiedRun",
         runId: run.id,
@@ -111,6 +130,7 @@ export function reconcileTerminalDesignDeliveries(input: {
         ...(repoPath ? { repoPath } : {}),
         targetBranch: integrationTargetBranch(run.context),
         push: false,
+        ...(integrationClosure ? { integrationClosure } : {}),
         immediateOutcomeReview: true,
         reason: `terminal design reconciliation for accepted proposal ${proposalId}`,
       });
@@ -436,8 +456,59 @@ function successfulIntegrationReceipt(harness: Harness, runId: string) {
     if (event.request.runId !== runId) {
       return false;
     }
-    return matchingIntegrationArtifact(event, runId, workerTaskIdForReceipt(event)) !== null;
+    const artifact = matchingIntegrationArtifact(event, runId, workerTaskIdForReceipt(event));
+    return artifact !== null && integrationReceiptHasClosure(artifact) && measurementReceiptEligible(harness, runId, artifact);
   }) ?? null;
+}
+
+function integrationReceiptHasClosure(artifact: Record<string, unknown>) {
+  if (typeof artifact.targetBaseSha !== "string") return false;
+  const paths = stringArray(artifact.paths);
+  const sourceTaskIds = stringArray(artifact.sourceTaskIds);
+  const sourceAttemptIds = stringArray(artifact.sourceAttemptIds);
+  const pathHashes = stringRecord(artifact.pathHashes);
+  const independentReadback = stringRecord(artifact.independentReadback);
+  if (!/^[0-9a-f]{40}$/i.test(artifact.targetBaseSha) ||
+      typeof artifact.candidateCommit !== "string" || !/^[0-9a-f]{40}$/i.test(artifact.candidateCommit) ||
+      !paths || paths.length === 0 || !sourceTaskIds || sourceTaskIds.length === 0 ||
+      !sourceAttemptIds || sourceTaskIds.length !== sourceAttemptIds.length ||
+      !pathHashes || !independentReadback) return false;
+  const keys = [...paths].sort().join("\0");
+  if (Object.keys(pathHashes).sort().join("\0") !== keys || Object.keys(independentReadback).sort().join("\0") !== keys) {
+    return false;
+  }
+  return paths.every((path) => /^[0-9a-f]{64}$/i.test(pathHashes[path] ?? "") &&
+    pathHashes[path]?.toLowerCase() === independentReadback[path]?.toLowerCase());
+}
+
+function stringArray(value: unknown): string[] | null {
+  return Array.isArray(value) && value.every((entry) => typeof entry === "string" && entry.length > 0)
+    ? value as string[]
+    : null;
+}
+
+function stringRecord(value: unknown): Record<string, string> | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const entries = Object.entries(value as Record<string, unknown>);
+  return entries.every(([key, entry]) => key.length > 0 && typeof entry === "string")
+    ? Object.fromEntries(entries) as Record<string, string>
+    : null;
+}
+
+function measurementReceiptEligible(harness: Harness, runId: string, artifact: Record<string, unknown>) {
+  if (artifact.preCompletion === true || typeof artifact.goalReviewTaskId !== "string") {
+    return false;
+  }
+  const overview = harness.getRunOverview({ runId, eventLimit: 0 });
+  if (overview.run?.status !== "done") {
+    return false;
+  }
+  const goalReview = overview.tasks.find((task) => task.id === artifact.goalReviewTaskId && task.role === "goal-review");
+  if (!goalReview || goalReview.status !== "done") {
+    return false;
+  }
+  const session = [...overview.sessions].reverse().find((candidate) => candidate.taskId === goalReview.id && candidate.status === "done");
+  return session?.output.runDecision === "complete";
 }
 
 function workerTaskIdForReceipt(event: NonNullable<HarnessActionEvent>) {
@@ -554,7 +625,65 @@ function terminalIntegrationRepoPath(input: {
   return topLevel && resolve(topLevel) === resolve(repoPath) ? resolve(repoPath) : null;
 }
 
+function terminalIntegrationClosure(input: {
+  harness: Harness;
+  run: ScopedRun;
+  workerTaskId: string;
+  repoPath: string;
+}): Record<string, unknown> | null {
+  const overview = input.harness.getRunOverview({ runId: input.run.id, eventLimit: 0 });
+  const worker = overview.tasks.find((task) => task.id === input.workerTaskId);
+  const verifier = overview.tasks.find((task) => task.role === "verifier" && task.dependsOn.includes(input.workerTaskId));
+  const workerSession = [...overview.sessions].reverse().find((session) => session.taskId === input.workerTaskId && session.status === "done");
+  if (!worker?.worktreePath || !verifier || !workerSession) return null;
+  const contract = verifier.config?.verifierContract ?? input.run.context.verifierContract;
+  const rawCommands = contract && typeof contract === "object" && !Array.isArray(contract)
+    ? (contract as Record<string, unknown>).deterministicChecks
+    : null;
+  const frozenCommands = Array.isArray(rawCommands)
+    ? rawCommands.map((check) => typeof check === "string" ? check : check && typeof check === "object" && !Array.isArray(check)
+      ? (check as Record<string, unknown>).command
+      : null)
+    : null;
+  if (!frozenCommands || frozenCommands.some((command) => typeof command !== "string" || command.length === 0)) return null;
+  const worktreePath = resolve(worker.worktreePath);
+  const targetBaseSha = strictGitLine(input.repoPath, ["rev-parse", "HEAD"]);
+  if (!targetBaseSha || !/^[0-9a-f]{40}$/i.test(targetBaseSha)) return null;
+  const diff = strictGitOutput(worktreePath, ["diff", "--name-only", targetBaseSha, "--"]);
+  const untracked = strictGitOutput(worktreePath, ["ls-files", "--others", "--exclude-standard"]);
+  if (diff === null || untracked === null) return null;
+  const paths = [...new Set(`${diff}\n${untracked}`.split(/\r?\n/).map((path) => path.trim()).filter(Boolean))].sort();
+  if (paths.length === 0) return null;
+  const pathHashes: Record<string, string> = {};
+  for (const path of paths) {
+    try {
+      pathHashes[path] = createHash("sha256").update(readFileSync(resolve(worktreePath, path))).digest("hex");
+    } catch {
+      return null;
+    }
+  }
+  return {
+    targetBaseSha,
+    sourceTaskIds: [input.workerTaskId],
+    sourceAttemptIds: [workerSession.attemptId],
+    paths,
+    pathHashes,
+    verifierTaskId: verifier.id,
+    frozenCommands,
+    ...(input.run.context.designEvaluationContract !== undefined
+      ? { evaluationContract: input.run.context.designEvaluationContract }
+      : {}),
+  };
+}
+
 function strictGitLine(cwd: string, args: string[]) {
+  const output = strictGitOutput(cwd, args);
+  if (output === null) return null;
+  const lines = output.trim().split(/\r?\n/).filter(Boolean);
+  return lines.length === 1 ? lines[0]! : null;
+}
+
+function strictGitOutput(cwd: string, args: string[]) {
   const result = Bun.spawnSync({
     cmd: ["git", "-C", cwd, ...args],
     stdout: "pipe",
@@ -563,8 +692,7 @@ function strictGitLine(cwd: string, args: string[]) {
   if (result.exitCode !== 0) {
     return null;
   }
-  const lines = result.stdout.toString().trim().split(/\r?\n/).filter(Boolean);
-  return lines.length === 1 ? lines[0]! : null;
+  return result.stdout.toString();
 }
 
 function recordValue(value: unknown): Record<string, unknown> {

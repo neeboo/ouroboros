@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, realpathSync, rmSync, unlinkSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, realpathSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { acceptGuardrailProposal, proposeGuardrailsFromLessons } from "./guardrails";
@@ -308,6 +308,7 @@ export interface HarnessActionResult {
 
 export interface HarnessActionOptions {
   runGit?: GitRunner;
+  runCommand?: CommandRunner;
   subsessionRunner?: SubsessionRunner;
 }
 
@@ -326,6 +327,45 @@ interface GitCommandResult {
 }
 
 type GitRunner = (input: GitCommandInput) => GitCommandResult;
+
+interface CommandRunnerInput {
+  cwd: string;
+  command: string;
+  timeoutMs?: number;
+  maxOutputBytes?: number;
+}
+
+interface CommandRunnerResult {
+  exitCode: number;
+  stdout: string;
+  stderr: string;
+}
+
+type CommandRunner = (input: CommandRunnerInput) => CommandRunnerResult;
+
+interface IntegrationClosureState {
+  receipt?: Record<string, unknown>;
+  materializedFiles?: Array<{ path: string; content: Buffer; mode: number }>;
+  git?: GitRunner;
+}
+
+const MAX_INTEGRATION_CLOSURE_PATHS = 256;
+const MAX_INTEGRATION_CLOSURE_FILE_BYTES = 8 * 1024 * 1024;
+const MAX_INTEGRATION_CLOSURE_TOTAL_BYTES = 32 * 1024 * 1024;
+const MAX_INTEGRATION_CLOSURE_COMMANDS = 32;
+const MAX_INTEGRATION_CLOSURE_COMMAND_BYTES = 4096;
+const INTEGRATION_CLOSURE_FIELDS = new Set([
+  "targetBaseSha",
+  "sourceTaskIds",
+  "sourceAttemptIds",
+  "paths",
+  "pathHashes",
+  "verifierTaskId",
+  "frozenCommands",
+  "evaluationContract",
+  "evaluationContractSha256",
+  "manifestHash",
+]);
 
 interface ExactGitIndexFile {
   status: "A";
@@ -1612,12 +1652,17 @@ function applyParsedHarnessAction(
   }
 
   if (action.type === "integrateVerifiedRun") {
+    const closureState: IntegrationClosureState = {};
     const integration = attachVerifierCommandReceipt(
       harness,
       action,
-      integrateVerifiedRun(harness, action, options),
+      integrateVerifiedRun(harness, action, options, closureState),
     );
-    return finalizeIntegrationOutcomeReview(harness, action, integration);
+    return finalizeIntegrationOutcomeReview(
+      harness,
+      action,
+      attachIntegrationClosureReceipt(integration, closureState),
+    );
   }
 
   if (action.type === "pushExactGitRef") {
@@ -2395,6 +2440,7 @@ function integrateVerifiedRun(
   harness: Harness,
   action: Extract<HarnessAction, { type: "integrateVerifiedRun" }>,
   options: HarnessActionOptions,
+  closureState: IntegrationClosureState = {},
 ): HarnessActionResult {
   const overview = harness.getRunOverview({ runId: action.runId, eventLimit: 0 });
   const run = overview.run;
@@ -2406,7 +2452,10 @@ function integrateVerifiedRun(
     { name: "run exists", status: "passed", evidence: action.runId },
   ];
   const isExplicitWorkerIntegration = action.workerTaskId !== undefined;
-  const isPreCompletionIntegration = run.status !== "done" && isExplicitWorkerIntegration;
+  const completedGoalReview = selectCompletedGoalReview(overview);
+  const isPreCompletionIntegration = run.status !== "done" && isExplicitWorkerIntegration && !completedGoalReview;
+  const isTerminalDesignIntegration = !isPreCompletionIntegration &&
+    run.context.source === "design" && typeof run.context.designProposalId === "string";
   if (run.status !== "done" && !isExplicitWorkerIntegration) {
     return blockedIntegration(action.type, "Run is not complete.", checks, [`run status is ${run.status}`]);
   }
@@ -2426,7 +2475,7 @@ function integrateVerifiedRun(
   checks.push({ name: "execution task", status: "passed", evidence: worker.id });
 
   const workerSession = latestSessionForTask(overview, worker.id);
-  const changedFiles = filterOuroborosRuntimePaths(
+  let changedFiles = filterOuroborosRuntimePaths(
     Array.isArray(workerSession?.output.changedFiles) ? workerSession.output.changedFiles : [],
   );
   if (changedFiles.length === 0) {
@@ -2460,7 +2509,7 @@ function integrateVerifiedRun(
     });
   }
 
-  const goalReview = isPreCompletionIntegration ? null : selectCompletedGoalReview(overview);
+  const goalReview = isPreCompletionIntegration ? null : completedGoalReview;
   if (!isPreCompletionIntegration && !goalReview) {
     return blockedIntegration(action.type, "Run has no completed goal-review decision.", checks, [
       "missing goal-review runDecision complete",
@@ -2493,6 +2542,7 @@ function integrateVerifiedRun(
   checks.push({ name: "worktree path", status: "passed", evidence: worktreePath });
 
   const git = options.runGit ?? defaultGitRunner;
+  closureState.git = git;
   const redirectedFromRepair = redirectRepairWorkerToSource({
     overview,
     worker,
@@ -2578,6 +2628,41 @@ function integrateVerifiedRun(
     ]);
   }
   checks.push({ name: "worker repository identity", status: "passed", evidence: targetCommonDir });
+
+  const closurePreflight = prepareIntegrationClosure({
+    action,
+    run,
+    overview,
+    worker,
+    verifier,
+    repoPath,
+    worktreePath,
+    changedFiles,
+    terminal: isTerminalDesignIntegration,
+    git,
+    runCommand: options.runCommand ?? defaultCommandRunner,
+  });
+  if (!closurePreflight.ok) {
+    return blockedIntegration(action.type, closurePreflight.reason, checks, [closurePreflight.reason]);
+  }
+  if (closurePreflight.receipt) {
+    closureState.receipt = closurePreflight.receipt;
+    closureState.materializedFiles = closurePreflight.materializedFiles;
+    const receiptPaths = Array.isArray(closurePreflight.receipt.paths)
+      ? closurePreflight.receipt.paths.filter((path): path is string => typeof path === "string")
+      : [];
+    changedFiles = receiptPaths.length > 0 ? receiptPaths : changedFiles;
+    checks.push({
+      name: "clean candidate verifier",
+      status: "passed",
+      evidence: String(closurePreflight.receipt.candidateCommit),
+    });
+    checks.push({
+      name: "integration closure",
+      status: "passed",
+      evidence: `${String(receiptPaths.length)} paths; ${String(closurePreflight.receipt.manifestHash)}`,
+    });
+  }
   const isContainedSameBranch = sourceBranch === targetBranch;
 
   if (targetStatus.stdout.trim().length > 0) {
@@ -6706,7 +6791,11 @@ function verifyIntegrationVerifierCommands(input: {
 }): { ok: true; commands?: string[] } | { ok: false; reason: string } {
   const contextClosure = optionalRecordValue(input.runContext.integrationClosure);
   const requestClosure = input.action.integrationClosure;
-  const persistedContract = input.verifier.config?.verifierContract;
+  const taskContract = input.verifier.config?.verifierContract;
+  const persistedContract = taskContract ?? input.runContext.verifierContract;
+  if (taskContract === undefined && !contextClosure && !requestClosure) {
+    return { ok: true };
+  }
   if (persistedContract === undefined) {
     // Older verifier tasks have no persisted contract. Preserve their existing
     // integration behavior, but never accept an unbound caller-supplied
@@ -6748,7 +6837,7 @@ function verifyIntegrationVerifierCommands(input: {
   }
   const closure = requestClosure ?? contextClosure;
   if (!closure) {
-    return { ok: false, reason: "integration closure is required for a persisted verifier contract" };
+    return { ok: true };
   }
   if (closure.verifierTaskId !== input.verifier.id) {
     return { ok: false, reason: "integration closure verifierTaskId does not match the referenced verifier task" };
@@ -6760,6 +6849,323 @@ function verifyIntegrationVerifierCommands(input: {
     return { ok: false, reason: "integration closure verifier commands do not exactly match the persisted verifier contract" };
   }
   return { ok: true, commands };
+}
+
+const MAX_CANDIDATE_WORKSPACE_DEPENDENCY_TREES = 64;
+
+function bindCandidateDependencyTrees(repoPath: string, candidatePath: string): boolean {
+  const bindings: Array<{ source: string; target: string }> = [];
+  const rootDependencyPath = join(repoPath, "node_modules");
+  if (existsSync(rootDependencyPath)) {
+    bindings.push({ source: rootDependencyPath, target: join(candidatePath, "node_modules") });
+  }
+
+  const packagesPath = join(repoPath, "packages");
+  if (existsSync(packagesPath)) {
+    try {
+      const workspaces = readdirSync(packagesPath, { withFileTypes: true })
+        .filter((entry) => entry.isDirectory() || entry.isSymbolicLink())
+        .sort((left, right) => left.name.localeCompare(right.name));
+      for (const workspace of workspaces) {
+        const source = join(packagesPath, workspace.name, "node_modules");
+        if (!existsSync(source)) continue;
+        bindings.push({
+          source,
+          target: join(candidatePath, "packages", workspace.name, "node_modules"),
+        });
+      }
+    } catch {
+      return false;
+    }
+  }
+
+  if (bindings.length > MAX_CANDIDATE_WORKSPACE_DEPENDENCY_TREES + 1) {
+    return false;
+  }
+  try {
+    for (const binding of bindings) {
+      if (existsSync(binding.target)) return false;
+      mkdirSync(dirname(binding.target), { recursive: true });
+      symlinkSync(binding.source, binding.target, "dir");
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function prepareIntegrationClosure(input: {
+  action: Extract<HarnessAction, { type: "integrateVerifiedRun" }>;
+  run: Run;
+  overview: RunOverview;
+  worker: Task;
+  verifier: Task;
+  repoPath: string;
+  worktreePath: string;
+  changedFiles: string[];
+  terminal: boolean;
+  git: GitRunner;
+  runCommand: CommandRunner;
+}): { ok: true; receipt?: Record<string, unknown>; materializedFiles?: Array<{ path: string; content: Buffer; mode: number }> } | { ok: false; reason: string } {
+  const closure = input.action.integrationClosure ?? optionalRecordValue(input.run.context.integrationClosure);
+  if (!closure && input.terminal) {
+    return { ok: false, reason: "terminal integration requires a complete integration closure" };
+  }
+  if (closure) {
+    const unknownFields = Object.keys(closure).filter((key) => !INTEGRATION_CLOSURE_FIELDS.has(key));
+    if (unknownFields.length > 0) {
+      return { ok: false, reason: `integration closure contains unsupported fields: ${unknownFields.sort().join(",")}` };
+    }
+  }
+  if (!closure || !hasCompleteClosureFields(closure)) {
+    if (input.terminal) {
+      return { ok: false, reason: "terminal integration requires a complete integration closure" };
+    }
+    // Command-only closures remain compatible with pre-manifest runs. A design
+    // delivery that starts freezing any manifest field must provide the whole
+    // manifest so it cannot silently fall back to source-worktree evidence.
+    if (closure && hasAnyClosureManifestField(closure)) {
+      return { ok: false, reason: "integration closure manifest is incomplete" };
+    }
+    return { ok: true };
+  }
+
+  const targetBaseSha = closure.targetBaseSha;
+  if (typeof targetBaseSha !== "string" || !/^[0-9a-f]{40}$/i.test(targetBaseSha)) {
+    return { ok: false, reason: "integration closure targetBaseSha must be a full commit SHA" };
+  }
+  const targetHead = readGitStdout(input.git, input.repoPath, ["rev-parse", "HEAD"]);
+  if (targetHead !== targetBaseSha) {
+    return { ok: false, reason: "integration closure target base is stale" };
+  }
+
+  const sourceTaskIds = closureStringArrayField(closure.sourceTaskIds);
+  const sourceAttemptIds = closureStringArrayField(closure.sourceAttemptIds);
+  const rawPaths = closureStringArrayField(closure.paths);
+  const paths = rawPaths ? normalizeRelativeFiles(rawPaths) : null;
+  const pathHashes = recordStringMap(closure.pathHashes);
+  if (!sourceTaskIds || !sourceAttemptIds || !paths || !pathHashes ||
+    sourceTaskIds.length === 0 || sourceTaskIds.length !== sourceAttemptIds.length ||
+    paths.length === 0 || paths.length > MAX_INTEGRATION_CLOSURE_PATHS || paths.length !== rawPaths!.length) {
+    return { ok: false, reason: "integration closure manifest contains invalid task, attempt, path, or hash fields" };
+  }
+  if (sourceTaskIds.length !== new Set(sourceTaskIds).size || sourceAttemptIds.length !== new Set(sourceAttemptIds).size) {
+    return { ok: false, reason: "integration closure source task and attempt order must be unique" };
+  }
+  for (let index = 0; index < sourceTaskIds.length; index += 1) {
+    const sourceTask = input.overview.tasks.find((task) => task.id === sourceTaskIds[index]);
+    const sourceAttempt = input.overview.sessions.find((session) =>
+      session.taskId === sourceTaskIds[index] && session.attemptId === sourceAttemptIds[index] && session.status === "done",
+    );
+    if (!sourceTask || !sourceAttempt) {
+      return { ok: false, reason: "integration closure contains a cross-run or unverified source task/attempt pair" };
+    }
+  }
+  const latestWorkerAttempt = latestSessionForTask(input.overview, input.worker.id)?.attemptId;
+  if (!sourceTaskIds.includes(input.worker.id) || !latestWorkerAttempt || !sourceAttemptIds.includes(latestWorkerAttempt)) {
+    return { ok: false, reason: "integration closure does not include the selected worker and its latest attempt" };
+  }
+
+  const sortedPaths = [...paths].sort();
+  const hashKeys = Object.keys(pathHashes).sort();
+  if (sortedPaths.join("\0") !== hashKeys.join("\0")) {
+    return { ok: false, reason: "integration closure pathHashes must exactly match the ordered materialized paths" };
+  }
+  for (const hash of Object.values(pathHashes)) {
+    if (!/^[0-9a-f]{64}$/i.test(hash)) {
+      return { ok: false, reason: "integration closure path hashes must be SHA-256 values" };
+    }
+  }
+  if (closure.verifierTaskId !== input.verifier.id) {
+    return { ok: false, reason: "integration closure verifierTaskId does not match the referenced verifier task" };
+  }
+  const frozenCommands = closureStringArrayField(closure.frozenCommands);
+  if (!frozenCommands || frozenCommands.length === 0 || frozenCommands.length > MAX_INTEGRATION_CLOSURE_COMMANDS ||
+      frozenCommands.some((command) => command.length === 0 || Buffer.byteLength(command) > MAX_INTEGRATION_CLOSURE_COMMAND_BYTES)) {
+    return { ok: false, reason: "integration closure frozenCommands must be a non-empty array of strings" };
+  }
+
+  const sourceDiff = sourceTargetDifference(input.git, input.worktreePath, targetBaseSha);
+  if (!sourceDiff.ok) {
+    return { ok: false, reason: sourceDiff.reason };
+  }
+  if (sourceDiff.files.join("\0") !== sortedPaths.join("\0")) {
+    return { ok: false, reason: `integration closure does not cover the complete source dependency closure: expected ${sourceDiff.files.join(",") || "none"}` };
+  }
+  for (const path of paths) {
+    const actualHash = sha256File(join(input.worktreePath, path));
+    if (!actualHash || actualHash.toLowerCase() !== pathHashes[path]!.toLowerCase()) {
+      return { ok: false, reason: `integration closure hash mismatch for ${path}` };
+    }
+  }
+  const materializedFiles: Array<{ path: string; content: Buffer; mode: number }> = [];
+  let totalBytes = 0;
+  try {
+    for (const path of paths) {
+      const source = join(input.worktreePath, path);
+      const stat = lstatSync(source);
+      if (!stat.isFile() || stat.size > MAX_INTEGRATION_CLOSURE_FILE_BYTES) {
+        return { ok: false, reason: `integration closure path is not a bounded regular file: ${path}` };
+      }
+      const content = readFileSync(source);
+      if (createHash("sha256").update(content).digest("hex").toLowerCase() !== pathHashes[path]!.toLowerCase()) {
+        return { ok: false, reason: `integration closure changed while freezing ${path}` };
+      }
+      totalBytes += content.byteLength;
+      if (totalBytes > MAX_INTEGRATION_CLOSURE_TOTAL_BYTES) {
+        return { ok: false, reason: "integration closure materialized files exceed the bounded byte limit" };
+      }
+      materializedFiles.push({ path, content, mode: stat.mode & 0o777 });
+    }
+  } catch {
+    return { ok: false, reason: "integration closure materialized files could not be frozen" };
+  }
+
+  const evaluation = input.run.context.designEvaluationContract ?? input.run.context.evaluationContract;
+  const evaluationHash = typeof closure.evaluationContractSha256 === "string"
+    ? closure.evaluationContractSha256
+    : null;
+  if (evaluation !== undefined && closure.evaluationContract === undefined && !evaluationHash) {
+    return { ok: false, reason: "integration closure must bind the frozen evaluation contract" };
+  }
+  if (closure.evaluationContract !== undefined && !sameCanonicalValue(closure.evaluationContract, evaluation)) {
+    return { ok: false, reason: "integration closure evaluation contract does not match the frozen run contract" };
+  }
+  if (evaluationHash && stableFingerprint(evaluation) !== evaluationHash) {
+    return { ok: false, reason: "integration closure evaluation contract does not match the frozen run contract" };
+  }
+
+  const normalizedManifest = {
+    targetBaseSha,
+    sourceTaskIds: [...sourceTaskIds],
+    sourceAttemptIds: [...sourceAttemptIds],
+    paths: sortedPaths,
+    pathHashes: Object.fromEntries(sortedPaths.map((path) => [path, pathHashes[path]!.toLowerCase()])),
+    verifierTaskId: input.verifier.id,
+    frozenCommands: [...frozenCommands],
+    ...(closure.evaluationContract !== undefined ? { evaluationContract: closure.evaluationContract } : {}),
+    ...(evaluationHash ? { evaluationContractSha256: evaluationHash } : {}),
+  };
+  const expectedManifestHash = stableFingerprint(normalizedManifest);
+  if (closure.manifestHash !== undefined && closure.manifestHash !== expectedManifestHash) {
+    return { ok: false, reason: "integration closure manifest hash does not match its frozen contents" };
+  }
+
+  const candidatePath = mkdtempSync(join(tmpdir(), "ouroboros-integration-candidate-"));
+  try {
+    const clone = runGitStep(input.git, dirname(candidatePath), [
+      "-c", "core.autocrlf=false", "clone", "--no-local", input.repoPath, candidatePath,
+    ]);
+    if (!clone.ok) {
+      return { ok: false, reason: "could not create a clean integration candidate" };
+    }
+    const checkout = runGitStep(input.git, candidatePath, ["checkout", "--detach", targetBaseSha]);
+    if (!checkout.ok) {
+      return { ok: false, reason: "could not reset the integration candidate to targetBaseSha" };
+    }
+    if (!materializeWorkerFiles(candidatePath, input.worktreePath, paths)) {
+      return { ok: false, reason: "could not reconstruct the frozen integration closure on the clean candidate" };
+    }
+    const stage = runGitStep(input.git, candidatePath, ["add", "-A", "--", ...paths]);
+    if (!stage.ok) {
+      return { ok: false, reason: "could not stage the frozen integration closure on the clean candidate" };
+    }
+    const commit = runGitStep(input.git, candidatePath, [
+      "-c", "user.name=Ouroboros Closure Candidate",
+      "-c", "user.email=ouroboros@example.invalid",
+      "-c", "commit.gpgSign=false",
+      "-c", "core.hooksPath=/dev/null",
+      "commit", "--no-verify", "-m", "Verify frozen integration closure",
+    ]);
+    if (!commit.ok) {
+      return { ok: false, reason: "could not commit the reconstructed clean integration candidate" };
+    }
+    const candidateCommit = readGitStdout(input.git, candidatePath, ["rev-parse", "HEAD"]);
+    if (!candidateCommit || !/^[0-9a-f]{40}$/i.test(candidateCommit)) {
+      return { ok: false, reason: "clean integration candidate did not produce a full commit SHA" };
+    }
+    const candidateDiff = runGitStep(input.git, candidatePath, ["diff", "--name-only", targetBaseSha, "HEAD"]);
+    if (!candidateDiff.ok || normalizeRelativeFiles(candidateDiff.stdout.split(/\r?\n/).filter(Boolean)).sort().join("\0") !== sortedPaths.join("\0")) {
+      return { ok: false, reason: "clean integration candidate does not contain the exact frozen path set" };
+    }
+    if (!bindCandidateDependencyTrees(input.repoPath, candidatePath)) {
+      return { ok: false, reason: "clean integration candidate could not bind the existing dependency trees" };
+    }
+    const runCommand = input.runCommand;
+    for (const [index, command] of frozenCommands.entries()) {
+      const result = runCommand({ cwd: candidatePath, command, timeoutMs: 600_000, maxOutputBytes: 128 * 1024 });
+      if (result.exitCode !== 0) {
+        return {
+          ok: false,
+          reason: `frozen verifier command failed on clean candidate at index ${index} (${stableFingerprint(command)})`,
+        };
+      }
+    }
+    const candidateReadback: Record<string, string> = {};
+    for (const path of paths) {
+      const actualHash = sha256File(join(candidatePath, path));
+      if (!actualHash || actualHash.toLowerCase() !== pathHashes[path]!.toLowerCase()) {
+        return { ok: false, reason: `clean candidate independent readback mismatch for ${path}` };
+      }
+      candidateReadback[path] = actualHash;
+    }
+    return {
+      ok: true,
+      materializedFiles,
+      receipt: {
+        ...normalizedManifest,
+        manifestHash: expectedManifestHash,
+        verifierCommandsSha256: stableFingerprint(frozenCommands),
+        candidateCommit,
+        candidateReadback,
+      },
+    };
+  } finally {
+    rmSync(candidatePath, { recursive: true, force: true });
+  }
+}
+
+function hasAnyClosureManifestField(closure: Record<string, unknown>) {
+  return ["targetBaseSha", "sourceTaskIds", "sourceAttemptIds", "paths", "pathHashes"].some((key) => key in closure);
+}
+
+function hasCompleteClosureFields(closure: Record<string, unknown>) {
+  return ["targetBaseSha", "sourceTaskIds", "sourceAttemptIds", "paths", "pathHashes"].every((key) => key in closure);
+}
+
+function closureStringArrayField(value: unknown): string[] | null {
+  return Array.isArray(value) && value.every((item) => typeof item === "string" && item.length > 0)
+    ? value as string[]
+    : null;
+}
+
+function recordStringMap(value: unknown): Record<string, string> | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const entries = Object.entries(value as Record<string, unknown>);
+  if (entries.some(([key, item]) => key.length === 0 || typeof item !== "string")) return null;
+  return Object.fromEntries(entries) as Record<string, string>;
+}
+
+function sourceTargetDifference(git: GitRunner, worktreePath: string, targetBaseSha: string):
+  { ok: true; files: string[] } | { ok: false; reason: string } {
+  const diff = runGitStep(git, worktreePath, ["diff", "--name-only", targetBaseSha, "--"]);
+  const untracked = runGitStep(git, worktreePath, ["ls-files", "--others", "--exclude-standard"]);
+  if (!diff.ok || !untracked.ok) {
+    return { ok: false, reason: "could not determine the complete source dependency closure" };
+  }
+  const files = new Set<string>();
+  for (const value of `${diff.stdout}\n${untracked.stdout}`.split(/\r?\n/).filter(Boolean)) {
+    files.add(value);
+  }
+  return { ok: true, files: normalizeRelativeFiles([...files]).sort() };
+}
+
+function sha256File(path: string): string | null {
+  try {
+    return createHash("sha256").update(readFileSync(path)).digest("hex");
+  } catch {
+    return null;
+  }
 }
 
 function attachVerifierCommandReceipt(
@@ -6786,6 +7192,115 @@ function attachVerifierCommandReceipt(
         }
       : artifact),
   };
+}
+
+function attachIntegrationClosureReceipt(result: HarnessActionResult, state: IntegrationClosureState): HarnessActionResult {
+  if (result.status !== "done" || !state.receipt) return result;
+  const integrationArtifact = result.artifacts.find((artifact) => artifact.kind === "integration");
+  const repoPath = typeof integrationArtifact?.repoPath === "string" ? integrationArtifact.repoPath : null;
+  const paths = closureStringArrayField(state.receipt.paths);
+  const pathHashes = recordStringMap(state.receipt.pathHashes);
+  if (!repoPath || !paths || !pathHashes || paths.length !== Object.keys(pathHashes).length) {
+    return blockAfterIntegrationClosureFailure(result, state,
+      "Integrated target cannot be independently read back from the frozen closure.",
+      "integration closure post-integration readback is unavailable");
+  }
+  const independentReadback: Record<string, string> = {};
+  const materializedReadback: Record<string, string> = {};
+  try {
+    for (const file of state.materializedFiles ?? []) {
+      const target = join(repoPath, file.path);
+      mkdirSync(dirname(target), { recursive: true });
+      writeFileSync(target, file.content);
+      chmodSync(target, file.mode);
+    }
+  } catch {
+    return blockAfterIntegrationClosureFailure(result, state,
+      "Integrated target could not materialize the frozen closure bytes.",
+      "integration closure post-integration materialization failed");
+  }
+  for (const path of paths) {
+    const materializedHash = sha256File(join(repoPath, path));
+    if (!materializedHash || materializedHash.toLowerCase() !== pathHashes[path]?.toLowerCase()) {
+      return blockAfterIntegrationClosureFailure(result, state,
+        "Integrated target does not match the frozen closure.",
+        `integration closure post-integration hash mismatch for ${path}: expected ${pathHashes[path]}, got ${materializedHash ?? "missing"}`);
+    }
+    const committedHash = sha256GitHeadPath(repoPath, path);
+    if (!committedHash || committedHash.toLowerCase() !== pathHashes[path]?.toLowerCase()) {
+      return blockAfterIntegrationClosureFailure(result, state,
+        "Integrated commit does not match the frozen closure.",
+        `integration closure committed hash mismatch for ${path}: expected ${pathHashes[path]}, got ${committedHash ?? "missing"}`);
+    }
+    materializedReadback[path] = materializedHash;
+    independentReadback[path] = committedHash;
+  }
+  result.checks.push({
+    name: "independent post-integration readback",
+    status: "passed",
+    evidence: `${paths.length} frozen paths`,
+  });
+  return {
+    ...result,
+    artifacts: result.artifacts.map((artifact) => artifact.kind === "integration"
+      ? { ...artifact, ...state.receipt, materializedReadback, independentReadback }
+      : artifact),
+  };
+}
+
+function blockAfterIntegrationClosureFailure(
+  result: HarnessActionResult,
+  state: IntegrationClosureState,
+  summary: string,
+  problem: string,
+): HarnessActionResult {
+  const artifact = result.artifacts.find((candidate) => candidate.kind === "integration");
+  const repoPath = typeof artifact?.repoPath === "string" ? artifact.repoPath : null;
+  const targetBranch = typeof artifact?.targetBranch === "string" ? artifact.targetBranch : null;
+  const targetBaseSha = typeof state.receipt?.targetBaseSha === "string" ? state.receipt.targetBaseSha : null;
+  const paths = closureStringArrayField(state.receipt?.paths);
+  const git = state.git ?? defaultGitRunner;
+  let rollbackProblem: string | null = null;
+  if (repoPath && targetBranch && targetBaseSha && paths) {
+    const integratedHead = readGitStdout(git, repoPath, ["rev-parse", "HEAD"]);
+    const rollback = integratedHead && runGitStep(git, repoPath, [
+      "update-ref", `refs/heads/${targetBranch}`, targetBaseSha, integratedHead,
+    ]);
+    if (!rollback || !rollback.ok) {
+      rollbackProblem = "integration closure rollback compare-and-swap failed";
+    } else {
+      const restore = artifact?.mode === "materialized_target_commit"
+        ? runGitStep(git, repoPath, ["reset", targetBaseSha, "--", ...paths])
+        : runGitStep(git, repoPath, ["restore", `--source=${targetBaseSha}`, "--staged", "--worktree", "--", ...paths]);
+      if (!restore.ok) {
+        rollbackProblem = "integration closure rollback path restoration failed";
+      } else {
+        result.checks.push({
+          name: "integration closure rollback",
+          status: "passed",
+          evidence: `${integratedHead} -> ${targetBaseSha}`,
+        });
+      }
+    }
+  } else {
+    rollbackProblem = "integration closure rollback evidence is incomplete";
+  }
+  return blockedIntegration("integrateVerifiedRun", summary, result.checks, [
+    problem,
+    ...(rollbackProblem ? [rollbackProblem] : []),
+  ]);
+}
+
+function sha256GitHeadPath(repoPath: string, path: string): string | null {
+  const result = Bun.spawnSync({
+    cmd: ["git", "show", `HEAD:${path}`],
+    cwd: repoPath,
+    stdout: "pipe",
+    stderr: "pipe",
+    maxBuffer: MAX_INTEGRATION_CLOSURE_FILE_BYTES + 1,
+  });
+  if (result.exitCode !== 0) return null;
+  return createHash("sha256").update(result.stdout).digest("hex");
 }
 
 function optionalRecordValue(value: unknown): Record<string, unknown> | null {
@@ -6860,6 +7375,31 @@ function defaultGitRunner(input: GitCommandInput): GitCommandResult {
     stdout: "pipe",
     stderr: "pipe",
     ...(input.env ? { env: { ...process.env, ...input.env } } : {}),
+    ...(input.timeoutMs === undefined ? {} : { timeout: input.timeoutMs }),
+    ...(input.maxOutputBytes === undefined ? {} : { maxBuffer: input.maxOutputBytes }),
+  });
+  return {
+    exitCode: result.exitCode,
+    stdout: decodeCommandOutput(result.stdout),
+    stderr: decodeCommandOutput(result.stderr),
+  };
+}
+
+function defaultCommandRunner(input: CommandRunnerInput): CommandRunnerResult {
+  const result = Bun.spawnSync({
+    cmd: ["sh", "-lc", input.command],
+    cwd: input.cwd,
+    stdout: "pipe",
+    stderr: "pipe",
+    env: {
+      PATH: process.env.PATH ?? "",
+      HOME: input.cwd,
+      TMPDIR: process.env.TMPDIR ?? tmpdir(),
+      LANG: process.env.LANG ?? "C.UTF-8",
+      LC_ALL: process.env.LC_ALL ?? "C.UTF-8",
+      CI: "1",
+      ...(process.env.BUN_INSTALL ? { BUN_INSTALL: process.env.BUN_INSTALL } : {}),
+    },
     ...(input.timeoutMs === undefined ? {} : { timeout: input.timeoutMs }),
     ...(input.maxOutputBytes === undefined ? {} : { maxBuffer: input.maxOutputBytes }),
   });
@@ -8145,6 +8685,22 @@ function finalizeIntegrationOutcomeReview(
   if (!integrationArtifact) {
     return result;
   }
+  const run = harness.getRun(action.runId);
+  const isTerminalDesignIntegration = integrationArtifact.preCompletion !== true &&
+    run?.context.source === "design" && typeof run.context.designProposalId === "string";
+  if (isTerminalDesignIntegration && !integrationArtifactHasCompleteClosure(integrationArtifact)) {
+    return blockedIntegration(action.type, "Terminal integration is missing a verified integration closure.", result.checks, [
+      "terminal integration cannot enter measurement without a complete closure receipt",
+    ]);
+  }
+  if (integrationArtifact.preCompletion === true || integrationArtifact.goalReviewTaskId === null) {
+    result.checks.push({
+      name: "measurement eligibility",
+      status: "passed",
+      evidence: "deferred until terminal goal-review completion and closure reconciliation",
+    });
+    return result;
+  }
   const immediate = action.immediateOutcomeReview === true;
   let linked: ReturnType<Harness["linkProposalOutcomeReview"]> | null = null;
   try {
@@ -8194,4 +8750,16 @@ function finalizeIntegrationOutcomeReview(
     });
   }
   return result;
+}
+
+function integrationArtifactHasCompleteClosure(artifact: Record<string, unknown>) {
+  const paths = closureStringArrayField(artifact.paths);
+  const pathHashes = recordStringMap(artifact.pathHashes);
+  const independentReadback = recordStringMap(artifact.independentReadback);
+  if (!paths || paths.length === 0 || !pathHashes || !independentReadback) return false;
+  const expectedKeys = [...paths].sort().join("\0");
+  if (Object.keys(pathHashes).sort().join("\0") !== expectedKeys ||
+      Object.keys(independentReadback).sort().join("\0") !== expectedKeys) return false;
+  return paths.every((path) => /^[0-9a-f]{64}$/i.test(pathHashes[path] ?? "") &&
+    pathHashes[path]?.toLowerCase() === independentReadback[path]?.toLowerCase());
 }

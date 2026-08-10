@@ -29,8 +29,26 @@ describe("terminal design delivery reconciliation", () => {
     const worktreePath = join(dir, "worker-tree");
     await initializeRepository(repoPath);
     git(repoPath, ["worktree", "add", "-b", "task-worker", worktreePath, "main"]);
-    await mkdir(join(worktreePath, "src"), { recursive: true });
-    await writeFile(join(worktreePath, "src", "feature.ts"), "export const delivered = true;\n");
+    const cumulativePaths = [
+      "packages/cli/src/dashboard.ts",
+      "packages/cli/src/main.ts",
+      "packages/cli/src/run-evidence.ts",
+      "packages/harness/src/actions.ts",
+      "packages/harness/src/harness.ts",
+      "packages/harness/src/index.ts",
+      "packages/harness/src/types.ts",
+      "packages/runner/src/codex-resumable-runner.ts",
+      "packages/runner/src/hooks/create-verifier.ts",
+      "packages/runner/src/prompt.ts",
+      "packages/runner/src/terminal-design-reconciliation.ts",
+      "tests/harness-actions.test.ts",
+      "tests/runner.test.ts",
+      "tests/terminal-design-reconciliation.test.ts",
+    ];
+    for (const path of cumulativePaths) {
+      await mkdir(join(worktreePath, path, ".."), { recursive: true });
+      await writeFile(join(worktreePath, path), `// verified cumulative path: ${path}\n`);
+    }
 
     const { rootRunId, deliveryRunId, proposalId } = createDesignDelivery({ repoPath, targetBranch: "release" });
     const workerTaskId = harness.createTask({
@@ -46,7 +64,7 @@ describe("terminal design delivery reconciliation", () => {
       output: {
         status: "done",
         summary: "Implemented the accepted design",
-        changedFiles: ["src/feature.ts"],
+        changedFiles: cumulativePaths,
         checks: [{ name: "worker", status: "passed" }],
         artifacts: [],
         problems: [],
@@ -112,7 +130,7 @@ describe("terminal design delivery reconciliation", () => {
       proposalId,
       actionEventId: integrationEvent?.id,
     });
-    expect(await Bun.file(join(repoPath, "src", "feature.ts")).text()).toContain("delivered = true");
+    expect(await Bun.file(join(repoPath, "packages/harness/src/actions.ts")).text()).toContain("verified cumulative path");
     expect(proposal?.status).toBe("measuring");
     expect(overview.tasks.filter((task) => task.role === "outcome-review")).toHaveLength(1);
     expect(overview.tasks.filter((task) => task.role === "system")).toHaveLength(1);
@@ -121,6 +139,12 @@ describe("terminal design delivery reconciliation", () => {
       actionEventId: integrationEvent?.id,
     });
     expect(integrationEvent?.request).toMatchObject({ targetBranch: "main" });
+    expect(integrationEvent?.result.artifacts).toContainEqual(expect.objectContaining({
+      kind: "integration",
+      paths: cumulativePaths,
+      pathHashes: expect.objectContaining(Object.fromEntries(cumulativePaths.map((path) => [path, expect.stringMatching(/^[0-9a-f]{64}$/)]))),
+      independentReadback: expect.objectContaining(Object.fromEntries(cumulativePaths.map((path) => [path, expect.stringMatching(/^[0-9a-f]{64}$/)]))),
+    }));
     expect(completionEvent?.request).toMatchObject({ actionEventId: integrationEvent?.id });
 
     setupHistoricalReceiptReplay();
@@ -250,6 +274,91 @@ describe("terminal design delivery reconciliation", () => {
     expect(harness.listHarnessActionEvents({ limit: 100 }).filter(
       (event) => event.actionType === "integrateVerifiedRun",
     )).toHaveLength(1);
+  });
+
+  test("keeps an accepted proposal unchanged when terminal integration has no closure", async () => {
+    const repoPath = join(dir, "repo-missing-closure");
+    const worktreePath = join(dir, "worker-missing-closure");
+    await initializeRepository(repoPath);
+    git(repoPath, ["worktree", "add", "-b", "task-missing-closure", worktreePath, "main"]);
+    await mkdir(join(worktreePath, "src"), { recursive: true });
+    await writeFile(join(worktreePath, "src", "feature.ts"), "export const delivered = true;\n");
+
+    const { rootRunId, deliveryRunId, proposalId } = createDesignDelivery({ repoPath, withoutVerifierContract: true });
+    const workerTaskId = harness.createTask({
+      runId: deliveryRunId,
+      role: "worker",
+      goal: "Implement the accepted design",
+      prompt: "Create src/feature.ts.",
+      worktreePath,
+    });
+    harness.recordAttempt({
+      taskId: workerTaskId,
+      input: { executor: "test" },
+      output: {
+        status: "done",
+        summary: "Implemented the accepted design",
+        changedFiles: ["src/feature.ts"],
+        checks: [{ name: "worker", status: "passed" }],
+        artifacts: [],
+        problems: [],
+      },
+    });
+    const verifierTaskId = harness.createTask({
+      runId: deliveryRunId,
+      role: "verifier",
+      goal: "Verify the accepted design",
+      prompt: "Verify src/feature.ts.",
+      dependsOn: [workerTaskId],
+      worktreePath,
+    });
+    harness.recordAttempt({
+      taskId: verifierTaskId,
+      input: { executor: "test" },
+      output: {
+        status: "done",
+        summary: "Verified the accepted design",
+        changedFiles: [],
+        checks: [{ name: "verification", status: "passed" }],
+        artifacts: [],
+        problems: [],
+      },
+    });
+    const goalReviewTaskId = harness.createTask({
+      runId: deliveryRunId,
+      role: "goal-review",
+      goal: "Review terminal delivery",
+      prompt: "Decide whether delivery is complete.",
+    });
+    harness.recordAttempt({
+      taskId: goalReviewTaskId,
+      input: { executor: "test" },
+      output: {
+        status: "done",
+        runDecision: "complete",
+        summary: "Delivery is complete",
+        changedFiles: [],
+        checks: [{ name: "goal", status: "passed" }],
+        artifacts: [],
+        problems: [],
+      },
+    });
+    harness.updateRunStatus({ runId: deliveryRunId, status: "done" });
+    const targetHead = git(repoPath, ["rev-parse", "HEAD"]).stdout.trim();
+
+    const result = reconcileTerminalDesignDeliveries({
+      harness,
+      rootRunId,
+      runs: harness.listRuns({ limit: 100 }),
+    });
+    const events = harness.listHarnessActionEvents({ limit: 100 });
+    const overview = harness.getRunOverview({ runId: deliveryRunId, eventLimit: 0 });
+
+    expect(result).toMatchObject({ blocksAssessment: true, state: "repairing", deliveryRunId, proposalId });
+    expect(git(repoPath, ["rev-parse", "HEAD"]).stdout.trim()).toBe(targetHead);
+    expect(events.filter((event) => event.actionType === "integrateVerifiedRun" && event.status === "done")).toHaveLength(0);
+    expect(overview.tasks.filter((task) => task.role === "outcome-review")).toHaveLength(0);
+    expect(harness.getDesignProposal({ id: proposalId })?.status).toBe("accepted");
   });
 
   test("creates only one bounded repair for a terminal delivery without valid integration evidence", () => {
@@ -443,6 +552,7 @@ describe("terminal design delivery reconciliation", () => {
   function createDesignDelivery(input: {
     repoPath?: string;
     bindDeliveryProject?: boolean;
+    withoutVerifierContract?: boolean;
     repairReplanBudget?: { limit: number; used: number; entries: unknown[] };
     targetBranch?: string;
   } = {}) {
@@ -482,7 +592,7 @@ describe("terminal design delivery reconciliation", () => {
         designProposalId: proposal.id,
         goalContract: { desiredState: "terminal delivery is reconciled" },
         designEvaluationContract: proposal.proposal.evaluationContract,
-        verifierContract: { deterministicChecks: ["bun test"] },
+        ...(input.withoutVerifierContract ? {} : { verifierContract: { deterministicChecks: ["true"] } }),
         integrationBoundary: { targetBranch: input.targetBranch ?? "main", push: false },
         permissions: { filesystem: "workspace-write" },
         completionCriteria: ["one audited integration or bounded disposition"],

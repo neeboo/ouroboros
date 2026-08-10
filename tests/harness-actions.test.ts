@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, setDefaultTimeout, test } from "bun:test";
+import { createHash } from "node:crypto";
 import { writeFileSync } from "node:fs";
 import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -116,7 +117,7 @@ describe("Harness actions", () => {
       prompt: "Move the dashboard to React.",
       worktreePath,
     });
-    harness.recordAttempt({
+    const workerAttemptId = harness.recordAttempt({
       taskId: workerTaskId,
       input: { executor: "test" },
       output: {
@@ -167,7 +168,7 @@ describe("Harness actions", () => {
       prompt: "Move the dashboard to React.",
       worktreePath,
     });
-    harness.recordAttempt({
+    const workerAttemptId = harness.recordAttempt({
       taskId: workerTaskId,
       input: { executor: "test" },
       output: {
@@ -947,7 +948,7 @@ describe("Harness actions", () => {
       prompt: "Create src/verified.ts.",
       worktreePath,
     });
-    harness.recordAttempt({
+    const workerAttemptId = harness.recordAttempt({
       taskId: workerTaskId,
       input: { executor: "test" },
       output: {
@@ -965,7 +966,7 @@ describe("Harness actions", () => {
       goal: "Verify the file with the frozen failing command",
       prompt: "Run the persisted verifier contract.",
       dependsOn: [workerTaskId],
-      config: { verifierContract: { deterministicChecks: ["bun test failing-contract"] } },
+      config: { verifierContract: { deterministicChecks: ["true", "false"] } },
     });
     harness.recordAttempt({
       taskId: verifierTaskId,
@@ -982,27 +983,40 @@ describe("Harness actions", () => {
 
     const targetHeadBefore = git(repoPath, ["rev-parse", "HEAD"]).stdout.trim();
     const targetStatusBefore = git(repoPath, ["status", "--short"]).stdout;
-    const result = applyHarnessAction(harness, {
-      type: "integrateVerifiedRun",
-      runId,
-      workerTaskId,
-      repoPath,
-      targetBranch: "main",
-      integrationClosure: {
-        verifierTaskId,
-        frozenCommands: ["bun test passing-replacement"],
-      },
-    });
-
-    expect(result).toMatchObject({ status: "blocked", actionType: "integrateVerifiedRun" });
-    expect(result.problems.join(" ")).toContain("verifier commands");
+    const path = "src/verified.ts";
+    const pathHash = createHash("sha256").update(await readFile(join(worktreePath, path))).digest("hex");
+    const closureManifest = {
+      targetBaseSha: targetHeadBefore,
+      sourceTaskIds: [workerTaskId],
+      sourceAttemptIds: [workerAttemptId],
+      paths: [path],
+      pathHashes: { [path]: pathHash },
+      verifierTaskId,
+    };
+    for (const frozenCommands of [
+      ["true", "true"],
+      ["true"],
+      ["true", "false", "true"],
+      ["false", "true"],
+    ]) {
+      const result = applyHarnessAction(harness, {
+        type: "integrateVerifiedRun",
+        runId,
+        workerTaskId,
+        repoPath,
+        targetBranch: "main",
+        integrationClosure: { ...closureManifest, frozenCommands },
+      });
+      expect(result).toMatchObject({ status: "blocked", actionType: "integrateVerifiedRun" });
+      expect(result.problems.join(" ")).toContain("verifier commands");
+    }
     expect(git(repoPath, ["rev-parse", "HEAD"]).stdout.trim()).toBe(targetHeadBefore);
     expect(git(repoPath, ["status", "--short"]).stdout).toBe(targetStatusBefore);
     expect(harness.listHarnessActionEvents({ limit: 10 }).filter((event) => event.status === "done")).toHaveLength(0);
 
     const exactClosure = {
-      verifierTaskId,
-      frozenCommands: ["bun test failing-contract"],
+      ...closureManifest,
+      frozenCommands: ["true", "false"],
     };
     const first = applyHarnessAction(harness, {
       type: "integrateVerifiedRun",
@@ -1012,7 +1026,6 @@ describe("Harness actions", () => {
       targetBranch: "main",
       integrationClosure: exactClosure,
     });
-    const headAfterFirst = git(repoPath, ["rev-parse", "HEAD"]).stdout.trim();
     const second = applyHarnessAction(harness, {
       type: "integrateVerifiedRun",
       runId,
@@ -1022,11 +1035,363 @@ describe("Harness actions", () => {
       integrationClosure: exactClosure,
     });
 
+    expect(first).toMatchObject({ status: "blocked", actionType: "integrateVerifiedRun" });
+    expect(first.problems.join(" ")).toContain("frozen verifier command failed");
+    expect(second).toMatchObject({ status: "blocked", actionType: "integrateVerifiedRun" });
+    expect(git(repoPath, ["rev-parse", "HEAD"]).stdout.trim()).toBe(targetHeadBefore);
+    expect(harness.listHarnessActionEvents({ limit: 10 }).filter((event) => event.status === "done")).toHaveLength(0);
+  });
+
+  test("rejects incomplete, stale, and hash-mismatched integration closures before Git mutation", async () => {
+    for (const kind of ["missing-terminal", "command-only-terminal", "incomplete", "stale", "hash-mismatch", "unknown-field"] as const) {
+      const fixtureDir = join(dir, `closure-${kind}`);
+      const repoPath = join(fixtureDir, "repo");
+      const worktreePath = join(fixtureDir, "worker");
+      const fixtureHarness = new Harness(join(fixtureDir, "ouroboros.db"));
+      fixtureHarness.init();
+      await mkdir(repoPath, { recursive: true });
+      await writeFile(join(repoPath, "README.md"), "initial\n");
+      git(repoPath, ["init", "-b", "main"]);
+      git(repoPath, ["config", "user.name", "Ouroboros Test"]);
+      git(repoPath, ["config", "user.email", "test@example.com"]);
+      git(repoPath, ["config", "commit.gpgSign", "false"]);
+      git(repoPath, ["add", "README.md"]);
+      git(repoPath, ["commit", "-m", "Initial commit"]);
+      git(repoPath, ["worktree", "add", "-b", `task-closure-${kind}`, worktreePath, "main"]);
+      await mkdir(join(worktreePath, "src"), { recursive: true });
+      const path = "src/verified.ts";
+      await writeFile(join(worktreePath, path), "export const verified = true;\n");
+
+      const isTerminalKind = kind === "missing-terminal" || kind === "command-only-terminal";
+      const runId = fixtureHarness.createRun({
+        goal: "Reject an invalid integration closure",
+        projectRoot: repoPath,
+        context: isTerminalKind ? { source: "design", designProposalId: "design_terminal_fixture" } : {},
+      });
+      const workerTaskId = fixtureHarness.createTask({
+        runId,
+        role: "worker",
+        goal: "Create the verified file",
+        prompt: "Create src/verified.ts.",
+        worktreePath,
+      });
+      const workerAttemptId = fixtureHarness.recordAttempt({
+        taskId: workerTaskId,
+        input: { executor: "test" },
+        output: {
+          status: "done",
+          summary: "Created verified file",
+          changedFiles: [path],
+          checks: [{ name: "worker", status: "passed" }],
+          artifacts: [],
+          problems: [],
+        },
+      });
+      const verifierTaskId = fixtureHarness.createTask({
+        runId,
+        role: "verifier",
+        goal: "Verify the complete closure",
+        prompt: "Verify the complete closure.",
+        dependsOn: [workerTaskId],
+        config: { verifierContract: { deterministicChecks: ["true"] } },
+      });
+      fixtureHarness.recordAttempt({
+        taskId: verifierTaskId,
+        input: { executor: "test" },
+        output: {
+          status: "done",
+          summary: "Verified the complete closure",
+          changedFiles: [],
+          checks: [{ name: "verifier", status: "passed" }],
+          artifacts: [],
+          problems: [],
+        },
+      });
+
+      if (isTerminalKind) {
+        const goalReviewTaskId = fixtureHarness.createTask({
+          runId,
+          role: "goal-review",
+          goal: "Review terminal delivery",
+          prompt: "Return a terminal decision.",
+        });
+        fixtureHarness.recordAttempt({
+          taskId: goalReviewTaskId,
+          input: { executor: "test" },
+          output: {
+            status: "done",
+            runDecision: "complete",
+            summary: "Terminal delivery is complete",
+            changedFiles: [],
+            checks: [{ name: "goal", status: "passed" }],
+            artifacts: [],
+            problems: [],
+          },
+        });
+        fixtureHarness.updateRunStatus({ runId, status: "done" });
+      }
+
+      const targetBaseSha = git(repoPath, ["rev-parse", "HEAD"]).stdout.trim();
+      const pathHash = createHash("sha256").update(await readFile(join(worktreePath, path))).digest("hex");
+      const integrationClosure: Record<string, unknown> = {
+        targetBaseSha,
+        sourceTaskIds: [workerTaskId],
+        sourceAttemptIds: [workerAttemptId],
+        paths: [path],
+        pathHashes: { [path]: pathHash },
+        verifierTaskId,
+        frozenCommands: ["true"],
+      };
+      if (kind === "incomplete") {
+        delete integrationClosure.pathHashes;
+      } else if (kind === "stale") {
+        integrationClosure.targetBaseSha = "0".repeat(40);
+      } else if (kind === "hash-mismatch") {
+        integrationClosure.pathHashes = { [path]: "f".repeat(64) };
+      } else if (kind === "unknown-field") {
+        integrationClosure.unfrozenOverride = true;
+      }
+
+      const result = applyHarnessAction(fixtureHarness, {
+        type: "integrateVerifiedRun",
+        runId,
+        workerTaskId,
+        repoPath,
+        targetBranch: "main",
+        ...(kind === "missing-terminal"
+          ? {}
+          : kind === "command-only-terminal"
+            ? { integrationClosure: { verifierTaskId, frozenCommands: ["true"] } }
+            : { integrationClosure }),
+      });
+
+      expect(result).toMatchObject({ status: "blocked", actionType: "integrateVerifiedRun" });
+      expect(git(repoPath, ["rev-parse", "HEAD"]).stdout.trim()).toBe(targetBaseSha);
+      expect(fixtureHarness.listHarnessActionEvents({ limit: 10 }).filter((event) => event.status === "done")).toHaveLength(0);
+    }
+  });
+
+  test("verifies a complete closure on a clean candidate and integrates exactly once", async () => {
+    const repoPath = join(dir, "repo-complete-closure");
+    const worktreePath = join(dir, "worker-complete-closure");
+    await mkdir(repoPath, { recursive: true });
+    await writeFile(join(repoPath, "README.md"), "initial\n");
+    await mkdir(join(repoPath, "bin"), { recursive: true });
+    await writeFile(join(repoPath, "bin", "orbs"), "#!/bin/sh\nexit 0\n");
+    await chmod(join(repoPath, "bin", "orbs"), 0o755);
+    await mkdir(join(repoPath, "node_modules"), { recursive: true });
+    await mkdir(join(repoPath, "packages", "cli", "node_modules"), { recursive: true });
+    await writeFile(join(repoPath, ".gitignore"), "node_modules/\n");
+    git(repoPath, ["init", "-b", "main"]);
+    git(repoPath, ["config", "core.autocrlf", "false"]);
+    git(repoPath, ["config", "user.name", "Ouroboros Test"]);
+    git(repoPath, ["config", "user.email", "test@example.com"]);
+    git(repoPath, ["config", "commit.gpgSign", "false"]);
+    git(repoPath, ["add", "README.md", "bin/orbs", ".gitignore"]);
+    git(repoPath, ["commit", "-m", "Initial commit"]);
+    git(repoPath, ["worktree", "add", "-b", "task-complete-closure", worktreePath, "main"]);
+    await mkdir(join(worktreePath, "src"), { recursive: true });
+    const path = "src/verified.ts";
+    await writeFile(join(worktreePath, path), "export const verified = true;\n");
+
+    const runId = harness.createRun({ goal: "Verify a complete integration closure", projectRoot: repoPath });
+    const workerTaskId = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Create the verified file",
+      prompt: "Create src/verified.ts.",
+      worktreePath,
+    });
+    const workerAttemptId = harness.recordAttempt({
+      taskId: workerTaskId,
+      input: { executor: "test" },
+      output: {
+        status: "done",
+        summary: "Created verified file",
+        changedFiles: [path],
+        checks: [{ name: "worker", status: "passed" }],
+        artifacts: [],
+        problems: [],
+      },
+    });
+    const verifierTaskId = harness.createTask({
+      runId,
+      role: "verifier",
+      goal: "Verify the complete closure",
+      prompt: "Verify the complete closure.",
+      dependsOn: [workerTaskId],
+      config: { verifierContract: { deterministicChecks: ["test -d node_modules && test -d packages/cli/node_modules && ./bin/orbs && test -f src/verified.ts"] } },
+    });
+    harness.recordAttempt({
+      taskId: verifierTaskId,
+      input: { executor: "test" },
+      output: {
+        status: "done",
+        summary: "Verified the complete closure",
+        changedFiles: [],
+        checks: [{ name: "verifier", status: "passed" }],
+        artifacts: [],
+        problems: [],
+      },
+    });
+    const targetBaseSha = git(repoPath, ["rev-parse", "HEAD"]).stdout.trim();
+    const pathHash = createHash("sha256").update(await readFile(join(worktreePath, path))).digest("hex");
+    const integrationClosure = {
+      targetBaseSha,
+      sourceTaskIds: [workerTaskId],
+      sourceAttemptIds: [workerAttemptId],
+      paths: [path],
+      pathHashes: { [path]: pathHash },
+      verifierTaskId,
+      frozenCommands: ["test -d node_modules && test -d packages/cli/node_modules && ./bin/orbs && test -f src/verified.ts"],
+    };
+
+    const first = applyHarnessAction(harness, {
+      type: "integrateVerifiedRun",
+      runId,
+      workerTaskId,
+      repoPath,
+      targetBranch: "main",
+      integrationClosure,
+    });
+    const headAfterFirst = git(repoPath, ["rev-parse", "HEAD"]).stdout.trim();
+    const second = applyHarnessAction(harness, {
+      type: "integrateVerifiedRun",
+      runId,
+      workerTaskId,
+      repoPath,
+      targetBranch: "main",
+      integrationClosure,
+    });
+
     expect(first).toMatchObject({ status: "done", actionType: "integrateVerifiedRun" });
-    expect(first.checks).toContainEqual(expect.objectContaining({ name: "verifier commands bound", status: "passed" }));
+    expect(first.checks).toContainEqual(expect.objectContaining({ name: "clean candidate verifier", status: "passed" }));
+    expect(first.artifacts).toContainEqual(expect.objectContaining({
+      kind: "integration",
+      targetBaseSha,
+      sourceTaskIds: [workerTaskId],
+      sourceAttemptIds: [workerAttemptId],
+      verifierTaskId,
+      candidateCommit: expect.stringMatching(/^[0-9a-f]{40}$/),
+      pathHashes: { [path]: pathHash },
+      independentReadback: { [path]: pathHash },
+      materializedReadback: { [path]: pathHash },
+    }));
     expect(second).toMatchObject({ status: "done", actionType: "integrateVerifiedRun" });
     expect(git(repoPath, ["rev-parse", "HEAD"]).stdout.trim()).toBe(headAfterFirst);
     expect(harness.listHarnessActionEvents({ limit: 10 }).filter((event) => event.status === "done")).toHaveLength(1);
+  });
+
+  test("rolls back when the source drifts after candidate verification and post-integration readback fails", async () => {
+    const repoPath = join(dir, "repo-post-readback-drift");
+    const worktreePath = join(dir, "worker-post-readback-drift");
+    await mkdir(repoPath, { recursive: true });
+    await writeFile(join(repoPath, "README.md"), "initial\n");
+    git(repoPath, ["init", "-b", "main"]);
+    git(repoPath, ["config", "user.name", "Ouroboros Test"]);
+    git(repoPath, ["config", "user.email", "test@example.com"]);
+    git(repoPath, ["config", "commit.gpgSign", "false"]);
+    git(repoPath, ["add", "README.md"]);
+    git(repoPath, ["commit", "-m", "Initial commit"]);
+    git(repoPath, ["worktree", "add", "-b", "task-post-readback-drift", worktreePath, "main"]);
+    await mkdir(join(worktreePath, "src"), { recursive: true });
+    const path = "src/drift.ts";
+    await writeFile(join(worktreePath, path), "export const frozen = true;\n");
+
+    const runId = harness.createRun({
+      goal: "Fail closed on post-integration drift",
+      projectRoot: repoPath,
+      context: { source: "design", designProposalId: "design_post_readback_fixture" },
+    });
+    const workerTaskId = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Create the frozen file",
+      prompt: "Create src/drift.ts.",
+      worktreePath,
+    });
+    const workerAttemptId = harness.recordAttempt({
+      taskId: workerTaskId,
+      input: { executor: "test" },
+      output: {
+        status: "done",
+        summary: "Created the frozen file",
+        changedFiles: [path],
+        checks: [{ name: "worker", status: "passed" }],
+        artifacts: [],
+        problems: [],
+      },
+    });
+    const verifierTaskId = harness.createTask({
+      runId,
+      role: "verifier",
+      goal: "Verify the frozen file",
+      prompt: "Run the frozen command.",
+      dependsOn: [workerTaskId],
+      config: { verifierContract: { deterministicChecks: ["true"] } },
+    });
+    harness.recordAttempt({
+      taskId: verifierTaskId,
+      input: { executor: "test" },
+      output: {
+        status: "done",
+        summary: "Verified the frozen file",
+        changedFiles: [],
+        checks: [{ name: "verifier", status: "passed" }],
+        artifacts: [],
+        problems: [],
+      },
+    });
+    const goalReviewTaskId = harness.createTask({
+      runId,
+      role: "goal-review",
+      goal: "Review terminal delivery",
+      prompt: "Return complete.",
+    });
+    harness.recordAttempt({
+      taskId: goalReviewTaskId,
+      input: { executor: "test" },
+      output: {
+        status: "done",
+        runDecision: "complete",
+        summary: "Delivery is complete",
+        changedFiles: [],
+        checks: [{ name: "goal", status: "passed" }],
+        artifacts: [],
+        problems: [],
+      },
+    });
+    harness.updateRunStatus({ runId, status: "done" });
+    const targetBaseSha = git(repoPath, ["rev-parse", "HEAD"]).stdout.trim();
+    const pathHash = createHash("sha256").update(await readFile(join(worktreePath, path))).digest("hex");
+
+    const result = applyHarnessAction(harness, {
+      type: "integrateVerifiedRun",
+      runId,
+      workerTaskId,
+      repoPath,
+      targetBranch: "main",
+      integrationClosure: {
+        targetBaseSha,
+        sourceTaskIds: [workerTaskId],
+        sourceAttemptIds: [workerAttemptId],
+        paths: [path],
+        pathHashes: { [path]: pathHash },
+        verifierTaskId,
+        frozenCommands: ["true"],
+      },
+    }, {
+      runCommand: () => {
+        writeFileSync(join(worktreePath, path), "export const drifted = true;\n");
+        return { exitCode: 0, stdout: "", stderr: "" };
+      },
+    });
+
+    expect(result).toMatchObject({ status: "blocked", actionType: "integrateVerifiedRun" });
+    expect(result.problems.join(" ")).toContain("committed hash mismatch");
+    expect(git(repoPath, ["rev-parse", "HEAD"]).stdout.trim()).toBe(targetBaseSha);
+    expect(await Bun.file(join(repoPath, path)).exists()).toBe(false);
+    expect(harness.listHarnessActionEvents({ limit: 20 }).filter((event) => event.status === "done")).toHaveLength(0);
   });
 
   test("redacts Git credential echoes from blocked integration results and audits", async () => {
@@ -1576,6 +1941,7 @@ describe("Harness actions", () => {
       goal: "Verify worker",
       prompt: "Verify worker changes.",
       dependsOn: [workerTaskId],
+      config: { verifierContract: { deterministicChecks: ["true"] } },
     });
     harness.recordAttempt({
       taskId: verifierTaskId,
