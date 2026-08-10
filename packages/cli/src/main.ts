@@ -19,6 +19,7 @@ import type {
   DesignOutcomeRecommendation,
   DesignOutcomeStage,
   ExecutionThread,
+  HarnessDatabase,
   FounderCharter,
   RunOverview,
 } from "@ouroboros/harness";
@@ -2134,6 +2135,26 @@ async function superviseSelfImprovementDaemon(input: SelfImprovementDaemonInput)
               ...linearIntakePump.tickFields(),
               createdAt: new Date().toISOString(),
             };
+          } else if (cycle.state === "drain-required") {
+            const result = await superviseCodexRuns({
+              ...input,
+              rootRunId: input.rootRunId,
+              maxCycles: input.tickCycles,
+              shouldStop: () => stopping || input.shouldStop?.() === true,
+            });
+            waitMs = result.status === "idle" ? input.idleMs : input.intervalMs;
+            tick = {
+              type: "self-improvement.tick",
+              index,
+              status: "ok",
+              createdCycle: null,
+              drain: cycle.drain,
+              authorityReconciliation,
+              result,
+              runCounts: harness.countRunsByStatus(),
+              ...linearIntakePump.tickFields(),
+              createdAt: new Date().toISOString(),
+            };
           } else {
             const result = await superviseCodexRuns({
               ...input,
@@ -2163,6 +2184,7 @@ async function superviseSelfImprovementDaemon(input: SelfImprovementDaemonInput)
           type: "self-improvement.tick",
           index,
           status: "error",
+          createdCycle: null,
           error: cliErrorMessage(error),
           runCounts: harness.countRunsByStatus(),
           ...linearIntakePump.tickFields(),
@@ -2445,18 +2467,28 @@ function ensureSelfImprovementCycle(rootRunId: string, cwd: string) {
   }
   scopedRuns = selfImprovementRuns(rootRunId);
 
-  const active = scopedRuns.some((run) => {
-    const overview = harness.getRunOverview({ runId: run.id, eventLimit: 0 });
-    const activeTaskOrSession = overview.tasks.some(
-      (task) => task.status === "todo" || task.status === "running",
-    ) || overview.sessions.some((session) => session.status === "running");
-    if (activeTaskOrSession) return true;
-    const assessmentRun = run.id === rootRunId
-      || run.context.source === "self-improvement-assessment";
-    return !assessmentRun && run.status !== "done" && run.status !== "blocked";
+  const root = harness.getRun(rootRunId);
+  if (!root) {
+    fail(`run not found: ${rootRunId}`);
+  }
+  const repositoryState = repositoryFingerprint(cwd);
+  const assessmentState = selfImprovementAssessmentFingerprint(repositoryState, scopedRuns);
+  const reviewCadenceDays = selfIterationReviewCadenceDays(root);
+  const lifecycle = classifySelfImprovementAssessment({
+    rootRunId,
+    runs: scopedRuns,
+    assessmentFingerprint: assessmentState,
+    reviewCadenceDays,
   });
-  if (active) {
+  if (lifecycle.state === "active") {
     return { state: "active" as const, createdCycle: null };
+  }
+  if (lifecycle.state === "drain-required") {
+    return {
+      state: "drain-required" as const,
+      createdCycle: null,
+      drain: prepareSelfImprovementDrain(lifecycle),
+    };
   }
 
   // Before asking the designer for a new proposal, surface any measuring
@@ -2485,13 +2517,7 @@ function ensureSelfImprovementCycle(rootRunId: string, cwd: string) {
     };
   }
 
-  const root = harness.getRun(rootRunId);
-  if (!root) {
-    fail(`run not found: ${rootRunId}`);
-  }
   const selfImprovement = recordValue(root.context.selfImprovement);
-  const repositoryState = repositoryFingerprint(cwd);
-  const assessmentState = selfImprovementAssessmentFingerprint(repositoryState, scopedRuns);
   if (selfImprovement.assessmentFingerprint === assessmentState) {
     const now = Date.now();
     const existingQuiescence = readSelfImprovementQuiescence(root.context);
@@ -2530,62 +2556,75 @@ function ensureSelfImprovementCycle(rootRunId: string, cwd: string) {
     }
   }
 
-  const cycleIndex = Math.max(
-    Number(selfImprovement.cycleIndex) || 0,
-    ...scopedRuns.map((run) => Number(recordValue(run.context.selfImprovement).cycleIndex) || 0),
-  ) + 1;
   const projectId = ensureSelfIterationProject();
   const charterId = ensureSelfIterationFounderCharter(projectId);
-  if (root.context.founderCharterId !== charterId) {
-    harness.updateRun({
-      runId: rootRunId,
-      contextPatch: {
-        founderCharterId: charterId,
-        designCharterId: charterId,
-      },
-    });
-  }
-  const cycleIdentity = createHash("sha256")
-    .update(`${rootRunId}\n${cycleIndex}\n${assessmentState}`)
-    .digest("hex");
-  const runId = `run_${cycleIdentity.slice(0, 32)}`;
-  const taskId = `task_${cycleIdentity.slice(32)}`;
-  harness.runInImmediateTransaction((db) => {
+  const createdCycle = harness.runInImmediateTransaction((db) => {
     const liveRoot = harness.getRunWithDb(db, rootRunId);
     if (!liveRoot) {
       throw new Error(`run not found: ${rootRunId}`);
     }
-    const existingCycle = harness.getRunWithDb(db, runId);
-    if (!existingCycle) {
-      harness.createRunWithDb(db, {
-        id: runId,
-        goal: `Designer assesses Ouroboros for cycle ${cycleIndex}`,
-        projectId,
-        context: {
-          ...selfImprovementControlContext(liveRoot.context),
-          parentRunId: rootRunId,
-          source: "self-improvement-assessment",
-          planDoc: SELF_ITERATION_PLAN_DOC,
-          designDoc: SELF_ITERATION_DESIGN_DOC,
-          goalContract: SELF_ITERATION_GOAL_CONTRACT,
-          founderCharterId: charterId,
-          designCharterId: charterId,
-          selfImprovement: {
-            cycleIndex,
-            assessmentFingerprint: assessmentState,
-          },
-        },
-      });
-      harness.createTaskWithDb(db, {
-        id: taskId,
-        runId,
-        role: "designer",
-        goal: `Decide whether Ouroboros should record signals, propose a design, defer, or stay quiescent for cycle ${cycleIndex}`,
-        prompt: selfIterationDesignerPrompt(),
-        doneWhen: SELF_ITERATION_PLANNER_DONE_WHEN,
-      });
+    const liveScopedRuns = selfImprovementRunsWithDb(db, rootRunId);
+    const liveRepositoryState = repositoryFingerprint(cwd);
+    const liveAssessmentState = selfImprovementAssessmentFingerprint(
+      liveRepositoryState,
+      liveScopedRuns,
+      db,
+    );
+    const liveLifecycle = classifySelfImprovementAssessment({
+      rootRunId,
+      runs: liveScopedRuns,
+      assessmentFingerprint: liveAssessmentState,
+      reviewCadenceDays,
+      db,
+    });
+    if (liveLifecycle.state !== "terminal") {
+      return null;
+    }
+    const liveQuiescence = readSelfImprovementQuiescence(liveRoot.context);
+    if (liveQuiescence && Date.parse(liveQuiescence.nextWakeAt) > Date.now()) {
+      return null;
     }
     const liveSelfImprovement = recordValue(liveRoot.context.selfImprovement);
+    const cycleIndex = Math.max(
+      Number(liveSelfImprovement.cycleIndex) || 0,
+      ...liveScopedRuns.map((run) => Number(recordValue(run.context.selfImprovement).cycleIndex) || 0),
+    ) + 1;
+    const cycleIdentity = createHash("sha256")
+      .update(`${rootRunId}\n${cycleIndex}\n${liveAssessmentState}`)
+      .digest("hex");
+    const runId = `run_${cycleIdentity.slice(0, 32)}`;
+    const taskId = `task_${cycleIdentity.slice(32)}`;
+    const existingCycle = harness.getRunWithDb(db, runId);
+    if (existingCycle) {
+      return null;
+    }
+    harness.createRunWithDb(db, {
+      id: runId,
+      goal: `Designer assesses Ouroboros for cycle ${cycleIndex}`,
+      projectId,
+      context: {
+        ...selfImprovementControlContext(liveRoot.context),
+        parentRunId: rootRunId,
+        source: "self-improvement-assessment",
+        planDoc: SELF_ITERATION_PLAN_DOC,
+        designDoc: SELF_ITERATION_DESIGN_DOC,
+        goalContract: SELF_ITERATION_GOAL_CONTRACT,
+        founderCharterId: charterId,
+        designCharterId: charterId,
+        selfImprovement: {
+          cycleIndex,
+          assessmentFingerprint: liveAssessmentState,
+        },
+      },
+    });
+    harness.createTaskWithDb(db, {
+      id: taskId,
+      runId,
+      role: "designer",
+      goal: `Decide whether Ouroboros should record signals, propose a design, defer, or stay quiescent for cycle ${cycleIndex}`,
+      prompt: selfIterationDesignerPrompt(),
+      doneWhen: SELF_ITERATION_PLANNER_DONE_WHEN,
+    });
     harness.updateRunWithDb(db, {
       runId: rootRunId,
       contextPatch: {
@@ -2594,19 +2633,236 @@ function ensureSelfImprovementCycle(rootRunId: string, cwd: string) {
         selfImprovement: {
           ...liveSelfImprovement,
           cycleIndex: Math.max(Number(liveSelfImprovement.cycleIndex) || 0, cycleIndex),
-          assessmentFingerprint: assessmentState,
+          assessmentFingerprint: liveAssessmentState,
           quiescent: false,
           nextWakeAt: null,
           quiescence: null,
         },
       },
     });
+    return {
+      runId,
+      taskId,
+      cycleIndex,
+      repositoryFingerprint: liveRepositoryState,
+      assessmentFingerprint: liveAssessmentState,
+    };
   });
+  if (!createdCycle) {
+    return {
+      state: "terminal" as const,
+      createdCycle: null,
+      repositoryFingerprint: repositoryState,
+      assessmentFingerprint: assessmentState,
+    };
+  }
   return {
     state: "created" as const,
-    createdCycle: { runId, taskId, cycleIndex },
-    repositoryFingerprint: repositoryState,
-    assessmentFingerprint: assessmentState,
+    createdCycle: {
+      runId: createdCycle.runId,
+      taskId: createdCycle.taskId,
+      cycleIndex: createdCycle.cycleIndex,
+    },
+    repositoryFingerprint: createdCycle.repositoryFingerprint,
+    assessmentFingerprint: createdCycle.assessmentFingerprint,
+  };
+}
+
+type SelfImprovementAssessmentLifecycle =
+  | { state: "active"; runId: string | null; reason: string }
+  | { state: "drain-required"; runId: string; reason: string }
+  | { state: "terminal"; runId: string | null; reason: string };
+
+function classifySelfImprovementAssessment(input: {
+  rootRunId: string;
+  runs: ReturnType<typeof selfImprovementRuns>;
+  assessmentFingerprint: string;
+  reviewCadenceDays: number;
+  db?: HarnessDatabase;
+}): SelfImprovementAssessmentLifecycle {
+  const assessments = input.runs
+    .filter((run) => run.id === input.rootRunId || run.context.source === "self-improvement-assessment")
+    .sort((left, right) => {
+      const leftCycle = Number(recordValue(left.context.selfImprovement).cycleIndex) || 0;
+      const rightCycle = Number(recordValue(right.context.selfImprovement).cycleIndex) || 0;
+      return rightCycle - leftCycle || right.id.localeCompare(left.id);
+    });
+  const latestAssessment = assessments[0] ?? null;
+  const overviews = new Map<string, RunOverview>();
+  const overviewFor = (runId: string) => {
+    const existing = overviews.get(runId);
+    if (existing) return existing;
+    const overview = input.db
+      ? harness.getRunOverviewWithDb(input.db, { runId, eventLimit: 0 })
+      : harness.getRunOverview({ runId, eventLimit: 0 });
+    overviews.set(runId, overview);
+    return overview;
+  };
+
+  for (const run of input.runs) {
+    const overview = overviewFor(run.id);
+    if (runHasActiveAssessmentWork(overview)) {
+      return {
+        state: "active",
+        runId: run.id,
+        reason: `active task, attempt, session, or execution lease remains for ${run.id}`,
+      };
+    }
+  }
+
+  const unresolved = input.runs.filter((run) => {
+    const overview = overviewFor(run.id);
+    return !hasAssessmentTerminalEvidence({
+      rootRunId: input.rootRunId,
+      latestAssessment,
+      run,
+      overview,
+      assessmentFingerprint: input.assessmentFingerprint,
+      reviewCadenceDays: input.reviewCadenceDays,
+      db: input.db,
+    });
+  });
+  if (unresolved.length > 0) {
+    const candidate = unresolved.find((run) => run.id === latestAssessment?.id)
+      ?? unresolved.find((run) => run.status !== "done" && run.status !== "blocked")
+      ?? unresolved[0]!;
+    return {
+      state: "drain-required",
+      runId: candidate.id,
+      reason: `assessment graph lacks terminal evidence for ${candidate.id}`,
+    };
+  }
+
+  return {
+    state: "terminal",
+    runId: latestAssessment?.id ?? null,
+    reason: "assessment and descendant delivery graph has explicit terminal evidence",
+  };
+}
+
+function runHasActiveAssessmentWork(overview: RunOverview) {
+  return overview.tasks.some((task) => task.status === "todo" || task.status === "running")
+    || overview.sessions.some((session) => session.status === "running")
+    || overview.threads.some((thread) => thread.status === "running");
+}
+
+function hasAssessmentTerminalEvidence(input: {
+  rootRunId: string;
+  latestAssessment: ReturnType<typeof selfImprovementRuns>[number] | null;
+  run: ReturnType<typeof selfImprovementRuns>[number];
+  overview: RunOverview;
+  assessmentFingerprint: string;
+  reviewCadenceDays: number;
+  db?: HarnessDatabase;
+}) {
+  const context = input.run.context;
+  if (context.terminal === true || context.terminalEvidence != null) {
+    return true;
+  }
+  if (
+    input.run.id === input.rootRunId
+    && input.overview.tasks.length === 0
+    && input.overview.sessions.length === 0
+  ) {
+    return true;
+  }
+  const quiescence = readSelfImprovementQuiescence(context);
+  if (quiescence && quiescence.assessmentFingerprint === input.assessmentFingerprint) {
+    return true;
+  }
+  if (context.goalReviewTerminalDisposition != null) {
+    return true;
+  }
+  const reconciliation = recordValue(context.terminalDesignReconciliation);
+  if (reconciliation.state === "integrated" || reconciliation.state === "exhausted") {
+    return true;
+  }
+  const exhaustion = recordValue(context.automaticRecoveryExhausted);
+  if (typeof exhaustion.used === "number" && typeof exhaustion.limit === "number" && exhaustion.used >= exhaustion.limit) {
+    return true;
+  }
+  const repairBudget = recordValue(context.repairReplanBudget);
+  if (typeof repairBudget.used === "number" && typeof repairBudget.limit === "number" && repairBudget.used >= repairBudget.limit) {
+    return true;
+  }
+
+  const proposalId = typeof context.designProposalId === "string" ? context.designProposalId : null;
+  if (proposalId) {
+    const proposal = input.db
+      ? harness.getDesignProposalWithDb(input.db, { id: proposalId })
+      : harness.getDesignProposal({ id: proposalId });
+    if (proposal && (proposal.status === "accepted" || proposal.status === "measuring" || proposal.status === "retained" || proposal.status === "revise")) {
+      return true;
+    }
+  }
+
+  const completedGoalReview = input.overview.sessions.some((session) =>
+    session.role === "goal-review"
+    && session.status === "done"
+    && (session.output.runDecision === "complete" || session.output.runDecision === "defer")
+  );
+  if (completedGoalReview) {
+    return true;
+  }
+  const nonTerminalGoalReviews = input.overview.sessions.filter((session) =>
+    session.role === "goal-review"
+    && session.status === "done"
+    && (session.output.runDecision === "continue" || session.output.runDecision === "verify")
+  );
+  if (nonTerminalGoalReviews.length >= 3) {
+    return true;
+  }
+
+  const designerSessions = input.overview.sessions.filter((session) => session.role === "designer" && session.status === "done");
+  const latestDesigner = designerSessions.at(-1);
+  const designerOutput = latestDesigner?.output ?? {};
+  const designActions = Array.isArray(designerOutput.designActions) ? designerOutput.designActions : [];
+  if (designActions.length > 0 && (designerOutput.problems?.length ?? 0) === 0) {
+    return true;
+  }
+
+  const isBootstrapRoot = input.run.id === input.rootRunId && input.run.context.source === "self-improve";
+  if (isBootstrapRoot && input.run.status === "blocked" && input.overview.sessions.some((session) => session.status === "blocked")) {
+    return true;
+  }
+
+  const storedAssessmentFingerprint = recordValue(context.selfImprovement).assessmentFingerprint;
+  const quiescent = quiescenceFromAssessmentOverview({
+    sourceRun: input.run,
+    overview: input.overview,
+    assessmentFingerprint: typeof storedAssessmentFingerprint === "string"
+      ? storedAssessmentFingerprint
+      : input.assessmentFingerprint,
+    reviewCadenceDays: input.reviewCadenceDays,
+  });
+  if (quiescent) {
+    return true;
+  }
+  return false;
+}
+
+function prepareSelfImprovementDrain(lifecycle: Extract<SelfImprovementAssessmentLifecycle, { state: "drain-required" }>) {
+  const run = harness.getRun(lifecycle.runId);
+  if (!run) {
+    return { runId: lifecycle.runId, action: null, reason: lifecycle.reason };
+  }
+  if (run.status === "done") {
+    harness.updateRunStatus({ runId: run.id, status: "todo" });
+  }
+  const action = applyHarnessAction(harness, {
+    type: "prepareRunDrain",
+    runId: run.id,
+    reason: `self-improvement assessment drain fence: ${lifecycle.reason}`,
+  });
+  return {
+    runId: run.id,
+    actionType: action.actionType,
+    actionStatus: action.status,
+    actionEventId: action.eventId,
+    followUpTaskId: action.artifacts.find((artifact) =>
+      artifact.kind === "task" && typeof artifact.taskId === "string"
+    )?.taskId ?? null,
+    reason: lifecycle.reason,
   };
 }
 
@@ -3000,6 +3256,7 @@ function worktreePathForSession(session: RunOverview["sessions"][number]) {
 function selfImprovementAssessmentFingerprint(
   repositoryState: string,
   scopedRuns: ReturnType<typeof selfImprovementRuns>,
+  db?: HarnessDatabase,
 ) {
   const blockers = scopedRuns
     .filter((run) => {
@@ -3008,7 +3265,9 @@ function selfImprovementAssessmentFingerprint(
       return source !== "self-improve" && source !== "self-improvement-assessment";
     })
     .map((run) => {
-      const overview = harness.getRunOverview({ runId: run.id, eventLimit: 0 });
+      const overview = db
+        ? harness.getRunOverviewWithDb(db, { runId: run.id, eventLimit: 0 })
+        : harness.getRunOverview({ runId: run.id, eventLimit: 0 });
       const blockedTasks = overview.tasks
         .filter((task) => task.status === "blocked")
         .map((task) => {
@@ -3032,7 +3291,14 @@ function selfImprovementAssessmentFingerprint(
 }
 
 function selfImprovementRuns(rootRunId: string) {
-  const allRuns = harness.listRuns({ limit: 1000 });
+  return collectSelfImprovementRuns(rootRunId, harness.listRuns({ limit: 1000 }));
+}
+
+function selfImprovementRunsWithDb(db: HarnessDatabase, rootRunId: string) {
+  return collectSelfImprovementRuns(rootRunId, harness.listRunsWithDb(db, { limit: 1000 }));
+}
+
+function collectSelfImprovementRuns(rootRunId: string, allRuns: ReturnType<typeof harness.listRuns>) {
   const included = new Set([rootRunId]);
   let changed = true;
   while (changed) {

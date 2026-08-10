@@ -9391,9 +9391,27 @@ if (args.includes("self-improve-daemon")) {
     const successors = runs.filter((run: { context: Record<string, unknown> }) =>
       run.context.source === "self-improvement-assessment"
     );
+    const winners = results.filter((result) => result.ticks[0].createdCycle != null);
+    const losers = results.filter((result) => result.ticks[0].createdCycle === null);
+    const successorId = winners[0]?.ticks[0].createdCycle?.runId;
+    const predecessorOverview = await runCliJson("run-overview", "--run-id", bootstrap.runId);
+    const predecessorLessons = await runCliJson("list-lessons", "--run-id", bootstrap.runId);
+    const successorOverview = successorId
+      ? await runCliJson("run-overview", "--run-id", successorId)
+      : null;
+    const successorLessons = successorId
+      ? await runCliJson("list-lessons", "--run-id", successorId)
+      : null;
 
     expect(results.some((result) => result.ticks[0].createdCycle?.cycleIndex === 1)).toBe(true);
+    expect(winners).toHaveLength(1);
+    expect(losers).toHaveLength(1);
+    expect(losers[0].ticks[0].createdCycle).toBeNull();
     expect(successors).toHaveLength(1);
+    expect(predecessorOverview.run.id).toBe(bootstrap.runId);
+    expect(predecessorLessons).toBeArray();
+    expect(successorOverview?.run.id).toBe(successorId);
+    expect(successorLessons).toBeArray();
   });
 
   test("self-improve-daemon never derives quiescence from the mutable root after an assessment child exists", async () => {
@@ -9614,7 +9632,99 @@ if (args.includes("self-improve-daemon")) {
     );
 
     expect(result.ticks[0].createdCycle).toBeNull();
+    expect(result.ticks[0]).toMatchObject({
+      status: "error",
+      createdCycle: null,
+    });
     expect(assessmentRuns).toHaveLength(0);
+  });
+
+  test("self-improve-daemon drains a blocked Designer handoff before allowing a successor", async () => {
+    const bootstrap = await runCliJson("self-iterate");
+    const setupHarness = new Harness(dbPath);
+    setupHarness.recordAttempt({
+      taskId: bootstrap.taskId,
+      input: {},
+      output: {
+        status: "done",
+        summary: "Bootstrap assessment drained",
+        changedFiles: [],
+        checks: [],
+        artifacts: [],
+        problems: [],
+      },
+    });
+    setupHarness.updateRunStatus({ runId: bootstrap.runId, status: "done" });
+    const root = setupHarness.getRun(bootstrap.runId)!;
+    const rootSelfImprovement = root.context.selfImprovement as Record<string, unknown>;
+    const predecessorRunId = setupHarness.createRun({
+      goal: "Designer handoff awaiting prepareRunDrain",
+      context: {
+        parentRunId: bootstrap.runId,
+        source: "self-improvement-assessment",
+        selfImprovement: {
+          cycleIndex: 1,
+          assessmentFingerprint: rootSelfImprovement.assessmentFingerprint,
+        },
+      },
+    });
+    const designerTaskId = setupHarness.createTask({
+      runId: predecessorRunId,
+      role: "designer",
+      goal: "Assess the recorded handoff",
+      prompt: "Inspect the blocked assessment and preserve its frozen contract.",
+    });
+    const blockedAttemptId = setupHarness.recordAttempt({
+      taskId: designerTaskId,
+      input: {},
+      output: {
+        status: "blocked",
+        summary: "Designer stopped before drain preparation",
+        changedFiles: [],
+        checks: [{ name: "designer handoff", status: "failed" }],
+        artifacts: [],
+        problems: ["drain preparation remains pending"],
+      },
+    });
+    setupHarness.updateRunStatus({ runId: predecessorRunId, status: "todo" });
+
+    const result = await runCliJson(
+      "self-improve-daemon",
+      "--executor", "codex-resumable",
+      "--root-run-id", bootstrap.runId,
+      "--codex-bin", join(dir, "missing-codex-blocked-handoff"),
+      "--max-ticks", "1",
+      "--tick-cycles", "1",
+      "--max-rounds", "1",
+      "--interval-ms", "1",
+      "--idle-ms", "1",
+    );
+    const predecessorOverview = await runCliJson("run-overview", "--run-id", predecessorRunId);
+    const predecessorLessons = await runCliJson("list-lessons", "--run-id", predecessorRunId);
+    const drainEvents = setupHarness.listHarnessActionEvents({ limit: 100 }).filter(
+      (event) => event.actionType === "prepareRunDrain" && event.request.runId === predecessorRunId,
+    );
+    const followUpTask = predecessorOverview.tasks.find((task: { role: string }) => task.role === "goal-review");
+    const successors = setupHarness.listRuns({ limit: 100 }).filter((run) =>
+      run.context.parentRunId === bootstrap.runId
+      && run.context.source === "self-improvement-assessment"
+      && run.id !== predecessorRunId,
+    );
+
+    expect(result.ticks[0]).toMatchObject({
+      status: "error",
+      createdCycle: null,
+    });
+    expect(drainEvents).toHaveLength(1);
+    expect(drainEvents[0]).toMatchObject({
+      actionType: "prepareRunDrain",
+      request: { runId: predecessorRunId },
+    });
+    expect(followUpTask).toBeTruthy();
+    expect(predecessorOverview.tasks).toContainEqual(expect.objectContaining({ id: designerTaskId, status: "blocked" }));
+    expect(predecessorLessons).toBeArray();
+    expect(successors).toHaveLength(0);
+    expect(blockedAttemptId).toMatch(/^attempt_/);
   });
 
   test("self-improve-daemon does not copy stale Claude defaults into a new assessment cycle", async () => {
