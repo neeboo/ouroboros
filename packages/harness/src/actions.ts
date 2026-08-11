@@ -7204,16 +7204,35 @@ function recordStringMap(value: unknown): Record<string, string> | null {
 
 function sourceTargetDifference(git: GitRunner, worktreePath: string, targetBaseSha: string):
   { ok: true; files: string[] } | { ok: false; reason: string } {
-  const diff = runGitStep(git, worktreePath, ["diff", "--name-only", targetBaseSha, "--"]);
+  const sourceHead = runGitStep(git, worktreePath, ["rev-parse", "HEAD"]);
+  if (!sourceHead.ok || !/^[0-9a-f]{40}$/i.test(sourceHead.stdout.trim())) {
+    return { ok: false, reason: "could not resolve the source worktree HEAD" };
+  }
+  const mergeBase = runGitStep(git, worktreePath, ["merge-base", targetBaseSha, sourceHead.stdout.trim()]);
+  if (!mergeBase.ok || !/^[0-9a-f]{40}$/i.test(mergeBase.stdout.trim())) {
+    return { ok: false, reason: "could not resolve a source and target merge base" };
+  }
+  const baseSha = mergeBase.stdout.trim();
+  const diff = runGitStep(git, worktreePath, ["diff", "--name-only", baseSha, "--"]);
+  const targetDiff = runGitStep(git, worktreePath, ["diff", "--name-only", baseSha, targetBaseSha, "--"]);
   const untracked = runGitStep(git, worktreePath, ["ls-files", "--others", "--exclude-standard"]);
-  if (!diff.ok || !untracked.ok) {
+  if (!diff.ok || !targetDiff.ok || !untracked.ok) {
     return { ok: false, reason: "could not determine the complete source dependency closure" };
   }
   const files = new Set<string>();
   for (const value of `${diff.stdout}\n${untracked.stdout}`.split(/\r?\n/).filter(Boolean)) {
     files.add(value);
   }
-  return { ok: true, files: normalizeRelativeFiles([...files]).sort() };
+  const normalizedFiles = normalizeRelativeFiles([...files]).sort();
+  const targetFiles = new Set(normalizeRelativeFiles(targetDiff.stdout.split(/\r?\n/).filter(Boolean)));
+  const overlappingFiles = normalizedFiles.filter((file) => targetFiles.has(file));
+  if (overlappingFiles.length > 0) {
+    return {
+      ok: false,
+      reason: `source dependency closure overlaps target branch changes: ${overlappingFiles.join(",")}`,
+    };
+  }
+  return { ok: true, files: normalizedFiles };
 }
 
 function sha256File(path: string): string | null {

@@ -1196,6 +1196,9 @@ describe("Harness actions", () => {
     await mkdir(join(worktreePath, "src"), { recursive: true });
     const path = "src/verified.ts";
     await writeFile(join(worktreePath, path), "export const verified = true;\n");
+    await writeFile(join(repoPath, "TARGET.md"), "target branch advanced\n");
+    git(repoPath, ["add", "TARGET.md"]);
+    git(repoPath, ["commit", "-m", "Advance target branch"]);
 
     const runId = harness.createRun({ goal: "Verify a complete integration closure", projectRoot: repoPath });
     const workerTaskId = harness.createTask({
@@ -1223,7 +1226,7 @@ describe("Harness actions", () => {
       goal: "Verify the complete closure",
       prompt: "Verify the complete closure.",
       dependsOn: [workerTaskId],
-      config: { verifierContract: { deterministicChecks: ["test -d node_modules && test -d packages/cli/node_modules && test \"$(cd packages/cli/node_modules/@fixture/shared && pwd -P)\" = \"$(cd packages/shared && pwd -P)\" && ./bin/orbs && test -f src/verified.ts"] } },
+      config: { verifierContract: { deterministicChecks: ["test -d node_modules && test -d packages/cli/node_modules && test \"$(cd packages/cli/node_modules/@fixture/shared && pwd -P)\" = \"$(cd packages/shared && pwd -P)\" && ./bin/orbs && test -f TARGET.md && test -f src/verified.ts"] } },
     });
     harness.recordAttempt({
       taskId: verifierTaskId,
@@ -1246,7 +1249,7 @@ describe("Harness actions", () => {
       paths: [path],
       pathHashes: { [path]: pathHash },
       verifierTaskId,
-      frozenCommands: ["test -d node_modules && test -d packages/cli/node_modules && test \"$(cd packages/cli/node_modules/@fixture/shared && pwd -P)\" = \"$(cd packages/shared && pwd -P)\" && ./bin/orbs && test -f src/verified.ts"],
+      frozenCommands: ["test -d node_modules && test -d packages/cli/node_modules && test \"$(cd packages/cli/node_modules/@fixture/shared && pwd -P)\" = \"$(cd packages/shared && pwd -P)\" && ./bin/orbs && test -f TARGET.md && test -f src/verified.ts"],
     };
 
     const first = applyHarnessAction(harness, {
@@ -1298,6 +1301,7 @@ describe("Harness actions", () => {
     }));
     expect(second).toMatchObject({ status: "done", actionType: "integrateVerifiedRun" });
     expect(git(repoPath, ["rev-parse", "HEAD"]).stdout.trim()).toBe(headAfterFirst);
+    expect(await readFile(join(repoPath, "TARGET.md"), "utf8")).toBe("target branch advanced\n");
     expect(harness.listHarnessActionEvents({ limit: 10 }).filter((event) => event.status === "done")).toHaveLength(1);
   });
 
@@ -1390,6 +1394,90 @@ describe("Harness actions", () => {
     expect(result).toMatchObject({ status: "blocked", actionType: "integrateVerifiedRun" });
     expect(result.problems.join("\n")).toContain("could not bind the existing dependency trees");
     expect(ranFrozenCommand).toBe(false);
+    expect(git(repoPath, ["rev-parse", "HEAD"]).stdout.trim()).toBe(targetBaseSha);
+    expect(harness.listHarnessActionEvents({ limit: 10 }).filter((event) => event.status === "done")).toHaveLength(0);
+  });
+
+  test("blocks a stale source when its verified path overlaps a newer target commit", async () => {
+    const repoPath = join(dir, "repo-overlapping-candidate-source");
+    const worktreePath = join(dir, "worker-overlapping-candidate-source");
+    await mkdir(join(repoPath, "src"), { recursive: true });
+    await writeFile(join(repoPath, "src", "shared.ts"), "export const value = 'base';\n");
+    git(repoPath, ["init", "-b", "main"]);
+    git(repoPath, ["config", "core.autocrlf", "false"]);
+    git(repoPath, ["config", "user.name", "Ouroboros Test"]);
+    git(repoPath, ["config", "user.email", "test@example.com"]);
+    git(repoPath, ["config", "commit.gpgSign", "false"]);
+    git(repoPath, ["add", "src/shared.ts"]);
+    git(repoPath, ["commit", "-m", "Initial commit"]);
+    git(repoPath, ["worktree", "add", "-b", "task-overlapping-candidate-source", worktreePath, "main"]);
+    await writeFile(join(worktreePath, "src", "shared.ts"), "export const value = 'worker';\n");
+    await writeFile(join(repoPath, "src", "shared.ts"), "export const value = 'target';\n");
+    git(repoPath, ["add", "src/shared.ts"]);
+    git(repoPath, ["commit", "-m", "Advance target path"]);
+
+    const runId = harness.createRun({ goal: "Reject overlapping source history", projectRoot: repoPath });
+    const workerTaskId = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Change the shared file",
+      prompt: "Change src/shared.ts.",
+      worktreePath,
+    });
+    const workerAttemptId = harness.recordAttempt({
+      taskId: workerTaskId,
+      input: { executor: "test" },
+      output: {
+        status: "done",
+        summary: "Changed shared file",
+        changedFiles: ["src/shared.ts"],
+        checks: [{ name: "worker", status: "passed" }],
+        artifacts: [],
+        problems: [],
+      },
+    });
+    const verifierTaskId = harness.createTask({
+      runId,
+      role: "verifier",
+      goal: "Verify the shared file",
+      prompt: "Verify src/shared.ts.",
+      dependsOn: [workerTaskId],
+      config: { verifierContract: { deterministicChecks: ["true"] } },
+    });
+    harness.recordAttempt({
+      taskId: verifierTaskId,
+      input: { executor: "test" },
+      output: {
+        status: "done",
+        summary: "Verified shared file",
+        changedFiles: [],
+        checks: [{ name: "verifier", status: "passed" }],
+        artifacts: [],
+        problems: [],
+      },
+    });
+    const targetBaseSha = git(repoPath, ["rev-parse", "HEAD"]).stdout.trim();
+    const pathHash = createHash("sha256").update(await readFile(join(worktreePath, "src", "shared.ts"))).digest("hex");
+    const result = applyHarnessAction(harness, {
+      type: "integrateVerifiedRun",
+      runId,
+      workerTaskId,
+      repoPath,
+      targetBranch: "main",
+      integrationClosure: {
+        targetBaseSha,
+        sourceTaskIds: [workerTaskId],
+        sourceAttemptIds: [workerAttemptId],
+        paths: ["src/shared.ts"],
+        pathHashes: { "src/shared.ts": pathHash },
+        verifierTaskId,
+        frozenCommands: ["true"],
+      },
+    });
+
+    expect(result).toMatchObject({ status: "blocked", actionType: "integrateVerifiedRun" });
+    expect(result.problems.join("\n")).toContain("overlaps target branch changes: src/shared.ts");
+    expect(await readFile(join(repoPath, "src", "shared.ts"), "utf8")).toBe("export const value = 'target';\n");
     expect(git(repoPath, ["rev-parse", "HEAD"]).stdout.trim()).toBe(targetBaseSha);
     expect(harness.listHarnessActionEvents({ limit: 10 }).filter((event) => event.status === "done")).toHaveLength(0);
   });
