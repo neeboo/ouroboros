@@ -3,7 +3,7 @@ import { runLocalCommand } from "../executors/command";
 import type { RunCommand } from "../executors/types";
 import { createHash } from "node:crypto";
 import { existsSync, lstatSync, readFileSync, readlinkSync, realpathSync } from "node:fs";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 
 const GENERATED_BUN_LOCK = "bun.lock";
 const GENERATED_BUN_LOCK_SOURCE = "start-hook:git-worktree:bun-install";
@@ -15,8 +15,9 @@ export function createGitWorktreeHook(options: {
 }): StartHook {
   const runCommand = options.runCommand ?? runLocalCommand;
   const defaultBaseRef = options.baseRef ?? "main";
+  const setupByWorktree = new Map<string, ReturnType<StartHook>>();
 
-  return async ({ run, task, cwd }) => {
+  const runSetup: StartHook = async ({ run, task, cwd }) => {
     const repoPath = run.projectRoot ?? options.repoPath;
     const resolvedBaseRef = worktreeBaseRef(run.context, defaultBaseRef);
     if (!resolvedBaseRef.ok) {
@@ -170,6 +171,43 @@ export function createGitWorktreeHook(options: {
         ...(bunLockBoundary.artifact ? [bunLockBoundary.artifact] : []),
       ],
     };
+  };
+
+  return async (input) => {
+    const repoPath = resolve(input.run.projectRoot ?? options.repoPath);
+    const baseRef = worktreeBaseRef(input.run.context, defaultBaseRef);
+    if (!baseRef.ok) {
+      return {
+        checks: [{ name: "git worktree base", status: "failed", summary: baseRef.problem }],
+        problems: [baseRef.problem],
+      };
+    }
+    const key = JSON.stringify([resolve(input.cwd), repoPath, baseRef.baseRef]);
+    const existing = setupByWorktree.get(key);
+    if (existing) {
+      const result = await existing;
+      return {
+        ...result,
+        checks: [
+          ...(result.checks ?? []),
+          {
+            name: "worktree setup single-flight",
+            status: "passed",
+            summary: "reused the in-flight setup for this exact worktree",
+          },
+        ],
+      };
+    }
+
+    const setup = runSetup(input);
+    setupByWorktree.set(key, setup);
+    try {
+      return await setup;
+    } finally {
+      if (setupByWorktree.get(key) === setup) {
+        setupByWorktree.delete(key);
+      }
+    }
   };
 }
 

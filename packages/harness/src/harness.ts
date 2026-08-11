@@ -1224,43 +1224,47 @@ export class Harness {
 
 
   leaseReadyTasks(input: LeaseReadyTasksInput) {
-    return withDatabase(this.dbPath, (db) => {
-      const runState = db
-        .query(
-          `
-          select json_extract(context_json, '$.retired') as retired
-          from runs
-          where id = $runId
-          `,
-        )
-        .get({ $runId: input.runId }) as { retired: number | null } | null;
-      if (runState?.retired === 1) {
-        return [];
-      }
-      const taskRows = db
-        .query(
-          `
-          select *
-          from tasks
-          where run_id = $runId and status = 'todo'
-          order by created_at, id
-          `,
-        )
-        .all({ $runId: input.runId }) as TaskRow[];
-      const allTaskRows = db
-        .query("select * from tasks where run_id = $runId")
-        .all({ $runId: input.runId }) as TaskRow[];
-      const dependencyIsSatisfied = createDependencyReadiness(allTaskRows.map(taskFromRow));
-      const ready = taskRows
-        .map(taskFromRow)
-        .filter((task) => task.dependsOn.every((dependencyId) => dependencyIsSatisfied(dependencyId, task)))
-        .slice(0, input.limit);
+    return withDatabase(this.dbPath, (db) =>
+      db.transaction(() => {
+        const runState = db
+          .query(
+            `
+            select json_extract(context_json, '$.retired') as retired
+            from runs
+            where id = $runId
+            `,
+          )
+          .get({ $runId: input.runId }) as { retired: number | null } | null;
+        if (runState?.retired === 1) {
+          return [];
+        }
+        const taskRows = db
+          .query(
+            `
+            select *
+            from tasks
+            where run_id = $runId and status = 'todo'
+            order by created_at, id
+            `,
+          )
+          .all({ $runId: input.runId }) as TaskRow[];
+        const allTasks = (db
+          .query("select * from tasks where run_id = $runId")
+          .all({ $runId: input.runId }) as TaskRow[]).map(taskFromRow);
+        const dependencyIsSatisfied = createDependencyReadiness(allTasks);
+        const selected: Task[] = [];
+        for (const task of taskRows.map(taskFromRow)) {
+          if (selected.length >= input.limit) break;
+          if (!task.dependsOn.every((dependencyId) => dependencyIsSatisfied(dependencyId, task))) continue;
+          if (!verifierLeaseIsAvailable(task, allTasks, selected)) continue;
+          selected.push(task);
+        }
 
-      return db.transaction(() => {
-        for (const task of ready) {
+        const leased: Task[] = [];
+        for (const task of selected) {
           const sessionRef = input.sessionForTask(task);
           const worktreePath = input.worktreeForTask?.(task) ?? task.worktreePath;
-          db.query(
+          const update = db.query(
             `
             update tasks
             set status = 'running',
@@ -1274,13 +1278,15 @@ export class Harness {
             $worktreePath: worktreePath,
             $taskId: task.id,
           });
+          if (update.changes !== 1) continue;
           task.status = "running";
           task.sessionRef = sessionRef;
           task.worktreePath = worktreePath;
+          leased.push(task);
         }
-        return ready;
-      })();
-    });
+        return leased;
+      }).immediate(),
+    );
   }
 
   recordAttempt(input: RecordAttemptInput) {
@@ -3279,6 +3285,24 @@ function stringOrNull(value: unknown) {
 
 function objectOrNull(value: unknown) {
   return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
+}
+
+function verifierLeaseIsAvailable(task: Task, allTasks: Task[], selectedCandidates: Task[]) {
+  if (task.role !== "verifier") {
+    return true;
+  }
+  const workerDependencies = task.dependsOn.filter((dependencyId) =>
+    allTasks.some((candidate) => candidate.id === dependencyId && candidate.role === "worker")
+  );
+  if (workerDependencies.length === 0) {
+    return true;
+  }
+  const sharesWorker = (candidate: Task) =>
+    candidate.role === "verifier"
+    && candidate.id !== task.id
+    && candidate.dependsOn.some((dependencyId) => workerDependencies.includes(dependencyId));
+  return !allTasks.some((candidate) => candidate.status === "running" && sharesWorker(candidate))
+    && !selectedCandidates.some(sharesWorker);
 }
 
 function createDependencyReadiness(tasks: Task[]) {

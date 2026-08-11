@@ -259,6 +259,89 @@ describe("git worktree hook", () => {
     }
   });
 
+  test("runs one dependency install when concurrent start hooks share a worktree", async () => {
+    const cwd = await gitRepository();
+    let bunCalls = 0;
+    let releaseInstall!: () => void;
+    let markInstallStarted!: () => void;
+    const installStarted = new Promise<void>((resolve) => {
+      markInstallStarted = resolve;
+    });
+    const installRelease = new Promise<void>((resolve) => {
+      releaseInstall = resolve;
+    });
+    try {
+      const hook = createGitWorktreeHook({
+        repoPath: cwd,
+        runCommand: async (input) => {
+          if (input.cmd[0] === "bun") {
+            bunCalls += 1;
+            markInstallStarted();
+            await installRelease;
+            return { exitCode: 0, stdout: "", stderr: "" };
+          }
+          return spawnCommand(input.cmd);
+        },
+      });
+      const firstInput = hookInput(cwd);
+      const secondInput = hookInput(cwd);
+      secondInput.task.id = "task_2";
+      secondInput.task.sessionRef = "session-task_2";
+
+      const first = hook(firstInput);
+      await installStarted;
+      const second = hook(secondInput);
+      await Bun.sleep(20);
+
+      expect(bunCalls).toBe(1);
+      releaseInstall();
+      const [firstResult, secondResult] = await Promise.all([first, second]);
+      expect(firstResult.problems ?? []).toEqual([]);
+      expect(secondResult.problems ?? []).toEqual([]);
+      expect(secondResult.checks).toContainEqual(expect.objectContaining({
+        name: "worktree setup single-flight",
+        status: "passed",
+      }));
+    } finally {
+      releaseInstall?.();
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  test("does not share setup across different frozen worktree identities", async () => {
+    const cwd = await gitRepository();
+    let releaseInstall!: () => void;
+    let markInstallStarted!: () => void;
+    const installStarted = new Promise<void>((resolve) => { markInstallStarted = resolve; });
+    const installRelease = new Promise<void>((resolve) => { releaseInstall = resolve; });
+    try {
+      const hook = createGitWorktreeHook({
+        repoPath: cwd,
+        runCommand: async (input) => {
+          if (input.cmd[0] === "bun") {
+            markInstallStarted();
+            await installRelease;
+            return { exitCode: 0, stdout: "", stderr: "" };
+          }
+          return spawnCommand(input.cmd);
+        },
+      });
+      const first = hook(hookInput(cwd));
+      await installStarted;
+      const invalid = hookInput(cwd);
+      invalid.run.context = { expectedRemoteSha: "not-a-commit" };
+
+      const invalidResult = await hook(invalid);
+      expect(invalidResult.problems).toContain("run expectedRemoteSha must be an exact lowercase commit SHA");
+      expect(invalidResult.checks).not.toContainEqual(expect.objectContaining({ name: "worktree setup single-flight" }));
+      releaseInstall();
+      expect((await first).problems ?? []).toEqual([]);
+    } finally {
+      releaseInstall?.();
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
   test("preserves and blocks on a root bun.lock created despite --no-save", async () => {
     const cwd = await gitRepository();
     const contents = "generated lock\n";

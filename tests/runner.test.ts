@@ -6934,6 +6934,102 @@ describe("runner", () => {
     });
   });
 
+  test("worker stop hook reuses the only verifier already bound to that worker", async () => {
+    const runId = harness.createRun({ goal: "Build loop" });
+    const workerTask = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Implement runner",
+      prompt: "Implement the smallest runner.",
+    });
+    const existingVerifier = harness.createTask({
+      runId,
+      role: "verifier",
+      goal: "Verify implementation",
+      prompt: "Verify the worker only after it completes.",
+      dependsOn: [workerTask],
+    });
+
+    const result = await createVerifierTaskHook({ harness })({
+      run: harness.getRun(runId)!,
+      task: harness.getTask(workerTask)!,
+      sessionName: "worker-session",
+      prompt: "source prompt",
+      output: {
+        status: "done",
+        summary: "Implemented runner",
+        artifacts: [],
+        checks: [],
+        problems: [],
+      },
+    });
+
+    const verifiers = harness.getRunOverview({ runId }).tasks.filter((task) => task.role === "verifier");
+    expect(verifiers.map((task) => task.id)).toEqual([existingVerifier]);
+    expect(result.decision).toBe("continue");
+    expect(result.artifacts).toContainEqual({
+      kind: "reused_verifier_task",
+      taskId: existingVerifier,
+      sourceTaskId: workerTask,
+      sourceWorktreePath: null,
+    });
+  });
+
+  test("worker stop hook binds an untouched planned verifier to the source worktree", async () => {
+    const runId = harness.createRun({ goal: "Build loop" });
+    const workerTask = harness.createTask({ runId, role: "worker", goal: "Implement", prompt: "Implement" });
+    const verifierTask = harness.createTask({
+      runId, role: "verifier", goal: "Verify", prompt: "Verify", dependsOn: [workerTask],
+    });
+    harness.leaseReadyTasks({
+      runId,
+      limit: 1,
+      sessionForTask: () => "worker-session",
+      worktreeForTask: () => "/tmp/source-worker-worktree",
+    });
+
+    const result = await createVerifierTaskHook({ harness })({
+      run: harness.getRun(runId)!,
+      task: harness.getTask(workerTask)!,
+      sessionName: "worker-session",
+      prompt: "",
+      output: { status: "done", summary: "done", checks: [], artifacts: [], problems: [] },
+    });
+
+    expect(result.decision).toBe("continue");
+    expect(harness.getTask(verifierTask)?.worktreePath).toBe("/tmp/source-worker-worktree");
+  });
+
+  test("worker stop hook rejects an existing verifier with a different frozen contract", async () => {
+    const runId = harness.createRun({ goal: "Build loop" });
+    const workerTask = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Implement",
+      prompt: "Implement",
+      config: { verifierContract: { successCriteria: ["new"] } },
+    });
+    harness.createTask({
+      runId,
+      role: "verifier",
+      goal: "Verify",
+      prompt: "Verify",
+      dependsOn: [workerTask],
+      config: { verifierContract: { successCriteria: ["old"] } },
+    });
+
+    const result = await createVerifierTaskHook({ harness })({
+      run: harness.getRun(runId)!,
+      task: harness.getTask(workerTask)!,
+      sessionName: "worker-session",
+      prompt: "",
+      output: { status: "done", summary: "done", checks: [], artifacts: [], problems: [] },
+    });
+
+    expect(result.decision).toBe("exit");
+    expect(result.artifacts).toContainEqual(expect.objectContaining({ kind: "conflicting_verifier_contract" }));
+  });
+
   test("worker stop hook records the source worktree for verifier tasks", async () => {
     const runId = harness.createRun({ goal: "Build loop" });
     const workerTask = harness.createTask({
@@ -7202,6 +7298,194 @@ describe("runner", () => {
       taskId: repair.id,
       verifierTaskId: verifierTask,
     });
+  });
+
+  test("blocked verifier defers repair while another verifier for the same worker is active", async () => {
+    const runId = harness.createRun({ goal: "Build loop" });
+    const workerTask = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Implement runner",
+      prompt: "Implement the runner.",
+    });
+    const blockedVerifier = harness.createTask({
+      runId,
+      role: "verifier",
+      goal: "Verify runner A",
+      prompt: "Verify the worker.",
+      dependsOn: [workerTask],
+    });
+    const activeVerifier = harness.createTask({
+      runId,
+      role: "verifier",
+      goal: "Verify runner B",
+      prompt: "Verify the worker once.",
+      dependsOn: [workerTask],
+    });
+
+    const result = await createRepairTaskHook({ harness })({
+      run: harness.getRun(runId)!,
+      task: harness.getTask(blockedVerifier)!,
+      sessionName: "blocked-verifier",
+      prompt: "source prompt",
+      output: {
+        status: "blocked",
+        summary: "Verification failed",
+        artifacts: [],
+        checks: [],
+        problems: ["failed"],
+      },
+    });
+
+    expect(result.decision).toBe("exit");
+    expect(result.artifacts).toContainEqual({
+      kind: "repair_deferred_to_active_verifier",
+      verifierTaskId: blockedVerifier,
+      activeVerifierTaskId: activeVerifier,
+      sourceTaskId: workerTask,
+      recheckRequired: false,
+    });
+    expect(harness.getRunOverview({ runId }).tasks.filter((task) => task.role === "worker")).toHaveLength(1);
+  });
+
+  test("running sibling verifier takes precedence over an earlier todo sibling", async () => {
+    const runId = harness.createRun({ goal: "Build loop" });
+    const workerTask = harness.createTask({ runId, role: "worker", goal: "Implement runner", prompt: "Implement." });
+    const blockedVerifier = harness.createTask({
+      runId, role: "verifier", goal: "Verify A", prompt: "Verify.", dependsOn: [workerTask],
+    });
+    harness.createTask({ runId, role: "verifier", goal: "Verify B", prompt: "Verify.", dependsOn: [workerTask] });
+    const runningVerifier = harness.createTask({
+      runId, role: "verifier", goal: "Verify C", prompt: "Verify.", dependsOn: [workerTask],
+    });
+    harness.startAttempt({ taskId: runningVerifier, input: {} });
+
+    const result = await createRepairTaskHook({ harness })({
+      run: harness.getRun(runId)!,
+      task: harness.getTask(blockedVerifier)!,
+      sessionName: "blocked-verifier",
+      prompt: "source prompt",
+      output: { status: "blocked", summary: "failed", checks: [], artifacts: [], problems: ["failed"] },
+    });
+
+    expect(result.decision).toBe("retry");
+    expect(result.artifacts).toContainEqual(expect.objectContaining({
+      kind: "repair_deferred_to_active_verifier",
+      activeVerifierTaskId: runningVerifier,
+      recheckRequired: true,
+    }));
+  });
+
+  test("repair deferral checks every worker dependency", async () => {
+    const runId = harness.createRun({ goal: "Build loop" });
+    const workerA = harness.createTask({ runId, role: "worker", goal: "Worker A", prompt: "A" });
+    const workerB = harness.createTask({ runId, role: "worker", goal: "Worker B", prompt: "B" });
+    const blockedVerifier = harness.createTask({
+      runId, role: "verifier", goal: "Verify both", prompt: "Verify", dependsOn: [workerA, workerB],
+    });
+    const runningVerifier = harness.createTask({
+      runId, role: "verifier", goal: "Verify B", prompt: "Verify", dependsOn: [workerB],
+    });
+    harness.startAttempt({ taskId: runningVerifier, input: {} });
+
+    const result = await createRepairTaskHook({ harness })({
+      run: harness.getRun(runId)!,
+      task: harness.getTask(blockedVerifier)!,
+      sessionName: "blocked",
+      prompt: "",
+      output: { status: "blocked", summary: "failed", checks: [], artifacts: [], problems: ["failed"] },
+    });
+
+    expect(result.decision).toBe("retry");
+    expect(result.artifacts).toContainEqual(expect.objectContaining({ activeVerifierTaskId: runningVerifier }));
+  });
+
+  test("concurrent duplicate verifiers recheck instead of mutually abandoning repair", async () => {
+    const runId = harness.createRun({ goal: "Build loop" });
+    const workerTask = harness.createTask({ runId, role: "worker", goal: "Implement runner", prompt: "Implement." });
+    const firstVerifier = harness.createTask({
+      runId,
+      role: "verifier",
+      goal: "Verify runner A",
+      prompt: "Verify.",
+      dependsOn: [workerTask],
+    });
+    const secondVerifier = harness.createTask({
+      runId,
+      role: "verifier",
+      goal: "Verify runner B",
+      prompt: "Verify.",
+      dependsOn: [workerTask],
+    });
+    harness.startAttempt({ taskId: firstVerifier, input: {} });
+    harness.startAttempt({ taskId: secondVerifier, input: {} });
+    const hook = createRepairTaskHook({ harness });
+    const blocked = { status: "blocked" as const, summary: "failed", checks: [], artifacts: [], problems: ["failed"] };
+
+    const first = await hook({
+      run: harness.getRun(runId)!, task: harness.getTask(firstVerifier)!, sessionName: "first", prompt: "", output: blocked,
+    });
+    const second = await hook({
+      run: harness.getRun(runId)!, task: harness.getTask(secondVerifier)!, sessionName: "second", prompt: "", output: blocked,
+    });
+
+    expect(first.decision).toBe("retry");
+    expect(second.decision).toBe("retry");
+    expect(harness.getRunOverview({ runId }).tasks.filter((task) => task.goal.startsWith("Repair:"))).toHaveLength(0);
+  });
+
+  test("leases duplicate verifiers for one worker one at a time", () => {
+    const runId = harness.createRun({ goal: "Build loop" });
+    const workerTask = harness.createTask({ runId, role: "worker", goal: "Implement runner", prompt: "Implement." });
+    harness.recordAttempt({
+      taskId: workerTask,
+      input: {},
+      output: { status: "done", summary: "done", checks: [], artifacts: [], problems: [] },
+    });
+    harness.createTask({ runId, role: "verifier", goal: "Verify runner A", prompt: "Verify.", dependsOn: [workerTask] });
+    harness.createTask({ runId, role: "verifier", goal: "Verify runner B", prompt: "Verify.", dependsOn: [workerTask] });
+
+    const leased = harness.leaseReadyTasks({
+      runId,
+      limit: 2,
+      sessionForTask: (task) => `session-${task.id}`,
+    });
+    const verifierTasks = harness.getRunOverview({ runId }).tasks.filter((task) => task.role === "verifier");
+
+    expect(leased).toHaveLength(1);
+    expect(leased[0]?.role).toBe("verifier");
+    expect(verifierTasks.filter((task) => task.status === "running")).toHaveLength(1);
+    expect(verifierTasks.filter((task) => task.status === "todo")).toHaveLength(1);
+  });
+
+  test("verifier leasing keeps unrelated workers concurrent when a bridge verifier is skipped", () => {
+    const runId = harness.createRun({ goal: "Build loop" });
+    const workerA = harness.createTask({ runId, role: "worker", goal: "Worker A", prompt: "A" });
+    const workerB = harness.createTask({ runId, role: "worker", goal: "Worker B", prompt: "B" });
+    for (const taskId of [workerA, workerB]) {
+      harness.recordAttempt({
+        taskId,
+        input: {},
+        output: { status: "done", summary: "done", checks: [], artifacts: [], problems: [] },
+      });
+    }
+    const verifierA = harness.createTask({
+      id: "task_lease_verifier_a", runId, role: "verifier", goal: "Verify A", prompt: "A", dependsOn: [workerA],
+    });
+    harness.createTask({
+      id: "task_lease_verifier_b", runId, role: "verifier", goal: "Verify both", prompt: "Both", dependsOn: [workerA, workerB],
+    });
+    const verifierB = harness.createTask({
+      id: "task_lease_verifier_c", runId, role: "verifier", goal: "Verify B", prompt: "B", dependsOn: [workerB],
+    });
+
+    const leased = harness.leaseReadyTasks({
+      runId,
+      limit: 2,
+      sessionForTask: (task) => `session-${task.id}`,
+    });
+
+    expect(leased.map((task) => task.id)).toEqual([verifierA, verifierB]);
   });
 
   test("blocked repair verifier stop hook does not create recursive repair tasks for the same branch", async () => {

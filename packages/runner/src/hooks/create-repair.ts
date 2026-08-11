@@ -1,4 +1,4 @@
-import { DEFAULT_REPAIR_TASK_PROMPT_TEMPLATE, readableValue, type AttemptOutput, type Harness } from "@ouroboros/harness";
+import { DEFAULT_REPAIR_TASK_PROMPT_TEMPLATE, readableValue, type AttemptOutput, type Harness, type Task } from "@ouroboros/harness";
 import { boundedDiagnosticText, compactAttemptEvidence, latestRootCause } from "../bounded-diagnostic";
 import { fitPromptAroundFrozenSections, HandoffContractTooLargeError } from "../prompt-budget";
 import { prettyJson, renderPromptTemplate } from "../template";
@@ -45,6 +45,34 @@ export function createRepairTaskHook(options: {
       };
     }
 
+    const sourceTasks = selectRepairSourceTasks(options.harness, task);
+    const sourceTask = sourceTasks[0] ?? null;
+    const sourceTaskIds = new Set(sourceTasks.map((candidate) => candidate.id));
+    const activeSiblingVerifier = sourceTasks.length > 0
+      ? options.harness
+        .getRunOverview({ runId: run.id, eventLimit: 0 })
+        .tasks
+        .filter((candidate) =>
+          candidate.id !== task.id
+          && candidate.role === "verifier"
+          && candidate.dependsOn.some((dependencyId) => sourceTaskIds.has(dependencyId))
+          && (candidate.status === "todo" || candidate.status === "running")
+        )
+        .sort((left, right) => Number(right.status === "running") - Number(left.status === "running"))[0]
+      : undefined;
+    if (sourceTask && activeSiblingVerifier) {
+      return {
+        decision: activeSiblingVerifier.status === "running" ? "retry" : "exit",
+        artifacts: [{
+          kind: "repair_deferred_to_active_verifier",
+          verifierTaskId: task.id,
+          activeVerifierTaskId: activeSiblingVerifier.id,
+          sourceTaskId: sourceTask.id,
+          recheckRequired: activeSiblingVerifier.status === "running",
+        }],
+      };
+    }
+
     const charge = chargeRepairBudget(options.harness, run.id, {
       limit: budgetLimit,
       taskId: task.id,
@@ -79,7 +107,6 @@ export function createRepairTaskHook(options: {
       };
     }
 
-    const sourceTask = selectRepairSourceTask(options.harness, task);
     const sourceWorktreePath = sourceTask?.worktreePath ?? task.worktreePath ?? null;
     const verifierContract = verifierContractFromTask(task);
     let prompt: string;
@@ -177,17 +204,18 @@ function recursiveRepairBranch(
   return null;
 }
 
-function selectRepairSourceTask(
+function selectRepairSourceTasks(
   harness: Harness,
   verifierTask: { dependsOn: string[]; worktreePath: string | null },
 ) {
+  const sources: Task[] = [];
   for (const dependencyId of verifierTask.dependsOn) {
     const dependency = harness.getTask(dependencyId);
-    if (dependency && dependency.role === "worker" && dependency.worktreePath) {
-      return dependency;
+    if (dependency && dependency.role === "worker") {
+      sources.push(dependency);
     }
   }
-  return null;
+  return sources;
 }
 
 function externalSetupBlockerReason(output: AttemptOutput) {
