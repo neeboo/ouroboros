@@ -295,6 +295,45 @@ describe("Harness actions", () => {
     expect(overview.tasks.find((task) => task.role === "goal-review")?.status).toBe("todo");
   });
 
+  test("prepareRunDrain waits for the canonical active design child instead of creating parent review work", () => {
+    const parentRunId = harness.createRun({
+      goal: "Supervise one accepted design delivery",
+      context: { source: "target-system-design" },
+    });
+    const childRunId = harness.createRun({
+      goal: "Deliver the accepted design",
+      context: {
+        source: "design",
+        parentRunId,
+        designProposalId: "design_canonical_delivery",
+      },
+    });
+    const plannerTaskId = harness.createTask({
+      runId: childRunId,
+      role: "planner",
+      goal: "Plan the canonical delivery",
+      prompt: "Return the canonical task graph.",
+    });
+
+    const result = applyHarnessAction(harness, {
+      type: "prepareRunDrain",
+      runId: parentRunId,
+      maxTries: 2,
+    });
+    const parentOverview = harness.getRunOverview({ runId: parentRunId, eventLimit: 0 });
+
+    expect(result).toMatchObject({ status: "done", actionType: "prepareRunDrain" });
+    expect(result.artifacts).toContainEqual({
+      kind: "active_child_run",
+      runId: childRunId,
+      source: "design",
+      status: "todo",
+    });
+    expect(parentOverview.tasks.filter((task) => task.role === "goal-review")).toHaveLength(0);
+    expect(harness.getTask(plannerTaskId)?.status).toBe("todo");
+    expect(harness.getRun(parentRunId)?.status).toBe("todo");
+  });
+
   test("prepares a drained run by accepting an existing complete goal-review", () => {
     const runId = harness.createRun({ goal: "Already reviewed run" });
     const reviewTaskId = harness.createTask({

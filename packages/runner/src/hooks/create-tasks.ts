@@ -9,6 +9,28 @@ export function createTasksFromOutputHook(options: { harness: Harness }): StopHo
     }
 
     const plannedTasks = validatePlannedTasks(output.nextTasks);
+    const activeDesignChildren = options.harness.listRuns({ limit: 1000 }).filter((candidate) =>
+      candidate.context.parentRunId === run.id
+      && candidate.context.source === "design"
+      && candidate.context.retired !== true
+      && (candidate.status === "todo" || candidate.status === "running")
+    );
+    if (plannedTasks.length > 0 && activeDesignChildren.length > 0) {
+      return {
+        decision: "exit",
+        checks: [{
+          name: "canonical design delivery ownership",
+          status: "passed",
+          evidence: activeDesignChildren.map((child) => child.id).join(","),
+        }],
+        artifacts: activeDesignChildren.map((child) => ({
+          kind: "delegated_to_child_run",
+          runId: child.id,
+          source: "design",
+          status: child.status,
+        })),
+      };
+    }
     const plannedEntries = plannedTasks.map((plannedTask) => ({
       id: makeId("task"),
       plannedTask,

@@ -5514,6 +5514,64 @@ describe("runner", () => {
     ]);
   });
 
+  test("planner stop hook does not duplicate work already delegated to an active design child", async () => {
+    const parentRunId = harness.createRun({
+      goal: "Supervise one accepted design delivery",
+      context: { source: "target-system-design" },
+    });
+    const parentPlannerId = harness.createTask({
+      runId: parentRunId,
+      role: "planner",
+      goal: "Replan the accepted delivery",
+      prompt: "Do not duplicate the canonical child.",
+    });
+    const childRunId = harness.createRun({
+      goal: "Deliver the accepted design",
+      context: {
+        source: "design",
+        parentRunId,
+        designProposalId: "design_canonical_delivery",
+      },
+    });
+    harness.createTask({
+      runId: childRunId,
+      role: "planner",
+      goal: "Plan the canonical delivery",
+      prompt: "Return the canonical task graph.",
+    });
+
+    const result = await runNextReadyTask({
+      harness,
+      runId: parentRunId,
+      executor: async () => ({
+        status: "done",
+        summary: "Attempted duplicate planning",
+        artifacts: [],
+        checks: [],
+        problems: [],
+        nextTasks: [{
+          role: "worker",
+          goal: "Duplicate the canonical delivery",
+          prompt: "Repeat work already owned by the child run.",
+          doneWhen: ["duplicate work completed"],
+        }],
+      }),
+      stopHooks: [createTasksFromOutputHook({ harness })],
+    });
+    const parentOverview = harness.getRunOverview({ runId: parentRunId, eventLimit: 0 });
+    const attempt = harness.getAttempt(result!.attemptId)!;
+
+    expect(result?.stopDecision).toBe("exit");
+    expect(parentOverview.tasks).toHaveLength(1);
+    expect(parentOverview.tasks[0]?.id).toBe(parentPlannerId);
+    expect(attempt.output.artifacts).toContainEqual({
+      kind: "delegated_to_child_run",
+      runId: childRunId,
+      source: "design",
+      status: "todo",
+    });
+  });
+
   test("planner stop hook creates child runs from structured nextRuns output", async () => {
     const runId = harness.createRun({
       goal: "Intake requirement document",

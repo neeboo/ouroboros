@@ -5375,6 +5375,30 @@ function prepareRunDrain(harness: Harness, action: Extract<HarnessAction, { type
     ], [{ kind: "run", runId: action.runId, status: "done" }]);
   }
 
+  const activeDesignChildren = harness.listRuns({ limit: 1000 }).filter((candidate) =>
+    candidate.context.parentRunId === action.runId
+    && candidate.context.source === "design"
+    && candidate.context.retired !== true
+    && (candidate.status === "todo" || candidate.status === "running")
+  );
+  if (activeDesignChildren.length > 0) {
+    return doneResult(
+      action.type,
+      `Run ${action.runId} is waiting for ${activeDesignChildren.length} active canonical design child run(s).`,
+      [{
+        name: "active canonical design children",
+        status: "passed",
+        evidence: activeDesignChildren.map((child) => child.id).join(","),
+      }],
+      activeDesignChildren.map((child) => ({
+        kind: "active_child_run",
+        runId: child.id,
+        source: "design",
+        status: child.status,
+      })),
+    );
+  }
+
   const initialOverview = harness.getRunOverview({ runId: action.runId, eventLimit: 0 });
   const initialActive = initialOverview.tasks.some((task) => task.status === "todo" || task.status === "running");
   const initialGoalReviewInvalidated = initialOverview.run?.context.goalReviewInvalidatedByIntegration === true;
