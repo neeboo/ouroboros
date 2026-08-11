@@ -4636,18 +4636,24 @@ describe("runner", () => {
     const attempt = harness.getAttempt(result!.attemptId)!;
     expect(attempt.taskId).toBe(taskId);
     expect(attempt.output.summary).toBe("Stop hooks can preserve compact context after successful execution.");
-    expect(attempt.output.artifacts).toContainEqual({
+    expect(attempt.output.artifacts).toContainEqual(expect.objectContaining({
       kind: "context_experience_archive",
       taskId,
       summary: "Stop hooks can preserve compact context after successful execution.",
-      evidence: { checks: [{ name: "bun test", status: "passed" }] },
-    });
-    expect(attempt.output.artifacts).toContainEqual({
+      evidence: expect.objectContaining({
+        checks: expect.objectContaining({ items: [{ name: "bun test", status: "passed" }] }),
+        originalEvidence: expect.objectContaining({ sha256: expect.stringMatching(/^[a-f0-9]{64}$/) }),
+      }),
+    }));
+    expect(attempt.output.artifacts).toContainEqual(expect.objectContaining({
       kind: "context_lesson_archive",
       taskId,
       summary: "No failure pattern found in this successful attempt.",
-      evidence: { rawProblems: [] },
-    });
+      evidence: expect.objectContaining({
+        problems: expect.objectContaining({ items: [] }),
+        originalEvidence: expect.objectContaining({ truncated: false }),
+      }),
+    }));
     expect(harness.listLessons({ runId })).toContainEqual(
       expect.objectContaining({
         kind: "experience",
@@ -4728,21 +4734,69 @@ describe("runner", () => {
     expect(attempt.taskId).toBe(taskId);
     expect(attempt.output.summary).toBe("Bound acpx planner turns with a shorter timeout or a smaller prompt.");
     expect(attempt.output.problems).toEqual([
-      "Bound acpx planner turns with a shorter timeout or a smaller prompt.",
       "exit code: 124 stderr: command timed out after 600000ms",
+      expect.stringMatching(/^Prior verifier evidence sha256=[a-f0-9]{64}; originalChars=\d+; truncated=false\.$/),
     ]);
-    expect(attempt.output.artifacts).toContainEqual({
+    expect(attempt.output.artifacts).toContainEqual(expect.objectContaining({
       kind: "context_lesson_archive",
       taskId,
       summary: "Bound acpx planner turns with a shorter timeout or a smaller prompt.",
-      evidence: { rawProblems: [rawProblem] },
-    });
+      evidence: expect.objectContaining({
+        problems: expect.objectContaining({
+          items: [rawProblem],
+          count: 1,
+          truncated: false,
+        }),
+      }),
+    }));
     expect(harness.listLessons({ runId })).toContainEqual(
       expect.objectContaining({
         kind: "lesson",
-        summary: "Bound acpx planner turns with a shorter timeout or a smaller prompt.",
+        summary: "exit code: 124 stderr: command timed out after 600000ms",
       }),
     );
+  });
+
+  test("context summary bounds blocked evidence without recursively retaining prior output", async () => {
+    const runId = harness.createRun({ goal: "Bound recursive verifier context" });
+    const taskId = harness.createTask({
+      runId,
+      role: "verifier",
+      goal: "Verify bounded context",
+      prompt: "Keep only compact verifier evidence.",
+    });
+    const latestRootCause = "LATEST_ROOT_CAUSE: repair prompt copied historical verifier output";
+    const historicalSentinel = `HISTORICAL_STDOUT_SENTINEL_${"x".repeat(1_050_000)}`;
+
+    const result = await runNextReadyTask({
+      harness,
+      runId,
+      executor: async () => ({
+        status: "blocked",
+        summary: "Verifier found recursive prompt growth",
+        changedFiles: ["packages/runner/src/hooks/context-summary.ts"],
+        artifacts: [{ kind: "executor_transcript", stdout: historicalSentinel }],
+        checks: [{ name: "bounded context replay", status: "failed", evidence: historicalSentinel }],
+        problems: [historicalSentinel, latestRootCause],
+      }),
+      stopHooks: [createContextSummaryHook()],
+    });
+
+    const attempt = harness.getAttempt(result!.attemptId)!;
+    const lessonArchive = attempt.output.artifacts?.find(
+      (artifact) => (artifact as Record<string, unknown>).kind === "context_lesson_archive",
+    ) as Record<string, unknown>;
+    const persistedOutput = JSON.stringify(attempt.output);
+    const evidence = lessonArchive.evidence as Record<string, unknown>;
+    const originalEvidence = evidence.originalEvidence as Record<string, unknown>;
+
+    expect(persistedOutput.length).toBeLessThan(12_000);
+    expect(persistedOutput).toContain(latestRootCause);
+    expect(persistedOutput).not.toContain("HISTORICAL_STDOUT_SENTINEL");
+    expect(originalEvidence.sha256).toMatch(/^[a-f0-9]{64}$/);
+    expect(originalEvidence.characterCount).toBeGreaterThan(1_000_000);
+    expect(originalEvidence.truncated).toBe(true);
+    expect(attempt.output.problems?.length).toBeLessThanOrEqual(2);
   });
 
   test("context summary derives readable lessons from structured problem objects", async () => {
@@ -6228,6 +6282,90 @@ describe("runner", () => {
     });
   });
 
+  test("worker stop hook bounds historical diagnostics while preserving the frozen verifier contract", async () => {
+    const runId = harness.createRun({ goal: "Bound verifier handoff evidence" });
+    const verifierContract = {
+      deterministicChecks: [{ name: "bounded verifier replay", required: true }],
+      amendmentPolicy: "explicit-only",
+    };
+    const workerTask = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Produce bounded verifier evidence",
+      prompt: "Return production-shaped evidence.",
+      config: { verifierContract },
+    });
+    const historicalSentinel = `VERIFIER_HISTORICAL_STDOUT_SENTINEL_${"v".repeat(1_050_000)}`;
+
+    await runNextReadyTask({
+      harness,
+      runId,
+      executor: async () => ({
+        status: "done",
+        summary: "Implemented bounded verifier evidence",
+        changedFiles: ["packages/runner/src/hooks/create-verifier.ts"],
+        checks: [{ name: "bounded verifier replay", status: "passed", evidence: historicalSentinel }],
+        artifacts: [{ kind: "executor_transcript", stdout: historicalSentinel, prompt: historicalSentinel }],
+        problems: [],
+      }),
+      stopHooks: [createVerifierTaskHook({ harness })],
+    });
+
+    const verifier = harness.nextReadyTask(runId)!;
+    expect(verifier.dependsOn).toEqual([workerTask]);
+    expect(verifier.prompt.length).toBeLessThanOrEqual(64_000);
+    expect(verifier.prompt).toContain("Implemented bounded verifier evidence");
+    expect(verifier.prompt).toContain("packages/runner/src/hooks/create-verifier.ts");
+    expect(verifier.prompt).toContain("bounded verifier replay");
+    expect(verifier.prompt).toContain('"amendmentPolicy": "explicit-only"');
+    expect(verifier.prompt).toMatch(/[a-f0-9]{64}/);
+    expect(verifier.prompt).not.toContain("VERIFIER_HISTORICAL_STDOUT_SENTINEL");
+    expect(verifier.config).toEqual({ verifierContract });
+  });
+
+  test("verifier handoff rejects an oversized frozen contract without creating a task", async () => {
+    const runId = harness.createRun({ goal: "Reject oversized verifier handoff" });
+    const sourceTaskId = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Produce evidence for an oversized contract",
+      prompt: "Return bounded evidence.",
+      config: {
+        verifierContract: {
+          deterministicChecks: [{ name: "oversized frozen verifier check", required: true }],
+          immutableRule: `FROZEN_VERIFIER_CONTRACT_${"v".repeat(70_000)}`,
+        },
+      },
+    });
+
+    const result = await createVerifierTaskHook({ harness })({
+      run: harness.getRun(runId)!,
+      task: harness.getTask(sourceTaskId)!,
+      sessionName: "oversized-verifier-handoff",
+      prompt: "source prompt",
+      output: {
+        status: "done",
+        summary: "Source evidence is ready",
+        changedFiles: [],
+        checks: [{ name: "source check", status: "passed" }],
+        artifacts: [],
+        problems: [],
+      },
+    });
+
+    expect(harness.getRunOverview({ runId }).tasks.map((task) => task.id)).toEqual([sourceTaskId]);
+    expect(result.decision).toBe("exit");
+    expect(result.artifacts).toContainEqual(expect.objectContaining({
+      kind: "handoff_contract_too_large",
+      chars: expect.any(Number),
+      bytes: expect.any(Number),
+      limit: 64_000,
+      sha: expect.stringMatching(/^[a-f0-9]{64}$/),
+    }));
+    expect(result.problems).toEqual([expect.stringContaining("handoff_contract_too_large")]);
+    expect(JSON.stringify(result)).not.toContain("FROZEN_VERIFIER_CONTRACT");
+  });
+
   test("verifier task hook uses the database template", async () => {
     const runId = harness.createRun({ goal: "Build loop" });
     harness.setPromptTemplate({
@@ -6254,7 +6392,10 @@ describe("runner", () => {
       stopHooks: [createVerifierTaskHook({ harness })],
     });
 
-    expect(harness.nextReadyTask(runId)?.prompt).toBe(`Custom verifier for ${workerTask}: Implemented runner`);
+    const prompt = harness.nextReadyTask(runId)?.prompt ?? "";
+    expect(prompt).toStartWith(`Custom verifier for ${workerTask}: Implemented runner`);
+    expect(prompt).toContain("## Bounded Source Evidence");
+    expect(prompt).toContain(`Source Task ID: ${workerTask}`);
   });
 
   test("verifier stop hook does not create verifier tasks for verifier attempts", async () => {
@@ -6429,6 +6570,263 @@ describe("runner", () => {
       sourceTaskId: workerTask,
       sourceWorktreePath,
     });
+  });
+
+  test("blocked verifier builds a bounded repair prompt with frozen criteria and output digest", async () => {
+    const runId = harness.createRun({ goal: "Bound recursive repair context" });
+    const sourceWorktreePath = "/tmp/ouroboros-bounded-repair-source";
+    const sourceTask = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Implement bounded repair context",
+      prompt: "Implement the frozen source task.",
+      doneWhen: [
+        "SOURCE_FROZEN_DONE_WHEN remains satisfied",
+        "SHARED_FROZEN_DONE_WHEN remains satisfied",
+      ],
+      worktreePath: sourceWorktreePath,
+    });
+    harness.recordAttempt({
+      taskId: sourceTask,
+      input: { prompt: `OLD_SOURCE_PROMPT_SENTINEL_${"s".repeat(500_000)}` },
+      output: {
+        status: "done",
+        summary: "Source implementation completed",
+        changedFiles: ["packages/runner/src/hooks/create-repair.ts"],
+        checks: [{ name: "source tests", status: "passed" }],
+        artifacts: [{ kind: "source_stdout", stdout: `OLD_SOURCE_STDOUT_SENTINEL_${"o".repeat(500_000)}` }],
+        problems: [],
+      },
+    });
+    const verifierTask = harness.createTask({
+      runId,
+      role: "verifier",
+      goal: "Verify bounded repair context",
+      prompt: "Verify the frozen contract.",
+      doneWhen: [
+        "SHARED_FROZEN_DONE_WHEN remains satisfied",
+        "VERIFIER_FROZEN_DONE_WHEN remains satisfied",
+      ],
+      config: {
+        verifierContract: {
+          deterministicChecks: [{ name: "production-shaped replay", required: true }],
+          amendmentPolicy: "explicit-only",
+        },
+      },
+      dependsOn: [sourceTask],
+      worktreePath: sourceWorktreePath,
+    });
+    const latestRootCause = "LATEST_ROOT_CAUSE: context archive recursively copied verifier output";
+    const nestedHistory = `OLD_NESTED_OUTPUT_SENTINEL_${"h".repeat(1_050_000)}`;
+
+    await runNextReadyTask({
+      harness,
+      runId,
+      executor: async () => ({
+        status: "blocked",
+        summary: "Verification failed because repair context is recursive",
+        changedFiles: ["packages/runner/src/hooks/context-summary.ts"],
+        checks: [
+          { name: "production-shaped replay", status: "failed", evidence: nestedHistory },
+          { name: "frozen verifier contract", status: "passed" },
+        ],
+        artifacts: [{ kind: "codex_transcript", prompt: nestedHistory, stdout: nestedHistory }],
+        problems: [nestedHistory, latestRootCause],
+      }),
+      stopHooks: [createRepairTaskHook({ harness })],
+    });
+
+    const repair = harness.getRunOverview({ runId }).tasks.find((task) => task.parentId === verifierTask)!;
+    expect(repair.prompt.length).toBeLessThanOrEqual(64_000);
+    expect(repair.prompt).toContain(`Verifier Task ID: ${verifierTask}`);
+    expect(repair.prompt).toContain(`Source Task ID: ${sourceTask}`);
+    expect(repair.prompt).toContain(`Source Worktree Path: ${sourceWorktreePath}`);
+    expect(repair.prompt).toContain(latestRootCause);
+    expect(repair.prompt).toContain("VERIFIER_FROZEN_DONE_WHEN remains satisfied");
+    expect(repair.prompt).toContain("SOURCE_FROZEN_DONE_WHEN remains satisfied");
+    expect(repair.prompt).toContain('"amendmentPolicy": "explicit-only"');
+    expect(repair.config).toEqual({
+      verifierContract: {
+        deterministicChecks: [{ name: "production-shaped replay", required: true }],
+        amendmentPolicy: "explicit-only",
+      },
+    });
+    expect(repair.doneWhen).toEqual([
+      "SOURCE_FROZEN_DONE_WHEN remains satisfied",
+      "SHARED_FROZEN_DONE_WHEN remains satisfied",
+      "VERIFIER_FROZEN_DONE_WHEN remains satisfied",
+      "verifier problems are addressed",
+      "relevant checks pass",
+      "the repair output describes changed files and validation",
+    ]);
+    expect(repair.prompt).toContain('"name": "production-shaped replay"');
+    expect(repair.prompt).toContain('"status": "failed"');
+    expect(repair.prompt).toContain("packages/runner/src/hooks/context-summary.ts");
+    expect(repair.prompt).toMatch(/[a-f0-9]{64}/);
+    expect(repair.prompt).not.toContain("OLD_NESTED_OUTPUT_SENTINEL");
+    expect(repair.prompt).not.toContain("OLD_SOURCE_STDOUT_SENTINEL");
+    expect(repair.prompt).not.toContain("OLD_SOURCE_PROMPT_SENTINEL");
+  });
+
+  test("repair handoff rejects an oversized frozen contract without charging budget or creating a task", async () => {
+    const runId = harness.createRun({ goal: "Reject oversized repair handoff" });
+    const verifierTaskId = harness.createTask({
+      runId,
+      role: "verifier",
+      goal: "Verify oversized repair handoff",
+      prompt: "Verify the frozen contract.",
+      doneWhen: ["original verifier criteria remain frozen"],
+      config: {
+        verifierContract: {
+          deterministicChecks: [{ name: "oversized repair check", required: true }],
+          immutableRule: `FROZEN_REPAIR_CONTRACT_${"r".repeat(70_000)}`,
+        },
+      },
+    });
+
+    const result = await createRepairTaskHook({ harness })({
+      run: harness.getRun(runId)!,
+      task: harness.getTask(verifierTaskId)!,
+      sessionName: "oversized-repair-handoff",
+      prompt: "verifier prompt",
+      output: {
+        status: "blocked",
+        summary: "Verifier found a repairable failure",
+        changedFiles: [],
+        checks: [{ name: "oversized repair check", status: "failed" }],
+        artifacts: [],
+        problems: ["latest bounded root cause"],
+      },
+    });
+
+    expect(harness.getRunOverview({ runId }).tasks.map((task) => task.id)).toEqual([verifierTaskId]);
+    expect(harness.getRun(runId)!.context.repairReplanBudget).toBeUndefined();
+    expect(result.decision).toBe("exit");
+    expect(result.artifacts).toContainEqual(expect.objectContaining({
+      kind: "handoff_contract_too_large",
+      chars: expect.any(Number),
+      bytes: expect.any(Number),
+      limit: 64_000,
+      sha: expect.stringMatching(/^[a-f0-9]{64}$/),
+    }));
+    expect(result.problems).toEqual([expect.stringContaining("handoff_contract_too_large")]);
+    expect(JSON.stringify(result)).not.toContain("FROZEN_REPAIR_CONTRACT");
+  });
+
+  test("multi-round blocked verifier repair and goal-review replay keeps prompts bounded without weakening contracts", async () => {
+    const frozenContract = {
+      deterministicChecks: [{ name: "MULTI_ROUND_FROZEN_CHECK", required: true }],
+      amendmentPolicy: "explicit-only",
+    };
+    const runId = harness.createRun({
+      goal: "Complete bounded multi-round repair replay",
+      context: {
+        goalContract: {
+          desiredFinalState: "MULTI_ROUND_FROZEN_GOAL_CONTRACT",
+          successCriteria: ["all bounded repairs verify"],
+        },
+      },
+    });
+    const historicalSentinel = `MULTI_ROUND_HISTORICAL_SENTINEL_${"q".repeat(1_050_000)}`;
+    const repairPrompts: string[] = [];
+    const repairTaskIds: string[] = [];
+
+    for (let round = 1; round <= 3; round += 1) {
+      const sourceTaskId = harness.createTask({
+        runId,
+        role: "worker",
+        goal: `Source round ${round}`,
+        prompt: "Produce source evidence.",
+        doneWhen: [`SOURCE_DONE_WHEN_ROUND_${round}`],
+        config: { verifierContract: frozenContract },
+        worktreePath: "/tmp/ouroboros-multi-round-source",
+      });
+      harness.recordAttempt({
+        taskId: sourceTaskId,
+        input: { prompt: historicalSentinel, stdout: historicalSentinel },
+        output: {
+          status: "done",
+          summary: `Source round ${round} completed`,
+          changedFiles: ["packages/runner/src/hooks/create-repair.ts"],
+          checks: [{ name: "source check", status: "passed" }],
+          artifacts: [{ kind: "historical_transcript", stdout: historicalSentinel }],
+          problems: [],
+        },
+      });
+      const verifierTaskId = harness.createTask({
+        runId,
+        role: "verifier",
+        goal: `Verify round ${round}`,
+        prompt: "Verify source evidence.",
+        doneWhen: [`VERIFIER_DONE_WHEN_ROUND_${round}`],
+        config: { verifierContract: frozenContract },
+        dependsOn: [sourceTaskId],
+        worktreePath: "/tmp/ouroboros-multi-round-source",
+      });
+      const latestRootCause = `LATEST_ROOT_CAUSE_ROUND_${round}`;
+      await runNextReadyTask({
+        harness,
+        runId,
+        executor: async () => ({
+          status: "blocked",
+          summary: `Verifier round ${round} blocked`,
+          changedFiles: ["packages/runner/src/hooks/context-summary.ts"],
+          checks: [{ name: "MULTI_ROUND_FROZEN_CHECK", status: "failed", evidence: historicalSentinel }],
+          artifacts: [{ kind: "historical_transcript", stdout: historicalSentinel }],
+          problems: [historicalSentinel, latestRootCause],
+        }),
+        stopHooks: [createRepairTaskHook({ harness }), createContextSummaryHook()],
+      });
+
+      const repairTask = harness.getRunOverview({ runId }).tasks.find(
+        (task) => task.parentId === verifierTaskId && task.role === "worker",
+      )!;
+      const repairPrompt = buildTaskPrompt({
+        run: harness.getRun(runId)!,
+        task: repairTask,
+        dependencyAttempts: harness.listLatestAttemptsForTasks(repairTask.dependsOn),
+      });
+      repairPrompts.push(repairPrompt);
+      repairTaskIds.push(repairTask.id);
+      expect(repairPrompt.length).toBeLessThan(100_000);
+      expect(repairPrompt).toContain(latestRootCause);
+      expect(repairPrompt).toContain(`VERIFIER_DONE_WHEN_ROUND_${round}`);
+      expect(repairPrompt).toContain("MULTI_ROUND_FROZEN_CHECK");
+      expect(repairPrompt).not.toContain("MULTI_ROUND_HISTORICAL_SENTINEL");
+      harness.recordAttempt({
+        taskId: repairTask.id,
+        input: { prompt: repairPrompt },
+        output: {
+          status: "done",
+          summary: `Repair round ${round} completed`,
+          changedFiles: ["packages/runner/src/hooks/create-repair.ts"],
+          checks: [{ name: "MULTI_ROUND_FROZEN_CHECK", status: "passed" }],
+          artifacts: [],
+          problems: [],
+        },
+      });
+    }
+
+    const goalReviewId = harness.createTask({
+      runId,
+      role: "goal-review",
+      goal: "Review bounded repair replay",
+      prompt: "Review the frozen run goal from bounded evidence.",
+      doneWhen: ["MULTI_ROUND_FROZEN_GOAL_CONTRACT remains satisfied"],
+      dependsOn: repairTaskIds,
+    });
+    const goalReviewPrompt = buildTaskPrompt({
+      run: harness.getRun(runId)!,
+      task: harness.getTask(goalReviewId)!,
+      dependencyAttempts: harness.listLatestAttemptsForTasks(repairTaskIds),
+    });
+    const repairBudget = harness.getRun(runId)!.context.repairReplanBudget as Record<string, unknown>;
+
+    expect(Math.max(...repairPrompts.map((prompt) => prompt.length)) - Math.min(...repairPrompts.map((prompt) => prompt.length))).toBeLessThan(2_000);
+    expect(goalReviewPrompt.length).toBeLessThan(100_000);
+    expect(goalReviewPrompt).toContain("MULTI_ROUND_FROZEN_GOAL_CONTRACT");
+    expect(goalReviewPrompt).not.toContain("MULTI_ROUND_HISTORICAL_SENTINEL");
+    expect(repairBudget).toMatchObject({ limit: 3, used: 3 });
   });
 
   test("blocked verifier stop hook skips repair for external setup blockers", async () => {
@@ -13063,6 +13461,94 @@ describe("runner", () => {
       .all({ $taskId: taskId }) as Array<{ id: string }>;
     db.close();
     expect(rows).toEqual([{ id: result[0].attemptId }]);
+  });
+
+  test("runReadyTasks blocks oversized prompts before creating or invoking an external executor", async () => {
+    const runId = harness.createRun({ goal: "Preflight generic executor input" });
+    const taskId = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Reject oversized generic prompt",
+      prompt: `OVERSIZED_GENERIC_PROMPT_${"x".repeat(910_000)}`,
+      doneWhen: ["frozen completion criteria remain unchanged"],
+    });
+    let factoryCalls = 0;
+    let executorCalls = 0;
+
+    const results = await runReadyTasks({
+      harness,
+      runId,
+      limit: 1,
+      executorFactory: () => {
+        factoryCalls += 1;
+        return async () => {
+          executorCalls += 1;
+          return doneOutput({ summary: "external executor should not run" });
+        };
+      },
+    });
+
+    const attempt = harness.getAttempt(results[0].attemptId)!;
+    expect(factoryCalls).toBe(0);
+    expect(executorCalls).toBe(0);
+    expect(attempt.taskId).toBe(taskId);
+    expect(attempt.status).toBe("blocked");
+    expect(attempt.input.prompt).toBeUndefined();
+    expect(attempt.output.checks).toContainEqual(expect.objectContaining({
+      name: "prompt input budget",
+      status: "failed",
+    }));
+    expect(attempt.output.artifacts).toContainEqual(expect.objectContaining({
+      kind: "prompt_input_budget_exceeded",
+      characterLimit: 900_000,
+    }));
+  });
+
+  test("runner-owned Codex loop blocks oversized prompts before client start", async () => {
+    const runId = harness.createRun({ goal: "Preflight Codex client input" });
+    const taskId = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Reject oversized Codex prompt",
+      prompt: `OVERSIZED_CODEX_PROMPT_${"界".repeat(910_000)}`,
+      doneWhen: ["frozen Codex completion criteria remain unchanged"],
+    });
+    let clientFactoryCalls = 0;
+    let startCalls = 0;
+
+    const result = await runCodexResumableLoop({
+      harness,
+      runId,
+      limit: 1,
+      maxRounds: 1,
+      maxTries: 3,
+      cwd: dir,
+      clientFactory: () => {
+        clientFactoryCalls += 1;
+        return {
+          start: async () => {
+            startCalls += 1;
+            throw new Error("Codex start should not run");
+          },
+          resume: async () => {
+            throw new Error("Codex resume should not run");
+          },
+        };
+      },
+    });
+
+    const taskResult = result.rounds[0].tasks[0];
+    const attempt = harness.getAttempt(taskResult.attemptId)!;
+    expect(clientFactoryCalls).toBe(0);
+    expect(startCalls).toBe(0);
+    expect(attempt.taskId).toBe(taskId);
+    expect(attempt.status).toBe("blocked");
+    expect(attempt.input.prompt).toBeUndefined();
+    expect(attempt.output.artifacts).toContainEqual(expect.objectContaining({
+      kind: "prompt_input_budget_exceeded",
+      characterLimit: 900_000,
+      utf8ByteLimit: 900_000,
+    }));
   });
 
   test("runNextReadyTask uses a new attempt id when a legal retry re-runs the task", async () => {

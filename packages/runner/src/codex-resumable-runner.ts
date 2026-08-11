@@ -17,6 +17,11 @@ import {
 } from "@ouroboros/harness";
 import { randomUUID } from "node:crypto";
 import { buildTaskPrompt, protectedPromptContractFingerprintForSource } from "./prompt";
+import {
+  promptBudgetAttemptInput,
+  promptBudgetBlockedOutput,
+  promptBudgetEvidence,
+} from "./prompt-budget";
 import { applyStartHooks } from "./runner";
 import { createCodexResumableClient, sessionIdFromEvents } from "./executors/codex-resumable";
 import type { CodexResumableClientOptions, CodexResumableResult } from "./executors/codex-resumable";
@@ -345,6 +350,21 @@ class CodexResumableOrchestrator {
     const prompt = this.promptForTask(run, task);
     const route = this.resolveRoute(run, task);
     const cwd = task.worktreePath ?? this.worktreeFor(task) ?? this.cwd;
+    const oversized = promptBudgetEvidence(prompt, "runner client start");
+    if (oversized) {
+      const attemptId = this.harness.recordAttempt({
+        taskId,
+        input: {
+          ...promptBudgetAttemptInput(oversized),
+          sessionName,
+          executor: route.backend.kind,
+          ...attemptInputForRoute(route, cwd),
+        },
+        output: promptBudgetBlockedOutput(oversized),
+      });
+      this.upsertAttemptThread({ runId: run.id, task, attemptId, sessionName, cwd, status: "blocked" });
+      return { attemptId, taskId, status: "blocked" as const, codexSessionId: null };
+    }
     const startResult = await applyStartHooks({
       hooks: this.input.startHooks ?? [],
       run,
@@ -405,6 +425,14 @@ class CodexResumableOrchestrator {
     }
     const sessionName = typeof attempt.input.sessionName === "string" ? attempt.input.sessionName : `attempt-${attemptId}`;
     const prompt = promptOverride ?? "Continue until you can return the required structured JSON.";
+    const oversized = promptBudgetEvidence(prompt, "runner client resume");
+    if (oversized) {
+      this.releaseDirectResumeClaim(attemptId, claimToken);
+      const output = promptBudgetBlockedOutput(oversized);
+      this.harness.finishAttempt({ attemptId, output });
+      this.updateAttemptThread({ attemptId, status: "blocked", agentSessionId: sessionId, heartbeat: true });
+      return { attemptId, status: "blocked" as const, codexSessionId: sessionId };
+    }
     const resolvedModel = attemptModelPreference(attempt.input);
     const cwd = typeof attempt.input.cwd === "string" ? attempt.input.cwd : task.worktreePath ?? this.cwd;
     const recorder = this.createAttemptEventRecorder(attemptId);
@@ -559,6 +587,14 @@ class CodexResumableOrchestrator {
         return null;
       }
       const { attempt: claimedAttempt, claimToken } = claimed;
+      const oversized = promptBudgetEvidence(prompt, "runner client resume");
+      if (oversized) {
+        this.releaseDirectResumeClaim(attempt.id, claimToken);
+        const output = promptBudgetBlockedOutput(oversized);
+        this.harness.finishAttempt({ attemptId: attempt.id, output });
+        this.updateAttemptThread({ attemptId: attempt.id, status: "blocked", agentSessionId: sessionId, heartbeat: true });
+        return { taskId: task.id, attemptId: attempt.id, sessionName, status: "blocked" as const, codexSessionId: sessionId };
+      }
       this.upsertAttemptThread({
         runId: run.id,
         task,
@@ -646,6 +682,21 @@ class CodexResumableOrchestrator {
       const prompt = this.promptForTask(run, task);
       const route = this.resolveRoute(run, task);
       const cwd = task.worktreePath ?? this.cwd;
+      const oversized = promptBudgetEvidence(prompt, "runner client start");
+      if (oversized) {
+        const attemptId = this.harness.recordAttempt({
+          taskId: task.id,
+          input: {
+            ...promptBudgetAttemptInput(oversized),
+            sessionName,
+            executor: route.backend.kind,
+            ...attemptInputForRoute(route, cwd),
+          },
+          output: promptBudgetBlockedOutput(oversized),
+        });
+        this.upsertAttemptThread({ runId: run.id, task, attemptId, sessionName, cwd, status: "blocked" });
+        return { taskId: task.id, attemptId, sessionName, status: "blocked" as const, codexSessionId: null };
+      }
       const baseInput = {
         prompt,
         sessionName,
