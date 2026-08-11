@@ -1124,6 +1124,15 @@ function applyCreateRunsFromDesignWithDb(
   }
   const proposalProjectId = requiredProjectId(proposal.projectId);
   const sourceRun = assertActionSourceProject(harness, db, context, proposalProjectId, "createRunsFromDesign");
+  const proposalSourceRun = proposal.runId
+    ? harness.getRunWithDb(db, proposal.runId)
+    : sourceRun;
+  if (!proposalSourceRun) {
+    throw new Error(
+      `createRunsFromDesign proposal ${proposalId} source run ${proposal.runId ?? "<missing>"} was not found`,
+    );
+  }
+  const proposalSourceTaskId = proposal.taskId ?? context.task.id;
 
   const decisions = harness.listDesignDecisionsWithDb(db, { proposalId });
   const approval = decisions.find((decision) => decision.decision === "approved");
@@ -1275,6 +1284,40 @@ function applyCreateRunsFromDesignWithDb(
   if (runs.length === 0) {
     throw new Error("createRunsFromDesign payload.runs must include at least one planned run");
   }
+  if (runs.length !== 1) {
+    throw new Error(
+      `createRunsFromDesign must create exactly one delivery run (exactly one run per proposal); received ${runs.length}`,
+    );
+  }
+
+  // A proposal owns one delivery run. Older releases derived child IDs from
+  // the calling run/task/action, so the same accepted proposal could create a
+  // second delivery when a later Designer cycle retried it. Resolve any
+  // existing proposal-bound delivery inside this transaction before deriving
+  // the new proposal-stable ID. More than one existing run is an already
+  // ambiguous state and fails closed; it must be retired through governance
+  // before delivery can continue.
+  const existingDeliveryIds = db.query(`
+    select id
+    from runs
+    where project_id = $projectId
+      and json_extract(context_json, '$.source') = 'design'
+      and json_extract(context_json, '$.designProposalId') = $proposalId
+      and coalesce(json_extract(context_json, '$.retired'), 0) != 1
+    order by created_at, id
+    limit 2
+  `).all({
+    $projectId: proposalProjectId,
+    $proposalId: proposal.id,
+  }) as Array<{ id: string }>;
+  if (existingDeliveryIds.length > 1) {
+    throw new Error(
+      `createRunsFromDesign proposal ${proposal.id} already has multiple non-retired delivery runs; retire duplicates before replay`,
+    );
+  }
+  const existingProposalDelivery = existingDeliveryIds[0]
+    ? harness.getRunWithDb(db, existingDeliveryIds[0].id)
+    : null;
 
   // Charter resolution. Automatic production approvals carry the durable
   // resolved founder charter pinned during authority evaluation, so they — and
@@ -1319,7 +1362,7 @@ function applyCreateRunsFromDesignWithDb(
   );
   const frozenEvolution = freezeTargetEvolutionContract(
     proposal,
-    sourceRun,
+    proposalSourceRun,
     proposalProjectId,
     frozenContract.comparison,
   );
@@ -1366,36 +1409,30 @@ function applyCreateRunsFromDesignWithDb(
   // Linear intake provenance for this run was read and validated above. The
   // single-run contract for Linear intake proposals is enforced here, after
   // the runs payload is parsed.
-  if (linearIntake && runs.length !== 1) {
-    throw new Error(
-      `createRunsFromDesign for Linear intake proposal ${proposalId} must create exactly one run; received ${runs.length}`,
-    );
-  }
-
   const createdRuns: Array<{ runId: string; plannerTaskId: string; proposalId: string }> = [];
   let intakeFinalization: LinearIntakeFinalization | null = null;
-  runs.forEach((plannedRun, runIndex) => {
+  runs.forEach((plannedRun) => {
     // Linear intake proposals derive canonical planning-run and planner-task
     // IDs from the immutable Linear issue ID (rooted at the supervised run).
     // Distinct proposals, action replays, and the legitimate
     // after-approveDesign continuation task all converge on the same canonical
     // IDs so exactly one planning run and one planner task exist per issue.
-    // Non-intake proposals keep the existing derivation keyed on the
-    // proposing run/task/action/proposal/runIndex.
+    // Non-intake proposals converge on the proposal-bound run. Legacy child
+    // IDs are reused when exactly one pre-existing delivery is found.
     const childRunId = linearIntake && canonicalChildRunId
       ? canonicalChildRunId
-      : stableChildRunId(context.run.id, context.task.id, context.actionIndex, proposalId, runIndex);
-    const plannerTaskId = linearIntake && canonicalPlannerTaskId
+      : existingProposalDelivery?.id ?? stableChildRunId(proposalId);
+    let plannerTaskId = linearIntake && canonicalPlannerTaskId
       ? canonicalPlannerTaskId
-      : stablePlannerTaskId(context.run.id, context.task.id, context.actionIndex, proposalId, runIndex);
+      : stablePlannerTaskId(proposalId);
     // Idempotent replay: a prior run with the same stable ID already encodes
     // the planned delivery. We never recreate or duplicate the run.
     const childContext: Record<string, unknown> = {
       ...withoutProtectedDesignContext(plannedRun.context),
-      ...inheritedControlContext(sourceRun.context),
+      ...inheritedControlContext(proposalSourceRun.context),
       projectId: proposalProjectId,
-      parentRunId: context.run.id,
-      sourceTaskId: linearIntakeSourceDesignerTaskId ?? context.task.id,
+      parentRunId: proposal.runId ?? context.run.id,
+      sourceTaskId: linearIntakeSourceDesignerTaskId ?? proposalSourceTaskId,
       source: "design",
       designProposalId: proposal.id,
       designCharterId: resolvedCharterId,
@@ -1463,12 +1500,25 @@ function applyCreateRunsFromDesignWithDb(
           childRunId,
         });
       }
-      if (frozenEvolution) {
-        verifyExistingFrozenDesignRun(existingRun, {
-          goal: plannedRun.goal,
-          expectedContext: childContext,
-        });
+      verifyExistingFrozenDesignRun(existingRun, {
+        goal: plannedRun.goal,
+        expectedContext: childContext,
+      });
+    }
+    if (!linearIntake && existingProposalDelivery) {
+      const existingTasks = harness
+        .getRunOverviewWithDb(db, { runId: existingProposalDelivery.id, eventLimit: 0 })
+        .tasks;
+      const plannerCandidates = existingTasks.filter((task) => task.role === "planner");
+      const existingPlanner = plannerCandidates.length === 1
+        ? plannerCandidates[0]
+        : (plannerCandidates.length === 0 && existingTasks.length === 1 ? existingTasks[0] : null);
+      if (!existingPlanner) {
+        throw new Error(
+          `createRunsFromDesign proposal ${proposal.id} delivery run ${existingProposalDelivery.id} has ${plannerCandidates.length} unambiguous planner tasks; expected exactly one`,
+        );
       }
+      plannerTaskId = existingPlanner.id;
     }
     const existingTask = harness.getTask(plannerTaskId);
     const plannerGoal = `Plan run: ${plannedRun.goal}`;
@@ -1493,7 +1543,7 @@ function applyCreateRunsFromDesignWithDb(
         doneWhen: plannerDoneWhen,
         config: plannerConfig,
       });
-    } else if (frozenEvolution) {
+    } else {
       verifyExistingPlannerTask(existingTask, {
         runId: childRunId,
         role: "planner",
@@ -3007,24 +3057,12 @@ function stableAdverseSignalId(runId: string, taskId: string, actionIndex: numbe
   return `signal_${sha1Hex(`adverse-outcome|${runId}|${taskId}|${actionIndex}|${proposalId}`)}`;
 }
 
-function stableChildRunId(
-  runId: string,
-  taskId: string,
-  actionIndex: number,
-  proposalId: string,
-  runIndex: number,
-): string {
-  return `run_${sha1Hex(`design-child|${runId}|${taskId}|${actionIndex}|${proposalId}|${runIndex}`)}`;
+function stableChildRunId(proposalId: string): string {
+  return `run_${sha1Hex(`design-child|${proposalId}`)}`;
 }
 
-function stablePlannerTaskId(
-  runId: string,
-  taskId: string,
-  actionIndex: number,
-  proposalId: string,
-  runIndex: number,
-): string {
-  return `task_${sha1Hex(`design-planner|${runId}|${taskId}|${actionIndex}|${proposalId}|${runIndex}`)}`;
+function stablePlannerTaskId(proposalId: string): string {
+  return `task_${sha1Hex(`design-planner|${proposalId}`)}`;
 }
 
 function sha1Hex(input: string): string {

@@ -1317,6 +1317,108 @@ describe("design-action transition coordinator (production authority path)", () 
     });
   });
 
+  test("the same accepted proposal reuses one delivery run across Designer cycles", async () => {
+    const projectId = harness.createProject({ name: "ouroboros", rootPath: dir });
+    seedActiveCharter(projectId);
+    const signalId = seedActiveSignal(projectId);
+    const firstRunId = harness.createRun({ goal: "cycle 18", projectId });
+    const firstTaskId = harness.createTask({
+      runId: firstRunId,
+      role: "designer",
+      goal: "design cycle 18",
+      prompt: "design",
+    });
+    const secondRunId = harness.createRun({ goal: "cycle 19", projectId });
+    const secondTaskId = harness.createTask({
+      runId: secondRunId,
+      role: "designer",
+      goal: "design cycle 19",
+      prompt: "design",
+    });
+
+    await runHook({
+      status: "done",
+      summary: "propose once",
+      designActions: [{
+        type: "proposeDesign",
+        payload: {
+          projectId,
+          title: "Pre-warm cache once",
+          proposal: lowRiskEnvelope(signalId),
+          status: "proposed",
+        },
+      }],
+    } as AttemptOutput, firstRunId, firstTaskId);
+    const proposal = harness.listDesignProposals({ projectId })[0];
+    expect(proposal.status).toBe("accepted");
+
+    const delivery: AttemptOutput = {
+      status: "done",
+      summary: "deliver the accepted proposal",
+      designActions: [{
+        type: "createRunsFromDesign",
+        payload: {
+          proposalId: proposal.id,
+          runs: [{ goal: "Plan pre-warm", prompt: "Plan the change." }],
+        },
+      }],
+    } as AttemptOutput;
+    const first = await runHook(delivery, firstRunId, firstTaskId);
+    const second = await runHook(delivery, secondRunId, secondTaskId);
+
+    expect(first.decision).toBe("continue");
+    expect(second.decision).toBe("continue");
+    const firstCreated = createdRunArtifacts(first) as Array<{ runId: string; plannerTaskId: string }>;
+    const secondCreated = createdRunArtifacts(second) as Array<{ runId: string; plannerTaskId: string }>;
+    expect(firstCreated).toHaveLength(1);
+    expect(secondCreated).toHaveLength(1);
+    expect(secondCreated[0]).toEqual(firstCreated[0]);
+    expect(
+      harness.listRuns({ limit: 100 }).filter((run) => run.context.designProposalId === proposal.id),
+    ).toHaveLength(1);
+  });
+
+  test("a proposal rejects multiple delivery runs before creating any child", async () => {
+    const { runId, taskId } = setupRunAndTask();
+    const projectId = harness.createProject({ name: "ouroboros", rootPath: dir });
+    seedActiveCharter(projectId);
+    const signalId = seedActiveSignal(projectId);
+    await runHook({
+      status: "done",
+      summary: "propose once",
+      designActions: [{
+        type: "proposeDesign",
+        payload: {
+          projectId,
+          title: "Single delivery boundary",
+          proposal: lowRiskEnvelope(signalId),
+          status: "proposed",
+        },
+      }],
+    } as AttemptOutput, runId, taskId);
+    const proposal = harness.listDesignProposals({ projectId })[0];
+    const before = harness.listRuns({ limit: 100 }).length;
+
+    const result = await runHook({
+      status: "done",
+      summary: "attempt two deliveries",
+      designActions: [{
+        type: "createRunsFromDesign",
+        payload: {
+          proposalId: proposal.id,
+          runs: [
+            { goal: "Plan A", prompt: "Plan A." },
+            { goal: "Plan B", prompt: "Plan B." },
+          ],
+        },
+      }],
+    } as AttemptOutput, runId, taskId);
+
+    expect(result.decision).toBe("exit");
+    expect(result.problems?.[0]).toContain("exactly one delivery run");
+    expect(harness.listRuns({ limit: 100 })).toHaveLength(before);
+  });
+
   test("production-format proposal without an explicit riskSurface field auto-approves when content is genuinely low-risk", async () => {
     // The production Designer prompt (packages/cli/src/main.ts) does not require
     // an explicit `riskSurface` field. When the designer omits the field

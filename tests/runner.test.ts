@@ -8311,13 +8311,17 @@ describe("runner", () => {
       reasons: ["bounded test fixture"],
     });
     const childRunId = `run_${createHash("sha1")
-      .update(`design-child|${runId}|${taskId}|0|${proposal.id}|0`, "utf8")
+      .update(`design-child|${proposal.id}`, "utf8")
       .digest("hex")}`;
     harness.createRun({
       id: childRunId,
       goal: "Existing polluted child",
       projectId,
-      context: { projectId: otherProjectId },
+      context: {
+        projectId: otherProjectId,
+        source: "design",
+        designProposalId: proposal.id,
+      },
     });
     const hook = createApplyDesignActionsHook({ harness });
 
