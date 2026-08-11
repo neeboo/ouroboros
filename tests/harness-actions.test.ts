@@ -689,6 +689,18 @@ describe("Harness actions", () => {
         problems: ["goal-review cannot create continue work after repair budget exhausted at 3/3"],
       },
     });
+    harness.recordAttempt({
+      taskId: reviewTaskId,
+      input: { executor: "bounded-stop" },
+      output: {
+        status: "blocked",
+        summary: "A later bounded stop has no new run decision",
+        changedFiles: [],
+        checks: [],
+        artifacts: [],
+        problems: ["The prior exhausted goal-review evidence remains authoritative."],
+      },
+    });
     harness.updateRunStatus({ runId, status: "blocked" });
     withDatabase(harness.dbPath, (db) => {
       db.query("update runs set updated_at = '2000-01-01 00:00:00' where id = $runId").run({ $runId: runId });
@@ -716,7 +728,7 @@ describe("Harness actions", () => {
     });
     expect(harness.getTask(reviewTaskId)?.status).toBe("blocked");
     expect(overview.run?.status).toBe("blocked");
-    expect(overview.sessions.filter((session) => session.taskId === reviewTaskId)).toHaveLength(1);
+    expect(overview.sessions.filter((session) => session.taskId === reviewTaskId)).toHaveLength(2);
     expect(firstUpdatedAt).toBe("2000-01-01 00:00:00");
     expect(secondUpdatedAt).toBe(firstUpdatedAt);
   });

@@ -5351,9 +5351,13 @@ function blockedGoalReviewAtExhaustedRepairBudget(overview: ReturnType<Harness["
   if (latestTask && latestTask.id !== blockedReview.id) {
     return null;
   }
-  const blockedSession = [...overview.sessions].reverse().find(
-    (session) => session.taskId === blockedReview.id && session.status === "blocked",
-  );
+  const blockedSession = [...overview.sessions].reverse().find((session) => {
+    if (session.taskId !== blockedReview.id || session.status !== "blocked") {
+      return false;
+    }
+    const decision = resolveRunDecision(session.output);
+    return decision === "continue" || decision === "verify";
+  });
   if (!blockedSession) {
     return null;
   }
