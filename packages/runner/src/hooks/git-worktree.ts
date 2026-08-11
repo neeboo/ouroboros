@@ -93,21 +93,20 @@ export function createGitWorktreeHook(options: {
         problems: [statusBeforeInstall.problem],
       };
     }
+    const dependencyInstall = dependencyInstallCommand(
+      cwd,
+      bunLockBeforeInstall.snapshot.kind === "regular",
+    );
     const installResult = await runCommand({
-      cmd: [
-        "bun",
-        "install",
-        "--no-save",
-        "--cwd",
-        cwd,
-        ...(bunLockBeforeInstall.snapshot.kind === "regular" ? ["--frozen-lockfile"] : []),
-      ],
+      cmd: dependencyInstall.cmd,
       stdin: "",
+      env: dependencyInstall.env,
     });
     const bunLockBoundary = inspectBunLockBoundary({
       cwd,
       path: bunLockPath,
       beforeInstall: bunLockBeforeInstall.snapshot,
+      installLabel: dependencyInstall.label,
     });
     const statusAfterInstall = await gitStatusSnapshot(runCommand, cwd);
     const statusBoundary = statusAfterInstall.ok && statusAfterInstall.status === statusBeforeInstall.status
@@ -115,7 +114,7 @@ export function createGitWorktreeHook(options: {
           check: {
             name: "worktree status boundary",
             status: "passed" as const,
-            summary: "worktree status preserved across bun install",
+            summary: `worktree status preserved across ${dependencyInstall.label}`,
           },
         }
       : {
@@ -123,11 +122,11 @@ export function createGitWorktreeHook(options: {
             name: "worktree status boundary",
             status: "failed" as const,
             summary: statusAfterInstall.ok
-              ? "bun install changed worktree status"
+              ? `${dependencyInstall.label} changed worktree status`
               : statusAfterInstall.problem,
           },
           problem: statusAfterInstall.ok
-            ? "bun install changed worktree status"
+            ? `${dependencyInstall.label} changed worktree status`
             : statusAfterInstall.problem,
         };
 
@@ -135,7 +134,7 @@ export function createGitWorktreeHook(options: {
       return {
         checks: [
           ...checks,
-          { name: "bun install", status: installResult.exitCode === 0 ? "passed" : "failed" },
+          { name: dependencyInstall.label, status: installResult.exitCode === 0 ? "passed" : "failed" },
           ...(bunLockBoundary.check ? [bunLockBoundary.check] : []),
           statusBoundary.check,
         ],
@@ -153,7 +152,7 @@ export function createGitWorktreeHook(options: {
     return {
       checks: [
         ...checks,
-        { name: "bun install", status: "passed" },
+        { name: dependencyInstall.label, status: "passed" },
         ...(bunLockBoundary.check ? [bunLockBoundary.check] : []),
         statusBoundary.check,
       ],
@@ -162,6 +161,46 @@ export function createGitWorktreeHook(options: {
         ...(bunLockBoundary.artifact ? [bunLockBoundary.artifact] : []),
       ],
     };
+  };
+}
+
+function dependencyInstallCommand(cwd: string, hasTrackedBunLock: boolean) {
+  try {
+    const packageJson = JSON.parse(readFileSync(join(cwd, "package.json"), "utf8")) as {
+      packageManager?: unknown;
+    };
+    const yarnOne = typeof packageJson.packageManager === "string"
+      ? /^yarn@(1(?:\.[0-9]+){1,2})$/.exec(packageJson.packageManager)
+      : null;
+    if (yarnOne) {
+      return {
+        label: "yarn install",
+        cmd: [
+          "corepack",
+          `yarn@${yarnOne[1]}`,
+          "--cwd",
+          cwd,
+          "install",
+          "--frozen-lockfile",
+          "--non-interactive",
+        ],
+        env: { COREPACK_ENABLE_PROJECT_SPEC: "0" },
+      };
+    }
+  } catch {
+    // The selected installer reports malformed or missing package metadata.
+  }
+  return {
+    label: "bun install",
+    cmd: [
+      "bun",
+      "install",
+      "--no-save",
+      "--cwd",
+      cwd,
+      ...(hasTrackedBunLock ? ["--frozen-lockfile"] : []),
+    ],
+    env: undefined,
   };
 }
 
@@ -200,6 +239,7 @@ function inspectBunLockBoundary(input: {
   cwd: string;
   path: string;
   beforeInstall: BunLockSnapshot;
+  installLabel: string;
 }): GeneratedArtifactBoundaryResult {
   const afterInstallResult = trySnapshotBunLock(input.path);
   if (!afterInstallResult.ok) {
@@ -211,7 +251,7 @@ function inspectBunLockBoundary(input: {
       return boundaryFailure("pre-existing bun.lock is not a regular file");
     }
     if (!sameBunLockSnapshot(input.beforeInstall, afterInstall)) {
-      return boundaryFailure("pre-existing bun.lock changed during bun install");
+      return boundaryFailure(`pre-existing bun.lock changed during ${input.installLabel}`);
     }
     return {};
   }
@@ -220,7 +260,9 @@ function inspectBunLockBoundary(input: {
   }
 
   if (afterInstall.kind === "regular") {
-    const summary = "bun install created bun.lock despite --no-save";
+    const summary = input.installLabel === "bun install"
+      ? "bun install created bun.lock despite --no-save"
+      : `${input.installLabel} created bun.lock despite the generated-artifact boundary`;
     return {
       check: {
         name: "generated artifact boundary",
@@ -239,7 +281,9 @@ function inspectBunLockBoundary(input: {
       problem: summary,
     };
   }
-  return boundaryFailure("bun install created an unsafe bun.lock despite --no-save");
+  return boundaryFailure(input.installLabel === "bun install"
+    ? "bun install created an unsafe bun.lock despite --no-save"
+    : `${input.installLabel} created an unsafe bun.lock despite the generated-artifact boundary`);
 }
 
 type GeneratedArtifactBoundaryResult = {
