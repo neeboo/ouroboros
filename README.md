@@ -4,15 +4,40 @@
 
 English · [简体中文](./zh_CN.md)
 
-Loop Engineering for long-running coding-agent work.
+Imagine a production system makes the same mistake for the third time. An agent can patch the code again. The tests can pass again. But if the next agent cannot see what happened, cannot reuse the fix, and cannot change the way future work is done, the system has learned nothing.
 
-Ouroboros turns a goal into planned tasks, isolated worktree sessions, verifier checks, repair loops, and reviewable artifacts. It is built for agent runs that last longer than a single prompt and need observable state, resumable execution, and a clear path from "work happened" to "this can be reviewed".
+Ouroboros exists to make that learning durable. It is a local-first **meta self-improvement system**: it improves its own way of working, and it helps other systems, such as Hodor, design and operate their own self-improvement loops. The CLI is shortened to `orbs`.
 
-The project is called Ouroboros because its core pattern is a self-improving loop. The CLI is shortened to `orbs`.
+## What Self-Improvement Means
+
+A system truly self-improves when real experience can change how its next generation works:
+
+```text
+experience
+  -> form a bounded improvement
+  -> verify the result
+  -> carry the proven capability into the next generation
+  -> new experience
+```
+
+The last step matters. A lesson in a report is useful evidence, but it becomes system improvement only when the next run actually loads the updated prompt, knowledge, reusable capability package (skill), tool, or operating rule and records proof that it did so.
+
+Ouroboros keeps this recursive method intentionally small. It can repeat at three levels:
+
+- an implementer completes one product change;
+- a target system improves how it performs its own domain work;
+- Ouroboros improves the operating framework that designs, governs, and verifies both loops.
 
 ## Why Ouroboros
 
-Coding agents are good at doing focused work, but long-running work often fails around control:
+Suppose Hodor discovers from real production episodes that one part of its media workflow is slow, expensive, or unreliable. Ouroboros helps it turn that evidence into a bounded design, deliver the change, measure the result, and retain or roll it back. At the same time, Ouroboros watches its own failures: weak planning, lost context, repeated repairs, stale tools, or a scheduler that stops making progress. Those become candidates for improving Ouroboros itself.
+
+This gives Ouroboros two connected responsibilities:
+
+- **Improve Ouroboros:** make its planning, execution, verification, memory, tools, and resource decisions better over time.
+- **Enable target systems:** give Hodor and other projects a governed way to observe outcomes, propose changes, verify them, and inherit successful capabilities.
+
+Long-running agent work needs this control because common failures happen between prompts:
 
 - task state lives in prompts instead of durable storage
 - workers run in the same directory and step on each other
@@ -21,47 +46,60 @@ Coding agents are good at doing focused work, but long-running work often fails 
 - logs are too raw for humans to understand
 - finished worktrees are hard to integrate safely
 
-Ouroboros keeps the control plane local and explicit:
+Ouroboros keeps the control plane local and explicit. SQLite stores durable state, workers run in isolated worktrees and resumable sessions, verifiers check frozen contracts, repairs remain bounded, and integration leaves reviewable evidence.
 
-- SQLite stores runs, tasks, attempts, sessions, lessons, artifacts, and external refs.
-- Planner tasks create a task graph.
-- Worker tasks run in resumable sessions, usually in separate git worktrees.
-- Verifier tasks check evidence against a contract.
-- Repair tasks continue from verifier failures without redefining success.
-- Integrator tasks collect verified work into reviewable output.
-- Dashboard shows the live run, sessions, todos, changed files, diffs, and runner state.
+## What Each Generation Must Inherit
+
+Every run needs two kinds of context. For Hodor, they look like this:
+
+- **Project knowledge:** production rules, cost records, past incidents, goals, and constraints from Hodor's own work.
+- **ORBS capabilities:** the callable tools, prompts, reusable skills, and safety rules available to the agents working on Hodor.
+
+Ouroboros is building a versioned operating framework (`HarnessRevision`) so each new generation can load an approved set of capabilities and leave proof of adoption. Existing runs already receive durable lessons, proven practices, frozen contracts, and resumable execution. Complete generation-by-generation proof for every skill and tool update is still in progress. The detailed data contract lives in the linked design documents below.
+
+## Resources and Human Decisions
+
+When time, compute, and people are limited, Ouroboros will choose one already approved candidate that is most worth testing, measure it, and only then select the next one. This resource choice is still under development; current scheduling is primarily task and dependency driven.
+
+Humans define the charter, decide what risks are acceptable, and approve spending or other reserved high-impact changes. Linear is the durable approval and evidence surface. The dashboard can help with observation, but approval does not depend on it. Under the current managed charter, evidence-backed zero-spend changes may proceed automatically, while spending and charter changes require explicit human authority; projects can reserve additional high-risk decisions for people.
+
+## The Operating Loop
 
 ```text
-goal
-  -> planner task graph
-  -> worker sessions in worktrees
-  -> verifier evidence
-  -> repair loop
-  -> integrator / proposed artifact
-  -> goal review
+real evidence
+  -> Designer proposes or deliberately waits
+  -> authority accepts, rejects, or asks a human
+  -> Planner freezes the delivery and verification contract
+  -> Worker implements in an isolated, resumable session
+  -> Verifier checks evidence; bounded repair handles failures
+  -> verified integration
+  -> outcome review retains, revises, or retires the change
+  -> the next generation inherits the accepted result
 ```
 
 ## Status
 
-Ouroboros is early, but it already has the core loop needed for self-iteration:
+Ouroboros is early. The control loop works today; durable capability inheritance and resource-aware evolution are the next product milestone.
 
-- SQLite-backed harness
-- prompt templates stored in the database
-- role-scoped stop hooks
-- resumable Codex executor
-- acpx/Codex executor foundation
-- configurable ACP/acpx agent backend selection per role or task
-- git worktree start hook
-- dashboard with task canvas, sessions, todos, changed files, and diff inspection
-- Linear mapping skeleton
-- self-iteration command
+Available today:
+
+- work can resume after interruption without losing task, session, lesson, or evidence history
+- real evidence can become a reviewed design with a fixed success contract and bounded repair
+- agents can work safely in isolated git worktrees and integrate verified changes
+- Linear can receive work, record bounded status and evidence updates, and preserve human decisions
+- Ouroboros can run continuous self-improvement without retrying the same failure forever
 
 Active areas:
 
-- integrator stage for merging verified worktree output into a reviewable patch, branch, or PR
-- smoke-tested agent-specific adapters beyond the generic ACP/acpx backend foundation
-- persistent dashboard history loaded from the database
-- conversation view that turns raw stdout into a readable coding-agent stream
+- make each new generation load approved capability updates and prove what it used
+- keep project knowledge separate from ORBS capabilities while refreshing both across runs
+- carry approved skill and tool improvements into later generations automatically
+- choose one worthwhile learning investment when resources are limited
+
+Read the fuller product and system design:
+
+- [Ouroboros and Hodor: Meta Self-Improvement](./docs/ouroboros-hodor-meta-self-improvement.md)
+- [Designing Self-Evolution for a Target System](./docs/target-system-evolution.md)
 
 ## Install
 
