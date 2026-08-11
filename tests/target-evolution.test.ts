@@ -1429,6 +1429,25 @@ describe("target-system evolution contracts", () => {
     expect(prompt.length).toBeLessThan(20_000);
   });
 
+  test("maps mutation surface targets and layers without overloading either enum", () => {
+    const prompt = designerPrompt();
+    const extension = jsonFenceAfter(prompt, "## Target System Evolution Proposal Contract");
+    const pack = extension.evolutionPack as EvolutionPackV1;
+
+    expect(prompt).toContain('evolutionTarget must be exactly "artifact" or "harness"');
+    expect(prompt).toContain('artifact allows layer "artifact", "code", or "policy"');
+    expect(prompt).toContain('harness allows layer "workflow", "prompt", "tool", "policy", or "code"');
+    expect(prompt).toContain('Never use "workflow", "prompt", "tool", "policy", or "code" as evolutionTarget');
+    expect(pack.mutationSurfaces).toContainEqual(expect.objectContaining({
+      evolutionTarget: "artifact",
+      layer: "policy",
+    }));
+    expect(pack.mutationSurfaces).toContainEqual(expect.objectContaining({
+      evolutionTarget: "harness",
+      layer: "workflow",
+    }));
+  });
+
   test("provides one standalone exact evolution extension fragment accepted by the parser", () => {
     const prompt = designerPrompt();
     const extension = jsonFenceAfter(prompt, "## Target System Evolution Proposal Contract");
