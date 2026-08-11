@@ -10426,6 +10426,8 @@ describe("runner", () => {
     expect(continuationTask).toBeDefined();
     expect(continuationTask?.role).toBe("designer");
     expect(continuationTask?.prompt).toContain(signalId);
+    expect(continuationTask?.prompt).toContain("evidenceRefs MUST equal the one-item array");
+    expect(continuationTask?.prompt).toContain("Do not add raw commit SHAs, proposal IDs, decision IDs");
     expect(continuationTask?.dependsOn).toEqual([taskId]);
 
     const continuationPrompt = buildTaskPrompt({

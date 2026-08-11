@@ -2669,8 +2669,9 @@ function buildSignalContinuationPrompt(signal: { id: string; title: string; summ
     "Designer cycle continuation after recordSignal.",
     `The cycle recorded signal ${signal.id} (title: ${JSON.stringify(signal.title)}; summary: ${JSON.stringify(signal.summary)}).`,
     "Choose the next bounded step:",
-    "  (a) proposeDesign anchored to this signal — its evidenceRefs MUST include this signal ID, OR",
+    `  (a) proposeDesign anchored to this signal — its evidenceRefs MUST equal the one-item array [${JSON.stringify(signal.id)}], OR`,
     "  (b) emit no design actions and stop with a justified no-action result.",
+    "Do not add raw commit SHAs, proposal IDs, decision IDs, repository refs, or other unresolved values to proposal.evidenceRefs; those belong inside the durable signal's evidence record.",
     "Do not re-record the signal. Do not mutate strategy state directly.",
     `Durable signal ID: ${signal.id}`,
   ].join("\n");
