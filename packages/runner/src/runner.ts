@@ -1,6 +1,11 @@
 import { describeIntegrationReadiness } from "@ouroboros/harness";
 import type { AttemptOutput, Harness, Task } from "@ouroboros/harness";
 import { buildTaskPrompt } from "./prompt";
+import {
+  blockedHarnessRevisionOutput,
+  harnessRevisionAttemptInput,
+  loadFrozenHarnessRevision,
+} from "./harness-revision-loader";
 import { resolveExecutionRoute } from "./execution-routing";
 import type {
   RunNextReadyTaskInput,
@@ -22,18 +27,38 @@ export async function runNextReadyTask(input: RunNextReadyTaskInput) {
     throw new Error(`run not found: ${input.runId}`);
   }
 
+  const cwd = task.worktreePath
+    ?? (run.projectId ? input.harness.getProject(run.projectId)?.rootPath ?? process.cwd() : process.cwd());
+  let loadedHarnessRevision;
+  try {
+    loadedHarnessRevision = loadFrozenHarnessRevision({ harness: input.harness, run, cwd });
+  } catch (error) {
+    const attemptId = input.harness.recordAttempt({
+      taskId: task.id,
+      input: { harnessRevisionValidation: "failed" },
+      output: blockedHarnessRevisionOutput(error),
+    });
+    return { taskId: task.id, attemptId, stopDecision: "exit" as const };
+  }
+
   const prompt = buildTaskPrompt({
     run,
     task,
     dependencyAttempts: latestDependencyAttempts(input.harness, task),
     lessons: input.harness.listLessons({ runId: input.runId }),
     template: input.harness.getPromptTemplate("task")?.contentMd,
+    loadedHarnessRevision: loadedHarnessRevision?.harnessRevision ?? null,
   });
   const sessionName = task.sessionRef ?? defaultSessionName(task.id);
   const route = resolveExecutionRoute({ run, task });
   const attemptId = input.harness.startAttempt({
     taskId: task.id,
-    input: { prompt, route, model: route.model },
+    input: {
+      prompt,
+      route,
+      model: route.model,
+      ...harnessRevisionAttemptInput(loadedHarnessRevision),
+    },
   });
   let rawOutput: AttemptOutput;
   try {
@@ -85,6 +110,17 @@ export async function runReadyTasks(input: RunReadyTasksInput) {
     tasks.map(async (task) => {
       const sessionName = task.sessionRef ?? defaultSessionName(task.id);
       const cwd = task.worktreePath ?? input.cwd ?? process.cwd();
+      let loadedHarnessRevision;
+      try {
+        loadedHarnessRevision = loadFrozenHarnessRevision({ harness: input.harness, run, cwd });
+      } catch (error) {
+        const attemptId = input.harness.recordAttempt({
+          taskId: task.id,
+          input: { sessionName, cwd, harnessRevisionValidation: "failed" },
+          output: blockedHarnessRevisionOutput(error),
+        });
+        return { taskId: task.id, attemptId, sessionName, stopDecision: "exit" as const };
+      }
       const startResult = await applyStartHooks({
         hooks: input.startHooks ?? [],
         run,
@@ -112,6 +148,7 @@ export async function runReadyTasks(input: RunReadyTasksInput) {
         dependencyAttempts: latestDependencyAttempts(input.harness, task),
         lessons: input.harness.listLessons({ runId: input.runId }),
         template: input.harness.getPromptTemplate("task")?.contentMd,
+        loadedHarnessRevision: loadedHarnessRevision?.harnessRevision ?? null,
       });
       const route = resolveExecutionRoute({
         run,
@@ -124,7 +161,14 @@ export async function runReadyTasks(input: RunReadyTasksInput) {
       const executor = input.executorFactory(factoryInput);
       const attemptId = input.harness.startAttempt({
         taskId: task.id,
-        input: { prompt, sessionName, route, model: route.model, ...(input.attemptInput?.(factoryInput) ?? {}) },
+        input: {
+          prompt,
+          sessionName,
+          route,
+          model: route.model,
+          ...(input.attemptInput?.(factoryInput) ?? {}),
+          ...harnessRevisionAttemptInput(loadedHarnessRevision),
+        },
       });
       let rawOutput: AttemptOutput;
       try {

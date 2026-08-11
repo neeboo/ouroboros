@@ -1,11 +1,18 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
 import { existsSync } from "node:fs";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { link, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { createHash } from "node:crypto";
-import { acceptGuardrailProposal, Harness, type AttemptOutput } from "../packages/harness/src";
+import { spawnSync } from "node:child_process";
+import {
+  acceptGuardrailProposal,
+  Harness,
+  type AttemptOutput,
+  type HarnessRevisionComponentKind,
+  type HarnessRevisionV1,
+} from "../packages/harness/src";
 import { consumeLinearInbox } from "../packages/cli/src/linear-intake";
 import { ingestLinearEvent } from "../packages/cli/src/linear";
 import {
@@ -185,6 +192,66 @@ function buildFrozenLinearPrompt(
   });
 }
 
+const HARNESS_REVISION_COMPONENT_KINDS: HarnessRevisionComponentKind[] = [
+  "prompt",
+  "knowledge",
+  "skills",
+  "tools",
+  "agent-policy",
+];
+
+async function writeHarnessRevisionFixture(
+  root: string,
+  projectId: string,
+  input: {
+    componentRef?: Partial<Record<HarnessRevisionComponentKind, string>>;
+    componentContent?: Partial<Record<HarnessRevisionComponentKind, string>>;
+    componentSha?: Partial<Record<HarnessRevisionComponentKind, string>>;
+  } = {},
+): Promise<HarnessRevisionV1> {
+  const gitProbe = spawnSync("git", ["-C", root, "rev-parse", "--is-inside-work-tree"], {
+    encoding: "utf8",
+  });
+  if (gitProbe.status !== 0) {
+    const initialized = spawnSync("git", ["init", "--quiet", root], { encoding: "utf8" });
+    if (initialized.status !== 0) {
+      throw new Error("failed to initialize Harness Revision fixture repository");
+    }
+  }
+  await mkdir(join(root, "harness"), { recursive: true });
+  const components = [];
+  for (const kind of HARNESS_REVISION_COMPONENT_KINDS) {
+    const ref = input.componentRef?.[kind] ?? `repo:harness/${kind}.md`;
+    const content = input.componentContent?.[kind] ?? `${kind} private body`;
+    if (ref.startsWith("repo:harness/")) {
+      await writeFile(join(root, ref.slice("repo:".length)), content);
+    }
+    components.push({
+      kind,
+      ref,
+      sha256: input.componentSha?.[kind]
+        ?? createHash("sha256").update(content, "utf8").digest("hex"),
+    });
+  }
+  const body: Omit<HarnessRevisionV1, "contentSha256"> = {
+    schemaVersion: 1,
+    projectId,
+    version: 1,
+    parentSha256: null,
+    variant: {
+      id: `variant_${"a".repeat(64)}`,
+      recordSha256: "a".repeat(64),
+      contentSha256: "b".repeat(64),
+    },
+    components,
+    evidenceRefs: ["action:harness-revision-fixture"],
+  };
+  return {
+    ...body,
+    contentSha256: createHash("sha256").update(JSON.stringify(body), "utf8").digest("hex"),
+  };
+}
+
 describe("runner", () => {
   let dir: string;
   let harness: Harness;
@@ -311,6 +378,389 @@ describe("runner", () => {
     });
 
     expect(runtimeGenerationAllowsLeasing(harness.getRun(childRunId), dir, harness)).toBe(false);
+  });
+
+  test("Harness Revision loads five repo components and persists a compact host attestation", async () => {
+    const projectId = harness.createProject({ name: "harness-revision", rootPath: dir });
+    const revision = await writeHarnessRevisionFixture(dir, projectId, {
+      componentContent: { knowledge: "PRIVATE_KNOWLEDGE_BODY_MUST_NOT_ENTER_PROMPT" },
+    });
+    const runId = harness.createRun({ goal: "load frozen Harness Revision", projectId, context: { harnessRevision: revision } });
+    harness.createTask({ runId, role: "worker", goal: "use frozen capabilities", prompt: "Work." });
+    let executorCalls = 0;
+    let capturedPrompt = "";
+
+    const result = await runReadyTasks({
+      harness,
+      runId,
+      limit: 1,
+      cwd: dir,
+      executorFactory: () => async ({ prompt }) => {
+        executorCalls += 1;
+        capturedPrompt = prompt;
+        return { status: "done", summary: "done" };
+      },
+      attemptInput: () => ({
+        harnessRevision: { tampered: true },
+        loadedHarnessComponents: [{ tampered: true }],
+      }),
+    });
+
+    expect(executorCalls).toBe(1);
+    expect(result).toHaveLength(1);
+    const attempt = harness.getAttempt(result[0]!.attemptId)!;
+    expect(attempt.input.harnessRevision).toEqual(revision);
+    expect(attempt.input.loadedHarnessComponents).toEqual(
+      revision.components.map((component) => ({
+        ...component,
+        bytes: Buffer.byteLength(
+          component.kind === "knowledge"
+            ? "PRIVATE_KNOWLEDGE_BODY_MUST_NOT_ENTER_PROMPT"
+            : `${component.kind} private body`,
+          "utf8",
+        ),
+      })),
+    );
+    expect(capturedPrompt).toContain("## Frozen Harness Revision");
+    expect(capturedPrompt).toContain(`Version: ${revision.version}`);
+    expect(capturedPrompt).toContain(`Content SHA-256: ${revision.contentSha256}`);
+    for (const component of revision.components) {
+      expect(capturedPrompt).toContain(`${component.kind}: ${component.ref} (${component.sha256})`);
+    }
+    expect(capturedPrompt).not.toContain("PRIVATE_KNOWLEDGE_BODY_MUST_NOT_ENTER_PROMPT");
+    expect(capturedPrompt).not.toContain("evidenceRefs");
+    expect(capturedPrompt).not.toContain("recordSha256");
+  });
+
+  test("Harness Revision prompt preview does not claim host verification before loading", async () => {
+    const projectId = harness.createProject({ name: "harness-revision-preview", rootPath: dir });
+    const revision = await writeHarnessRevisionFixture(dir, projectId);
+    const runId = harness.createRun({
+      goal: "preview without host loading",
+      projectId,
+      context: { harnessRevision: revision },
+    });
+    const taskId = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "preview only",
+      prompt: "Preview.",
+    });
+
+    const prompt = buildTaskPrompt({
+      run: harness.getRun(runId)!,
+      task: harness.getTask(taskId)!,
+      dependencyAttempts: [],
+    });
+
+    expect(prompt).not.toContain("## Frozen Harness Revision");
+    expect(prompt).not.toContain("The host verified");
+    expect(prompt).not.toContain(revision.contentSha256);
+  });
+
+  test("Harness Revision rejects a foreign Git repository with matching files and hashes", async () => {
+    const foreign = await mkdtemp(join(tmpdir(), "ouroboros-harness-foreign-"));
+    try {
+      const projectId = harness.createProject({ name: "harness-revision-project", rootPath: dir });
+      const revision = await writeHarnessRevisionFixture(dir, projectId);
+      await writeHarnessRevisionFixture(foreign, projectId);
+      const runId = harness.createRun({
+        goal: "reject foreign repository identity",
+        projectId,
+        context: { harnessRevision: revision },
+      });
+      harness.createTask({ runId, role: "worker", goal: "must not start", prompt: "Do not execute." });
+      let startHookCalls = 0;
+      let executorCalls = 0;
+
+      const result = await runReadyTasks({
+        harness,
+        runId,
+        limit: 1,
+        cwd: foreign,
+        startHooks: [() => {
+          startHookCalls += 1;
+          return {};
+        }],
+        executorFactory: () => async () => {
+          executorCalls += 1;
+          return { status: "done", summary: "must not run" };
+        },
+      });
+
+      expect(startHookCalls).toBe(0);
+      expect(executorCalls).toBe(0);
+      expect(harness.getAttempt(result[0]!.attemptId)?.status).toBe("blocked");
+    } finally {
+      await rm(foreign, { recursive: true, force: true });
+    }
+  });
+
+  test.each([
+    ["hash mismatch", async (root: string, projectId: string) =>
+      writeHarnessRevisionFixture(root, projectId, {
+        componentSha: { prompt: "f".repeat(64) },
+      })],
+    ["missing file", async (root: string, projectId: string) =>
+      writeHarnessRevisionFixture(root, projectId, {
+        componentRef: { prompt: "repo:missing/prompt.md" },
+      })],
+    ["absolute path", async (root: string, projectId: string) =>
+      writeHarnessRevisionFixture(root, projectId, {
+        componentRef: { prompt: "repo:/tmp/prompt.md" },
+      })],
+    ["parent traversal", async (root: string, projectId: string) =>
+      writeHarnessRevisionFixture(root, projectId, {
+        componentRef: { prompt: "repo:../prompt.md" },
+      })],
+    ["non-repo scheme", async (root: string, projectId: string) =>
+      writeHarnessRevisionFixture(root, projectId, {
+        componentRef: { prompt: "resource:prompt-v1" },
+      })],
+    ["oversized file", async (root: string, projectId: string) =>
+      writeHarnessRevisionFixture(root, projectId, {
+        componentContent: { prompt: "x".repeat(300_000) },
+      })],
+  ])("Harness Revision %s blocks before start hooks and executors", async (_label, buildRevision) => {
+    const projectId = harness.createProject({ name: "harness-revision-invalid", rootPath: dir });
+    const revision = await buildRevision(dir, projectId);
+    const runId = harness.createRun({
+      goal: "reject invalid frozen Harness Revision",
+      projectId,
+      context: { harnessRevision: revision },
+    });
+    harness.createTask({ runId, role: "worker", goal: "must not start", prompt: "Do not execute." });
+    let startHookCalls = 0;
+    let executorFactoryCalls = 0;
+
+    const result = await runReadyTasks({
+      harness,
+      runId,
+      limit: 1,
+      cwd: dir,
+      startHooks: [() => {
+        startHookCalls += 1;
+        return {};
+      }],
+      executorFactory: () => {
+        executorFactoryCalls += 1;
+        return async () => ({ status: "done", summary: "must not run" });
+      },
+    });
+
+    expect(startHookCalls).toBe(0);
+    expect(executorFactoryCalls).toBe(0);
+    const attempt = harness.getAttempt(result[0]!.attemptId)!;
+    expect(attempt.status).toBe("blocked");
+    expect(attempt.output?.problems?.join(" ")).toMatch(/Harness Revision/i);
+    expect(JSON.stringify(attempt)).not.toContain("private body");
+  });
+
+  test("Harness Revision rejects a directory and a symlink escape before execution", async () => {
+    const outside = await mkdtemp(join(tmpdir(), "ouroboros-harness-outside-"));
+    try {
+      const projectId = harness.createProject({ name: "harness-revision-paths", rootPath: dir });
+      const cases = [
+        async () => {
+          const revision = await writeHarnessRevisionFixture(dir, projectId);
+          await rm(join(dir, "harness/prompt.md"));
+          await mkdir(join(dir, "harness/prompt.md"));
+          return revision;
+        },
+        async () => {
+          const revision = await writeHarnessRevisionFixture(dir, projectId);
+          await writeFile(join(outside, "prompt.md"), "prompt private body");
+          await rm(join(dir, "harness/prompt.md"));
+          await symlink(join(outside, "prompt.md"), join(dir, "harness/prompt.md"));
+          return revision;
+        },
+      ];
+      for (const buildRevision of cases) {
+        const revision = await buildRevision();
+        const runId = harness.createRun({
+          goal: "reject unsafe component",
+          projectId,
+          context: { harnessRevision: revision },
+        });
+        harness.createTask({ runId, role: "worker", goal: "must not start", prompt: "Do not execute." });
+        let executorCalls = 0;
+        const result = await runReadyTasks({
+          harness,
+          runId,
+          limit: 1,
+          cwd: dir,
+          executorFactory: () => async () => {
+            executorCalls += 1;
+            return { status: "done", summary: "must not run" };
+          },
+        });
+        expect(executorCalls).toBe(0);
+        expect(harness.getAttempt(result[0]!.attemptId)?.status).toBe("blocked");
+        await rm(join(dir, "harness"), { recursive: true, force: true });
+      }
+    } finally {
+      await rm(outside, { recursive: true, force: true });
+    }
+  });
+
+  test("Harness Revision rejects a hard link to a file outside the worktree", async () => {
+    const outside = await mkdtemp(join(tmpdir(), "ouroboros-harness-hardlink-"));
+    try {
+      const projectId = harness.createProject({ name: "harness-revision-hardlink", rootPath: dir });
+      const revision = await writeHarnessRevisionFixture(dir, projectId);
+      const externalFile = join(outside, "prompt.md");
+      await writeFile(externalFile, "prompt private body");
+      await rm(join(dir, "harness/prompt.md"));
+      await link(externalFile, join(dir, "harness/prompt.md"));
+      const runId = harness.createRun({
+        goal: "reject hard-link escape",
+        projectId,
+        context: { harnessRevision: revision },
+      });
+      harness.createTask({ runId, role: "worker", goal: "must not start", prompt: "Do not execute." });
+      let executorCalls = 0;
+
+      const result = await runReadyTasks({
+        harness,
+        runId,
+        limit: 1,
+        cwd: dir,
+        executorFactory: () => async () => {
+          executorCalls += 1;
+          return { status: "done", summary: "must not run" };
+        },
+      });
+
+      expect(executorCalls).toBe(0);
+      expect(harness.getAttempt(result[0]!.attemptId)?.status).toBe("blocked");
+    } finally {
+      await rm(outside, { recursive: true, force: true });
+    }
+  });
+
+  test("Harness Revision Git identity ignores inherited GIT_DIR and GIT_WORK_TREE", async () => {
+    const foreign = await mkdtemp(join(tmpdir(), "ouroboros-harness-git-env-"));
+    const previousGitDir = process.env.GIT_DIR;
+    const previousGitWorkTree = process.env.GIT_WORK_TREE;
+    try {
+      const projectId = harness.createProject({ name: "harness-revision-git-env", rootPath: dir });
+      const revision = await writeHarnessRevisionFixture(dir, projectId);
+      await writeHarnessRevisionFixture(foreign, projectId, {
+        componentContent: { prompt: "foreign prompt must never be loaded" },
+      });
+      process.env.GIT_DIR = join(foreign, ".git");
+      process.env.GIT_WORK_TREE = foreign;
+      const runId = harness.createRun({
+        goal: "ignore inherited Git routing",
+        projectId,
+        context: { harnessRevision: revision },
+      });
+      harness.createTask({ runId, role: "worker", goal: "load real project", prompt: "Work." });
+      let executorCalls = 0;
+
+      const result = await runReadyTasks({
+        harness,
+        runId,
+        limit: 1,
+        cwd: dir,
+        executorFactory: () => async () => {
+          executorCalls += 1;
+          return { status: "done", summary: "loaded real repository" };
+        },
+      });
+
+      expect(executorCalls).toBe(1);
+      expect(harness.getAttempt(result[0]!.attemptId)?.status).toBe("done");
+    } finally {
+      if (previousGitDir === undefined) delete process.env.GIT_DIR;
+      else process.env.GIT_DIR = previousGitDir;
+      if (previousGitWorkTree === undefined) delete process.env.GIT_WORK_TREE;
+      else process.env.GIT_WORK_TREE = previousGitWorkTree;
+      await rm(foreign, { recursive: true, force: true });
+    }
+  });
+
+  test("Harness Revision validation blocks the resumable client and start hooks before startup", async () => {
+    const projectId = harness.createProject({ name: "harness-revision-resumable", rootPath: dir });
+    const revision = await writeHarnessRevisionFixture(dir, projectId, {
+      componentSha: { tools: "0".repeat(64) },
+    });
+    const runId = harness.createRun({
+      goal: "block invalid resumable startup",
+      projectId,
+      context: { harnessRevision: revision },
+    });
+    const taskId = harness.createTask({ runId, role: "worker", goal: "must not start", prompt: "Do not execute." });
+    let startHookCalls = 0;
+    let clientFactoryCalls = 0;
+
+    const result = await startCodexResumableAttempt({
+      harness,
+      taskId,
+      cwd: dir,
+      startHooks: [() => {
+        startHookCalls += 1;
+        return {};
+      }],
+      clientFactory: () => {
+        clientFactoryCalls += 1;
+        throw new Error("client must not be constructed");
+      },
+    });
+
+    expect(result.status).toBe("blocked");
+    expect(startHookCalls).toBe(0);
+    expect(clientFactoryCalls).toBe(0);
+    const attempt = harness.getAttempt(result.attemptId)!;
+    expect(attempt.status).toBe("blocked");
+    expect(attempt.input.loadedHarnessComponents).toBeUndefined();
+    expect(JSON.stringify(attempt)).not.toContain("tools private body");
+  });
+
+  test("Harness Revision resumable startup attests the manifest and blocks resume after component drift", async () => {
+    const projectId = harness.createProject({ name: "harness-revision-resume", rootPath: dir });
+    const revision = await writeHarnessRevisionFixture(dir, projectId);
+    const runId = harness.createRun({
+      goal: "revalidate frozen capabilities",
+      projectId,
+      context: { harnessRevision: revision },
+    });
+    const taskId = harness.createTask({ runId, role: "worker", goal: "resume safely", prompt: "Work." });
+    let resumeCalls = 0;
+    const orchestration = {
+      harness,
+      cwd: dir,
+      clientFactory: () => ({
+        start: async () => ({
+          status: "running" as const,
+          sessionId: "session_harness_revision",
+          outputPath: join(dir, "output.json"),
+          stdout: "",
+          stderr: "",
+          events: [],
+          output: { status: "done" as const, summary: "unused" },
+        }),
+        resume: async () => {
+          resumeCalls += 1;
+          throw new Error("resume must not run after component drift");
+        },
+      }),
+    };
+
+    const started = await startCodexResumableAttempt({ ...orchestration, taskId });
+    expect(started.status).toBe("running");
+    const startedAttempt = harness.getAttempt(started.attemptId)!;
+    expect(startedAttempt.input.harnessRevision).toEqual(revision);
+    expect(startedAttempt.input.loadedHarnessComponents).toHaveLength(5);
+    expect(startedAttempt.input.prompt).toContain("## Frozen Harness Revision");
+    expect(startedAttempt.input.prompt).not.toContain("prompt private body");
+
+    await writeFile(join(dir, "harness/prompt.md"), "drifted prompt body");
+    const resumed = await resumeCodexResumableAttempt({ ...orchestration, attemptId: started.attemptId });
+
+    expect(resumed.status).toBe("blocked");
+    expect(resumeCalls).toBe(0);
+    expect(harness.getAttempt(started.attemptId)?.output?.problems?.join(" ")).toMatch(/Harness Revision/i);
   });
 
   test("explicit runner start rejects retired runs before invoking hooks or the executor", async () => {

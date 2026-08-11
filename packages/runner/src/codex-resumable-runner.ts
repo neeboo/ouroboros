@@ -17,6 +17,13 @@ import {
 } from "@ouroboros/harness";
 import { randomUUID } from "node:crypto";
 import { buildTaskPrompt, protectedPromptContractFingerprintForSource } from "./prompt";
+import {
+  assertPersistedHarnessRevisionAttestation,
+  blockedHarnessRevisionOutput,
+  harnessRevisionAttemptInput,
+  loadFrozenHarnessRevision,
+  type LoadedHarnessRevision,
+} from "./harness-revision-loader";
 import { applyStartHooks } from "./runner";
 import { createCodexResumableClient, sessionIdFromEvents } from "./executors/codex-resumable";
 import type { CodexResumableClientOptions, CodexResumableResult } from "./executors/codex-resumable";
@@ -345,9 +352,15 @@ class CodexResumableOrchestrator {
     }
     this.harness.clearRunPause(run.id);
     const sessionName = task.sessionRef ?? `task-${task.id}`;
-    const prompt = this.promptForTask(run, task);
     const route = this.resolveRoute(run, task);
     const cwd = task.worktreePath ?? this.worktreeFor(task) ?? this.cwd;
+    let loadedHarnessRevision: LoadedHarnessRevision | null;
+    try {
+      loadedHarnessRevision = loadFrozenHarnessRevision({ harness: this.harness, run, cwd });
+    } catch (error) {
+      return this.blockNewAttemptForHarnessRevision({ run, task, sessionName, cwd, route, error });
+    }
+    const prompt = this.promptForTask(run, task, loadedHarnessRevision);
     const startResult = await applyStartHooks({
       hooks: this.input.startHooks ?? [],
       run,
@@ -360,6 +373,7 @@ class CodexResumableOrchestrator {
       sessionName,
       executor: route.backend.kind,
       ...attemptInputForRoute(route, cwd),
+      ...harnessRevisionAttemptInput(loadedHarnessRevision),
     };
     if ((startResult.problems ?? []).length > 0) {
       const attemptId = this.harness.recordAttempt({
@@ -383,6 +397,18 @@ class CodexResumableOrchestrator {
     }
     const task = this.taskOrThrow(existingAttempt.taskId);
     const run = this.runOrThrow(task.runId);
+    const cwd = typeof existingAttempt.input.cwd === "string"
+      ? existingAttempt.input.cwd
+      : task.worktreePath ?? this.cwd;
+    try {
+      const loadedHarnessRevision = loadFrozenHarnessRevision({ harness: this.harness, run, cwd });
+      assertPersistedHarnessRevisionAttestation(existingAttempt.input, loadedHarnessRevision);
+    } catch (error) {
+      const output = blockedHarnessRevisionOutput(error);
+      this.harness.finishAttempt({ attemptId, output });
+      this.updateAttemptThread({ attemptId, status: "blocked", agentSessionId: null, heartbeat: true });
+      return { attemptId, status: "blocked" as const, codexSessionId: null };
+    }
     this.harness.clearRunPause(run.id);
     const sessionId = this.sessionIdForAttempt(
       existingAttempt,
@@ -409,7 +435,6 @@ class CodexResumableOrchestrator {
     const sessionName = typeof attempt.input.sessionName === "string" ? attempt.input.sessionName : `attempt-${attemptId}`;
     const prompt = promptOverride ?? "Continue until you can return the required structured JSON.";
     const resolvedModel = attemptModelPreference(attempt.input);
-    const cwd = typeof attempt.input.cwd === "string" ? attempt.input.cwd : task.worktreePath ?? this.cwd;
     const recorder = this.createAttemptEventRecorder(attemptId);
     let result: CodexResumableResult;
     try {
@@ -533,11 +558,20 @@ class CodexResumableOrchestrator {
       if (!task) return null;
       const run = this.harness.getRun(task.runId);
       if (!run) return null;
+      const sessionName = typeof attempt.input.sessionName === "string" ? attempt.input.sessionName : `attempt-${attempt.id}`;
+      const cwd = typeof attempt.input.cwd === "string" ? attempt.input.cwd : task.worktreePath ?? this.cwd;
+      try {
+        const loadedHarnessRevision = loadFrozenHarnessRevision({ harness: this.harness, run, cwd });
+        assertPersistedHarnessRevisionAttestation(attempt.input, loadedHarnessRevision);
+      } catch (error) {
+        const output = blockedHarnessRevisionOutput(error);
+        this.harness.finishAttempt({ attemptId: attempt.id, output });
+        this.updateAttemptThread({ attemptId: attempt.id, status: "blocked", agentSessionId: null, heartbeat: true });
+        return { taskId: task.id, attemptId: attempt.id, sessionName, status: "blocked" as const, codexSessionId: null };
+      }
       const thread = threadsByAttemptId.get(attempt.id);
       const sessionId = this.sessionIdForAttempt(attempt, thread);
       if (!sessionId) {
-        const sessionName = typeof attempt.input.sessionName === "string" ? attempt.input.sessionName : `attempt-${attempt.id}`;
-        const cwd = typeof attempt.input.cwd === "string" ? attempt.input.cwd : task.worktreePath ?? this.cwd;
         if (this.runningAttemptIsFresh(sessionsByAttemptId.get(attempt.id), thread)) {
           this.upsertAttemptThread({ runId: run.id, task, attemptId: attempt.id, sessionName, cwd, status: "running" });
           return { taskId: task.id, attemptId: attempt.id, sessionName, status: "running" as const, codexSessionId: null };
@@ -550,13 +584,11 @@ class CodexResumableOrchestrator {
         this.harness.finishAttempt({ attemptId: attempt.id, output });
         return { taskId: task.id, attemptId: attempt.id, sessionName, status: "blocked" as const, codexSessionId: null };
       }
-      const sessionName = typeof attempt.input.sessionName === "string" ? attempt.input.sessionName : `attempt-${attempt.id}`;
       const prompt =
         typeof attempt.input.prompt === "string"
           ? attempt.input.prompt
           : "Continue until you can return the required structured JSON.";
       const resolvedModel = attemptModelPreference(attempt.input);
-      const cwd = typeof attempt.input.cwd === "string" ? attempt.input.cwd : task.worktreePath ?? this.cwd;
       const claimed = this.tryClaimDirectResume(attempt.id);
       if (!claimed) {
         return null;
@@ -649,14 +681,21 @@ class CodexResumableOrchestrator {
     });
     return Promise.all(leased.map(async (task) => {
       const sessionName = task.sessionRef ?? `task-${task.id}`;
-      const prompt = this.promptForTask(run, task);
       const route = this.resolveRoute(run, task);
       const cwd = task.worktreePath ?? this.cwd;
+      let loadedHarnessRevision: LoadedHarnessRevision | null;
+      try {
+        loadedHarnessRevision = loadFrozenHarnessRevision({ harness: this.harness, run, cwd });
+      } catch (error) {
+        return this.blockNewAttemptForHarnessRevision({ run, task, sessionName, cwd, route, error });
+      }
+      const prompt = this.promptForTask(run, task, loadedHarnessRevision);
       const baseInput = {
         prompt,
         sessionName,
         executor: route.backend.kind,
         ...attemptInputForRoute(route, cwd),
+        ...harnessRevisionAttemptInput(loadedHarnessRevision),
       };
       const startResult = await applyStartHooks({
         hooks: this.input.startHooks ?? [],
@@ -915,14 +954,54 @@ class CodexResumableOrchestrator {
     return { taskId: input.task.id, attemptId, sessionName: input.sessionName, status: output.status, codexSessionId: null };
   }
 
-  private promptForTask(run: NonNullable<ReturnType<Harness["getRun"]>>, task: Task) {
+  private promptForTask(
+    run: NonNullable<ReturnType<Harness["getRun"]>>,
+    task: Task,
+    loadedHarnessRevision: LoadedHarnessRevision | null = null,
+  ) {
     return buildTaskPrompt({
       run,
       task,
       dependencyAttempts: task.dependsOn.length > 0 ? this.harness.listLatestAttemptsForTasks(task.dependsOn) : [],
       lessons: this.harness.listLessons({ runId: run.id }),
       template: this.harness.getPromptTemplate("task")?.contentMd,
+      loadedHarnessRevision: loadedHarnessRevision?.harnessRevision ?? null,
     });
+  }
+
+  private blockNewAttemptForHarnessRevision(input: {
+    run: NonNullable<ReturnType<Harness["getRun"]>>;
+    task: Task;
+    sessionName: string;
+    cwd: string;
+    route: ResolvedExecutionRoute;
+    error: unknown;
+  }) {
+    const attemptId = this.harness.recordAttempt({
+      taskId: input.task.id,
+      input: {
+        sessionName: input.sessionName,
+        cwd: input.cwd,
+        executor: input.route.backend.kind,
+        harnessRevisionValidation: "failed",
+      },
+      output: blockedHarnessRevisionOutput(input.error),
+    });
+    this.upsertAttemptThread({
+      runId: input.run.id,
+      task: input.task,
+      attemptId,
+      sessionName: input.sessionName,
+      cwd: input.cwd,
+      status: "blocked",
+    });
+    return {
+      taskId: input.task.id,
+      attemptId,
+      sessionName: input.sessionName,
+      status: "blocked" as const,
+      codexSessionId: null,
+    };
   }
 
   private resolveRoute(run: NonNullable<ReturnType<Harness["getRun"]>>, task: Task) {

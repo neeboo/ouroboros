@@ -1,5 +1,8 @@
-import { canonicalEvolutionValueSha256, DEFAULT_TASK_PROMPT_TEMPLATE } from "@ouroboros/harness";
-import type { Lesson } from "@ouroboros/harness";
+import {
+  canonicalEvolutionValueSha256,
+  DEFAULT_TASK_PROMPT_TEMPLATE,
+} from "@ouroboros/harness";
+import type { HarnessRevisionV1, Lesson } from "@ouroboros/harness";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -286,7 +289,9 @@ function targetEvolutionProposalExtension(projectId: string, charterId: string) 
   } as const;
 }
 
-export function buildTaskPrompt(input: PromptInput) {
+export function buildTaskPrompt(
+  input: PromptInput & { loadedHarnessRevision?: HarnessRevisionV1 | null },
+) {
   const compactRecentLessons = compactLessons(input.lessons ?? []);
   const template = input.template ?? DEFAULT_TASK_PROMPT_TEMPLATE;
   const sealedHoldoutRefs = frozenHoldoutEvidenceRefs(input.run.context);
@@ -302,7 +307,9 @@ export function buildTaskPrompt(input: PromptInput) {
     input.run.context,
     input.task.role,
   );
+  const frozenHarnessRevision = input.loadedHarnessRevision ?? null;
   const protectedSections = [
+    renderFrozenHarnessRevisionManifest(frozenHarnessRevision),
     frozenLinearImplementationGate,
     frozenTargetEvolutionContract,
   ].filter(Boolean);
@@ -340,6 +347,25 @@ export function buildTaskPrompt(input: PromptInput) {
     return `${prompt}\n\n${omittedProtectedSections.join("\n")}`;
   }
   return prompt;
+}
+
+export function renderFrozenHarnessRevisionManifest(
+  revision: HarnessRevisionV1 | null,
+): string {
+  if (!revision) {
+    return "";
+  }
+  return [
+    "## Frozen Harness Revision",
+    "The host verified these content-addressed capability components before agent startup.",
+    "This receipt proves loading and prompt delivery; it does not by itself prove agent adoption.",
+    `Version: ${revision.version}`,
+    `Content SHA-256: ${revision.contentSha256}`,
+    ...revision.components.map(
+      (component) => `- ${component.kind}: ${component.ref} (${component.sha256})`,
+    ),
+    "",
+  ].join("\n");
 }
 
 function renderFrozenTargetEvolutionContract(
@@ -424,14 +450,24 @@ function promptSafeRunContext(
     || context.designProposalId !== undefined
     || asRecord(context.designProposal) !== null;
   if (!isDesignChild && !evolutionInstance && sealedHoldoutRefs.length === 0) {
-    return context;
+    const {
+      harnessRevision: _harnessRevision,
+      activeHarnessRevision: _activeHarnessRevision,
+      ...contextWithoutHarnessRevisions
+    } = context;
+    return contextWithoutHarnessRevisions;
   }
   const safeContext = redactSealedPromptValues(
     redactSensitivePromptMaterial(context),
     sealedHoldoutRefs,
   ) as Record<string, unknown>;
+  const {
+    harnessRevision: _harnessRevision,
+    activeHarnessRevision: _activeHarnessRevision,
+    ...contextWithoutHarnessRevisions
+  } = safeContext;
   if (!evolutionInstance) {
-    return safeContext;
+    return contextWithoutHarnessRevisions;
   }
   const {
     evolutionPack: _evolutionPack,
@@ -442,7 +478,7 @@ function promptSafeRunContext(
     designProposal: _designProposal,
     evolutionInstance: _evolutionInstance,
     ...rest
-  } = safeContext;
+  } = contextWithoutHarnessRevisions;
   return {
     ...rest,
     targetEvolutionSummary: redactSealedPromptValues(
