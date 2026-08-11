@@ -1456,6 +1456,14 @@ describe("target-system evolution contracts", () => {
     expect(prompt).toContain("Never place evaluationContract inside evolutionPack");
   });
 
+  test("requires the maturity gate to hash the final normalized evolution pack", () => {
+    const prompt = designerPrompt();
+
+    expect(prompt).toContain("recompute maturityGateContract.packRef.contentSha256");
+    expect(prompt).toContain("final normalized evolutionPack");
+    expect(prompt).toContain("Never copy the example pack hash after changing the pack");
+  });
+
   test("provides one standalone exact evolution extension fragment accepted by the parser", () => {
     const prompt = designerPrompt();
     const extension = jsonFenceAfter(prompt, "## Target System Evolution Proposal Contract");
