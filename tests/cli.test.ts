@@ -6774,6 +6774,51 @@ if (args.includes("self-improve-daemon")) {
     expect(new Harness(dbPath).getTask(task.id)?.worktreePath).toBe(join(worktreeRoot, task.id));
   });
 
+  test("routes a project-bound run worktree under that project instead of the supervisor worktree root", async () => {
+    await runCli("init");
+    const projectRoot = join(dir, "hodor-web");
+    await mkdir(projectRoot, { recursive: true });
+    const project = await runCliJson(
+      "create-project",
+      "--name",
+      "Hodor Web",
+      "--root-path",
+      projectRoot,
+    );
+    const run = await runCliJson(
+      "create-run",
+      "--goal",
+      "Verify Hodor Web",
+      "--project-id",
+      project.id,
+    );
+    const task = await runCliJson(
+      "create-task",
+      "--run-id",
+      run.id,
+      "--role",
+      "worker",
+      "--goal",
+      "Task in the project repository",
+      "--prompt",
+      "Do work.",
+    );
+
+    await runCliJson(
+      "run-next",
+      "--run-id",
+      run.id,
+      "--executor",
+      "noop",
+      "--worktree-root",
+      join(dir, "hodor-supervisor", ".ouroboros", "worktrees"),
+    );
+
+    expect(new Harness(dbPath).getTask(task.id)?.worktreePath).toBe(
+      join(projectRoot, ".ouroboros", "worktrees", task.id),
+    );
+  });
+
   test("runs git worktree start hook from the CLI", async () => {
     await runCli("init");
     const run = await runCliJson("create-run", "--goal", "Bootstrap ouroboros");

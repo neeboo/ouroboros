@@ -4915,7 +4915,15 @@ function worktreeForTask() {
   if (!root) {
     return undefined;
   }
-  return (task: { id: string; worktreePath?: string | null }) => task.worktreePath ?? join(root, task.id);
+  return (task: { id: string; runId: string; worktreePath?: string | null }) => {
+    if (task.worktreePath) {
+      return task.worktreePath;
+    }
+    const projectRoot = harness.getRun(task.runId)?.projectRoot;
+    return projectRoot
+      ? join(projectRoot, ".ouroboros", "worktrees", task.id)
+      : join(root, task.id);
+  };
 }
 
 function stopHooksByRole(defaultRaw?: string) {

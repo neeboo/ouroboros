@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 describe("git worktree hook", () => {
-  test("creates a git worktree for the task cwd", async () => {
+  test("falls back to the supervisor repository when a legacy run has no project root", async () => {
     const calls: string[][] = [];
     const hook = createGitWorktreeHook({
       repoPath: "/repo",
@@ -22,7 +22,7 @@ describe("git worktree hook", () => {
       run: {
         id: "run_1",
         projectId: "project_1",
-        projectRoot: "/repo",
+        projectRoot: null,
         goal: "Goal",
         status: "todo",
         context: {},
@@ -66,6 +66,58 @@ describe("git worktree hook", () => {
     });
   });
 
+  test("creates a child run worktree from that run's project root instead of the supervisor cwd", async () => {
+    const calls: string[][] = [];
+    const hook = createGitWorktreeHook({
+      repoPath: "/repos/hodor",
+      baseRef: "main",
+      runCommand: async ({ cmd }) => {
+        calls.push(cmd);
+        return { exitCode: 0, stdout: "", stderr: "" };
+      },
+    });
+
+    await hook({
+      run: {
+        id: "run_hodor_web",
+        projectId: "project_hodor_web",
+        projectRoot: "/repos/hodor-web",
+        goal: "Verify the hodor-web delivery",
+        status: "todo",
+        context: { parentRunId: "run_hodor" },
+      },
+      task: {
+        id: "task_hodor_web",
+        runId: "run_hodor_web",
+        parentId: null,
+        cycleId: "task_hodor_web",
+        status: "running",
+        role: "worker",
+        goal: "Verify",
+        prompt: "Verify the remote delivery",
+        dependsOn: [],
+        doneWhen: [],
+        worktreePath: "/runtime/worktrees/task_hodor_web",
+        sessionRef: "session-task_hodor_web",
+        contextVersion: 1,
+      },
+      sessionName: "session-task_hodor_web",
+      cwd: "/runtime/worktrees/task_hodor_web",
+    });
+
+    expect(calls[0]).toEqual([
+      "git",
+      "-C",
+      "/repos/hodor-web",
+      "worktree",
+      "add",
+      "/runtime/worktrees/task_hodor_web",
+      "-b",
+      "ouroboros/task_hodor_web",
+      "main",
+    ]);
+  });
+
   test("rejects an existing task worktree owned by a different git common directory", async () => {
     const repoPath = await committedGitRepository("target repository\n");
     const foreignRepoPath = await committedGitRepository("foreign repository\n");
@@ -97,7 +149,9 @@ describe("git worktree hook", () => {
         },
       });
 
-      const result = await hook(hookInput(foreignWorktreePath));
+      const input = hookInput(foreignWorktreePath);
+      input.run.projectRoot = repoPath;
+      const result = await hook(input);
 
       expect(bunCalled).toBe(false);
       expect(result.problems ?? []).toContain("existing task worktree belongs to a different git common directory");
@@ -110,6 +164,50 @@ describe("git worktree hook", () => {
       await rm(repoPath, { recursive: true, force: true });
       await rm(foreignRepoPath, { recursive: true, force: true });
       await rm(foreignWorktreePath, { recursive: true, force: true });
+    }
+  });
+
+  test("reuses a child run worktree by its project root instead of the supervisor repository", async () => {
+    const supervisorRepoPath = await committedGitRepository("supervisor repository\n");
+    const childRepoPath = await committedGitRepository("child repository\n");
+    const childWorktreePath = await mkdtemp(join(tmpdir(), "ouroboros-child-worktree-parent-"));
+    await rm(childWorktreePath, { recursive: true, force: true });
+    const addWorktree = spawnCommand([
+      "git",
+      "-C",
+      childRepoPath,
+      "worktree",
+      "add",
+      "-q",
+      "-b",
+      "child-task",
+      childWorktreePath,
+      "HEAD",
+    ]);
+    if (addWorktree.exitCode !== 0) throw new Error(addWorktree.stderr);
+
+    try {
+      const hook = createGitWorktreeHook({
+        repoPath: supervisorRepoPath,
+        runCommand: async (input) => input.cmd[0] === "bun"
+          ? { exitCode: 0, stdout: "", stderr: "" }
+          : spawnCommand(input.cmd),
+      });
+      const input = hookInput(childWorktreePath);
+      input.run.projectRoot = childRepoPath;
+
+      const result = await hook(input);
+
+      expect(result.problems ?? []).toEqual([]);
+      expect(result.checks).toContainEqual({
+        name: "git repository boundary",
+        status: "passed",
+        summary: "existing task worktree belongs to the target repository",
+      });
+    } finally {
+      await rm(supervisorRepoPath, { recursive: true, force: true });
+      await rm(childRepoPath, { recursive: true, force: true });
+      await rm(childWorktreePath, { recursive: true, force: true });
     }
   });
 

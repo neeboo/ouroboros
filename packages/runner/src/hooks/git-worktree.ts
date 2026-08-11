@@ -16,7 +16,8 @@ export function createGitWorktreeHook(options: {
   const runCommand = options.runCommand ?? runLocalCommand;
   const baseRef = options.baseRef ?? "main";
 
-  return async ({ task, cwd }) => {
+  return async ({ run, task, cwd }) => {
+    const repoPath = run.projectRoot ?? options.repoPath;
     const branch = `ouroboros/${task.id}`;
     const checks: Array<{ name: string; status: "passed" | "failed"; summary?: string }> = [];
 
@@ -32,7 +33,7 @@ export function createGitWorktreeHook(options: {
         };
       }
       checks.push({ name: "git worktree reuse", status: "passed", summary: "existing task worktree reused" });
-      const repositoryBoundary = await verifyRepositoryBoundary(runCommand, options.repoPath, cwd);
+      const repositoryBoundary = await verifyRepositoryBoundary(runCommand, repoPath, cwd);
       if (!repositoryBoundary.ok) {
         return {
           checks: [
@@ -53,7 +54,7 @@ export function createGitWorktreeHook(options: {
       });
     } else {
       const result = await runCommand({
-        cmd: ["git", "-C", options.repoPath, "worktree", "add", cwd, "-b", branch, baseRef],
+        cmd: ["git", "-C", repoPath, "worktree", "add", cwd, "-b", branch, baseRef],
         stdin: "",
       });
 
