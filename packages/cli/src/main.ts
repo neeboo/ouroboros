@@ -2136,13 +2136,7 @@ async function superviseSelfImprovementDaemon(input: SelfImprovementDaemonInput)
               createdAt: new Date().toISOString(),
             };
           } else if (cycle.state === "drain-required") {
-            const result = await superviseCodexRuns({
-              ...input,
-              rootRunId: input.rootRunId,
-              maxCycles: input.tickCycles,
-              shouldStop: () => stopping || input.shouldStop?.() === true,
-            });
-            waitMs = result.status === "idle" ? input.idleMs : input.intervalMs;
+            waitMs = input.idleMs;
             tick = {
               type: "self-improvement.tick",
               index,
@@ -2150,7 +2144,6 @@ async function superviseSelfImprovementDaemon(input: SelfImprovementDaemonInput)
               createdCycle: null,
               drain: cycle.drain,
               authorityReconciliation,
-              result,
               runCounts: harness.countRunsByStatus(),
               ...linearIntakePump.tickFields(),
               createdAt: new Date().toISOString(),
