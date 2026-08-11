@@ -2741,9 +2741,26 @@ function classifySelfImprovementAssessment(input: {
 }
 
 function runHasActiveAssessmentWork(overview: RunOverview) {
-  return overview.tasks.some((task) => task.status === "todo" || task.status === "running")
-    || overview.sessions.some((session) => session.status === "running")
-    || overview.threads.some((thread) => thread.status === "running");
+  const activeTaskIds = new Set(
+    overview.tasks
+      .filter((task) => task.status === "todo" || task.status === "running")
+      .map((task) => task.id),
+  );
+  const activeAttemptIds = new Set(
+    overview.sessions
+      .filter((session) => session.status === "running")
+      .map((session) => session.attemptId),
+  );
+  return activeTaskIds.size > 0
+    || activeAttemptIds.size > 0
+    || overview.threads.some((thread) =>
+      thread.status === "running"
+      && (
+        (thread.taskId != null && activeTaskIds.has(thread.taskId))
+        || (thread.attemptId != null && activeAttemptIds.has(thread.attemptId))
+        || (thread.taskId == null && thread.attemptId == null)
+      )
+    );
 }
 
 function hasAssessmentTerminalEvidence(input: {
@@ -2791,7 +2808,16 @@ function hasAssessmentTerminalEvidence(input: {
     const proposal = input.db
       ? harness.getDesignProposalWithDb(input.db, { id: proposalId })
       : harness.getDesignProposal({ id: proposalId });
-    if (proposal && (proposal.status === "accepted" || proposal.status === "measuring" || proposal.status === "retained" || proposal.status === "revise")) {
+    if (
+      proposal
+      && (
+        proposal.status === "accepted"
+        || proposal.status === "measuring"
+        || proposal.status === "retained"
+        || proposal.status === "revise"
+        || proposal.status === "retired"
+      )
+    ) {
       return true;
     }
   }

@@ -7468,6 +7468,51 @@ describe("Control-plane watchdog contract", () => {
     expect(watchdog?.history?.at(-1)?.reason).not.toBe("not eligible");
   });
 
+  test("a future outcome review does not mask a terminal continuous root without a durable wake", () => {
+    const runId = harness.createRun({
+      goal: "Continuously improve Ouroboros from evidence-backed gaps",
+      context: {
+        source: "self-improve",
+        selfImprovement: {
+          cycleIndex: 17,
+          assessmentFingerprint: "post-outcome-assessment",
+        },
+        controlPlaneRuntime: { state: "current" },
+      },
+    });
+    harness.updateRunStatus({ runId, status: "blocked" });
+
+    applyHarnessAction(harness, {
+      type: "runWatchdogPass",
+      rootRunId: runId,
+      now: 1_700_000_000_000,
+      daemonIntervalMs: 1500,
+      inboxEvents: [],
+      scheduledReviews: [{ runId: "run_future_review", reviewAt: "2099-01-01T00:00:00.000Z" }],
+      reason: "post-outcome continuous root observation 1",
+    });
+    const result = applyHarnessAction(harness, {
+      type: "runWatchdogPass",
+      rootRunId: runId,
+      now: 1_700_000_090_000,
+      daemonIntervalMs: 1500,
+      inboxEvents: [],
+      scheduledReviews: [{ runId: "run_future_review", reviewAt: "2099-01-01T00:00:00.000Z" }],
+      reason: "post-outcome continuous root observation 2",
+    });
+
+    const observation = result.artifacts.find((artifact) =>
+      (artifact as Record<string, unknown>).kind === "watchdog_observation"
+    ) as Record<string, unknown>;
+    const watchdog = harness.getRun(runId)?.context.controlPlaneWatchdog as
+      | { state?: string; history?: Array<{ reason?: string }> }
+      | undefined;
+    expect(observation.eligible).toBe(true);
+    expect(observation.eligibilityReasons).toEqual(["terminal-evolution-without-wake"]);
+    expect(watchdog?.state).not.toBe("healthy");
+    expect(watchdog?.history?.at(-1)?.reason).not.toBe("not eligible");
+  });
+
   test("a terminal self-improvement root with a future durable wake stays intentionally quiescent", () => {
     const assessmentFingerprint = "a".repeat(64);
     const runId = harness.createRun({

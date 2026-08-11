@@ -234,7 +234,19 @@ export function computeWatchdogEligibility(input: {
   if (hasHumanCheckpoint(rootRun.context)) {
     return { eligible: false, reasons: ["human-checkpoint"] };
   }
-  if (hasFutureScheduledReview(scheduledReviews, now)) {
+  const nonTerminalRuns = runs.filter((run) => run.status !== "done" && run.status !== "blocked");
+  const activeTasks = tasks.filter((task) => task.status === "todo" || task.status === "running");
+  const durableFutureWake = hasFutureSelfImprovementWake(rootRun.context, now);
+  const terminalContinuousRootWithoutWake =
+    nonTerminalRuns.length === 0
+    && activeTasks.length === 0
+    && isContinuousSelfImprovementRoot(rootRun)
+    && !durableFutureWake;
+  if (
+    hasFutureScheduledReview(scheduledReviews, now)
+    && !terminalContinuousRootWithoutWake
+    && !durableFutureWake
+  ) {
     return { eligible: false, reasons: ["scheduled-review-pending"] };
   }
   if (hasPendingLinearIntake(inboxEvents)) {
@@ -249,12 +261,10 @@ export function computeWatchdogEligibility(input: {
   // Expected work: any nonterminal run in the supervised descendant tree.
   // This intentionally includes empty nonterminal PAN-1223 fixtures while
   // excluding drained terminal trees.
-  const nonTerminalRuns = runs.filter((run) => run.status !== "done" && run.status !== "blocked");
-  const activeTasks = tasks.filter((task) => task.status === "todo" || task.status === "running");
   if (
     nonTerminalRuns.length === 0
     && activeTasks.length === 0
-    && hasFutureSelfImprovementWake(rootRun.context, now)
+    && durableFutureWake
   ) {
     return { eligible: false, reasons: ["intentionally-quiescent"] };
   }
