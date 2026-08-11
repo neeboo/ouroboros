@@ -662,6 +662,80 @@ describe("Harness actions", () => {
     expect(overview.tasks.some((task) => task.status === "todo" || task.status === "running")).toBe(false);
   });
 
+  test("prepareRunDrain does not retry a blocked goal-review after the repair budget is exhausted", () => {
+    const runId = harness.createRun({
+      goal: "Stop bounded goal review recovery",
+      context: {
+        repairReplanBudget: {
+          limit: 3,
+          used: 3,
+          entries: [],
+        },
+      },
+    });
+    const reviewTaskId = harness.createTask({
+      runId,
+      role: "goal-review",
+      goal: "Review the exhausted delivery",
+      prompt: "Do not create work beyond the frozen repair budget.",
+    });
+    harness.recordAttempt({
+      taskId: reviewTaskId,
+      input: { executor: "test" },
+      output: {
+        status: "blocked",
+        runDecision: "continue",
+        summary: "More delivery work remains",
+        changedFiles: [],
+        checks: [],
+        artifacts: [],
+        problems: ["goal-review cannot create continue work after repair budget exhausted at 3/3"],
+      },
+    });
+    harness.recordAttempt({
+      taskId: reviewTaskId,
+      input: { executor: "bounded-stop" },
+      output: {
+        status: "blocked",
+        summary: "A later bounded stop has no new run decision",
+        changedFiles: [],
+        checks: [],
+        artifacts: [],
+        problems: ["The prior exhausted goal-review evidence remains authoritative."],
+      },
+    });
+    harness.updateRunStatus({ runId, status: "blocked" });
+    withDatabase(harness.dbPath, (db) => {
+      db.query("update runs set updated_at = '2000-01-01 00:00:00' where id = $runId").run({ $runId: runId });
+    });
+
+    const first = applyHarnessAction(harness, { type: "prepareRunDrain", runId, maxTries: 3 });
+    const firstUpdatedAt = withDatabase(harness.dbPath, (db) =>
+      (db.query("select updated_at as updatedAt from runs where id = $runId").get({ $runId: runId }) as { updatedAt: string }).updatedAt,
+    );
+    const second = applyHarnessAction(harness, { type: "prepareRunDrain", runId, maxTries: 3 });
+    const overview = harness.getRunOverview({ runId });
+    const secondUpdatedAt = withDatabase(harness.dbPath, (db) =>
+      (db.query("select updated_at as updatedAt from runs where id = $runId").get({ $runId: runId }) as { updatedAt: string }).updatedAt,
+    );
+
+    expect(first).toMatchObject({
+      status: "blocked",
+      actionType: "prepareRunDrain",
+      summary: expect.stringContaining("repair budget exhausted at 3/3"),
+    });
+    expect(second).toMatchObject({
+      status: "blocked",
+      actionType: "prepareRunDrain",
+      summary: expect.stringContaining("repair budget exhausted at 3/3"),
+    });
+    expect(harness.getTask(reviewTaskId)?.status).toBe("blocked");
+    expect(overview.run?.status).toBe("blocked");
+    expect(overview.sessions.filter((session) => session.taskId === reviewTaskId)).toHaveLength(2);
+    expect(firstUpdatedAt).toBe("2000-01-01 00:00:00");
+    expect(secondUpdatedAt).toBe(firstUpdatedAt);
+  });
+
   test("prepares a drained run by blocking todo tasks whose dependencies are blocked", () => {
     const runId = harness.createRun({ goal: "Drain impossible dependency chain" });
     const workerTaskId = harness.createTask({

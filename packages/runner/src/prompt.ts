@@ -7,6 +7,7 @@ import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { PromptInput } from "./types";
+import { compactAttemptEvidence } from "./bounded-diagnostic";
 import { prettyJson, renderPromptTemplate } from "./template";
 
 const MAX_PROMPT_LESSONS = 12;
@@ -323,7 +324,7 @@ export function buildTaskPrompt(
     taskPrompt: sealText(input.task.prompt),
     doneWhenMarkdown: input.task.doneWhen.map((item) => `- ${sealText(item)}`).join("\n"),
     dependencyAttemptsJson: prettyJson(
-      redactSealedPromptValues(input.dependencyAttempts, sealedHoldoutRefs),
+      redactSealedPromptValues(compactDependencyAttempts(input.dependencyAttempts), sealedHoldoutRefs),
     ),
     activeGuardrailsMarkdown: [
       ...protectedSections,
@@ -366,6 +367,34 @@ export function renderFrozenHarnessRevisionManifest(
     ),
     "",
   ].join("\n");
+}
+
+function compactDependencyAttempts(attempts: unknown[]) {
+  return attempts.slice(0, 32).map((value) => {
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+      return compactAttemptEvidence({
+        status: "blocked",
+        summary: "Malformed dependency attempt evidence",
+        artifacts: [{ kind: "malformed_dependency_attempt", value }],
+        checks: [],
+        problems: [],
+      });
+    }
+    const attempt = value as Record<string, unknown>;
+    const output = compactAttemptEvidence({
+      status: attempt.status === "done" ? "done" : "blocked",
+      summary: typeof attempt.summary === "string" ? attempt.summary : "Dependency attempt",
+      changedFiles: Array.isArray(attempt.changedFiles) ? attempt.changedFiles as string[] : [],
+      checks: Array.isArray(attempt.checks) ? attempt.checks : [],
+      artifacts: Array.isArray(attempt.artifacts) ? attempt.artifacts : [],
+      problems: Array.isArray(attempt.problems) ? attempt.problems as string[] : [],
+    });
+    return {
+      taskId: attempt.taskId,
+      attemptId: attempt.attemptId,
+      ...output,
+    };
+  });
 }
 
 function renderFrozenTargetEvolutionContract(

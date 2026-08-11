@@ -6,6 +6,11 @@ import {
   harnessRevisionAttemptInput,
   loadFrozenHarnessRevision,
 } from "./harness-revision-loader";
+import {
+  promptBudgetAttemptInput,
+  promptBudgetBlockedOutput,
+  promptBudgetEvidence,
+} from "./prompt-budget";
 import { resolveExecutionRoute } from "./execution-routing";
 import type {
   RunNextReadyTaskInput,
@@ -51,6 +56,15 @@ export async function runNextReadyTask(input: RunNextReadyTaskInput) {
   });
   const sessionName = task.sessionRef ?? defaultSessionName(task.id);
   const route = resolveExecutionRoute({ run, task });
+  const oversized = promptBudgetEvidence(prompt, "task executor start");
+  if (oversized) {
+    const attemptId = input.harness.recordAttempt({
+      taskId: task.id,
+      input: { ...promptBudgetAttemptInput(oversized), route, model: route.model },
+      output: promptBudgetBlockedOutput(oversized),
+    });
+    return { taskId: task.id, attemptId, stopDecision: "exit" as const };
+  }
   const attemptId = input.harness.startAttempt({
     taskId: task.id,
     input: {
@@ -157,6 +171,24 @@ export async function runReadyTasks(input: RunReadyTasksInput) {
         cliExecutor: input.cliExecutor,
         globalModel: input.model,
       });
+      const oversized = promptBudgetEvidence(prompt, "task executor start");
+      if (oversized) {
+        const blocked = promptBudgetBlockedOutput(oversized);
+        blocked.checks = [...(startResult.checks ?? []), ...(blocked.checks ?? [])];
+        blocked.artifacts = [...(startResult.artifacts ?? []), ...(blocked.artifacts ?? [])];
+        const attemptId = input.harness.recordAttempt({
+          taskId: task.id,
+          input: {
+            ...promptBudgetAttemptInput(oversized),
+            sessionName,
+            cwd,
+            route,
+            model: route.model,
+          },
+          output: blocked,
+        });
+        return { taskId: task.id, attemptId, sessionName, stopDecision: "exit" as const };
+      }
       const factoryInput = { run, task, sessionName, cwd, route };
       const executor = input.executorFactory(factoryInput);
       const attemptId = input.harness.startAttempt({

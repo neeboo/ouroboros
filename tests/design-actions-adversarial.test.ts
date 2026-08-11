@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -1391,7 +1392,19 @@ describe("design-action transition coordinator (production authority path)", () 
       }],
     } as AttemptOutput;
     const first = await runHook(delivery, firstRunId, firstTaskId);
-    const second = await runHook(delivery, secondRunId, secondTaskId);
+    const second = await runHook({
+      ...delivery,
+      designActions: [{
+        type: "createRunsFromDesign",
+        payload: {
+          proposalId: proposal.id,
+          runs: [{
+            goal: "A later cycle paraphrased the same delivery",
+            prompt: "This replay text must not replace the first frozen plan.",
+          }],
+        },
+      }],
+    } as AttemptOutput, secondRunId, secondTaskId);
 
     expect(first.decision).toBe("continue");
     expect(second.decision).toBe("continue");
@@ -1403,6 +1416,78 @@ describe("design-action transition coordinator (production authority path)", () 
     expect(
       harness.listRuns({ limit: 100 }).filter((run) => run.context.designProposalId === proposal.id),
     ).toHaveLength(1);
+    expect(harness.getRun(firstCreated[0].runId)?.goal).toBe("Plan pre-warm");
+    expect(harness.getTask(firstCreated[0].plannerTaskId)?.prompt).toBe("Plan the change.");
+  });
+
+  test("a legacy delivery without a frozen plan cannot self-certify polluted run and planner state", async () => {
+    const projectId = harness.createProject({ name: "ouroboros", rootPath: dir });
+    seedActiveCharter(projectId);
+    const signalId = seedActiveSignal(projectId);
+    const runId = harness.createRun({ goal: "legacy replay", projectId });
+    const taskId = harness.createTask({
+      runId,
+      role: "designer",
+      goal: "replay accepted proposal",
+      prompt: "replay",
+    });
+    await runHook({
+      status: "done",
+      summary: "propose once",
+      designActions: [{
+        type: "proposeDesign",
+        payload: {
+          projectId,
+          title: "Freeze the delivery plan",
+          proposal: lowRiskEnvelope(signalId),
+          status: "proposed",
+        },
+      }],
+    } as AttemptOutput, runId, taskId);
+    const proposal = harness.listDesignProposals({ projectId })[0];
+    const childRunId = `run_${createHash("sha1")
+      .update(`design-child|${proposal.id}`, "utf8")
+      .digest("hex")}`;
+    const plannerTaskId = `task_${createHash("sha1")
+      .update(`design-planner|${proposal.id}`, "utf8")
+      .digest("hex")}`;
+    harness.createRun({
+      id: childRunId,
+      goal: "Polluted legacy goal",
+      projectId,
+      context: {
+        projectId,
+        parentRunId: runId,
+        sourceTaskId: taskId,
+        source: "design",
+        designProposalId: proposal.id,
+      },
+    });
+    harness.createTask({
+      id: plannerTaskId,
+      runId: childRunId,
+      role: "planner",
+      goal: "Polluted legacy planner goal",
+      prompt: "Polluted legacy planner prompt",
+      doneWhen: ["polluted completion"],
+      config: { modelPreference: { model: "gpt-5.6-sol" } },
+    });
+
+    const replay = await runHook({
+      status: "done",
+      summary: "replay delivery",
+      designActions: [{
+        type: "createRunsFromDesign",
+        payload: {
+          proposalId: proposal.id,
+          runs: [{ goal: "Canonical requested goal", prompt: "Canonical requested prompt" }],
+        },
+      }],
+    } as AttemptOutput, runId, taskId);
+
+    expect(replay.problems?.[0]).toContain("designDeliveryPlan");
+    expect(harness.getRun(childRunId)?.goal).toBe("Polluted legacy goal");
+    expect(harness.getTask(plannerTaskId)?.prompt).toBe("Polluted legacy planner prompt");
   });
 
   test("a proposal rejects multiple delivery runs before creating any child", async () => {

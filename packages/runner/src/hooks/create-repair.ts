@@ -1,4 +1,6 @@
 import { DEFAULT_REPAIR_TASK_PROMPT_TEMPLATE, readableValue, type AttemptOutput, type Harness } from "@ouroboros/harness";
+import { boundedDiagnosticText, compactAttemptEvidence, latestRootCause } from "../bounded-diagnostic";
+import { fitPromptAroundFrozenSections, HandoffContractTooLargeError } from "../prompt-budget";
 import { prettyJson, renderPromptTemplate } from "../template";
 import type { StopHook } from "../types";
 import { chargeRepairBudget, repairBudgetExhausted, type RepairBudgetChargeDecision } from "./repair-budget";
@@ -79,25 +81,51 @@ export function createRepairTaskHook(options: {
 
     const sourceTask = selectRepairSourceTask(options.harness, task);
     const sourceWorktreePath = sourceTask?.worktreePath ?? task.worktreePath ?? null;
+    const verifierContract = verifierContractFromTask(task);
+    let prompt: string;
+    try {
+      prompt = buildRepairPrompt(
+        options.harness.getPromptTemplate("repair-task")?.contentMd,
+        {
+          verifierTaskId: task.id,
+          verifierDoneWhen: task.doneWhen,
+          verifierContract,
+          sourceTaskId: sourceTask?.id ?? null,
+          sourceDoneWhen: sourceTask?.doneWhen ?? [],
+          sourceWorktreePath,
+          output,
+        },
+      );
+    } catch (error) {
+      if (error instanceof HandoffContractTooLargeError) {
+        return {
+          decision: "exit",
+          checks: [{ name: "handoff contract budget", status: "failed", evidence: error.artifact }],
+          artifacts: [error.artifact],
+          problems: [
+            `handoff_contract_too_large: ${error.artifact.chars}/${error.artifact.limit} characters; `
+            + `${error.artifact.bytes} UTF-8 bytes; sha256=${error.artifact.sha}.`,
+          ],
+        };
+      }
+      throw error;
+    }
     const taskId = options.harness.createTask({
       runId: run.id,
       parentId: task.id,
       role: "worker",
       goal: `Repair: ${task.goal}`,
-      prompt: buildRepairPrompt(
-        options.harness.getPromptTemplate("repair-task")?.contentMd,
-        task.id,
-        sourceTask?.id ?? null,
-        sourceWorktreePath,
-        output,
-      ),
+      prompt,
       dependsOn: sourceTask ? [sourceTask.id] : [],
       worktreePath: sourceWorktreePath,
-      doneWhen: [
+      doneWhen: uniqueStrings([
+        ...(sourceTask?.doneWhen ?? []),
+        ...task.doneWhen,
         "verifier problems are addressed",
         "relevant checks pass",
         "the repair output describes changed files and validation",
-      ],
+      ]),
+      ...(verifierContract ? { config: { verifierContract } } : {}),
     });
     if (charge.charged) {
       options.harness.updateRun({
@@ -213,39 +241,77 @@ function externalSetupBlockerReason(output: AttemptOutput) {
 
 function buildRepairPrompt(
   template: string | undefined,
-  verifierTaskId: string,
-  sourceTaskId: string | null,
-  sourceWorktreePath: string | null,
-  output: AttemptOutput,
+  input: {
+    verifierTaskId: string;
+    verifierDoneWhen: string[];
+    verifierContract: Record<string, unknown> | undefined;
+    sourceTaskId: string | null;
+    sourceDoneWhen: string[];
+    sourceWorktreePath: string | null;
+    output: AttemptOutput;
+  },
 ) {
-  const verifierSummary = readableValue(output.summary);
+  const verifierSummary = boundedDiagnosticText(input.output.summary, 1_200).text;
+  const rootCause = latestRootCause(input.output);
   const verifierOutput = {
-    summary: verifierSummary,
-    changedFiles: output.changedFiles ?? [],
-    checks: output.checks ?? [],
-    artifacts: output.artifacts ?? [],
-    problems: output.problems ?? [],
-    sourceTaskId,
-    sourceWorktreePath,
+    ...compactAttemptEvidence(input.output),
+    latestRootCause: rootCause,
+    sourceTaskId: input.sourceTaskId,
+    sourceWorktreePath: input.sourceWorktreePath,
   };
   const sourceSection = [
     "## Source Worktree",
-    `Source Task ID: ${sourceTaskId ?? "not recorded"}`,
-    `Source Worktree Path: ${sourceWorktreePath ?? "not recorded"}`,
+    `Source Task ID: ${input.sourceTaskId ?? "not recorded"}`,
+    `Source Worktree Path: ${input.sourceWorktreePath ?? "not recorded"}`,
   ].join("\n");
   const rendered = renderPromptTemplate(template ?? DEFAULT_REPAIR_TASK_PROMPT_TEMPLATE, {
-    verifierTaskId,
+    verifierTaskId: input.verifierTaskId,
     verifierSummary,
     verifierOutputJson: prettyJson(verifierOutput),
-    verifierProblemsJson: prettyJson(output.problems ?? []),
-    sourceTaskId: sourceTaskId ?? "not recorded",
-    sourceWorktreePath: sourceWorktreePath ?? "not recorded",
+    verifierProblemsJson: prettyJson(verifierOutput.problems.items),
+    sourceTaskId: input.sourceTaskId ?? "not recorded",
+    sourceWorktreePath: input.sourceWorktreePath ?? "not recorded",
     sourceWorktreeSection: sourceSection,
   });
-  if (rendered.includes(sourceSection)) {
-    return rendered;
+  const frozenDoneWhenSection = [
+    "## Frozen Completion Criteria",
+    "The repair must preserve these criteria exactly; it may not weaken or amend them.",
+    "### Verifier doneWhen",
+    ...input.verifierDoneWhen.map((item) => `- ${boundedDiagnosticText(item, 1_000).text}`),
+    "### Source task doneWhen",
+    ...(input.sourceDoneWhen.length > 0
+      ? input.sourceDoneWhen.map((item) => `- ${boundedDiagnosticText(item, 1_000).text}`)
+      : ["- not recorded"]),
+  ].join("\n");
+  const verifierContractSection = input.verifierContract
+    ? ["## Frozen Verifier Contract", "```json", prettyJson(input.verifierContract), "```"].join("\n")
+    : "";
+  const boundedEvidenceSection = [
+    "## Bounded Verifier Evidence",
+    `Verifier Task ID: ${input.verifierTaskId}`,
+    sourceSection,
+    `Latest Root Cause: ${rootCause}`,
+    "```json",
+    prettyJson(verifierOutput),
+    "```",
+  ].join("\n");
+  return fitPromptAroundFrozenSections(rendered, [
+    boundedEvidenceSection,
+    frozenDoneWhenSection,
+    verifierContractSection,
+  ]);
+}
+
+function verifierContractFromTask(task: { config?: { verifierContract?: unknown } }) {
+  const value = task.config?.verifierContract;
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return undefined;
   }
-  return `${rendered}\n\n${sourceSection}`;
+  return value as Record<string, unknown>;
+}
+
+function uniqueStrings(values: string[]) {
+  return [...new Set(values)];
 }
 
 export function isRepairBudgetExhausted(artifact: unknown): artifact is {

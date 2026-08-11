@@ -1,4 +1,5 @@
 import type { CommandResult, RunCommand } from "./types";
+import { boundedDiagnosticText } from "../bounded-diagnostic";
 import { childEnvForProcess } from "./proxy-env";
 
 const IDLE_STARTUP_GRACE_MS = 500;
@@ -257,7 +258,11 @@ export function commandProblem(result: CommandResult) {
     ["stderr", result.stderr],
   ]
     .filter(([, value], index) => index === 0 || value.trim().length > 0)
-    .map(([label, value]) => (label === "exit code" ? `${label}: ${value}` : `${label}:\n${value.trim()}`));
+    .map(([label, value]) => (
+      label === "exit code"
+        ? `${label}: ${value}`
+        : `${label}:\n${boundedDiagnosticText(value.trim(), 8_000).text}`
+    ));
 
   return parts.join("\n\n");
 }

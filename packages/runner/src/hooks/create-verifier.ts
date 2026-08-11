@@ -1,4 +1,6 @@
 import { DEFAULT_VERIFIER_TASK_PROMPT_TEMPLATE, type AttemptOutput, type Harness } from "@ouroboros/harness";
+import { boundedDiagnosticText, compactAttemptEvidence } from "../bounded-diagnostic";
+import { fitPromptAroundFrozenSections, HandoffContractTooLargeError } from "../prompt-budget";
 import { prettyJson, renderPromptTemplate } from "../template";
 import type { StopHook } from "../types";
 
@@ -12,17 +14,34 @@ export function createVerifierTaskHook(options: { harness: Harness; sourceRoles?
     }
 
     const verifierContract = verifierContractFromTask(task);
-    const taskId = options.harness.createTask({
-      runId: run.id,
-      role: "verifier",
-      goal: `Verify: ${task.goal}`,
-      prompt: buildVerifierPrompt(
+    let prompt: string;
+    try {
+      prompt = buildVerifierPrompt(
         options.harness.getPromptTemplate("verifier-task")?.contentMd,
         task.id,
         task.worktreePath,
         output,
         verifierContract,
-      ),
+      );
+    } catch (error) {
+      if (error instanceof HandoffContractTooLargeError) {
+        return {
+          decision: "exit",
+          checks: [{ name: "handoff contract budget", status: "failed", evidence: error.artifact }],
+          artifacts: [error.artifact],
+          problems: [
+            `handoff_contract_too_large: ${error.artifact.chars}/${error.artifact.limit} characters; `
+            + `${error.artifact.bytes} UTF-8 bytes; sha256=${error.artifact.sha}.`,
+          ],
+        };
+      }
+      throw error;
+    }
+    const taskId = options.harness.createTask({
+      runId: run.id,
+      role: "verifier",
+      goal: `Verify: ${task.goal}`,
+      prompt,
       dependsOn: [task.id],
       worktreePath: task.worktreePath,
       doneWhen: [
@@ -56,11 +75,7 @@ function buildVerifierPrompt(
   verifierContract: Record<string, unknown> | undefined,
 ) {
   const sourceOutput = {
-    summary: output.summary,
-    changedFiles: output.changedFiles ?? [],
-    checks: output.checks ?? [],
-    artifacts: output.artifacts ?? [],
-    problems: output.problems ?? [],
+    ...compactAttemptEvidence(output),
     worktreePath: sourceTaskWorktreePath,
   };
   const contractSection = verifierContract
@@ -69,16 +84,21 @@ function buildVerifierPrompt(
   const rendered = renderPromptTemplate(template ?? DEFAULT_VERIFIER_TASK_PROMPT_TEMPLATE, {
     sourceTaskId,
     sourceTaskWorktreePath: sourceTaskWorktreePath ?? "not recorded",
-    sourceSummary: output.summary,
+    sourceSummary: boundedDiagnosticText(output.summary, 1_200).text,
     sourceOutputJson: prettyJson(sourceOutput),
-    sourceProblemsJson: prettyJson(output.problems ?? []),
+    sourceProblemsJson: prettyJson(sourceOutput.problems.items),
     sourceVerifierContractJson: verifierContract ? prettyJson(verifierContract) : "null",
     sourceVerifierContractSection: contractSection,
   });
-  if (!verifierContract || rendered.includes(contractSection)) {
-    return rendered;
-  }
-  return `${rendered}\n\n${contractSection}`;
+  const boundedEvidenceSection = [
+    "## Bounded Source Evidence",
+    `Source Task ID: ${sourceTaskId}`,
+    `Source Worktree Path: ${sourceTaskWorktreePath ?? "not recorded"}`,
+    "```json",
+    prettyJson(sourceOutput),
+    "```",
+  ].join("\n");
+  return fitPromptAroundFrozenSections(rendered, [boundedEvidenceSection, contractSection]);
 }
 
 function verifierContractFromTask(task: { config?: { verifierContract?: unknown } }) {

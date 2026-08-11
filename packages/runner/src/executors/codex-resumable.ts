@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { defaultCodexBin } from "./codex-bin";
 import { commandProblem, runLocalCommand } from "./command";
+import { promptBudgetBlockedOutput, promptBudgetEvidence } from "../prompt-budget";
 import { withBrowserProcessPolicy } from "./browser-process-policy";
 import { parseAttemptOutput, parseAttemptOutputOrBlocked } from "./output";
 import type { CodexCliExecutorOptions, RunCommand } from "./types";
@@ -52,6 +53,10 @@ export function createCodexResumableClient(options: CodexResumableClientOptions)
 
   return {
     start: async (input: CodexResumableStartInput) => {
+      const oversized = inputTooLargeResult(input.prompt, "codex client start");
+      if (oversized) {
+        return oversized;
+      }
       const outputPath = await makeOutputPath(options.outputDir, input.sessionName);
       const modelArgs = options.model ? ["-m", options.model] : [];
       const reasoningArgs = options.reasoningEffort ? ["-c", `model_reasoning_effort=${JSON.stringify(options.reasoningEffort)}`] : [];
@@ -84,6 +89,10 @@ export function createCodexResumableClient(options: CodexResumableClientOptions)
       return resumableResult({ result, outputPath, commandName: "codex exec" });
     },
     resume: async (input: CodexResumableResumeInput) => {
+      const oversized = inputTooLargeResult(input.prompt ?? "", "codex client resume");
+      if (oversized) {
+        return oversized;
+      }
       const outputPath = await makeOutputPath(options.outputDir, input.sessionName);
       const modelArgs = options.model ? ["-m", options.model] : [];
       const reasoningArgs = options.reasoningEffort ? ["-c", `model_reasoning_effort=${JSON.stringify(options.reasoningEffort)}`] : [];
@@ -117,6 +126,22 @@ export function createCodexResumableClient(options: CodexResumableClientOptions)
       });
       return resumableResult({ result, outputPath, commandName: "codex exec resume" });
     },
+  };
+}
+
+function inputTooLargeResult(prompt: string, phase: string): CodexResumableResult | null {
+  const evidence = promptBudgetEvidence(prompt, phase);
+  if (!evidence) {
+    return null;
+  }
+  return {
+    status: "blocked",
+    sessionId: null,
+    outputPath: "",
+    stdout: "",
+    stderr: "",
+    events: [],
+    output: promptBudgetBlockedOutput(evidence),
   };
 }
 

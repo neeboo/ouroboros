@@ -7,6 +7,7 @@ import type { TaskExecutor } from "../types";
 import { mkdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { promptBudgetBlockedOutput, promptBudgetEvidence } from "../prompt-budget";
 
 export function createCodexCliExecutor(options: CodexCliExecutorOptions): TaskExecutor {
   const sandbox = options.sandbox ?? "read-only";
@@ -14,6 +15,10 @@ export function createCodexCliExecutor(options: CodexCliExecutorOptions): TaskEx
   const codexBin = options.codexBin ?? defaultCodexBin();
 
   return async ({ prompt, sessionName }) => {
+    const oversizedPrompt = promptBudgetEvidence(prompt, "codex cli executor start");
+    if (oversizedPrompt) {
+      return promptBudgetBlockedOutput(oversizedPrompt);
+    }
     const outputPath = await makeOutputPath(options.outputDir, sessionName);
     const modelArgs = options.model ? ["-m", options.model] : [];
     const reasoningArgs = options.reasoningEffort ? ["-c", `model_reasoning_effort=${JSON.stringify(options.reasoningEffort)}`] : [];
