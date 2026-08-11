@@ -14,10 +14,18 @@ export function createGitWorktreeHook(options: {
   runCommand?: RunCommand;
 }): StartHook {
   const runCommand = options.runCommand ?? runLocalCommand;
-  const baseRef = options.baseRef ?? "main";
+  const defaultBaseRef = options.baseRef ?? "main";
 
   return async ({ run, task, cwd }) => {
     const repoPath = run.projectRoot ?? options.repoPath;
+    const resolvedBaseRef = worktreeBaseRef(run.context, defaultBaseRef);
+    if (!resolvedBaseRef.ok) {
+      return {
+        checks: [{ name: "git worktree base", status: "failed", summary: resolvedBaseRef.problem }],
+        problems: [resolvedBaseRef.problem],
+      };
+    }
+    const baseRef = resolvedBaseRef.baseRef;
     const branch = `ouroboros/${task.id}`;
     const checks: Array<{ name: string; status: "passed" | "failed"; summary?: string }> = [];
 
@@ -163,6 +171,23 @@ export function createGitWorktreeHook(options: {
       ],
     };
   };
+}
+
+function worktreeBaseRef(context: Record<string, unknown>, fallback: string) {
+  const expectedRemoteSha = context.expectedRemoteSha;
+  if (expectedRemoteSha === undefined) {
+    return { ok: true as const, baseRef: fallback };
+  }
+  if (
+    typeof expectedRemoteSha !== "string"
+    || !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(expectedRemoteSha)
+  ) {
+    return {
+      ok: false as const,
+      problem: "run expectedRemoteSha must be an exact lowercase commit SHA",
+    };
+  }
+  return { ok: true as const, baseRef: expectedRemoteSha };
 }
 
 function dependencyInstallCommand(cwd: string, hasTrackedBunLock: boolean) {

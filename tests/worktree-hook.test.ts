@@ -118,6 +118,54 @@ describe("git worktree hook", () => {
     ]);
   });
 
+  test("creates a recovery worktree from the run's frozen remote commit", async () => {
+    const calls: string[][] = [];
+    const expectedRemoteSha = "694a8d4c764a4a4507f58e973c8cb357e9135f9e";
+    const hook = createGitWorktreeHook({
+      repoPath: "/repos/hodor",
+      baseRef: "main",
+      runCommand: async ({ cmd }) => {
+        calls.push(cmd);
+        return { exitCode: 0, stdout: "", stderr: "" };
+      },
+    });
+    const input = hookInput("/repos/hodor-web/.ouroboros/worktrees/task_recovery");
+    input.run.projectRoot = "/repos/hodor-web";
+    input.run.context = { expectedRemoteSha };
+
+    await hook(input);
+
+    expect(calls[0]).toEqual([
+      "git",
+      "-C",
+      "/repos/hodor-web",
+      "worktree",
+      "add",
+      "/repos/hodor-web/.ouroboros/worktrees/task_recovery",
+      "-b",
+      "ouroboros/task_1",
+      expectedRemoteSha,
+    ]);
+  });
+
+  test("rejects an invalid frozen remote commit before creating a worktree", async () => {
+    const calls: string[][] = [];
+    const hook = createGitWorktreeHook({
+      repoPath: "/repos/hodor-web",
+      runCommand: async ({ cmd }) => {
+        calls.push(cmd);
+        return { exitCode: 0, stdout: "", stderr: "" };
+      },
+    });
+    const input = hookInput("/repos/hodor-web/.ouroboros/worktrees/task_invalid");
+    input.run.context = { expectedRemoteSha: "refs/heads/main" };
+
+    const result = await hook(input);
+
+    expect(calls).toEqual([]);
+    expect(result.problems).toEqual(["run expectedRemoteSha must be an exact lowercase commit SHA"]);
+  });
+
   test("rejects an existing task worktree owned by a different git common directory", async () => {
     const repoPath = await committedGitRepository("target repository\n");
     const foreignRepoPath = await committedGitRepository("foreign repository\n");
