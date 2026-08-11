@@ -13226,6 +13226,12 @@ describe("runner", () => {
         if (cmd.includes("rev-parse")) {
           return { exitCode: 0, stdout: "true\n", stderr: "" };
         }
+        if (cmd.includes("status")) {
+          return { exitCode: 0, stdout: "", stderr: "" };
+        }
+        if (cmd.includes("ls-files")) {
+          return { exitCode: 0, stdout: "bun.lock\n", stderr: "" };
+        }
         if (cmd[0] === "bun") {
           return { exitCode: 0, stdout: "", stderr: "" };
         }

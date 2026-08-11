@@ -1,5 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import { createGitWorktreeHook } from "../packages/runner/src";
+import { createHash } from "node:crypto";
+import { existsSync } from "node:fs";
+import { mkdtemp, readFile, readlink, rm, symlink, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 describe("git worktree hook", () => {
   test("creates a git worktree for the task cwd", async () => {
@@ -43,14 +48,337 @@ describe("git worktree hook", () => {
 
     expect(calls).toEqual([
       ["git", "-C", "/repo", "worktree", "add", "/tmp/wt/task_1", "-b", "ouroboros/task_1", "main"],
-      ["bun", "install", "--cwd", "/tmp/wt/task_1", "--frozen-lockfile"],
+      ["git", "-C", "/tmp/wt/task_1", "status", "--porcelain=v1", "-z", "--untracked-files=all"],
+      ["bun", "install", "--no-save", "--cwd", "/tmp/wt/task_1"],
+      ["git", "-C", "/tmp/wt/task_1", "status", "--porcelain=v1", "-z", "--untracked-files=all"],
     ]);
     expect(result).toEqual({
       checks: [
         { name: "git worktree add", status: "passed" },
         { name: "bun install", status: "passed" },
+        {
+          name: "worktree status boundary",
+          status: "passed",
+          summary: "worktree status preserved across bun install",
+        },
       ],
       artifacts: [{ kind: "worktree", path: "/tmp/wt/task_1", branch: "ouroboros/task_1" }],
     });
   });
+
+  test("preserves and blocks on a root bun.lock created despite --no-save", async () => {
+    const cwd = await gitRepository();
+    const contents = "generated lock\n";
+    let bunCalls = 0;
+    try {
+      const hook = createGitWorktreeHook({
+        repoPath: cwd,
+        runCommand: async (input) => {
+          if (input.cmd[0] === "bun") {
+            bunCalls += 1;
+            await writeFile(join(cwd, "bun.lock"), contents);
+            return { exitCode: 0, stdout: "", stderr: "" };
+          }
+          return spawnCommand(input.cmd);
+        },
+      });
+
+      const firstResult = await hook(hookInput(cwd));
+      const secondResult = await hook(hookInput(cwd));
+
+      expect(existsSync(join(cwd, "bun.lock"))).toBe(true);
+      expect(bunCalls).toBe(1);
+      expect(firstResult.problems ?? []).toContain("bun install created bun.lock despite --no-save");
+      expect(firstResult.checks).toContainEqual({
+        name: "generated artifact boundary",
+        status: "failed",
+        summary: "bun install created bun.lock despite --no-save",
+      });
+      expect(firstResult.artifacts).toContainEqual({
+        kind: "generated_artifact_boundary",
+        path: "bun.lock",
+        worktreePath: cwd,
+        source: "start-hook:git-worktree:bun-install",
+        sha256: createHash("sha256").update(contents).digest("hex"),
+        sizeBytes: Buffer.byteLength(contents),
+        lifecycle: "preserved-and-blocked",
+      });
+      expect(secondResult.problems ?? []).toContain("pre-existing bun.lock is not tracked by git");
+      expect(secondResult.checks).toContainEqual({
+        name: "generated artifact boundary",
+        status: "failed",
+        summary: "pre-existing bun.lock is not tracked by git",
+      });
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  test("preserves and blocks on a tracked bun.lock changed by dependency installation", async () => {
+    const cwd = await gitRepository();
+    const bunLockPath = join(cwd, "bun.lock");
+    await writeFile(bunLockPath, "operator lock\n");
+    const add = spawnCommand(["git", "-C", cwd, "add", "--", "bun.lock"]);
+    if (add.exitCode !== 0) throw new Error(add.stderr);
+    try {
+      const hook = createGitWorktreeHook({
+        repoPath: cwd,
+        runCommand: async (input) => {
+          if (input.cmd[0] === "bun") {
+            await writeFile(bunLockPath, "installer changed lock\n");
+            return { exitCode: 0, stdout: "", stderr: "" };
+          }
+          return spawnCommand(input.cmd);
+        },
+      });
+
+      const result = await hook(hookInput(cwd));
+
+      expect(await readFile(bunLockPath, "utf8")).toBe("installer changed lock\n");
+      expect(result.problems ?? []).toContain("pre-existing bun.lock changed during bun install");
+      expect(result.artifacts ?? []).not.toContainEqual(expect.objectContaining({ kind: "generated_artifact" }));
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  test("preserves and blocks on an unexpected generated file", async () => {
+    const cwd = await gitRepository();
+    const unexpectedPath = join(cwd, "package-lock.json");
+    try {
+      const hook = createGitWorktreeHook({
+        repoPath: cwd,
+        runCommand: async (input) => {
+          if (input.cmd[0] === "bun") {
+            await writeFile(unexpectedPath, "unexpected\n");
+            return { exitCode: 0, stdout: "", stderr: "" };
+          }
+          return spawnCommand(input.cmd);
+        },
+      });
+
+      const result = await hook(hookInput(cwd));
+
+      expect(await readFile(unexpectedPath, "utf8")).toBe("unexpected\n");
+      expect(result.problems ?? []).toContain("bun install changed worktree status");
+      expect(result.artifacts).not.toContainEqual(expect.objectContaining({ kind: "generated_artifact" }));
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  test("preserves an unchanged tracked bun.lock without claiming it", async () => {
+    const cwd = await gitRepository();
+    const bunLockPath = join(cwd, "bun.lock");
+    await writeFile(bunLockPath, "operator lock\n");
+    const add = spawnCommand(["git", "-C", cwd, "add", "--", "bun.lock"]);
+    if (add.exitCode !== 0) throw new Error(add.stderr);
+    try {
+      const hook = createGitWorktreeHook({
+        repoPath: cwd,
+        runCommand: async (input) => {
+          if (input.cmd[0] === "bun") {
+            expect(input.cmd).toContain("--frozen-lockfile");
+            return { exitCode: 0, stdout: "", stderr: "" };
+          }
+          return spawnCommand(input.cmd);
+        },
+      });
+
+      const result = await hook(hookInput(cwd));
+
+      expect(await readFile(bunLockPath, "utf8")).toBe("operator lock\n");
+      expect(result.problems).toBeUndefined();
+      expect(result.artifacts).not.toContainEqual(expect.objectContaining({ kind: "generated_artifact" }));
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  test("preserves and blocks on a bun.lock added to the index by dependency installation", async () => {
+    const cwd = await gitRepository();
+    const bunLockPath = join(cwd, "bun.lock");
+    try {
+      const hook = createGitWorktreeHook({
+        repoPath: cwd,
+        runCommand: async (input) => {
+          if (input.cmd[0] === "bun") {
+            await writeFile(bunLockPath, "tracked lock\n");
+            const add = spawnCommand(["git", "-C", cwd, "add", "--", "bun.lock"]);
+            if (add.exitCode !== 0) throw new Error(add.stderr);
+            return { exitCode: 0, stdout: "", stderr: "" };
+          }
+          return spawnCommand(input.cmd);
+        },
+      });
+
+      const result = await hook(hookInput(cwd));
+
+      expect(await readFile(bunLockPath, "utf8")).toBe("tracked lock\n");
+      expect(result.problems ?? []).toContain("bun install created bun.lock despite --no-save");
+      expect(result.artifacts).toContainEqual(expect.objectContaining({
+        kind: "generated_artifact_boundary",
+        path: "bun.lock",
+        lifecycle: "preserved-and-blocked",
+      }));
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  test("preserves and blocks on a generated bun.lock symlink", async () => {
+    const cwd = await gitRepository();
+    const outside = await mkdtemp(join(tmpdir(), "ouroboros-worktree-hook-outside-"));
+    const outsideTarget = join(outside, "operator.lock");
+    const bunLockPath = join(cwd, "bun.lock");
+    await writeFile(outsideTarget, "outside\n");
+    try {
+      const hook = createGitWorktreeHook({
+        repoPath: cwd,
+        runCommand: async (input) => {
+          if (input.cmd[0] === "bun") {
+            await symlink(outsideTarget, bunLockPath);
+            return { exitCode: 0, stdout: "", stderr: "" };
+          }
+          return spawnCommand(input.cmd);
+        },
+      });
+
+      const result = await hook(hookInput(cwd));
+
+      expect(existsSync(bunLockPath)).toBe(true);
+      expect(await readFile(outsideTarget, "utf8")).toBe("outside\n");
+      expect(result.problems ?? []).toContain("bun install created an unsafe bun.lock despite --no-save");
+      expect(result.artifacts).not.toContainEqual(expect.objectContaining({ kind: "generated_artifact" }));
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+      await rm(outside, { recursive: true, force: true });
+    }
+  });
+
+  test("preserves and blocks on a pre-existing broken bun.lock symlink", async () => {
+    const cwd = await gitRepository();
+    const bunLockPath = join(cwd, "bun.lock");
+    const missingTarget = join(cwd, "missing.lock");
+    let bunCalled = false;
+    await symlink(missingTarget, bunLockPath);
+    try {
+      const hook = createGitWorktreeHook({
+        repoPath: cwd,
+        runCommand: async (input) => {
+          if (input.cmd[0] === "bun") {
+            bunCalled = true;
+            return { exitCode: 0, stdout: "", stderr: "" };
+          }
+          return spawnCommand(input.cmd);
+        },
+      });
+
+      const result = await hook(hookInput(cwd));
+
+      expect(await readlink(bunLockPath)).toBe(missingTarget);
+      expect(bunCalled).toBe(false);
+      expect(result.problems ?? []).toContain("pre-existing bun.lock is not a regular file");
+      expect(result.artifacts ?? []).not.toContainEqual(expect.objectContaining({ kind: "generated_artifact" }));
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  test("keeps a real empty Yarn repository clean without writing bun.lock", async () => {
+    const cwd = await gitRepository();
+    await writeFile(join(cwd, "package.json"), JSON.stringify({
+      name: "empty-yarn-repository",
+      private: true,
+      packageManager: "yarn@1.22.22",
+      dependencies: {},
+      devDependencies: {},
+    }, null, 2));
+    await writeFile(join(cwd, "yarn.lock"), "# yarn lockfile v1\n");
+    await writeFile(join(cwd, ".gitignore"), "node_modules\n");
+    const commit = spawnCommand([
+      "git",
+      "-C",
+      cwd,
+      "-c",
+      "user.name=Ouroboros Test",
+      "-c",
+      "user.email=ouroboros@example.invalid",
+      "add",
+      "--all",
+    ]);
+    if (commit.exitCode !== 0) throw new Error(commit.stderr);
+    const commitResult = spawnCommand([
+      "git",
+      "-C",
+      cwd,
+      "-c",
+      "user.name=Ouroboros Test",
+      "-c",
+      "user.email=ouroboros@example.invalid",
+      "commit",
+      "-qm",
+      "fixture",
+    ]);
+    if (commitResult.exitCode !== 0) throw new Error(commitResult.stderr);
+    try {
+      const result = await createGitWorktreeHook({ repoPath: cwd })(hookInput(cwd));
+      const status = spawnCommand(["git", "-C", cwd, "status", "--porcelain=v1", "--untracked-files=all"]);
+
+      expect(result.problems).toBeUndefined();
+      expect(result.checks).toContainEqual({ name: "bun install", status: "passed" });
+      expect(existsSync(join(cwd, "bun.lock"))).toBe(false);
+      expect(status).toMatchObject({ exitCode: 0, stdout: "" });
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
 });
+
+async function gitRepository() {
+  const cwd = await mkdtemp(join(tmpdir(), "ouroboros-worktree-hook-"));
+  const result = spawnCommand(["git", "-C", cwd, "init", "-q"]);
+  if (result.exitCode !== 0) {
+    throw new Error(result.stderr);
+  }
+  return cwd;
+}
+
+function spawnCommand(cmd: string[]) {
+  const result = Bun.spawnSync({ cmd, stdout: "pipe", stderr: "pipe" });
+  return {
+    exitCode: result.exitCode,
+    stdout: new TextDecoder().decode(result.stdout),
+    stderr: new TextDecoder().decode(result.stderr),
+  };
+}
+
+function hookInput(cwd: string) {
+  return {
+    run: {
+      id: "run_1",
+      projectId: "project_1",
+      projectRoot: cwd,
+      goal: "Goal",
+      status: "todo" as const,
+      context: {},
+    },
+    task: {
+      id: "task_1",
+      runId: "run_1",
+      parentId: null,
+      cycleId: "task_1",
+      status: "running" as const,
+      role: "worker",
+      goal: "Task",
+      prompt: "Do it",
+      dependsOn: [],
+      doneWhen: [],
+      worktreePath: cwd,
+      sessionRef: "session-task_1",
+      contextVersion: 1,
+    },
+    sessionName: "session-task_1",
+    cwd,
+  };
+}

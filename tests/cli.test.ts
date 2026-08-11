@@ -6768,6 +6768,10 @@ if (args.includes("self-improve-daemon")) {
       [
         "#!/bin/sh",
         "set -eu",
+        "case \"$3\" in",
+        "  status) exit 0 ;;",
+        "  ls-files) printf 'bun.lock\\n'; exit 0 ;;",
+        "esac",
         "target=\"$5\"",
         "mkdir -p \"$target/packages/cli\" \"$target/packages/harness\" \"$target/packages/runner\"",
         "cp package.json bun.lock \"$target/\"",
@@ -6830,6 +6834,10 @@ if (args.includes("self-improve-daemon")) {
       [
         "#!/bin/sh",
         "set -eu",
+        "case \"$3\" in",
+        "  status) exit 0 ;;",
+        "  ls-files) printf 'bun.lock\\n'; exit 0 ;;",
+        "esac",
         "target=\"$5\"",
         "mkdir -p \"$target/packages/cli\" \"$target/packages/harness\" \"$target/packages/runner\"",
         "cp package.json bun.lock \"$target/\"",
