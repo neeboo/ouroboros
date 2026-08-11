@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, realpathSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
-import { dirname, isAbsolute, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { tmpdir } from "node:os";
 import { acceptGuardrailProposal, proposeGuardrailsFromLessons } from "./guardrails";
 import type { HarnessDatabase } from "./database";
@@ -6852,6 +6852,58 @@ function verifyIntegrationVerifierCommands(input: {
 }
 
 const MAX_CANDIDATE_WORKSPACE_DEPENDENCY_TREES = 64;
+const MAX_CANDIDATE_DEPENDENCY_LINKS = 4096;
+
+function candidateDependencyTarget(
+  repoPath: string,
+  candidatePath: string,
+  sourcePath: string,
+  requireCandidateMapping: boolean,
+): { ok: true; target: string } | { ok: false } {
+  const resolvedRepo = realpathSync(repoPath);
+  const resolvedSource = realpathSync(sourcePath);
+  if (!requireCandidateMapping) return { ok: true, target: resolvedSource };
+  const repoRelative = relative(resolvedRepo, resolvedSource);
+  if (repoRelative === ".." || repoRelative.startsWith(`..${sep}`) || isAbsolute(repoRelative)) {
+    return { ok: true, target: resolvedSource };
+  }
+  const candidateTarget = resolve(realpathSync(candidatePath), repoRelative);
+  return existsSync(candidateTarget)
+    ? { ok: true, target: candidateTarget }
+    : { ok: false };
+}
+
+function bindCandidateDependencyTree(input: {
+  source: string;
+  target: string;
+  repoPath: string;
+  candidatePath: string;
+  linkCount: { value: number };
+  scoped?: boolean;
+}): boolean {
+  if (existsSync(input.target)) return false;
+  mkdirSync(input.target, { recursive: true });
+  const entries = readdirSync(input.source, { withFileTypes: true }).sort((left, right) => left.name.localeCompare(right.name));
+  for (const entry of entries) {
+    input.linkCount.value += 1;
+    if (input.linkCount.value > MAX_CANDIDATE_DEPENDENCY_LINKS) return false;
+    const source = join(input.source, entry.name);
+    const target = join(input.target, entry.name);
+    if (!input.scoped && entry.name.startsWith("@") && entry.isDirectory() && !entry.isSymbolicLink()) {
+      if (!bindCandidateDependencyTree({ ...input, source, target, scoped: true })) return false;
+      continue;
+    }
+    const dependencyTarget = candidateDependencyTarget(
+      input.repoPath,
+      input.candidatePath,
+      source,
+      entry.isSymbolicLink(),
+    );
+    if (!dependencyTarget.ok) return false;
+    symlinkSync(dependencyTarget.target, target);
+  }
+  return true;
+}
 
 function bindCandidateDependencyTrees(repoPath: string, candidatePath: string): boolean {
   const bindings: Array<{ source: string; target: string }> = [];
@@ -6883,10 +6935,14 @@ function bindCandidateDependencyTrees(repoPath: string, candidatePath: string): 
     return false;
   }
   try {
+    const linkCount = { value: 0 };
     for (const binding of bindings) {
-      if (existsSync(binding.target)) return false;
-      mkdirSync(dirname(binding.target), { recursive: true });
-      symlinkSync(binding.source, binding.target, "dir");
+      if (!bindCandidateDependencyTree({
+        ...binding,
+        repoPath,
+        candidatePath,
+        linkCount,
+      })) return false;
     }
     return true;
   } catch {
