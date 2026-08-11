@@ -25,6 +25,7 @@ import {
   parseEvolutionDeliveryContracts,
   parseEvolutionInstance,
   parseEvolutionPackV1,
+  parseHarnessRevisionV1,
 } from "@ouroboros/harness";
 import { optionalStrictIsoTimestamp } from "@ouroboros/harness";
 import { createHash } from "node:crypto";
@@ -225,11 +226,9 @@ function applyActionAtomically(
         if (!proposal) {
           throw new Error(`design proposal not found: ${proposalId}`);
         }
-        if (proposalHasAnyTargetEvolutionData(proposal)) {
-          return applyCreateRunsFromDesignWithDb(harness, db, action, context, {
-            requireExisting: true,
-          });
-        }
+        return applyCreateRunsFromDesignWithDb(harness, db, action, context, {
+          requireExisting: true,
+        });
       }
       return reconstructActionResultFromAudit(action, priorEvent.result);
     }
@@ -1429,7 +1428,7 @@ function applyCreateRunsFromDesignWithDb(
     // the planned delivery. We never recreate or duplicate the run.
     const childContext: Record<string, unknown> = {
       ...withoutProtectedDesignContext(plannedRun.context),
-      ...inheritedControlContext(proposalSourceRun.context),
+      ...inheritedControlContext(harness, db, proposalSourceRun, proposalProjectId),
       projectId: proposalProjectId,
       parentRunId: proposal.runId ?? context.run.id,
       sourceTaskId: linearIntakeSourceDesignerTaskId ?? proposalSourceTaskId,
@@ -1618,7 +1617,13 @@ function applyCreateRunsFromDesignWithDb(
   };
 }
 
-function inheritedControlContext(context: Record<string, unknown>) {
+function inheritedControlContext(
+  harness: Harness,
+  db: HarnessDatabase,
+  sourceRun: Run,
+  projectId: string,
+) {
+  const context = sourceRun.context;
   const inherited = Object.fromEntries(
     [
       "modelDefaults",
@@ -1633,10 +1638,74 @@ function inheritedControlContext(context: Record<string, unknown>) {
       .filter((key) => context[key] !== undefined)
       .map((key) => [key, context[key]]),
   );
+  if (context.harnessRevision !== undefined) {
+    inherited.harnessRevision = trustedSourceHarnessRevision(harness, db, sourceRun, projectId);
+  }
   if (context.source === "self-improve" || context.source === "self-improvement-assessment") {
     inherited.agentDefaults = codexOnlyAgentDefaults(context.agentDefaults);
   }
   return inherited;
+}
+
+function trustedSourceHarnessRevision(
+  harness: Harness,
+  db: HarnessDatabase,
+  sourceRun: Run,
+  projectId: string,
+) {
+  const frozen = parseHarnessRevisionV1(
+    sourceRun.context.harnessRevision,
+    projectId,
+    "harnessRevision",
+  );
+  let current: Run = sourceRun;
+  const visited = new Set<string>();
+  while (true) {
+    if (visited.has(current.id)) {
+      throw new Error("harnessRevision ancestry contains a cycle");
+    }
+    visited.add(current.id);
+    if (current.projectId !== projectId) {
+      throw new Error(
+        `harnessRevision ancestry run ${current.id} belongs to project ${current.projectId ?? "<null>"}; expected ${projectId}`,
+      );
+    }
+    const parentRunId = current.context.parentRunId;
+    if (parentRunId === undefined) {
+      if (current.context.source !== "self-improve") {
+        throw new Error("harnessRevision source run does not descend from a canonical self-improve root");
+      }
+      const selfImprovement = current.context.selfImprovement;
+      if (
+        typeof selfImprovement !== "object"
+        || selfImprovement === null
+        || Array.isArray(selfImprovement)
+        || typeof (selfImprovement as Record<string, unknown>).cycleIndex !== "number"
+        || !Number.isInteger((selfImprovement as Record<string, unknown>).cycleIndex)
+        || typeof (selfImprovement as Record<string, unknown>).assessmentFingerprint !== "string"
+        || (selfImprovement as Record<string, unknown>).assessmentFingerprint === ""
+      ) {
+        throw new Error("harnessRevision ancestry root is missing the canonical self-improvement identity");
+      }
+      const active = parseHarnessRevisionV1(
+        current.context.activeHarnessRevision,
+        projectId,
+        "canonical root activeHarnessRevision",
+      );
+      if (stableCanonicalJson(active) !== stableCanonicalJson(frozen)) {
+        throw new Error("source harnessRevision does not match canonical root activeHarnessRevision");
+      }
+      return frozen;
+    }
+    if (typeof parentRunId !== "string" || parentRunId.trim() === "") {
+      throw new Error("harnessRevision ancestry parentRunId must be a non-empty string");
+    }
+    const parent = harness.getRunWithDb(db, parentRunId);
+    if (!parent) {
+      throw new Error(`harnessRevision ancestry parent run was not found: ${parentRunId}`);
+    }
+    current = parent;
+  }
 }
 
 const PROTECTED_DESIGN_CONTEXT_KEYS = [
@@ -1659,6 +1728,8 @@ const PROTECTED_DESIGN_CONTEXT_KEYS = [
   "evolutionComparison",
   "evolutionInstance",
   "linearIntake",
+  "activeHarnessRevision",
+  "harnessRevision",
 ] as const;
 
 interface FrozenTargetEvolutionContract {

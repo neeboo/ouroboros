@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
   type AttemptOutput,
+  canonicalHarnessRevisionContentSha256,
   canonicalEvolutionValueSha256,
   type DesignActionInput,
   type HarnessDatabase,
@@ -73,6 +74,32 @@ const validProposal = {
     timeBudget: "1 hour",
   },
 };
+
+function harnessRevisionFixture(projectId: string, version = 1, parentSha256: string | null = null) {
+  const body = {
+    schemaVersion: 1 as const,
+    projectId,
+    version,
+    parentSha256,
+    variant: {
+      id: `variant_${"a".repeat(64)}`,
+      recordSha256: "a".repeat(64),
+      contentSha256: "b".repeat(64),
+    },
+    components: [
+      { kind: "prompt" as const, ref: `git:prompt-v${version}`, sha256: "1".repeat(64) },
+      { kind: "knowledge" as const, ref: `git:knowledge-v${version}`, sha256: "2".repeat(64) },
+      { kind: "skills" as const, ref: `git:skills-v${version}`, sha256: "3".repeat(64) },
+      { kind: "tools" as const, ref: `git:tools-v${version}`, sha256: "4".repeat(64) },
+      { kind: "agent-policy" as const, ref: `git:agent-policy-v${version}`, sha256: "5".repeat(64) },
+    ],
+    evidenceRefs: [`run:evidence-v${version}`],
+  };
+  return {
+    ...body,
+    contentSha256: canonicalHarnessRevisionContentSha256(body),
+  };
+}
 
 function targetEvolutionEnvelope(projectId: string) {
   const evolutionPack = {
@@ -1678,6 +1705,207 @@ describe("design-action transition coordinator (production authority path)", () 
         actorKind: "auto",
       }),
     });
+  });
+
+  test("createRunsFromDesign inherits the source run frozen Harness revision and blocks replay drift", async () => {
+    const projectId = harness.createProject({ name: "revision-source", rootPath: dir });
+    const otherProjectId = harness.createProject({ name: "revision-other", rootPath: join(dir, "other") });
+    seedActiveCharter(projectId);
+    const revisionA = harnessRevisionFixture(projectId);
+    const rootRunId = harness.createRun({
+      goal: "canonical self-improvement root",
+      projectId,
+      context: {
+        source: "self-improve",
+        selfImprovement: { cycleIndex: 1, assessmentFingerprint: "a".repeat(64) },
+        activeHarnessRevision: revisionA,
+      },
+    });
+    const runId = harness.createRun({
+      goal: "revision-bound design run",
+      projectId,
+      context: {
+        parentRunId: rootRunId,
+        source: "self-improvement-assessment",
+        harnessRevision: revisionA,
+      },
+    });
+    const taskId = harness.createTask({
+      runId,
+      role: "designer",
+      goal: "design",
+      prompt: "design",
+    });
+    const signalId = seedActiveSignal(projectId);
+    await runHook({
+      status: "done",
+      summary: "propose",
+      designActions: [{
+        type: "proposeDesign",
+        payload: {
+          projectId,
+          title: "Revision-bound delivery",
+          proposal: lowRiskEnvelope(signalId),
+          status: "proposed",
+        },
+      }],
+    } as AttemptOutput, runId, taskId);
+    const proposal = harness.listDesignProposals({ projectId })[0];
+    expect(proposal.status).toBe("accepted");
+
+    const delivery: AttemptOutput = {
+      status: "done",
+      summary: "deliver",
+      designActions: [{
+        type: "createRunsFromDesign",
+        payload: {
+          proposalId: proposal.id,
+          runs: [{
+            goal: "Plan revision-bound delivery",
+            prompt: "Plan it.",
+            context: {
+              harnessRevision: harnessRevisionFixture(otherProjectId),
+              activeHarnessRevision: harnessRevisionFixture(otherProjectId),
+            },
+          }],
+        },
+      }],
+    } as AttemptOutput;
+    const first = await runHook(delivery, runId, taskId);
+    expect(first.decision).toBe("continue");
+    const childRunId = (createdRunArtifacts(first)[0] as { runId: string }).runId;
+    expect(harness.getRun(childRunId)!.context.harnessRevision).toEqual(revisionA);
+    expect(harness.getRun(childRunId)!.context.activeHarnessRevision).toBeUndefined();
+
+    harness.updateRun({ runId: childRunId, contextPatch: { activeHarnessRevision: revisionA } });
+    const activeRevisionReplay = await runHook(delivery, runId, taskId);
+    expect(activeRevisionReplay.decision).toBe("exit");
+    expect(activeRevisionReplay.problems?.[0]).toContain("frozen context.activeHarnessRevision is unexpected");
+    harness.updateRun({ runId: childRunId, contextPatch: { activeHarnessRevision: undefined } });
+
+    const revisionB = harnessRevisionFixture(projectId, 2, revisionA.contentSha256);
+    harness.updateRun({ runId: childRunId, contextPatch: { harnessRevision: revisionB } });
+    const replay = await runHook(delivery, runId, taskId);
+    expect(replay.decision).toBe("exit");
+    expect(replay.problems?.[0]).toContain("frozen context.harnessRevision drifted");
+    expect(harness.listRuns({ limit: 100 }).filter(
+      (run) => run.context.designProposalId === proposal.id,
+    )).toHaveLength(1);
+  });
+
+  test("createRunsFromDesign rejects a forged source Harness revision that differs from its canonical root", async () => {
+    const projectId = harness.createProject({ name: "forged-source-revision", rootPath: dir });
+    seedActiveCharter(projectId);
+    const revisionA = harnessRevisionFixture(projectId);
+    const revisionB = harnessRevisionFixture(projectId, 2, revisionA.contentSha256);
+    const rootRunId = harness.createRun({
+      goal: "canonical self-improvement root",
+      projectId,
+      context: {
+        source: "self-improve",
+        selfImprovement: { cycleIndex: 1, assessmentFingerprint: "a".repeat(64) },
+        activeHarnessRevision: revisionA,
+      },
+    });
+    const runId = harness.createRun({
+      goal: "forged revision source",
+      projectId,
+      context: {
+        parentRunId: rootRunId,
+        source: "self-improvement-assessment",
+        harnessRevision: revisionB,
+      },
+    });
+    const taskId = harness.createTask({
+      runId,
+      role: "designer",
+      goal: "design",
+      prompt: "design",
+    });
+    const signalId = seedActiveSignal(projectId);
+    await runHook({
+      status: "done",
+      summary: "propose",
+      designActions: [{
+        type: "proposeDesign",
+        payload: {
+          projectId,
+          title: "Reject forged source revision",
+          proposal: lowRiskEnvelope(signalId),
+          status: "proposed",
+        },
+      }],
+    } as AttemptOutput, runId, taskId);
+    const proposal = harness.listDesignProposals({ projectId })[0];
+
+    const result = await runHook({
+      status: "done",
+      summary: "deliver",
+      designActions: [{
+        type: "createRunsFromDesign",
+        payload: {
+          proposalId: proposal.id,
+          runs: [{ goal: "Plan rejected forged delivery", prompt: "Plan it." }],
+        },
+      }],
+    } as AttemptOutput, runId, taskId);
+    expect(result.decision).toBe("exit");
+    expect(result.problems?.[0]).toContain("does not match canonical root activeHarnessRevision");
+    expect(harness.listRuns({ limit: 100 }).filter(
+      (run) => run.context.designProposalId === proposal.id,
+    )).toHaveLength(0);
+  });
+
+  test("createRunsFromDesign rejects a frozen Harness revision from another project", async () => {
+    const projectId = harness.createProject({ name: "revision-project", rootPath: dir });
+    const otherProjectId = harness.createProject({ name: "foreign-revision-project", rootPath: join(dir, "foreign") });
+    seedActiveCharter(projectId);
+    const runId = harness.createRun({
+      goal: "cross-project revision source",
+      projectId,
+      context: {
+        source: "self-improvement-assessment",
+        harnessRevision: harnessRevisionFixture(otherProjectId),
+      },
+    });
+    const taskId = harness.createTask({
+      runId,
+      role: "designer",
+      goal: "design",
+      prompt: "design",
+    });
+    const signalId = seedActiveSignal(projectId);
+    await runHook({
+      status: "done",
+      summary: "propose",
+      designActions: [{
+        type: "proposeDesign",
+        payload: {
+          projectId,
+          title: "Reject foreign revision",
+          proposal: lowRiskEnvelope(signalId),
+          status: "proposed",
+        },
+      }],
+    } as AttemptOutput, runId, taskId);
+    const proposal = harness.listDesignProposals({ projectId })[0];
+
+    const result = await runHook({
+      status: "done",
+      summary: "deliver",
+      designActions: [{
+        type: "createRunsFromDesign",
+        payload: {
+          proposalId: proposal.id,
+          runs: [{ goal: "Plan rejected delivery", prompt: "Plan it." }],
+        },
+      }],
+    } as AttemptOutput, runId, taskId);
+    expect(result.decision).toBe("exit");
+    expect(result.problems?.[0]).toContain(`harnessRevision.projectId must equal expected projectId ${projectId}`);
+    expect(harness.listRuns({ limit: 100 }).filter(
+      (run) => run.context.designProposalId === proposal.id,
+    )).toHaveLength(0);
   });
 
   test("production envelope omitting charterId and riskSurface inherits resolved charter across proposal, decision, and child run with replay idempotency", async () => {

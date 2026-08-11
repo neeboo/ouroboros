@@ -5,6 +5,7 @@ import { join, resolve } from "node:path";
 import { homedir, tmpdir } from "node:os";
 import {
   applyHarnessAction,
+  canonicalHarnessRevisionContentSha256,
   canonicalEvolutionRecordSha256,
   canonicalEvolutionValueSha256,
   checkpointDatabase,
@@ -47,6 +48,32 @@ import {
 } from "../packages/cli/src/evolution-readback";
 
 setDefaultTimeout(10_000);
+
+function harnessRevisionFixture(projectId: string, version = 1, parentSha256: string | null = null) {
+  const body = {
+    schemaVersion: 1 as const,
+    projectId,
+    version,
+    parentSha256,
+    variant: {
+      id: `variant_${"a".repeat(64)}`,
+      recordSha256: "a".repeat(64),
+      contentSha256: "b".repeat(64),
+    },
+    components: [
+      { kind: "prompt" as const, ref: `git:prompt-v${version}`, sha256: "1".repeat(64) },
+      { kind: "knowledge" as const, ref: `git:knowledge-v${version}`, sha256: "2".repeat(64) },
+      { kind: "skills" as const, ref: `git:skills-v${version}`, sha256: "3".repeat(64) },
+      { kind: "tools" as const, ref: `git:tools-v${version}`, sha256: "4".repeat(64) },
+      { kind: "agent-policy" as const, ref: `git:agent-policy-v${version}`, sha256: "5".repeat(64) },
+    ],
+    evidenceRefs: [`run:evidence-v${version}`],
+  };
+  return {
+    ...body,
+    contentSha256: canonicalHarnessRevisionContentSha256(body),
+  };
+}
 
 async function snapshotDatabaseFilesystem(dbPath: string, dir: string) {
   const dbStat = await stat(dbPath);
@@ -9417,6 +9444,118 @@ if (args.includes("self-improve-daemon")) {
     expect(predecessorLessons).toBeArray();
     expect(successorOverview?.run.id).toBe(successorId);
     expect(successorLessons).toBeArray();
+  });
+
+  test("self-improve-daemon freezes the root active Harness revision into the next cycle", async () => {
+    const bootstrap = await runCliJson("self-iterate");
+    const setupHarness = new Harness(dbPath);
+    const root = setupHarness.getRun(bootstrap.runId)!;
+    const revisionA = harnessRevisionFixture(root.projectId!);
+    setupHarness.updateRun({
+      runId: root.id,
+      contextPatch: { activeHarnessRevision: revisionA },
+    });
+    setupHarness.recordAttempt({
+      taskId: bootstrap.taskId,
+      input: {},
+      output: {
+        status: "blocked",
+        summary: "Schedule the next revision-bound cycle.",
+        changedFiles: [],
+        checks: [{ name: "root assessment", status: "failed" }],
+        artifacts: [],
+        problems: ["terminal root without wake"],
+      },
+    });
+    setupHarness.updateRunStatus({ runId: root.id, status: "blocked" });
+
+    const codexBin = join(dir, "fake-codex-harness-revision");
+    const output = {
+      status: "done",
+      summary: "Revision-bound successor completed without new mutation.",
+      changedFiles: [],
+      checks: [{ name: "revision inheritance", status: "passed" }],
+      artifacts: [],
+      problems: [],
+    };
+    await writeFile(codexBin, [
+      "#!/usr/bin/env bun",
+      "import { writeFileSync } from 'node:fs';",
+      "const flag = Bun.argv.indexOf('--output-last-message');",
+      "const path = flag >= 0 ? Bun.argv[flag + 1] : '';",
+      `const output = ${JSON.stringify(output)};`,
+      "if (path) writeFileSync(path, JSON.stringify(output));",
+      "console.log(JSON.stringify({ type: 'session.started', session_id: 'session_harness_revision' }));",
+      "console.log(JSON.stringify({ type: 'agent.message', message: JSON.stringify(output) }));",
+    ].join("\n"));
+    await chmod(codexBin, 0o755);
+
+    const result = await runCliJson(
+      "self-improve-daemon",
+      "--executor", "codex-resumable",
+      "--root-run-id", root.id,
+      "--codex-bin", codexBin,
+      "--parallel", "auto",
+      "--max-ticks", "1",
+      "--tick-cycles", "1",
+      "--max-rounds", "1",
+      "--interval-ms", "1",
+      "--idle-ms", "1",
+    );
+    const childRunId = result.ticks[0].createdCycle?.runId as string;
+    const childBeforeUpgrade = new Harness(dbPath).getRun(childRunId)!;
+    expect(childBeforeUpgrade.context.harnessRevision).toEqual(revisionA);
+    expect(childBeforeUpgrade.context.activeHarnessRevision).toBeUndefined();
+
+    const revisionB = harnessRevisionFixture(root.projectId!, 2, revisionA.contentSha256);
+    setupHarness.updateRun({
+      runId: root.id,
+      contextPatch: { activeHarnessRevision: revisionB },
+    });
+    expect(new Harness(dbPath).getRun(childRunId)!.context.harnessRevision).toEqual(revisionA);
+  });
+
+  test("self-improve-daemon rejects a malformed active Harness revision before creating a cycle", async () => {
+    const bootstrap = await runCliJson("self-iterate");
+    const setupHarness = new Harness(dbPath);
+    const root = setupHarness.getRun(bootstrap.runId)!;
+    const { components: _components, ...malformed } = harnessRevisionFixture(root.projectId!);
+    setupHarness.updateRun({
+      runId: root.id,
+      contextPatch: { activeHarnessRevision: malformed },
+    });
+    setupHarness.recordAttempt({
+      taskId: bootstrap.taskId,
+      input: {},
+      output: {
+        status: "blocked",
+        summary: "Malformed active revision must stop inheritance.",
+        changedFiles: [],
+        checks: [],
+        artifacts: [],
+        problems: ["malformed revision"],
+      },
+    });
+    setupHarness.updateRunStatus({ runId: root.id, status: "blocked" });
+
+    const result = await runCliJson(
+      "self-improve-daemon",
+      "--executor", "codex-resumable",
+      "--root-run-id", root.id,
+      "--parallel", "auto",
+      "--max-ticks", "1",
+      "--tick-cycles", "1",
+      "--max-rounds", "1",
+      "--interval-ms", "1",
+      "--idle-ms", "1",
+    );
+    const runs = setupHarness.listRuns({ limit: 100 });
+    expect(result.ticks[0]).toMatchObject({
+      status: "error",
+      createdCycle: null,
+      error: expect.stringContaining("activeHarnessRevision.components must be an array"),
+    });
+    expect(runs.filter((run) => run.context.source === "self-improvement-assessment")).toHaveLength(0);
   });
 
   test("self-improve-daemon never derives quiescence from the mutable root after an assessment child exists", async () => {

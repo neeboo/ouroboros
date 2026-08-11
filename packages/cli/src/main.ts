@@ -10,6 +10,7 @@ import {
   readableList,
   readableValue,
   readSelfImprovementQuiescence,
+  parseHarnessRevisionV1,
   requireStrictIsoTimestamp,
 } from "@ouroboros/harness";
 import type {
@@ -2603,7 +2604,7 @@ function ensureSelfImprovementCycle(rootRunId: string, cwd: string) {
       goal: `Designer assesses Ouroboros for cycle ${cycleIndex}`,
       projectId,
       context: {
-        ...selfImprovementControlContext(liveRoot.context),
+        ...selfImprovementControlContext(liveRoot.context, projectId),
         parentRunId: rootRunId,
         source: "self-improvement-assessment",
         planDoc: SELF_ITERATION_PLAN_DOC,
@@ -3397,7 +3398,14 @@ function linkDueOutcomeReviews(runs: ReturnType<typeof selfImprovementRuns>) {
   return created;
 }
 
-function selfImprovementControlContext(context: Record<string, unknown>) {
+function selfImprovementControlContext(context: Record<string, unknown>, projectId: string) {
+  const activeHarnessRevision = context.activeHarnessRevision === undefined
+    ? undefined
+    : parseHarnessRevisionV1(
+        context.activeHarnessRevision,
+        projectId,
+        "activeHarnessRevision",
+      );
   return {
     ...Object.fromEntries(
       ["modelDefaults", "agentBackends", "guardrails", "integrationBoundary", "controlPlaneRuntime"]
@@ -3405,6 +3413,7 @@ function selfImprovementControlContext(context: Record<string, unknown>) {
         .map((key) => [key, context[key]]),
     ),
     agentDefaults: codexOnlyAgentDefaults(context.agentDefaults),
+    ...(activeHarnessRevision ? { harnessRevision: activeHarnessRevision } : {}),
   };
 }
 

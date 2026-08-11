@@ -6991,6 +6991,26 @@ describe("Evolution runtime fixed actions", () => {
     expect(JSON.stringify(event)).not.toContain("repo:");
   });
 
+  test("activateHarnessRevision rejects a null active revision instead of treating it as never activated", () => {
+    const graph = activationFixture();
+    harness.updateRun({
+      runId: graph.rootRunId,
+      contextPatch: { activeHarnessRevision: null },
+    });
+    const revision = graph.verifiedRevision(1, null, "null-active");
+
+    const result = applyHarnessAction(harness, {
+      type: "activateHarnessRevision",
+      runId: graph.runId,
+      rootRunId: graph.rootRunId,
+      revision,
+    });
+
+    expect(result.status).toBe("blocked");
+    expect(result.problems.join(" ")).toContain("activeHarnessRevision must be an object");
+    expect(harness.getRun(graph.rootRunId)?.context.activeHarnessRevision).toBeNull();
+  });
+
   test("activateHarnessRevision blocks stale parents and skipped versions without changing the active revision", () => {
     const graph = activationFixture();
     const firstRevision = graph.verifiedRevision(1, null);

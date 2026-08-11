@@ -906,7 +906,7 @@ function activateHarnessRevisionWithDb(
 
   const currentRaw = rootRun.context.activeHarnessRevision;
   let reused = false;
-  if (currentRaw !== undefined && currentRaw !== null) {
+  if (currentRaw !== undefined) {
     const current = parseHarnessRevisionV1(
       currentRaw,
       rootRun.projectId,
