@@ -13,6 +13,7 @@ import {
 } from "./goal-review";
 import { Harness } from "./harness";
 import { makeId } from "./ids";
+import { parseHarnessRevisionV1 } from "./harness-revision";
 import { filterOuroborosRuntimePaths, isOuroborosRuntimePath } from "./runtime-paths";
 import {
   advanceAfterRepair,
@@ -50,6 +51,7 @@ import type {
   EvolutionProfile,
   ExecutionThread,
   HarnessVariant,
+  HarnessRevisionV1,
   HarnessActionEvent,
   MatchedExperiment,
   ProductionEpisode,
@@ -139,6 +141,12 @@ export type HarnessAction =
   | { type: "registerEvolutionProfile"; runId: string; profile: EvolutionProfile }
   | { type: "recordProductionEpisode"; runId: string; episode: ProductionEpisode }
   | { type: "registerHarnessVariant"; runId: string; variant: HarnessVariant }
+  | {
+      type: "activateHarnessRevision";
+      runId: string;
+      rootRunId: string;
+      revision: HarnessRevisionV1;
+    }
   | { type: "freezeMatchedExperiment"; runId: string; experiment: MatchedExperiment }
   | {
       type: "interruptAttemptAndCreateTask";
@@ -394,6 +402,9 @@ const FROZEN_DESIGN_CONTEXT_KEYS = new Set([
   "evaluationContract",
   "designEvaluationContract",
   "linearIntake",
+  "parentRunId",
+  "activeHarnessRevision",
+  "harnessRevision",
 ]);
 
 function frozenDesignContextKeys(keys: Iterable<string>): string[] {
@@ -561,6 +572,17 @@ export function parseHarnessAction(value: unknown): HarnessAction {
     const projectId = exactNonEmptyStringField(variantRecord, "projectId");
     return { type, runId, variant: parseHarnessVariant(variantRecord, projectId, "variant") };
   }
+  if (type === "activateHarnessRevision") {
+    assertOnlyFields(record, type, ["type", "runId", "rootRunId", "revision"]);
+    const revisionRecord = objectRecord(record.revision, "revision");
+    const projectId = exactNonEmptyStringField(revisionRecord, "projectId");
+    return {
+      type,
+      runId: exactNonEmptyStringField(record, "runId"),
+      rootRunId: exactNonEmptyStringField(record, "rootRunId"),
+      revision: parseHarnessRevisionV1(revisionRecord, projectId, "revision"),
+    };
+  }
   if (type === "freezeMatchedExperiment") {
     assertOnlyFields(record, type, ["type", "runId", "experiment"]);
     const runId = exactNonEmptyStringField(record, "runId");
@@ -645,7 +667,7 @@ export function parseHarnessAction(value: unknown): HarnessAction {
     };
   }
   throw new Error(
-    "harness action type must be reclaimRunningTasks, retryTask, markRunTodo, updateRunContext, amendRunContract, retireRun, prepareRunDrain, completeSystemTask, integrateVerifiedRun, pushExactGitRef, createExactGitRef, commitExactGitIndex, registerEvolutionProfile, recordProductionEpisode, registerHarnessVariant, freezeMatchedExperiment, interruptAttemptAndCreateTask, interruptRunningAttemptsAndCreateTask, acceptGuardrailProposal, startSubsession, collectSubsessions, cancelSubsessions, or runWatchdogPass",
+    "harness action type must be reclaimRunningTasks, retryTask, markRunTodo, updateRunContext, amendRunContract, retireRun, prepareRunDrain, completeSystemTask, integrateVerifiedRun, pushExactGitRef, createExactGitRef, commitExactGitIndex, registerEvolutionProfile, recordProductionEpisode, registerHarnessVariant, activateHarnessRevision, freezeMatchedExperiment, interruptAttemptAndCreateTask, interruptRunningAttemptsAndCreateTask, acceptGuardrailProposal, startSubsession, collectSubsessions, cancelSubsessions, or runWatchdogPass",
   );
 }
 
@@ -662,7 +684,7 @@ export function applyHarnessAction(
     const eventId = harness.recordHarnessActionEvent({
       actionType: "invalid",
       status: result.status,
-      request: safeRequest(rawAction),
+      request: invalidActionAuditRequest(rawAction),
       result: resultToRecord(result),
     });
     return { ...result, eventId };
@@ -676,6 +698,10 @@ export function applyHarnessAction(
 
   if (isEvolutionAction(action)) {
     return applyEvolutionActionAtomically(harness, action);
+  }
+
+  if (action.type === "activateHarnessRevision") {
+    return applyHarnessRevisionActivationAtomically(harness, action);
   }
 
   if (action.type === "integrateVerifiedRun") {
@@ -712,6 +738,8 @@ type EvolutionAction = Extract<
       | "freezeMatchedExperiment";
   }
 >;
+
+type HarnessRevisionActivationAction = Extract<HarnessAction, { type: "activateHarnessRevision" }>;
 
 function isEvolutionAction(action: HarnessAction): action is EvolutionAction {
   return action.type === "registerEvolutionProfile"
@@ -797,6 +825,279 @@ function applyEvolutionActionAtomically(
     });
     return { ...result, eventId };
   }
+}
+
+function applyHarnessRevisionActivationAtomically(
+  harness: Harness,
+  action: HarnessRevisionActivationAction,
+): HarnessActionResult & { eventId: string } {
+  try {
+    return harness.runInImmediateTransaction((db) => {
+      const result = activateHarnessRevisionWithDb(harness, db, action);
+      const eventId = harness.recordHarnessActionEventWithDb(db, {
+        actionType: action.type,
+        status: result.status,
+        request: harnessRevisionActivationAuditRequest(action),
+        result: resultToRecord(result),
+      });
+      return { ...result, eventId };
+    });
+  } catch (error) {
+    const problem = limitUtf8Output(sanitizeEvolutionErrorText(errorMessage(error)), 4_096);
+    const result = blockedResult(action.type, `${action.type} blocked: ${problem}`, [problem]);
+    const eventId = harness.recordHarnessActionEvent({
+      actionType: action.type,
+      status: result.status,
+      request: harnessRevisionActivationAuditRequest(action),
+      result: resultToRecord(result),
+    });
+    return { ...result, eventId };
+  }
+}
+
+function activateHarnessRevisionWithDb(
+  harness: Harness,
+  db: HarnessDatabase,
+  action: HarnessRevisionActivationAction,
+): HarnessActionResult {
+  const sourceRun = harness.getRunWithDb(db, action.runId);
+  if (!sourceRun?.projectId) {
+    throw new Error(`activateHarnessRevision requires a project-bound source run: ${action.runId}`);
+  }
+  const rootRun = harness.getRunWithDb(db, action.rootRunId);
+  if (!rootRun?.projectId) {
+    throw new Error(`activateHarnessRevision requires a project-bound root run: ${action.rootRunId}`);
+  }
+  if (sourceRun.projectId !== rootRun.projectId || action.revision.projectId !== rootRun.projectId) {
+    throw new Error("activateHarnessRevision project identity must match the source run and root run");
+  }
+  requireCanonicalSelfImprovementRoot(rootRun);
+  if (!runDescendsFromRootWithDb(harness, db, sourceRun.id, rootRun.id)) {
+    throw new Error("activateHarnessRevision source run must belong to the long-lived root run");
+  }
+
+  const frozen = frozenEvolutionContext(harness, db, sourceRun, action.type);
+  const variant = harness.getHarnessVariantWithDb(db, {
+    projectId: action.revision.projectId,
+    id: action.revision.variant.id,
+  });
+  if (!variant) {
+    throw new Error(
+      `HarnessVariant record hash mismatch: trusted variant ${action.revision.variant.id} was not found`,
+    );
+  }
+  if (variant.role !== "candidate" || !variant.evolutionTargets.includes("harness")) {
+    throw new Error("activateHarnessRevision requires a candidate HarnessVariant that targets harness evolution");
+  }
+  const variantRecordSha256 = canonicalEvolutionRecordSha256(variant);
+  if (variantRecordSha256 !== action.revision.variant.recordSha256) {
+    throw new Error("HarnessVariant record hash mismatch");
+  }
+  if (variant.contentSha256 !== action.revision.variant.contentSha256) {
+    throw new Error("HarnessVariant content hash mismatch");
+  }
+  requireEvolutionActionReceipt(db, {
+    projectId: variant.projectId,
+    recordKind: "variant",
+    recordId: variant.id,
+    recordSha256: variantRecordSha256,
+  }, frozen);
+  validateHarnessRevisionEvidence(db, action, variant);
+
+  const currentRaw = rootRun.context.activeHarnessRevision;
+  let reused = false;
+  if (currentRaw !== undefined && currentRaw !== null) {
+    const current = parseHarnessRevisionV1(
+      currentRaw,
+      rootRun.projectId,
+      "root activeHarnessRevision",
+    );
+    if (current.contentSha256 === action.revision.contentSha256) {
+      if (!sameCanonicalValue(current, action.revision)) {
+        throw new Error("active Harness revision digest collision or canonical readback mismatch");
+      }
+      reused = true;
+    } else {
+      if (action.revision.version !== current.version + 1) {
+        throw new Error(
+          `Harness revision version must advance exactly once from ${current.version} to ${current.version + 1}`,
+        );
+      }
+      if (action.revision.parentSha256 !== current.contentSha256) {
+        throw new Error("Harness revision parentSha256 is stale or does not match the active revision");
+      }
+    }
+  } else if (action.revision.version !== 1 || action.revision.parentSha256 !== null) {
+    throw new Error("The first active Harness revision must be version 1 with parentSha256=null");
+  }
+
+  if (!reused) {
+    const updated = harness.updateRunWithDb(db, {
+      runId: rootRun.id,
+      contextPatch: { activeHarnessRevision: action.revision },
+    });
+    const readback = updated?.context.activeHarnessRevision;
+    const parsedReadback = parseHarnessRevisionV1(
+      readback,
+      rootRun.projectId,
+      "active Harness revision readback",
+    );
+    if (!sameCanonicalValue(parsedReadback, action.revision)) {
+      throw new Error("active Harness revision transactional readback mismatch");
+    }
+  }
+
+  return doneResult(
+    action.type,
+    `${reused ? "Reused" : "Activated"} Harness revision ${action.revision.version} for project ${rootRun.projectId}.`,
+    [
+      { name: "root project identity", status: "passed", evidence: rootRun.projectId },
+      { name: "accepted design proposal", status: "passed", evidence: frozen.proposalId },
+      { name: "approved authority decision", status: "passed", evidence: frozen.authorityDecisionId },
+      { name: "trusted HarnessVariant receipt", status: "passed", evidence: variantRecordSha256 },
+      { name: "verified revision evidence", status: "passed", evidence: String(action.revision.evidenceRefs.length) },
+      { name: "active revision readback", status: "passed", evidence: action.revision.contentSha256 },
+    ],
+    [{
+      kind: "harness_revision_activation",
+      projectId: rootRun.projectId,
+      rootRunId: rootRun.id,
+      sourceRunId: sourceRun.id,
+      version: action.revision.version,
+      parentSha256: action.revision.parentSha256,
+      contentSha256: action.revision.contentSha256,
+      variantId: variant.id,
+      variantRecordSha256,
+      reused,
+      externalEffectsApplied: false,
+    }],
+  );
+}
+
+function requireCanonicalSelfImprovementRoot(
+  run: NonNullable<ReturnType<Harness["getRunWithDb"]>>,
+) {
+  if (run.context.source !== "self-improve" || run.context.parentRunId !== undefined) {
+    throw new Error("activateHarnessRevision root must be the canonical parentless self-improve root");
+  }
+  const selfImprovement = objectRecord(
+    run.context.selfImprovement,
+    "activateHarnessRevision root selfImprovement",
+  );
+  if (
+    typeof selfImprovement.cycleIndex !== "number"
+    || !Number.isInteger(selfImprovement.cycleIndex)
+    || selfImprovement.cycleIndex < 0
+    || typeof selfImprovement.assessmentFingerprint !== "string"
+    || selfImprovement.assessmentFingerprint.length === 0
+  ) {
+    throw new Error("activateHarnessRevision root must carry the canonical self-improvement cycle identity");
+  }
+}
+
+function runDescendsFromRootWithDb(
+  harness: Harness,
+  db: HarnessDatabase,
+  sourceRunId: string,
+  rootRunId: string,
+) {
+  let currentId: string | null = sourceRunId;
+  const visited = new Set<string>();
+  while (currentId) {
+    if (currentId === rootRunId) return true;
+    if (visited.has(currentId)) {
+      throw new Error("activateHarnessRevision run ancestry contains a cycle");
+    }
+    visited.add(currentId);
+    const current = harness.getRunWithDb(db, currentId);
+    const parentRunId = current?.context.parentRunId;
+    currentId = typeof parentRunId === "string" && parentRunId.length > 0 ? parentRunId : null;
+  }
+  return false;
+}
+
+function validateHarnessRevisionEvidence(
+  db: HarnessDatabase,
+  action: HarnessRevisionActivationAction,
+  variant: HarnessVariant,
+) {
+  let verifiedAttemptCount = 0;
+  for (const evidenceRef of action.revision.evidenceRefs) {
+    if (!evidenceRef.startsWith("attempt:")) {
+      throw new Error(`Harness revision evidence must use a trusted verifier attempt receipt: ${evidenceRef}`);
+    }
+    const attemptId = evidenceRef.slice("attempt:".length);
+    const row = db.query(`
+      select attempts.status as attempt_status,
+             attempts.output_json as output_json,
+             tasks.role as task_role,
+             tasks.run_id as task_run_id,
+             runs.project_id as project_id
+      from attempts
+      join tasks on tasks.id = attempts.task_id
+      join runs on runs.id = tasks.run_id
+      where attempts.id = $attemptId
+    `).get({ $attemptId: attemptId }) as {
+      attempt_status: string;
+      output_json: string;
+      task_role: string;
+      task_run_id: string;
+      project_id: string | null;
+    } | null;
+    if (
+      !row
+      || row.attempt_status !== "done"
+      || row.task_role !== "verifier"
+      || row.task_run_id !== action.runId
+      || row.project_id !== action.revision.projectId
+    ) {
+      throw new Error(`Harness revision evidence is not a done verifier receipt from the source run: ${evidenceRef}`);
+    }
+    const output = objectRecord(JSON.parse(row.output_json), `Harness revision evidence ${evidenceRef} output`);
+    const checks = Array.isArray(output.checks) ? output.checks : [];
+    if (
+      checks.length === 0
+      || checks.some((check) => !check || typeof check !== "object" || Array.isArray(check)
+        || (check as Record<string, unknown>).status !== "passed")
+    ) {
+      throw new Error(`Harness revision evidence must contain only passed checks: ${evidenceRef}`);
+    }
+    const problems = Array.isArray(output.problems) ? output.problems : [];
+    if (problems.length > 0) {
+      throw new Error(`Harness revision evidence contains verifier problems: ${evidenceRef}`);
+    }
+    const artifacts = Array.isArray(output.artifacts) ? output.artifacts : [];
+    const matchingArtifact = artifacts.some((artifact) => {
+      if (!artifact || typeof artifact !== "object" || Array.isArray(artifact)) return false;
+      const record = artifact as Record<string, unknown>;
+      return record.kind === "harness_revision_verification"
+        && record.projectId === action.revision.projectId
+        && record.variantId === variant.id
+        && record.variantRecordSha256 === action.revision.variant.recordSha256
+        && record.variantContentSha256 === action.revision.variant.contentSha256
+        && record.revisionContentSha256 === action.revision.contentSha256;
+    });
+    if (!matchingArtifact) {
+      throw new Error(`Harness revision verifier receipt does not bind the frozen hashes: ${evidenceRef}`);
+    }
+    verifiedAttemptCount += 1;
+  }
+  if (verifiedAttemptCount === 0) {
+    throw new Error("Harness revision requires at least one trusted verifier attempt receipt");
+  }
+}
+
+function harnessRevisionActivationAuditRequest(action: HarnessRevisionActivationAction) {
+  return {
+    type: action.type,
+    runId: action.runId,
+    rootRunId: action.rootRunId,
+    projectId: action.revision.projectId,
+    version: action.revision.version,
+    contentSha256: action.revision.contentSha256,
+    variantId: action.revision.variant.id,
+    variantRecordSha256: action.revision.variant.recordSha256,
+  };
 }
 
 function sanitizeEvolutionErrorText(value: string) {
@@ -979,7 +1280,7 @@ function frozenEvolutionContext(
   harness: Harness,
   db: HarnessDatabase,
   run: NonNullable<ReturnType<Harness["getRunWithDb"]>>,
-  actionType: EvolutionAction["type"],
+  actionType: EvolutionAction["type"] | HarnessRevisionActivationAction["type"],
 ): FrozenEvolutionActionContext {
   const projectId = run.projectId;
   if (!projectId) {
@@ -1525,7 +1826,7 @@ function integrationConvergenceRecords(harness: Harness, runId: string) {
 
 function applyParsedHarnessAction(
   harness: Harness,
-  action: Exclude<HarnessAction, SubsessionAction | EvolutionAction>,
+  action: Exclude<HarnessAction, SubsessionAction | EvolutionAction | HarnessRevisionActivationAction>,
   options: HarnessActionOptions,
 ): HarnessActionResult {
   if (action.type === "reclaimRunningTasks") {
@@ -8694,6 +8995,32 @@ function safeRequest(value: unknown): Record<string, unknown> {
   return sanitized && typeof sanitized === "object" && !Array.isArray(sanitized)
     ? (sanitized as Record<string, unknown>)
     : { value: sanitized };
+}
+
+function invalidActionAuditRequest(value: unknown): Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return safeRequest(value);
+  }
+  const record = value as Record<string, unknown>;
+  if (record.type !== "activateHarnessRevision") {
+    return safeRequest(value);
+  }
+  const revision = record.revision && typeof record.revision === "object" && !Array.isArray(record.revision)
+    ? record.revision as Record<string, unknown>
+    : {};
+  const variant = revision.variant && typeof revision.variant === "object" && !Array.isArray(revision.variant)
+    ? revision.variant as Record<string, unknown>
+    : {};
+  return Object.fromEntries(Object.entries({
+    type: "activateHarnessRevision",
+    runId: typeof record.runId === "string" ? record.runId : undefined,
+    rootRunId: typeof record.rootRunId === "string" ? record.rootRunId : undefined,
+    projectId: typeof revision.projectId === "string" ? revision.projectId : undefined,
+    version: typeof revision.version === "number" ? revision.version : undefined,
+    contentSha256: typeof revision.contentSha256 === "string" ? revision.contentSha256 : undefined,
+    variantId: typeof variant.id === "string" ? variant.id : undefined,
+    variantRecordSha256: typeof variant.recordSha256 === "string" ? variant.recordSha256 : undefined,
+  }).filter(([, fieldValue]) => fieldValue !== undefined));
 }
 
 function sanitizeActionRequestValue(

@@ -6,6 +6,8 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
   applyHarnessAction,
+  canonicalHarnessRevisionContentSha256,
+  canonicalEvolutionRecordSha256,
   canonicalEvolutionValueSha256,
   describeAuthorityEvaluation,
   describeIntegrationReadiness,
@@ -21,6 +23,7 @@ import {
   parseProductionEpisode,
   withDatabase,
   type HarnessDatabase,
+  type HarnessRevisionV1,
   type SubsessionRunner,
   type SubsessionRunnerCancelChild,
   type SubsessionRunnerCollectChild,
@@ -6850,6 +6853,369 @@ describe("Evolution runtime fixed actions", () => {
     }
     return results;
   }
+
+  function activationFixture(input: { trustedVariantReceipt?: boolean } = {}) {
+    const graph = fixture();
+    const rootRunId = harness.createRun({
+      id: "run_continual_harness_root",
+      projectId: graph.projectId,
+      goal: "Continuously improve the project harness.",
+      context: {
+        source: "self-improve",
+        selfImprovement: { cycleIndex: 0, assessmentFingerprint: SHA_A },
+      },
+    });
+    harness.updateRun({ runId: graph.runId, contextPatch: { parentRunId: rootRunId } });
+    expect(applyHarnessAction(harness, {
+      type: "registerEvolutionProfile",
+      runId: graph.runId,
+      profile: graph.profile,
+    }).status).toBe("done");
+    if (input.trustedVariantReceipt === false) {
+      harness.recordHarnessVariant(graph.candidate);
+    } else {
+      expect(applyHarnessAction(harness, {
+        type: "registerHarnessVariant",
+        runId: graph.runId,
+        variant: graph.candidate,
+      }).status).toBe("done");
+    }
+
+    const verifiedRevision = (
+      version: number,
+      parentSha256: string | null,
+      marker = String(version),
+    ): HarnessRevisionV1 => {
+      const attemptId = `attempt_harness_revision_${marker}`;
+      const body: Omit<HarnessRevisionV1, "contentSha256"> = {
+        schemaVersion: 1,
+        projectId: graph.projectId,
+        version,
+        parentSha256,
+        variant: {
+          id: graph.candidate.id,
+          recordSha256: canonicalEvolutionRecordSha256(graph.candidate),
+          contentSha256: graph.candidate.contentSha256,
+        },
+        components: [
+          { kind: "tools", ref: `repo:orbs/tools-${marker}.json`, sha256: SHA_B },
+          { kind: "prompt", ref: `repo:prompts/harness-${marker}.md`, sha256: SHA_A },
+          { kind: "agent-policy", ref: `content:agent-policy-${marker}`, sha256: SHA_C },
+          { kind: "skills", ref: `mcp://orbs/skills/${marker}`, sha256: SHA_B },
+          { kind: "knowledge", ref: `mcp://project/knowledge/${marker}`, sha256: SHA_A },
+        ],
+        evidenceRefs: [`attempt:${attemptId}`],
+      };
+      const revision: HarnessRevisionV1 = {
+        ...body,
+        contentSha256: canonicalHarnessRevisionContentSha256(body),
+      };
+      const verifierTaskId = harness.createTask({
+        id: `task_harness_revision_${marker}`,
+        runId: graph.runId,
+        role: "verifier",
+        goal: `Verify Harness revision ${marker}`,
+        prompt: "Verify the frozen Harness revision and its candidate provenance.",
+      });
+      harness.recordAttempt({
+        id: attemptId,
+        taskId: verifierTaskId,
+        input: { executor: "test" },
+        output: {
+          status: "done",
+          summary: `Verified Harness revision ${marker}`,
+          checks: [{ name: "frozen Harness revision", status: "passed" }],
+          artifacts: [{
+            kind: "harness_revision_verification",
+            projectId: graph.projectId,
+            variantId: graph.candidate.id,
+            variantRecordSha256: canonicalEvolutionRecordSha256(graph.candidate),
+            variantContentSha256: graph.candidate.contentSha256,
+            revisionContentSha256: revision.contentSha256,
+          }],
+          problems: [],
+        },
+      });
+      return revision;
+    };
+
+    return { ...graph, rootRunId, verifiedRevision };
+  }
+
+  test("activateHarnessRevision activates once and reuses the exact sequential retry", () => {
+    const graph = activationFixture();
+    const revision = graph.verifiedRevision(1, null);
+    const request = {
+      type: "activateHarnessRevision",
+      runId: graph.runId,
+      rootRunId: graph.rootRunId,
+      revision,
+    };
+
+    const first = applyHarnessAction(harness, request);
+    const replay = applyHarnessAction(harness, request);
+
+    expect(first).toMatchObject({
+      status: "done",
+      actionType: "activateHarnessRevision",
+      artifacts: [expect.objectContaining({
+        kind: "harness_revision_activation",
+        version: 1,
+        contentSha256: revision.contentSha256,
+        reused: false,
+      })],
+    });
+    expect(replay).toMatchObject({
+      status: "done",
+      actionType: "activateHarnessRevision",
+      artifacts: [expect.objectContaining({ reused: true })],
+    });
+    expect(harness.getRun(graph.rootRunId)?.context.activeHarnessRevision).toEqual({
+      ...revision,
+      components: ["prompt", "knowledge", "skills", "tools", "agent-policy"].map((kind) =>
+        revision.components.find((component) => component.kind === kind)!,
+      ),
+    });
+    const event = harness.getHarnessActionEvent({ id: first.eventId });
+    expect(event?.request).toEqual({
+      type: "activateHarnessRevision",
+      runId: graph.runId,
+      rootRunId: graph.rootRunId,
+      projectId: graph.projectId,
+      version: 1,
+      contentSha256: revision.contentSha256,
+      variantId: graph.candidate.id,
+      variantRecordSha256: canonicalEvolutionRecordSha256(graph.candidate),
+    });
+    expect(JSON.stringify(event)).not.toContain("mcp://");
+    expect(JSON.stringify(event)).not.toContain("repo:");
+  });
+
+  test("activateHarnessRevision blocks stale parents and skipped versions without changing the active revision", () => {
+    const graph = activationFixture();
+    const firstRevision = graph.verifiedRevision(1, null);
+    expect(applyHarnessAction(harness, {
+      type: "activateHarnessRevision",
+      runId: graph.runId,
+      rootRunId: graph.rootRunId,
+      revision: firstRevision,
+    }).status).toBe("done");
+
+    const staleParent = graph.verifiedRevision(2, SHA_B, "stale-parent");
+    const skippedVersion = graph.verifiedRevision(3, firstRevision.contentSha256, "skipped-version");
+    for (const revision of [staleParent, skippedVersion]) {
+      const result = applyHarnessAction(harness, {
+        type: "activateHarnessRevision",
+        runId: graph.runId,
+        rootRunId: graph.rootRunId,
+        revision,
+      });
+      expect(result.status).toBe("blocked");
+    }
+    expect(harness.getRun(graph.rootRunId)?.context.activeHarnessRevision).toEqual(
+      expect.objectContaining({ contentSha256: firstRevision.contentSha256, version: 1 }),
+    );
+  });
+
+  test("activateHarnessRevision rejects an ordinary ancestor in place of the canonical self-improvement root", () => {
+    const graph = activationFixture();
+    const ordinaryAncestorId = harness.createRun({
+      id: "run_ordinary_harness_ancestor",
+      projectId: graph.projectId,
+      goal: "Ordinary delivery ancestor",
+      context: {
+        source: "self-improvement-assessment",
+        parentRunId: graph.rootRunId,
+        selfImprovement: { cycleIndex: 1, assessmentFingerprint: SHA_B },
+      },
+    });
+    harness.updateRun({ runId: graph.runId, contextPatch: { parentRunId: ordinaryAncestorId } });
+    const revision = graph.verifiedRevision(1, null, "ordinary-ancestor");
+
+    const result = applyHarnessAction(harness, {
+      type: "activateHarnessRevision",
+      runId: graph.runId,
+      rootRunId: ordinaryAncestorId,
+      revision,
+    });
+
+    expect(result.status).toBe("blocked");
+    expect(result.problems.join(" ")).toMatch(/self-improve|root/i);
+    expect(harness.getRun(ordinaryAncestorId)?.context.activeHarnessRevision).toBeUndefined();
+  });
+
+  test("activateHarnessRevision rejects wrong projects, missing receipts, hash mismatch, and untrusted evidence", () => {
+    const scenarios: Array<{
+      build: () => ReturnType<typeof activationFixture>;
+      mutate: (graph: ReturnType<typeof activationFixture>, revision: HarnessRevisionV1) => void;
+      problem: RegExp;
+    }> = [
+      {
+        build: () => activationFixture(),
+        mutate: (_graph, revision) => {
+          revision.projectId = "project_foreign";
+          revision.contentSha256 = canonicalHarnessRevisionContentSha256(revision);
+        },
+        problem: /project/i,
+      },
+      {
+        build: () => activationFixture({ trustedVariantReceipt: false }),
+        mutate: () => {},
+        problem: /receipt/i,
+      },
+      {
+        build: () => activationFixture(),
+        mutate: (_graph, revision) => {
+          revision.variant.recordSha256 = SHA_A;
+          revision.variant.id = `variant_${SHA_A}`;
+          revision.contentSha256 = canonicalHarnessRevisionContentSha256(revision);
+        },
+        problem: /record.*hash.*mismatch/i,
+      },
+      {
+        build: () => activationFixture(),
+        mutate: (_graph, revision) => {
+          revision.variant.contentSha256 = SHA_A;
+          revision.contentSha256 = canonicalHarnessRevisionContentSha256(revision);
+        },
+        problem: /content.*hash|contentSha256|mismatch/i,
+      },
+      {
+        build: () => activationFixture(),
+        mutate: (graph) => {
+          harness.recordDesignDecision({
+            proposalId: graph.proposal.id,
+            charterId: graph.charter.id,
+            decision: "rejected",
+            actorKind: "governance",
+            actorRef: "governance-test",
+          });
+        },
+        problem: /decision|approved/i,
+      },
+      {
+        build: () => activationFixture(),
+        mutate: (graph, revision) => {
+          const attemptId = revision.evidenceRefs[0]!.slice("attempt:".length);
+          const taskId = harness.createTask({
+            id: "task_untrusted_harness_revision",
+            runId: graph.runId,
+            role: "worker",
+            goal: "Pretend to verify",
+            prompt: "This is not a verifier.",
+          });
+          revision.evidenceRefs = ["attempt:attempt_untrusted_harness_revision"];
+          revision.contentSha256 = canonicalHarnessRevisionContentSha256(revision);
+          expect(attemptId).not.toBe("attempt_untrusted_harness_revision");
+          harness.recordAttempt({
+            id: "attempt_untrusted_harness_revision",
+            taskId,
+            input: {},
+            output: { status: "done", summary: "Untrusted", checks: [], artifacts: [], problems: [] },
+          });
+        },
+        problem: /evidence|verifier|receipt/i,
+      },
+    ];
+
+    for (const [index, scenario] of scenarios.entries()) {
+      harness = new Harness(join(dir, `activation-negative-${index}.db`));
+      harness.init();
+      const graph = scenario.build();
+      const revision = graph.verifiedRevision(1, null, `negative-${index}`);
+      scenario.mutate(graph, revision);
+      const result = applyHarnessAction(harness, {
+        type: "activateHarnessRevision",
+        runId: graph.runId,
+        rootRunId: graph.rootRunId,
+        revision,
+      });
+      expect(result.status, result.summary).toBe("blocked");
+      expect(result.problems.join(" ")).toMatch(scenario.problem);
+      expect(harness.getRun(graph.rootRunId)?.context.activeHarnessRevision).toBeUndefined();
+    }
+  });
+
+  test("generic context actions cannot replace active or frozen Harness revisions", () => {
+    const graph = activationFixture();
+    for (const key of ["activeHarnessRevision", "harnessRevision"]) {
+      const update = applyHarnessAction(harness, {
+        type: "updateRunContext",
+        runId: graph.rootRunId,
+        contextPatch: { [key]: { attacker: true } },
+      });
+      const amendment = applyHarnessAction(harness, {
+        type: "amendRunContract",
+        runId: graph.rootRunId,
+        contractKey: key,
+        value: { attacker: true },
+        version: 1,
+        expectedVersion: 0,
+      });
+      expect(update.status, key).toBe("blocked");
+      expect(amendment.status, key).toBe("blocked");
+      expect(harness.getRun(graph.rootRunId)?.context[key]).toBeUndefined();
+    }
+  });
+
+  test("generic context actions cannot forge parentRunId ancestry for Harness activation", () => {
+    const graph = activationFixture();
+    const forgedRootId = harness.createRun({
+      id: "run_forged_harness_root",
+      projectId: graph.projectId,
+      goal: "Forged root",
+    });
+
+    const update = applyHarnessAction(harness, {
+      type: "updateRunContext",
+      runId: graph.runId,
+      contextPatch: { parentRunId: forgedRootId },
+    });
+    const amendment = applyHarnessAction(harness, {
+      type: "amendRunContract",
+      runId: graph.runId,
+      contractKey: "parentRunId",
+      value: forgedRootId,
+      version: 1,
+      expectedVersion: 0,
+    });
+
+    expect(update.status).toBe("blocked");
+    expect(amendment.status).toBe("blocked");
+    expect(harness.getRun(graph.runId)?.context.parentRunId).toBe(graph.rootRunId);
+  });
+
+  test("activateHarnessRevision keeps invalid-action audit records compact and credential free", () => {
+    const graph = activationFixture();
+    const revision = graph.verifiedRevision(1, null) as HarnessRevisionV1 & {
+      authorization?: string;
+    };
+    revision.authorization = "Bearer should-never-appear";
+
+    const result = applyHarnessAction(harness, {
+      type: "activateHarnessRevision",
+      runId: graph.runId,
+      rootRunId: graph.rootRunId,
+      revision,
+    });
+
+    expect(result.status).toBe("blocked");
+    expect(result.actionType).toBe("invalid");
+    const event = harness.getHarnessActionEvent({ id: result.eventId });
+    expect(event?.request).toEqual({
+      type: "activateHarnessRevision",
+      runId: graph.runId,
+      rootRunId: graph.rootRunId,
+      projectId: graph.projectId,
+      version: 1,
+      contentSha256: revision.contentSha256,
+      variantId: graph.candidate.id,
+      variantRecordSha256: canonicalEvolutionRecordSha256(graph.candidate),
+    });
+    expect(JSON.stringify(event)).not.toContain("should-never-appear");
+    expect(JSON.stringify(event)).not.toContain("mcp://");
+    expect(JSON.stringify(event)).not.toContain("repo:");
+  });
 
   function createEquivalentDesignRun(graph: ReturnType<typeof fixture>, marker: string) {
     const proposal = harness.createDesignProposal({
