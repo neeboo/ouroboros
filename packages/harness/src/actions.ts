@@ -5090,6 +5090,35 @@ function prepareRunDrain(harness: Harness, action: Extract<HarnessAction, { type
       problems: [`goal-review terminal disposition already recorded for ${action.runId}`],
     };
   }
+  const repairBudgetStop = initialGoalReviewInvalidated
+    ? null
+    : blockedGoalReviewAtExhaustedRepairBudget(initialOverview);
+  if (repairBudgetStop) {
+    if (run.status !== "blocked") {
+      harness.updateRunStatus({ runId: action.runId, status: "blocked" });
+    }
+    return {
+      status: "blocked",
+      actionType: action.type,
+      summary: `Run ${action.runId} retains blocked goal-review ${repairBudgetStop.taskId}; repair budget exhausted at ${repairBudgetStop.used}/${repairBudgetStop.limit}.`,
+      checks: [{
+        name: "repair budget exhausted",
+        status: "failed",
+        evidence: `${repairBudgetStop.used}/${repairBudgetStop.limit}`,
+      }],
+      artifacts: [{
+        kind: "goal_review",
+        taskId: repairBudgetStop.taskId,
+        attemptId: repairBudgetStop.attemptId,
+        status: "blocked",
+        runDecision: repairBudgetStop.runDecision,
+        repairBudget: { used: repairBudgetStop.used, limit: repairBudgetStop.limit },
+      }],
+      problems: [
+        `goal-review ${repairBudgetStop.taskId} cannot be retried after repair budget exhausted at ${repairBudgetStop.used}/${repairBudgetStop.limit}`,
+      ],
+    };
+  }
   const initialNonTerminalReviews = initialReviewSessions.filter((session) => {
     const decision = resolveRunDecision(session.output);
     return decision === "continue" || decision === "verify";
@@ -5294,6 +5323,51 @@ function prepareRunDrain(harness: Harness, action: Extract<HarnessAction, { type
     };
   }
   return doneResult(action.type, review.summary, checks, artifacts);
+}
+
+function blockedGoalReviewAtExhaustedRepairBudget(overview: ReturnType<Harness["getRunOverview"]>) {
+  const rawBudget = overview.run?.context.repairReplanBudget;
+  if (!rawBudget || typeof rawBudget !== "object" || Array.isArray(rawBudget)) {
+    return null;
+  }
+  const budget = rawBudget as Record<string, unknown>;
+  const limit = typeof budget.limit === "number" && Number.isFinite(budget.limit) && budget.limit > 0
+    ? budget.limit
+    : 3;
+  const used = typeof budget.used === "number" && Number.isFinite(budget.used) && budget.used >= 0
+    ? budget.used
+    : 0;
+  if (used < limit) {
+    return null;
+  }
+  const invalidatedTaskIds = invalidatedGoalReviewTaskIds(overview);
+  const blockedReview = [...overview.tasks].reverse().find(
+    (task) => task.role === "goal-review" && task.status === "blocked" && !invalidatedTaskIds.has(task.id),
+  );
+  if (!blockedReview) {
+    return null;
+  }
+  const latestTask = overview.tasks[overview.tasks.length - 1];
+  if (latestTask && latestTask.id !== blockedReview.id) {
+    return null;
+  }
+  const blockedSession = [...overview.sessions].reverse().find(
+    (session) => session.taskId === blockedReview.id && session.status === "blocked",
+  );
+  if (!blockedSession) {
+    return null;
+  }
+  const runDecision = resolveRunDecision(blockedSession.output);
+  if (runDecision !== "continue" && runDecision !== "verify") {
+    return null;
+  }
+  return {
+    taskId: blockedReview.id,
+    attemptId: blockedSession.attemptId,
+    runDecision,
+    used,
+    limit,
+  };
 }
 
 function runWatchdogPass(
