@@ -4445,6 +4445,45 @@ describe("Harness actions", () => {
     });
   });
 
+  test("treats a retired run as an execution tombstone across drain, lease, and attempt entry points", () => {
+    const runId = harness.createRun({
+      goal: "Retired duplicate delivery",
+      context: {
+        retired: true,
+        retiredReason: "superseded by canonical delivery",
+      },
+    });
+    harness.updateRunStatus({ runId, status: "blocked" });
+    const staleTaskId = harness.createTask({
+      runId,
+      role: "planner",
+      goal: "Stale planner must never restart",
+      prompt: "This task was created by an obsolete recovery path.",
+    });
+
+    const drain = applyHarnessAction(harness, {
+      type: "prepareRunDrain",
+      runId,
+      reason: "replayed recovery against retired duplicate",
+    });
+    const leased = harness.leaseReadyTasks({
+      runId,
+      limit: 1,
+      sessionForTask: (task) => `task-${task.id}`,
+    });
+
+    expect(drain).toMatchObject({
+      status: "blocked",
+      actionType: "prepareRunDrain",
+      problems: [expect.stringContaining("retired")],
+    });
+    expect(harness.getRun(runId)).toMatchObject({ status: "blocked", context: { retired: true } });
+    expect(leased).toEqual([]);
+    expect(harness.getTask(staleTaskId)?.status).toBe("todo");
+    expect(() => harness.startAttempt({ taskId: staleTaskId, input: {} })).toThrow("retired");
+    expect(harness.getRunOverview({ runId, eventLimit: 0 }).sessions).toEqual([]);
+  });
+
   test("updates run context through an audited action", () => {
     const runId = harness.createRun({
       goal: "Prove backend support",

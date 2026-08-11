@@ -5060,6 +5060,13 @@ function prepareRunDrain(harness: Harness, action: Extract<HarnessAction, { type
   if (!run) {
     return blockedResult(action.type, `Run not found: ${action.runId}`, [`run not found: ${action.runId}`]);
   }
+  if (run.context.retired === true) {
+    return blockedResult(
+      action.type,
+      `Run ${action.runId} is retired and cannot be prepared for execution.`,
+      [`retired run cannot be drained: ${action.runId}`],
+    );
+  }
   if (run.status === "done") {
     return doneResult(action.type, `Run ${action.runId} is already done.`, [
       { name: "run status", status: "passed", evidence: "done" },

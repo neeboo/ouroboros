@@ -337,6 +337,9 @@ class CodexResumableOrchestrator {
   async startAttempt(taskId: string) {
     const task = this.taskOrThrow(taskId);
     const run = this.runOrThrow(task.runId);
+    if (run.context.retired === true) {
+      throw new Error(`run ${run.id} is retired and cannot start attempts`);
+    }
     if (!runtimeGenerationAllowsLeasing(run, this.cwd, this.harness)) {
       throw new Error(`runtime generation ${String((run.context.controlPlaneRuntime as Record<string, unknown> | undefined)?.state ?? "unknown")} cannot start new work`);
     }
@@ -631,6 +634,9 @@ class CodexResumableOrchestrator {
 
   async startReadyAttempts(input: { runId: string; limit: number }) {
     const run = this.runOrThrow(input.runId);
+    if (run.context.retired === true) {
+      return [];
+    }
     if (!runtimeGenerationAllowsLeasing(run, this.cwd, this.harness)) {
       return [];
     }
@@ -1336,6 +1342,9 @@ function runnableRuns(harness: Harness, input: { limit: number; rootRunId?: stri
   const scoped = input.rootRunId ? runsInScope(allRuns, input.rootRunId) : allRuns;
   const runnable = [];
   for (const run of scoped) {
+    if (run.context.retired === true) {
+      continue;
+    }
     if (run.status !== "todo" && run.status !== "running") {
       continue;
     }

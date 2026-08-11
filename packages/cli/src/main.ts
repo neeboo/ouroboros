@@ -3063,6 +3063,7 @@ function recoverBlockedSelfImprovementRuns(
     .reverse()
     .filter((run) => {
       if (run.id === rootRunId || run.status !== "blocked") return false;
+      if (run.context.retired === true) return false;
       const source = typeof run.context.source === "string" ? run.context.source : null;
       return source !== "self-improve";
     });

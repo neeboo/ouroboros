@@ -8164,7 +8164,7 @@ if (args.includes("self-improve-daemon")) {
     expect(overview.run.status).toBe("done");
   });
 
-  test("run-loop restores a blocked run when a goal review has labeled textual completion", async () => {
+  test("run-loop cannot revive a retired run from historical goal-review completion text", async () => {
     await runCli("init");
     const run = await runCliJson("create-run", "--goal", "Finish blocked intake workflow");
     const review = await runCliJson(
@@ -8197,7 +8197,7 @@ if (args.includes("self-improve-daemon")) {
       JSON.stringify({ type: "retireRun", runId: run.id, reason: "simulate maxed blocked review" }),
     );
 
-    await runCliJson(
+    const result = await runCliJson(
       "run-loop",
       "--run-id",
       run.id,
@@ -8214,7 +8214,12 @@ if (args.includes("self-improve-daemon")) {
     );
     const overview = await runCliJson("run-overview", "--run-id", run.id);
 
-    expect(overview.run.status).toBe("done");
+    expect(result.rounds).toEqual([]);
+    expect(overview.run).toMatchObject({
+      status: "blocked",
+      context: expect.objectContaining({ retired: true }),
+    });
+    expect(overview.sessions).toHaveLength(1);
   });
 
   test("run-loop restores a run completed by an existing goal review", async () => {
@@ -9980,6 +9985,114 @@ if (args.includes("self-improve-daemon")) {
       "1",
     );
     expect(repeated.ticks[0].status).not.toBe("quiescent");
+  });
+
+  test("self-improve-daemon ignores a retired duplicate and starts the canonical planner exactly once", async () => {
+    const bootstrap = await runCliJson("self-iterate");
+    const setupHarness = new Harness(dbPath);
+    setupHarness.recordAttempt({
+      taskId: bootstrap.taskId,
+      input: {},
+      output: {
+        status: "done",
+        summary: "Initial assessment selected one canonical delivery",
+        changedFiles: [],
+        checks: [],
+        artifacts: [],
+        problems: [],
+      },
+    });
+    setupHarness.updateRunStatus({ runId: bootstrap.runId, status: "done" });
+
+    const retiredRunId = setupHarness.createRun({
+      goal: "Earlier duplicate delivery",
+      context: {
+        parentRunId: bootstrap.runId,
+        source: "design",
+        retired: true,
+        retiredReason: "superseded by canonical delivery",
+      },
+    });
+    const retiredTaskId = setupHarness.createTask({
+      runId: retiredRunId,
+      role: "planner",
+      goal: "Obsolete delivery planner",
+      prompt: "This duplicate must remain retired.",
+    });
+    setupHarness.recordAttempt({
+      taskId: retiredTaskId,
+      input: {},
+      output: {
+        status: "blocked",
+        summary: "Duplicate delivery was retired",
+        changedFiles: [],
+        checks: [],
+        artifacts: [],
+        problems: ["superseded by canonical delivery"],
+      },
+    });
+    setupHarness.updateRunStatus({ runId: retiredRunId, status: "blocked" });
+
+    const canonicalRunId = setupHarness.createRun({
+      goal: "Canonical accepted delivery",
+      context: { parentRunId: bootstrap.runId, source: "design" },
+    });
+    const canonicalTaskId = setupHarness.createTask({
+      runId: canonicalRunId,
+      role: "planner",
+      goal: "Plan the canonical accepted delivery",
+      prompt: "Return the bounded canonical plan.",
+    });
+
+    const codexBin = join(dir, "fake-codex-canonical-delivery");
+    const payload = {
+      status: "done",
+      summary: "Canonical planner started once",
+      changedFiles: [],
+      checks: [{ name: "canonical planner", status: "passed" }],
+      artifacts: [],
+      problems: [],
+    };
+    await writeFile(
+      codexBin,
+      [
+        "#!/usr/bin/env bun",
+        "import { writeFileSync } from 'node:fs';",
+        "const outputFlag = Bun.argv.indexOf('--output-last-message');",
+        "const outputPath = outputFlag >= 0 ? Bun.argv[outputFlag + 1] : '';",
+        `const payload = ${JSON.stringify(payload)};`,
+        "if (outputPath) writeFileSync(outputPath, JSON.stringify(payload));",
+        "console.log(JSON.stringify({ type: 'session.started', session_id: 'session_canonical_delivery' }));",
+        "console.log(JSON.stringify({ type: 'agent.message', message: JSON.stringify(payload) }));",
+      ].join("\n"),
+    );
+    await chmod(codexBin, 0o755);
+
+    const daemonArgs = [
+      "self-improve-daemon",
+      "--executor", "codex-resumable",
+      "--root-run-id", bootstrap.runId,
+      "--codex-bin", codexBin,
+      "--runs", "1",
+      "--max-ticks", "1",
+      "--tick-cycles", "1",
+      "--max-rounds", "1",
+      "--stop-hook", "context-summary",
+      "--no-integrate", "true",
+      "--interval-ms", "1",
+      "--idle-ms", "1",
+    ];
+    const first = await runCliJson(...daemonArgs);
+    const second = await runCliJson(...daemonArgs);
+    const retiredOverview = setupHarness.getRunOverview({ runId: retiredRunId, eventLimit: 0 });
+    const canonicalOverview = setupHarness.getRunOverview({ runId: canonicalRunId, eventLimit: 0 });
+
+    expect(first.ticks[0].recovery).toBeUndefined();
+    expect(first.ticks[0].result.cycles[0].runs[0].runId).toBe(canonicalRunId);
+    expect(second.ticks[0].recovery).toBeUndefined();
+    expect(retiredOverview.tasks).toHaveLength(1);
+    expect(retiredOverview.sessions).toHaveLength(1);
+    expect(canonicalOverview.sessions.filter((session) => session.taskId === canonicalTaskId)).toHaveLength(1);
   });
 
   test("self-improve-daemon stops cloning recovery tasks when the run repair budget is exhausted", async () => {

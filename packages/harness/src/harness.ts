@@ -1224,6 +1224,18 @@ export class Harness {
 
   leaseReadyTasks(input: LeaseReadyTasksInput) {
     return withDatabase(this.dbPath, (db) => {
+      const runState = db
+        .query(
+          `
+          select json_extract(context_json, '$.retired') as retired
+          from runs
+          where id = $runId
+          `,
+        )
+        .get({ $runId: input.runId }) as { retired: number | null } | null;
+      if (runState?.retired === 1) {
+        return [];
+      }
       const taskRows = db
         .query(
           `
@@ -1346,6 +1358,20 @@ export class Harness {
     const id = input.id ?? makeId("attempt");
     return withDatabase(this.dbPath, (db) => {
       db.transaction(() => {
+        const runState = db
+          .query(
+            `
+            select runs.id as runId,
+                   json_extract(runs.context_json, '$.retired') as retired
+            from tasks
+            join runs on runs.id = tasks.run_id
+            where tasks.id = $taskId
+            `,
+          )
+          .get({ $taskId: input.taskId }) as { runId: string; retired: number | null } | null;
+        if (runState?.retired === 1) {
+          throw new Error(`run ${runState.runId} is retired and cannot start attempts`);
+        }
         db.query(
           `
           insert into attempts (

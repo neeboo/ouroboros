@@ -313,6 +313,45 @@ describe("runner", () => {
     expect(runtimeGenerationAllowsLeasing(harness.getRun(childRunId), dir, harness)).toBe(false);
   });
 
+  test("explicit runner start rejects retired runs before invoking hooks or the executor", async () => {
+    const runId = harness.createRun({
+      goal: "Retired delivery",
+      context: { retired: true, retiredReason: "superseded by canonical delivery" },
+    });
+    const taskId = harness.createTask({
+      runId,
+      role: "planner",
+      goal: "Never start this planner",
+      prompt: "Retired work is an execution tombstone.",
+    });
+    let hookCalls = 0;
+    let executorCalls = 0;
+
+    await expect(startCodexResumableAttempt({
+      harness,
+      taskId,
+      cwd: dir,
+      startHooks: [() => {
+        hookCalls += 1;
+        return { checks: [], artifacts: [] };
+      }],
+      clientFactory: () => ({
+        start: async () => {
+          executorCalls += 1;
+          throw new Error("retired executor must not start");
+        },
+        resume: async () => {
+          throw new Error("resume should not be called");
+        },
+      }),
+    })).rejects.toThrow("retired");
+
+    expect(hookCalls).toBe(0);
+    expect(executorCalls).toBe(0);
+    expect(harness.getTask(taskId)?.status).toBe("todo");
+    expect(harness.getRunOverview({ runId, eventLimit: 0 }).sessions).toEqual([]);
+  });
+
   test("builds prompts with run lessons", () => {
     const runId = harness.createRun({
       goal: "Use Ouroboros to iterate on Ouroboros",
@@ -2853,6 +2892,88 @@ describe("runner", () => {
     expect(harness.getRun(pausedRunId)?.context.runPause).toEqual(
       expect.objectContaining({ reason: "human requested pause" }),
     );
+  });
+
+  test("retired duplicate does not occupy run concurrency ahead of the canonical planner", async () => {
+    const rootRunId = harness.createRun({ goal: "Self-improvement root" });
+    harness.updateRunStatus({ runId: rootRunId, status: "blocked" });
+    const retiredRunId = harness.createRun({
+      goal: "Earlier duplicate delivery",
+      context: {
+        parentRunId: rootRunId,
+        source: "design",
+        retired: true,
+        retiredReason: "superseded by canonical delivery",
+      },
+    });
+    const retiredTaskId = harness.createTask({
+      runId: retiredRunId,
+      role: "planner",
+      goal: "Obsolete planner",
+      prompt: "Do not run.",
+    });
+    const canonicalRunId = harness.createRun({
+      goal: "Canonical delivery",
+      context: { parentRunId: rootRunId, source: "design" },
+    });
+    const canonicalTaskId = harness.createTask({
+      runId: canonicalRunId,
+      role: "planner",
+      goal: "Start canonical delivery",
+      prompt: "Plan the accepted design.",
+    });
+    const startedTaskIds: string[] = [];
+
+    const supervise = () => superviseCodexRuns({
+      harness,
+      cwd: dir,
+      rootRunId,
+      runConcurrency: 1,
+      taskConcurrency: 1,
+      maxCycles: 1,
+      maxRounds: 1,
+      maxTries: 3,
+      intervalMs: 1,
+      clientFactory: ({ task }) => ({
+        start: async () => {
+          startedTaskIds.push(task!.id);
+          return {
+            status: "done" as const,
+            sessionId: "session_canonical_planner",
+            outputPath: join(dir, "canonical-planner-output.json"),
+            stdout: "",
+            stderr: "",
+            events: [],
+            output: {
+              status: "done" as const,
+              summary: "Canonical planner started",
+              changedFiles: [],
+              checks: [],
+              artifacts: [],
+              problems: [],
+            },
+          };
+        },
+        resume: async () => {
+          throw new Error("resume should not be called");
+        },
+      }),
+    });
+    const results = await Promise.all([supervise(), supervise()]);
+    const selectedRunIds = results.flatMap((result) =>
+      result.cycles.flatMap((cycle) => cycle.runs.map((run) => run.runId))
+    );
+
+    expect(selectedRunIds).not.toContain(retiredRunId);
+    expect(startedTaskIds.filter((taskId) => taskId === canonicalTaskId)).toHaveLength(1);
+    expect(startedTaskIds).not.toContain(retiredTaskId);
+    expect(harness.getTask(canonicalTaskId)?.status).toBe("done");
+    expect(harness.getTask(retiredTaskId)?.status).toBe("todo");
+    expect(harness.getRunOverview({ runId: retiredRunId, eventLimit: 0 }).sessions).toEqual([]);
+    expect(
+      harness.getRunOverview({ runId: canonicalRunId, eventLimit: 0 }).sessions
+        .filter((session) => session.taskId === canonicalTaskId),
+    ).toHaveLength(1);
   });
 
   test("supervisor reaches runnable descendants through terminal ancestors", async () => {
