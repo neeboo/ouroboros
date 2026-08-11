@@ -55,11 +55,11 @@ Every run needs two kinds of context. For Hodor, they look like this:
 - **Project knowledge:** production rules, cost records, past incidents, goals, and constraints from Hodor's own work.
 - **ORBS capabilities:** the callable tools, prompts, reusable skills, and safety rules available to the agents working on Hodor.
 
-Ouroboros is building a versioned operating framework (`HarnessRevision`) so each new generation can load an approved set of capabilities and leave proof of adoption. Existing runs already receive durable lessons, proven practices, frozen contracts, and resumable execution. Complete generation-by-generation proof for every skill and tool update is still in progress. The detailed data contract lives in the linked design documents below.
+Ouroboros now has a versioned operating framework (`HarnessRevision`). An approved revision binds prompts, project knowledge, reusable skills, tools, and agent policy by content hash. New runs freeze that revision, verify every component before startup, and record what was actually loaded. This is the mechanism that turns a proven change into capability inherited by the next generation. Project-wide activation of the first revision remains an explicit governed action, so old runs do not silently change underneath ongoing work.
 
 ## Resources and Human Decisions
 
-When time, compute, and people are limited, Ouroboros will choose one already approved candidate that is most worth testing, measure it, and only then select the next one. This resource choice is still under development; current scheduling is primarily task and dependency driven.
+When time, compute, and people are limited, the Designer contract asks every new proposal for one small resource request: expected value, information gain, maximum duration, task parallelism, human review time, and zero paid spend. The first allocator chooses the highest-value learning investment per project, caps its parallel tasks and duration, and leaves legacy work compatible. It deliberately avoids a separate planning bureaucracy; measured outcomes feed the next choice.
 
 Humans define the charter, decide what risks are acceptable, and approve spending or other reserved high-impact changes. Linear is the durable approval and evidence surface. The dashboard can help with observation, but approval does not depend on it. Under the current managed charter, evidence-backed zero-spend changes may proceed automatically, while spending and charter changes require explicit human authority; projects can reserve additional high-risk decisions for people.
 
@@ -79,7 +79,7 @@ real evidence
 
 ## Status
 
-Ouroboros is early. The control loop works today; durable capability inheritance and resource-aware evolution are the next product milestone.
+Ouroboros is early. The control loop, durable capability inheritance, and the first zero-spend resource allocator work today; broader project adoption and measured long-term effectiveness are the next product milestone.
 
 Available today:
 
@@ -91,10 +91,10 @@ Available today:
 
 Active areas:
 
-- make each new generation load approved capability updates and prove what it used
+- activate the first governed Harness revision on every long-running project
 - keep project knowledge separate from ORBS capabilities while refreshing both across runs
 - carry approved skill and tool improvements into later generations automatically
-- choose one worthwhile learning investment when resources are limited
+- use measured outcomes to improve future value and information-gain estimates
 
 Read the fuller product and system design:
 
@@ -134,7 +134,7 @@ For normal project work, use the default runbook:
 docs/default-runbook.md
 ```
 
-It keeps the default path Designer-first: Codex runs `designer`, `planner`, `verifier`, `outcome-review`, and `goal-review`; Claude Code runs `worker`.
+It keeps the default path Designer-first and routes every role, including `worker`, through `codex-resumable`. Claude Code remains available only when a task selects it explicitly.
 
 Launch continuous self-improvement with the dashboard:
 

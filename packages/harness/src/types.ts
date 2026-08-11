@@ -1204,6 +1204,21 @@ export interface DesignExperiment {
   [key: string]: unknown;
 }
 
+export interface DesignResourceRequestV0 {
+  schemaVersion: 1;
+  value: number;
+  informationGain: number;
+  maxDurationMinutes: number;
+  maxParallelTasks: number;
+  humanReviewMinutes: number;
+  paidUsd: 0;
+}
+
+export interface FrozenResourceAllocationV0 extends DesignResourceRequestV0 {
+  proposalId: string;
+  priorityScore: number;
+}
+
 export interface DesignProposalData {
   problem: string;
   evidenceRefs?: string[];
@@ -1221,6 +1236,7 @@ export interface DesignProposalData {
   productionEpisodePrivacyReceiptContract?: ProductionEpisodePrivacyReceiptContract;
   promotionReceiptContract?: PromotionReceiptContract;
   rollbackContract?: RollbackContract;
+  resourceRequest?: DesignResourceRequestV0;
   evaluationContract: DesignEvaluationContract;
   investment: DesignInvestment;
   experiment?: DesignExperiment;

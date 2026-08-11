@@ -55,6 +55,15 @@ export {
   parseHarnessRevisionV1,
 } from "./harness-revision";
 export {
+  effectiveResourceHardTimeoutMs,
+  effectiveResourceTaskLimit,
+  freezeResourceAllocationV0,
+  parseDesignResourceRequestV0,
+  parseFrozenResourceAllocationV0,
+  RESOURCE_ALLOCATION_LIMITS,
+  selectResourceAwareRuns,
+} from "./resource-allocator";
+export {
   describeAuthorityEvaluation,
   evaluateAuthority,
   HARD_AUTHORITY_RULES,
@@ -161,6 +170,7 @@ export type {
   DesignProposalData,
   DesignProposalOption,
   DesignProposalStatus,
+  DesignResourceRequestV0,
   EpisodeCollectionContract,
   EvolutionCausalHypothesis,
   EvolutionComparison,
@@ -177,6 +187,7 @@ export type {
   EvolutionRuntimeMaturity,
   EvolutionSideEffectCounters,
   EvolutionTarget,
+  FrozenResourceAllocationV0,
   ExecutionThread,
   ExecutionThreadStatus,
   ExternalRef,

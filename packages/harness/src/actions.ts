@@ -405,6 +405,7 @@ const FROZEN_DESIGN_CONTEXT_KEYS = new Set([
   "parentRunId",
   "activeHarnessRevision",
   "harnessRevision",
+  "resourceAllocation",
 ]);
 
 function frozenDesignContextKeys(keys: Iterable<string>): string[] {

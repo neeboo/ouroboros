@@ -1285,7 +1285,17 @@ describe("design-action transition coordinator (production authority path)", () 
           payload: {
             projectId,
             title: "Pre-warm cache",
-            proposal: lowRiskEnvelope(signalId),
+            proposal: lowRiskEnvelope(signalId, {
+              resourceRequest: {
+                schemaVersion: 1,
+                value: 5,
+                informationGain: 4,
+                maxDurationMinutes: 30,
+                maxParallelTasks: 2,
+                humanReviewMinutes: 10,
+                paidUsd: 0,
+              },
+            }),
             status: "proposed",
           },
         },
@@ -1337,6 +1347,16 @@ describe("design-action transition coordinator (production authority path)", () 
         problem: "Test runner flakes on cold cache",
         recommendation: "Pre-warm the cache before running",
         evidenceRefs: [signalId],
+        resourceRequest: expect.objectContaining({
+          value: 5,
+          informationGain: 4,
+          paidUsd: 0,
+        }),
+      }),
+      resourceAllocation: expect.objectContaining({
+        proposalId: proposals[0].id,
+        priorityScore: 14,
+        maxParallelTasks: 2,
       }),
       designApprovalAuthority: expect.objectContaining({
         decision: "approved",

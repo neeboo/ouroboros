@@ -71,9 +71,9 @@ v1 不新建知识库或 Skill 仓库。清单引用现有文件或资源。后�
 
 ## ResourceAllocator v0
 
-资源分配在 Harness 继承闭环完成后接入。v0 只从已经通过 authority gate 的候选中选一个：价值分高者优先；信息增益高者优先；占用槽位少者优先；最后按 proposal ID 排序。
+资源分配在 Harness 继承闭环完成后接入。v0 只处理已经通过 authority gate 且已经形成交付运行的候选：价值和信息增益形成简单分数；同项目只选一项；同分时优先更短的时间申请，最后按 proposal ID 排序。
 
-选中结果写入现有 action event，并冻结到 child run context。它不决定权限、不绕过成本审批，也不动态切换模型。首版不做抢占、金额账本、多项目公平性、权重学习或复杂优化。
+资源申请由现有 `createRunsFromDesign` 动作冻结到 child run context，并沿用它的审计记录。Supervisor 用它限制任务并发和单次执行时长。它不决定权限、不绕过成本审批，也不动态切换模型。首版不做抢占、金额账本、多项目公平性、权重学习或复杂优化。
 
 ## 人类审批
 
@@ -89,4 +89,3 @@ Dashboard 不参与审批正确性。需要人批准的 Harness 变化由 ORBS �
 - 不让运行中的 run 切换 HarnessRevision。
 - 不让 outcome-review 直接激活候选。
 - 不依赖 Dashboard 完成任何状态转换。
-

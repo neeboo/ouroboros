@@ -172,15 +172,15 @@ Commit message: `feat: attest loaded harness capabilities`
 
 **Step 1: Write failing allocator tests**
 
-Cover eligibility, value score, information gain, slot cost, deterministic tie-break, capacity one, stale input fingerprint, concurrent replay and authority-gate preservation.
+Cover strict zero-spend requests, value score, information gain, deterministic tie-break, one selected run per project, task parallelism, and duration caps.
 
 **Step 2: Run tests and verify RED**
 
 Expected: allocator module or action missing.
 
-**Step 3: Implement pure selection and fixed allocation action**
+**Step 3: Implement pure selection in the existing delivery action**
 
-Select one approved candidate and freeze a small resource package. Store the receipt in existing action events and copy it into the delivery run context. Do not add a table or modify task-level FIFO.
+Normalize the request while proposing, freeze the allocation through the existing `createRunsFromDesign` action, and copy it into the delivery run context. The supervisor selects one resource-aware run per project and caps task concurrency and attempt duration. Do not add a table, a second allocation workflow, or modify task-level FIFO.
 
 **Step 4: Run focused tests and verify GREEN**
 
@@ -226,4 +226,3 @@ Review frozen revision integrity, credential redaction, project isolation, autho
 **Step 5: Integrate and operate**
 
 Merge the reviewed branch to `main`, push, independently read back `origin/main`, refresh the daemon generation, then create one real HarnessRevision and prove the next self-improvement cycle attests it. Use Linear for any human checkpoint and final evidence.
-

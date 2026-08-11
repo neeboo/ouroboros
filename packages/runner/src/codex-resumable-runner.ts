@@ -11,9 +11,14 @@ import {
   type ExecutionThreadStatus,
   type Harness,
   type HarnessActionResult,
+  type FrozenResourceAllocationV0,
   type Run,
   type RunOverview,
   type Task,
+  effectiveResourceHardTimeoutMs,
+  effectiveResourceTaskLimit,
+  parseFrozenResourceAllocationV0,
+  selectResourceAwareRuns,
 } from "@ouroboros/harness";
 import { randomUUID } from "node:crypto";
 import { buildTaskPrompt, protectedPromptContractFingerprintForSource } from "./prompt";
@@ -210,12 +215,17 @@ export async function superviseCodexRuns(input: SuperviseCodexRunsInput) {
       return { status: "idle" as const, cycles };
     }
     const results = await Promise.all(candidates.map(async (run) => {
+      const resourceAllocation = resourceAllocationForRun(run);
       const result = await runCodexResumableLoop({
         ...input,
         runId: run.id,
         maxRounds: input.maxRounds,
-        limit: input.taskConcurrency,
+        limit: effectiveResourceTaskLimit(input.taskConcurrency, resourceAllocation),
         maxTries: input.maxTries,
+        genericAttemptHardTimeoutMs: effectiveResourceHardTimeoutMs(
+          input.genericAttemptHardTimeoutMs,
+          resourceAllocation,
+        ),
       });
       const overview = input.harness.getRunOverview({ runId: run.id, eventLimit: 0 });
       const loopIntegration = result.rounds.flatMap((round) => {
@@ -1516,11 +1526,18 @@ function runnableRuns(harness: Harness, input: { limit: number; rootRunId?: stri
       continue;
     }
     runnable.push(run);
-    if (runnable.length >= input.limit) {
-      break;
-    }
   }
-  return runnable;
+  return selectResourceAwareRuns(runnable, input.limit);
+}
+
+function resourceAllocationForRun(run: Run): FrozenResourceAllocationV0 | null {
+  if (run.context.resourceAllocation === undefined) {
+    return null;
+  }
+  return parseFrozenResourceAllocationV0(
+    run.context.resourceAllocation,
+    `run ${run.id} resourceAllocation`,
+  );
 }
 
 function maybeIntegrateCompletedRun(

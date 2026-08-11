@@ -20,6 +20,8 @@ import {
   type Run,
   type StrategySignal,
   type Task,
+  freezeResourceAllocationV0,
+  parseDesignResourceRequestV0,
   parseEvolutionCausalHypothesis,
   parseEvolutionComparison,
   parseEvolutionDeliveryContracts,
@@ -1365,6 +1367,15 @@ function applyCreateRunsFromDesignWithDb(
     proposalProjectId,
     frozenContract.comparison,
   );
+  const normalizedResourceRequest = proposal.proposal.resourceRequest === undefined
+    ? null
+    : parseDesignResourceRequestV0(
+        proposal.proposal.resourceRequest,
+        "createRunsFromDesign proposal.resourceRequest",
+      );
+  const frozenResourceAllocation = normalizedResourceRequest
+    ? freezeResourceAllocationV0(proposal.id, normalizedResourceRequest)
+    : null;
   // Preserve proposal envelope extensions outside evaluationContract. The
   // evaluation contract itself is normalized to the supported whitelist so
   // arbitrary stored fields cannot become child-run or prompt material. The
@@ -1384,6 +1395,9 @@ function applyCreateRunsFromDesignWithDb(
     additions: proposal.proposal.additions ?? [],
     removals: proposal.proposal.removals ?? [],
     evaluationContract: frozenContract,
+    ...(normalizedResourceRequest
+      ? { resourceRequest: normalizedResourceRequest }
+      : {}),
     ...(frozenEvolution
       ? {
           evolutionPack: frozenEvolution.pack,
@@ -1499,6 +1513,7 @@ function applyCreateRunsFromDesignWithDb(
       designRemovals: frozenRemovals,
       designApprovalAuthority: approvalAuthority,
       designDeliveryPlan: canonicalDeliveryPlan,
+      ...(frozenResourceAllocation ? { resourceAllocation: frozenResourceAllocation } : {}),
       ...(frozenEvolution
         ? {
             evolutionPack: frozenEvolution.pack,
@@ -1743,6 +1758,7 @@ const PROTECTED_DESIGN_CONTEXT_KEYS = [
   "designRemovals",
   "designApprovalAuthority",
   "designDeliveryPlan",
+  "resourceAllocation",
   "evolutionPack",
   "causalHypothesis",
   "comparison",

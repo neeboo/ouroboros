@@ -811,6 +811,7 @@ function renderTargetEvolutionProposalContract(role: string, run: PromptInput["r
     "- comparison must freeze non-empty development, holdout, and unrelated evidence refs plus a corpus hash, controlRef, primary metric, thresholds, and the same equal budget for control and candidate.",
     "- The five delivery contracts freeze commitment-only episode collection, designed-to-instrumented-to-shadowing gates, privacy-review requirements (not an approval receipt), a draft-only promotion receipt shape, and exact idempotent rollback/readback. Their nested fields are strict; unknown or missing fields are rejected.",
     "- Candidate generation receives only a sealed holdout commitment, hash, and count. It must not receive, cite, query, or reproduce holdout refs, contents, or results. Tests alone do not replace the matched baseline or unrelated-regression evidence.",
+    "Every new proposal should include one compact resourceRequest: value and informationGain from 1 to 5, bounded duration and task parallelism, bounded human review time, and paidUsd fixed to 0. Paid work remains a human decision.",
     "Merge this exact optional extension fragment into the single proposeDesign proposal shown below. Do not emit another proposeDesign action:",
     "```json",
     prettyJson(targetEvolutionProposalExtension(projectId, charterId)),
@@ -1230,6 +1231,15 @@ function proposeDesignActionExample(signalId = "signal_<id>"): Record<string, un
           oneTimeCost: 0,
           recurringCost: 0,
           timeBudget: "bounded time budget",
+        },
+        resourceRequest: {
+          schemaVersion: 1,
+          value: 4,
+          informationGain: 4,
+          maxDurationMinutes: 60,
+          maxParallelTasks: 2,
+          humanReviewMinutes: 15,
+          paidUsd: 0,
         },
         experiment: {
           hypothesis: "testable hypothesis",

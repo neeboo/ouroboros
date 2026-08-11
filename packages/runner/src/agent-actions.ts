@@ -4,6 +4,7 @@ import {
   parseEvolutionComparison,
   parseEvolutionDeliveryContracts,
   parseEvolutionPackV1,
+  parseDesignResourceRequestV0,
   requireStrictIsoTimestamp,
 } from "@ouroboros/harness";
 import type {
@@ -437,6 +438,9 @@ function parseDesignProposalData(
     ? null
     : parseEvolutionDeliveryContracts(record, expectedProjectId, evolutionPack, label);
   const investment = parseDesignInvestment(record.investment, `${label}.investment`);
+  const resourceRequest = record.resourceRequest === undefined
+    ? undefined
+    : parseDesignResourceRequestV0(record.resourceRequest, `${label}.resourceRequest`);
   const experiment = record.experiment === undefined ? undefined : parseDesignExperiment(record.experiment, `${label}.experiment`);
   const additions = optionalStringArray(record.additions, `${label}.additions`);
   const removals = optionalStringArray(record.removals, `${label}.removals`);
@@ -459,6 +463,7 @@ function parseDesignProposalData(
   if (uncertainty !== undefined) data.uncertainty = uncertainty;
   if (evolutionPack !== undefined) data.evolutionPack = evolutionPack;
   if (causalHypothesis !== undefined) data.causalHypothesis = causalHypothesis;
+  if (resourceRequest !== undefined) data.resourceRequest = resourceRequest;
   if (deliveryContracts !== null) Object.assign(data, deliveryContracts);
   return data;
 }
