@@ -4561,6 +4561,84 @@ describe("Harness actions", () => {
     });
   });
 
+  test("retires one superseded todo task without blocking the canonical sibling", () => {
+    const runId = harness.createRun({ goal: "Continue the accepted delivery" });
+    const supersededTaskId = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Obsolete package-manager delivery",
+      prompt: "Use the superseded package-manager contract.",
+    });
+    const canonicalTaskId = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Canonical Bun delivery",
+      prompt: "Use the frozen Bun contract.",
+    });
+
+    const result = applyHarnessAction(harness, {
+      type: "retireTask",
+      taskId: supersededTaskId,
+      reason: "superseded by the canonical Bun-only worker",
+    });
+    harness.runInTransaction((db) => {
+      for (let index = 0; index < 1_001; index += 1) {
+        harness.recordHarnessActionEventWithDb(db, {
+          actionType: "markRunTodo",
+          status: "blocked",
+          request: { type: "markRunTodo", runId, reason: `unrelated-${index}` },
+          result: { status: "blocked", artifacts: [], problems: ["unrelated"] },
+        });
+      }
+    });
+    const replay = applyHarnessAction(harness, {
+      type: "retireTask",
+      taskId: supersededTaskId,
+      reason: "superseded by the canonical Bun-only worker",
+    });
+
+    expect(result).toMatchObject({
+      status: "done",
+      actionType: "retireTask",
+      artifacts: [expect.objectContaining({
+        kind: "retired_task",
+        taskId: supersededTaskId,
+        previousStatus: "todo",
+        status: "blocked",
+      })],
+    });
+    expect(replay).toMatchObject({ status: "done", actionType: "retireTask" });
+    expect(harness.getTask(supersededTaskId)?.status).toBe("blocked");
+    expect(harness.getTask(canonicalTaskId)?.status).toBe("todo");
+    expect(harness.getRun(runId)?.status).not.toBe("blocked");
+  });
+
+  test("retireTask fails closed for running, done, and independently blocked tasks", () => {
+    const runId = harness.createRun({ goal: "Protect non-todo task evidence" });
+    const runningTaskId = harness.createTask({ runId, role: "worker", goal: "Running", prompt: "Run." });
+    harness.startAttempt({ taskId: runningTaskId, input: {} });
+    const doneTaskId = harness.createTask({ runId, role: "worker", goal: "Done", prompt: "Finish." });
+    const doneAttemptId = harness.startAttempt({ taskId: doneTaskId, input: {} });
+    harness.finishAttempt({
+      attemptId: doneAttemptId,
+      output: { status: "done", summary: "done", changedFiles: [], checks: [], artifacts: [], problems: [] },
+    });
+    const blockedTaskId = harness.createTask({ runId, role: "worker", goal: "Blocked", prompt: "Block." });
+    const blockedAttemptId = harness.startAttempt({ taskId: blockedTaskId, input: {} });
+    harness.finishAttempt({
+      attemptId: blockedAttemptId,
+      output: { status: "blocked", summary: "blocked", changedFiles: [], checks: [], artifacts: [], problems: ["root cause"] },
+    });
+
+    for (const taskId of [runningTaskId, doneTaskId, blockedTaskId]) {
+      const result = applyHarnessAction(harness, { type: "retireTask", taskId, reason: "must not rewrite evidence" });
+      expect(result).toMatchObject({ status: "blocked", actionType: "retireTask" });
+    }
+    expect(harness.getTask(runningTaskId)?.status).toBe("running");
+    expect(harness.getTask(doneTaskId)?.status).toBe("done");
+    expect(harness.getTask(blockedTaskId)?.status).toBe("blocked");
+  });
+
   test("treats a retired run as an execution tombstone across drain, lease, and attempt entry points", () => {
     const runId = harness.createRun({
       goal: "Retired duplicate delivery",

@@ -89,6 +89,7 @@ export type HarnessAction =
       reason?: string;
     }
   | { type: "retireRun"; runId: string; reason: string }
+  | { type: "retireTask"; taskId: string; reason: string }
   | { type: "prepareRunDrain"; runId: string; maxTries?: number; reason?: string }
   | { type: "completeSystemTask"; taskId: string; actionEventId: string; reason?: string }
   | {
@@ -441,6 +442,9 @@ export function parseHarnessAction(value: unknown): HarnessAction {
   if (type === "retireRun") {
     return { type, runId: stringField(record, "runId"), reason: stringField(record, "reason") };
   }
+  if (type === "retireTask") {
+    return { type, taskId: stringField(record, "taskId"), reason: stringField(record, "reason") };
+  }
   if (type === "prepareRunDrain") {
     return {
       type,
@@ -668,7 +672,7 @@ export function parseHarnessAction(value: unknown): HarnessAction {
     };
   }
   throw new Error(
-    "harness action type must be reclaimRunningTasks, retryTask, markRunTodo, updateRunContext, amendRunContract, retireRun, prepareRunDrain, completeSystemTask, integrateVerifiedRun, pushExactGitRef, createExactGitRef, commitExactGitIndex, registerEvolutionProfile, recordProductionEpisode, registerHarnessVariant, activateHarnessRevision, freezeMatchedExperiment, interruptAttemptAndCreateTask, interruptRunningAttemptsAndCreateTask, acceptGuardrailProposal, startSubsession, collectSubsessions, cancelSubsessions, or runWatchdogPass",
+    "harness action type must be reclaimRunningTasks, retryTask, markRunTodo, updateRunContext, amendRunContract, retireRun, retireTask, prepareRunDrain, completeSystemTask, integrateVerifiedRun, pushExactGitRef, createExactGitRef, commitExactGitIndex, registerEvolutionProfile, recordProductionEpisode, registerHarnessVariant, activateHarnessRevision, freezeMatchedExperiment, interruptAttemptAndCreateTask, interruptRunningAttemptsAndCreateTask, acceptGuardrailProposal, startSubsession, collectSubsessions, cancelSubsessions, or runWatchdogPass",
   );
 }
 
@@ -1947,6 +1951,54 @@ function applyParsedHarnessAction(
         reason: task.reason,
       })),
     ]);
+  }
+
+  if (action.type === "retireTask") {
+    const task = harness.getTask(action.taskId);
+    if (!task) {
+      return blockedResult(action.type, `Task not found: ${action.taskId}`, [`task not found: ${action.taskId}`]);
+    }
+    if (task.status === "blocked") {
+      const receipt = harness.runInTransaction((db) => harness.listHarnessActionEventsWithDb(db, {
+        actionType: "retireTask",
+        statuses: ["done"],
+        requestTaskId: action.taskId,
+        limit: 1,
+      })).find((event) => event.request.reason === action.reason);
+      if (!receipt) {
+        return blockedResult(action.type, `Task ${action.taskId} is already blocked without a matching retirement receipt.`, [
+          `task status is blocked: ${action.taskId}`,
+        ]);
+      }
+      return doneResult(action.type, `Task ${action.taskId} retirement reused.`, [
+        { name: "task exists", status: "passed", evidence: action.taskId },
+        { name: "retirement receipt", status: "passed", evidence: receipt.id },
+      ], [{ kind: "retired_task", taskId: action.taskId, previousStatus: "blocked", status: "blocked", reused: true }]);
+    }
+    if (task.status !== "todo") {
+      return blockedResult(action.type, `Task ${action.taskId} must be todo before retirement.`, [
+        `task status is ${task.status}: ${action.taskId}`,
+      ]);
+    }
+    const retired = harness.retireTask({ taskId: action.taskId, reason: action.reason });
+    if (!retired?.retired) {
+      return blockedResult(action.type, `Task ${action.taskId} changed before retirement.`, [
+        `task status is ${retired?.task.status ?? "missing"}: ${action.taskId}`,
+      ]);
+    }
+    return doneResult(action.type, `Task ${action.taskId} retired from the active queue.`, [
+      { name: "task exists", status: "passed", evidence: action.taskId },
+      { name: "previous task status", status: "passed", evidence: "todo" },
+      { name: "retired task status", status: "passed", evidence: "blocked" },
+    ], [{
+      kind: "retired_task",
+      taskId: action.taskId,
+      runId: task.runId,
+      role: task.role,
+      previousStatus: "todo",
+      status: "blocked",
+      reason: action.reason,
+    }]);
   }
 
   if (action.type === "completeSystemTask") {

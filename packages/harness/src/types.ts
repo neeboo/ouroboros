@@ -461,6 +461,11 @@ export interface RetryTaskInput {
   taskId: string;
 }
 
+export interface RetireTaskInput {
+  taskId: string;
+  reason: string;
+}
+
 export interface CreateExternalRefInput {
   localType: string;
   localId: string;

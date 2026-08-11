@@ -49,7 +49,7 @@ export function createTasksFromOutputHook(options: { harness: Harness }): StopHo
       };
     }
 
-    const created = plannedEntries.map(({ id, plannedTask }, index) => {
+    const prepared = plannedEntries.map(({ id, plannedTask }, index) => {
       const dependsOn = resolved.dependsOnByIndex[index] ?? [task.id];
       const sourceWorktreePath = inheritedWorktreePath(options.harness, task, dependsOn);
       const config = {
@@ -57,24 +57,62 @@ export function createTasksFromOutputHook(options: { harness: Harness }): StopHo
         ...(plannedTask.verifierContract ? { verifierContract: plannedTask.verifierContract } : {}),
         ...(sourceWorktreePath ? { sourceWorktreePath } : {}),
       };
-      const taskId = options.harness.createTask({
-        id,
+      return { id, plannedTask, dependsOn, sourceWorktreePath, config };
+    });
+    const createPrepared = (entry: typeof prepared[number], db?: Parameters<Harness["createTaskWithDb"]>[0]) => {
+      const input = {
+        id: entry.id,
         runId: run.id,
-        role: plannedTask.role,
-        goal: plannedTask.goal,
-        prompt: plannedTask.prompt,
-        dependsOn,
-        doneWhen: plannedTask.doneWhen ?? [],
+        role: entry.plannedTask.role,
+        goal: entry.plannedTask.goal,
+        prompt: entry.plannedTask.prompt,
+        dependsOn: entry.dependsOn,
+        doneWhen: entry.plannedTask.doneWhen ?? [],
         worktreePath: null,
-        config,
-      });
+        config: entry.config,
+      };
+      const taskId = db ? options.harness.createTaskWithDb(db, input) : options.harness.createTask(input);
       return {
         kind: "created_task",
         taskId,
         sourceTaskId: task.id,
-        ...(sourceWorktreePath ? { sourceWorktreePath } : {}),
+        ...(entry.sourceWorktreePath ? { sourceWorktreePath: entry.sourceWorktreePath } : {}),
       };
-    });
+    };
+
+    if (plannedTasks.length > 0 && task.role === "goal-review") {
+      const atomic = options.harness.runInImmediateTransaction((db) => {
+        const activeTasks = options.harness.getRunOverviewWithDb(db, { runId: run.id, eventLimit: 0 }).tasks.filter((candidate) =>
+          candidate.id !== task.id && (candidate.status === "todo" || candidate.status === "running")
+        );
+        if (activeTasks.length > 0) {
+          return { activeTasks, created: [] as ReturnType<typeof createPrepared>[] };
+        }
+        return { activeTasks: [], created: prepared.map((entry) => createPrepared(entry, db)) };
+      });
+      if (atomic.activeTasks.length > 0) {
+        return {
+          decision: "exit",
+          checks: [{
+            name: "goal review completion snapshot",
+            status: "passed",
+            evidence: atomic.activeTasks.map((candidate) => candidate.id).join(","),
+          }],
+          artifacts: atomic.activeTasks.map((candidate) => ({
+            kind: "delegated_to_active_task",
+            taskId: candidate.id,
+            role: candidate.role,
+            status: candidate.status,
+          })),
+        };
+      }
+      return {
+        decision: atomic.created.length > 0 ? "continue" : "exit",
+        artifacts: atomic.created,
+      };
+    }
+
+    const created = prepared.map((entry) => createPrepared(entry));
 
     return {
       decision: created.length > 0 ? "continue" : "exit",

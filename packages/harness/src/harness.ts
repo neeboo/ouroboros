@@ -125,6 +125,7 @@ import type {
   ReclaimedRunningTask,
   ReclaimRunningTasksInput,
   RetryTaskInput,
+  RetireTaskInput,
   SetPromptTemplateInput,
   StartAttemptInput,
   Status,
@@ -1984,6 +1985,31 @@ export class Harness {
           });
         }
       }
+    });
+  }
+
+  retireTask(input: RetireTaskInput) {
+    return withDatabase(this.dbPath, (db) => {
+      const row = db.query("select * from tasks where id = $taskId").get({ $taskId: input.taskId }) as TaskRow | null;
+      if (!row) {
+        return null;
+      }
+      const task = taskFromRow(row);
+      if (task.status !== "todo") {
+        return { task, retired: false };
+      }
+      const result = db.query(
+        `
+        update tasks
+        set status = 'blocked', updated_at = current_timestamp
+        where id = $taskId and status = 'todo'
+        `,
+      ).run({ $taskId: input.taskId });
+      if (result.changes !== 1) {
+        const current = db.query("select * from tasks where id = $taskId").get({ $taskId: input.taskId }) as TaskRow;
+        return { task: taskFromRow(current), retired: false };
+      }
+      return { task: { ...task, status: "blocked" as const }, retired: true };
     });
   }
 

@@ -5572,6 +5572,57 @@ describe("runner", () => {
     });
   });
 
+  test("goal review stop hook does not append stale next tasks when work appeared while the review was running", async () => {
+    const runId = harness.createRun({ goal: "Finish one canonical delivery" });
+    const reviewTaskId = harness.createTask({
+      runId,
+      role: "goal-review",
+      goal: "Review whether the run goal is complete",
+      prompt: "Return a repair task only when the run is still drained.",
+    });
+    let replacementTaskId = "";
+
+    const result = await runNextReadyTask({
+      harness,
+      runId,
+      executor: async () => {
+        replacementTaskId = harness.createTask({
+          runId,
+          role: "worker",
+          goal: "Canonical replacement already queued",
+          prompt: "Continue the accepted delivery with the corrected contract.",
+          dependsOn: [reviewTaskId],
+        });
+        return {
+          status: "done",
+          runDecision: "continue",
+          summary: "The stale review snapshot requested duplicate work",
+          artifacts: [],
+          checks: [],
+          problems: [],
+          nextTasks: [{
+            role: "worker",
+            goal: "Stale duplicate replacement",
+            prompt: "This task must not be created.",
+            doneWhen: ["duplicate work completed"],
+          }],
+        };
+      },
+      stopHooks: [createTasksFromOutputHook({ harness })],
+    });
+    const overview = harness.getRunOverview({ runId, eventLimit: 0 });
+    const attempt = harness.getAttempt(result!.attemptId)!;
+
+    expect(result?.stopDecision).toBe("exit");
+    expect(overview.tasks.map((task) => task.id).sort()).toEqual([replacementTaskId, reviewTaskId].sort());
+    expect(attempt.output.artifacts).toContainEqual({
+      kind: "delegated_to_active_task",
+      taskId: replacementTaskId,
+      role: "worker",
+      status: "todo",
+    });
+  });
+
   test("planner stop hook creates child runs from structured nextRuns output", async () => {
     const runId = harness.createRun({
       goal: "Intake requirement document",

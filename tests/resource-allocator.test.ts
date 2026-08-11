@@ -5,7 +5,7 @@ import {
   freezeResourceAllocationV0,
   parseDesignResourceRequestV0,
   selectResourceAwareRuns,
-} from "@ouroboros/harness";
+} from "../packages/harness/src/index";
 
 const request = {
   schemaVersion: 1,
