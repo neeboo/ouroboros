@@ -1509,6 +1509,68 @@ describe("runner", () => {
     expect(harness.getTask(taskId)?.status).toBe("running");
   });
 
+  test("runner-owned codex loop bounds repeated running resumptions and terminalizes the stale lease", async () => {
+    const runId = harness.createRun({ goal: "Bound stale resumable work" });
+    const taskId = harness.createTask({
+      runId,
+      role: "goal-review",
+      goal: "Review once",
+      prompt: "Review the drained run.",
+    });
+    let startCalls = 0;
+    let resumeCalls = 0;
+    const clientFactory = () => ({
+      start: async () => {
+        startCalls += 1;
+        return {
+          status: "running" as const,
+          sessionId: "bounded_session",
+          outputPath: join(dir, "bounded-start.json"),
+          stdout: "",
+          stderr: "",
+          events: [],
+        };
+      },
+      resume: async ({ sessionId }: { sessionId: string }) => {
+        resumeCalls += 1;
+        return {
+          status: "running" as const,
+          sessionId,
+          outputPath: join(dir, `bounded-resume-${resumeCalls}.json`),
+          stdout: "",
+          stderr: "",
+          events: [],
+        };
+      },
+    });
+
+    for (let tick = 0; tick < 5; tick += 1) {
+      await runCodexResumableLoop({
+        harness,
+        runId,
+        limit: 1,
+        maxRounds: 1,
+        maxTries: 3,
+        cwd: dir,
+        clientFactory,
+      });
+    }
+
+    const latestAttempt = harness.listLatestAttemptsForTasks([taskId])[0];
+    const attempt = latestAttempt ? harness.getAttempt(latestAttempt.attemptId) : null;
+    const thread = harness.getRunOverview({ runId, eventLimit: 0 }).threads.find(
+      (candidate) => candidate.attemptId === attempt?.id,
+    );
+    expect(startCalls).toBe(1);
+    expect(resumeCalls).toBe(3);
+    expect(attempt?.status).toBe("blocked");
+    expect(attempt?.output.problems).toContain(
+      "resumable attempt exhausted 3 running continuations without reaching a terminal result",
+    );
+    expect(harness.getTask(taskId)?.status).toBe("blocked");
+    expect(thread?.status).toBe("blocked");
+  });
+
   test("runner-owned codex loop orphans running attempts when the owner pid is gone", async () => {
     const runId = harness.createRun({ goal: "Recover dead owner" });
     const taskId = harness.createTask({
@@ -13223,6 +13285,9 @@ describe("runner", () => {
       repoPath: dir,
       runCommand: async ({ cmd }) => {
         commands.push(cmd);
+        if (cmd.includes("--git-common-dir")) {
+          return { exitCode: 0, stdout: `${dir}\n`, stderr: "" };
+        }
         if (cmd.includes("rev-parse")) {
           return { exitCode: 0, stdout: "true\n", stderr: "" };
         }

@@ -1425,6 +1425,62 @@ function applyCreateRunsFromDesignWithDb(
     let plannerTaskId = linearIntake && canonicalPlannerTaskId
       ? canonicalPlannerTaskId
       : stablePlannerTaskId(proposalId);
+    const existingRun = harness.getRunWithDb(db, childRunId);
+    // Preserve the project-identity failure boundary before inspecting any
+    // legacy planner state. A polluted child must never be interpreted as a
+    // compatible legacy delivery merely because its task graph is incomplete.
+    if (existingRun) {
+      if (existingRun.projectId !== proposalProjectId) {
+        throw new Error(
+          `createRunsFromDesign child run ${childRunId} belongs to project ${existingRun.projectId ?? "<null>"}; expected ${proposalProjectId}`,
+        );
+      }
+      if (
+        existingRun.context.projectId !== undefined
+        && existingRun.context.projectId !== proposalProjectId
+      ) {
+        throw new Error(
+          `createRunsFromDesign child run ${childRunId} context.projectId is ${String(existingRun.context.projectId)}; expected ${proposalProjectId}`,
+        );
+      }
+    }
+    if (!linearIntake && existingProposalDelivery) {
+      const existingTasks = harness
+        .getRunOverviewWithDb(db, { runId: existingProposalDelivery.id, eventLimit: 0 })
+        .tasks;
+      const plannerCandidates = existingTasks.filter((task) => task.role === "planner");
+      const existingPlanner = plannerCandidates.length === 1
+        ? plannerCandidates[0]
+        : (plannerCandidates.length === 0 && existingTasks.length === 1 ? existingTasks[0] : null);
+      if (!existingPlanner) {
+        throw new Error(
+          `createRunsFromDesign proposal ${proposal.id} delivery run ${existingProposalDelivery.id} has ${plannerCandidates.length} unambiguous planner tasks; expected exactly one`,
+        );
+      }
+      plannerTaskId = existingPlanner.id;
+    }
+    const existingTask = harness.getTask(plannerTaskId);
+    const requestedDeliveryPlan = designDeliveryPlan({
+      runGoal: plannedRun.goal,
+      plannerGoal: `Plan run: ${plannedRun.goal}`,
+      plannerPrompt: plannedRun.prompt,
+      plannerDoneWhen: plannedRun.doneWhen ?? [
+        "Planner returns a small nextTasks graph for this run",
+        "Every generated task honors the frozen design evaluation contract",
+        "The run can be drained by the supervisor without manual task injection",
+      ],
+      plannerConfig: plannedRun.modelPreference ? { modelPreference: plannedRun.modelPreference } : {},
+    });
+    const storedDeliveryPlan = existingRun?.context.designDeliveryPlan === undefined
+      ? null
+      : parseDesignDeliveryPlan(existingRun.context.designDeliveryPlan, childRunId);
+    if (existingRun && !storedDeliveryPlan) {
+      throw new Error(
+        `createRunsFromDesign child run ${childRunId} is missing frozen context.designDeliveryPlan; legacy delivery state cannot authorize replay`,
+      );
+    }
+    const canonicalDeliveryPlan = storedDeliveryPlan
+      ?? requestedDeliveryPlan;
     // Idempotent replay: a prior run with the same stable ID already encodes
     // the planned delivery. We never recreate or duplicate the run.
     const childContext: Record<string, unknown> = {
@@ -1443,6 +1499,7 @@ function applyCreateRunsFromDesignWithDb(
       designAdditions: frozenAdditions,
       designRemovals: frozenRemovals,
       designApprovalAuthority: approvalAuthority,
+      designDeliveryPlan: canonicalDeliveryPlan,
       ...(frozenEvolution
         ? {
             evolutionPack: frozenEvolution.pack,
@@ -1463,7 +1520,6 @@ function applyCreateRunsFromDesignWithDb(
       });
     }
 
-    const existingRun = harness.getRunWithDb(db, childRunId);
     if (!existingRun) {
       if (options.requireExisting) {
         throw new Error(
@@ -1472,24 +1528,11 @@ function applyCreateRunsFromDesignWithDb(
       }
       harness.createRunWithDb(db, {
         id: childRunId,
-        goal: plannedRun.goal,
+        goal: canonicalDeliveryPlan.runGoal,
         projectId: proposalProjectId,
         context: childContext,
       });
     } else {
-      if (existingRun.projectId !== proposalProjectId) {
-        throw new Error(
-          `createRunsFromDesign child run ${childRunId} belongs to project ${existingRun.projectId ?? "<null>"}; expected ${proposalProjectId}`,
-        );
-      }
-      if (
-        existingRun.context.projectId !== undefined
-        && existingRun.context.projectId !== proposalProjectId
-      ) {
-        throw new Error(
-          `createRunsFromDesign child run ${childRunId} context.projectId is ${String(existingRun.context.projectId)}; expected ${proposalProjectId}`,
-        );
-      }
       if (linearIntake) {
         verifyExistingRunIntakeProvenance(existingRun.context, {
           parent: linearIntake,
@@ -1501,33 +1544,10 @@ function applyCreateRunsFromDesignWithDb(
         });
       }
       verifyExistingFrozenDesignRun(existingRun, {
-        goal: plannedRun.goal,
+        goal: canonicalDeliveryPlan.runGoal,
         expectedContext: childContext,
       });
     }
-    if (!linearIntake && existingProposalDelivery) {
-      const existingTasks = harness
-        .getRunOverviewWithDb(db, { runId: existingProposalDelivery.id, eventLimit: 0 })
-        .tasks;
-      const plannerCandidates = existingTasks.filter((task) => task.role === "planner");
-      const existingPlanner = plannerCandidates.length === 1
-        ? plannerCandidates[0]
-        : (plannerCandidates.length === 0 && existingTasks.length === 1 ? existingTasks[0] : null);
-      if (!existingPlanner) {
-        throw new Error(
-          `createRunsFromDesign proposal ${proposal.id} delivery run ${existingProposalDelivery.id} has ${plannerCandidates.length} unambiguous planner tasks; expected exactly one`,
-        );
-      }
-      plannerTaskId = existingPlanner.id;
-    }
-    const existingTask = harness.getTask(plannerTaskId);
-    const plannerGoal = `Plan run: ${plannedRun.goal}`;
-    const plannerDoneWhen = plannedRun.doneWhen ?? [
-      "Planner returns a small nextTasks graph for this run",
-      "Every generated task honors the frozen design evaluation contract",
-      "The run can be drained by the supervisor without manual task injection",
-    ];
-    const plannerConfig = plannedRun.modelPreference ? { modelPreference: plannedRun.modelPreference } : {};
     if (!existingTask) {
       if (options.requireExisting || (existingRun && frozenEvolution)) {
         throw new Error(
@@ -1538,19 +1558,19 @@ function applyCreateRunsFromDesignWithDb(
         id: plannerTaskId,
         runId: childRunId,
         role: "planner",
-        goal: plannerGoal,
-        prompt: plannedRun.prompt,
-        doneWhen: plannerDoneWhen,
-        config: plannerConfig,
+        goal: canonicalDeliveryPlan.planner.goal,
+        prompt: canonicalDeliveryPlan.planner.prompt,
+        doneWhen: canonicalDeliveryPlan.planner.doneWhen,
+        config: canonicalDeliveryPlan.planner.config,
       });
     } else {
       verifyExistingPlannerTask(existingTask, {
         runId: childRunId,
         role: "planner",
-        goal: plannerGoal,
-        prompt: plannedRun.prompt,
-        doneWhen: plannerDoneWhen,
-        config: plannerConfig,
+        goal: canonicalDeliveryPlan.planner.goal,
+        prompt: canonicalDeliveryPlan.planner.prompt,
+        doneWhen: canonicalDeliveryPlan.planner.doneWhen,
+        config: canonicalDeliveryPlan.planner.config,
       });
     }
     createdRuns.push({ runId: childRunId, plannerTaskId, proposalId: proposal.id });
@@ -1653,6 +1673,7 @@ const PROTECTED_DESIGN_CONTEXT_KEYS = [
   "designAdditions",
   "designRemovals",
   "designApprovalAuthority",
+  "designDeliveryPlan",
   "evolutionPack",
   "causalHypothesis",
   "comparison",
@@ -1660,6 +1681,72 @@ const PROTECTED_DESIGN_CONTEXT_KEYS = [
   "evolutionInstance",
   "linearIntake",
 ] as const;
+
+interface DesignDeliveryPlan {
+  schemaVersion: 1;
+  runGoal: string;
+  planner: {
+    goal: string;
+    prompt: string;
+    doneWhen: string[];
+    config: Record<string, unknown>;
+  };
+}
+
+function designDeliveryPlan(input: {
+  runGoal: string;
+  plannerGoal: string;
+  plannerPrompt: string;
+  plannerDoneWhen: string[];
+  plannerConfig: Record<string, unknown>;
+}): DesignDeliveryPlan {
+  return {
+    schemaVersion: 1,
+    runGoal: input.runGoal,
+    planner: {
+      goal: input.plannerGoal,
+      prompt: input.plannerPrompt,
+      doneWhen: [...input.plannerDoneWhen],
+      config: { ...input.plannerConfig },
+    },
+  };
+}
+
+function parseDesignDeliveryPlan(value: unknown, childRunId: string): DesignDeliveryPlan {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error(`createRunsFromDesign child run ${childRunId} designDeliveryPlan must be an object`);
+  }
+  const record = value as Record<string, unknown>;
+  const keys = Object.keys(record).sort();
+  if (stableCanonicalJson(keys) !== stableCanonicalJson(["planner", "runGoal", "schemaVersion"])) {
+    throw new Error(`createRunsFromDesign child run ${childRunId} designDeliveryPlan has invalid fields`);
+  }
+  if (record.schemaVersion !== 1 || typeof record.runGoal !== "string" || record.runGoal.trim().length === 0) {
+    throw new Error(`createRunsFromDesign child run ${childRunId} designDeliveryPlan is invalid`);
+  }
+  if (!record.planner || typeof record.planner !== "object" || Array.isArray(record.planner)) {
+    throw new Error(`createRunsFromDesign child run ${childRunId} designDeliveryPlan.planner must be an object`);
+  }
+  const planner = record.planner as Record<string, unknown>;
+  if (stableCanonicalJson(Object.keys(planner).sort()) !== stableCanonicalJson(["config", "doneWhen", "goal", "prompt"])) {
+    throw new Error(`createRunsFromDesign child run ${childRunId} designDeliveryPlan.planner has invalid fields`);
+  }
+  if (
+    typeof planner.goal !== "string" || planner.goal.trim().length === 0
+    || typeof planner.prompt !== "string" || planner.prompt.trim().length === 0
+    || !Array.isArray(planner.doneWhen) || planner.doneWhen.some((entry) => typeof entry !== "string")
+    || !planner.config || typeof planner.config !== "object" || Array.isArray(planner.config)
+  ) {
+    throw new Error(`createRunsFromDesign child run ${childRunId} designDeliveryPlan.planner is invalid`);
+  }
+  return designDeliveryPlan({
+    runGoal: record.runGoal,
+    plannerGoal: planner.goal,
+    plannerPrompt: planner.prompt,
+    plannerDoneWhen: planner.doneWhen as string[],
+    plannerConfig: planner.config as Record<string, unknown>,
+  });
+}
 
 interface FrozenTargetEvolutionContract {
   pack: EvolutionPackV1;

@@ -66,6 +66,53 @@ describe("git worktree hook", () => {
     });
   });
 
+  test("rejects an existing task worktree owned by a different git common directory", async () => {
+    const repoPath = await committedGitRepository("target repository\n");
+    const foreignRepoPath = await committedGitRepository("foreign repository\n");
+    const foreignWorktreePath = await mkdtemp(join(tmpdir(), "ouroboros-foreign-worktree-parent-"));
+    await rm(foreignWorktreePath, { recursive: true, force: true });
+    const addWorktree = spawnCommand([
+      "git",
+      "-C",
+      foreignRepoPath,
+      "worktree",
+      "add",
+      "-q",
+      "-b",
+      "foreign-task",
+      foreignWorktreePath,
+      "HEAD",
+    ]);
+    if (addWorktree.exitCode !== 0) throw new Error(addWorktree.stderr);
+    let bunCalled = false;
+    try {
+      const hook = createGitWorktreeHook({
+        repoPath,
+        runCommand: async (input) => {
+          if (input.cmd[0] === "bun") {
+            bunCalled = true;
+            return { exitCode: 0, stdout: "", stderr: "" };
+          }
+          return spawnCommand(input.cmd);
+        },
+      });
+
+      const result = await hook(hookInput(foreignWorktreePath));
+
+      expect(bunCalled).toBe(false);
+      expect(result.problems ?? []).toContain("existing task worktree belongs to a different git common directory");
+      expect(result.checks).toContainEqual({
+        name: "git repository boundary",
+        status: "failed",
+        summary: "existing task worktree belongs to a different git common directory",
+      });
+    } finally {
+      await rm(repoPath, { recursive: true, force: true });
+      await rm(foreignRepoPath, { recursive: true, force: true });
+      await rm(foreignWorktreePath, { recursive: true, force: true });
+    }
+  });
+
   test("preserves and blocks on a root bun.lock created despite --no-save", async () => {
     const cwd = await gitRepository();
     const contents = "generated lock\n";
@@ -341,6 +388,37 @@ async function gitRepository() {
   if (result.exitCode !== 0) {
     throw new Error(result.stderr);
   }
+  return cwd;
+}
+
+async function committedGitRepository(contents: string) {
+  const cwd = await gitRepository();
+  await writeFile(join(cwd, "README.md"), contents);
+  const commit = spawnCommand([
+    "git",
+    "-C",
+    cwd,
+    "-c",
+    "user.name=Ouroboros Test",
+    "-c",
+    "user.email=ouroboros@example.invalid",
+    "add",
+    "README.md",
+  ]);
+  if (commit.exitCode !== 0) throw new Error(commit.stderr);
+  const commitResult = spawnCommand([
+    "git",
+    "-C",
+    cwd,
+    "-c",
+    "user.name=Ouroboros Test",
+    "-c",
+    "user.email=ouroboros@example.invalid",
+    "commit",
+    "-qm",
+    "fixture",
+  ]);
+  if (commitResult.exitCode !== 0) throw new Error(commitResult.stderr);
   return cwd;
 }
 

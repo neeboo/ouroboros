@@ -102,7 +102,11 @@ export async function runCodexResumableLoop(input: RunCodexResumableLoopInput) {
       break;
     }
     const reclaimed = input.harness.reclaimRunningTasksWithoutAttempts({ runId: input.runId });
-    const resumed = await orchestrator.resumeRunningAttempts({ runId: input.runId, limit: input.limit });
+    const resumed = await orchestrator.resumeRunningAttempts({
+      runId: input.runId,
+      limit: input.limit,
+      maxRunningContinuations: input.maxTries,
+    });
     if (resumed.length > 0) {
       rounds.push({ index, tasks: resumed, reclaimed });
       if (resumed.some((task) => task.status === "running")) {
@@ -545,7 +549,7 @@ class CodexResumableOrchestrator {
     });
   }
 
-  async resumeRunningAttempts(input: { runId: string; limit: number }) {
+  async resumeRunningAttempts(input: { runId: string; limit: number; maxRunningContinuations: number }) {
     const attempts = this.harness.listRunningAttempts({ runId: input.runId }).slice(0, input.limit);
     if (attempts.length > 0) {
       this.harness.clearRunPause(input.runId);
@@ -587,6 +591,14 @@ class CodexResumableOrchestrator {
         return null;
       }
       const { attempt: claimedAttempt, claimToken } = claimed;
+      const runningContinuations = resumableRunningContinuationCount(claimedAttempt.input);
+      if (runningContinuations >= input.maxRunningContinuations) {
+        this.releaseDirectResumeClaim(attempt.id, claimToken);
+        const output = resumableContinuationBudgetOutput(input.maxRunningContinuations);
+        this.harness.finishAttempt({ attemptId: attempt.id, output });
+        this.updateAttemptThread({ attemptId: attempt.id, status: "blocked", agentSessionId: sessionId, heartbeat: true });
+        return { taskId: task.id, attemptId: attempt.id, sessionName, status: "blocked" as const, codexSessionId: sessionId };
+      }
       const oversized = promptBudgetEvidence(prompt, "runner client resume");
       if (oversized) {
         this.releaseDirectResumeClaim(attempt.id, claimToken);
@@ -624,6 +636,9 @@ class CodexResumableOrchestrator {
         input: {
           ...(this.harness.getAttempt(attempt.id)?.input ?? claimedAttempt.input),
           ...codexAttemptInput({ prompt, sessionName, result, model: resolvedModel, cwd }),
+          resumableRunningContinuations: result.status === "running"
+            ? runningContinuations + 1
+            : runningContinuations,
           threadId: threadIdForAttempt(attempt.id),
         },
       });
@@ -771,6 +786,7 @@ class CodexResumableOrchestrator {
       input: {
         ...(this.harness.getAttempt(attemptId)?.input ?? input.baseInput),
         ...codexAttemptInput({ prompt: input.prompt, sessionName: input.sessionName, result, model: input.route.model, cwd: input.cwd }),
+        resumableRunningContinuations: 0,
         threadId: threadIdForAttempt(attemptId),
       },
     });
@@ -1276,6 +1292,23 @@ function missingResumableSessionOutput(source: string): AttemptOutput {
     problems: [
       "running attempt is missing an agent session id; automatic retry is disabled because this attempt cannot be resumed safely",
     ],
+  };
+}
+
+function resumableRunningContinuationCount(input: Record<string, unknown>) {
+  const value = input.resumableRunningContinuations;
+  return typeof value === "number" && Number.isInteger(value) && value >= 0 ? value : 0;
+}
+
+function resumableContinuationBudgetOutput(limit: number): AttemptOutput {
+  const problem = `resumable attempt exhausted ${limit} running continuations without reaching a terminal result`;
+  return {
+    status: "blocked",
+    summary: "Resumable attempt exhausted its bounded continuation budget",
+    changedFiles: [],
+    checks: [{ name: "resumable continuation budget", status: "failed", evidence: `${limit}/${limit}` }],
+    artifacts: [{ kind: "resumable_continuation_budget", limit }],
+    problems: [problem],
   };
 }
 

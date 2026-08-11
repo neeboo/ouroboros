@@ -2,7 +2,7 @@ import type { StartHook } from "../types";
 import { runLocalCommand } from "../executors/command";
 import type { RunCommand } from "../executors/types";
 import { createHash } from "node:crypto";
-import { existsSync, lstatSync, readFileSync, readlinkSync } from "node:fs";
+import { existsSync, lstatSync, readFileSync, readlinkSync, realpathSync } from "node:fs";
 import { join } from "node:path";
 
 const GENERATED_BUN_LOCK = "bun.lock";
@@ -32,6 +32,25 @@ export function createGitWorktreeHook(options: {
         };
       }
       checks.push({ name: "git worktree reuse", status: "passed", summary: "existing task worktree reused" });
+      const repositoryBoundary = await verifyRepositoryBoundary(runCommand, options.repoPath, cwd);
+      if (!repositoryBoundary.ok) {
+        return {
+          checks: [
+            ...checks,
+            {
+              name: "git repository boundary",
+              status: "failed",
+              summary: repositoryBoundary.problem,
+            },
+          ],
+          problems: [repositoryBoundary.problem],
+        };
+      }
+      checks.push({
+        name: "git repository boundary",
+        status: "passed",
+        summary: "existing task worktree belongs to the target repository",
+      });
     } else {
       const result = await runCommand({
         cmd: ["git", "-C", options.repoPath, "worktree", "add", cwd, "-b", branch, baseRef],
@@ -144,6 +163,37 @@ export function createGitWorktreeHook(options: {
       ],
     };
   };
+}
+
+async function verifyRepositoryBoundary(runCommand: RunCommand, repoPath: string, worktreePath: string) {
+  const readCommonDir = async (cwd: string) => {
+    const result = await runCommand({
+      cmd: ["git", "-C", cwd, "rev-parse", "--path-format=absolute", "--git-common-dir"],
+      stdin: "",
+    });
+    if (result.exitCode !== 0 || result.stdout.trim().length === 0) {
+      return {
+        ok: false as const,
+        problem: result.stderr || result.stdout || `failed to resolve git common directory for ${cwd}`,
+      };
+    }
+    try {
+      return { ok: true as const, path: realpathSync(result.stdout.trim()) };
+    } catch {
+      return { ok: false as const, problem: `failed to resolve git common directory for ${cwd}` };
+    }
+  };
+  const target = await readCommonDir(repoPath);
+  if (!target.ok) return target;
+  const candidate = await readCommonDir(worktreePath);
+  if (!candidate.ok) return candidate;
+  if (target.path !== candidate.path) {
+    return {
+      ok: false as const,
+      problem: "existing task worktree belongs to a different git common directory",
+    };
+  }
+  return { ok: true as const };
 }
 
 function inspectBunLockBoundary(input: {
