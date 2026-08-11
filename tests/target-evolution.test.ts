@@ -1464,6 +1464,14 @@ describe("target-system evolution contracts", () => {
     expect(prompt).toContain("Never copy the example pack hash after changing the pack");
   });
 
+  test("restricts proposal authority evidence to durable active strategy signals", () => {
+    const prompt = designerPrompt();
+
+    expect(prompt).toContain("proposal.evidenceRefs is authority input, not a bibliography");
+    expect(prompt).toContain("only durable active strategy signal IDs from this target project");
+    expect(prompt).toContain("Do not put proposal IDs, decision IDs, Git SHAs, or free-form evidence labels");
+  });
+
   test("provides one standalone exact evolution extension fragment accepted by the parser", () => {
     const prompt = designerPrompt();
     const extension = jsonFenceAfter(prompt, "## Target System Evolution Proposal Contract");
