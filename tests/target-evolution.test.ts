@@ -1448,6 +1448,14 @@ describe("target-system evolution contracts", () => {
     }));
   });
 
+  test("requires comparison to merge into the proposal's single evaluation contract", () => {
+    const prompt = designerPrompt();
+
+    expect(prompt).toContain("exactly one proposal.evaluationContract object");
+    expect(prompt).toContain("comparison beside successMetrics and requiredEvidence");
+    expect(prompt).toContain("Never place evaluationContract inside evolutionPack");
+  });
+
   test("provides one standalone exact evolution extension fragment accepted by the parser", () => {
     const prompt = designerPrompt();
     const extension = jsonFenceAfter(prompt, "## Target System Evolution Proposal Contract");
