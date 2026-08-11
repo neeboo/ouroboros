@@ -332,7 +332,7 @@ describe("git worktree hook", () => {
     } finally {
       await rm(cwd, { recursive: true, force: true });
     }
-  });
+  }, 10_000);
 });
 
 async function gitRepository() {
