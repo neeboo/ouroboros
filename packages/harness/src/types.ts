@@ -1103,6 +1103,34 @@ export interface HarnessVariant {
   createdFromEvidenceRefs: string[];
 }
 
+export type HarnessRevisionComponentKind =
+  | "prompt"
+  | "knowledge"
+  | "skills"
+  | "tools"
+  | "agent-policy";
+
+export interface HarnessRevisionComponentV1 {
+  kind: HarnessRevisionComponentKind;
+  ref: string;
+  sha256: string;
+}
+
+export interface HarnessRevisionV1 {
+  schemaVersion: 1;
+  projectId: string;
+  version: number;
+  parentSha256: string | null;
+  variant: {
+    id: string;
+    recordSha256: string;
+    contentSha256: string;
+  };
+  components: HarnessRevisionComponentV1[];
+  evidenceRefs: string[];
+  contentSha256: string;
+}
+
 export interface MatchedExperiment {
   schemaVersion: 1;
   id: string;

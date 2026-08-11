@@ -49,6 +49,12 @@ export type {
 } from "./watchdog";
 export { isValidInboxTransition } from "./harness";
 export {
+  canonicalHarnessRevisionContentSha256,
+  HARNESS_REVISION_COMPONENT_ORDER,
+  HARNESS_REVISION_LIMITS,
+  parseHarnessRevisionV1,
+} from "./harness-revision";
+export {
   describeAuthorityEvaluation,
   evaluateAuthority,
   HARD_AUTHORITY_RULES,
@@ -186,6 +192,9 @@ export type {
   GetInboxEventInput,
   GetStrategySignalInput,
   HarnessVariant,
+  HarnessRevisionComponentKind,
+  HarnessRevisionComponentV1,
+  HarnessRevisionV1,
   HarnessActionEvent,
   InboxEvent,
   LeaseReadyTasksInput,
