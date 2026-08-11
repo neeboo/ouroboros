@@ -165,31 +165,6 @@ export function createGitWorktreeHook(options: {
 }
 
 function dependencyInstallCommand(cwd: string, hasTrackedBunLock: boolean) {
-  try {
-    const packageJson = JSON.parse(readFileSync(join(cwd, "package.json"), "utf8")) as {
-      packageManager?: unknown;
-    };
-    const yarnOne = typeof packageJson.packageManager === "string"
-      ? /^yarn@(1(?:\.[0-9]+){1,2})$/.exec(packageJson.packageManager)
-      : null;
-    if (yarnOne) {
-      return {
-        label: "yarn install",
-        cmd: [
-          "corepack",
-          `yarn@${yarnOne[1]}`,
-          "--cwd",
-          cwd,
-          "install",
-          "--frozen-lockfile",
-          "--non-interactive",
-        ],
-        env: { COREPACK_ENABLE_PROJECT_SPEC: "0" },
-      };
-    }
-  } catch {
-    // The selected installer reports malformed or missing package metadata.
-  }
   return {
     label: "bun install",
     cmd: [

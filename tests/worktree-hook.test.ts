@@ -332,7 +332,7 @@ describe("git worktree hook", () => {
     }
   });
 
-  test("keeps a real empty Yarn repository clean without writing bun.lock", async () => {
+  test("uses Bun for a legacy Yarn-declared repository without writing bun.lock", async () => {
     const cwd = await gitRepository();
     await writeFile(join(cwd, "package.json"), JSON.stringify({
       name: "empty-yarn-repository",
@@ -373,7 +373,7 @@ describe("git worktree hook", () => {
       const status = spawnCommand(["git", "-C", cwd, "status", "--porcelain=v1", "--untracked-files=all"]);
 
       expect(result.problems).toBeUndefined();
-      expect(result.checks).toContainEqual({ name: "yarn install", status: "passed" });
+      expect(result.checks).toContainEqual({ name: "bun install", status: "passed" });
       expect(existsSync(join(cwd, "bun.lock"))).toBe(false);
       expect(status).toMatchObject({ exitCode: 0, stdout: "" });
     } finally {
@@ -381,7 +381,7 @@ describe("git worktree hook", () => {
     }
   }, 10_000);
 
-  test("uses the declared Yarn 1 toolchain without invoking Bun", async () => {
+  test("never invokes Yarn or Corepack for a legacy Yarn-declared repository", async () => {
     const cwd = await gitRepository();
     await writeFile(join(cwd, "package.json"), JSON.stringify({
       name: "yarn-repository",
@@ -395,25 +395,14 @@ describe("git worktree hook", () => {
         repoPath: cwd,
         runCommand: async (input) => {
           calls.push(input.cmd);
-          if (input.cmd[0] === "bun") {
-            await writeFile(join(cwd, "bun.lock"), "unexpected Bun lock\n");
-          }
           return input.cmd[0] === "git"
             ? spawnCommand(input.cmd)
             : { exitCode: 0, stdout: "", stderr: "" };
         },
       })(hookInput(cwd));
 
-      expect(calls).toContainEqual([
-        "corepack",
-        "yarn@1.22.22",
-        "--cwd",
-        cwd,
-        "install",
-        "--frozen-lockfile",
-        "--non-interactive",
-      ]);
-      expect(calls.some((cmd) => cmd[0] === "bun")).toBe(false);
+      expect(calls).toContainEqual(["bun", "install", "--no-save", "--cwd", cwd]);
+      expect(calls.some((cmd) => cmd[0] === "yarn" || cmd[0] === "corepack")).toBe(false);
       expect(existsSync(join(cwd, "bun.lock"))).toBe(false);
       expect(result.problems).toBeUndefined();
     } finally {
