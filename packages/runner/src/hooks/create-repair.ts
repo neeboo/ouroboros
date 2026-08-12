@@ -64,7 +64,6 @@ export function createRepairTaskHook(options: {
             sharedRootCause: accounting.charge.sharedRootCause ?? null,
             reason: accounting.charge.reason,
           }],
-          problems: [`Repair budget exhausted (${accounting.charge.used}/${accounting.charge.limit}): ${accounting.charge.reason}`],
         };
       }
       return {
@@ -264,12 +263,6 @@ export function createRepairTaskHook(options: {
           sharedRootCause: charge.sharedRootCause ?? null,
           reason: charge.reason,
         }],
-        problems: [
-          `Repair budget exhausted (${charge.used}/${charge.limit}): ${charge.reason}`,
-          ...(charge.exhaustedRootCauses.length > 0
-            ? [`exhausted root causes: ${charge.exhaustedRootCauses.join(", ")}`]
-            : []),
-        ],
       };
     }
 

@@ -4,6 +4,7 @@ import type { StopHook } from "../types";
 import {
   chargeRepairBudgetState,
   goalReviewRepairTrigger,
+  isFinalVerificationOnlyContinuation,
   readRepairBudget,
   reconcileGoalReviewRepairBudget,
 } from "./repair-budget";
@@ -183,6 +184,8 @@ export function createTasksFromOutputHook(options: { harness: Harness }): StopHo
         }
 
         const repairTrigger = goalReviewRepairTrigger(overview, task.id);
+        const finalVerificationOnly = output.runDecision === "verify"
+          && isFinalVerificationOnlyContinuation(overview, task.id, plannedTasks);
         const existingCharge = currentRepairBudget?.entries.some((entry) =>
           entry.taskId === task.id && entry.kind === "replan"
         );
@@ -193,7 +196,7 @@ export function createTasksFromOutputHook(options: { harness: Harness }): StopHo
             conflict: "repair budget was charged for this goal-review but its durable continuation task is missing",
           };
         }
-        const repairBudget = repairTrigger && currentRepairBudget
+        const repairBudget = repairTrigger && currentRepairBudget && !finalVerificationOnly
           ? chargeRepairBudgetState(currentRepairBudget, {
               limit: currentRepairBudget.limit,
               taskId: task.id,
