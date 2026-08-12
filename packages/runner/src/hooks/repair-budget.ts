@@ -1,4 +1,4 @@
-import type { Harness, RunOverview } from "@ouroboros/harness";
+import type { Harness, PlannedTask, RunOverview } from "@ouroboros/harness";
 
 export interface RepairBudgetEntry {
   taskId: string;
@@ -292,6 +292,43 @@ export function goalReviewRepairTrigger(
       : null;
   }
   return null;
+}
+
+export function isFinalVerificationOnlyContinuation(
+  overview: Pick<RunOverview, "tasks" | "sessions">,
+  goalReviewTaskId: string,
+  plannedTasks: PlannedTask[],
+): boolean {
+  if (plannedTasks.length !== 1 || plannedTasks[0]?.role !== "verifier") {
+    return false;
+  }
+  const reviewIndex = overview.tasks.findIndex((task) => task.id === goalReviewTaskId);
+  if (reviewIndex < 0) {
+    return false;
+  }
+  const reviewTask = overview.tasks[reviewIndex]!;
+  const latestDeliveryTask = overview.tasks
+    .slice(0, reviewIndex)
+    .filter((task) => task.role !== "goal-review" && task.role !== "system")
+    .at(-1);
+  if (!latestDeliveryTask || latestDeliveryTask.role !== "worker" || latestDeliveryTask.status !== "done") {
+    return false;
+  }
+  const requestedDependencies = plannedTasks[0].dependsOn?.length
+    ? plannedTasks[0].dependsOn
+    : reviewTask.dependsOn;
+  if (!requestedDependencies.includes(latestDeliveryTask.id)) {
+    return false;
+  }
+  const taskById = new Map(overview.tasks.map((task) => [task.id, task]));
+  if (requestedDependencies.some((dependencyId) => taskById.get(dependencyId)?.status !== "done")) {
+    return false;
+  }
+  return !overview.tasks.some((task, index) =>
+    index < reviewIndex
+    && task.role === "verifier"
+    && task.dependsOn.includes(latestDeliveryTask.id)
+  );
 }
 
 export function repairBudgetExhausted(state: RepairBudgetState): boolean {

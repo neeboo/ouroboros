@@ -110,6 +110,118 @@ describe("Harness actions", () => {
     expect(overview.tasks).toContainEqual(expect.objectContaining({ role: "goal-review", status: "todo" }));
   });
 
+  test("repair exhaustion stops after the final verifier without creating goal review work", () => {
+    const runId = harness.createRun({
+      goal: "Stop at the final verifier verdict",
+      context: {
+        repairReplanBudget: {
+          limit: 3,
+          used: 3,
+          entries: [
+            { taskId: "task_repair_1", kind: "repair", summary: "one", chargedAt: "2026-08-11T00:00:00.000Z" },
+            { taskId: "task_repair_2", kind: "repair", summary: "two", chargedAt: "2026-08-11T00:01:00.000Z" },
+            { taskId: "task_repair_3", kind: "repair", summary: "three", chargedAt: "2026-08-11T00:02:00.000Z" },
+          ],
+        },
+      },
+    });
+    const workerId = harness.createTask({ runId, role: "worker", goal: "Final repair", prompt: "Repair." });
+    harness.recordAttempt({
+      taskId: workerId,
+      input: { executor: "test" },
+      output: { status: "done", summary: "Final repair done.", changedFiles: ["src/final.ts"], checks: [], artifacts: [], problems: [] },
+    });
+    const verifierId = harness.createTask({
+      runId,
+      role: "verifier",
+      goal: "Final verifier",
+      prompt: "Verify.",
+      dependsOn: [workerId],
+    });
+    const verifierAttemptId = harness.recordAttempt({
+      taskId: verifierId,
+      input: { executor: "test" },
+      output: {
+        status: "blocked",
+        summary: "The host capability remains publicly reachable.",
+        changedFiles: [],
+        checks: [],
+        artifacts: [{ kind: "capability_probe", accepted: true }],
+        problems: ["public receipt minting remains reachable"],
+      },
+    });
+
+    const first = applyHarnessAction(harness, {
+      type: "prepareRunDrain",
+      runId,
+      reason: "runner found no ready tasks",
+    });
+    const second = applyHarnessAction(harness, {
+      type: "prepareRunDrain",
+      runId,
+      reason: "runner replayed the terminal drain",
+    });
+
+    expect(first.status).toBe("blocked");
+    expect(first.artifacts).toContainEqual(expect.objectContaining({
+      kind: "terminal_verifier",
+      taskId: verifierId,
+      attemptId: verifierAttemptId,
+      repairBudget: { used: 3, limit: 3 },
+    }));
+    expect(second.status).toBe("blocked");
+    expect(harness.getRun(runId)?.status).toBe("blocked");
+    expect(harness.getRunOverview({ runId, eventLimit: 0 }).tasks.filter((task) => task.role === "goal-review"))
+      .toHaveLength(0);
+  });
+
+  test("repair exhaustion still allows a pending final verifier to remain runnable", () => {
+    const runId = harness.createRun({
+      goal: "Run one final verifier",
+      context: {
+        repairReplanBudget: {
+          limit: 3,
+          used: 3,
+          entries: [
+            { taskId: "task_repair_1", kind: "repair", summary: "one", chargedAt: "2026-08-11T00:00:00.000Z" },
+            { taskId: "task_repair_2", kind: "repair", summary: "two", chargedAt: "2026-08-11T00:01:00.000Z" },
+            { taskId: "task_repair_3", kind: "repair", summary: "three", chargedAt: "2026-08-11T00:02:00.000Z" },
+          ],
+        },
+      },
+    });
+    const workerId = harness.createTask({ runId, role: "worker", goal: "Final repair", prompt: "Repair." });
+    harness.recordAttempt({
+      taskId: workerId,
+      input: { executor: "test" },
+      output: { status: "done", summary: "Done.", changedFiles: ["src/final.ts"], checks: [], artifacts: [], problems: [] },
+    });
+    const verifierId = harness.createTask({
+      runId,
+      role: "verifier",
+      goal: "Final verifier",
+      prompt: "Verify.",
+      dependsOn: [workerId],
+    });
+
+    const result = applyHarnessAction(harness, {
+      type: "prepareRunDrain",
+      runId,
+      reason: "runner found pending final verification",
+    });
+
+    expect(result.status).toBe("done");
+    expect(result.artifacts).toContainEqual(expect.objectContaining({
+      kind: "active_task",
+      taskId: verifierId,
+      role: "verifier",
+      status: "todo",
+    }));
+    expect(harness.getTask(verifierId)?.status).toBe("todo");
+    expect(harness.getRunOverview({ runId, eventLimit: 0 }).tasks.filter((task) => task.role === "goal-review"))
+      .toHaveLength(0);
+  });
+
   test("prepares a drained run by binding goal-review to the latest candidate worktree", () => {
     const runId = harness.createRun({ goal: "Review candidate implementation" });
     const worktreePath = "/tmp/ouroboros-candidate-worktree";

@@ -1,10 +1,14 @@
 import { inferExplicitRunDecision, type Harness } from "@ouroboros/harness";
 import type { StopHook } from "../types";
-import { readRepairBudget, repairBudgetExhausted } from "./repair-budget";
+import {
+  isFinalVerificationOnlyContinuation,
+  readRepairBudget,
+  repairBudgetExhausted,
+} from "./repair-budget";
 
 const MAX_GOAL_REVIEW_NEXT_TASKS = 5;
 
-export function createGoalReviewDecisionHook(_options: { harness: Harness }): StopHook {
+export function createGoalReviewDecisionHook(options: { harness: Harness }): StopHook {
   return ({ run, task, output }) => {
     if (task.role !== "goal-review") {
       return { decision: "exit" };
@@ -53,7 +57,14 @@ export function createGoalReviewDecisionHook(_options: { harness: Harness }): St
     }
 
     const repairBudget = readRepairBudget(run.context);
-    if (output.status === "done" && repairBudgetExhausted(repairBudget)) {
+    const nextTasks = output.nextTasks ?? [];
+    const finalVerificationOnly = inferredRunDecision === "verify"
+      && isFinalVerificationOnlyContinuation(
+        options.harness.getRunOverview({ runId: run.id, eventLimit: 0 }),
+        task.id,
+        nextTasks,
+      );
+    if (output.status === "done" && repairBudgetExhausted(repairBudget) && !finalVerificationOnly) {
       return {
         decision: "exit",
         artifacts: [
@@ -73,7 +84,6 @@ export function createGoalReviewDecisionHook(_options: { harness: Harness }): St
       };
     }
 
-    const nextTasks = output.nextTasks ?? [];
     if (nextTasks.length < 1 || nextTasks.length > MAX_GOAL_REVIEW_NEXT_TASKS) {
       return {
         decision: "exit",

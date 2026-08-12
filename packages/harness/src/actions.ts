@@ -5457,6 +5457,32 @@ function prepareRunDrain(harness: Harness, action: Extract<HarnessAction, { type
   const initialReviewSessions = currentGoalReviewSessions(initialOverview, initialGoalReviewInvalidated);
   const initialLatestReview = initialReviewSessions[initialReviewSessions.length - 1];
   const initialCompletedReview = initialGoalReviewInvalidated ? null : selectCompletedGoalReview(initialOverview);
+  const terminalVerifier = initialGoalReviewInvalidated
+    ? null
+    : blockedVerifierAtExhaustedRepairBudget(initialOverview);
+  if (!initialActive && terminalVerifier) {
+    if (run.status !== "blocked") {
+      harness.updateRunStatus({ runId: action.runId, status: "blocked" });
+    }
+    return {
+      status: "blocked",
+      actionType: action.type,
+      summary: `Run ${action.runId} reached its final verifier with repair budget exhausted at ${terminalVerifier.used}/${terminalVerifier.limit}.`,
+      checks: [{
+        name: "terminal verifier",
+        status: "failed",
+        evidence: `${terminalVerifier.taskId}:${terminalVerifier.attemptId}`,
+      }],
+      artifacts: [{
+        kind: "terminal_verifier",
+        taskId: terminalVerifier.taskId,
+        attemptId: terminalVerifier.attemptId,
+        status: "blocked",
+        repairBudget: { used: terminalVerifier.used, limit: terminalVerifier.limit },
+      }],
+      problems: [`final verifier ${terminalVerifier.taskId} remains blocked after repair budget exhausted`],
+    };
+  }
   const terminalDisposition = currentGoalReviewTerminalDisposition(initialOverview);
   if (!initialGoalReviewInvalidated && terminalDisposition) {
     if (run.status !== "blocked") {
@@ -5708,6 +5734,39 @@ function prepareRunDrain(harness: Harness, action: Extract<HarnessAction, { type
     };
   }
   return doneResult(action.type, review.summary, checks, artifacts);
+}
+
+function blockedVerifierAtExhaustedRepairBudget(overview: ReturnType<Harness["getRunOverview"]>) {
+  const rawBudget = overview.run?.context.repairReplanBudget;
+  if (!rawBudget || typeof rawBudget !== "object" || Array.isArray(rawBudget)) {
+    return null;
+  }
+  const budget = rawBudget as Record<string, unknown>;
+  const limit = typeof budget.limit === "number" && Number.isFinite(budget.limit) && budget.limit > 0
+    ? budget.limit
+    : 3;
+  const used = typeof budget.used === "number" && Number.isFinite(budget.used) && budget.used >= 0
+    ? budget.used
+    : 0;
+  if (used < limit) {
+    return null;
+  }
+  const verifier = [...overview.tasks].reverse().find((task) => task.role === "verifier");
+  if (!verifier || verifier.status !== "blocked") {
+    return null;
+  }
+  const session = [...overview.sessions].reverse().find((candidate) =>
+    candidate.taskId === verifier.id && candidate.status === "blocked"
+  );
+  if (!session?.attemptId) {
+    return null;
+  }
+  const laterRepair = overview.tasks.some((task) =>
+    task.role === "worker"
+    && task.parentId === verifier.id
+    && (task.status === "todo" || task.status === "running")
+  );
+  return laterRepair ? null : { taskId: verifier.id, attemptId: session.attemptId, used, limit };
 }
 
 function blockedGoalReviewAtExhaustedRepairBudget(overview: ReturnType<Harness["getRunOverview"]>) {
