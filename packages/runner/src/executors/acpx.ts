@@ -12,6 +12,7 @@ import type {
 } from "./types";
 import type { ExecutorEventRecorder } from "../types";
 import type { AttemptOutput } from "@ouroboros/harness";
+import { acpxCodexHostCapabilityOutput } from "./host-sandbox-capability";
 
 const RECOVERY_PROMPT = [
   "Output only the existing attempt-result JSON envelope.",
@@ -56,6 +57,13 @@ export const createAcpxAgentExecutor: AcpxAgentExecutorFactory = (options) => {
         });
         return cached;
       }
+    }
+    if (options.agent === "codex") {
+      const unavailableHost = acpxCodexHostCapabilityOutput({
+        phase: "ACPX Codex executor start",
+        browserProcessPolicy: options.browserProcessPolicy,
+      });
+      if (unavailableHost) return unavailableHost;
     }
     const ownsInitialRequest = !attemptId || replayCache.reserveInitialRequest(attemptId);
     if (!ownsInitialRequest) {

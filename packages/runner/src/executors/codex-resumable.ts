@@ -5,7 +5,10 @@ import { defaultCodexBin } from "./codex-bin";
 import { commandProblem, runLocalCommand } from "./command";
 import { promptBudgetBlockedOutput, promptBudgetEvidence } from "../prompt-budget";
 import { withBrowserProcessPolicy } from "./browser-process-policy";
+import type { AttemptOutput } from "@ouroboros/harness";
 import { parseAttemptOutput, parseAttemptOutputOrBlocked } from "./output";
+import { hostSandboxCapabilityOutput } from "./host-sandbox-capability";
+import { prepareCodexHostExecution } from "./codex-host-execution";
 import type { CodexCliExecutorOptions, RunCommand } from "./types";
 
 export interface CodexResumableClientOptions extends CodexCliExecutorOptions {}
@@ -48,20 +51,31 @@ export type CodexResumableResult =
 
 export function createCodexResumableClient(options: CodexResumableClientOptions) {
   const sandbox = options.sandbox ?? "read-only";
-  const runCommand = withBrowserProcessPolicy(options.runCommand ?? runLocalCommand, options.browserProcessPolicy);
+  const rawRunCommand = options.runCommand ?? runLocalCommand;
+  const policyRunCommand = withBrowserProcessPolicy(rawRunCommand, options.browserProcessPolicy);
   const codexBin = options.codexBin ?? defaultCodexBin();
 
   return {
     start: async (input: CodexResumableStartInput) => {
+      const unavailableHost = hostSandboxCapabilityOutput(sandbox, "codex client start");
+      if (unavailableHost) {
+        return blockedCapabilityResult(unavailableHost);
+      }
       const oversized = inputTooLargeResult(input.prompt, "codex client start");
       if (oversized) {
         return oversized;
       }
-      const outputPath = await makeOutputPath(options.outputDir, input.sessionName);
+      const hostExecution = await prepareCodexHostExecution({
+        cwd: options.cwd,
+        sandbox,
+        browserProcessPolicy: options.browserProcessPolicy,
+        injectedRunCommand: options.runCommand,
+      });
+      const outputPath = await makeOutputPath(hostExecution?.outputDir ?? options.outputDir, input.sessionName);
       const modelArgs = options.model ? ["-m", options.model] : [];
       const reasoningArgs = options.reasoningEffort ? ["-c", `model_reasoning_effort=${JSON.stringify(options.reasoningEffort)}`] : [];
       const stdoutObserver = createStdoutObserver(input);
-      const result = await runCommand({
+      const result = await (hostExecution ? rawRunCommand : policyRunCommand)({
         cmd: [
           codexBin,
           "exec",
@@ -69,18 +83,19 @@ export function createCodexResumableClient(options: CodexResumableClientOptions)
           ...reasoningArgs,
           "--json",
           "--skip-git-repo-check",
-          "--ignore-user-config",
+          ...(hostExecution ? ["--strict-config"] : []),
+          ...(hostExecution ? [] : ["--ignore-user-config"]),
           "-c",
           'approval_policy="never"',
           "--output-last-message",
           outputPath,
           "-C",
           options.cwd,
-          "--sandbox",
-          sandbox,
+          ...(hostExecution ? [] : ["--sandbox", sandbox]),
           "-",
         ],
         stdin: input.prompt,
+        env: hostExecution?.env,
         timeoutMs: options.timeoutMs,
         idleTimeoutMs: options.idleTimeoutMs,
         onStdout: stdoutObserver,
@@ -89,15 +104,25 @@ export function createCodexResumableClient(options: CodexResumableClientOptions)
       return resumableResult({ result, outputPath, commandName: "codex exec" });
     },
     resume: async (input: CodexResumableResumeInput) => {
+      const unavailableHost = hostSandboxCapabilityOutput(sandbox, "codex client resume");
+      if (unavailableHost) {
+        return blockedCapabilityResult(unavailableHost);
+      }
       const oversized = inputTooLargeResult(input.prompt ?? "", "codex client resume");
       if (oversized) {
         return oversized;
       }
-      const outputPath = await makeOutputPath(options.outputDir, input.sessionName);
+      const hostExecution = await prepareCodexHostExecution({
+        cwd: options.cwd,
+        sandbox,
+        browserProcessPolicy: options.browserProcessPolicy,
+        injectedRunCommand: options.runCommand,
+      });
+      const outputPath = await makeOutputPath(hostExecution?.outputDir ?? options.outputDir, input.sessionName);
       const modelArgs = options.model ? ["-m", options.model] : [];
       const reasoningArgs = options.reasoningEffort ? ["-c", `model_reasoning_effort=${JSON.stringify(options.reasoningEffort)}`] : [];
       const stdoutObserver = createStdoutObserver(input);
-      const result = await runCommand({
+      const result = await (hostExecution ? rawRunCommand : policyRunCommand)({
         cmd: [
           codexBin,
           "exec",
@@ -105,20 +130,21 @@ export function createCodexResumableClient(options: CodexResumableClientOptions)
           ...reasoningArgs,
           "--json",
           "--skip-git-repo-check",
-          "--ignore-user-config",
+          ...(hostExecution ? ["--strict-config"] : []),
+          ...(hostExecution ? [] : ["--ignore-user-config"]),
           "-c",
           'approval_policy="never"',
           "--output-last-message",
           outputPath,
           "-C",
           options.cwd,
-          "--sandbox",
-          sandbox,
+          ...(hostExecution ? [] : ["--sandbox", sandbox]),
           "resume",
           input.sessionId,
           "-",
         ],
         stdin: input.prompt ?? "",
+        env: hostExecution?.env,
         timeoutMs: options.timeoutMs,
         idleTimeoutMs: options.idleTimeoutMs,
         onStdout: stdoutObserver,
@@ -128,6 +154,19 @@ export function createCodexResumableClient(options: CodexResumableClientOptions)
     },
   };
 }
+
+function blockedCapabilityResult(output: AttemptOutput): CodexResumableResult {
+  return {
+    status: "blocked",
+    sessionId: null,
+    outputPath: "",
+    stdout: "",
+    stderr: "",
+    events: [],
+    output,
+  };
+}
+
 
 function inputTooLargeResult(prompt: string, phase: string): CodexResumableResult | null {
   const evidence = promptBudgetEvidence(prompt, phase);

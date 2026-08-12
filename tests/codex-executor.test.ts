@@ -1,8 +1,13 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { createCodexCliExecutor, createCodexResumableClient } from "../packages/runner/src";
+import { runLocalCommand } from "../packages/runner/src/executors/command";
+import {
+  prepareCodexHostExecution,
+  protectedCodexRuntimeRoot,
+} from "../packages/runner/src/executors/codex-host-execution";
 
 const runFixture = {
   id: "run_1",
@@ -25,6 +30,10 @@ const routeFixture = {
 } as const;
 
 describe("codex cli executor", () => {
+  test("derives a stable protected runtime identity for a synthetic executor cwd", () => {
+    expect(protectedCodexRuntimeRoot("/repo")).toBe(protectedCodexRuntimeRoot("/repo"));
+  });
+
   test("runs codex exec through an injectable command runner", async () => {
     const calls: Array<{ cmd: string[]; stdin: string }> = [];
     const executor = createCodexCliExecutor({
@@ -555,13 +564,14 @@ describe("codex cli executor", () => {
   });
 
   test("resumable client enforces a browser process deny policy", async () => {
-    const calls: string[][] = [];
+    const cwd = await mkdtemp(join(tmpdir(), "orbs-codex-browser-policy-"));
+    const calls: Array<{ cmd: string[]; env?: Record<string, string | undefined> }> = [];
     const client = createCodexResumableClient({
-      cwd: "/repo",
+      cwd,
       codexBin: "/custom/codex",
       browserProcessPolicy: "deny",
-      runCommand: async ({ cmd }) => {
-        calls.push(cmd);
+      runCommand: async ({ cmd, env }) => {
+        calls.push({ cmd, env });
         return {
           exitCode: 0,
           stdout: JSON.stringify({
@@ -575,14 +585,205 @@ describe("codex cli executor", () => {
 
     await client.start({ prompt: "Review without a browser", sessionName: "goal-review" });
 
+    expect(calls[0]?.cmd.slice(0, 2)).toEqual(["/custom/codex", "exec"]);
+    expect(calls[0]?.cmd).not.toContain("danger-full-access");
     if (process.platform === "darwin") {
-      expect(calls[0]?.slice(0, 2)).toEqual(["/usr/bin/sandbox-exec", "-p"]);
-      expect(calls[0]?.[2]).toContain("deny process-exec");
-      expect(calls[0]?.[2]).toContain("Google Chrome");
-      expect(calls[0]?.[2]).toContain('/usr/bin/open');
-      expect(calls[0]).toContain("/custom/codex");
+      expect(calls[0]?.cmd).not.toContain("--sandbox");
+      expect(calls[0]?.cmd).not.toContain("--ignore-user-config");
+      expect(calls[0]?.cmd).toContain("--strict-config");
+      expect(calls[0]?.env?.CODEX_HOME).toContain("ouroboros-codex-runtime");
     } else {
-      expect(calls[0]?.[0]).toBe("/custom/codex");
+      expect(calls[0]?.cmd).toContain("--sandbox");
+      expect(calls[0]?.cmd).toContain("read-only");
+    }
+    expect(calls[0]?.env?.ORBS_BROWSER_PROCESS_POLICY).toBe("deny");
+    await rm(cwd, { recursive: true, force: true });
+  });
+
+  test.skipIf(process.platform !== "darwin")("protected Codex profile hides runtime credentials and limits writes to the worktree", async () => {
+    const dir = await mkdtemp(join(process.cwd(), ".orbs-protected-codex-"));
+    const outside = `${dir}-outside.txt`;
+    try {
+      const execution = await prepareCodexHostExecution({
+        cwd: dir,
+        sandbox: "workspace-write",
+        browserProcessPolicy: "deny",
+        injectedRunCommand: async () => ({ exitCode: 0, stdout: "", stderr: "" }),
+      });
+      expect(execution).not.toBeNull();
+      const codexHome = execution!.env.CODEX_HOME;
+      await writeFile(join(codexHome, "private-proof.txt"), "secret-token", "utf8");
+      const codexBin = "/Applications/ChatGPT.app/Contents/Resources/codex";
+
+      const inside = await runLocalCommand({
+        cmd: [codexBin, "sandbox", "-P", "orbs-workspace", "-C", dir, "/bin/sh", "-c", "printf ok > inside.txt"],
+        stdin: "",
+        env: execution!.env,
+      });
+      expect(inside.exitCode).toBe(0);
+      expect(await Bun.file(join(dir, "inside.txt")).text()).toBe("ok");
+
+      const credentials = await runLocalCommand({
+        cmd: [codexBin, "sandbox", "-P", "orbs-workspace", "-C", dir, "/bin/cat", join(codexHome, "private-proof.txt")],
+        stdin: "",
+        env: execution!.env,
+      });
+      expect(credentials.exitCode).not.toBe(0);
+      expect(credentials.stdout).not.toContain("secret-token");
+
+      const credentialsWrite = await runLocalCommand({
+        cmd: [codexBin, "sandbox", "-P", "orbs-workspace", "-C", dir, "/bin/sh", "-c", `printf replaced > ${JSON.stringify(join(codexHome, "private-proof.txt"))}`],
+        stdin: "",
+        env: execution!.env,
+      });
+      expect(credentialsWrite.exitCode).not.toBe(0);
+      expect(await Bun.file(join(codexHome, "private-proof.txt")).text()).toBe("secret-token");
+
+      const sourceCredentials = await runLocalCommand({
+        cmd: [codexBin, "sandbox", "-P", "orbs-workspace", "-C", dir, "/bin/sh", "-c", `/bin/cat ${JSON.stringify(join(process.env.HOME ?? "", ".codex", "auth.json"))} >/dev/null`],
+        stdin: "",
+        env: execution!.env,
+      });
+      expect(sourceCredentials.exitCode).not.toBe(0);
+
+      const outsideWrite = await runLocalCommand({
+        cmd: [codexBin, "sandbox", "-P", "orbs-workspace", "-C", dir, "/bin/sh", "-c", `printf denied > ${JSON.stringify(outside)}`],
+        stdin: "",
+        env: execution!.env,
+      });
+      expect(outsideWrite.exitCode).not.toBe(0);
+      expect(await Bun.file(outside).exists()).toBe(false);
+
+      const readOnly = await runLocalCommand({
+        cmd: [codexBin, "sandbox", "-P", "orbs-read-only", "-C", dir, "/bin/sh", "-c", "printf denied > read-only.txt"],
+        stdin: "",
+        env: execution!.env,
+      });
+      expect(readOnly.exitCode).not.toBe(0);
+      expect(await Bun.file(join(dir, "read-only.txt")).exists()).toBe(false);
+
+      const openBaseline = await runLocalCommand({
+        cmd: ["/bin/sh", "-c", 'p=/usr/bin/o; "$p"pen -Ra Safari'],
+        stdin: "",
+      });
+      expect(openBaseline.exitCode).toBe(0);
+
+      const open = await runLocalCommand({
+        cmd: [codexBin, "sandbox", "-P", "orbs-workspace", "-C", dir, "/bin/sh", "-c", 'p=/usr/bin/o; "$p"pen -Ra Safari'],
+        stdin: "",
+        env: execution!.env,
+      });
+      expect(open.exitCode).not.toBe(0);
+
+      const chrome = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
+      if (await Bun.file(chrome).exists()) {
+        const browser = await runLocalCommand({
+          cmd: [codexBin, "sandbox", "-P", "orbs-workspace", "-C", dir, "/bin/sh", "-c", `p=${JSON.stringify(chrome)}; "$p" --version`],
+          stdin: "",
+          env: execution!.env,
+        });
+        expect(browser.exitCode).not.toBe(0);
+      }
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+      await rm(outside, { force: true });
+    }
+  });
+
+  test.skipIf(process.platform !== "darwin")("protected Codex runtime rejects a precreated auth symlink before copying credentials", async () => {
+    const dir = await mkdtemp(join(process.cwd(), ".orbs-protected-codex-symlink-"));
+    const sourceHome = await mkdtemp(join(tmpdir(), "orbs-source-codex-home-"));
+    const runtimeBase = await mkdtemp(join(tmpdir(), "orbs-protected-runtime-"));
+    const leakedAuth = join(dir, "leaked-auth.json");
+    const previousCodexHome = process.env.CODEX_HOME;
+    const previousRuntimeRoot = process.env.ORBS_CODEX_RUNTIME_ROOT;
+    try {
+      process.env.CODEX_HOME = sourceHome;
+      process.env.ORBS_CODEX_RUNTIME_ROOT = runtimeBase;
+      await writeFile(join(sourceHome, "auth.json"), "host-secret", "utf8");
+      const runtimeRoot = protectedCodexRuntimeRoot(dir);
+      await mkdir(runtimeRoot, { recursive: true, mode: 0o700 });
+      await symlink(leakedAuth, join(runtimeRoot, "auth.json"));
+
+      await expect(prepareCodexHostExecution({
+        cwd: dir,
+        sandbox: "workspace-write",
+        browserProcessPolicy: "deny",
+      })).rejects.toThrow("unsafe existing node");
+      expect(await Bun.file(leakedAuth).exists()).toBe(false);
+    } finally {
+      if (previousCodexHome === undefined) delete process.env.CODEX_HOME;
+      else process.env.CODEX_HOME = previousCodexHome;
+      if (previousRuntimeRoot === undefined) delete process.env.ORBS_CODEX_RUNTIME_ROOT;
+      else process.env.ORBS_CODEX_RUNTIME_ROOT = previousRuntimeRoot;
+      await rm(dir, { recursive: true, force: true });
+      await rm(sourceHome, { recursive: true, force: true });
+      await rm(runtimeBase, { recursive: true, force: true });
+    }
+  });
+
+  test("resumable client rejects danger-full-access before launching Codex", async () => {
+    let calls = 0;
+    const client = createCodexResumableClient({
+      cwd: "/repo",
+      codexBin: "/custom/codex",
+      sandbox: "danger-full-access",
+      runCommand: async () => {
+        calls += 1;
+        throw new Error("danger-full-access must not launch");
+      },
+    });
+
+    const result = await client.start({ prompt: "write without limits", sessionName: "danger" });
+
+    expect(calls).toBe(0);
+    expect(result.status).toBe("blocked");
+    if (result.status === "running") throw new Error("expected blocked result");
+    expect(result.output.summary).toContain("host_sandbox_capability_unavailable");
+    expect(result.output.artifacts).toContainEqual(expect.objectContaining({
+      kind: "host_sandbox_capability",
+      requestedSandbox: "danger-full-access",
+      recoverable: false,
+    }));
+  });
+
+  test.skipIf(process.platform !== "darwin")("resumable client fails before launch when its host is already inside seatbelt", async () => {
+    const previousSandbox = process.env.CODEX_SANDBOX;
+    let calls = 0;
+    try {
+      process.env.CODEX_SANDBOX = "seatbelt";
+      const client = createCodexResumableClient({
+        cwd: "/repo",
+        codexBin: "/custom/codex",
+        sandbox: "workspace-write",
+        runCommand: async () => {
+          calls += 1;
+          throw new Error("nested codex must not launch");
+        },
+      });
+
+      const start = await client.start({ prompt: "write safely", sessionName: "nested-start" });
+      const resume = await client.resume({
+        sessionId: "session_nested",
+        prompt: "continue safely",
+        sessionName: "nested-resume",
+      });
+
+      expect(calls).toBe(0);
+      for (const result of [start, resume]) {
+        expect(result.status).toBe("blocked");
+        if (result.status === "running") throw new Error("expected blocked result");
+        expect(result.output.summary).toContain("host_sandbox_capability_unavailable");
+        expect(result.output.artifacts).toContainEqual(expect.objectContaining({
+          kind: "host_sandbox_capability",
+          requestedSandbox: "workspace-write",
+          hostSandbox: "seatbelt",
+          recoverable: true,
+        }));
+      }
+    } finally {
+      if (previousSandbox === undefined) delete process.env.CODEX_SANDBOX;
+      else process.env.CODEX_SANDBOX = previousSandbox;
     }
   });
 

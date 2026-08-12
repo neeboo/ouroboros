@@ -370,6 +370,35 @@ describe("acpx executor", () => {
     }
   });
 
+  test.skipIf(process.platform !== "darwin")("fails before ACPX launches Codex beneath a browser-deny seatbelt", async () => {
+    let calls = 0;
+    const executor = createAcpxCodexExecutor({
+      cwd: "/repo",
+      browserProcessPolicy: "deny",
+      runCommand: async () => {
+        calls += 1;
+        throw new Error("nested ACPX Codex must not launch");
+      },
+    });
+
+    const output = await executor({
+      prompt: "Do the task",
+      sessionName: "nested-acpx-codex",
+      run: runFixture,
+      route: routeFixture,
+      task: taskFixture,
+    });
+
+    expect(calls).toBe(0);
+    expect(output.status).toBe("blocked");
+    expect(output.summary).toContain("host_sandbox_capability_unavailable");
+    expect(output.artifacts).toContainEqual(expect.objectContaining({
+      kind: "host_sandbox_capability",
+      executor: "acpx-codex",
+      recoverable: true,
+    }));
+  });
+
   test("parses claude prompt final JSON even when tool output contains Error text", async () => {
     const executor = createAcpxAgentExecutor({
       agent: "claude",

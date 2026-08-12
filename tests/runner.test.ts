@@ -1858,12 +1858,9 @@ describe("runner", () => {
       },
     });
 
-    if (process.platform === "darwin") {
-      expect(commands[0]?.slice(0, 2)).toEqual(["/usr/bin/sandbox-exec", "-p"]);
-      expect(commands[0]?.[2]).toContain("Google Chrome");
-    } else {
-      expect(commands[0]?.[0]).toBe("/custom/codex");
-    }
+    expect(commands[0]?.slice(0, 2)).toEqual(["/custom/codex", "exec"]);
+    expect(commands[0]).not.toContain("--sandbox");
+    expect(commands[0]).not.toContain("danger-full-access");
   });
 
   test("runner-owned codex attempts enforce the existing generic timeout contract by default", async () => {
