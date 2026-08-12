@@ -339,24 +339,67 @@ describe("codex cli executor", () => {
         injectedRunCommand: async () => ({ exitCode: 0, stdout: "", stderr: "" }),
       });
       const codexBin = "/Applications/ChatGPT.app/Contents/Resources/codex";
-      const browser = await runLocalCommand({
-        cmd: [codexBin, "sandbox", "-P", "orbs-workspace", "-C", cwd, "/opt/homebrew/bin/agent-browser", "open", `http://127.0.0.1:${port}/healthz`],
+      const agentBrowserReadback = await runLocalCommand({
+        cmd: ["/usr/bin/env", "agent-browser", "--version"],
         stdin: "",
         env: execution!.env,
-        timeoutMs: 20_000,
-        cleanupOnFailure: true,
+        timeoutMs: 5_000,
       });
-      if (browser.exitCode !== 0) throw new Error(browser.stderr || browser.stdout);
-      expect(browser.stdout).toContain("127.0.0.1");
-      const title = await runLocalCommand({
-        cmd: [codexBin, "sandbox", "-P", "orbs-workspace", "-C", cwd, "/opt/homebrew/bin/agent-browser", "get", "text", "body"],
+      const agentBrowser = join(execution!.capabilities!.browser!.socketDirectory, "client-bin", "agent-browser");
+      expect(agentBrowserReadback.exitCode).toBe(0);
+      const socketPath = execution!.capabilities!.browser!.socketPath;
+      const versionPath = socketPath.replace(/\.sock$/, ".version");
+      const clientVersion = await runLocalCommand({
+        cmd: [agentBrowser, "--version"],
+        stdin: "",
+        inheritEnv: false,
+        timeoutMs: 5_000,
+      });
+      expect(clientVersion.exitCode).toBe(0);
+      expect(clientVersion.stdout).toBe(agentBrowserReadback.stdout);
+      expect((await Bun.file(versionPath).text()).trim()).toBe(clientVersion.stdout.trim().replace(/^agent-browser\s+/, ""));
+      const clientOverwrite = await runLocalCommand({
+        cmd: [codexBin, "sandbox", "-P", "orbs-workspace", "-C", cwd, "/bin/sh", "-c", `printf replaced > ${JSON.stringify(agentBrowser)}`],
         stdin: "",
         env: execution!.env,
-        timeoutMs: 10_000,
+        timeoutMs: 5_000,
         cleanupOnFailure: true,
       });
-      if (title.exitCode !== 0) throw new Error(title.stderr || title.stdout);
-      expect(title.stdout).toContain("browser-health");
+      expect(clientOverwrite.exitCode).not.toBe(0);
+      expect((await Bun.file(agentBrowser).text())).toContain("exec ");
+      const arbitraryApplication = await runLocalCommand({
+        cmd: [codexBin, "sandbox", "-P", "orbs-workspace", "-C", cwd, "/usr/bin/open", "-Ra", "Safari"],
+        stdin: "",
+        env: execution!.env,
+        timeoutMs: 5_000,
+        cleanupOnFailure: true,
+      });
+      expect(arbitraryApplication.exitCode).not.toBe(0);
+      const initialDaemonPidReadback = await runLocalCommand({
+        cmd: ["/usr/sbin/lsof", "-t", "--", socketPath],
+        stdin: "",
+        env: { PATH: "/usr/bin:/bin:/usr/sbin:/sbin" },
+        inheritEnv: false,
+        timeoutMs: 5_000,
+      });
+      const initialDaemonPids = initialDaemonPidReadback.stdout.trim().split(/\s+/).filter(Boolean);
+      expect(initialDaemonPids).toHaveLength(1);
+      for (const [args, expected] of [
+        [["open", `http://127.0.0.1:${port}/healthz`], "127.0.0.1"],
+        [["get", "url"], "127.0.0.1"],
+        [["snapshot", "-i"], "选择文件"],
+        [["get", "text", "body"], "browser-health"],
+      ] as const) {
+        const browserCommand = await runLocalCommand({
+          cmd: [codexBin, "sandbox", "-P", "orbs-workspace", "-C", cwd, "/usr/bin/env", "agent-browser", ...args],
+          stdin: "",
+          env: execution!.env,
+          timeoutMs: 20_000,
+          cleanupOnFailure: true,
+        });
+        if (browserCommand.exitCode !== 0) throw new Error(browserCommand.stderr || browserCommand.stdout);
+        expect(browserCommand.stdout).toContain(expected);
+      }
       const directCredentialRead = await runLocalCommand({
         cmd: [codexBin, "sandbox", "-P", "orbs-workspace", "-C", cwd, "/bin/cat", protectedAuth],
         stdin: "",
@@ -367,7 +410,7 @@ describe("codex cli executor", () => {
       expect(directCredentialRead.exitCode).not.toBe(0);
       expect(`${directCredentialRead.stdout}${directCredentialRead.stderr}`).not.toContain(protectedSentinel);
       const browserCredentialRead = await runLocalCommand({
-        cmd: [codexBin, "sandbox", "-P", "orbs-workspace", "-C", cwd, "/opt/homebrew/bin/agent-browser", "upload", "#f", protectedAuth],
+        cmd: [codexBin, "sandbox", "-P", "orbs-workspace", "-C", cwd, "/usr/bin/env", "agent-browser", "upload", "#f", protectedAuth],
         stdin: "",
         env: execution!.env,
         timeoutMs: 5_000,
@@ -378,7 +421,7 @@ describe("codex cli executor", () => {
       const adjacentServer = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response("adjacent-secret-service") });
       try {
         const adjacent = await runLocalCommand({
-          cmd: [codexBin, "sandbox", "-P", "orbs-workspace", "-C", cwd, "/opt/homebrew/bin/agent-browser", "open", `http://127.0.0.1:${adjacentServer.port}/secret`],
+          cmd: [codexBin, "sandbox", "-P", "orbs-workspace", "-C", cwd, "/usr/bin/env", "agent-browser", "open", `http://127.0.0.1:${adjacentServer.port}/secret`],
           stdin: "",
           env: execution!.env,
           timeoutMs: 10_000,
@@ -400,7 +443,6 @@ describe("codex cli executor", () => {
         cleanupOnFailure: true,
       });
       expect(directNetwork.exitCode).not.toBe(0);
-      const socketPath = execution!.capabilities!.browser!.socketPath;
       expect(existsSync(socketPath)).toBe(true);
       const daemonPidReadback = await runLocalCommand({
         cmd: ["/usr/sbin/lsof", "-t", "--", socketPath],
@@ -411,6 +453,7 @@ describe("codex cli executor", () => {
       });
       const daemonPids = daemonPidReadback.stdout.trim().split(/\s+/).filter(Boolean);
       expect(daemonPids).toHaveLength(1);
+      expect(daemonPids).toEqual(initialDaemonPids);
       const browserProcessReadback = await runLocalCommand({
         cmd: ["/bin/ps", "-axo", "pid=,command="],
         stdin: "",

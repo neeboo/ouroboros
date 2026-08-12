@@ -81,14 +81,18 @@ export async function prepareCodexHostExecution(input: CodexHostExecutionInput) 
     throw error;
   }
 
+  const env: Record<string, string | undefined> & {
+    CODEX_HOME: string;
+    ORBS_BROWSER_PROCESS_POLICY: "allow" | "deny";
+  } = {
+    CODEX_HOME: runtimeRoot,
+    ORBS_BROWSER_PROCESS_POLICY: capabilities?.browser ? "allow" : "deny",
+    ...capabilityEnvironment(capabilities),
+    ...clearedAmbientProxyEnvironment(capabilities),
+  };
   return {
     outputDir,
-    env: {
-      CODEX_HOME: runtimeRoot,
-      ORBS_BROWSER_PROCESS_POLICY: capabilities?.browser ? "allow" : "deny",
-      ...capabilityEnvironment(capabilities),
-      ...clearedAmbientProxyEnvironment(capabilities),
-    },
+    env,
     capabilities,
     cleanup: async () => {
       await browserCleanup?.();
@@ -187,7 +191,13 @@ function networkProfile(capabilities: ResolvedHostExecutionCapabilities | undefi
 
 function capabilityEnvironment(capabilities: ResolvedHostExecutionCapabilities | undefined) {
   if (!capabilities) return {};
+  const browserClientDirectory = capabilities.browser
+    ? join(capabilities.browser.socketDirectory, "client-bin")
+    : undefined;
   return {
+    ...(browserClientDirectory ? {
+      PATH: `${browserClientDirectory}:${process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin"}`,
+    } : {}),
     ORBS_HOST_EXECUTION_CAPABILITY_SHA256: capabilities.contractSha256,
     ORBS_ALLOWED_LOOPBACK_HOST: capabilities.loopback?.host,
     ORBS_ALLOWED_LOOPBACK_PORTS: capabilities.loopback?.ports.join(","),
@@ -305,16 +315,30 @@ async function ensureBrowserHostDaemon(capabilities: ResolvedHostExecutionCapabi
   if (!agentBrowser) throw new Error("browser host daemon requires agent-browser");
   const nativeAgentBrowser = join(dirname(realpathSync(agentBrowser)), `agent-browser-darwin-${process.arch}`);
   if (!existsSync(nativeAgentBrowser)) throw new Error("browser host daemon requires the native agent-browser executable");
+  const agentBrowserVersion = await readAgentBrowserVersion(agentBrowser);
+  if (await readAgentBrowserVersion(nativeAgentBrowser) !== agentBrowserVersion) {
+    throw new Error("browser host daemon executable version does not match its login-shell client");
+  }
+  const frozenClientDirectory = join(browser.socketDirectory, "client-bin");
+  await ensurePrivateDirectory(frozenClientDirectory);
+  const frozenClientPath = join(frozenClientDirectory, "agent-browser");
+  await atomicPrivateWrite(
+    frozenClientPath,
+    `#!/bin/sh\nexec ${shellSingleQuoted(nativeAgentBrowser)} "$@"\n`,
+  );
+  await chmod(frozenClientPath, 0o700);
   await ensurePrivateDirectory(browser.homeDirectory);
   await atomicPrivateWrite(browser.actionPolicyPath, JSON.stringify({
     default: "deny",
-    allow: ["launch", "url", "gettext", "navigate", "click", "fill", "scroll", "wait", "read", "get", "interact"],
+    allow: ["launch", "url", "gettext", "navigate", "snapshot", "click", "fill", "scroll", "wait", "read", "get", "interact"],
   }) + "\n");
   await atomicPrivateWrite(browser.configPath, JSON.stringify({
     actionPolicy: browser.actionPolicyPath,
     contentBoundaries: true,
     maxOutput: 50_000,
   }) + "\n");
+  const cdpPort = await reserveLoopbackPort();
+  const cdpAddress = `http://127.0.0.1:${cdpPort}`;
   const env: Record<string, string | undefined> = {
     PATH: process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin",
     HOME: browser.homeDirectory,
@@ -333,13 +357,12 @@ async function ensureBrowserHostDaemon(capabilities: ResolvedHostExecutionCapabi
   };
   const chromeExecutable = DARWIN_BROWSER_EXECUTABLES.find((path) => path.includes("Chrome.app") && existsSync(path));
   if (!chromeExecutable) throw new Error("browser host daemon requires an installed Chrome executable");
-  const cdpPort = await reserveLoopbackPort();
   const chrome = Bun.spawn({
     cmd: [
       "/usr/bin/sandbox-exec",
       "-p",
       browserProcessSandboxProfile(cdpPort, loopback.ports),
-      chromeExecutable,
+      realpathSync(chromeExecutable),
       "--headless=new",
       "--no-sandbox",
       "--no-first-run",
@@ -351,6 +374,7 @@ async function ensureBrowserHostDaemon(capabilities: ResolvedHostExecutionCapabi
       "--disable-sync",
       "--disable-extensions",
       `--remote-debugging-port=${cdpPort}`,
+      "--remote-debugging-address=127.0.0.1",
       `--user-data-dir=${join(browser.homeDirectory, "chrome-profile")}`,
       "about:blank",
     ],
@@ -386,7 +410,7 @@ async function ensureBrowserHostDaemon(capabilities: ResolvedHostExecutionCapabi
         browserDaemonSandboxProfile(cdpPort, browser.socketDirectory, nativeAgentBrowser, deniedReadPaths),
         nativeAgentBrowser,
         "--cdp",
-        String(cdpPort),
+        cdpAddress,
         "get",
         "url",
       ],
@@ -399,6 +423,10 @@ async function ensureBrowserHostDaemon(capabilities: ResolvedHostExecutionCapabi
     if (connected.exitCode !== 0) throw new Error(`browser host daemon failed to connect to frozen Chrome: ${connected.stderr || connected.stdout}`);
     const socket = await lstatIfPresent(browser.socketPath);
     if (!socket?.isSocket() || socket.isSymbolicLink()) throw new Error("browser host daemon did not create its frozen Unix socket");
+    await ensureBrowserDaemonVersionMarker(
+      browser.socketPath.replace(/\.sock$/, ".version"),
+      agentBrowserVersion,
+    );
     daemonPids = await processesHoldingPath(browser.socketPath);
     if (daemonPids.length !== 1) throw new Error("browser host daemon must have exactly one process holding its frozen Unix socket");
     return cleanup;
@@ -406,6 +434,39 @@ async function ensureBrowserHostDaemon(capabilities: ResolvedHostExecutionCapabi
     await cleanup();
     throw error;
   }
+}
+
+async function readAgentBrowserVersion(executablePath: string) {
+  const result = await runLocalCommand({
+    cmd: [executablePath, "--version"],
+    stdin: "",
+    env: { PATH: "/usr/bin:/bin:/usr/sbin:/sbin" },
+    inheritEnv: false,
+    timeoutMs: 5_000,
+  });
+  const match = result.exitCode === 0
+    ? /^agent-browser\s+([0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?)$/.exec(result.stdout.trim())
+    : null;
+  if (!match) throw new Error("browser host daemon executable did not report a valid version");
+  return match[1]!;
+}
+
+async function ensureBrowserDaemonVersionMarker(path: string, expectedVersion: string) {
+  const existing = await lstatIfPresent(path);
+  if (existing) {
+    if (!existing.isFile() || existing.isSymbolicLink() || existing.nlink !== 1) {
+      throw new Error("browser host daemon version marker is not a private regular file");
+    }
+    if ((await readFile(path, "utf8")).trim() === expectedVersion) return;
+  }
+  await atomicPrivateWrite(path, `${expectedVersion}\n`);
+  if ((await readFile(path, "utf8")).trim() !== expectedVersion) {
+    throw new Error("browser host daemon version marker readback failed");
+  }
+}
+
+function shellSingleQuoted(value: string) {
+  return `'${value.replaceAll("'", `'"'"'`)}'`;
 }
 
 function browserDaemonSandboxProfile(cdpPort: number, socketDirectory: string, executablePath: string, deniedReadPaths: string[]) {
