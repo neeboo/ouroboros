@@ -31,12 +31,18 @@ export function createCodexCliExecutor(options: CodexCliExecutorOptions): TaskEx
       sandbox,
       browserProcessPolicy: options.browserProcessPolicy,
       injectedRunCommand: options.runCommand,
+      hostExecutionCapabilities: options.hostExecutionCapabilities,
+      taskRole: options.taskRole,
+      verifierContract: options.verifierContract,
     });
-    const outputPath = await makeOutputPath(hostExecution?.outputDir ?? options.outputDir, sessionName);
     const modelArgs = options.model ? ["-m", options.model] : [];
     const reasoningArgs = options.reasoningEffort ? ["-c", `model_reasoning_effort=${JSON.stringify(options.reasoningEffort)}`] : [];
-    const result = await (hostExecution ? rawRunCommand : policyRunCommand)({
-      cmd: [
+    let result;
+    let outputPath = "";
+    try {
+      outputPath = await makeOutputPath(hostExecution?.outputDir ?? options.outputDir, sessionName);
+      result = await (hostExecution ? rawRunCommand : policyRunCommand)({
+        cmd: [
         codexBin,
         "exec",
         ...modelArgs,
@@ -52,12 +58,15 @@ export function createCodexCliExecutor(options: CodexCliExecutorOptions): TaskEx
         options.cwd,
         ...(hostExecution ? [] : ["--sandbox", sandbox]),
         "-",
-      ],
-      stdin: prompt,
-      env: hostExecution?.env,
-      timeoutMs: options.timeoutMs,
-      idleTimeoutMs: options.idleTimeoutMs,
-    });
+        ],
+        stdin: prompt,
+        env: hostExecution?.env,
+        timeoutMs: options.timeoutMs,
+        idleTimeoutMs: options.idleTimeoutMs,
+      });
+    } finally {
+      await hostExecution?.cleanup?.();
+    }
 
     if (result.exitCode !== 0) {
       return {

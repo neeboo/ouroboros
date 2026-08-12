@@ -12,6 +12,7 @@ import {
   promptBudgetEvidence,
 } from "./prompt-budget";
 import { resolveExecutionRoute } from "./execution-routing";
+import { hostExecutionCapabilityAttemptInput } from "./executors/host-execution-capabilities";
 import type {
   RunNextReadyTaskInput,
   RunReadyTasksInput,
@@ -45,6 +46,19 @@ export async function runNextReadyTask(input: RunNextReadyTaskInput) {
     });
     return { taskId: task.id, attemptId, stopDecision: "exit" as const };
   }
+  const hostCapabilityInput = hostExecutionCapabilityAttemptInput(task.config?.hostExecutionCapabilities, {
+    role: task.role,
+    verifierContract: task.config?.verifierContract,
+  });
+  const hostCapabilityProblem = invalidHostExecutionCapabilityProblem(hostCapabilityInput);
+  if (hostCapabilityProblem) {
+    const attemptId = input.harness.recordAttempt({
+      taskId: task.id,
+      input: hostCapabilityInput,
+      output: blockedHostExecutionCapabilityOutput(hostCapabilityProblem),
+    });
+    return { taskId: task.id, attemptId, stopDecision: "exit" as const };
+  }
 
   const prompt = buildTaskPrompt({
     run,
@@ -71,6 +85,7 @@ export async function runNextReadyTask(input: RunNextReadyTaskInput) {
       prompt,
       route,
       model: route.model,
+      ...hostCapabilityInput,
       ...harnessRevisionAttemptInput(loadedHarnessRevision),
     },
   });
@@ -132,6 +147,19 @@ export async function runReadyTasks(input: RunReadyTasksInput) {
           taskId: task.id,
           input: { sessionName, cwd, harnessRevisionValidation: "failed" },
           output: blockedHarnessRevisionOutput(error),
+        });
+        return { taskId: task.id, attemptId, sessionName, stopDecision: "exit" as const };
+      }
+      const hostCapabilityInput = hostExecutionCapabilityAttemptInput(task.config?.hostExecutionCapabilities, {
+        role: task.role,
+        verifierContract: task.config?.verifierContract,
+      });
+      const hostCapabilityProblem = invalidHostExecutionCapabilityProblem(hostCapabilityInput);
+      if (hostCapabilityProblem) {
+        const attemptId = input.harness.recordAttempt({
+          taskId: task.id,
+          input: { sessionName, cwd, ...hostCapabilityInput },
+          output: blockedHostExecutionCapabilityOutput(hostCapabilityProblem),
         });
         return { taskId: task.id, attemptId, sessionName, stopDecision: "exit" as const };
       }
@@ -199,6 +227,7 @@ export async function runReadyTasks(input: RunReadyTasksInput) {
           route,
           model: route.model,
           ...(input.attemptInput?.(factoryInput) ?? {}),
+          ...hostCapabilityInput,
           ...harnessRevisionAttemptInput(loadedHarnessRevision),
         },
       });
@@ -236,6 +265,24 @@ export async function runReadyTasks(input: RunReadyTasksInput) {
       return { taskId: task.id, attemptId, sessionName, stopDecision: decision };
     }),
   );
+}
+
+function invalidHostExecutionCapabilityProblem(input: Record<string, unknown>) {
+  const receipt = input.hostExecutionCapability;
+  if (!receipt || typeof receipt !== "object" || Array.isArray(receipt)) return null;
+  const record = receipt as Record<string, unknown>;
+  return record.status === "invalid"
+    ? (typeof record.problem === "string" ? record.problem : "host execution capability is invalid")
+    : null;
+}
+
+function blockedHostExecutionCapabilityOutput(problem: string): AttemptOutput {
+  return {
+    status: "blocked",
+    summary: "Host execution capability validation failed before task startup.",
+    checks: [{ name: "host execution capability", status: "failed", evidence: problem }],
+    problems: [problem],
+  };
 }
 
 export async function runUntilIdle(input: RunUntilIdleInput) {

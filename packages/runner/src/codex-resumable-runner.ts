@@ -39,6 +39,10 @@ import { createCodexResumableClient, sessionIdFromEvents } from "./executors/cod
 import type { CodexResumableClientOptions, CodexResumableResult } from "./executors/codex-resumable";
 import { childToolchainEnvEvidence } from "./executors/proxy-env";
 import { createRouteExecutor } from "./route-executor";
+import {
+  assertPersistedHostExecutionCapabilityAttestation,
+  hostExecutionCapabilityAttemptInput,
+} from "./executors/host-execution-capabilities";
 import { createDurableAttemptReplayCache } from "./executors/replay";
 import { resolveExecutionRoute } from "./execution-routing";
 import type { ResolvedExecutionRoute } from "./execution-routing";
@@ -369,10 +373,17 @@ class CodexResumableOrchestrator {
     if (!runtimeGenerationAllowsLeasing(run, this.cwd, this.harness)) {
       throw new Error(`runtime generation ${String((run.context.controlPlaneRuntime as Record<string, unknown> | undefined)?.state ?? "unknown")} cannot start new work`);
     }
-    this.harness.clearRunPause(run.id);
     const sessionName = task.sessionRef ?? `task-${task.id}`;
     const route = this.resolveRoute(run, task);
     const cwd = task.worktreePath ?? this.worktreeFor(task) ?? this.cwd;
+    const hostCapabilityInput = hostExecutionCapabilityAttemptInput(task.config?.hostExecutionCapabilities, {
+      role: task.role,
+      verifierContract: task.config?.verifierContract,
+    });
+    if (hostExecutionCapabilityProblem(hostCapabilityInput)) {
+      return this.blockNewAttemptForHostExecutionCapability({ run, task, sessionName, cwd, route, hostCapabilityInput });
+    }
+    this.harness.clearRunPause(run.id);
     let loadedHarnessRevision: LoadedHarnessRevision | null;
     try {
       loadedHarnessRevision = loadFrozenHarnessRevision({ harness: this.harness, run, cwd });
@@ -408,6 +419,7 @@ class CodexResumableOrchestrator {
       executor: route.backend.kind,
       ...attemptInputForRoute(route, cwd),
       ...harnessRevisionAttemptInput(loadedHarnessRevision),
+      ...hostCapabilityInput,
     };
     if ((startResult.problems ?? []).length > 0) {
       const attemptId = this.harness.recordAttempt({
@@ -435,10 +447,15 @@ class CodexResumableOrchestrator {
       ? existingAttempt.input.cwd
       : task.worktreePath ?? this.cwd;
     try {
+      assertPersistedHostExecutionCapabilityAttestation(
+        existingAttempt.input,
+        task.config?.hostExecutionCapabilities,
+        { role: task.role, verifierContract: task.config?.verifierContract },
+      );
       const loadedHarnessRevision = loadFrozenHarnessRevision({ harness: this.harness, run, cwd });
       assertPersistedHarnessRevisionAttestation(existingAttempt.input, loadedHarnessRevision);
     } catch (error) {
-      const output = blockedHarnessRevisionOutput(error);
+      const output = blockedResumeContractOutput(error);
       this.harness.finishAttempt({ attemptId, output });
       this.updateAttemptThread({ attemptId, status: "blocked", agentSessionId: null, heartbeat: true });
       return { attemptId, status: "blocked" as const, codexSessionId: null };
@@ -766,12 +783,20 @@ class CodexResumableOrchestrator {
         this.upsertAttemptThread({ runId: run.id, task, attemptId, sessionName, cwd, status: "blocked" });
         return { taskId: task.id, attemptId, sessionName, status: "blocked" as const, codexSessionId: null };
       }
+      const hostCapabilityInput = hostExecutionCapabilityAttemptInput(task.config?.hostExecutionCapabilities, {
+        role: task.role,
+        verifierContract: task.config?.verifierContract,
+      });
+      if (hostExecutionCapabilityProblem(hostCapabilityInput)) {
+        return this.blockNewAttemptForHostExecutionCapability({ run, task, sessionName, cwd, route, hostCapabilityInput });
+      }
       const baseInput = {
         prompt,
         sessionName,
         executor: route.backend.kind,
         ...attemptInputForRoute(route, cwd),
         ...harnessRevisionAttemptInput(loadedHarnessRevision),
+        ...hostCapabilityInput,
       };
       const startResult = await applyStartHooks({
         hooks: this.input.startHooks ?? [],
@@ -1081,6 +1106,34 @@ class CodexResumableOrchestrator {
     };
   }
 
+  private blockNewAttemptForHostExecutionCapability(input: {
+    run: NonNullable<ReturnType<Harness["getRun"]>>;
+    task: Task;
+    sessionName: string;
+    cwd: string;
+    route: ResolvedExecutionRoute;
+    hostCapabilityInput: Record<string, unknown>;
+  }) {
+    const problem = hostExecutionCapabilityProblem(input.hostCapabilityInput) ?? "host execution capability is invalid";
+    const attemptId = this.harness.recordAttempt({
+      taskId: input.task.id,
+      input: {
+        sessionName: input.sessionName,
+        cwd: input.cwd,
+        executor: input.route.backend.kind,
+        ...input.hostCapabilityInput,
+      },
+      output: {
+        status: "blocked",
+        summary: "Host execution capability validation failed before task startup.",
+        problems: [problem],
+        checks: [{ name: "host execution capability", status: "failed", evidence: problem }],
+      },
+    });
+    this.upsertAttemptThread({ runId: input.run.id, task: input.task, attemptId, sessionName: input.sessionName, cwd: input.cwd, status: "blocked" });
+    return { taskId: input.task.id, attemptId, sessionName: input.sessionName, status: "blocked" as const, codexSessionId: null };
+  }
+
   private resolveRoute(run: NonNullable<ReturnType<Harness["getRun"]>>, task: Task) {
     return resolveExecutionRoute({
       run,
@@ -1154,6 +1207,9 @@ class CodexResumableOrchestrator {
       sandbox: "workspace-write",
       ...this.input.codexOptions,
       browserProcessPolicy: input.task?.role === "goal-review" ? "deny" : this.input.codexOptions?.browserProcessPolicy,
+      hostExecutionCapabilities: input.task?.config?.hostExecutionCapabilities,
+      taskRole: input.task?.role,
+      verifierContract: input.task?.config?.verifierContract,
       timeoutMs: this.input.codexOptions?.timeoutMs ?? this.genericHardMs,
       idleTimeoutMs: this.input.codexOptions?.idleTimeoutMs ?? this.genericIdleMs,
       model: input.model,
@@ -1831,6 +1887,25 @@ function unrefTimer(timer: ReturnType<typeof setInterval>) {
 
 function errorMessage(error: unknown) {
   return error instanceof Error ? error.message : String(error);
+}
+
+function hostExecutionCapabilityProblem(input: Record<string, unknown>) {
+  const receipt = input.hostExecutionCapability;
+  if (!receipt || typeof receipt !== "object" || Array.isArray(receipt)) return null;
+  const record = receipt as Record<string, unknown>;
+  return record.status === "invalid"
+    ? (typeof record.problem === "string" ? record.problem : "host execution capability is invalid")
+    : null;
+}
+
+function blockedResumeContractOutput(error: unknown): AttemptOutput {
+  const problem = errorMessage(error);
+  return {
+    status: "blocked",
+    summary: "Frozen execution contract validation failed before resume.",
+    problems: [problem],
+    checks: [{ name: "frozen execution contract", status: "failed", evidence: problem }],
+  };
 }
 
 /**

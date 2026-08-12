@@ -16,6 +16,27 @@ const testBunPath = `${testHome}/.bun/bin`;
 const testLocalBinPath = `${testHome}/.local/bin`;
 
 describe("command runner", () => {
+  test("can replace the inherited environment for a host-owned subprocess", async () => {
+    const previous = process.env.ORBS_BROWSER_HOST_SECRET;
+    process.env.ORBS_BROWSER_HOST_SECRET = "must-not-cross-host-boundary";
+    try {
+      const result = await runLocalCommand({
+        cmd: ["/usr/bin/env"],
+        stdin: "",
+        inheritEnv: false,
+        env: { PATH: "/usr/bin:/bin", ORBS_BROWSER_VISIBLE: "yes" },
+      });
+
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout).toContain("ORBS_BROWSER_VISIBLE=yes");
+      expect(result.stdout).not.toContain("ORBS_BROWSER_HOST_SECRET");
+      expect(result.stdout).not.toContain("must-not-cross-host-boundary");
+    } finally {
+      if (previous === undefined) delete process.env.ORBS_BROWSER_HOST_SECRET;
+      else process.env.ORBS_BROWSER_HOST_SECRET = previous;
+    }
+  });
+
   test("builds proxy env from macOS system proxy output", () => {
     const env = proxyEnvFromScutilOutput([
       "<dictionary> {",

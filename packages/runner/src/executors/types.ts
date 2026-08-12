@@ -14,6 +14,7 @@ export interface RunCommandInput {
   cmd: string[];
   stdin: string;
   env?: Record<string, string | undefined>;
+  inheritEnv?: boolean;
   timeoutMs?: number;
   idleTimeoutMs?: number;
   cleanupOnFailure?: boolean;
@@ -87,4 +88,7 @@ export interface CodexCliExecutorOptions {
   timeoutMs?: number;
   idleTimeoutMs?: number;
   runCommand?: RunCommand;
+  hostExecutionCapabilities?: unknown;
+  taskRole?: string;
+  verifierContract?: unknown;
 }

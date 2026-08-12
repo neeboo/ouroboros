@@ -44,6 +44,7 @@ import {
   createAcpxSubsessionRunner,
   createCollectSubsessionsHook,
   createRouteExecutor,
+  hostExecutionCapabilityAttemptInput,
   reconcileDeferredDesignAuthority,
   reconcileGoalReviewRepairBudget,
   reconcileTerminalDesignDeliveries,
@@ -113,7 +114,36 @@ import { createHash } from "node:crypto";
 import { realpathSync } from "node:fs";
 import type { Task } from "@ouroboros/harness";
 
+const HOST_FIXED_NETWORK_COMMANDS = new Set([
+  "linear-check",
+  "linear-create-issue",
+  "linear-update-status",
+  "linear-write-evidence-comment",
+  "poll-linear-issues",
+]);
+
+async function reexecHostFixedNetworkCommandWithoutAmbientProxy(command: string) {
+  if (!HOST_FIXED_NETWORK_COMMANDS.has(command) || process.env.ORBS_HOST_FIXED_NETWORK_ENV === "clean") return;
+  const proxyKeys = [
+    "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
+    "http_proxy", "https_proxy", "all_proxy", "no_proxy",
+  ];
+  if (!proxyKeys.some((key) => process.env[key] !== undefined)) return;
+  const env: Record<string, string | undefined> = { ...process.env, ORBS_HOST_FIXED_NETWORK_ENV: "clean" };
+  for (const key of proxyKeys) delete env[key];
+  const child = Bun.spawn({
+    cmd: [process.execPath, Bun.argv[1]!, ...Bun.argv.slice(2)],
+    cwd: process.cwd(),
+    env,
+    stdin: "inherit",
+    stdout: "inherit",
+    stderr: "inherit",
+  });
+  process.exit(await child.exited);
+}
+
 const parsed = parseArgs(Bun.argv.slice(2));
+await reexecHostFixedNetworkCommandWithoutAmbientProxy(parsed.command);
 const harness = new Harness(parsed.db);
 const DEFAULT_MAX_TRIES = 3;
 const DEFAULT_SELF_ITERATION_CONCURRENCY = 3;
@@ -1699,6 +1729,9 @@ function executorFactory(_executorName: "noop" | "acpx-codex" | "codex-cli" | "c
       timeoutMs: genericHardTimeoutMs(),
       idleTimeoutMs: genericIdleTimeoutMs(),
       replayCache,
+      hostExecutionCapabilities: input.task.config?.hostExecutionCapabilities,
+      taskRole: input.task.role,
+      verifierContract: input.task.config?.verifierContract,
     });
 }
 
@@ -1708,7 +1741,13 @@ function attemptInputFactory(_executorName: "noop" | "acpx-codex" | "codex-cli" 
     task: NonNullable<ReturnType<Harness["getTask"]>>;
     cwd: string;
     route: ResolvedExecutionRoute;
-  }) => attemptInputForRoute(input.route, input.cwd);
+  }) => ({
+    ...attemptInputForRoute(input.route, input.cwd),
+    ...hostExecutionCapabilityAttemptInput(input.task.config?.hostExecutionCapabilities, {
+      role: input.task.role,
+      verifierContract: input.task.config?.verifierContract,
+    }),
+  });
 }
 
 function resolveCliExecutionRoute(input: {

@@ -44,6 +44,11 @@ export { createCodexCliExecutor } from "./executors/codex-cli";
 export { createCodexResumableClient } from "./executors/codex-resumable";
 export { defaultCodexBin, resolveDefaultCodexBin } from "./executors/codex-bin";
 export { createRouteExecutor } from "./route-executor";
+export {
+  hostExecutionCapabilityAttemptInput,
+  parseHostExecutionCapabilities,
+  resolveHostExecutionCapabilities,
+} from "./executors/host-execution-capabilities";
 export { parseAttemptOutput } from "./executors/output";
 export { codexOnlyAgentDefaults, resolveAgentBackend } from "./agent-backends";
 export { resolveExecutionRoute } from "./execution-routing";

@@ -7,7 +7,7 @@ const IDLE_STARTUP_GRACE_MS = 500;
 export const runLocalCommand: RunCommand = async (input) => {
   const proc = Bun.spawn({
     cmd: input.cmd,
-    env: commandEnv(input.env),
+    env: commandEnv(input.env, input.inheritEnv),
     stdin: "pipe",
     stdout: "pipe",
     stderr: "pipe",
@@ -203,12 +203,12 @@ function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function commandEnv(overrides: Record<string, string | undefined> | undefined) {
-  if (!overrides) {
+function commandEnv(overrides: Record<string, string | undefined> | undefined, inheritEnv = true) {
+  if (!overrides && inheritEnv) {
     return childEnvForProcess();
   }
-  const env = { ...childEnvForProcess() };
-  for (const [key, value] of Object.entries(overrides)) {
+  const env: Record<string, string | undefined> = inheritEnv ? { ...childEnvForProcess() } : {};
+  for (const [key, value] of Object.entries(overrides ?? {})) {
     if (value === undefined) {
       delete env[key];
     } else {

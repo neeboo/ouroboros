@@ -4028,11 +4028,14 @@ describe("Harness actions", () => {
       head?: string;
     } = {}) {
       const calls: string[][] = [];
+      const environments: Array<Record<string, string | undefined> | undefined> = [];
       const remoteReads = [...(input.remoteReads ?? [expectedOldSha, newSha])];
       return {
         calls,
-        runGit: ({ args }: { cwd: string; args: string[] }) => {
+        environments,
+        runGit: ({ args, env }: { cwd: string; args: string[]; env?: Record<string, string | undefined> }) => {
           calls.push(args);
+          environments.push(env);
           const command = args.join(" ");
           if (command === "remote get-url --push origin") {
             return { exitCode: 0, stdout: `${input.remoteUrl ?? "git@github.com:neeboo/hodor-web.git"}\n`, stderr: "" };
@@ -4087,6 +4090,11 @@ describe("Harness actions", () => {
       }));
       expect(remote.calls).toContainEqual(["push", "--no-verify", "--porcelain", "origin", `${newSha}:${ref}`]);
       expect(remote.calls.filter((args) => args[0] === "ls-remote")).toHaveLength(2);
+      for (const index of remote.calls.map((args, index) => ({ args, index })).filter(({ args }) => args[0] === "ls-remote" || args[0] === "push").map(({ index }) => index)) {
+        expect(remote.environments[index]?.HTTP_PROXY).toBeUndefined();
+        expect(remote.environments[index]?.https_proxy).toBeUndefined();
+        expect(remote.environments[index]?.GIT_SSH_COMMAND).toBeUndefined();
+      }
     });
 
     test("reuses an already-pushed ref without issuing a second push", () => {

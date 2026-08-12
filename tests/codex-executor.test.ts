@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { existsSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { createCodexCliExecutor, createCodexResumableClient } from "../packages/runner/src";
 import { runLocalCommand } from "../packages/runner/src/executors/command";
@@ -8,6 +9,11 @@ import {
   prepareCodexHostExecution,
   protectedCodexRuntimeRoot,
 } from "../packages/runner/src/executors/codex-host-execution";
+import {
+  parseHostExecutionCapabilities,
+  resolveHostExecutionCapabilities,
+  verifierContractSha256,
+} from "../packages/runner/src/executors/host-execution-capabilities";
 
 const runFixture = {
   id: "run_1",
@@ -30,6 +36,462 @@ const routeFixture = {
 } as const;
 
 describe("codex cli executor", () => {
+  test("host execution capabilities reject unknown fields and browser access outside verifier tasks", () => {
+    const verifierContract = { deterministicChecks: ["browser health"] };
+    const verifierContractHash = verifierContractSha256(verifierContract);
+    expect(() => parseHostExecutionCapabilities({
+      schemaVersion: 1,
+      browser: { mode: "isolated-agent-browser", allowedDomains: ["127.0.0.1"], verifierContractSha256: verifierContractHash },
+      extra: true,
+    }, { role: "verifier", verifierContract })).toThrow("unknown field");
+
+    expect(() => parseHostExecutionCapabilities({
+      schemaVersion: 1,
+      browser: { mode: "isolated-agent-browser", allowedDomains: ["127.0.0.1"], verifierContractSha256: verifierContractHash },
+    }, { role: "worker", verifierContract })).toThrow("browser capability is verifier-only");
+
+    expect(() => parseHostExecutionCapabilities({
+      schemaVersion: 1,
+      browser: { mode: "isolated-agent-browser", allowedDomains: ["127.0.0.1"], verifierContractSha256: "0".repeat(64) },
+    }, { role: "verifier", verifierContract })).toThrow("verifierContractSha256 mismatch");
+  });
+
+  test("host execution capabilities bind Git metadata and local services to the frozen task contract", async () => {
+    const root = await mkdtemp(join(tmpdir(), "orbs-host-capability-git-"));
+    const worktree = `${root}-worktree`;
+    const databaseUrl = "postgresql:///hodor_test?host=/tmp";
+    const previousDatabaseUrl = process.env.TEST_DATABASE_URL;
+    try {
+      git(root, "init", "-b", "main");
+      git(root, "config", "user.email", "orbs@example.test");
+      git(root, "config", "user.name", "ORBS Test");
+      await writeFile(join(root, "README.md"), "root\n", "utf8");
+      git(root, "add", "README.md");
+      git(root, "commit", "-m", "root");
+      git(root, "remote", "add", "origin", "git@github.com:example/repository.git");
+      git(root, "worktree", "add", "-b", "codex/capability", worktree);
+      process.env.TEST_DATABASE_URL = databaseUrl;
+
+      const parsed = parseHostExecutionCapabilities({
+        schemaVersion: 1,
+        git: { worktreeMetadata: "own", remoteDomains: ["github.com"] },
+        postgres: {
+          environmentVariable: "TEST_DATABASE_URL",
+          valueSha256: new Bun.CryptoHasher("sha256").update(databaseUrl).digest("hex"),
+          unixSocketPath: "/tmp/.s.PGSQL.5432",
+        },
+        loopback: { host: "127.0.0.1", ports: [43127] },
+        network: { mode: "host-fixed-actions", domains: ["github.com", "api.github.com", "api.linear.app"], clearAmbientProxy: true },
+      }, { role: "worker" });
+      const resolved = resolveHostExecutionCapabilities({ cwd: worktree, capabilities: parsed });
+
+      expect(resolved.git?.gitDir).toContain("/.git/worktrees/");
+      expect(resolved.git?.commonDir).toBe(realpathSync(join(root, ".git")));
+      expect(resolved.git?.branchRef).toBe(join(realpathSync(join(root, ".git")), "refs", "heads", "codex", "capability"));
+      expect(resolved.postgres).toMatchObject({
+        environmentVariable: "TEST_DATABASE_URL",
+        unixSocketPath: "/tmp/.s.PGSQL.5432",
+        databaseName: "hodor_test",
+      });
+      expect(resolved.loopback).toMatchObject({ host: "127.0.0.1", ports: [43127] });
+      expect(resolved.loopback?.sockets).toEqual([{ port: 43127, path: expect.stringMatching(/port-43127\.sock$/) }]);
+      expect(JSON.stringify(resolved)).not.toContain(databaseUrl);
+    } finally {
+      if (previousDatabaseUrl === undefined) delete process.env.TEST_DATABASE_URL;
+      else process.env.TEST_DATABASE_URL = previousDatabaseUrl;
+      await rm(worktree, { recursive: true, force: true });
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("host execution capabilities fail before launch when the frozen PostgreSQL value drifts", async () => {
+    const previousDatabaseUrl = process.env.TEST_DATABASE_URL;
+    const cwd = await mkdtemp(join(tmpdir(), "orbs-host-capability-drift-"));
+    try {
+      process.env.TEST_DATABASE_URL = "postgresql:///other?host=/tmp";
+      const parsed = parseHostExecutionCapabilities({
+        schemaVersion: 1,
+        postgres: {
+          environmentVariable: "TEST_DATABASE_URL",
+          valueSha256: "0".repeat(64),
+          unixSocketPath: "/tmp/.s.PGSQL.5432",
+        },
+      }, { role: "worker" });
+      expect(() => resolveHostExecutionCapabilities({ cwd, capabilities: parsed })).toThrow(
+        "frozen PostgreSQL environment value mismatch",
+      );
+    } finally {
+      if (previousDatabaseUrl === undefined) delete process.env.TEST_DATABASE_URL;
+      else process.env.TEST_DATABASE_URL = previousDatabaseUrl;
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  test("host execution capabilities reject alternate database variables and mismatched socket ports", () => {
+    expect(() => parseHostExecutionCapabilities({
+      schemaVersion: 1,
+      postgres: {
+        environmentVariable: "UNRELATED_DATABASE_URL",
+        valueSha256: "0".repeat(64),
+        unixSocketPath: "/tmp/.s.PGSQL.5432",
+      },
+    }, { role: "worker" })).toThrow("must be TEST_DATABASE_URL");
+
+    const databaseUrl = "postgresql:///hodor_test?host=/tmp";
+    const previous = process.env.TEST_DATABASE_URL;
+    process.env.TEST_DATABASE_URL = databaseUrl;
+    try {
+      const parsed = parseHostExecutionCapabilities({
+        schemaVersion: 1,
+        postgres: {
+          environmentVariable: "TEST_DATABASE_URL",
+          valueSha256: new Bun.CryptoHasher("sha256").update(databaseUrl).digest("hex"),
+          unixSocketPath: "/tmp/.s.PGSQL.6543",
+        },
+      }, { role: "worker" });
+      expect(() => resolveHostExecutionCapabilities({ cwd: process.cwd(), capabilities: parsed })).toThrow(
+        "socket port must match TEST_DATABASE_URL",
+      );
+    } finally {
+      if (previous === undefined) delete process.env.TEST_DATABASE_URL;
+      else process.env.TEST_DATABASE_URL = previous;
+    }
+  });
+
+  test.skipIf(process.platform !== "darwin")("Codex clears ambient proxies while outbound domains remain host-owned", async () => {
+    const cwd = await mkdtemp(join(process.cwd(), ".orbs-host-network-"));
+    const previousProxy = process.env.HTTPS_PROXY;
+    const calls: Array<{ env?: Record<string, string | undefined> }> = [];
+    try {
+      process.env.HTTPS_PROXY = "http://dead-proxy.invalid:9999";
+      const executor = createCodexCliExecutor({
+        cwd,
+        sandbox: "workspace-write",
+        taskRole: "worker",
+        hostExecutionCapabilities: {
+          schemaVersion: 1,
+          network: { mode: "host-fixed-actions", domains: ["github.com", "api.github.com", "api.linear.app"], clearAmbientProxy: true },
+        },
+        runCommand: async ({ env, cmd }) => {
+          calls.push({ env });
+          const outputPath = cmd[cmd.indexOf("--output-last-message") + 1];
+          await writeFile(outputPath, JSON.stringify({ status: "done", summary: "network-ready", changedFiles: [], checks: [], artifacts: [], problems: [] }));
+          return { exitCode: 0, stdout: "", stderr: "" };
+        },
+      });
+      const result = await executor({ prompt: "check network", run: runFixture, task: { id: "task_network", runId: "run_1", parentId: null, cycleId: "cycle", status: "todo", role: "worker", goal: "network", prompt: "network", dependsOn: [], doneWhen: [], config: {}, worktreePath: cwd, sessionRef: null, contextVersion: 1 }, sessionName: "network", route: routeFixture });
+      expect(result.status).toBe("done");
+      expect(calls[0]?.env?.HTTPS_PROXY).toBeUndefined();
+      expect(calls[0]?.env?.https_proxy).toBeUndefined();
+      expect(calls[0]?.env?.GIT_SSH_COMMAND).toBeUndefined();
+      const config = await Bun.file(join(calls[0]!.env!.CODEX_HOME!, "config.toml")).text();
+      expect(config).not.toContain('"api.linear.app" = "allow"');
+      expect(config).not.toContain("dead-proxy.invalid");
+    } finally {
+      if (previousProxy === undefined) delete process.env.HTTPS_PROXY;
+      else process.env.HTTPS_PROXY = previousProxy;
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  test.skipIf(process.platform !== "darwin")("protected Codex profile commits through only its linked worktree metadata", async () => {
+    const root = await mkdtemp(join(tmpdir(), "orbs-host-git-canary-"));
+    const worktree = `${root}-worktree`;
+    try {
+      git(root, "init", "-b", "main");
+      git(root, "config", "user.email", "orbs@example.test");
+      git(root, "config", "user.name", "ORBS Test");
+      await writeFile(join(root, "README.md"), "root\n", "utf8");
+      git(root, "add", "README.md");
+      git(root, "commit", "-m", "root");
+      git(root, "worktree", "add", "-b", "codex/capability-canary", worktree);
+      const execution = await prepareCodexHostExecution({
+        cwd: worktree,
+        sandbox: "workspace-write",
+        browserProcessPolicy: "deny",
+        hostExecutionCapabilities: {
+          schemaVersion: 1,
+          git: { worktreeMetadata: "own", remoteDomains: [] },
+        },
+        taskRole: "worker",
+        injectedRunCommand: async () => ({ exitCode: 0, stdout: "", stderr: "" }),
+      });
+      const codexBin = "/Applications/ChatGPT.app/Contents/Resources/codex";
+      const committed = await runLocalCommand({
+        cmd: [codexBin, "sandbox", "-P", "orbs-workspace", "-C", worktree, "/bin/sh", "-c", "printf worker >> README.md && git add README.md && git commit --no-gpg-sign --no-verify -m worker"],
+        stdin: "",
+        env: execution!.env,
+      });
+      if (committed.exitCode !== 0) throw new Error(committed.stderr || committed.stdout);
+      expect(committed.exitCode).toBe(0);
+      expect(git(worktree, "show", "--format=", "--name-only", "HEAD")).toBe("README.md");
+
+      const mainRef = join(realpathSync(join(root, ".git")), "refs", "heads", "main");
+      const originalMain = await Bun.file(mainRef).text();
+      const unrelated = await runLocalCommand({
+        cmd: [codexBin, "sandbox", "-P", "orbs-workspace", "-C", worktree, "/bin/sh", "-c", `printf forbidden > ${JSON.stringify(mainRef)}`],
+        stdin: "",
+        env: execution!.env,
+      });
+      expect(unrelated.exitCode).not.toBe(0);
+      expect(await Bun.file(mainRef).text()).toBe(originalMain);
+    } finally {
+      await rm(worktree, { recursive: true, force: true });
+      await rm(root, { recursive: true, force: true });
+    }
+  }, 10_000);
+
+  test.skipIf(process.platform !== "darwin")("protected Codex profile reaches only the frozen PostgreSQL socket and loopback service", async () => {
+    const cwd = await mkdtemp(join(process.cwd(), ".orbs-host-local-canary-"));
+    const databaseUrl = "postgresql:///hodor_test?host=/tmp";
+    const previousDatabaseUrl = process.env.TEST_DATABASE_URL;
+    const allowedServer = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response("health-ok") });
+    const undeclaredServer = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response("must-not-be-readable") });
+    const port = allowedServer.port;
+    let execution: Awaited<ReturnType<typeof prepareCodexHostExecution>> = null;
+    try {
+      process.env.TEST_DATABASE_URL = databaseUrl;
+      execution = await prepareCodexHostExecution({
+        cwd,
+        sandbox: "workspace-write",
+        hostExecutionCapabilities: {
+          schemaVersion: 1,
+          postgres: {
+            environmentVariable: "TEST_DATABASE_URL",
+            valueSha256: new Bun.CryptoHasher("sha256").update(databaseUrl).digest("hex"),
+            unixSocketPath: "/tmp/.s.PGSQL.5432",
+          },
+          loopback: { host: "127.0.0.1", ports: [port] },
+        },
+        taskRole: "worker",
+        injectedRunCommand: async () => ({ exitCode: 0, stdout: "", stderr: "" }),
+      });
+      const codexBin = "/Applications/ChatGPT.app/Contents/Resources/codex";
+      const postgres = await runLocalCommand({
+        cmd: [codexBin, "sandbox", "-P", "orbs-workspace", "-C", cwd, "/opt/homebrew/opt/postgresql@15/bin/psql", databaseUrl, "-Atc", "select current_database()"],
+        stdin: "",
+        env: execution!.env,
+      });
+      if (postgres.exitCode !== 0) throw new Error(postgres.stderr || postgres.stdout);
+      expect(postgres.stdout.trim()).toBe("hodor_test");
+
+      const socketMap = JSON.parse(execution!.env.ORBS_LOOPBACK_SOCKET_MAP!) as Record<string, string>;
+      const loopback = await runLocalCommand({
+        cmd: [codexBin, "sandbox", "-P", "orbs-workspace", "-C", cwd, "/usr/bin/curl", "--unix-socket", socketMap[String(port)]!, "http://localhost/healthz"],
+        stdin: "",
+        env: execution!.env,
+        timeoutMs: 8_000,
+      });
+      if (loopback.exitCode !== 0) throw new Error(loopback.stderr || loopback.stdout);
+      expect(loopback.stdout.trim()).toBe("health-ok");
+      expect(execution!.env.ORBS_ALLOWED_LOOPBACK_PORTS).toBe(String(port));
+      const undeclared = await runLocalCommand({
+        cmd: [codexBin, "sandbox", "-P", "orbs-workspace", "-C", cwd, "/usr/bin/curl", "--fail-with-body", "--max-time", "2", `http://127.0.0.1:${undeclaredServer.port}/healthz`],
+        stdin: "",
+        env: execution!.env,
+        timeoutMs: 4_000,
+      });
+      expect(undeclared.exitCode).not.toBe(0);
+      expect(undeclared.stdout).not.toContain("must-not-be-readable");
+    } finally {
+      await execution?.cleanup?.();
+      allowedServer.stop(true);
+      undeclaredServer.stop(true);
+      if (previousDatabaseUrl === undefined) delete process.env.TEST_DATABASE_URL;
+      else process.env.TEST_DATABASE_URL = previousDatabaseUrl;
+      await rm(cwd, { recursive: true, force: true });
+    }
+  }, 15_000);
+
+  test.skipIf(process.platform !== "darwin")("verifier-only browser capability opens the frozen loopback service", async () => {
+    const cwd = await mkdtemp(join(process.cwd(), ".orbs-host-browser-canary-"));
+    const protectedHome = await mkdtemp(join(tmpdir(), "orbs-protected-browser-auth-"));
+    const protectedAuth = join(protectedHome, "auth.json");
+    const protectedSentinel = "ORBS_PROTECTED_AUTH_SENTINEL_71C8";
+    await writeFile(protectedAuth, protectedSentinel);
+    const previousCodexHome = process.env.CODEX_HOME;
+    process.env.CODEX_HOME = protectedHome;
+    const server = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch: () => new Response('<body>browser-health<input id="f" type="file"></body>', {
+        headers: { "content-type": "text/html" },
+      }),
+    });
+    const port = server.port;
+    const verifierContract = { deterministicChecks: ["healthz", "browser body"] };
+    try {
+      const execution = await prepareCodexHostExecution({
+        cwd,
+        sandbox: "workspace-write",
+        browserProcessPolicy: "allow",
+        hostExecutionCapabilities: {
+          schemaVersion: 1,
+          loopback: { host: "127.0.0.1", ports: [port] },
+          browser: {
+            mode: "isolated-agent-browser",
+            allowedDomains: ["127.0.0.1"],
+            verifierContractSha256: verifierContractSha256(verifierContract),
+          },
+        },
+        taskRole: "verifier",
+        verifierContract,
+        injectedRunCommand: async () => ({ exitCode: 0, stdout: "", stderr: "" }),
+      });
+      const codexBin = "/Applications/ChatGPT.app/Contents/Resources/codex";
+      const browser = await runLocalCommand({
+        cmd: [codexBin, "sandbox", "-P", "orbs-workspace", "-C", cwd, "/opt/homebrew/bin/agent-browser", "open", `http://127.0.0.1:${port}/healthz`],
+        stdin: "",
+        env: execution!.env,
+        timeoutMs: 20_000,
+        cleanupOnFailure: true,
+      });
+      if (browser.exitCode !== 0) throw new Error(browser.stderr || browser.stdout);
+      expect(browser.stdout).toContain("127.0.0.1");
+      const title = await runLocalCommand({
+        cmd: [codexBin, "sandbox", "-P", "orbs-workspace", "-C", cwd, "/opt/homebrew/bin/agent-browser", "get", "text", "body"],
+        stdin: "",
+        env: execution!.env,
+        timeoutMs: 10_000,
+        cleanupOnFailure: true,
+      });
+      if (title.exitCode !== 0) throw new Error(title.stderr || title.stdout);
+      expect(title.stdout).toContain("browser-health");
+      const directCredentialRead = await runLocalCommand({
+        cmd: [codexBin, "sandbox", "-P", "orbs-workspace", "-C", cwd, "/bin/cat", protectedAuth],
+        stdin: "",
+        env: execution!.env,
+        timeoutMs: 5_000,
+        cleanupOnFailure: true,
+      });
+      expect(directCredentialRead.exitCode).not.toBe(0);
+      expect(`${directCredentialRead.stdout}${directCredentialRead.stderr}`).not.toContain(protectedSentinel);
+      const browserCredentialRead = await runLocalCommand({
+        cmd: [codexBin, "sandbox", "-P", "orbs-workspace", "-C", cwd, "/opt/homebrew/bin/agent-browser", "upload", "#f", protectedAuth],
+        stdin: "",
+        env: execution!.env,
+        timeoutMs: 5_000,
+        cleanupOnFailure: true,
+      });
+      expect(browserCredentialRead.exitCode).not.toBe(0);
+      expect(`${browserCredentialRead.stdout}${browserCredentialRead.stderr}`).not.toContain(protectedSentinel);
+      const adjacentServer = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response("adjacent-secret-service") });
+      try {
+        const adjacent = await runLocalCommand({
+          cmd: [codexBin, "sandbox", "-P", "orbs-workspace", "-C", cwd, "/opt/homebrew/bin/agent-browser", "open", `http://127.0.0.1:${adjacentServer.port}/secret`],
+          stdin: "",
+          env: execution!.env,
+          timeoutMs: 10_000,
+          cleanupOnFailure: true,
+        });
+        expect(adjacent.exitCode).not.toBe(0);
+        expect(`${adjacent.stdout}${adjacent.stderr}`).not.toContain("adjacent-secret-service");
+      } finally {
+        adjacentServer.stop(true);
+      }
+      expect(execution!.env.ORBS_BROWSER_PROCESS_POLICY).toBe("allow");
+      const config = await Bun.file(join(execution!.env.CODEX_HOME!, "config.toml")).text();
+      expect(config).not.toContain('"127.0.0.1" = "allow"');
+      const directNetwork = await runLocalCommand({
+        cmd: [codexBin, "sandbox", "-P", "orbs-workspace", "-C", cwd, "/usr/bin/curl", "--fail-with-body", "--max-time", "3", "https://example.com"],
+        stdin: "",
+        env: execution!.env,
+        timeoutMs: 5_000,
+        cleanupOnFailure: true,
+      });
+      expect(directNetwork.exitCode).not.toBe(0);
+      const socketPath = execution!.capabilities!.browser!.socketPath;
+      expect(existsSync(socketPath)).toBe(true);
+      const daemonPidReadback = await runLocalCommand({
+        cmd: ["/usr/sbin/lsof", "-t", "--", socketPath],
+        stdin: "",
+        env: { PATH: "/usr/bin:/bin:/usr/sbin:/sbin" },
+        inheritEnv: false,
+        timeoutMs: 5_000,
+      });
+      const daemonPids = daemonPidReadback.stdout.trim().split(/\s+/).filter(Boolean);
+      expect(daemonPids).toHaveLength(1);
+      const browserProcessReadback = await runLocalCommand({
+        cmd: ["/bin/ps", "-axo", "pid=,command="],
+        stdin: "",
+        env: { PATH: "/usr/bin:/bin" },
+        inheritEnv: false,
+        timeoutMs: 5_000,
+      });
+      const browserPids = browserProcessReadback.stdout
+        .split(/\r?\n/)
+        .filter((line) => line.includes(join(execution!.capabilities!.browser!.homeDirectory, "chrome-profile")))
+        .map((line) => line.trim().split(/\s+/, 1)[0]!)
+        .filter(Boolean);
+      expect(browserPids.length).toBeGreaterThan(0);
+      await execution!.cleanup?.();
+      expect(existsSync(socketPath)).toBe(false);
+      const terminated = await runLocalCommand({
+        cmd: ["/bin/ps", "-o", "state=", "-p", [...daemonPids, ...browserPids].join(",")],
+        stdin: "",
+        env: { PATH: "/usr/bin:/bin" },
+        inheritEnv: false,
+        timeoutMs: 5_000,
+      });
+      expect(terminated.stdout.split(/\s+/).filter(Boolean).every((state) => state.startsWith("Z"))).toBe(true);
+    } finally {
+      server.stop(true);
+      if (previousCodexHome === undefined) delete process.env.CODEX_HOME;
+      else process.env.CODEX_HOME = previousCodexHome;
+      await rm(protectedHome, { recursive: true, force: true });
+      await rm(cwd, { recursive: true, force: true });
+    }
+  }, 35_000);
+
+  test.skipIf(process.platform !== "darwin")("codex executor cleans frozen loopback relays when command startup fails", async () => {
+    const cwd = await mkdtemp(join(process.cwd(), ".orbs-host-cleanup-canary-"));
+    const server = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response("unused") });
+    let relayPath = "";
+    try {
+      const executor = createCodexCliExecutor({
+        cwd,
+        sandbox: "workspace-write",
+        hostExecutionCapabilities: {
+          schemaVersion: 1,
+          loopback: { host: "127.0.0.1", ports: [server.port] },
+        },
+        taskRole: "worker",
+        runCommand: async ({ env }) => {
+          const socketMap = JSON.parse(env?.ORBS_LOOPBACK_SOCKET_MAP ?? "{}") as Record<string, string>;
+          relayPath = socketMap[String(server.port)] ?? "";
+          expect(existsSync(relayPath)).toBe(true);
+          throw new Error("synthetic command startup failure");
+        },
+      });
+      await expect(executor({
+        prompt: "Exercise cleanup",
+        sessionName: "cleanup",
+        run: { ...runFixture, projectRoot: cwd },
+        route: routeFixture,
+        task: {
+          id: "task_cleanup",
+          runId: "run_1",
+          parentId: null,
+          cycleId: "task_cleanup",
+          status: "todo",
+          role: "worker",
+          goal: "Cleanup",
+          prompt: "Exercise cleanup",
+          dependsOn: [],
+          doneWhen: [],
+          worktreePath: cwd,
+          sessionRef: null,
+          contextVersion: 1,
+        },
+      })).rejects.toThrow("synthetic command startup failure");
+      expect(relayPath).not.toBe("");
+      expect(existsSync(relayPath)).toBe(false);
+    } finally {
+      server.stop(true);
+      await rm(cwd, { recursive: true, force: true });
+    }
+  }, 10_000);
+
   test("derives a stable protected runtime identity for a synthetic executor cwd", () => {
     expect(protectedCodexRuntimeRoot("/repo")).toBe(protectedCodexRuntimeRoot("/repo"));
   });
@@ -688,7 +1150,7 @@ describe("codex cli executor", () => {
       await rm(dir, { recursive: true, force: true });
       await rm(outside, { force: true });
     }
-  });
+  }, 10_000);
 
   test.skipIf(process.platform !== "darwin")("protected Codex runtime rejects a precreated auth symlink before copying credentials", async () => {
     const dir = await mkdtemp(join(process.cwd(), ".orbs-protected-codex-symlink-"));
@@ -885,3 +1347,11 @@ describe("codex cli executor", () => {
     }
   });
 });
+
+function git(cwd: string, ...args: string[]) {
+  const result = Bun.spawnSync({ cmd: ["git", "-C", cwd, ...args], stdout: "pipe", stderr: "pipe" });
+  if (result.exitCode !== 0) {
+    throw new Error(new TextDecoder().decode(result.stderr));
+  }
+  return new TextDecoder().decode(result.stdout).trim();
+}

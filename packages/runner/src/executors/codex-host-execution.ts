@@ -3,7 +3,14 @@ import { createHash, randomUUID } from "node:crypto";
 import { existsSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
+import { createServer, connect, type Server, type Socket } from "node:net";
 import type { CodexSandbox, RunCommand } from "./types";
+import { runLocalCommand } from "./command";
+import {
+  parseHostExecutionCapabilities,
+  resolveHostExecutionCapabilities,
+  type ResolvedHostExecutionCapabilities,
+} from "./host-execution-capabilities";
 
 const DARWIN_BROWSER_EXECUTABLES = [
   "/usr/bin/open",
@@ -22,10 +29,22 @@ export interface CodexHostExecutionInput {
   sandbox: CodexSandbox;
   browserProcessPolicy?: "allow" | "deny";
   injectedRunCommand?: RunCommand;
+  hostExecutionCapabilities?: unknown;
+  taskRole?: string;
+  verifierContract?: unknown;
 }
 
 export async function prepareCodexHostExecution(input: CodexHostExecutionInput) {
-  if (process.platform !== "darwin" || input.browserProcessPolicy !== "deny") return null;
+  if (process.platform !== "darwin" || (input.browserProcessPolicy !== "deny" && input.hostExecutionCapabilities === undefined)) return null;
+  const capabilities = input.hostExecutionCapabilities === undefined
+    ? undefined
+    : resolveHostExecutionCapabilities({
+        cwd: input.cwd,
+        capabilities: parseHostExecutionCapabilities(input.hostExecutionCapabilities, {
+          role: input.taskRole ?? "unknown",
+          verifierContract: input.verifierContract,
+        }),
+      });
   const runtimeRoot = protectedCodexRuntimeRoot(input.cwd);
   const outputDir = join(runtimeRoot, "outputs");
   const sourceHome = process.env.CODEX_HOME ?? join(process.env.HOME ?? "", ".codex");
@@ -35,6 +54,8 @@ export async function prepareCodexHostExecution(input: CodexHostExecutionInput) 
   await ensurePrivateDirectory(runtimeRoot);
   await ensurePrivateDirectory(join(runtimeRoot, "rules"));
   await ensurePrivateDirectory(outputDir);
+  if (capabilities?.browser) await ensurePrivateDirectory(capabilities.browser.socketDirectory);
+  if (capabilities?.loopback) await ensurePrivateDirectory(capabilities.loopback.socketDirectory);
 
   if (!input.injectedRunCommand) {
     await atomicPrivateWrite(join(runtimeRoot, "auth.json"), await readFile(sourceAuthPath));
@@ -44,14 +65,34 @@ export async function prepareCodexHostExecution(input: CodexHostExecutionInput) 
     runtimeRoot,
     sandbox: input.sandbox,
     sourceAuthPath,
+    capabilities,
   }));
-  await atomicPrivateWrite(join(runtimeRoot, "rules", "default.rules"), browserExecRules());
+  await atomicPrivateWrite(join(runtimeRoot, "rules", "default.rules"), capabilities?.browser ? "" : browserExecRules());
+  let browserCleanup: (() => Promise<void>) | undefined;
+  let loopbackCleanup: (() => Promise<void>) | undefined;
+  try {
+    browserCleanup = capabilities?.browser
+      ? await ensureBrowserHostDaemon(capabilities, [runtimeRoot, sourceHome])
+      : undefined;
+    loopbackCleanup = capabilities?.loopback ? await ensureLoopbackRelays(capabilities) : undefined;
+  } catch (error) {
+    await browserCleanup?.();
+    await loopbackCleanup?.();
+    throw error;
+  }
 
   return {
     outputDir,
     env: {
       CODEX_HOME: runtimeRoot,
-      ORBS_BROWSER_PROCESS_POLICY: "deny",
+      ORBS_BROWSER_PROCESS_POLICY: capabilities?.browser ? "allow" : "deny",
+      ...capabilityEnvironment(capabilities),
+      ...clearedAmbientProxyEnvironment(capabilities),
+    },
+    capabilities,
+    cleanup: async () => {
+      await browserCleanup?.();
+      await loopbackCleanup?.();
     },
   };
 }
@@ -63,7 +104,12 @@ export function protectedCodexRuntimeRoot(cwd: string) {
   return join(root, identity);
 }
 
-export function protectedCodexConfig(input: { runtimeRoot: string; sandbox: CodexSandbox; sourceAuthPath: string }) {
+export function protectedCodexConfig(input: {
+  runtimeRoot: string;
+  sandbox: CodexSandbox;
+  sourceAuthPath: string;
+  capabilities?: ResolvedHostExecutionCapabilities;
+}) {
   if (input.sandbox === "danger-full-access") {
     throw new Error("danger-full-access is prohibited for protected Codex execution");
   }
@@ -74,30 +120,100 @@ export function protectedCodexConfig(input: { runtimeRoot: string; sandbox: Code
     ...DARWIN_BROWSER_EXECUTABLES,
     ...resolvedPathBrowserExecutables(),
   ];
-  const filesystem = [...new Set(deniedPaths)].map((path) => `${tomlString(path)} = "deny"`).join("\n");
+  const filesystem = [
+    ...[...new Set(deniedPaths)].map((path) => `${tomlString(path)} = "deny"`),
+    ...(input.capabilities?.git ? [`${tomlString(input.capabilities.git.commonDir)} = "read"`] : []),
+    ...(input.capabilities?.browser ? [`${tomlString(input.capabilities.browser.socketDirectory)} = "read"`] : []),
+    ...(input.capabilities?.loopback ? [`${tomlString(input.capabilities.loopback.socketDirectory)} = "read"`] : []),
+    ...writableCapabilityPaths(input.capabilities).map((path) => `${tomlString(path)} = "write"`),
+  ].join("\n");
+  const network = networkProfile(input.capabilities);
+  const excludedEnvironment = [
+    ".*KEY.*", ".*TOKEN.*", ".*SECRET.*", ".*PASSWORD.*", ".*CREDENTIAL.*",
+    ".*AUTHORIZATION.*", ".*COOKIE.*", "^CODEX_HOME$", "^DATABASE_URL$", "^REDIS_URL$",
+    "^SSH_AUTH_SOCK$", "^AWS_.*",
+  ];
   return [
     `default_permissions = ${tomlString(profile)}`,
     "",
+    ...((input.capabilities?.loopback || input.capabilities?.postgres || input.capabilities?.browser) ? ["[features]", "network_proxy = true", ""] : []),
     "[permissions.orbs-workspace]",
     'extends = ":workspace"',
     "",
     "[permissions.orbs-workspace.filesystem]",
     filesystem,
+    ...network.map((line) => line.replaceAll("permissions.__PROFILE__", "permissions.orbs-workspace")),
     "",
     "[permissions.orbs-read-only]",
     'extends = ":read-only"',
     "",
     "[permissions.orbs-read-only.filesystem]",
-    filesystem,
+    [...new Set(deniedPaths)].map((path) => `${tomlString(path)} = "deny"`).join("\n"),
+    ...network.map((line) => line.replaceAll("permissions.__PROFILE__", "permissions.orbs-read-only")),
     "",
     "[shell_environment_policy]",
-    'exclude = [".*KEY.*", ".*TOKEN.*", ".*SECRET.*", "^CODEX_HOME$"]',
+    `exclude = ${JSON.stringify(excludedEnvironment)}`,
     "",
   ].join("\n");
 }
 
+function writableCapabilityPaths(capabilities: ResolvedHostExecutionCapabilities | undefined) {
+  const git = capabilities?.git;
+  return [
+    ...(git ? [git.gitDir, git.objectsDir, git.branchRef, `${git.branchRef}.lock`, git.branchReflog, `${git.branchReflog}.lock`] : []),
+  ];
+}
+
+function networkProfile(capabilities: ResolvedHostExecutionCapabilities | undefined) {
+  const sockets = [
+    capabilities?.postgres?.unixSocketPath,
+    capabilities?.browser?.socketPath,
+    ...(capabilities?.loopback?.sockets.map((entry) => entry.path) ?? []),
+  ].filter((value): value is string => Boolean(value));
+  if (sockets.length === 0) return [];
+  return [
+    "",
+    "[permissions.__PROFILE__.network]",
+    "enabled = true",
+    'mode = "limited"',
+    "enable_socks5 = true",
+    "",
+    "[permissions.__PROFILE__.network.domains]",
+    '"127.0.0.1" = "deny"',
+    '"localhost" = "deny"',
+    ...(sockets.length > 0 ? ["", "[permissions.__PROFILE__.network.unix_sockets]", ...[...new Set(sockets)].sort().map((socket) => `${tomlString(socket)} = "allow"`)] : []),
+  ];
+}
+
+function capabilityEnvironment(capabilities: ResolvedHostExecutionCapabilities | undefined) {
+  if (!capabilities) return {};
+  return {
+    ORBS_HOST_EXECUTION_CAPABILITY_SHA256: capabilities.contractSha256,
+    ORBS_ALLOWED_LOOPBACK_HOST: capabilities.loopback?.host,
+    ORBS_ALLOWED_LOOPBACK_PORTS: capabilities.loopback?.ports.join(","),
+    ORBS_LOOPBACK_SOCKET_MAP: capabilities.loopback
+      ? JSON.stringify(Object.fromEntries(capabilities.loopback.sockets.map((entry) => [entry.port, entry.path])))
+      : undefined,
+    ORBS_GIT_COMMIT_ARGS: capabilities.git ? "--no-gpg-sign --no-verify" : undefined,
+    AGENT_BROWSER_ALLOWED_DOMAINS: capabilities.browser?.allowedDomains.join(","),
+    AGENT_BROWSER_SOCKET_DIR: capabilities.browser?.socketDirectory,
+    AGENT_BROWSER_SESSION: capabilities.browser?.sessionName,
+  };
+}
+
+const AMBIENT_PROXY_VARIABLES = [
+  "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
+  "http_proxy", "https_proxy", "all_proxy", "no_proxy",
+  "GIT_SSH_COMMAND",
+];
+
+function clearedAmbientProxyEnvironment(capabilities: ResolvedHostExecutionCapabilities | undefined) {
+  if (!capabilities) return {};
+  return Object.fromEntries(AMBIENT_PROXY_VARIABLES.map((key) => [key, undefined]));
+}
+
 function resolvedPathBrowserExecutables() {
-  const names = ["google-chrome", "chrome", "chromium", "chromium-browser", "firefox", "agent-browser"];
+  const names = ["google-chrome", "chrome", "chromium", "chromium-browser", "firefox"];
   const dirs = (process.env.PATH ?? "").split(":").filter(Boolean);
   const paths: string[] = [];
   for (const dir of dirs) {
@@ -173,6 +289,280 @@ async function lstatIfPresent(path: string) {
     return await lstat(path);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw error;
+  }
+}
+
+async function ensureBrowserHostDaemon(capabilities: ResolvedHostExecutionCapabilities, deniedReadPaths: string[]) {
+  const browser = capabilities.browser;
+  const loopback = capabilities.loopback;
+  if (!browser || !loopback) throw new Error("browser host daemon requires frozen loopback capability");
+  const existing = await lstatIfPresent(browser.socketPath);
+  if (existing) {
+    throw new Error("browser host daemon socket already exists before host startup");
+  }
+  const agentBrowser = Bun.which("agent-browser");
+  if (!agentBrowser) throw new Error("browser host daemon requires agent-browser");
+  const nativeAgentBrowser = join(dirname(realpathSync(agentBrowser)), `agent-browser-darwin-${process.arch}`);
+  if (!existsSync(nativeAgentBrowser)) throw new Error("browser host daemon requires the native agent-browser executable");
+  await ensurePrivateDirectory(browser.homeDirectory);
+  await atomicPrivateWrite(browser.actionPolicyPath, JSON.stringify({
+    default: "deny",
+    allow: ["launch", "url", "gettext", "navigate", "click", "fill", "scroll", "wait", "read", "get", "interact"],
+  }) + "\n");
+  await atomicPrivateWrite(browser.configPath, JSON.stringify({
+    actionPolicy: browser.actionPolicyPath,
+    contentBoundaries: true,
+    maxOutput: 50_000,
+  }) + "\n");
+  const env: Record<string, string | undefined> = {
+    PATH: process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin",
+    HOME: browser.homeDirectory,
+    XDG_CONFIG_HOME: join(browser.homeDirectory, ".config"),
+    XDG_CACHE_HOME: join(browser.homeDirectory, ".cache"),
+    TMPDIR: tmpdir(),
+    LANG: process.env.LANG ?? "C.UTF-8",
+    LC_ALL: process.env.LC_ALL ?? "C.UTF-8",
+    LC_CTYPE: process.env.LC_CTYPE ?? "C.UTF-8",
+    AGENT_BROWSER_SOCKET_DIR: browser.socketDirectory,
+    AGENT_BROWSER_SESSION: browser.sessionName,
+    AGENT_BROWSER_CONFIG: browser.configPath,
+    AGENT_BROWSER_ACTION_POLICY: browser.actionPolicyPath,
+    AGENT_BROWSER_ALLOWED_DOMAINS: browser.allowedDomains.join(","),
+    AGENT_BROWSER_ALLOW_FILE_ACCESS: "false",
+  };
+  const chromeExecutable = DARWIN_BROWSER_EXECUTABLES.find((path) => path.includes("Chrome.app") && existsSync(path));
+  if (!chromeExecutable) throw new Error("browser host daemon requires an installed Chrome executable");
+  const cdpPort = await reserveLoopbackPort();
+  const chrome = Bun.spawn({
+    cmd: [
+      "/usr/bin/sandbox-exec",
+      "-p",
+      browserProcessSandboxProfile(cdpPort, loopback.ports),
+      chromeExecutable,
+      "--headless=new",
+      "--no-sandbox",
+      "--no-first-run",
+      "--no-default-browser-check",
+      "--password-store=basic",
+      "--use-mock-keychain",
+      "--disable-background-networking",
+      "--disable-component-update",
+      "--disable-sync",
+      "--disable-extensions",
+      `--remote-debugging-port=${cdpPort}`,
+      `--user-data-dir=${join(browser.homeDirectory, "chrome-profile")}`,
+      "about:blank",
+    ],
+    env: Object.fromEntries(Object.entries(env).filter((entry): entry is [string, string] => entry[1] !== undefined)),
+    stdout: "ignore",
+    stderr: "ignore",
+  });
+  try {
+    await waitForChromeCdp(cdpPort, chrome);
+  } catch (error) {
+    await terminateSubprocess(chrome);
+    throw error;
+  }
+  let daemonPids: number[] = [];
+  const cleanup = async () => {
+    await runLocalCommand({
+      cmd: [agentBrowser, "close"],
+      stdin: "",
+      env,
+      inheritEnv: false,
+      timeoutMs: 10_000,
+      cleanupOnFailure: true,
+    });
+    await terminateOwnedProcesses(daemonPids);
+    await terminateSubprocess(chrome);
+    await rm(browser.socketPath, { force: true });
+  };
+  try {
+    const connected = await runLocalCommand({
+      cmd: [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        browserDaemonSandboxProfile(cdpPort, browser.socketDirectory, nativeAgentBrowser, deniedReadPaths),
+        nativeAgentBrowser,
+        "--cdp",
+        String(cdpPort),
+        "get",
+        "url",
+      ],
+      stdin: "",
+      env,
+      inheritEnv: false,
+      timeoutMs: 15_000,
+      cleanupOnFailure: false,
+    });
+    if (connected.exitCode !== 0) throw new Error(`browser host daemon failed to connect to frozen Chrome: ${connected.stderr || connected.stdout}`);
+    const socket = await lstatIfPresent(browser.socketPath);
+    if (!socket?.isSocket() || socket.isSymbolicLink()) throw new Error("browser host daemon did not create its frozen Unix socket");
+    daemonPids = await processesHoldingPath(browser.socketPath);
+    if (daemonPids.length !== 1) throw new Error("browser host daemon must have exactly one process holding its frozen Unix socket");
+    return cleanup;
+  } catch (error) {
+    await cleanup();
+    throw error;
+  }
+}
+
+function browserDaemonSandboxProfile(cdpPort: number, socketDirectory: string, executablePath: string, deniedReadPaths: string[]) {
+  return [
+    "(version 1)",
+    "(allow default)",
+    "(deny network*)",
+    "(allow system-socket (socket-domain AF_UNIX))",
+    "(allow network-bind (local unix-socket))",
+    "(allow network-inbound (local unix-socket))",
+    "(allow network-outbound (remote unix-socket))",
+    `(allow network-outbound (remote ip "localhost:${cdpPort}"))`,
+    `(allow file-read* file-write* (subpath ${JSON.stringify(socketDirectory)}))`,
+    ...deniedReadPaths.map((path) => `(deny file-read* (subpath ${JSON.stringify(path)}))`),
+    "(deny process-exec*)",
+    `(allow process-exec (literal ${JSON.stringify(executablePath)}))`,
+  ].join("\n");
+}
+
+function browserProcessSandboxProfile(cdpPort: number, ports: number[]) {
+  return [
+    "(version 1)",
+    "(allow default)",
+    "(deny network*)",
+    "(allow system-socket (socket-domain AF_UNIX))",
+    "(allow network-bind (local unix-socket))",
+    "(allow network-outbound (remote unix-socket))",
+    `(allow network-bind (local ip "localhost:${cdpPort}"))`,
+    `(allow network-inbound (local ip "localhost:${cdpPort}"))`,
+    ...ports.map((port) => `(allow network-outbound (remote ip "localhost:${port}"))`),
+  ].join("\n");
+}
+
+async function reserveLoopbackPort() {
+  const server = createServer();
+  await new Promise<void>((resolveListen, rejectListen) => {
+    server.once("error", rejectListen);
+    server.listen(0, "127.0.0.1", () => {
+      server.off("error", rejectListen);
+      resolveListen();
+    });
+  });
+  const address = server.address();
+  await new Promise<void>((resolveClose) => server.close(() => resolveClose()));
+  if (!address || typeof address === "string") throw new Error("failed to reserve browser CDP port");
+  return address.port;
+}
+
+async function waitForChromeCdp(port: number, chrome: Bun.Subprocess) {
+  const deadline = Date.now() + 10_000;
+  while (Date.now() < deadline) {
+    if (chrome.exitCode !== null) throw new Error(`frozen browser process exited before CDP startup (${chrome.exitCode})`);
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/json/version`, { signal: AbortSignal.timeout(250) });
+      if (response.ok) return;
+    } catch {
+      // Retry only until the bounded startup deadline.
+    }
+    await new Promise((resolveWait) => setTimeout(resolveWait, 25));
+  }
+  throw new Error("frozen browser process did not expose CDP before startup deadline");
+}
+
+async function terminateSubprocess(subprocess: Bun.Subprocess) {
+  if (subprocess.exitCode !== null) return;
+  subprocess.kill("SIGTERM");
+  const exited = await Promise.race([
+    subprocess.exited.then(() => true),
+    new Promise<false>((resolveWait) => setTimeout(() => resolveWait(false), 2_000)),
+  ]);
+  if (!exited && subprocess.exitCode === null) {
+    subprocess.kill("SIGKILL");
+    await subprocess.exited;
+  }
+}
+
+async function processesHoldingPath(path: string) {
+  const result = await runLocalCommand({
+    cmd: ["/usr/sbin/lsof", "-t", "--", path],
+    stdin: "",
+    env: { PATH: "/usr/bin:/bin:/usr/sbin:/sbin" },
+    inheritEnv: false,
+    timeoutMs: 5_000,
+  });
+  if (result.exitCode !== 0) return [];
+  return [...new Set(result.stdout.split(/\s+/).filter(Boolean).map(Number).filter((pid) => Number.isSafeInteger(pid) && pid > 1 && pid !== process.pid))];
+}
+
+async function terminateOwnedProcesses(pids: number[]) {
+  for (const pid of pids) {
+    try { process.kill(pid, "SIGTERM"); } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+    }
+  }
+  const deadline = Date.now() + 2_000;
+  while (Date.now() < deadline && pids.some(processExists)) await new Promise((resolveWait) => setTimeout(resolveWait, 25));
+  for (const pid of pids.filter(processExists)) {
+    try { process.kill(pid, "SIGKILL"); } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+    }
+  }
+  if (pids.some(processExists)) throw new Error("browser host daemon did not terminate during cleanup");
+}
+
+function processExists(pid: number) {
+  try {
+    process.kill(pid, 0);
+    const state = Bun.spawnSync({ cmd: ["/bin/ps", "-o", "state=", "-p", String(pid)], stdout: "pipe", stderr: "ignore" });
+    if (state.exitCode !== 0) return false;
+    return !new TextDecoder().decode(state.stdout).trim().startsWith("Z");
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code !== "ESRCH";
+  }
+}
+
+async function ensureLoopbackRelays(capabilities: ResolvedHostExecutionCapabilities) {
+  const loopback = capabilities.loopback;
+  if (!loopback) return undefined;
+  const servers: Server[] = [];
+  const connections = new Set<Socket>();
+  const closeAll = async () => {
+    for (const connection of connections) connection.destroy();
+    await Promise.all(servers.map((server) => new Promise<void>((resolveClose) => server.close(() => resolveClose()))));
+    await Promise.all(loopback.sockets.map((entry) => rm(entry.path, { force: true })));
+  };
+  try {
+    for (const entry of loopback.sockets) {
+      if (await lstatIfPresent(entry.path)) throw new Error(`loopback relay socket already exists: ${entry.path}`);
+      const server = createServer((client) => {
+        const upstream = connect({ host: loopback.host, port: entry.port });
+        connections.add(client);
+        connections.add(upstream);
+        client.pipe(upstream);
+        upstream.pipe(client);
+        const closePeer = () => {
+          connections.delete(client);
+          connections.delete(upstream);
+          client.destroy();
+          upstream.destroy();
+        };
+        client.on("close", closePeer);
+        upstream.on("close", closePeer);
+        client.on("error", closePeer);
+        upstream.on("error", closePeer);
+      });
+      await new Promise<void>((resolveListen, rejectListen) => {
+        server.once("error", rejectListen);
+        server.listen(entry.path, () => {
+          server.off("error", rejectListen);
+          resolveListen();
+        });
+      });
+      servers.push(server);
+    }
+    return closeAll;
+  } catch (error) {
+    await closeAll();
     throw error;
   }
 }

@@ -5075,7 +5075,10 @@ function safeGitStep(
   limits: { timeoutMs?: number; maxOutputBytes?: number } = {},
 ) {
   try {
-    const result = runGitStep(git, cwd, args, limits);
+    const result = runGitStep(git, cwd, args, {
+      ...limits,
+      ...(isGitRemoteCommand(args) ? { env: clearedAmbientProxyEnv() } : {}),
+    });
     const stdout = limitUtf8Output(result.stdout, limits.maxOutputBytes);
     const stderr = limitUtf8Output(result.stderr, limits.maxOutputBytes);
     return {
@@ -7966,12 +7969,17 @@ function resolveWorktreePath(repoPath: string, worktreePath: string | null) {
 }
 
 function defaultGitRunner(input: GitCommandInput): GitCommandResult {
+  const env = { ...process.env } as Record<string, string | undefined>;
+  for (const [key, value] of Object.entries(input.env ?? {})) {
+    if (value === undefined) delete env[key];
+    else env[key] = value;
+  }
   const result = Bun.spawnSync({
     cmd: ["git", ...input.args],
     cwd: input.cwd,
     stdout: "pipe",
     stderr: "pipe",
-    ...(input.env ? { env: { ...process.env, ...input.env } } : {}),
+    env,
     ...(input.timeoutMs === undefined ? {} : { timeout: input.timeoutMs }),
     ...(input.maxOutputBytes === undefined ? {} : { maxBuffer: input.maxOutputBytes }),
   });
@@ -8011,7 +8019,7 @@ function runGitStep(
   git: GitRunner,
   cwd: string,
   args: string[],
-  limits: { timeoutMs?: number; maxOutputBytes?: number } = {},
+  limits: { timeoutMs?: number; maxOutputBytes?: number; env?: Record<string, string | undefined> } = {},
 ) {
   const result = git({ cwd, args, ...limits });
   return {
@@ -8020,6 +8028,18 @@ function runGitStep(
     command: `git ${args.join(" ")}`,
     cwd,
   };
+}
+
+function isGitRemoteCommand(args: string[]) {
+  return args[0] === "ls-remote" || args[0] === "push" || args[0] === "fetch";
+}
+
+function clearedAmbientProxyEnv() {
+  return Object.fromEntries([
+    "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
+    "http_proxy", "https_proxy", "all_proxy", "no_proxy",
+    "GIT_SSH_COMMAND",
+  ].map((key) => [key, undefined]));
 }
 
 function readTargetDirtyFiles(git: GitRunner, cwd: string): { ok: true; files: string[] } | { ok: false; result: ReturnType<typeof runGitStep> } {

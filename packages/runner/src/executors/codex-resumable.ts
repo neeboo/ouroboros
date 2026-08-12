@@ -70,13 +70,19 @@ export function createCodexResumableClient(options: CodexResumableClientOptions)
         sandbox,
         browserProcessPolicy: options.browserProcessPolicy,
         injectedRunCommand: options.runCommand,
+        hostExecutionCapabilities: options.hostExecutionCapabilities,
+        taskRole: options.taskRole,
+        verifierContract: options.verifierContract,
       });
-      const outputPath = await makeOutputPath(hostExecution?.outputDir ?? options.outputDir, input.sessionName);
       const modelArgs = options.model ? ["-m", options.model] : [];
       const reasoningArgs = options.reasoningEffort ? ["-c", `model_reasoning_effort=${JSON.stringify(options.reasoningEffort)}`] : [];
       const stdoutObserver = createStdoutObserver(input);
-      const result = await (hostExecution ? rawRunCommand : policyRunCommand)({
-        cmd: [
+      let result;
+      let outputPath = "";
+      try {
+        outputPath = await makeOutputPath(hostExecution?.outputDir ?? options.outputDir, input.sessionName);
+        result = await (hostExecution ? rawRunCommand : policyRunCommand)({
+          cmd: [
           codexBin,
           "exec",
           ...modelArgs,
@@ -93,14 +99,17 @@ export function createCodexResumableClient(options: CodexResumableClientOptions)
           options.cwd,
           ...(hostExecution ? [] : ["--sandbox", sandbox]),
           "-",
-        ],
-        stdin: input.prompt,
-        env: hostExecution?.env,
-        timeoutMs: options.timeoutMs,
-        idleTimeoutMs: options.idleTimeoutMs,
-        onStdout: stdoutObserver,
-        onStderr: input.onStderr,
-      });
+          ],
+          stdin: input.prompt,
+          env: hostExecution?.env,
+          timeoutMs: options.timeoutMs,
+          idleTimeoutMs: options.idleTimeoutMs,
+          onStdout: stdoutObserver,
+          onStderr: input.onStderr,
+        });
+      } finally {
+        await hostExecution?.cleanup?.();
+      }
       return resumableResult({ result, outputPath, commandName: "codex exec" });
     },
     resume: async (input: CodexResumableResumeInput) => {
@@ -117,13 +126,19 @@ export function createCodexResumableClient(options: CodexResumableClientOptions)
         sandbox,
         browserProcessPolicy: options.browserProcessPolicy,
         injectedRunCommand: options.runCommand,
+        hostExecutionCapabilities: options.hostExecutionCapabilities,
+        taskRole: options.taskRole,
+        verifierContract: options.verifierContract,
       });
-      const outputPath = await makeOutputPath(hostExecution?.outputDir ?? options.outputDir, input.sessionName);
       const modelArgs = options.model ? ["-m", options.model] : [];
       const reasoningArgs = options.reasoningEffort ? ["-c", `model_reasoning_effort=${JSON.stringify(options.reasoningEffort)}`] : [];
       const stdoutObserver = createStdoutObserver(input);
-      const result = await (hostExecution ? rawRunCommand : policyRunCommand)({
-        cmd: [
+      let result;
+      let outputPath = "";
+      try {
+        outputPath = await makeOutputPath(hostExecution?.outputDir ?? options.outputDir, input.sessionName);
+        result = await (hostExecution ? rawRunCommand : policyRunCommand)({
+          cmd: [
           codexBin,
           "exec",
           ...modelArgs,
@@ -142,14 +157,17 @@ export function createCodexResumableClient(options: CodexResumableClientOptions)
           "resume",
           input.sessionId,
           "-",
-        ],
-        stdin: input.prompt ?? "",
-        env: hostExecution?.env,
-        timeoutMs: options.timeoutMs,
-        idleTimeoutMs: options.idleTimeoutMs,
-        onStdout: stdoutObserver,
-        onStderr: input.onStderr,
-      });
+          ],
+          stdin: input.prompt ?? "",
+          env: hostExecution?.env,
+          timeoutMs: options.timeoutMs,
+          idleTimeoutMs: options.idleTimeoutMs,
+          onStdout: stdoutObserver,
+          onStderr: input.onStderr,
+        });
+      } finally {
+        await hostExecution?.cleanup?.();
+      }
       return resumableResult({ result, outputPath, commandName: "codex exec resume" });
     },
   };

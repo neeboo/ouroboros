@@ -2385,6 +2385,14 @@ if (args.includes("self-improve-daemon")) {
         fixture.issueId,
         "--state-id",
         fixture.targetStateId,
+        {
+          HTTP_PROXY: "http://dead-proxy.invalid:9999",
+          HTTPS_PROXY: "http://dead-proxy.invalid:9999",
+          ALL_PROXY: "http://dead-proxy.invalid:9999",
+          http_proxy: "http://dead-proxy.invalid:9999",
+          https_proxy: "http://dead-proxy.invalid:9999",
+          all_proxy: "http://dead-proxy.invalid:9999",
+        },
       );
 
       expect(result).toMatchObject({

@@ -18,6 +18,9 @@ export interface RouteExecutorOptions {
   runCommand?: RunCommand;
   replayCache?: AttemptReplayCache;
   worktreeEvidence?: WorktreeEvidenceProbe;
+  hostExecutionCapabilities?: unknown;
+  taskRole?: string;
+  verifierContract?: unknown;
 }
 
 export function createRouteExecutor(options: RouteExecutorOptions): TaskExecutor {
@@ -33,6 +36,16 @@ export function createRouteExecutor(options: RouteExecutorOptions): TaskExecutor
     });
   }
   if (backend.kind === "acpx") {
+    if (options.hostExecutionCapabilities !== undefined) {
+      return async () => ({
+        status: "blocked" as const,
+        summary: "host execution capabilities require the direct Codex executor",
+        changedFiles: [],
+        checks: [{ name: "host execution capability route", status: "failed" as const }],
+        artifacts: [{ kind: "host_execution_capability_route", backend: "acpx", supported: false }],
+        problems: ["ACPX cannot carry the frozen host execution capability contract"],
+      });
+    }
     return createAcpxAgentExecutor({
       cwd: options.cwd,
       ...acpxAgentConfig(backend),
@@ -62,6 +75,9 @@ export function createRouteExecutor(options: RouteExecutorOptions): TaskExecutor
     timeoutMs: options.timeoutMs,
     idleTimeoutMs: options.idleTimeoutMs,
     runCommand: options.runCommand,
+    hostExecutionCapabilities: options.hostExecutionCapabilities,
+    taskRole: options.taskRole,
+    verifierContract: options.verifierContract,
   });
 }
 

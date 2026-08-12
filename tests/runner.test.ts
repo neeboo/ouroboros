@@ -717,6 +717,199 @@ describe("runner", () => {
     expect(JSON.stringify(attempt)).not.toContain("tools private body");
   });
 
+  test("resumable attempts persist a secret-free frozen host execution capability receipt", async () => {
+    const runId = harness.createRun({ goal: "attest host capabilities" });
+    const taskId = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "use approved network",
+      prompt: "Check the approved remote.",
+      config: {
+        hostExecutionCapabilities: {
+          schemaVersion: 1,
+          network: { mode: "host-fixed-actions", domains: ["github.com", "api.linear.app"], clearAmbientProxy: true },
+        },
+      },
+    });
+    const result = await startCodexResumableAttempt({
+      harness,
+      taskId,
+      cwd: dir,
+      clientFactory: () => ({
+        start: async () => ({
+          status: "done" as const,
+          sessionId: "session_host_capability",
+          outputPath: join(dir, "host-capability.json"),
+          stdout: "",
+          stderr: "",
+          events: [],
+          output: { status: "done" as const, summary: "approved network checked" },
+        }),
+        resume: async () => { throw new Error("unused"); },
+      }),
+    });
+
+    expect(result.status).toBe("done");
+    const receipt = harness.getAttempt(result.attemptId)?.input.hostExecutionCapability;
+    expect(receipt).toMatchObject({
+      status: "frozen",
+      schemaVersion: 1,
+      network: { mode: "host-fixed-actions", domains: ["api.linear.app", "github.com"], clearAmbientProxy: true },
+    });
+    expect((receipt as Record<string, unknown>).contractSha256).toMatch(/^[0-9a-f]{64}$/);
+    expect(JSON.stringify(receipt)).not.toContain("LINEAR_API_KEY");
+  });
+
+  test("invalid host execution capabilities block before start hooks", async () => {
+    const runId = harness.createRun({ goal: "reject invalid host capability" });
+    const taskId = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "must not start",
+      prompt: "Do not execute.",
+      config: { hostExecutionCapabilities: { schemaVersion: 1, unknown: true } },
+    });
+    let startHookCalls = 0;
+    let clientFactoryCalls = 0;
+    const result = await startCodexResumableAttempt({
+      harness,
+      taskId,
+      cwd: dir,
+      startHooks: [() => {
+        startHookCalls += 1;
+        return {};
+      }],
+      clientFactory: () => {
+        clientFactoryCalls += 1;
+        throw new Error("client must not be constructed");
+      },
+    });
+
+    expect(result.status).toBe("blocked");
+    expect(startHookCalls).toBe(0);
+    expect(clientFactoryCalls).toBe(0);
+    expect(harness.getAttempt(result.attemptId)?.input.hostExecutionCapability).toMatchObject({ status: "invalid" });
+  });
+
+  test("generic task execution rejects invalid host capabilities before start hooks", async () => {
+    const runId = harness.createRun({ goal: "reject invalid generic host capability" });
+    harness.createTask({
+      runId,
+      role: "worker",
+      goal: "must not start",
+      prompt: "Do not execute.",
+      config: { hostExecutionCapabilities: { schemaVersion: 1, unknown: true } },
+    });
+    let startHookCalls = 0;
+    let executorFactoryCalls = 0;
+
+    const result = await runReadyTasks({
+      harness,
+      runId,
+      limit: 1,
+      cwd: dir,
+      startHooks: [() => {
+        startHookCalls += 1;
+        return {};
+      }],
+      executorFactory: () => {
+        executorFactoryCalls += 1;
+        return async () => ({ status: "done", summary: "must not run" });
+      },
+    });
+
+    expect(startHookCalls).toBe(0);
+    expect(executorFactoryCalls).toBe(0);
+    const attempt = harness.getAttempt(result[0]!.attemptId)!;
+    expect(attempt.status).toBe("blocked");
+    expect(attempt.input.hostExecutionCapability).toMatchObject({ status: "invalid" });
+  });
+
+  test("generic task execution persists the frozen host capability receipt", async () => {
+    const runId = harness.createRun({ goal: "attest generic host capability" });
+    harness.createTask({
+      runId,
+      role: "worker",
+      goal: "use a host-owned fixed action",
+      prompt: "Read the approved remote.",
+      config: {
+        hostExecutionCapabilities: {
+          schemaVersion: 1,
+          network: { mode: "host-fixed-actions", domains: ["github.com"], clearAmbientProxy: true },
+        },
+      },
+    });
+
+    const result = await runReadyTasks({
+      harness,
+      runId,
+      limit: 1,
+      cwd: dir,
+      executorFactory: () => async () => ({ status: "done", summary: "fixed action completed" }),
+    });
+
+    expect(harness.getAttempt(result[0]!.attemptId)?.input.hostExecutionCapability).toMatchObject({
+      status: "frozen",
+      schemaVersion: 1,
+      network: { mode: "host-fixed-actions", domains: ["github.com"], clearAmbientProxy: true },
+    });
+  });
+
+  test("resumable attempts reject host capability drift before resuming the client", async () => {
+    const runId = harness.createRun({ goal: "freeze host capability across resume" });
+    const taskId = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "resume safely",
+      prompt: "Work.",
+      config: {
+        hostExecutionCapabilities: {
+          schemaVersion: 1,
+          network: { mode: "host-fixed-actions", domains: ["github.com"], clearAmbientProxy: true },
+        },
+      },
+    });
+    let resumeCalls = 0;
+    const orchestration = {
+      harness,
+      cwd: dir,
+      clientFactory: () => ({
+        start: async () => ({
+          status: "running" as const,
+          sessionId: "session_host_capability_drift",
+          outputPath: join(dir, "host-capability-drift.json"),
+          stdout: "",
+          stderr: "",
+          events: [],
+          output: { status: "done" as const, summary: "unused" },
+        }),
+        resume: async () => {
+          resumeCalls += 1;
+          throw new Error("resume must not run after capability drift");
+        },
+      }),
+    };
+    const started = await startCodexResumableAttempt({ ...orchestration, taskId });
+    expect(started.status).toBe("running");
+
+    const db = new Database(harness.dbPath);
+    db.query("update tasks set config_json = $config where id = $id").run({
+      $id: taskId,
+      $config: JSON.stringify({
+        hostExecutionCapabilities: {
+          schemaVersion: 1,
+          network: { mode: "host-fixed-actions", domains: ["api.linear.app"], clearAmbientProxy: true },
+        },
+      }),
+    });
+    db.close();
+
+    const resumed = await resumeCodexResumableAttempt({ ...orchestration, attemptId: started.attemptId });
+    expect(resumed.status).toBe("blocked");
+    expect(resumeCalls).toBe(0);
+    expect(harness.getAttempt(started.attemptId)?.output?.problems?.join(" ")).toContain("changed before resume");
+  });
+
   test("Harness Revision resumable startup attests the manifest and blocks resume after component drift", async () => {
     const projectId = harness.createProject({ name: "harness-revision-resume", rootPath: dir });
     const revision = await writeHarnessRevisionFixture(dir, projectId);
