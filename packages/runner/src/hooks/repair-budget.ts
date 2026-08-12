@@ -1,4 +1,4 @@
-import type { Harness } from "@ouroboros/harness";
+import type { Harness, RunOverview } from "@ouroboros/harness";
 
 export interface RepairBudgetEntry {
   taskId: string;
@@ -103,10 +103,26 @@ export function chargeRepairBudget(
     };
   }
   const state = readRepairBudget(run.context);
+  const overview = harness.getRunOverview({ runId, eventLimit: 0 });
+  const reconciliation = reconcileGoalReviewRepairBudget(state, overview);
+  return chargeRepairBudgetState(reconciliation.nextBudget, input);
+}
+
+export interface GoalReviewRepairTrigger {
+  taskId: string;
+  attemptId?: string;
+  role: string;
+  rootCause: string;
+}
+
+export function chargeRepairBudgetState(
+  state: RepairBudgetState,
+  input: RepairBudgetChargeInput,
+): RepairBudgetChargeDecision {
   const limit = state.limit > 0 ? state.limit : input.limit;
   const effectiveLimit = Math.min(limit, input.limit);
-  const idempotencyKey = `${input.taskId}:${input.attemptId ?? ""}:${input.kind}`;
-  const alreadyCharged = state.entries.find((entry) => `${entry.taskId}:${entry.attemptId ?? ""}:${entry.kind}` === idempotencyKey);
+  const idempotencyKey = `${input.taskId}:${input.kind}`;
+  const alreadyCharged = state.entries.find((entry) => `${entry.taskId}:${entry.kind}` === idempotencyKey);
   if (alreadyCharged) {
     return {
       allowed: true,
@@ -162,6 +178,120 @@ export function chargeRepairBudget(
     exhaustedRootCauses: state.exhaustedRootCauses ?? [],
     sharedRootCause: state.sharedRootCause ?? null,
   };
+}
+
+export function reconcileGoalReviewRepairBudget(
+  state: RepairBudgetState,
+  overview: Pick<RunOverview, "tasks" | "sessions">,
+): { nextBudget: RepairBudgetState; chargedTaskIds: string[] } {
+  const taskById = new Map(overview.tasks.map((task) => [task.id, task]));
+  let nextBudget = state;
+  const chargedTaskIds: string[] = [];
+
+  for (const session of overview.sessions) {
+    const task = taskById.get(session.taskId);
+    if (!task || task.role !== "goal-review" || session.status === "running") {
+      continue;
+    }
+    if (session.output.runDecision !== "continue" && session.output.runDecision !== "verify") {
+      continue;
+    }
+    const createdTaskIds = (session.output.artifacts ?? []).flatMap((artifact) => {
+        if (!artifact || typeof artifact !== "object" || Array.isArray(artifact)) {
+          return [];
+        }
+        const record = artifact as Record<string, unknown>;
+        if (
+          record.kind !== "created_task"
+          || record.sourceTaskId !== task.id
+          || typeof record.taskId !== "string"
+        ) {
+          return [];
+        }
+        return [record.taskId];
+      });
+    const createdFollowupWork = createdTaskIds.some((taskId) => taskById.has(taskId));
+    if (!createdFollowupWork) {
+      continue;
+    }
+    const trigger = goalReviewRepairTrigger(overview, task.id, session.attemptId);
+    if (!trigger) {
+      continue;
+    }
+    if (nextBudget.entries.some((entry) => entry.taskId === task.id && entry.kind === "replan")) {
+      continue;
+    }
+    const decision = chargeRepairBudgetState(nextBudget, {
+      limit: nextBudget.limit,
+      taskId: task.id,
+      kind: "replan",
+      summary: `reconciled goal-review follow-up after blocked ${trigger.role} ${trigger.taskId}`,
+      rootTaskId: trigger.taskId,
+      rootCause: trigger.rootCause,
+    });
+    nextBudget = decision.nextBudget;
+    if (decision.charged) {
+      chargedTaskIds.push(task.id);
+    }
+  }
+
+  return { nextBudget, chargedTaskIds };
+}
+
+export function goalReviewRepairTrigger(
+  overview: Pick<RunOverview, "tasks" | "sessions">,
+  goalReviewTaskId: string,
+  goalReviewAttemptId?: string,
+): GoalReviewRepairTrigger | null {
+  const sessions = overview.sessions;
+  const reviewTaskIndex = overview.tasks.findIndex((task) => task.id === goalReviewTaskId);
+  const taskIndexById = new Map(overview.tasks.map((task, index) => [task.id, index]));
+  let reviewSessionIndex = goalReviewAttemptId
+    ? sessions.findIndex((session) => session.attemptId === goalReviewAttemptId && session.taskId === goalReviewTaskId)
+    : -1;
+  if (reviewSessionIndex < 0) {
+    for (let index = sessions.length - 1; index >= 0; index -= 1) {
+      if (sessions[index]?.taskId === goalReviewTaskId) {
+        reviewSessionIndex = index;
+        break;
+      }
+    }
+  }
+  if (reviewSessionIndex >= 0) {
+    for (let index = reviewSessionIndex - 1; index >= 0; index -= 1) {
+      const session = sessions[index]!;
+      if (session.status === "running" || session.role === "goal-review" || session.role === "system") {
+        continue;
+      }
+      if (reviewTaskIndex >= 0 && (taskIndexById.get(session.taskId) ?? Number.MAX_SAFE_INTEGER) >= reviewTaskIndex) {
+        continue;
+      }
+      if (session.status !== "blocked") {
+        return null;
+      }
+      return {
+        taskId: session.taskId,
+        attemptId: session.attemptId,
+        role: session.role,
+        rootCause: `blocked ${session.role} ${session.taskId} attempt ${session.attemptId}`,
+      };
+    }
+    return null;
+  }
+
+  if (reviewTaskIndex < 0) {
+    return null;
+  }
+  for (let index = reviewTaskIndex - 1; index >= 0; index -= 1) {
+    const task = overview.tasks[index]!;
+    if (task.role === "goal-review" || task.role === "system") {
+      continue;
+    }
+    return task.status === "blocked"
+      ? { taskId: task.id, role: task.role, rootCause: `blocked ${task.role} ${task.id}` }
+      : null;
+  }
+  return null;
 }
 
 export function repairBudgetExhausted(state: RepairBudgetState): boolean {

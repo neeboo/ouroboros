@@ -1,9 +1,15 @@
-import { DEFAULT_REPAIR_TASK_PROMPT_TEMPLATE, readableValue, type AttemptOutput, type Harness, type Task } from "@ouroboros/harness";
+import { DEFAULT_REPAIR_TASK_PROMPT_TEMPLATE, makeId, readableValue, type AttemptOutput, type Harness, type Task } from "@ouroboros/harness";
 import { boundedDiagnosticText, compactAttemptEvidence, latestRootCause } from "../bounded-diagnostic";
 import { fitPromptAroundFrozenSections, HandoffContractTooLargeError } from "../prompt-budget";
 import { prettyJson, renderPromptTemplate } from "../template";
 import type { StopHook } from "../types";
-import { chargeRepairBudget, repairBudgetExhausted, type RepairBudgetChargeDecision } from "./repair-budget";
+import {
+  chargeRepairBudgetState,
+  readRepairBudget,
+  reconcileGoalReviewRepairBudget,
+  repairBudgetExhausted,
+  type RepairBudgetChargeDecision,
+} from "./repair-budget";
 
 export const DEFAULT_REPAIR_REPLAN_BUDGET_LIMIT = 3;
 
@@ -15,6 +21,63 @@ export function createRepairTaskHook(options: {
   return ({ run, task, output }) => {
     if (task.role !== "verifier" || output.status !== "blocked") {
       return { decision: "exit" };
+    }
+    const durableExistingRepair = options.harness.getRunOverview({ runId: run.id, eventLimit: 0 }).tasks.find((candidate) =>
+      candidate.role === "worker" && candidate.parentId === task.id
+    );
+    if (durableExistingRepair) {
+      const accounting = options.harness.runInImmediateTransaction((db) => {
+        const overview = options.harness.getRunOverviewWithDb(db, { runId: run.id, eventLimit: 0 });
+        const existing = overview.tasks.find((candidate) => candidate.id === durableExistingRepair.id);
+        const storedBudget = readRepairBudget(overview.run?.context ?? {});
+        const reconciled = reconcileGoalReviewRepairBudget(storedBudget, overview);
+        const charge = chargeRepairBudgetState(reconciled.nextBudget, {
+          limit: budgetLimit,
+          taskId: task.id,
+          kind: "repair",
+          summary: `Repair: ${task.goal}`,
+        });
+        if (!existing) {
+          return { existing: null, charge };
+        }
+        const active = existing.status === "todo" || existing.status === "running";
+        if (charge.charged || reconciled.chargedTaskIds.length > 0 || (active && overview.run?.status !== "todo")) {
+          options.harness.updateRunWithDb(db, {
+            runId: run.id,
+            ...(active ? { status: "todo" as const } : {}),
+            contextPatch: { repairReplanBudget: charge.nextBudget },
+          });
+        }
+        return { existing: charge.allowed ? existing : null, charge };
+      });
+      if (!accounting.charge.allowed || !accounting.existing) {
+        return {
+          decision: "exit",
+          artifacts: [{
+            kind: "repair_budget_exhausted",
+            verifierTaskId: task.id,
+            runId: run.id,
+            budgetLimit: accounting.charge.limit,
+            budgetUsed: accounting.charge.used,
+            remaining: 0,
+            exhaustedRootCauses: accounting.charge.exhaustedRootCauses,
+            sharedRootCause: accounting.charge.sharedRootCause ?? null,
+            reason: accounting.charge.reason,
+          }],
+          problems: [`Repair budget exhausted (${accounting.charge.used}/${accounting.charge.limit}): ${accounting.charge.reason}`],
+        };
+      }
+      return {
+        decision: accounting.existing.status === "todo" || accounting.existing.status === "running"
+          ? "continue"
+          : "exit",
+        artifacts: [{
+          kind: "created_repair_task",
+          taskId: accounting.existing.id,
+          verifierTaskId: task.id,
+          reused: true,
+        }],
+      };
     }
     const recursiveRepair = recursiveRepairBranch(options.harness, task);
     if (recursiveRepair) {
@@ -73,40 +136,6 @@ export function createRepairTaskHook(options: {
       };
     }
 
-    const charge = chargeRepairBudget(options.harness, run.id, {
-      limit: budgetLimit,
-      taskId: task.id,
-      attemptId: (output.artifacts?.find((artifact) => (artifact as Record<string, unknown>).attemptId) as
-        | Record<string, unknown>
-        | undefined)?.attemptId as string | undefined,
-      kind: "repair",
-      summary: `Repair: ${task.goal}`,
-    });
-    if (!charge.allowed) {
-      return {
-        decision: "exit",
-        artifacts: [
-          {
-            kind: "repair_budget_exhausted",
-            verifierTaskId: task.id,
-            runId: run.id,
-            budgetLimit: charge.limit,
-            budgetUsed: charge.used,
-            remaining: 0,
-            exhaustedRootCauses: charge.exhaustedRootCauses,
-            sharedRootCause: charge.sharedRootCause ?? null,
-            reason: charge.reason,
-          },
-        ],
-        problems: [
-          `Repair budget exhausted (${charge.used}/${charge.limit}): ${charge.reason}`,
-          ...(charge.exhaustedRootCauses.length > 0
-            ? [`exhausted root causes: ${charge.exhaustedRootCauses.join(", ")}`]
-            : []),
-        ],
-      };
-    }
-
     const sourceWorktreePath = sourceTask?.worktreePath ?? task.worktreePath ?? null;
     const verifierContract = verifierContractFromTask(task);
     let prompt: string;
@@ -137,30 +166,111 @@ export function createRepairTaskHook(options: {
       }
       throw error;
     }
-    const taskId = options.harness.createTask({
-      runId: run.id,
-      parentId: task.id,
-      role: "worker",
-      goal: `Repair: ${task.goal}`,
-      prompt,
-      dependsOn: sourceTask ? [sourceTask.id] : [],
-      worktreePath: sourceWorktreePath,
-      doneWhen: uniqueStrings([
-        ...(sourceTask?.doneWhen ?? []),
-        ...task.doneWhen,
-        "verifier problems are addressed",
-        "relevant checks pass",
-        "the repair output describes changed files and validation",
-      ]),
-      ...(verifierContract ? { config: { verifierContract } } : {}),
-    });
-    if (charge.charged) {
-      options.harness.updateRun({
-        runId: run.id,
-        contextPatch: {
-          repairReplanBudget: charge.nextBudget,
-        },
+    const proposedTaskId = makeId("task");
+    const atomic = options.harness.runInImmediateTransaction((db) => {
+      const overview = options.harness.getRunOverviewWithDb(db, { runId: run.id, eventLimit: 0 });
+      const storedBudget = readRepairBudget(overview.run?.context ?? {});
+      const reconciled = reconcileGoalReviewRepairBudget(storedBudget, overview);
+      const charge = chargeRepairBudgetState(reconciled.nextBudget, {
+        limit: budgetLimit,
+        taskId: task.id,
+        kind: "repair",
+        summary: `Repair: ${task.goal}`,
       });
+      const existingRepair = overview.tasks.find((candidate) =>
+        candidate.role === "worker" && candidate.parentId === task.id
+      );
+      if (existingRepair) {
+        if (charge.charged || reconciled.chargedTaskIds.length > 0) {
+          options.harness.updateRunWithDb(db, {
+            runId: run.id,
+            contextPatch: { repairReplanBudget: charge.nextBudget },
+          });
+        }
+        return { existingRepair: charge.allowed ? existingRepair : null, taskId: null, charge, conflict: null };
+      }
+      if (!charge.allowed) {
+        options.harness.updateRunWithDb(db, {
+          runId: run.id,
+          contextPatch: { repairReplanBudget: charge.nextBudget },
+        });
+        return { existingRepair: null, taskId: null, charge, conflict: null };
+      }
+      if (!charge.charged) {
+        return {
+          existingRepair: null,
+          taskId: null,
+          charge,
+          conflict: "repair budget was charged but the durable repair task is missing",
+        };
+      }
+      const taskId = options.harness.createTaskWithDb(db, {
+        id: proposedTaskId,
+        runId: run.id,
+        parentId: task.id,
+        role: "worker",
+        goal: `Repair: ${task.goal}`,
+        prompt,
+        dependsOn: sourceTask ? [sourceTask.id] : [],
+        worktreePath: sourceWorktreePath,
+        doneWhen: uniqueStrings([
+          ...(sourceTask?.doneWhen ?? []),
+          ...task.doneWhen,
+          "verifier problems are addressed",
+          "relevant checks pass",
+          "the repair output describes changed files and validation",
+        ]),
+        ...(verifierContract ? { config: { verifierContract } } : {}),
+      });
+      options.harness.updateRunWithDb(db, {
+        runId: run.id,
+        contextPatch: { repairReplanBudget: charge.nextBudget },
+      });
+      return { existingRepair: null, taskId, charge, conflict: null };
+    });
+    if (atomic.existingRepair) {
+      return {
+        decision: atomic.existingRepair.status === "todo" || atomic.existingRepair.status === "running"
+          ? "continue"
+          : "exit",
+        artifacts: [{
+          kind: "created_repair_task",
+          taskId: atomic.existingRepair.id,
+          verifierTaskId: task.id,
+          reused: true,
+          ...(sourceTask ? { sourceTaskId: sourceTask.id, sourceWorktreePath } : {}),
+        }],
+      };
+    }
+    if (atomic.conflict) {
+      return {
+        decision: "exit",
+        artifacts: [{ kind: "repair_creation_conflict", verifierTaskId: task.id }],
+        problems: [atomic.conflict],
+      };
+    }
+    if (!atomic.charge?.allowed || !atomic.charge.charged || !atomic.taskId) {
+      const charge = atomic.charge!;
+      return {
+        decision: "exit",
+        artifacts: [{
+          kind: "repair_budget_exhausted",
+          verifierTaskId: task.id,
+          runId: run.id,
+          budgetLimit: charge.limit,
+          budgetUsed: charge.used,
+          remaining: 0,
+          exhaustedRootCauses: charge.exhaustedRootCauses,
+          sharedRootCause: charge.sharedRootCause ?? null,
+          reason: charge.reason,
+        }],
+        problems: [
+          `Repair budget exhausted (${charge.used}/${charge.limit}): ${charge.reason}`,
+          ...(charge.exhaustedRootCauses.length > 0
+            ? [`exhausted root causes: ${charge.exhaustedRootCauses.join(", ")}`]
+            : []),
+        ],
+      };
     }
 
     return {
@@ -168,7 +278,7 @@ export function createRepairTaskHook(options: {
       artifacts: [
         {
           kind: "created_repair_task",
-          taskId,
+          taskId: atomic.taskId,
           verifierTaskId: task.id,
           ...(sourceTask ? { sourceTaskId: sourceTask.id, sourceWorktreePath } : {}),
         },

@@ -72,7 +72,10 @@ export type { CollectSubsessionsHookOptions } from "./hooks/collect-subsessions"
 export { createRepairTaskHook, DEFAULT_REPAIR_REPLAN_BUDGET_LIMIT } from "./hooks/create-repair";
 export {
   chargeRepairBudget,
+  chargeRepairBudgetState,
+  goalReviewRepairTrigger,
   readRepairBudget,
+  reconcileGoalReviewRepairBudget,
   repairBudgetExhausted,
   type RepairBudgetEntry,
   type RepairBudgetState,

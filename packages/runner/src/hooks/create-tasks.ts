@@ -1,6 +1,12 @@
 import { makeId, type Harness, type PlannedTask, type Task } from "@ouroboros/harness";
 import { validatePlannedTasks } from "../executors/output";
 import type { StopHook } from "../types";
+import {
+  chargeRepairBudgetState,
+  goalReviewRepairTrigger,
+  readRepairBudget,
+  reconcileGoalReviewRepairBudget,
+} from "./repair-budget";
 
 export function createTasksFromOutputHook(options: { harness: Harness }): StopHook {
   return ({ run, task, output }) => {
@@ -56,6 +62,9 @@ export function createTasksFromOutputHook(options: { harness: Harness }): StopHo
         ...(plannedTask.modelPreference ? { modelPreference: plannedTask.modelPreference } : {}),
         ...(plannedTask.verifierContract ? { verifierContract: plannedTask.verifierContract } : {}),
         ...(sourceWorktreePath ? { sourceWorktreePath } : {}),
+        ...(task.role === "goal-review" ? {
+          goalReviewContinuation: { sourceTaskId: task.id, ordinal: index },
+        } : {}),
       };
       return { id, plannedTask, dependsOn, sourceWorktreePath, config };
     });
@@ -82,13 +91,133 @@ export function createTasksFromOutputHook(options: { harness: Harness }): StopHo
 
     if (plannedTasks.length > 0 && task.role === "goal-review") {
       const atomic = options.harness.runInImmediateTransaction((db) => {
-        const activeTasks = options.harness.getRunOverviewWithDb(db, { runId: run.id, eventLimit: 0 }).tasks.filter((candidate) =>
+        const overview = options.harness.getRunOverviewWithDb(db, { runId: run.id, eventLimit: 0 });
+        const storedRepairBudget = overview.run ? readRepairBudget(overview.run.context) : null;
+        const reconciliation = storedRepairBudget
+          ? reconcileGoalReviewRepairBudget(storedRepairBudget, overview)
+          : null;
+        const currentRepairBudget = reconciliation?.nextBudget ?? storedRepairBudget;
+        if (reconciliation && reconciliation.chargedTaskIds.length > 0) {
+          options.harness.updateRunWithDb(db, {
+            runId: run.id,
+            contextPatch: { repairReplanBudget: reconciliation.nextBudget },
+          });
+        }
+        const base = {
+          created: [] as ReturnType<typeof createPrepared>[],
+          replayedTaskIds: [] as string[],
+          repairBudget: null as ReturnType<typeof chargeRepairBudgetState> | null,
+          reconciledTaskIds: reconciliation?.chargedTaskIds ?? [],
+          conflict: null as string | null,
+        };
+        const activeTasks = overview.tasks.filter((candidate) =>
           candidate.id !== task.id && (candidate.status === "todo" || candidate.status === "running")
         );
         if (activeTasks.length > 0) {
-          return { activeTasks, created: [] as ReturnType<typeof createPrepared>[] };
+          return { ...base, activeTasks };
         }
-        return { activeTasks: [], created: prepared.map((entry) => createPrepared(entry, db)) };
+
+        const durableContinuations = overview.tasks.filter((candidate) => {
+          const provenance = candidate.config?.goalReviewContinuation;
+          return provenance != null
+            && typeof provenance === "object"
+            && !Array.isArray(provenance)
+            && (provenance as Record<string, unknown>).sourceTaskId === task.id;
+        });
+        if (durableContinuations.length > 0) {
+          const byOrdinal = new Map(durableContinuations.map((candidate) => {
+            const provenance = candidate.config!.goalReviewContinuation as Record<string, unknown>;
+            return [provenance.ordinal, candidate] as const;
+          }));
+          const exact = durableContinuations.length === prepared.length && prepared.every((entry, index) => {
+            const existing = byOrdinal.get(index);
+            const expectedDependsOn = entry.dependsOn.map((dependencyId) => {
+              const plannedOrdinal = prepared.findIndex((candidate) => candidate.id === dependencyId);
+              return plannedOrdinal >= 0 ? byOrdinal.get(plannedOrdinal)?.id ?? dependencyId : dependencyId;
+            });
+            return existing?.role === entry.plannedTask.role
+              && existing.goal === entry.plannedTask.goal
+              && existing.prompt === entry.plannedTask.prompt
+              && JSON.stringify(existing.dependsOn) === JSON.stringify(expectedDependsOn)
+              && JSON.stringify(existing.doneWhen) === JSON.stringify(entry.plannedTask.doneWhen ?? [])
+              && JSON.stringify(existing.config ?? {}) === JSON.stringify(entry.config);
+          });
+          return {
+            ...base,
+            activeTasks: [],
+            replayedTaskIds: exact ? durableContinuations.map((candidate) => candidate.id) : [],
+            conflict: exact ? null : "goal-review continuation replay conflicts with the durable task set",
+          };
+        }
+
+        const legacyReplayedTaskIds = [...new Set(overview.sessions
+          .filter((candidate) => candidate.taskId === task.id && candidate.status !== "running")
+          .flatMap((candidate) => candidate.output.artifacts ?? [])
+          .flatMap((artifact) => {
+            if (!artifact || typeof artifact !== "object" || Array.isArray(artifact)) return [];
+            const record = artifact as Record<string, unknown>;
+            return record.kind === "created_task"
+              && record.sourceTaskId === task.id
+              && typeof record.taskId === "string"
+              && overview.tasks.some((candidate) => candidate.id === record.taskId)
+              ? [record.taskId]
+              : [];
+          }))];
+        if (legacyReplayedTaskIds.length > 0) {
+          return { ...base, activeTasks: [], replayedTaskIds: legacyReplayedTaskIds };
+        }
+
+        if (
+          reconciliation
+          && reconciliation.chargedTaskIds.length > 0
+          && currentRepairBudget
+          && currentRepairBudget.used >= currentRepairBudget.limit
+        ) {
+          const exhausted = chargeRepairBudgetState(currentRepairBudget, {
+            limit: currentRepairBudget.limit,
+            taskId: task.id,
+            kind: "replan",
+            summary: "goal-review continuation blocked after historical repair reconciliation exhausted the budget",
+          });
+          return { ...base, activeTasks: [], repairBudget: exhausted };
+        }
+
+        const repairTrigger = goalReviewRepairTrigger(overview, task.id);
+        const existingCharge = currentRepairBudget?.entries.some((entry) =>
+          entry.taskId === task.id && entry.kind === "replan"
+        );
+        if (repairTrigger && existingCharge) {
+          return {
+            ...base,
+            activeTasks: [],
+            conflict: "repair budget was charged for this goal-review but its durable continuation task is missing",
+          };
+        }
+        const repairBudget = repairTrigger && currentRepairBudget
+          ? chargeRepairBudgetState(currentRepairBudget, {
+              limit: currentRepairBudget.limit,
+              taskId: task.id,
+              kind: "replan",
+              summary: `goal-review follow-up after blocked ${repairTrigger.role} ${repairTrigger.taskId}`,
+              rootTaskId: repairTrigger.taskId,
+              rootCause: repairTrigger.rootCause,
+            })
+          : null;
+        if (repairBudget && !repairBudget.allowed) {
+          return { ...base, activeTasks: [], repairBudget };
+        }
+        if (repairBudget?.charged) {
+          options.harness.updateRunWithDb(db, {
+            runId: run.id,
+            contextPatch: { repairReplanBudget: repairBudget.nextBudget },
+          });
+        }
+        return {
+          ...base,
+          activeTasks: [],
+          created: prepared.map((entry) => createPrepared(entry, db)),
+          repairBudget,
+        };
       });
       if (atomic.activeTasks.length > 0) {
         return {
@@ -106,9 +235,61 @@ export function createTasksFromOutputHook(options: { harness: Harness }): StopHo
           })),
         };
       }
+      if (atomic.repairBudget && !atomic.repairBudget.allowed) {
+        return {
+          decision: "exit",
+          artifacts: [{
+            kind: "repair_budget_exhausted",
+            taskId: task.id,
+            used: atomic.repairBudget.used,
+            limit: atomic.repairBudget.limit,
+            requestedRunDecision: output.runDecision ?? null,
+          }],
+          problems: [
+            `goal-review cannot create repair/replan work after repair budget exhausted at ${atomic.repairBudget.used}/${atomic.repairBudget.limit}`,
+          ],
+        };
+      }
+      if (atomic.conflict) {
+        return {
+          decision: "exit",
+          artifacts: [{ kind: "goal_review_continuation_conflict", taskId: task.id }],
+          problems: [atomic.conflict],
+        };
+      }
+      if (atomic.replayedTaskIds.length > 0) {
+        return {
+          decision: "exit",
+          artifacts: atomic.replayedTaskIds.map((taskId) => ({
+            kind: "reused_created_task",
+            taskId,
+            sourceTaskId: task.id,
+          })),
+        };
+      }
       return {
         decision: atomic.created.length > 0 ? "continue" : "exit",
-        artifacts: atomic.created,
+        checks: atomic.repairBudget?.charged ? [{
+          name: "shared repair budget",
+          status: "passed",
+          evidence: `charged ${atomic.repairBudget.nextBudget.used}/${atomic.repairBudget.limit} for ${task.id}`,
+        }] : undefined,
+        artifacts: [
+          ...(atomic.repairBudget?.charged ? [{
+            kind: "repair_budget_charged",
+            taskId: task.id,
+            rootTaskId: atomic.repairBudget.nextBudget.entries.at(-1)?.rootTaskId ?? null,
+            used: atomic.repairBudget.nextBudget.used,
+            limit: atomic.repairBudget.limit,
+          }] : []),
+          ...(atomic.reconciledTaskIds.length > 0 ? [{
+            kind: "repair_budget_reconciled",
+            taskIds: atomic.reconciledTaskIds,
+            used: atomic.repairBudget?.nextBudget.used ?? null,
+            limit: atomic.repairBudget?.limit ?? null,
+          }] : []),
+          ...atomic.created,
+        ],
       };
     }
 

@@ -10412,6 +10412,170 @@ if (args.includes("self-improve-daemon")) {
     });
   });
 
+  test("concurrent self-improve daemons create and charge one automatic recovery", async () => {
+    const bootstrap = await runCliJson("self-iterate");
+    const setupHarness = new Harness(dbPath);
+    setupHarness.recordAttempt({
+      taskId: bootstrap.taskId,
+      input: {},
+      output: {
+        status: "done",
+        summary: "Initial assessment drained",
+        changedFiles: [],
+        checks: [{ name: "assessment", status: "passed" }],
+        artifacts: [],
+        problems: [],
+      },
+    });
+    setupHarness.updateRunStatus({ runId: bootstrap.runId, status: "done" });
+    const blockedRunId = setupHarness.createRun({
+      goal: "One blocked delivery needs one recovery",
+      context: { parentRunId: bootstrap.runId, source: "design" },
+    });
+    const blockedTaskId = setupHarness.createTask({
+      runId: blockedRunId,
+      role: "worker",
+      goal: "Produce the missing host receipt",
+      prompt: "Return the bounded receipt evidence.",
+    });
+    const blockedAttemptId = setupHarness.recordAttempt({
+      taskId: blockedTaskId,
+      input: {},
+      output: {
+        status: "blocked",
+        summary: "The host receipt is still missing",
+        changedFiles: [],
+        checks: [{ name: "host receipt", status: "failed" }],
+        artifacts: [],
+        problems: ["host receipt missing"],
+      },
+    });
+    setupHarness.updateRunStatus({ runId: blockedRunId, status: "blocked" });
+
+    const codexBin = join(dir, "fake-codex-concurrent-recovery");
+    const payload = {
+      status: "done",
+      summary: "The single recovery completed",
+      changedFiles: [],
+      checks: [{ name: "recovery", status: "passed" }],
+      artifacts: [],
+      problems: [],
+    };
+    await writeFile(
+      codexBin,
+      [
+        "#!/usr/bin/env bun",
+        "import { writeFileSync } from 'node:fs';",
+        "await Bun.sleep(100);",
+        "const outputFlag = Bun.argv.indexOf('--output-last-message');",
+        "const outputPath = outputFlag >= 0 ? Bun.argv[outputFlag + 1] : '';",
+        `const payload = ${JSON.stringify(payload)};`,
+        "if (outputPath) writeFileSync(outputPath, JSON.stringify(payload));",
+        "console.log(JSON.stringify({ type: 'session.started', session_id: 'session_concurrent_recovery' }));",
+        "console.log(JSON.stringify({ type: 'agent.message', message: JSON.stringify(payload) }));",
+      ].join("\n"),
+    );
+    await chmod(codexBin, 0o755);
+
+    const daemonArgs = [
+      "self-improve-daemon",
+      "--executor", "codex-resumable",
+      "--root-run-id", bootstrap.runId,
+      "--codex-bin", codexBin,
+      "--parallel", "auto",
+      "--max-ticks", "1",
+      "--tick-cycles", "1",
+      "--max-rounds", "1",
+      "--stop-hook", "context-summary",
+      "--no-integrate", "true",
+      "--interval-ms", "1",
+      "--idle-ms", "1",
+    ];
+    await Promise.all([runCliJson(...daemonArgs), runCliJson(...daemonArgs)]);
+
+    const overview = setupHarness.getRunOverview({ runId: blockedRunId, eventLimit: 0 });
+    const recoveryTasks = overview.tasks.filter((candidate) => {
+      const recovery = candidate.config?.automaticRecovery as { sourceAttemptId?: string } | undefined;
+      return recovery?.sourceAttemptId === blockedAttemptId;
+    });
+    expect(recoveryTasks).toHaveLength(1);
+    expect((overview.run?.context.repairReplanBudget as { used?: number } | undefined)?.used).toBe(1);
+  });
+
+  test("self-improve-daemon restores accounting for an existing automatic recovery", async () => {
+    const bootstrap = await runCliJson("self-iterate");
+    const setupHarness = new Harness(dbPath);
+    setupHarness.recordAttempt({
+      taskId: bootstrap.taskId,
+      input: {},
+      output: { status: "done", summary: "Assessment drained", changedFiles: [], checks: [], artifacts: [], problems: [] },
+    });
+    setupHarness.updateRunStatus({ runId: bootstrap.runId, status: "done" });
+    const blockedRunId = setupHarness.createRun({
+      goal: "Restore recovery accounting",
+      context: { parentRunId: bootstrap.runId, source: "design" },
+    });
+    const sourceTaskId = setupHarness.createTask({
+      runId: blockedRunId,
+      role: "worker",
+      goal: "Original blocked work",
+      prompt: "Implement.",
+    });
+    const sourceAttemptId = setupHarness.recordAttempt({
+      taskId: sourceTaskId,
+      input: {},
+      output: { status: "blocked", summary: "Blocked.", changedFiles: [], checks: [], artifacts: [], problems: ["repair"] },
+    });
+    const recoveryTaskId = setupHarness.createTask({
+      runId: blockedRunId,
+      parentId: sourceTaskId,
+      role: "worker",
+      goal: "Existing recovery",
+      prompt: "Repair once.",
+      config: { automaticRecovery: { generation: 1, sourceTaskId, sourceAttemptId } },
+    });
+    setupHarness.updateRunStatus({ runId: blockedRunId, status: "blocked" });
+
+    const codexBin = join(dir, "fake-codex-existing-recovery");
+    const payload = { status: "done", summary: "Recovery done", changedFiles: [], checks: [], artifacts: [], problems: [] };
+    await writeFile(codexBin, [
+      "#!/usr/bin/env bun",
+      "import { writeFileSync } from 'node:fs';",
+      "const outputFlag = Bun.argv.indexOf('--output-last-message');",
+      "const outputPath = outputFlag >= 0 ? Bun.argv[outputFlag + 1] : '';",
+      `const payload = ${JSON.stringify(payload)};`,
+      "if (outputPath) writeFileSync(outputPath, JSON.stringify(payload));",
+      "console.log(JSON.stringify({ type: 'session.started', session_id: 'session_existing_recovery' }));",
+      "console.log(JSON.stringify({ type: 'agent.message', message: JSON.stringify(payload) }));",
+    ].join("\n"));
+    await chmod(codexBin, 0o755);
+
+    await runCliJson(
+      "self-improve-daemon",
+      "--executor", "codex-resumable",
+      "--root-run-id", bootstrap.runId,
+      "--codex-bin", codexBin,
+      "--parallel", "auto",
+      "--max-ticks", "1",
+      "--tick-cycles", "1",
+      "--max-rounds", "1",
+      "--stop-hook", "context-summary",
+      "--no-integrate", "true",
+      "--interval-ms", "1",
+      "--idle-ms", "1",
+    );
+
+    const overview = setupHarness.getRunOverview({ runId: blockedRunId, eventLimit: 0 });
+    expect(overview.tasks.filter((task) => {
+      const recovery = task.config?.automaticRecovery as { sourceAttemptId?: string } | undefined;
+      return recovery?.sourceAttemptId === sourceAttemptId;
+    }).map((task) => task.id)).toEqual([recoveryTaskId]);
+    expect(overview.run?.context.repairReplanBudget).toMatchObject({
+      used: 1,
+      entries: [expect.objectContaining({ taskId: sourceTaskId, kind: "repair" })],
+    });
+  });
+
   test("self-improve-daemon does not reopen a drained run whose matching recovery is terminal", async () => {
     const bootstrap = await runCliJson("self-iterate");
     const setupHarness = new Harness(dbPath);
@@ -10474,6 +10638,22 @@ if (args.includes("self-improve-daemon")) {
         checks: [{ name: "recovery", status: "passed" }],
         artifacts: [],
         problems: [],
+      },
+    });
+    setupHarness.updateRun({
+      runId: blockedRunId,
+      contextPatch: {
+        repairReplanBudget: {
+          limit: 3,
+          used: 1,
+          entries: [{
+            taskId: blockedTaskId,
+            attemptId: blockedAttemptId,
+            kind: "repair",
+            summary: "One bounded recovery",
+            chargedAt: "2026-08-11T00:00:00.000Z",
+          }],
+        },
       },
     });
     for (let index = 0; index < 3; index += 1) {

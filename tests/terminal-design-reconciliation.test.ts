@@ -387,6 +387,11 @@ describe("terminal design delivery reconciliation", () => {
     harness.updateRunStatus({ runId: deliveryRunId, status: "blocked" });
 
     const first = reconcileTerminalDesignDeliveries({ harness, rootRunId, runs: harness.listRuns({ limit: 100 }) });
+    harness.updateRun({
+      runId: deliveryRunId,
+      contextPatch: { repairReplanBudget: { limit: 2, used: 0, entries: [] } },
+    });
+    harness.updateRunStatus({ runId: deliveryRunId, status: "blocked" });
     const second = reconcileTerminalDesignDeliveries({ harness, rootRunId, runs: harness.listRuns({ limit: 100 }) });
     const overview = harness.getRunOverview({ runId: deliveryRunId, eventLimit: 0 });
     const repairs = overview.tasks.filter((task) => task.config?.terminalDesignReconciliation);
@@ -396,6 +401,7 @@ describe("terminal design delivery reconciliation", () => {
     expect(repairs.filter((task) => task.role === "worker")).toHaveLength(1);
     expect(overview.tasks.filter((task) => task.role === "system")).toHaveLength(0);
     expect(overview.run?.context.repairReplanBudget).toMatchObject({ limit: 2, used: 1 });
+    expect(overview.run?.status).toBe("todo");
     expect(overview.run?.context.terminalDesignReconciliation).toMatchObject({
       state: "repairing",
       repairTaskId: first.repairTaskId,

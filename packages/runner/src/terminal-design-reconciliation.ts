@@ -1,6 +1,7 @@
 import {
   applyHarnessAction,
   describeIntegrationReadiness,
+  makeId,
   type Harness,
   type RunOverview,
 } from "@ouroboros/harness";
@@ -8,7 +9,11 @@ import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { dirname, isAbsolute, resolve } from "node:path";
 import { DEFAULT_REPAIR_REPLAN_BUDGET_LIMIT } from "./hooks/create-repair";
-import { chargeRepairBudget, readRepairBudget } from "./hooks/repair-budget";
+import {
+  chargeRepairBudgetState,
+  readRepairBudget,
+  reconcileGoalReviewRepairBudget,
+} from "./hooks/repair-budget";
 
 type ScopedRun = ReturnType<Harness["listRuns"]>[number];
 type HarnessActionEvent = ReturnType<Harness["getHarnessActionEvent"]>;
@@ -46,15 +51,14 @@ export function reconcileTerminalDesignDeliveries(input: {
     const currentMarker = reconciliationMarker(run.context, run.id, proposalId);
     const currentRepair = currentMarker?.repairTaskId ? input.harness.getTask(currentMarker.repairTaskId) : null;
     if (currentRepair?.status === "todo" || currentRepair?.status === "running") {
-      return {
-        blocksAssessment: true,
-        state: "repairing",
+      const overview = input.harness.getRunOverview({ runId: run.id, eventLimit: 0 });
+      return createRepairOrTerminalDisposition({
+        harness: input.harness,
+        run,
         proposalId,
-        deliveryRunId: run.id,
         reconciliationTaskId: currentMarker?.reconciliationTaskId,
-        repairTaskId: currentRepair.id,
-        reason: "bounded reconciliation repair already active",
-      };
+        failure: reconciliationFailureEvidence(overview, null, null),
+      });
     }
     if (!isTerminal(run.status)) {
       continue;
@@ -173,27 +177,13 @@ export function reconcileTerminalDesignDeliveries(input: {
     const existing = reconciliationMarker(run.context, run.id, proposalId);
     const existingRepair = existing?.repairTaskId ? input.harness.getTask(existing.repairTaskId) : null;
     if (existingRepair) {
-      const budget = readRepairBudget(run.context);
-      if (budget.used >= budget.limit) {
-        return persistExhaustedDisposition({
-          harness: input.harness,
-          run,
-          proposalId,
-          reconciliationTaskId: existing?.reconciliationTaskId,
-          failure: reconciliationFailureEvidence(overview, null, null),
-        }, budget.used, budget.limit);
-      }
-      return {
-        blocksAssessment: true,
-        state: "repairing",
+      return createRepairOrTerminalDisposition({
+        harness: input.harness,
+        run,
         proposalId,
-        deliveryRunId: run.id,
         reconciliationTaskId: existing?.reconciliationTaskId,
-        repairTaskId: existingRepair.id,
-        reason: existingRepair.status === "todo" || existingRepair.status === "running"
-          ? "bounded reconciliation repair already active"
-          : "terminal reconciliation repair awaits the bounded recovery controller",
-      };
+        failure: reconciliationFailureEvidence(overview, null, null),
+      });
     }
 
     return createRepairOrTerminalDisposition({
@@ -219,72 +209,136 @@ function createRepairOrTerminalDisposition(input: {
   reconciliationTaskId?: string;
   failure: ReturnType<typeof reconciliationFailureEvidence>;
 }): TerminalDesignReconciliationResult {
-  const budget = readRepairBudget(input.run.context);
-  if (budget.used >= budget.limit) {
-    return persistExhaustedDisposition(input, budget.used, budget.limit);
-  }
-
-  const charge = chargeRepairBudget(input.harness, input.run.id, {
-    limit: DEFAULT_REPAIR_REPLAN_BUDGET_LIMIT,
-    taskId: input.failure.sourceTaskId ?? input.reconciliationTaskId ?? input.run.id,
-    ...(input.failure.sourceAttemptId ? { attemptId: input.failure.sourceAttemptId } : {}),
-    kind: "repair",
-    summary: `Terminal design reconciliation repair for proposal ${input.proposalId}`,
-    rootTaskId: input.failure.sourceWorkerTaskId ?? input.failure.sourceTaskId ?? input.reconciliationTaskId ?? input.run.id,
-    rootCause: "terminal-design-reconciliation",
-  });
-  if (!charge.allowed) {
-    return persistExhaustedDisposition(input, charge.nextBudget.used, charge.nextBudget.limit);
-  }
-
-  const repairTaskId = input.harness.createTask({
-    runId: input.run.id,
-    ...(input.reconciliationTaskId ? { parentId: input.reconciliationTaskId } : {}),
-    role: "worker",
-    goal: `Repair terminal design delivery for proposal ${input.proposalId}`,
-    prompt: [
-      "Repair the unresolved terminal accepted design delivery in its recorded source worktree.",
-      `Proposal: ${input.proposalId}`,
-      `Delivery run: ${input.run.id}`,
-      `Failure evidence: ${JSON.stringify(input.failure)}`,
-      "Preserve the original goal, evaluation, verifier, retry, worktree, permissions, completion, and integration contracts.",
-      "Do not claim integration until the frozen verifier passes and integrateVerifiedRun records its audited receipt.",
-    ].join("\n"),
-    worktreePath: input.failure.sourceWorktreePath,
-    doneWhen: [
-      "the recorded terminal failure is addressed",
-      "the frozen deterministic checks pass",
-      "changed files and verification evidence are returned",
-    ],
-    config: {
-      terminalDesignReconciliation: {
-        kind: "terminal-design-reconciliation",
-        proposalId: input.proposalId,
-        deliveryRunId: input.run.id,
-        reconciliationTaskId: input.reconciliationTaskId ?? null,
-        failureEvidence: input.failure,
+  const proposedRepairTaskId = makeId("task");
+  const atomic = input.harness.runInImmediateTransaction((db) => {
+    const overview = input.harness.getRunOverviewWithDb(db, { runId: input.run.id, eventLimit: 0 });
+    const currentRun = overview.run;
+    if (!currentRun) {
+      return { kind: "missing" as const, repairTaskId: null, charge: null };
+    }
+    const existingRepair = overview.tasks.find((task) => {
+      const contract = task.config?.terminalDesignReconciliation;
+      return task.role === "worker"
+        && contract != null
+        && typeof contract === "object"
+        && !Array.isArray(contract)
+        && (contract as Record<string, unknown>).proposalId === input.proposalId;
+    });
+    const storedBudget = readRepairBudget(currentRun.context);
+    const reconciled = reconcileGoalReviewRepairBudget(storedBudget, overview);
+    const existingContract = existingRepair?.config?.terminalDesignReconciliation;
+    const existingFailure = existingContract != null
+      && typeof existingContract === "object"
+      && !Array.isArray(existingContract)
+      && (existingContract as Record<string, unknown>).failureEvidence != null
+      && typeof (existingContract as Record<string, unknown>).failureEvidence === "object"
+      ? (existingContract as Record<string, unknown>).failureEvidence as Record<string, unknown>
+      : null;
+    const sourceTaskId = typeof existingFailure?.sourceTaskId === "string"
+      ? existingFailure.sourceTaskId
+      : input.failure.sourceTaskId ?? input.reconciliationTaskId ?? input.run.id;
+    const sourceAttemptId = typeof existingFailure?.sourceAttemptId === "string"
+      ? existingFailure.sourceAttemptId
+      : input.failure.sourceAttemptId;
+    const charge = chargeRepairBudgetState(reconciled.nextBudget, {
+      limit: DEFAULT_REPAIR_REPLAN_BUDGET_LIMIT,
+      taskId: sourceTaskId,
+      ...(sourceAttemptId ? { attemptId: sourceAttemptId } : {}),
+      kind: "repair",
+      summary: `Terminal design reconciliation repair for proposal ${input.proposalId}`,
+      rootTaskId: input.failure.sourceWorkerTaskId ?? input.failure.sourceTaskId ?? input.reconciliationTaskId ?? input.run.id,
+      rootCause: "terminal-design-reconciliation",
+    });
+    if (existingRepair) {
+      const active = existingRepair.status === "todo" || existingRepair.status === "running";
+      if (charge.charged || reconciled.chargedTaskIds.length > 0 || (active && currentRun.status !== "todo")) {
+        input.harness.updateRunWithDb(db, {
+          runId: input.run.id,
+          ...(active ? { status: "todo" as const } : {}),
+          contextPatch: { repairReplanBudget: charge.nextBudget },
+        });
+      }
+      return charge.allowed
+        ? { kind: "existing" as const, repairTaskId: existingRepair.id, charge }
+        : { kind: "exhausted" as const, repairTaskId: null, charge };
+    }
+    if (!charge.allowed) {
+      input.harness.updateRunWithDb(db, {
+        runId: input.run.id,
+        contextPatch: { repairReplanBudget: charge.nextBudget },
+      });
+      return { kind: "exhausted" as const, repairTaskId: null, charge };
+    }
+    if (!charge.charged) {
+      return { kind: "conflict" as const, repairTaskId: null, charge };
+    }
+    const repairTaskId = input.harness.createTaskWithDb(db, {
+      id: proposedRepairTaskId,
+      runId: input.run.id,
+      ...(input.reconciliationTaskId ? { parentId: input.reconciliationTaskId } : {}),
+      role: "worker",
+      goal: `Repair terminal design delivery for proposal ${input.proposalId}`,
+      prompt: [
+        "Repair the unresolved terminal accepted design delivery in its recorded source worktree.",
+        `Proposal: ${input.proposalId}`,
+        `Delivery run: ${input.run.id}`,
+        `Failure evidence: ${JSON.stringify(input.failure)}`,
+        "Preserve the original goal, evaluation, verifier, retry, worktree, permissions, completion, and integration contracts.",
+        "Do not claim integration until the frozen verifier passes and integrateVerifiedRun records its audited receipt.",
+      ].join("\n"),
+      worktreePath: input.failure.sourceWorktreePath,
+      doneWhen: [
+        "the recorded terminal failure is addressed",
+        "the frozen deterministic checks pass",
+        "changed files and verification evidence are returned",
+      ],
+      config: {
+        terminalDesignReconciliation: {
+          kind: "terminal-design-reconciliation",
+          proposalId: input.proposalId,
+          deliveryRunId: input.run.id,
+          reconciliationTaskId: input.reconciliationTaskId ?? null,
+          failureEvidence: input.failure,
+        },
+        ...(input.failure.sourceWorktreePath ? { sourceWorktreePath: input.failure.sourceWorktreePath } : {}),
+        ...reconciliationContracts(currentRun.context),
       },
-      ...(input.failure.sourceWorktreePath ? { sourceWorktreePath: input.failure.sourceWorktreePath } : {}),
-      ...reconciliationContracts(input.run.context),
-    },
-  });
-  input.harness.updateRun({
-    runId: input.run.id,
-    status: "todo",
-    contextPatch: {
-      repairReplanBudget: charge.nextBudget,
-      terminalDesignReconciliation: {
-        kind: "terminal-design-reconciliation",
-        proposalId: input.proposalId,
-        deliveryRunId: input.run.id,
-        state: "repairing",
-        reconciliationTaskId: input.reconciliationTaskId ?? null,
-        repairTaskId,
-        failureEvidence: input.failure,
-        contracts: reconciliationContracts(input.run.context),
+    });
+    input.harness.updateRunWithDb(db, {
+      runId: input.run.id,
+      status: "todo",
+      contextPatch: {
+        repairReplanBudget: charge.nextBudget,
+        terminalDesignReconciliation: {
+          kind: "terminal-design-reconciliation",
+          proposalId: input.proposalId,
+          deliveryRunId: input.run.id,
+          state: "repairing",
+          reconciliationTaskId: input.reconciliationTaskId ?? null,
+          repairTaskId,
+          failureEvidence: input.failure,
+          contracts: reconciliationContracts(currentRun.context),
+        },
       },
-    },
+    });
+    return { kind: "created" as const, repairTaskId, charge };
   });
+  if (atomic.kind === "missing") {
+    return persistExhaustedDisposition(input, 0, DEFAULT_REPAIR_REPLAN_BUDGET_LIMIT);
+  }
+  if (atomic.kind === "exhausted") {
+    return persistExhaustedDisposition(input, atomic.charge.nextBudget.used, atomic.charge.nextBudget.limit);
+  }
+  if (atomic.kind === "conflict") {
+    return {
+      blocksAssessment: true,
+      state: "exhausted",
+      proposalId: input.proposalId,
+      deliveryRunId: input.run.id,
+      reason: "repair budget was charged but the durable terminal reconciliation task is missing",
+    };
+  }
+  const repairTaskId = atomic.repairTaskId;
   return {
     blocksAssessment: true,
     state: "repairing",
@@ -292,7 +346,7 @@ function createRepairOrTerminalDisposition(input: {
     deliveryRunId: input.run.id,
     ...(input.reconciliationTaskId ? { reconciliationTaskId: input.reconciliationTaskId } : {}),
     repairTaskId,
-    reason: charge.reason,
+    reason: atomic.kind === "existing" ? "bounded reconciliation repair already recorded" : atomic.charge.reason,
   };
 }
 

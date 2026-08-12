@@ -5,6 +5,7 @@ import {
   describeIntegrationReadiness,
   diagnoseRunOverview,
   Harness,
+  makeId,
   proposeGuardrailsFromLessons as buildGuardrailProposalsFromLessons,
   refreshGuardrailProposalsForRun,
   readableList,
@@ -37,15 +38,17 @@ import {
   createRunsFromOutputHook,
   createTasksFromOutputHook,
   createVerifierTaskHook,
-  chargeRepairBudget,
+  chargeRepairBudgetState,
   childEnvForProcess,
   codexOnlyAgentDefaults,
   createAcpxSubsessionRunner,
   createCollectSubsessionsHook,
   createRouteExecutor,
   reconcileDeferredDesignAuthority,
+  reconcileGoalReviewRepairBudget,
   reconcileTerminalDesignDeliveries,
   resolveExecutionRoute,
+  readRepairBudget,
   resumeCodexResumableAttempt,
   runCodexAutopilot,
   runCodexResumableLoop,
@@ -3076,33 +3079,10 @@ function recoverBlockedSelfImprovementRuns(
     }
 
     const sourceAttemptId = sourceSession?.attemptId ?? null;
-    const existingRecovery = overview.tasks.find((task) => {
-      const recovery = recordValue(task.config?.automaticRecovery);
-      return sourceAttemptId != null && recovery.sourceAttemptId === sourceAttemptId;
-    });
     const terminalReason = sourceSession ? terminalReasonForSession(sourceSession) : null;
     const isExecutorFailure = terminalReason != null && EXECUTOR_FAILURE_TERMINAL_REASONS.has(terminalReason);
     const fromBackend = sourceSession ? backendIdForSession(sourceSession) : configuredBackendForTask(run.context, sourceTask);
     const toBackend = "codex-resumable";
-
-    if (existingRecovery) {
-      if (existingRecovery.status === "todo" || existingRecovery.status === "running") {
-        if (run.status !== "todo") {
-          harness.updateRunStatus({ runId: run.id, status: "todo" });
-        }
-        recoveries.push({
-          runId: run.id,
-          taskId: existingRecovery.id,
-          sourceTaskId: sourceTask.id,
-          sourceAttemptId,
-          terminalReason,
-          fromBackend,
-          toBackend,
-          resumed: true,
-        });
-      }
-      continue;
-    }
 
     const previousRecovery = recordValue(sourceTask.config?.automaticRecovery);
     const inheritedSourceWorktreePath = typeof sourceTask.config?.sourceWorktreePath === "string"
@@ -3114,107 +3094,155 @@ function recoverBlockedSelfImprovementRuns(
       : sourceTask.worktreePath);
     const generation = Math.max(0, Number(previousRecovery.generation) || 0) + 1;
     const { modelPreference: _modelPreference, automaticRecovery: _automaticRecovery, ...sourceConfig } = sourceTask.config ?? {};
-    const budget = chargeRepairBudget(harness, run.id, {
-      limit: DEFAULT_REPAIR_REPLAN_BUDGET_LIMIT,
-      taskId: sourceTask.id,
-      ...(sourceAttemptId ? { attemptId: sourceAttemptId } : {}),
-      kind: "repair",
-      summary: sourceSession?.output.summary ?? `Automatic recovery for blocked ${sourceTask.role} task`,
-      rootTaskId: typeof previousRecovery.sourceTaskId === "string" ? previousRecovery.sourceTaskId : sourceTask.id,
-      rootCause: terminalReason ?? `${sourceTask.role}:blocked`,
-    });
-    if (!budget.allowed) {
-      const currentExhaustion = recordValue(run.context.automaticRecoveryExhausted);
-      const nextExhaustion = {
-        sourceTaskId: sourceTask.id,
-        sourceAttemptId,
-        used: budget.nextBudget.used,
-        limit: budget.nextBudget.limit,
-        reason: budget.reason,
-      };
-      const exhaustionChanged =
-        currentExhaustion.sourceTaskId !== nextExhaustion.sourceTaskId ||
-        currentExhaustion.sourceAttemptId !== nextExhaustion.sourceAttemptId ||
-        currentExhaustion.used !== nextExhaustion.used ||
-        currentExhaustion.limit !== nextExhaustion.limit;
-      if (exhaustionChanged) {
-        harness.updateRun({
+    const proposedRecoveryTaskId = makeId("task");
+    const atomic = harness.runInImmediateTransaction((db) => {
+      const currentOverview = harness.getRunOverviewWithDb(db, { runId: run.id, eventLimit: 0 });
+      const currentRun = currentOverview.run;
+      if (!currentRun || currentRun.context.retired === true) {
+        return { kind: "blocked" as const, taskId: null };
+      }
+      const storedBudget = readRepairBudget(currentRun.context);
+      const reconciled = reconcileGoalReviewRepairBudget(storedBudget, currentOverview);
+      const budget = chargeRepairBudgetState(reconciled.nextBudget, {
+        limit: DEFAULT_REPAIR_REPLAN_BUDGET_LIMIT,
+        taskId: sourceTask.id,
+        ...(sourceAttemptId ? { attemptId: sourceAttemptId } : {}),
+        kind: "repair",
+        summary: sourceSession?.output.summary ?? `Automatic recovery for blocked ${sourceTask.role} task`,
+        rootTaskId: typeof previousRecovery.sourceTaskId === "string" ? previousRecovery.sourceTaskId : sourceTask.id,
+        rootCause: terminalReason ?? `${sourceTask.role}:blocked`,
+      });
+      const existing = currentOverview.tasks.find((candidate) => {
+        const recovery = recordValue(candidate.config?.automaticRecovery);
+        return recovery.sourceTaskId === sourceTask.id
+          && (recovery.sourceAttemptId ?? null) === sourceAttemptId;
+      });
+      if (existing) {
+        if (!budget.allowed) {
+          harness.updateRunWithDb(db, {
+            runId: run.id,
+            status: "blocked",
+            contextPatch: {
+              repairReplanBudget: budget.nextBudget,
+              automaticRecoveryExhausted: {
+                sourceTaskId: sourceTask.id,
+                sourceAttemptId,
+                used: budget.nextBudget.used,
+                limit: budget.nextBudget.limit,
+                reason: budget.reason,
+              },
+            },
+          });
+          return { kind: "blocked" as const, taskId: null };
+        }
+        const active = existing.status === "todo" || existing.status === "running";
+        if (budget.charged || reconciled.chargedTaskIds.length > 0 || (active && currentRun.status !== "todo")) {
+          harness.updateRunWithDb(db, {
+            runId: run.id,
+            ...(active ? { status: "todo" as const } : {}),
+            contextPatch: {
+              repairReplanBudget: budget.nextBudget,
+              ...(active ? { automaticRecoveryExhausted: null } : {}),
+            },
+          });
+        }
+        return { kind: active ? "existing-active" as const : "existing-terminal" as const, taskId: existing.id };
+      }
+      if (!budget.allowed || !budget.charged) {
+        harness.updateRunWithDb(db, {
           runId: run.id,
           status: "blocked",
           contextPatch: {
             repairReplanBudget: budget.nextBudget,
-            automaticRecoveryExhausted: nextExhaustion,
+            automaticRecoveryExhausted: {
+              sourceTaskId: sourceTask.id,
+              sourceAttemptId,
+              used: budget.nextBudget.used,
+              limit: budget.nextBudget.limit,
+              reason: budget.allowed
+                ? "repair budget was charged but the durable automatic recovery task is missing"
+                : budget.reason,
+            },
           },
         });
+        return { kind: "blocked" as const, taskId: null };
       }
+      const recoveryTaskId = harness.createTaskWithDb(db, {
+        id: proposedRecoveryTaskId,
+        runId: run.id,
+        parentId: sourceTask.id,
+        role: "worker",
+        goal: isExecutorFailure
+          ? `Continue ${sourceTask.goal} with ${toBackend} after ${fromBackend} failed`
+          : `Diagnose and repair blocked work: ${sourceTask.goal}`,
+        prompt: [
+          "This task is an automatic recovery of blocked work in the same run.",
+          "Do not defer, close, or replace the original goal. Diagnose the recorded failure and continue until the original acceptance evidence passes.",
+          "Preserve useful uncommitted changes in the source worktree. Do not restart the implementation from an empty checkout.",
+          "",
+          `Blocked task: ${sourceTask.id}`,
+          `Blocked goal: ${sourceTask.goal}`,
+          `Blocked attempt: ${sourceAttemptId ?? "none recorded"}`,
+          `Failure: ${sourceSession?.output.summary ?? "blocked without a terminal attempt summary"}`,
+          `Executor route: ${fromBackend} -> ${toBackend}`,
+          terminalReason ? `Terminal reason: ${terminalReason}` : "Terminal reason: logical or verification block",
+          sourceWorktreePath ? `Source worktree: ${sourceWorktreePath}` : "Source worktree: inspect the current task and run evidence",
+          "",
+          "Original prompt:",
+          sourceTask.prompt,
+          "",
+          "Inspect the run overview, recent lessons, repository diff, and failing checks before editing.",
+          "Resolve the root cause, run the original deterministic checks, and return normal structured attempt output.",
+        ].join("\n"),
+        doneWhen: sourceTask.doneWhen.length > 0
+          ? sourceTask.doneWhen
+          : ["the blocking root cause is resolved", "the original goal has passing evidence"],
+        worktreePath: sourceWorktreePath,
+        config: {
+          ...sourceConfig,
+          agentBackend: toBackend,
+          ...(sourceWorktreePath ? { sourceWorktreePath } : {}),
+          automaticRecovery: {
+            generation,
+            sourceTaskId: sourceTask.id,
+            sourceAttemptId,
+            terminalReason,
+            fromBackend,
+            toBackend,
+            strategy: isExecutorFailure && fromBackend === "claude-code"
+              ? "switch-backend"
+              : isExecutorFailure
+                ? "codex-repair"
+                : "diagnose-and-repair",
+          },
+        },
+      });
+      harness.updateRunWithDb(db, {
+        runId: run.id,
+        status: "todo",
+        contextPatch: {
+          repairReplanBudget: budget.nextBudget,
+          automaticRecoveryExhausted: null,
+          automaticRecovery: {
+            taskId: recoveryTaskId,
+            sourceTaskId: sourceTask.id,
+            sourceAttemptId,
+            terminalReason,
+            fromBackend,
+            toBackend,
+            generation,
+          },
+        },
+      });
+      return { kind: "created" as const, taskId: recoveryTaskId };
+    });
+    if (atomic.kind === "blocked") {
       continue;
     }
-    const recoveryTaskId = harness.createTask({
-      runId: run.id,
-      parentId: sourceTask.id,
-      role: "worker",
-      goal: isExecutorFailure
-        ? `Continue ${sourceTask.goal} with ${toBackend} after ${fromBackend} failed`
-        : `Diagnose and repair blocked work: ${sourceTask.goal}`,
-      prompt: [
-        "This task is an automatic recovery of blocked work in the same run.",
-        "Do not defer, close, or replace the original goal. Diagnose the recorded failure and continue until the original acceptance evidence passes.",
-        "Preserve useful uncommitted changes in the source worktree. Do not restart the implementation from an empty checkout.",
-        "",
-        `Blocked task: ${sourceTask.id}`,
-        `Blocked goal: ${sourceTask.goal}`,
-        `Blocked attempt: ${sourceAttemptId ?? "none recorded"}`,
-        `Failure: ${sourceSession?.output.summary ?? "blocked without a terminal attempt summary"}`,
-        `Executor route: ${fromBackend} -> ${toBackend}`,
-        terminalReason ? `Terminal reason: ${terminalReason}` : "Terminal reason: logical or verification block",
-        sourceWorktreePath ? `Source worktree: ${sourceWorktreePath}` : "Source worktree: inspect the current task and run evidence",
-        "",
-        "Original prompt:",
-        sourceTask.prompt,
-        "",
-        "Inspect the run overview, recent lessons, repository diff, and failing checks before editing.",
-        "Resolve the root cause, run the original deterministic checks, and return normal structured attempt output.",
-      ].join("\n"),
-      doneWhen: sourceTask.doneWhen.length > 0
-        ? sourceTask.doneWhen
-        : ["the blocking root cause is resolved", "the original goal has passing evidence"],
-      worktreePath: sourceWorktreePath,
-      config: {
-        ...sourceConfig,
-        agentBackend: toBackend,
-        ...(sourceWorktreePath ? { sourceWorktreePath } : {}),
-        automaticRecovery: {
-          generation,
-          sourceTaskId: sourceTask.id,
-          sourceAttemptId,
-          terminalReason,
-          fromBackend,
-          toBackend,
-          strategy: isExecutorFailure && fromBackend === "claude-code"
-            ? "switch-backend"
-            : isExecutorFailure
-              ? "codex-repair"
-              : "diagnose-and-repair",
-        },
-      },
-    });
-    harness.updateRun({
-      runId: run.id,
-      status: "todo",
-      contextPatch: {
-        repairReplanBudget: budget.nextBudget,
-        automaticRecoveryExhausted: null,
-        automaticRecovery: {
-          taskId: recoveryTaskId,
-          sourceTaskId: sourceTask.id,
-          sourceAttemptId,
-          terminalReason,
-          fromBackend,
-          toBackend,
-          generation,
-        },
-      },
-    });
+    if (atomic.kind === "existing-terminal") {
+      continue;
+    }
+    const recoveryTaskId = atomic.taskId;
     recoveries.push({
       runId: run.id,
       taskId: recoveryTaskId,
@@ -3223,7 +3251,7 @@ function recoverBlockedSelfImprovementRuns(
       terminalReason,
       fromBackend,
       toBackend,
-      resumed: false,
+      resumed: atomic.kind === "existing-active",
     });
   }
 

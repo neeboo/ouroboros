@@ -7300,6 +7300,159 @@ describe("runner", () => {
     });
   });
 
+  test("automatic repair reconciles historical goal-review repairs before charging the shared budget", async () => {
+    const runId = harness.createRun({
+      goal: "Bound mixed automatic and goal-review repairs",
+      context: {
+        repairReplanBudget: {
+          limit: 3,
+          used: 2,
+          entries: [
+            { taskId: "task_auto_1", kind: "repair", summary: "first automatic repair", chargedAt: "2026-08-11T00:00:00.000Z" },
+            { taskId: "task_auto_3", kind: "repair", summary: "third automatic repair", chargedAt: "2026-08-11T00:02:00.000Z" },
+          ],
+        },
+      },
+    });
+    const priorVerifierId = harness.createTask({ runId, role: "verifier", goal: "Prior verifier", prompt: "Verify." });
+    harness.recordAttempt({
+      taskId: priorVerifierId,
+      input: { executor: "test" },
+      output: { status: "blocked", summary: "Prior gap.", changedFiles: [], checks: [], artifacts: [], problems: ["gap"] },
+    });
+    const historicalReviewId = harness.createTask({ runId, role: "goal-review", goal: "Historical repair review", prompt: "Repair." });
+    const historicalRepairId = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Historical goal-review repair",
+      prompt: "Repair.",
+      dependsOn: [historicalReviewId],
+    });
+    harness.recordAttempt({
+      taskId: historicalReviewId,
+      input: { executor: "test" },
+      output: {
+        status: "done",
+        runDecision: "continue",
+        summary: "Created repair work.",
+        changedFiles: [],
+        checks: [],
+        artifacts: [{ kind: "created_task", taskId: historicalRepairId, sourceTaskId: historicalReviewId }],
+        problems: [],
+      },
+    });
+    harness.recordAttempt({
+      taskId: historicalRepairId,
+      input: { executor: "test" },
+      output: { status: "done", summary: "Repair done.", changedFiles: [], checks: [], artifacts: [], problems: [] },
+    });
+    const finalVerifierId = harness.createTask({
+      runId,
+      role: "verifier",
+      goal: "Final verifier after mixed repair paths",
+      prompt: "Verify.",
+      dependsOn: [historicalRepairId],
+    });
+
+    const decision = await createRepairTaskHook({ harness })({
+      run: harness.getRun(runId)!,
+      task: harness.getTask(finalVerifierId)!,
+      sessionName: "final-verifier",
+      prompt: "Verify.",
+      output: {
+        status: "blocked",
+        summary: "The final repair still fails.",
+        changedFiles: [],
+        checks: [],
+        artifacts: [],
+        problems: ["terminal verifier failure"],
+      },
+    });
+
+    expect(decision.decision).toBe("exit");
+    expect(decision.artifacts).toContainEqual(expect.objectContaining({
+      kind: "repair_budget_exhausted",
+      budgetUsed: 3,
+      budgetLimit: 3,
+    }));
+    expect(harness.getRunOverview({ runId, eventLimit: 0 }).tasks.filter((task) =>
+      task.goal.startsWith("Repair: Final verifier after mixed repair paths")
+    )).toHaveLength(0);
+    expect(harness.getRun(runId)!.context.repairReplanBudget).toMatchObject({ used: 3 });
+  });
+
+  test("concurrent replay of one blocked verifier creates one repair and one budget charge", async () => {
+    const runId = harness.createRun({ goal: "Create one atomic repair" });
+    const verifierId = harness.createTask({
+      runId,
+      role: "verifier",
+      goal: "Verify atomic repair",
+      prompt: "Verify.",
+    });
+    const hook = createRepairTaskHook({ harness });
+    const context = {
+      run: harness.getRun(runId)!,
+      task: harness.getTask(verifierId)!,
+      sessionName: "atomic-verifier",
+      prompt: "Verify.",
+      output: {
+        status: "blocked" as const,
+        summary: "A repair is required.",
+        changedFiles: [],
+        checks: [],
+        artifacts: [],
+        problems: ["repair once"],
+      },
+    };
+
+    await Promise.all([hook(context), hook(context)]);
+
+    const repairs = harness.getRunOverview({ runId, eventLimit: 0 }).tasks.filter((task) =>
+      task.role === "worker" && task.parentId === verifierId
+    );
+    expect(repairs).toHaveLength(1);
+    expect(harness.getRun(runId)!.context.repairReplanBudget).toMatchObject({
+      used: 1,
+      entries: [expect.objectContaining({ taskId: verifierId, kind: "repair" })],
+    });
+  });
+
+  test("replaying an existing verifier repair restores a missing budget charge", async () => {
+    const runId = harness.createRun({ goal: "Restore verifier repair accounting" });
+    const verifierId = harness.createTask({ runId, role: "verifier", goal: "Verify accounting", prompt: "Verify." });
+    const repairId = harness.createTask({
+      runId,
+      parentId: verifierId,
+      role: "worker",
+      goal: "Repair: Verify accounting",
+      prompt: "Repair once.",
+    });
+    const result = await createRepairTaskHook({ harness })({
+      run: harness.getRun(runId)!,
+      task: harness.getTask(verifierId)!,
+      sessionName: "verifier",
+      prompt: "Verify.",
+      output: {
+        status: "blocked",
+        summary: "Accounting repair required.",
+        changedFiles: [],
+        checks: [],
+        artifacts: [],
+        problems: ["external_setup_blocker: existing repair accounting still must be restored"],
+      },
+    });
+
+    expect(result.artifacts).toContainEqual(expect.objectContaining({
+      kind: "created_repair_task",
+      taskId: repairId,
+      reused: true,
+    }));
+    expect(harness.getRun(runId)!.context.repairReplanBudget).toMatchObject({
+      used: 1,
+      entries: [expect.objectContaining({ taskId: verifierId, kind: "repair" })],
+    });
+  });
+
   test("blocked verifier defers repair while another verifier for the same worker is active", async () => {
     const runId = harness.createRun({ goal: "Build loop" });
     const workerTask = harness.createTask({
@@ -8342,6 +8495,24 @@ describe("runner", () => {
         },
       },
     });
+    const blockedVerifierId = harness.createTask({
+      runId,
+      role: "verifier",
+      goal: "Verify the exhausted delivery",
+      prompt: "Record the final failed verification.",
+    });
+    harness.recordAttempt({
+      taskId: blockedVerifierId,
+      input: {},
+      output: {
+        status: "blocked",
+        summary: "The frozen verification still fails",
+        changedFiles: [],
+        checks: [{ name: "frozen verification", status: "failed" }],
+        artifacts: [],
+        problems: ["frozen verification failed"],
+      },
+    });
     const taskId = harness.createTask({
       runId,
       role: "goal-review",
@@ -8393,8 +8564,1029 @@ describe("runner", () => {
         "goal-review cannot create verify work after repair budget exhausted at 3/3",
       ]),
     });
-    expect(overview.tasks.filter((task) => task.role === "verifier")).toHaveLength(0);
+    expect(overview.tasks.filter((task) => task.role === "verifier").map((task) => task.id)).toEqual([blockedVerifierId]);
     expect(harness.nextReadyTask(runId)).toBeNull();
+  });
+
+  test("goal-review follow-up work after a blocked verifier consumes the shared repair budget", async () => {
+    const runId = harness.createRun({
+      goal: "Bound every repair path",
+      context: {
+        repairReplanBudget: {
+          limit: 3,
+          used: 1,
+          entries: [{
+            taskId: "task_automatic_repair",
+            attemptId: "attempt_automatic_repair",
+            kind: "repair",
+            summary: "first automatic repair",
+            chargedAt: "2026-08-11T00:00:00.000Z",
+          }],
+        },
+      },
+    });
+    const workerId = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Initial implementation",
+      prompt: "Implement once.",
+    });
+    const verifierId = harness.createTask({
+      runId,
+      role: "verifier",
+      goal: "Verify initial implementation",
+      prompt: "Verify once.",
+      dependsOn: [workerId],
+    });
+    harness.recordAttempt({
+      taskId: workerId,
+      input: { executor: "test" },
+      output: {
+        status: "done",
+        summary: "Initial implementation completed.",
+        changedFiles: [],
+        checks: [{ name: "implementation", status: "passed" }],
+        artifacts: [],
+        problems: [],
+      },
+    });
+    harness.recordAttempt({
+      taskId: verifierId,
+      input: { executor: "test" },
+      output: {
+        status: "blocked",
+        summary: "Frozen identity remains caller controlled.",
+        changedFiles: [],
+        checks: [{ name: "frozen identity", status: "failed" }],
+        artifacts: [],
+        problems: ["repair required"],
+      },
+    });
+    const goalReviewId = harness.createTask({
+      runId,
+      role: "goal-review",
+      goal: "Review the blocked verifier",
+      prompt: "Create one bounded repair chain.",
+      dependsOn: [workerId],
+    });
+
+    await runNextReadyTask({
+      harness,
+      runId,
+      stopHooksByRole: {
+        "goal-review": [
+          createGoalReviewDecisionHook({ harness }),
+          createTasksFromOutputHook({ harness }),
+        ],
+      },
+      executor: async () => ({
+        status: "done",
+        runDecision: "continue",
+        summary: "The verifier found a concrete repairable gap.",
+        changedFiles: [],
+        checks: [],
+        artifacts: [],
+        problems: [],
+        nextTasks: [
+          {
+            role: "worker",
+            goal: "Repair frozen identity binding",
+            prompt: "Repair the exact verifier finding.",
+          },
+          {
+            role: "verifier",
+            goal: "Verify frozen identity binding",
+            prompt: "Re-run the frozen checks.",
+            dependsOn: ["Repair frozen identity binding"],
+          },
+        ],
+      }),
+    });
+
+    const budget = harness.getRun(runId)!.context.repairReplanBudget as {
+      limit: number;
+      used: number;
+      entries: Array<Record<string, unknown>>;
+    };
+    expect(budget).toMatchObject({ limit: 3, used: 2 });
+    expect(budget.entries).toContainEqual(expect.objectContaining({
+      taskId: goalReviewId,
+      kind: "replan",
+      rootTaskId: verifierId,
+    }));
+    expect(harness.getRunOverview({ runId, eventLimit: 0 }).tasks.filter((task) =>
+      task.goal === "Repair frozen identity binding" || task.goal === "Verify frozen identity binding"
+    )).toHaveLength(2);
+  });
+
+  test("goal-review repair after a directly blocked worker consumes the shared budget", async () => {
+    const runId = harness.createRun({ goal: "Repair a directly blocked worker" });
+    const workerId = harness.createTask({ runId, role: "worker", goal: "Blocked worker", prompt: "Implement." });
+    harness.recordAttempt({
+      taskId: workerId,
+      input: {},
+      output: {
+        status: "blocked",
+        summary: "Implementation hit a concrete blocker",
+        changedFiles: [],
+        checks: [{ name: "implementation", status: "failed" }],
+        artifacts: [],
+        problems: ["repair required"],
+      },
+    });
+    const reviewId = harness.createTask({ runId, role: "goal-review", goal: "Repair worker", prompt: "Repair once." });
+    await runNextReadyTask({
+      harness,
+      runId,
+      stopHooksByRole: {
+        "goal-review": [createGoalReviewDecisionHook({ harness }), createTasksFromOutputHook({ harness })],
+      },
+      executor: async () => ({
+        status: "done",
+        runDecision: "continue",
+        summary: "Create one repair.",
+        changedFiles: [],
+        checks: [],
+        artifacts: [],
+        problems: [],
+        nextTasks: [{ role: "worker", goal: "Repair direct blocker", prompt: "Repair the blocker." }],
+      }),
+    });
+    expect(harness.getRun(runId)!.context.repairReplanBudget).toMatchObject({
+      used: 1,
+      entries: [expect.objectContaining({ taskId: reviewId, rootTaskId: workerId })],
+    });
+  });
+
+  test("goal-review reuses a durable continuation when its attempt receipt was lost", async () => {
+    const runId = harness.createRun({
+      goal: "Recover a lost goal-review receipt",
+      context: {
+        repairReplanBudget: {
+          limit: 3,
+          used: 1,
+          entries: [{
+            taskId: "placeholder",
+            kind: "replan",
+            summary: "placeholder",
+            chargedAt: "2026-08-11T00:00:00.000Z",
+          }],
+        },
+      },
+    });
+    const blockedWorkerId = harness.createTask({ runId, role: "worker", goal: "Blocked worker", prompt: "Implement." });
+    harness.recordAttempt({
+      taskId: blockedWorkerId,
+      input: {},
+      output: { status: "blocked", summary: "Blocked.", changedFiles: [], checks: [], artifacts: [], problems: ["repair"] },
+    });
+    const reviewId = harness.createTask({ runId, role: "goal-review", goal: "Create durable repair", prompt: "Repair." });
+    const currentBudget = harness.getRun(runId)!.context.repairReplanBudget as { entries: Array<Record<string, unknown>> };
+    harness.updateRun({
+      runId,
+      contextPatch: {
+        repairReplanBudget: {
+          limit: 3,
+          used: 1,
+          entries: [{
+            ...currentBudget.entries[0],
+            taskId: reviewId,
+            rootTaskId: blockedWorkerId,
+          }],
+        },
+      },
+    });
+    const durableTaskId = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Receipt-lost repair",
+      prompt: "Repair once.",
+      config: { goalReviewContinuation: { sourceTaskId: reviewId, ordinal: 0 } },
+    });
+    harness.recordAttempt({
+      taskId: durableTaskId,
+      input: {},
+      output: { status: "done", summary: "Repair done.", changedFiles: [], checks: [], artifacts: [], problems: [] },
+    });
+
+    await runNextReadyTask({
+      harness,
+      runId,
+      stopHooksByRole: {
+        "goal-review": [createGoalReviewDecisionHook({ harness }), createTasksFromOutputHook({ harness })],
+      },
+      executor: async () => ({
+        status: "done",
+        runDecision: "continue",
+        summary: "Replay the same repair.",
+        changedFiles: [],
+        checks: [],
+        artifacts: [],
+        problems: [],
+        nextTasks: [{ role: "worker", goal: "Receipt-lost repair", prompt: "Repair once." }],
+      }),
+    });
+
+    expect(harness.getRunOverview({ runId, eventLimit: 0 }).tasks.filter((task) => task.goal === "Receipt-lost repair"))
+      .toHaveLength(1);
+    expect(harness.getRun(runId)!.context.repairReplanBudget).toMatchObject({ used: 1 });
+  });
+
+  test("replaying a charged goal-review reuses durable created-task receipts", async () => {
+    const runId = harness.createRun({ goal: "Replay one repair chain" });
+    const verifierId = harness.createTask({ runId, role: "verifier", goal: "Blocked verifier", prompt: "Verify." });
+    harness.recordAttempt({
+      taskId: verifierId,
+      input: { executor: "test" },
+      output: { status: "blocked", summary: "Blocked.", changedFiles: [], checks: [], artifacts: [], problems: ["repair"] },
+    });
+    const goalReviewId = harness.createTask({ runId, role: "goal-review", goal: "Create one repair", prompt: "Repair." });
+    const stopHooksByRole = {
+      "goal-review": [createGoalReviewDecisionHook({ harness }), createTasksFromOutputHook({ harness })],
+    };
+    const executor = async () => ({
+      status: "done" as const,
+      runDecision: "continue" as const,
+      summary: "Create one bounded repair.",
+      changedFiles: [],
+      checks: [],
+      artifacts: [],
+      problems: [],
+      nextTasks: [
+        { role: "worker" as const, goal: "Receipt-bound repair", prompt: "Repair once." },
+        {
+          role: "verifier" as const,
+          goal: "Receipt-bound verification",
+          prompt: "Verify once.",
+          dependsOn: ["Receipt-bound repair"],
+        },
+      ],
+    });
+
+    await runNextReadyTask({ harness, runId, stopHooksByRole, executor });
+    const repair = harness.getRunOverview({ runId, eventLimit: 0 }).tasks.find((task) => task.goal === "Receipt-bound repair")!;
+    harness.recordAttempt({
+      taskId: repair.id,
+      input: { executor: "test" },
+      output: { status: "done", summary: "Repair done.", changedFiles: [], checks: [], artifacts: [], problems: [] },
+    });
+    const verification = harness.getRunOverview({ runId, eventLimit: 0 }).tasks.find(
+      (task) => task.goal === "Receipt-bound verification",
+    )!;
+    harness.recordAttempt({
+      taskId: verification.id,
+      input: { executor: "test" },
+      output: { status: "done", summary: "Verification done.", changedFiles: [], checks: [], artifacts: [], problems: [] },
+    });
+    harness.retryTask({ taskId: goalReviewId });
+    await runNextReadyTask({ harness, runId, stopHooksByRole, executor });
+    harness.retryTask({ taskId: goalReviewId });
+    await runNextReadyTask({ harness, runId, stopHooksByRole, executor });
+
+    expect(harness.getRunOverview({ runId, eventLimit: 0 }).tasks.filter((task) => task.goal === "Receipt-bound repair")).toHaveLength(1);
+    expect(harness.getRunOverview({ runId, eventLimit: 0 }).tasks.filter((task) => task.goal === "Receipt-bound verification"))
+      .toHaveLength(1);
+    expect(harness.getRun(runId)!.context.repairReplanBudget).toMatchObject({ used: 1 });
+  });
+
+  test("ordinary goal-review continuation without a blocked verifier does not consume repair budget", async () => {
+    const runId = harness.createRun({ goal: "Continue planned product work" });
+    const goalReviewId = harness.createTask({
+      runId,
+      role: "goal-review",
+      goal: "Review planned work",
+      prompt: "Continue the plan.",
+    });
+
+    await runNextReadyTask({
+      harness,
+      runId,
+      stopHooksByRole: {
+        "goal-review": [
+          createGoalReviewDecisionHook({ harness }),
+          createTasksFromOutputHook({ harness }),
+        ],
+      },
+      executor: async () => ({
+        status: "done",
+        runDecision: "continue",
+        summary: "Start the first implementation task.",
+        changedFiles: [],
+        checks: [],
+        artifacts: [],
+        problems: [],
+        nextTasks: [{
+          role: "worker",
+          goal: "Implement planned work",
+          prompt: "Implement the accepted plan.",
+        }],
+      }),
+    });
+
+    expect(harness.getRun(runId)!.context.repairReplanBudget).toBeUndefined();
+    expect(harness.getTask(goalReviewId)?.status).toBe("done");
+  });
+
+  test("goal-review ignores verifiers created after that review task", async () => {
+    const runId = harness.createRun({ goal: "Bind review to preceding evidence" });
+    const goalReviewId = harness.createTask({
+      runId,
+      role: "goal-review",
+      goal: "Review preceding evidence",
+      prompt: "Continue ordinary work.",
+    });
+    const laterVerifierId = harness.createTask({
+      runId,
+      role: "verifier",
+      goal: "Later verifier",
+      prompt: "This verifier was created after the review.",
+    });
+    harness.recordAttempt({
+      taskId: laterVerifierId,
+      input: { executor: "test" },
+      output: { status: "blocked", summary: "Later failure.", changedFiles: [], checks: [], artifacts: [], problems: ["later gap"] },
+    });
+
+    await runNextReadyTask({
+      harness,
+      runId,
+      stopHooksByRole: {
+        "goal-review": [createGoalReviewDecisionHook({ harness }), createTasksFromOutputHook({ harness })],
+      },
+      executor: async () => ({
+        status: "done",
+        runDecision: "continue",
+        summary: "Continue work based on earlier evidence.",
+        changedFiles: [],
+        checks: [],
+        artifacts: [],
+        problems: [],
+        nextTasks: [{ role: "worker", goal: "Ordinary earlier continuation", prompt: "Continue." }],
+      }),
+    });
+
+    expect(harness.getTask(goalReviewId)?.status).toBe("done");
+    expect(harness.getRun(runId)!.context.repairReplanBudget).toBeUndefined();
+  });
+
+  test("goal-review reconciles an already-created repair chain before granting the final budget slot", async () => {
+    const runId = harness.createRun({
+      goal: "Reconcile a historical goal-review repair",
+      context: {
+        repairReplanBudget: {
+          limit: 3,
+          used: 1,
+          entries: [{
+            taskId: "task_automatic_repair",
+            attemptId: "attempt_automatic_repair",
+            kind: "repair",
+            summary: "first automatic repair",
+            chargedAt: "2026-08-11T00:00:00.000Z",
+          }],
+        },
+      },
+    });
+    const priorVerifierId = harness.createTask({
+      runId,
+      role: "verifier",
+      goal: "Verify the first repair",
+      prompt: "Verify.",
+    });
+    harness.recordAttempt({
+      taskId: priorVerifierId,
+      input: { executor: "test" },
+      output: {
+        status: "blocked",
+        summary: "The first repair still fails.",
+        changedFiles: [],
+        checks: [],
+        artifacts: [],
+        problems: ["second repair required"],
+      },
+    });
+    const priorGoalReviewId = harness.createTask({
+      runId,
+      role: "goal-review",
+      goal: "Create the second repair",
+      prompt: "Continue once.",
+    });
+    const priorRepairId = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Second repair already created",
+      prompt: "Repair.",
+      dependsOn: [priorGoalReviewId],
+    });
+    harness.recordAttempt({
+      taskId: priorGoalReviewId,
+      input: { executor: "test" },
+      output: {
+        status: "done",
+        runDecision: "continue",
+        summary: "Created the second bounded repair.",
+        changedFiles: [],
+        checks: [],
+        artifacts: [{
+          kind: "created_task",
+          taskId: priorRepairId,
+          sourceTaskId: priorGoalReviewId,
+        }],
+        problems: [],
+      },
+    });
+    harness.recordAttempt({
+      taskId: priorRepairId,
+      input: { executor: "test" },
+      output: {
+        status: "done",
+        summary: "Second repair completed.",
+        changedFiles: [],
+        checks: [],
+        artifacts: [],
+        problems: [],
+      },
+    });
+    const currentVerifierId = harness.createTask({
+      runId,
+      role: "verifier",
+      goal: "Verify the second repair",
+      prompt: "Verify again.",
+      dependsOn: [priorRepairId],
+    });
+    harness.recordAttempt({
+      taskId: currentVerifierId,
+      input: { executor: "test" },
+      output: {
+        status: "blocked",
+        summary: "One final gap remains.",
+        changedFiles: [],
+        checks: [],
+        artifacts: [],
+        problems: ["final repair required"],
+      },
+    });
+    const currentGoalReviewId = harness.createTask({
+      runId,
+      role: "goal-review",
+      goal: "Create the final repair",
+      prompt: "Use only the final budget slot.",
+    });
+
+    await runNextReadyTask({
+      harness,
+      runId,
+      stopHooksByRole: {
+        "goal-review": [
+          createGoalReviewDecisionHook({ harness }),
+          createTasksFromOutputHook({ harness }),
+        ],
+      },
+      executor: async () => ({
+        status: "done",
+        runDecision: "continue",
+        summary: "Use the last allowed repair.",
+        changedFiles: [],
+        checks: [],
+        artifacts: [],
+        problems: [],
+        nextTasks: [{
+          role: "worker",
+          goal: "Final repair after historical reconciliation",
+          prompt: "Repair only the latest verifier finding.",
+        }],
+      }),
+    });
+
+    const budget = harness.getRun(runId)!.context.repairReplanBudget as {
+      used: number;
+      entries: Array<{ taskId: string; kind: string; rootTaskId?: string }>;
+    };
+    expect(budget.used).toBe(3);
+    expect(budget.entries).toContainEqual(expect.objectContaining({
+      taskId: priorGoalReviewId,
+      kind: "replan",
+      rootTaskId: priorVerifierId,
+    }));
+    expect(budget.entries).toContainEqual(expect.objectContaining({
+      taskId: currentGoalReviewId,
+      kind: "replan",
+      rootTaskId: currentVerifierId,
+    }));
+    expect(harness.getRunOverview({ runId, eventLimit: 0 }).tasks.some((task) =>
+      task.goal === "Final repair after historical reconciliation"
+    )).toBe(true);
+  });
+
+  test("historical reconciliation that reaches the limit blocks same-tick continuation", async () => {
+    const runId = harness.createRun({
+      goal: "Stop after historical reconciliation exhausts the budget",
+      context: {
+        repairReplanBudget: {
+          limit: 3,
+          used: 2,
+          entries: [
+            { taskId: "task_auto_1", kind: "repair", summary: "one", chargedAt: "2026-08-11T00:00:00.000Z" },
+            { taskId: "task_auto_2", kind: "repair", summary: "two", chargedAt: "2026-08-11T00:01:00.000Z" },
+          ],
+        },
+      },
+    });
+    const blockedVerifierId = harness.createTask({ runId, role: "verifier", goal: "Historical verifier", prompt: "Verify." });
+    harness.recordAttempt({
+      taskId: blockedVerifierId,
+      input: {},
+      output: { status: "blocked", summary: "Blocked.", changedFiles: [], checks: [], artifacts: [], problems: ["repair"] },
+    });
+    const historicalReviewId = harness.createTask({ runId, role: "goal-review", goal: "Historical repair", prompt: "Repair." });
+    const historicalRepairId = harness.createTask({ runId, role: "worker", goal: "Historical repair task", prompt: "Repair." });
+    harness.recordAttempt({
+      taskId: historicalReviewId,
+      input: {},
+      output: {
+        status: "done",
+        runDecision: "continue",
+        summary: "Created historical repair.",
+        changedFiles: [],
+        checks: [],
+        artifacts: [{ kind: "created_task", taskId: historicalRepairId, sourceTaskId: historicalReviewId }],
+        problems: [],
+      },
+    });
+    harness.recordAttempt({
+      taskId: historicalRepairId,
+      input: {},
+      output: { status: "done", summary: "Done.", changedFiles: [], checks: [], artifacts: [], problems: [] },
+    });
+    const currentReviewId = harness.createTask({ runId, role: "goal-review", goal: "Ordinary continuation", prompt: "Continue." });
+    const result = await runNextReadyTask({
+      harness,
+      runId,
+      stopHooksByRole: {
+        "goal-review": [createGoalReviewDecisionHook({ harness }), createTasksFromOutputHook({ harness })],
+      },
+      executor: async () => ({
+        status: "done",
+        runDecision: "continue",
+        summary: "Continue after completed work.",
+        changedFiles: [],
+        checks: [],
+        artifacts: [],
+        problems: [],
+        nextTasks: [{ role: "worker", goal: "Must not start", prompt: "Do not run." }],
+      }),
+    });
+    const attempt = harness.getAttempt(result!.attemptId)!;
+    expect(attempt.output.status).toBe("blocked");
+    expect(attempt.output.artifacts).toContainEqual(expect.objectContaining({ kind: "repair_budget_exhausted" }));
+    expect(harness.getRunOverview({ runId, eventLimit: 0 }).tasks.some((task) => task.goal === "Must not start"))
+      .toBe(false);
+    expect(harness.getRun(runId)!.context.repairReplanBudget).toMatchObject({
+      used: 3,
+      entries: expect.arrayContaining([expect.objectContaining({ taskId: historicalReviewId })]),
+    });
+    expect(harness.getTask(currentReviewId)?.status).toBe("blocked");
+  });
+
+  test("historical reconciliation does not jump over a newer successful verifier", async () => {
+    const runId = harness.createRun({
+      goal: "Keep successful verification terminal",
+      context: {
+        repairReplanBudget: {
+          limit: 3,
+          used: 1,
+          entries: [{ taskId: "task_auto", kind: "repair", summary: "automatic repair", chargedAt: "2026-08-11T00:00:00.000Z" }],
+        },
+      },
+    });
+    const blockedVerifierId = harness.createTask({ runId, role: "verifier", goal: "Blocked verifier", prompt: "Verify." });
+    harness.recordAttempt({
+      taskId: blockedVerifierId,
+      input: { executor: "test" },
+      output: { status: "blocked", summary: "Blocked.", changedFiles: [], checks: [], artifacts: [], problems: ["gap"] },
+    });
+    const successfulVerifierId = harness.createTask({
+      runId,
+      role: "verifier",
+      goal: "Successful verifier",
+      prompt: "Verify.",
+    });
+    harness.recordAttempt({
+      taskId: successfulVerifierId,
+      input: { executor: "test" },
+      output: { status: "done", summary: "Verified.", changedFiles: [], checks: [], artifacts: [], problems: [] },
+    });
+    const historicalReviewId = harness.createTask({ runId, role: "goal-review", goal: "Historical review", prompt: "Continue." });
+    const historicalWorkerId = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Historical continuation",
+      prompt: "Continue.",
+      dependsOn: [historicalReviewId],
+    });
+    harness.recordAttempt({
+      taskId: historicalReviewId,
+      input: { executor: "test" },
+      output: {
+        status: "done",
+        runDecision: "continue",
+        summary: "Created historical work.",
+        changedFiles: [],
+        checks: [],
+        artifacts: [{ kind: "created_task", taskId: historicalWorkerId, sourceTaskId: historicalReviewId }],
+        problems: [],
+      },
+    });
+    harness.recordAttempt({
+      taskId: historicalWorkerId,
+      input: { executor: "test" },
+      output: { status: "done", summary: "Done.", changedFiles: [], checks: [], artifacts: [], problems: [] },
+    });
+    const currentReviewId = harness.createTask({ runId, role: "goal-review", goal: "Ordinary continuation", prompt: "Continue." });
+
+    await runNextReadyTask({
+      harness,
+      runId,
+      stopHooksByRole: {
+        "goal-review": [createGoalReviewDecisionHook({ harness }), createTasksFromOutputHook({ harness })],
+      },
+      executor: async () => ({
+        status: "done",
+        runDecision: "continue",
+        summary: "Start unrelated follow-up work.",
+        changedFiles: [],
+        checks: [],
+        artifacts: [],
+        problems: [],
+        nextTasks: [{ role: "worker", goal: "Unrelated follow-up", prompt: "Continue." }],
+      }),
+    });
+
+    expect(harness.getTask(currentReviewId)?.status).toBe("done");
+    expect(harness.getRun(runId)!.context.repairReplanBudget).toMatchObject({ used: 1 });
+  });
+
+  test("the last goal-review repair reaches the limit and the next review cannot create another chain", async () => {
+    const runId = harness.createRun({
+      goal: "Stop after the last bounded repair",
+      context: {
+        repairReplanBudget: {
+          limit: 3,
+          used: 2,
+          entries: [
+            { taskId: "task_repair_1", kind: "repair", summary: "repair one", chargedAt: "2026-08-11T00:00:00.000Z" },
+            { taskId: "task_repair_2", kind: "replan", summary: "repair two", chargedAt: "2026-08-11T00:01:00.000Z" },
+          ],
+        },
+      },
+    });
+    const completedWorkerId = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Completed second repair",
+      prompt: "Already complete.",
+    });
+    harness.recordAttempt({
+      taskId: completedWorkerId,
+      input: { executor: "test" },
+      output: {
+        status: "done",
+        summary: "Second repair completed.",
+        changedFiles: [],
+        checks: [],
+        artifacts: [],
+        problems: [],
+      },
+    });
+    const blockedVerifierId = harness.createTask({
+      runId,
+      role: "verifier",
+      goal: "Verify second repair",
+      prompt: "Verify.",
+      dependsOn: [completedWorkerId],
+    });
+    harness.recordAttempt({
+      taskId: blockedVerifierId,
+      input: { executor: "test" },
+      output: {
+        status: "blocked",
+        summary: "One final concrete gap remains.",
+        changedFiles: [],
+        checks: [],
+        artifacts: [],
+        problems: ["final repair required"],
+      },
+    });
+    const finalReviewId = harness.createTask({
+      runId,
+      role: "goal-review",
+      goal: "Create the final repair",
+      prompt: "Use the last budget slot.",
+      dependsOn: [completedWorkerId],
+    });
+    const stopHooksByRole = {
+      "goal-review": [
+        createGoalReviewDecisionHook({ harness }),
+        createTasksFromOutputHook({ harness }),
+      ],
+    };
+
+    await runNextReadyTask({
+      harness,
+      runId,
+      stopHooksByRole,
+      executor: async () => ({
+        status: "done",
+        runDecision: "continue",
+        summary: "Use the final repair slot.",
+        changedFiles: [],
+        checks: [],
+        artifacts: [],
+        problems: [],
+        nextTasks: [{
+          role: "worker",
+          goal: "Final bounded repair",
+          prompt: "Repair only the final verifier finding.",
+        }],
+      }),
+    });
+
+    expect((harness.getRun(runId)!.context.repairReplanBudget as { used: number }).used).toBe(3);
+    const finalRepair = harness.getRunOverview({ runId, eventLimit: 0 }).tasks.find((task) =>
+      task.goal === "Final bounded repair"
+    )!;
+    harness.recordAttempt({
+      taskId: finalRepair.id,
+      input: { executor: "test" },
+      output: {
+        status: "done",
+        summary: "Final bounded repair completed.",
+        changedFiles: [],
+        checks: [],
+        artifacts: [],
+        problems: [],
+      },
+    });
+    const finalBlockedVerifierId = harness.createTask({
+      runId,
+      role: "verifier",
+      goal: "Verify final bounded repair",
+      prompt: "Verify the final repair.",
+      dependsOn: [finalRepair.id],
+    });
+    harness.recordAttempt({
+      taskId: finalBlockedVerifierId,
+      input: { executor: "test" },
+      output: {
+        status: "blocked",
+        summary: "The frozen contract still fails.",
+        changedFiles: [],
+        checks: [],
+        artifacts: [],
+        problems: ["terminal verifier failure"],
+      },
+    });
+    const terminalReviewId = harness.createTask({
+      runId,
+      role: "goal-review",
+      goal: "Stop after exhausted repair budget",
+      prompt: "Do not create another repair.",
+      dependsOn: [finalRepair.id],
+    });
+
+    const terminalResult = await runNextReadyTask({
+      harness,
+      runId,
+      stopHooksByRole,
+      executor: async () => ({
+        status: "done",
+        runDecision: "continue",
+        summary: "Try to create an invalid fourth repair.",
+        changedFiles: [],
+        checks: [],
+        artifacts: [],
+        problems: [],
+        nextTasks: [{
+          role: "worker",
+          goal: "Forbidden fourth repair",
+          prompt: "This task must not be created.",
+        }],
+      }),
+    });
+
+    expect(terminalResult?.taskId).toBe(terminalReviewId);
+    const terminalAttempt = terminalResult ? harness.getAttempt(terminalResult.attemptId) : null;
+    expect(terminalAttempt?.output).toMatchObject({
+      status: "blocked",
+      artifacts: expect.arrayContaining([expect.objectContaining({
+        kind: "repair_budget_exhausted",
+        used: 3,
+        limit: 3,
+      })]),
+    });
+    expect(harness.getRunOverview({ runId, eventLimit: 0 }).tasks.some((task) =>
+      task.goal === "Forbidden fourth repair"
+    )).toBe(false);
+    expect(finalReviewId).not.toBe(terminalReviewId);
+  });
+
+  test("a historical goal-review repair plus two automatic repairs exhausts the shared budget", async () => {
+    const runId = harness.createRun({
+      goal: "Stop the live-shaped mixed repair chain",
+      context: {
+        repairReplanBudget: {
+          limit: 3,
+          used: 2,
+          entries: [
+            { taskId: "task_first_verifier", kind: "repair", summary: "first automatic repair", chargedAt: "2026-08-11T00:00:00.000Z" },
+            { taskId: "task_final_verifier", kind: "repair", summary: "final automatic repair", chargedAt: "2026-08-11T00:02:00.000Z" },
+          ],
+        },
+      },
+    });
+    const firstVerifierId = harness.createTask({
+      runId,
+      role: "verifier",
+      goal: "First verifier",
+      prompt: "Verify.",
+    });
+    harness.recordAttempt({
+      taskId: firstVerifierId,
+      input: { executor: "test" },
+      output: { status: "blocked", summary: "First gap.", changedFiles: [], checks: [], artifacts: [], problems: ["gap"] },
+    });
+    const historicalReviewId = harness.createTask({
+      runId,
+      role: "goal-review",
+      goal: "Historical goal review repair",
+      prompt: "Repair.",
+    });
+    const historicalRepairId = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Historical second repair",
+      prompt: "Repair.",
+      dependsOn: [historicalReviewId],
+    });
+    harness.recordAttempt({
+      taskId: historicalReviewId,
+      input: { executor: "test" },
+      output: {
+        status: "done",
+        runDecision: "continue",
+        summary: "Created a repair through nextTasks.",
+        changedFiles: [],
+        checks: [],
+        artifacts: [{ kind: "created_task", taskId: historicalRepairId, sourceTaskId: historicalReviewId }],
+        problems: [],
+      },
+    });
+    harness.recordAttempt({
+      taskId: historicalRepairId,
+      input: { executor: "test" },
+      output: { status: "done", summary: "Historical repair done.", changedFiles: [], checks: [], artifacts: [], problems: [] },
+    });
+    const finalVerifierId = harness.createTask({
+      runId,
+      role: "verifier",
+      goal: "Final verifier",
+      prompt: "Verify final repair.",
+      dependsOn: [historicalRepairId],
+    });
+    harness.recordAttempt({
+      taskId: finalVerifierId,
+      input: { executor: "test" },
+      output: { status: "blocked", summary: "Still failing.", changedFiles: [], checks: [], artifacts: [], problems: ["terminal gap"] },
+    });
+    const terminalReviewId = harness.createTask({
+      runId,
+      role: "goal-review",
+      goal: "Terminal goal review",
+      prompt: "Do not bypass the total budget.",
+    });
+
+    const result = await runNextReadyTask({
+      harness,
+      runId,
+      stopHooksByRole: {
+        "goal-review": [
+          createGoalReviewDecisionHook({ harness }),
+          createTasksFromOutputHook({ harness }),
+        ],
+      },
+      executor: async () => ({
+        status: "done",
+        runDecision: "continue",
+        summary: "Try an invalid fourth repair.",
+        changedFiles: [],
+        checks: [],
+        artifacts: [],
+        problems: [],
+        nextTasks: [{ role: "worker", goal: "Invalid fourth repair", prompt: "Must not run." }],
+      }),
+    });
+
+    const attempt = result ? harness.getAttempt(result.attemptId) : null;
+    expect(result?.taskId).toBe(terminalReviewId);
+    expect(attempt?.output).toMatchObject({
+      status: "blocked",
+      artifacts: expect.arrayContaining([expect.objectContaining({ kind: "repair_budget_exhausted", used: 3, limit: 3 })]),
+    });
+    const budget = harness.getRun(runId)!.context.repairReplanBudget as {
+      used: number;
+      entries: Array<{ taskId: string; kind: string }>;
+    };
+    expect(budget.used).toBe(3);
+    expect(budget.entries).toContainEqual(expect.objectContaining({ taskId: historicalReviewId, kind: "replan" }));
+    expect(harness.getRunOverview({ runId, eventLimit: 0 }).tasks.some((task) => task.goal === "Invalid fourth repair")).toBe(false);
+  });
+
+  test("a historical verifier-only goal-review loop also consumes the shared budget", async () => {
+    const runId = harness.createRun({
+      goal: "Count equivalent verifier loops",
+      context: {
+        repairReplanBudget: {
+          limit: 3,
+          used: 2,
+          entries: [
+            { taskId: "task_auto_1", kind: "repair", summary: "first repair", chargedAt: "2026-08-11T00:00:00.000Z" },
+            { taskId: "task_auto_3", kind: "repair", summary: "third repair", chargedAt: "2026-08-11T00:02:00.000Z" },
+          ],
+        },
+      },
+    });
+    const blockedVerifierId = harness.createTask({ runId, role: "verifier", goal: "Blocked verifier", prompt: "Verify." });
+    harness.recordAttempt({
+      taskId: blockedVerifierId,
+      input: { executor: "test" },
+      output: { status: "blocked", summary: "Blocked.", changedFiles: [], checks: [], artifacts: [], problems: ["gap"] },
+    });
+    const historicalReviewId = harness.createTask({ runId, role: "goal-review", goal: "Historical verify review", prompt: "Verify again." });
+    const historicalVerifierId = harness.createTask({
+      runId,
+      role: "verifier",
+      goal: "Historical repeated verifier",
+      prompt: "Verify again.",
+      dependsOn: [historicalReviewId],
+    });
+    harness.recordAttempt({
+      taskId: historicalReviewId,
+      input: { executor: "test" },
+      output: {
+        status: "done",
+        runDecision: "verify",
+        summary: "Created an equivalent verifier loop.",
+        changedFiles: [],
+        checks: [],
+        artifacts: [{ kind: "created_task", taskId: historicalVerifierId, sourceTaskId: historicalReviewId }],
+        problems: [],
+      },
+    });
+    harness.recordAttempt({
+      taskId: historicalVerifierId,
+      input: { executor: "test" },
+      output: { status: "blocked", summary: "Still blocked.", changedFiles: [], checks: [], artifacts: [], problems: ["same gap"] },
+    });
+    harness.retryTask({ taskId: historicalReviewId });
+    harness.recordAttempt({
+      taskId: historicalReviewId,
+      input: { executor: "test" },
+      output: {
+        status: "blocked",
+        runDecision: "verify",
+        summary: "Replayed the existing verifier receipt.",
+        changedFiles: [],
+        checks: [],
+        artifacts: [{ kind: "reused_created_task", taskId: historicalVerifierId, sourceTaskId: historicalReviewId }],
+        problems: ["same verifier remains blocked"],
+      },
+    });
+    const terminalReviewId = harness.createTask({ runId, role: "goal-review", goal: "Terminal review", prompt: "Stop." });
+
+    const result = await runNextReadyTask({
+      harness,
+      runId,
+      stopHooksByRole: {
+        "goal-review": [createGoalReviewDecisionHook({ harness }), createTasksFromOutputHook({ harness })],
+      },
+      executor: async () => ({
+        status: "done",
+        runDecision: "continue",
+        summary: "Try another repair.",
+        changedFiles: [],
+        checks: [],
+        artifacts: [],
+        problems: [],
+        nextTasks: [{ role: "worker", goal: "Forbidden work after verifier loop", prompt: "Must not run." }],
+      }),
+    });
+
+    const attempt = result ? harness.getAttempt(result.attemptId) : null;
+    expect(result?.taskId).toBe(terminalReviewId);
+    expect(attempt?.output).toMatchObject({
+      status: "blocked",
+      artifacts: expect.arrayContaining([expect.objectContaining({ kind: "repair_budget_exhausted", used: 3, limit: 3 })]),
+    });
+    expect(harness.getRunOverview({ runId, eventLimit: 0 }).tasks.some((task) => task.goal === "Forbidden work after verifier loop")).toBe(false);
   });
 
   test("goal-review refresh hook surfaces repeated lesson guardrail proposals without auto-accepting", async () => {
