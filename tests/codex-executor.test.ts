@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { existsSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -409,6 +409,94 @@ describe("codex cli executor", () => {
       });
       const initialDaemonPids = initialDaemonPidReadback.stdout.trim().split(/\s+/).filter(Boolean);
       expect(initialDaemonPids).toHaveLength(1);
+      const protectedConfig = await Bun.file(join(execution!.env.CODEX_HOME, "config.toml")).text();
+      expect(protectedConfig).toContain("[shell_environment_policy]");
+      expect(protectedConfig).toContain('inherit = "none"');
+      expect(protectedConfig).toContain("allow_login_shell = false");
+      expect(protectedConfig).toContain(`AGENT_BROWSER_SESSION = ${JSON.stringify(execution!.capabilities!.browser!.sessionName)}`);
+      expect(protectedConfig).toContain(`AGENT_BROWSER_SOCKET_DIR = ${JSON.stringify(execution!.capabilities!.browser!.socketDirectory)}`);
+      expect(protectedConfig).toContain(`AGENT_BROWSER_CONFIG = ${JSON.stringify(execution!.capabilities!.browser!.configPath)}`);
+      expect(protectedConfig).toContain(`AGENT_BROWSER_ACTION_POLICY = ${JSON.stringify(execution!.capabilities!.browser!.actionPolicyPath)}`);
+      expect(protectedConfig).toContain(join(execution!.capabilities!.browser!.socketDirectory, "client-bin"));
+      const strippedExecutorEnvironment = {
+        CODEX_HOME: execution!.env.CODEX_HOME,
+        HOME: process.env.HOME ?? "",
+        PATH: "/usr/bin:/bin:/usr/sbin:/sbin",
+        LINEAR_API_KEY: "synthetic-linear-key-must-not-propagate",
+        HOST_PAYMENT_DSN: "synthetic-payment-dsn-must-not-propagate",
+      };
+      const propagatedEnvironment = await runLocalCommand({
+        cmd: [
+          codexBin,
+          "sandbox",
+          "-P",
+          "orbs-workspace",
+          "-C",
+          cwd,
+          "/bin/sh",
+          "-c",
+          "printf '%s\\n%s\\n%s\\n' \"$AGENT_BROWSER_SESSION\" \"$AGENT_BROWSER_SOCKET_DIR\" \"$AGENT_BROWSER_CONFIG\"",
+        ],
+        stdin: "",
+        env: strippedExecutorEnvironment,
+        inheritEnv: false,
+        timeoutMs: 5_000,
+        cleanupOnFailure: true,
+      });
+      expect(propagatedEnvironment.exitCode).toBe(0);
+      expect(propagatedEnvironment.stdout).toContain(execution!.capabilities!.browser!.sessionName);
+      expect(propagatedEnvironment.stdout).toContain(execution!.capabilities!.browser!.socketDirectory);
+      expect(propagatedEnvironment.stdout).toContain(execution!.capabilities!.browser!.configPath);
+      const secretEnvironment = await runLocalCommand({
+        cmd: [codexBin, "sandbox", "-P", "orbs-workspace", "-C", cwd, "/bin/sh", "-c", "test -z \"${LINEAR_API_KEY:-}\" && test -z \"${HOST_PAYMENT_DSN:-}\""],
+        stdin: "",
+        env: strippedExecutorEnvironment,
+        inheritEnv: false,
+        timeoutMs: 5_000,
+        cleanupOnFailure: true,
+      });
+      expect(secretEnvironment.exitCode).toBe(0);
+      for (const invocation of ["-ic", "-lic"]) {
+        const nestedShellEnvironment = await runLocalCommand({
+          cmd: [codexBin, "sandbox", "-P", "orbs-workspace", "-C", cwd, "/bin/zsh", invocation, "test -z \"${LINEAR_API_KEY:-}\" && test -z \"${HOST_PAYMENT_DSN:-}\""],
+          stdin: "",
+          env: strippedExecutorEnvironment,
+          inheritEnv: false,
+          timeoutMs: 5_000,
+          cleanupOnFailure: true,
+        });
+        expect(nestedShellEnvironment.exitCode).toBe(0);
+      }
+      const attachedThroughExecutorEnvironment = await runLocalCommand({
+        cmd: [codexBin, "sandbox", "-P", "orbs-workspace", "-C", cwd, "/usr/bin/env", "agent-browser", "get", "url"],
+        stdin: "",
+        env: strippedExecutorEnvironment,
+        inheritEnv: false,
+        timeoutMs: 10_000,
+        cleanupOnFailure: true,
+      });
+      if (attachedThroughExecutorEnvironment.exitCode !== 0) {
+        throw new Error(attachedThroughExecutorEnvironment.stderr || attachedThroughExecutorEnvironment.stdout);
+      }
+      expect(attachedThroughExecutorEnvironment.stdout).toContain("about:blank");
+      for (const override of [
+        ["--session", "unfrozen-session", "get", "url"],
+        ["--cdp", "http://127.0.0.1:9", "get", "url"],
+        ["--config", join(cwd, "alternate-browser.json"), "get", "url"],
+        ["--allow-file-access=true", "get", "url"],
+        ["-pios", "get", "url"],
+      ]) {
+        const rejectedOverride = await runLocalCommand({
+          cmd: [codexBin, "sandbox", "-P", "orbs-workspace", "-C", cwd, "/usr/bin/env", "agent-browser", ...override],
+          stdin: "",
+          env: strippedExecutorEnvironment,
+          inheritEnv: false,
+          timeoutMs: 5_000,
+          cleanupOnFailure: true,
+        });
+        expect(rejectedOverride.exitCode).not.toBe(0);
+        expect(`${rejectedOverride.stdout}${rejectedOverride.stderr}`).toContain("browser client connection override is forbidden");
+      }
       for (const [args, expected] of [
         [["open", `http://127.0.0.1:${port}/healthz`], "127.0.0.1"],
         [["get", "url"], "127.0.0.1"],
@@ -564,6 +652,31 @@ describe("codex cli executor", () => {
         cleanupOnFailure: true,
       });
       expect(directNetwork.exitCode).not.toBe(0);
+      await writeFile(versionPath, "0.0.0\n");
+      const staleVersion = await runLocalCommand({
+        cmd: [codexBin, "sandbox", "-P", "orbs-workspace", "-C", cwd, "/usr/bin/env", "agent-browser", "get", "url"],
+        stdin: "",
+        env: strippedExecutorEnvironment,
+        inheritEnv: false,
+        timeoutMs: 5_000,
+        cleanupOnFailure: true,
+      });
+      expect(staleVersion.exitCode).not.toBe(0);
+      expect(`${staleVersion.stdout}${staleVersion.stderr}`).toContain("frozen browser daemon version mismatch");
+      await writeFile(versionPath, `${clientVersion.stdout.trim().replace(/^agent-browser\s+/, "")}\n`);
+      const hiddenSocketPath = `${socketPath}.hidden`;
+      await rename(socketPath, hiddenSocketPath);
+      const missingSocket = await runLocalCommand({
+        cmd: [codexBin, "sandbox", "-P", "orbs-workspace", "-C", cwd, "/usr/bin/env", "agent-browser", "get", "url"],
+        stdin: "",
+        env: strippedExecutorEnvironment,
+        inheritEnv: false,
+        timeoutMs: 5_000,
+        cleanupOnFailure: true,
+      });
+      expect(missingSocket.exitCode).not.toBe(0);
+      expect(`${missingSocket.stdout}${missingSocket.stderr}`).toContain("frozen browser daemon socket is unavailable");
+      await rename(hiddenSocketPath, socketPath);
       expect(existsSync(socketPath)).toBe(true);
       const daemonPidReadback = await runLocalCommand({
         cmd: ["/usr/sbin/lsof", "-t", "--", socketPath],

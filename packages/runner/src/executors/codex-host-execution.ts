@@ -132,13 +132,9 @@ export function protectedCodexConfig(input: {
     ...writableCapabilityPaths(input.capabilities).map((path) => `${tomlString(path)} = "write"`),
   ].join("\n");
   const network = networkProfile(input.capabilities);
-  const excludedEnvironment = [
-    ".*KEY.*", ".*TOKEN.*", ".*SECRET.*", ".*PASSWORD.*", ".*CREDENTIAL.*",
-    ".*AUTHORIZATION.*", ".*COOKIE.*", "^CODEX_HOME$", "^DATABASE_URL$", "^REDIS_URL$",
-    "^SSH_AUTH_SOCK$", "^AWS_.*",
-  ];
   return [
     `default_permissions = ${tomlString(profile)}`,
+    "allow_login_shell = false",
     "",
     ...((input.capabilities?.loopback || input.capabilities?.postgres || input.capabilities?.browser) ? ["[features]", "network_proxy = true", ""] : []),
     "[permissions.orbs-workspace]",
@@ -156,7 +152,8 @@ export function protectedCodexConfig(input: {
     ...network.map((line) => line.replaceAll("permissions.__PROFILE__", "permissions.orbs-read-only")),
     "",
     "[shell_environment_policy]",
-    `exclude = ${JSON.stringify(excludedEnvironment)}`,
+    'inherit = "none"',
+    `set = ${tomlInlineStringTable(protectedShellEnvironment(input.capabilities))}`,
     "",
   ].join("\n");
 }
@@ -208,6 +205,27 @@ function capabilityEnvironment(capabilities: ResolvedHostExecutionCapabilities |
     AGENT_BROWSER_ALLOWED_DOMAINS: capabilities.browser?.allowedDomains.join(","),
     AGENT_BROWSER_SOCKET_DIR: capabilities.browser?.socketDirectory,
     AGENT_BROWSER_SESSION: capabilities.browser?.sessionName,
+    AGENT_BROWSER_CONFIG: capabilities.browser?.configPath,
+    AGENT_BROWSER_ACTION_POLICY: capabilities.browser?.actionPolicyPath,
+    AGENT_BROWSER_ALLOW_FILE_ACCESS: capabilities.browser ? "false" : undefined,
+  };
+}
+
+function protectedShellEnvironment(capabilities: ResolvedHostExecutionCapabilities | undefined) {
+  const runtimeHome = capabilities?.browser?.homeDirectory
+    ?? capabilities?.loopback?.socketDirectory
+    ?? tmpdir();
+  return {
+    HOME: runtimeHome,
+    LANG: process.env.LANG ?? "C.UTF-8",
+    LC_ALL: process.env.LC_ALL,
+    LC_CTYPE: process.env.LC_CTYPE ?? "C.UTF-8",
+    TMPDIR: process.env.TMPDIR ?? tmpdir(),
+    ORBS_BROWSER_PROCESS_POLICY: capabilities?.browser ? "allow" : "deny",
+    ...capabilityEnvironment(capabilities),
+    ...(capabilities?.postgres ? {
+      [capabilities.postgres.environmentVariable]: process.env[capabilities.postgres.environmentVariable],
+    } : {}),
   };
 }
 
@@ -252,6 +270,14 @@ function browserExecRules() {
 
 function tomlString(value: string) {
   return JSON.stringify(value);
+}
+
+function tomlInlineStringTable(input: Record<string, string | undefined>) {
+  return `{ ${Object.entries(input)
+    .filter((entry): entry is [string, string] => entry[1] !== undefined)
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([key, value]) => `${key} = ${tomlString(value)}`)
+    .join(", ")} }`;
 }
 
 async function ensurePrivateDirectory(path: string) {
@@ -322,9 +348,21 @@ async function ensureBrowserHostDaemon(capabilities: ResolvedHostExecutionCapabi
   const frozenClientDirectory = join(browser.socketDirectory, "client-bin");
   await ensurePrivateDirectory(frozenClientDirectory);
   const frozenClientPath = join(frozenClientDirectory, "agent-browser");
+  const versionPath = browser.socketPath.replace(/\.sock$/, ".version");
+  const pidPath = browser.socketPath.replace(/\.sock$/, ".pid");
   await atomicPrivateWrite(
     frozenClientPath,
-    `#!/bin/sh\nexec ${shellSingleQuoted(nativeAgentBrowser)} "$@"\n`,
+    frozenBrowserClient({
+      nativeAgentBrowser,
+      socketPath: browser.socketPath,
+      socketDirectory: browser.socketDirectory,
+      sessionName: browser.sessionName,
+      configPath: browser.configPath,
+      actionPolicyPath: browser.actionPolicyPath,
+      versionPath,
+      pidPath,
+      expectedVersion: agentBrowserVersion,
+    }),
   );
   await chmod(frozenClientPath, 0o700);
   await ensurePrivateDirectory(browser.homeDirectory);
@@ -401,6 +439,8 @@ async function ensureBrowserHostDaemon(capabilities: ResolvedHostExecutionCapabi
     await terminateOwnedProcesses(daemonPids);
     await terminateSubprocess(chrome);
     await rm(browser.socketPath, { force: true });
+    await rm(versionPath, { force: true });
+    await rm(pidPath, { force: true });
   };
   try {
     const connected = await runLocalCommand({
@@ -424,16 +464,59 @@ async function ensureBrowserHostDaemon(capabilities: ResolvedHostExecutionCapabi
     const socket = await lstatIfPresent(browser.socketPath);
     if (!socket?.isSocket() || socket.isSymbolicLink()) throw new Error("browser host daemon did not create its frozen Unix socket");
     await ensureBrowserDaemonVersionMarker(
-      browser.socketPath.replace(/\.sock$/, ".version"),
+      versionPath,
       agentBrowserVersion,
     );
     daemonPids = await processesHoldingPath(browser.socketPath);
     if (daemonPids.length !== 1) throw new Error("browser host daemon must have exactly one process holding its frozen Unix socket");
+    await atomicPrivateWrite(pidPath, `${daemonPids[0]}\n`);
     return cleanup;
   } catch (error) {
     await cleanup();
     throw error;
   }
+}
+
+function frozenBrowserClient(input: {
+  nativeAgentBrowser: string;
+  socketPath: string;
+  socketDirectory: string;
+  sessionName: string;
+  configPath: string;
+  actionPolicyPath: string;
+  versionPath: string;
+  pidPath: string;
+  expectedVersion: string;
+}) {
+  const fixedEnvironment = [
+    ["AGENT_BROWSER_SOCKET_DIR", input.socketDirectory],
+    ["AGENT_BROWSER_SESSION", input.sessionName],
+    ["AGENT_BROWSER_CONFIG", input.configPath],
+    ["AGENT_BROWSER_ACTION_POLICY", input.actionPolicyPath],
+    ["AGENT_BROWSER_ALLOW_FILE_ACCESS", "false"],
+  ] as const;
+  return [
+    "#!/bin/sh",
+    "set -eu",
+    `socket=${shellSingleQuoted(input.socketPath)}`,
+    `version_file=${shellSingleQuoted(input.versionPath)}`,
+    `pid_file=${shellSingleQuoted(input.pidPath)}`,
+    `expected_version=${shellSingleQuoted(input.expectedVersion)}`,
+    'if [ ! -S "$socket" ]; then echo "frozen browser daemon socket is unavailable" >&2; exit 78; fi',
+    'if [ ! -f "$version_file" ] || [ "$(/bin/cat "$version_file")" != "$expected_version" ]; then echo "frozen browser daemon version mismatch" >&2; exit 78; fi',
+    'if [ ! -f "$pid_file" ]; then echo "frozen browser daemon process receipt is unavailable" >&2; exit 78; fi',
+    'daemon_pid=$(/bin/cat "$pid_file")',
+    'case "$daemon_pid" in ""|*[!0-9]*) echo "frozen browser daemon process receipt is invalid" >&2; exit 78;; esac',
+    'for arg in "$@"; do',
+    '  case "$arg" in',
+    '    --session|--session=*|--session-name|--session-name=*|--profile|--profile=*|--state|--state=*|--auto-connect|--cdp|--cdp=*|--provider|--provider=*|-p|-p?*|--executable-path|--executable-path=*|--extension|--extension=*|--args|--args=*|--proxy|--proxy=*|--allow-file-access|--allow-file-access=*|--config|--config=*|--action-policy|--action-policy=*|--headed|--headed=*|--engine|--engine=*)',
+    '      echo "browser client connection override is forbidden" >&2; exit 78;;',
+    '  esac',
+    'done',
+    ...fixedEnvironment.map(([key, value]) => `${key}=${shellSingleQuoted(value)}; export ${key}`),
+    `exec ${shellSingleQuoted(input.nativeAgentBrowser)} "$@"`,
+    "",
+  ].join("\n");
 }
 
 async function readAgentBrowserVersion(executablePath: string) {
