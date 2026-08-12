@@ -330,7 +330,7 @@ async function ensureBrowserHostDaemon(capabilities: ResolvedHostExecutionCapabi
   await ensurePrivateDirectory(browser.homeDirectory);
   await atomicPrivateWrite(browser.actionPolicyPath, JSON.stringify({
     default: "deny",
-    allow: ["launch", "url", "gettext", "navigate", "snapshot", "click", "fill", "scroll", "wait", "read", "get", "interact"],
+    allow: ["launch", "url", "gettext", "navigate", "snapshot", "click", "fill", "select", "scroll", "scrollintoview", "wait", "read", "get", "interact"],
   }) + "\n");
   await atomicPrivateWrite(browser.configPath, JSON.stringify({
     actionPolicy: browser.actionPolicyPath,

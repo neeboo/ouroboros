@@ -314,7 +314,32 @@ describe("codex cli executor", () => {
     const server = Bun.serve({
       hostname: "127.0.0.1",
       port: 0,
-      fetch: () => new Response('<body>browser-health<input id="f" type="file"></body>', {
+      fetch: () => new Response(`
+        <body>
+          browser-health
+          <input id="f" type="file">
+          <div role="dialog" aria-label="project settings" style="height: 120px; overflow: auto">
+            <div style="height: 480px"></div>
+            <button id="preset" type="button">use preset</button>
+            <label>visual manual
+              <select id="visual-manual">
+                <option value="">unconfigured</option>
+                <option value="western_fantasy">western fantasy</option>
+              </select>
+            </label>
+            <output id="selection-state">unconfigured</output>
+          </div>
+          <a id="download" download="proof.txt" href="data:text/plain,blocked">download proof</a>
+          <script>
+            document.querySelector('#preset').addEventListener('click', () => {
+              document.querySelector('#selection-state').textContent = 'clicked';
+            });
+            document.querySelector('#visual-manual').addEventListener('change', (event) => {
+              document.querySelector('#selection-state').textContent = event.target.value;
+            });
+          </script>
+        </body>
+      `, {
         headers: { "content-type": "text/html" },
       }),
     });
@@ -400,6 +425,102 @@ describe("codex cli executor", () => {
         if (browserCommand.exitCode !== 0) throw new Error(browserCommand.stderr || browserCommand.stdout);
         expect(browserCommand.stdout).toContain(expected);
       }
+      const snapshot = await runLocalCommand({
+        cmd: [codexBin, "sandbox", "-P", "orbs-workspace", "-C", cwd, "/usr/bin/env", "agent-browser", "snapshot", "-i"],
+        stdin: "",
+        env: execution!.env,
+        timeoutMs: 10_000,
+        cleanupOnFailure: true,
+      });
+      const presetRef = /button "use preset" \[ref=(e\d+)\]/.exec(snapshot.stdout)?.[1];
+      expect(presetRef).toBeDefined();
+      const referenceClick = await runLocalCommand({
+        cmd: [codexBin, "sandbox", "-P", "orbs-workspace", "-C", cwd, "/usr/bin/env", "agent-browser", "click", `@${presetRef}`],
+        stdin: "",
+        env: execution!.env,
+        timeoutMs: 10_000,
+        cleanupOnFailure: true,
+      });
+      expect(referenceClick.exitCode).toBe(0);
+      const clickedState = await runLocalCommand({
+        cmd: [codexBin, "sandbox", "-P", "orbs-workspace", "-C", cwd, "/usr/bin/env", "agent-browser", "get", "text", "#selection-state"],
+        stdin: "",
+        env: execution!.env,
+        timeoutMs: 10_000,
+        cleanupOnFailure: true,
+      });
+      expect(clickedState.stdout).toContain("unconfigured");
+      const scrollIntoView = await runLocalCommand({
+        cmd: [codexBin, "sandbox", "-P", "orbs-workspace", "-C", cwd, "/usr/bin/env", "agent-browser", "scrollintoview", "#preset"],
+        stdin: "",
+        env: execution!.env,
+        timeoutMs: 10_000,
+        cleanupOnFailure: true,
+      });
+      if (scrollIntoView.exitCode !== 0) throw new Error(scrollIntoView.stderr || scrollIntoView.stdout);
+      const selectorClick = await runLocalCommand({
+        cmd: [codexBin, "sandbox", "-P", "orbs-workspace", "-C", cwd, "/usr/bin/env", "agent-browser", "click", `@${presetRef}`],
+        stdin: "",
+        env: execution!.env,
+        timeoutMs: 10_000,
+        cleanupOnFailure: true,
+      });
+      expect(selectorClick.exitCode).toBe(0);
+      const selectorClickedState = await runLocalCommand({
+        cmd: [codexBin, "sandbox", "-P", "orbs-workspace", "-C", cwd, "/usr/bin/env", "agent-browser", "get", "text", "#selection-state"],
+        stdin: "",
+        env: execution!.env,
+        timeoutMs: 10_000,
+        cleanupOnFailure: true,
+      });
+      expect(selectorClickedState.stdout).toContain("clicked");
+      for (const args of [
+        ["scrollintoview", "#visual-manual"],
+        ["select", "#visual-manual", "western_fantasy"],
+      ]) {
+        const interaction = await runLocalCommand({
+          cmd: [codexBin, "sandbox", "-P", "orbs-workspace", "-C", cwd, "/usr/bin/env", "agent-browser", ...args],
+          stdin: "",
+          env: execution!.env,
+          timeoutMs: 10_000,
+          cleanupOnFailure: true,
+        });
+        if (interaction.exitCode !== 0) throw new Error(interaction.stderr || interaction.stdout);
+      }
+      const selectedSnapshot = await runLocalCommand({
+        cmd: [codexBin, "sandbox", "-P", "orbs-workspace", "-C", cwd, "/usr/bin/env", "agent-browser", "snapshot", "-i"],
+        stdin: "",
+        env: execution!.env,
+        timeoutMs: 10_000,
+        cleanupOnFailure: true,
+      });
+      const selectedState = await runLocalCommand({
+        cmd: [codexBin, "sandbox", "-P", "orbs-workspace", "-C", cwd, "/usr/bin/env", "agent-browser", "get", "text", "#selection-state"],
+        stdin: "",
+        env: execution!.env,
+        timeoutMs: 10_000,
+        cleanupOnFailure: true,
+      });
+      expect(selectedSnapshot.stdout).toContain("western fantasy");
+      expect(selectedSnapshot.stdout).toContain("selected");
+      expect(selectedState.stdout).toContain("western_fantasy");
+      for (const args of [
+        ["focus", "#visual-manual"],
+        ["press", "Enter"],
+        ["get", "value", "#visual-manual"],
+        ["eval", "document.body.textContent"],
+        ["download", "#download", join(cwd, "download-proof.txt")],
+      ]) {
+        const deniedInteraction = await runLocalCommand({
+          cmd: [codexBin, "sandbox", "-P", "orbs-workspace", "-C", cwd, "/usr/bin/env", "agent-browser", ...args],
+          stdin: "",
+          env: execution!.env,
+          timeoutMs: 10_000,
+          cleanupOnFailure: true,
+        });
+        expect(deniedInteraction.exitCode).not.toBe(0);
+      }
+      expect(existsSync(join(cwd, "download-proof.txt"))).toBe(false);
       const directCredentialRead = await runLocalCommand({
         cmd: [codexBin, "sandbox", "-P", "orbs-workspace", "-C", cwd, "/bin/cat", protectedAuth],
         stdin: "",
