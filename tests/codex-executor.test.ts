@@ -15,6 +15,17 @@ import {
   verifierContractSha256,
 } from "../packages/runner/src/executors/host-execution-capabilities";
 
+const exactPan1286VerifierFixture = JSON.parse(
+  await Bun.file(new URL("./fixtures/pan-1286-verifier-config.json", import.meta.url)).text(),
+) as {
+  taskId: string;
+  attemptId: string;
+  sessionId: string;
+  inheritedFromTaskId: string;
+  verifierContract: Record<string, unknown>;
+  hostExecutionCapabilities: Record<string, unknown>;
+};
+
 const runFixture = {
   id: "run_1",
   projectId: "project_1",
@@ -36,6 +47,20 @@ const routeFixture = {
 } as const;
 
 describe("codex cli executor", () => {
+  test("preserves the exact failing PAN-1286 verifier capability fixture", () => {
+    expect(exactPan1286VerifierFixture.taskId).toBe("task_e9464a9b199f42febc596f7d4342ee36");
+    expect(exactPan1286VerifierFixture.attemptId).toBe("attempt_226ae4f59e164b7e9ab94b6dbcf62104");
+    expect(exactPan1286VerifierFixture.sessionId).toBe("019ff830-46cb-7311-9f0e-383c60022193");
+    expect(exactPan1286VerifierFixture.inheritedFromTaskId).toBe("task_3796794bed4f47fea9d9f41f874e8db2");
+    expect(verifierContractSha256(exactPan1286VerifierFixture.verifierContract)).toBe(
+      "df239ffff74e06c3557b4b32f90736632852c0bba791248e7c54158e4126fa2d",
+    );
+    expect(() => parseHostExecutionCapabilities(exactPan1286VerifierFixture.hostExecutionCapabilities, {
+      role: "verifier",
+      verifierContract: exactPan1286VerifierFixture.verifierContract,
+    })).not.toThrow();
+  });
+
   test("host execution capabilities reject unknown fields and browser access outside verifier tasks", () => {
     const verifierContract = { deterministicChecks: ["browser health"] };
     const verifierContractHash = verifierContractSha256(verifierContract);
@@ -383,6 +408,10 @@ describe("codex cli executor", () => {
       expect(clientVersion.exitCode).toBe(0);
       expect(clientVersion.stdout).toBe(agentBrowserReadback.stdout);
       expect((await Bun.file(versionPath).text()).trim()).toBe(clientVersion.stdout.trim().replace(/^agent-browser\s+/, ""));
+      const frozenClientSource = await Bun.file(agentBrowser).text();
+      for (const name of ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy", "AGENT_BROWSER_PROXY"]) {
+        expect(frozenClientSource).toContain(`unset ${name}`);
+      }
       const clientOverwrite = await runLocalCommand({
         cmd: [codexBin, "sandbox", "-P", "orbs-workspace", "-C", cwd, "/bin/sh", "-c", `printf replaced > ${JSON.stringify(agentBrowser)}`],
         stdin: "",
@@ -410,6 +439,13 @@ describe("codex cli executor", () => {
       const initialDaemonPids = initialDaemonPidReadback.stdout.trim().split(/\s+/).filter(Boolean);
       expect(initialDaemonPids).toHaveLength(1);
       const protectedConfig = await Bun.file(join(execution!.env.CODEX_HOME, "config.toml")).text();
+      const actionPolicy = JSON.parse(await Bun.file(execution!.capabilities!.browser!.actionPolicyPath).text()) as { default: string; allow: string[] };
+      expect(actionPolicy.default).toBe("deny");
+      expect(actionPolicy.allow).toContain("reload");
+      expect(actionPolicy.allow).toContain("dialog");
+      expect(actionPolicy.allow).not.toContain("eval");
+      expect(actionPolicy.allow).not.toContain("upload");
+      expect(actionPolicy.allow).not.toContain("download");
       expect(protectedConfig).toContain("[shell_environment_policy]");
       expect(protectedConfig).toContain('inherit = "none"');
       expect(protectedConfig).toContain("allow_login_shell = false");
@@ -467,50 +503,95 @@ describe("codex cli executor", () => {
         });
         expect(nestedShellEnvironment.exitCode).toBe(0);
       }
-      const attachedThroughExecutorEnvironment = await runLocalCommand({
-        cmd: [codexBin, "sandbox", "-P", "orbs-workspace", "-C", cwd, "/usr/bin/env", "agent-browser", "get", "url"],
+      const attachmentProof = await runLocalCommand({
+        cmd: [
+          codexBin,
+          "sandbox",
+          "-P",
+          "orbs-workspace",
+          "-C",
+          cwd,
+          "/usr/bin/env",
+          "HTTP_PROXY=",
+          "HTTPS_PROXY=",
+          "ALL_PROXY=",
+          "http_proxy=",
+          "https_proxy=",
+          "all_proxy=",
+          "AGENT_BROWSER_SESSION_NAME=unfrozen-session",
+          "AGENT_BROWSER_STREAM_PORT=1",
+          "AGENT_BROWSER_IDLE_TIMEOUT_MS=1",
+          "AGENT_BROWSER_CONFIRM_ACTIONS=upload,download",
+          "AGENT_BROWSER_SCREENSHOT_DIR=/tmp/unfrozen-browser-output",
+          "agent-browser",
+          "--orbs-attachment-proof",
+        ],
         stdin: "",
         env: strippedExecutorEnvironment,
         inheritEnv: false,
         timeoutMs: 10_000,
         cleanupOnFailure: true,
       });
-      if (attachedThroughExecutorEnvironment.exitCode !== 0) {
-        throw new Error(attachedThroughExecutorEnvironment.stderr || attachedThroughExecutorEnvironment.stdout);
-      }
-      expect(attachedThroughExecutorEnvironment.stdout).toContain("about:blank");
-      for (const override of [
-        ["--session", "unfrozen-session", "get", "url"],
-        ["--cdp", "http://127.0.0.1:9", "get", "url"],
-        ["--config", join(cwd, "alternate-browser.json"), "get", "url"],
-        ["--allow-file-access=true", "get", "url"],
-        ["-pios", "get", "url"],
-      ]) {
-        const rejectedOverride = await runLocalCommand({
-          cmd: [codexBin, "sandbox", "-P", "orbs-workspace", "-C", cwd, "/usr/bin/env", "agent-browser", ...override],
-          stdin: "",
-          env: strippedExecutorEnvironment,
-          inheritEnv: false,
-          timeoutMs: 5_000,
-          cleanupOnFailure: true,
-        });
-        expect(rejectedOverride.exitCode).not.toBe(0);
-        expect(`${rejectedOverride.stdout}${rejectedOverride.stderr}`).toContain("browser client connection override is forbidden");
-      }
-      for (const [args, expected] of [
-        [["open", `http://127.0.0.1:${port}/healthz`], "127.0.0.1"],
-        [["get", "url"], "127.0.0.1"],
-        [["snapshot", "-i"], "选择文件"],
-        [["get", "text", "body"], "browser-health"],
-      ] as const) {
-        const browserCommand = await runLocalCommand({
-          cmd: [codexBin, "sandbox", "-P", "orbs-workspace", "-C", cwd, "/usr/bin/env", "agent-browser", ...args],
-          stdin: "",
-          env: execution!.env,
-          timeoutMs: 20_000,
-          cleanupOnFailure: true,
-        });
-        if (browserCommand.exitCode !== 0) throw new Error(browserCommand.stderr || browserCommand.stdout);
+      expect(attachmentProof.exitCode).toBe(0);
+      expect(JSON.parse(attachmentProof.stdout)).toMatchObject({
+        schemaVersion: 1,
+        sessionName: execution!.capabilities!.browser!.sessionName,
+        socketPath,
+        clientVersion: clientVersion.stdout.trim().replace(/^agent-browser\s+/, ""),
+      });
+      const rejectedOverrides = await runLocalCommand({
+        cmd: [
+          codexBin,
+          "sandbox",
+          "-P",
+          "orbs-workspace",
+          "-C",
+          cwd,
+          "/bin/sh",
+          "-c",
+          [
+            "set -eu",
+            "reject_override() { output=$(agent-browser \"$@\" 2>&1) && exit 1; case \"$output\" in *\"browser client connection override is forbidden\"*) ;; *) printf '%s\\n' \"$output\" >&2; exit 1;; esac; }",
+            "reject_override --session unfrozen-session get url",
+            "reject_override --cdp http://127.0.0.1:9 get url",
+            `reject_override --config ${JSON.stringify(join(cwd, "alternate-browser.json"))} get url`,
+            "reject_override --allow-file-access=true get url",
+            "reject_override --allowed-domains example.com get url",
+            "reject_override -pios get url",
+          ].join("\n"),
+        ],
+        stdin: "",
+        env: strippedExecutorEnvironment,
+        inheritEnv: false,
+        timeoutMs: 10_000,
+        cleanupOnFailure: true,
+      });
+      expect(rejectedOverrides.exitCode).toBe(0);
+      const browserCommand = await runLocalCommand({
+        cmd: [
+          codexBin,
+          "sandbox",
+          "-P",
+          "orbs-workspace",
+          "-C",
+          cwd,
+          "/bin/sh",
+          "-c",
+          [
+            `agent-browser open http://127.0.0.1:${port}/healthz`,
+            "agent-browser get url",
+            "agent-browser reload",
+            "agent-browser snapshot -i",
+            "agent-browser get text body",
+          ].join("\n"),
+        ],
+        stdin: "",
+        env: execution!.env,
+        timeoutMs: 20_000,
+        cleanupOnFailure: true,
+      });
+      if (browserCommand.exitCode !== 0) throw new Error(browserCommand.stderr || browserCommand.stdout);
+      for (const expected of ["127.0.0.1", "选择文件", "browser-health"]) {
         expect(browserCommand.stdout).toContain(expected);
       }
       const snapshot = await runLocalCommand({
@@ -592,22 +673,32 @@ describe("codex cli executor", () => {
       expect(selectedSnapshot.stdout).toContain("western fantasy");
       expect(selectedSnapshot.stdout).toContain("selected");
       expect(selectedState.stdout).toContain("western_fantasy");
-      for (const args of [
-        ["focus", "#visual-manual"],
-        ["press", "Enter"],
-        ["get", "value", "#visual-manual"],
-        ["eval", "document.body.textContent"],
-        ["download", "#download", join(cwd, "download-proof.txt")],
-      ]) {
-        const deniedInteraction = await runLocalCommand({
-          cmd: [codexBin, "sandbox", "-P", "orbs-workspace", "-C", cwd, "/usr/bin/env", "agent-browser", ...args],
-          stdin: "",
-          env: execution!.env,
-          timeoutMs: 10_000,
-          cleanupOnFailure: true,
-        });
-        expect(deniedInteraction.exitCode).not.toBe(0);
-      }
+      const deniedInteractions = await runLocalCommand({
+        cmd: [
+          codexBin,
+          "sandbox",
+          "-P",
+          "orbs-workspace",
+          "-C",
+          cwd,
+          "/bin/sh",
+          "-c",
+          [
+            "set -eu",
+            "reject_action() { agent-browser \"$@\" >/dev/null 2>&1 && exit 1 || :; }",
+            "reject_action focus '#visual-manual'",
+            "reject_action press Enter",
+            "reject_action get value '#visual-manual'",
+            "reject_action eval 'document.body.textContent'",
+            `reject_action download '#download' ${JSON.stringify(join(cwd, "download-proof.txt"))}`,
+          ].join("\n"),
+        ],
+        stdin: "",
+        env: execution!.env,
+        timeoutMs: 10_000,
+        cleanupOnFailure: true,
+      });
+      expect(deniedInteractions.exitCode).toBe(0);
       expect(existsSync(join(cwd, "download-proof.txt"))).toBe(false);
       const directCredentialRead = await runLocalCommand({
         cmd: [codexBin, "sandbox", "-P", "orbs-workspace", "-C", cwd, "/bin/cat", protectedAuth],
@@ -664,6 +755,20 @@ describe("codex cli executor", () => {
       expect(staleVersion.exitCode).not.toBe(0);
       expect(`${staleVersion.stdout}${staleVersion.stderr}`).toContain("frozen browser daemon version mismatch");
       await writeFile(versionPath, `${clientVersion.stdout.trim().replace(/^agent-browser\s+/, "")}\n`);
+      const identityPath = socketPath.replace(/\.sock$/, ".identity");
+      const expectedIdentity = (await Bun.file(identityPath).text()).trim();
+      await writeFile(identityPath, "0:0\n");
+      const mismatchedIdentity = await runLocalCommand({
+        cmd: [codexBin, "sandbox", "-P", "orbs-workspace", "-C", cwd, "/usr/bin/env", "agent-browser", "get", "url"],
+        stdin: "",
+        env: strippedExecutorEnvironment,
+        inheritEnv: false,
+        timeoutMs: 5_000,
+        cleanupOnFailure: true,
+      });
+      expect(mismatchedIdentity.exitCode).not.toBe(0);
+      expect(`${mismatchedIdentity.stdout}${mismatchedIdentity.stderr}`).toContain("frozen browser daemon socket identity mismatch");
+      await writeFile(identityPath, `${expectedIdentity}\n`);
       const hiddenSocketPath = `${socketPath}.hidden`;
       await rename(socketPath, hiddenSocketPath);
       const missingSocket = await runLocalCommand({
