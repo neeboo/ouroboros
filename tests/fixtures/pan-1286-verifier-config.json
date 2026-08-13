@@ -1,0 +1,77 @@
+{
+  "taskId": "task_e9464a9b199f42febc596f7d4342ee36",
+  "attemptId": "attempt_226ae4f59e164b7e9ab94b6dbcf62104",
+  "sessionId": "019ff830-46cb-7311-9f0e-383c60022193",
+  "inheritedFromTaskId": "task_3796794bed4f47fea9d9f41f874e8db2",
+  "verifierContract": {
+    "schemaVersion": 1,
+    "sourceTaskId": "task_77218895ce1d4693a433dc0fd179a7d6",
+    "amendmentOfVerifierTaskId": "task_1d0b16e91dd54f8da0c13f675e797994",
+    "amendmentReason": "Preserve the acceptance bar while replacing sandbox-blocked full-suite execution with exact host-owned evidence and a synthetic isolated authentication service.",
+    "scope": {
+      "hodorWorktree": "/Users/ghostcorn/dev/hodor-production-media-workflow/.ouroboros/worktrees/task_77218895ce1d4693a433dc0fd179a7d6",
+      "hodorWebWorktree": "/private/tmp/hodor-web-pan-1286-final.uGmQNi"
+    },
+    "deterministicChecks": [
+      "Review host-owned Hodor cloud suite evidence: 209 passed, 0 failed",
+      "Review host-owned hodor-web full suite evidence: 67 files and 424 tests passed",
+      "Reconfirm focused PostgreSQL, typecheck, build, diff and user-state boundaries"
+    ],
+    "liveChecks": {
+      "backendUrl": "http://127.0.0.1:10589",
+      "frontendUrl": "http://127.0.0.1:4173",
+      "authUrl": "http://127.0.0.1:10590",
+      "healthPath": "/healthz",
+      "browserFlow": "log in with isolated synthetic verifier identity, create/edit/select/save/reload 使用欧美玄幻预设, then clean up the test project"
+    },
+    "requiredEvidence": [
+      "authenticated project API round trip with western_fantasy",
+      "independent isolated browser select/save/reload readback",
+      "host-owned full-suite evidence review",
+      "exact changed-file and user-state review"
+    ],
+    "stopPolicy": "Fail closed on any regression, missing evidence, unauthorized file, user-state mutation, or contract weakening."
+  },
+  "sourceWorktreePath": "/Users/ghostcorn/dev/hodor-production-media-workflow/.ouroboros/worktrees/task_77218895ce1d4693a433dc0fd179a7d6",
+  "hostVerificationEvidence": {
+    "observedAt": "2026-08-12T19:43:00+08:00",
+    "hodor": {
+      "command": "DATABASE_URL=postgresql:///hodor_runtime_test?host=/tmp TEST_DATABASE_URL=postgresql:///hodor_test?host=/tmp DB_SSL_MODE=disable bun run test:cloud",
+      "result": "209 passed, 0 failed, 44 files"
+    },
+    "hodorWeb": {
+      "command": "bun run test",
+      "result": "67 test files passed, 424 tests passed"
+    },
+    "provenance": "Executed host-side from the exact frozen worktrees after the first verifier identified fixed-port sandbox mismatch."
+  },
+  "isolatedSyntheticAuth": {
+    "url": "http://127.0.0.1:10590",
+    "username": "pan1286-verifier",
+    "password": "isolated-test-only",
+    "credentialClass": "synthetic non-production verifier identity",
+    "cleanupPolicy": "Delete any created project before completion; no production credential access."
+  },
+  "hostExecutionCapabilities": {
+    "schemaVersion": 1,
+    "postgres": {
+      "environmentVariable": "TEST_DATABASE_URL",
+      "valueSha256": "b8389fa21af9c8e8869119dab95697a64205719123d98c2e6ecf674c7edf0447",
+      "unixSocketPath": "/tmp/.s.PGSQL.5432"
+    },
+    "loopback": {
+      "host": "127.0.0.1",
+      "ports": [4173, 10589, 10590]
+    },
+    "network": {
+      "mode": "host-fixed-actions",
+      "domains": ["github.com", "ssh.github.com", "api.linear.app"],
+      "clearAmbientProxy": true
+    },
+    "browser": {
+      "mode": "isolated-agent-browser",
+      "allowedDomains": ["127.0.0.1"],
+      "verifierContractSha256": "df239ffff74e06c3557b4b32f90736632852c0bba791248e7c54158e4126fa2d"
+    }
+  }
+}

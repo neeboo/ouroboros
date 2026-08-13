@@ -350,6 +350,8 @@ async function ensureBrowserHostDaemon(capabilities: ResolvedHostExecutionCapabi
   const frozenClientPath = join(frozenClientDirectory, "agent-browser");
   const versionPath = browser.socketPath.replace(/\.sock$/, ".version");
   const pidPath = browser.socketPath.replace(/\.sock$/, ".pid");
+  const identityPath = browser.socketPath.replace(/\.sock$/, ".identity");
+  const attachmentPath = browser.socketPath.replace(/\.sock$/, ".attachment.json");
   await atomicPrivateWrite(
     frozenClientPath,
     frozenBrowserClient({
@@ -359,8 +361,11 @@ async function ensureBrowserHostDaemon(capabilities: ResolvedHostExecutionCapabi
       sessionName: browser.sessionName,
       configPath: browser.configPath,
       actionPolicyPath: browser.actionPolicyPath,
+      allowedDomains: browser.allowedDomains,
       versionPath,
       pidPath,
+      identityPath,
+      attachmentPath,
       expectedVersion: agentBrowserVersion,
     }),
   );
@@ -368,7 +373,7 @@ async function ensureBrowserHostDaemon(capabilities: ResolvedHostExecutionCapabi
   await ensurePrivateDirectory(browser.homeDirectory);
   await atomicPrivateWrite(browser.actionPolicyPath, JSON.stringify({
     default: "deny",
-    allow: ["launch", "url", "gettext", "navigate", "snapshot", "click", "fill", "select", "scroll", "scrollintoview", "wait", "read", "get", "interact"],
+    allow: ["launch", "url", "gettext", "navigate", "reload", "snapshot", "click", "fill", "select", "scroll", "scrollintoview", "wait", "read", "get", "interact", "dialog"],
   }) + "\n");
   await atomicPrivateWrite(browser.configPath, JSON.stringify({
     actionPolicy: browser.actionPolicyPath,
@@ -441,6 +446,8 @@ async function ensureBrowserHostDaemon(capabilities: ResolvedHostExecutionCapabi
     await rm(browser.socketPath, { force: true });
     await rm(versionPath, { force: true });
     await rm(pidPath, { force: true });
+    await rm(identityPath, { force: true });
+    await rm(attachmentPath, { force: true });
   };
   try {
     const connected = await runLocalCommand({
@@ -470,6 +477,16 @@ async function ensureBrowserHostDaemon(capabilities: ResolvedHostExecutionCapabi
     daemonPids = await processesHoldingPath(browser.socketPath);
     if (daemonPids.length !== 1) throw new Error("browser host daemon must have exactly one process holding its frozen Unix socket");
     await atomicPrivateWrite(pidPath, `${daemonPids[0]}\n`);
+    const socketIdentity = `${socket.dev}:${socket.ino}`;
+    await atomicPrivateWrite(identityPath, `${socketIdentity}\n`);
+    await atomicPrivateWrite(attachmentPath, JSON.stringify({
+      schemaVersion: 1,
+      sessionName: browser.sessionName,
+      socketPath: browser.socketPath,
+      socketIdentity,
+      daemonPid: daemonPids[0],
+      clientVersion: agentBrowserVersion,
+    }) + "\n");
     return cleanup;
   } catch (error) {
     await cleanup();
@@ -484,8 +501,11 @@ function frozenBrowserClient(input: {
   sessionName: string;
   configPath: string;
   actionPolicyPath: string;
+  allowedDomains: string[];
   versionPath: string;
   pidPath: string;
+  identityPath: string;
+  attachmentPath: string;
   expectedVersion: string;
 }) {
   const fixedEnvironment = [
@@ -493,6 +513,7 @@ function frozenBrowserClient(input: {
     ["AGENT_BROWSER_SESSION", input.sessionName],
     ["AGENT_BROWSER_CONFIG", input.configPath],
     ["AGENT_BROWSER_ACTION_POLICY", input.actionPolicyPath],
+    ["AGENT_BROWSER_ALLOWED_DOMAINS", input.allowedDomains.join(",")],
     ["AGENT_BROWSER_ALLOW_FILE_ACCESS", "false"],
   ] as const;
   return [
@@ -501,19 +522,75 @@ function frozenBrowserClient(input: {
     `socket=${shellSingleQuoted(input.socketPath)}`,
     `version_file=${shellSingleQuoted(input.versionPath)}`,
     `pid_file=${shellSingleQuoted(input.pidPath)}`,
+    `identity_file=${shellSingleQuoted(input.identityPath)}`,
+    `attachment_file=${shellSingleQuoted(input.attachmentPath)}`,
     `expected_version=${shellSingleQuoted(input.expectedVersion)}`,
     'if [ ! -S "$socket" ]; then echo "frozen browser daemon socket is unavailable" >&2; exit 78; fi',
     'if [ ! -f "$version_file" ] || [ "$(/bin/cat "$version_file")" != "$expected_version" ]; then echo "frozen browser daemon version mismatch" >&2; exit 78; fi',
     'if [ ! -f "$pid_file" ]; then echo "frozen browser daemon process receipt is unavailable" >&2; exit 78; fi',
     'daemon_pid=$(/bin/cat "$pid_file")',
     'case "$daemon_pid" in ""|*[!0-9]*) echo "frozen browser daemon process receipt is invalid" >&2; exit 78;; esac',
+    'if [ ! -f "$identity_file" ]; then echo "frozen browser daemon socket identity receipt is unavailable" >&2; exit 78; fi',
+    'expected_identity=$(/bin/cat "$identity_file")',
+    'actual_identity=$(/usr/bin/stat -f "%d:%i" "$socket")',
+    'if [ "$actual_identity" != "$expected_identity" ]; then echo "frozen browser daemon socket identity mismatch" >&2; exit 78; fi',
+    'if [ ! -f "$attachment_file" ]; then echo "frozen browser daemon attachment receipt is unavailable" >&2; exit 78; fi',
     'for arg in "$@"; do',
     '  case "$arg" in',
-    '    --session|--session=*|--session-name|--session-name=*|--profile|--profile=*|--state|--state=*|--auto-connect|--cdp|--cdp=*|--provider|--provider=*|-p|-p?*|--executable-path|--executable-path=*|--extension|--extension=*|--args|--args=*|--proxy|--proxy=*|--allow-file-access|--allow-file-access=*|--config|--config=*|--action-policy|--action-policy=*|--headed|--headed=*|--engine|--engine=*)',
+    '    --session|--session=*|--session-name|--session-name=*|--profile|--profile=*|--state|--state=*|--auto-connect|--cdp|--cdp=*|--provider|--provider=*|-p|-p?*|--executable-path|--executable-path=*|--extension|--extension=*|--args|--args=*|--proxy|--proxy=*|--allow-file-access|--allow-file-access=*|--allowed-domains|--allowed-domains=*|--config|--config=*|--action-policy|--action-policy=*|--headed|--headed=*|--engine|--engine=*)',
     '      echo "browser client connection override is forbidden" >&2; exit 78;;',
     '  esac',
     'done',
+    ...[
+      ...AMBIENT_PROXY_VARIABLES,
+      "AGENT_BROWSER_PROXY",
+      "AGENT_BROWSER_PROXY_BYPASS",
+      "AGENT_BROWSER_EXECUTABLE_PATH",
+      "AGENT_BROWSER_EXTENSIONS",
+      "AGENT_BROWSER_PROFILE",
+      "AGENT_BROWSER_STATE",
+      "AGENT_BROWSER_ARGS",
+      "AGENT_BROWSER_USER_AGENT",
+      "AGENT_BROWSER_PROVIDER",
+      "AGENT_BROWSER_IGNORE_HTTPS_ERRORS",
+      "AGENT_BROWSER_AUTO_CONNECT",
+      "AGENT_BROWSER_CDP",
+      "AGENT_BROWSER_ENGINE",
+      "AGENT_BROWSER_HEADED",
+      "AGENT_BROWSER_DOWNLOAD_PATH",
+      "AGENT_BROWSER_ALLOWED_DOMAINS",
+      "AGENT_BROWSER_SESSION",
+      "AGENT_BROWSER_SESSION_NAME",
+      "AGENT_BROWSER_SOCKET_DIR",
+      "AGENT_BROWSER_CONFIG",
+      "AGENT_BROWSER_ACTION_POLICY",
+      "AGENT_BROWSER_ALLOW_FILE_ACCESS",
+      "AGENT_BROWSER_ENCRYPTION_KEY",
+      "AGENT_BROWSER_STATE_EXPIRE_DAYS",
+      "AGENT_BROWSER_STREAM_PORT",
+      "AGENT_BROWSER_IDLE_TIMEOUT_MS",
+      "AGENT_BROWSER_CONFIRM_ACTIONS",
+      "AGENT_BROWSER_CONFIRM_INTERACTIVE",
+      "AGENT_BROWSER_SCREENSHOT_DIR",
+      "AGENT_BROWSER_SCREENSHOT_FORMAT",
+      "AGENT_BROWSER_SCREENSHOT_QUALITY",
+      "AGENT_BROWSER_DEFAULT_TIMEOUT",
+      "AGENT_BROWSER_IOS_DEVICE",
+      "AGENT_BROWSER_IOS_UDID",
+      "AGENT_BROWSER_ANNOTATE",
+      "AGENT_BROWSER_COLOR_SCHEME",
+      "AGENT_BROWSER_CONTENT_BOUNDARIES",
+      "AGENT_BROWSER_DEBUG",
+      "AGENT_BROWSER_FULL",
+      "AGENT_BROWSER_JSON",
+      "AGENT_BROWSER_MAX_OUTPUT",
+    ].map((key) => `unset ${key}`),
     ...fixedEnvironment.map(([key, value]) => `${key}=${shellSingleQuoted(value)}; export ${key}`),
+    'if [ "$#" -eq 1 ] && [ "$1" = "--orbs-attachment-proof" ]; then',
+    `  ${shellSingleQuoted(input.nativeAgentBrowser)} get url >/dev/null`,
+    '  /bin/cat "$attachment_file"',
+    '  exit 0',
+    'fi',
     `exec ${shellSingleQuoted(input.nativeAgentBrowser)} "$@"`,
     "",
   ].join("\n");
