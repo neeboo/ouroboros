@@ -227,6 +227,32 @@ then run.context.modelDefaults.global
 then CLI --model
 ```
 
+## 接入 DeepSeek Harness
+
+DeepSeek Harness 可以作为另一种任务执行器。先单独安装并配置官方 `dsh` 命令，再在配置中声明一个后端：
+
+```toml
+[agentDefaults.roles]
+worker = "deepseek-harness"
+
+["agentBackends"."deepseek-harness"]
+kind = "dsh-cli"
+command = "dsh"
+profile = "headless"
+```
+
+也可以只让一次运行使用内置路线：
+
+```bash
+bun run orbs -- run-next \
+  --run-id <run_id> \
+  --executor dsh-cli \
+  --cwd "$(pwd)" \
+  --sandbox workspace-write
+```
+
+第一版只做单次执行。Ouroboros 会在任务自己的隔离工作区中启动 `dsh --profile headless`，继续管理已经冻结的任务和验收合同，并且只接受结构化的 `AttemptOutput` 结果。危险权限、不支持的 DSH profile、超长命令参数，以及需要 Ouroboros 宿主执行能力的任务，都会在 DSH 开始工作前被阻断。DSH 使用自己 profile 中的模型配置，不继承 Ouroboros 的模型默认值。等真实任务证明 DSH 带来稳定收益后，再接 ACP 可恢复会话，并把 HarnessRevision 中的项目知识、能力包和 ORBS 工具提供给 DSH。
+
 ## 常用命令
 
 ```bash

@@ -293,6 +293,32 @@ See `docs/default-runbook.md` for the recommended end-to-end run commands. See `
 
 Claude Code uses its local Claude configuration by default. When a route resolves to semantic `agent: "claude"`, including a reserved `claude-code` backend using raw `agentCommand` transport, Orbs drops inherited `modelDefaults` and CLI `--model` values, including inert metadata such as `base_url` and `env_key`. A task can still set an explicit `config.modelPreference` when the Claude adapter should receive a specific `--model`; an explicit provider must be `anthropic` or `claude`. Provider identity is declared by backend metadata and is never inferred from the command path.
 
+### DeepSeek Harness
+
+DeepSeek Harness can be selected as another task executor. Install and configure the official `dsh` CLI separately, then declare a named backend:
+
+```toml
+[agentDefaults.roles]
+worker = "deepseek-harness"
+
+["agentBackends"."deepseek-harness"]
+kind = "dsh-cli"
+command = "dsh"
+profile = "headless"
+```
+
+Or select the built-in route for one run:
+
+```bash
+orbs run-next \
+  --run-id <run_id> \
+  --executor dsh-cli \
+  --cwd "$(pwd)" \
+  --sandbox workspace-write
+```
+
+This first adapter is intentionally one-shot. Ouroboros starts `dsh --profile headless` in the exact task worktree, keeps the frozen task and verifier contracts, and accepts only a structured `AttemptOutput` result. `danger-full-access`, unsupported DSH profiles, oversized command arguments, and tasks requesting Ouroboros host execution capabilities fail before DSH can act. DSH owns its model selection through its profile, so Ouroboros model defaults are not forwarded. ACP session recovery and HarnessRevision-backed DSH skills are planned after real task evidence shows where DSH improves the executor portfolio.
+
 ### Self-Iteration Backend Default
 
 Self-iteration runs keep `designer`, `planner`, `worker`, `verifier`, `outcome-review`, and `goal-review` on `codex-resumable` by default. Claude Code remains available only through an explicit task-level `config.agentBackend = "claude-code"`. Claude failures recover to Codex; Codex failures continue as bounded Codex repair tasks under the repair budget. This policy is finite and does not rotate backends automatically or retry forever. Configure it through `ouroboros.toml`:
