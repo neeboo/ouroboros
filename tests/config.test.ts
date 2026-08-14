@@ -89,6 +89,37 @@ describe("config", () => {
     });
   });
 
+  test("parses a named DeepSeek Harness backend from TOML", async () => {
+    const configPath = join(dir, "config.toml");
+    await writeFile(
+      configPath,
+      [
+        "[agentDefaults.roles]",
+        'worker = "deepseek-harness"',
+        "",
+        '["agentBackends"."deepseek-harness"]',
+        'kind = "dsh-cli"',
+        'command = "/opt/deepseek/bin/dsh"',
+        'profile = "headless"',
+        "",
+        '["agentBackends"."deepseek-harness".env]',
+        'DSH_HOME = "/tmp/dsh-home"',
+      ].join("\n"),
+    );
+
+    await expect(loadOuroborosConfig(configPath)).resolves.toMatchObject({
+      agentDefaults: { roles: { worker: "deepseek-harness" } },
+      agentBackends: {
+        "deepseek-harness": {
+          kind: "dsh-cli",
+          command: "/opt/deepseek/bin/dsh",
+          profile: "headless",
+          env: { DSH_HOME: "/tmp/dsh-home" },
+        },
+      },
+    });
+  });
+
   test("parses global and role-scoped agent backend defaults from TOML", async () => {
     const configPath = join(dir, "config.toml");
     await writeFile(

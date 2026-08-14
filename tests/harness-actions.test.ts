@@ -5524,6 +5524,60 @@ describe("Harness actions", () => {
     expect(JSON.stringify(event)).not.toContain("subsession-secret");
   });
 
+  test("startSubsession resolves the built-in DeepSeek Harness backend", () => {
+    const worktreePath = join(dir, "dsh-worker-tree");
+    const runId = harness.createRun({
+      goal: "Run DeepSeek Harness research",
+      projectRoot: worktreePath,
+    });
+    const taskId = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Drive DSH research",
+      prompt: "Request a harness-managed subsession.",
+      worktreePath,
+    });
+    const calls: SubsessionRunnerStartInput[] = [];
+    const runner: SubsessionRunner = {
+      start(input) {
+        calls.push(input);
+        return {
+          threadId: input.threadId,
+          sessionName: input.sessionName,
+          agentSessionId: "dsh-session",
+          status: "running",
+        };
+      },
+      collect() {
+        return [];
+      },
+      cancel() {
+        return [];
+      },
+    };
+
+    const result = applyHarnessAction(
+      harness,
+      {
+        type: "startSubsession",
+        parentTaskId: taskId,
+        purpose: "Research with DeepSeek Harness",
+        prompt: "Inspect the repository architecture.",
+        backend: "dsh-cli",
+      },
+      { subsessionRunner: runner },
+    );
+
+    expect(result).toMatchObject({ status: "done", actionType: "startSubsession" });
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.backend).toEqual({
+      id: "dsh-cli",
+      kind: "dsh-cli",
+      command: "dsh",
+      profile: "headless",
+    });
+  });
+
   test("collectSubsessions and cancelSubsessions update recorded child thread evidence", () => {
     const worktreePath = join(dir, "worker-tree");
     const runId = harness.createRun({

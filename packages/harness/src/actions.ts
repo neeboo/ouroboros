@@ -298,6 +298,9 @@ export interface ResolvedSubsessionBackend {
   agentCommand?: string;
   approval?: string;
   format?: string;
+  command?: string;
+  profile?: string;
+  env?: Record<string, string>;
 }
 
 export interface SubsessionRunner {
@@ -2065,6 +2068,7 @@ const SUBSESSION_BUILT_IN_BACKEND_IDS = new Set([
   "codex",
   "codex-resumable",
   "codex-cli",
+  "dsh-cli",
   "acpx-codex",
   "noop",
 ]);
@@ -2196,7 +2200,7 @@ function readSubsessionBackendDefinition(
   }
   const record = definition as Record<string, unknown>;
   const kind = typeof record.kind === "string" ? record.kind : null;
-  if (kind !== "acpx" && kind !== "codex-cli" && kind !== "codex-resumable" && kind !== "noop") {
+  if (kind !== "acpx" && kind !== "codex-cli" && kind !== "codex-resumable" && kind !== "dsh-cli" && kind !== "noop") {
     return null;
   }
   const backend: ResolvedSubsessionBackend = { id, kind };
@@ -2211,6 +2215,20 @@ function readSubsessionBackendDefinition(
   }
   if (typeof record.format === "string") {
     backend.format = record.format;
+  }
+  if (kind === "dsh-cli") {
+    const profile = typeof record.profile === "string" ? record.profile : "headless";
+    if (profile !== "headless") {
+      return null;
+    }
+    backend.command = typeof record.command === "string" && record.command.trim() ? record.command.trim() : "dsh";
+    backend.profile = profile;
+    if (record.env && typeof record.env === "object" && !Array.isArray(record.env)) {
+      backend.env = Object.fromEntries(
+        Object.entries(record.env as Record<string, unknown>)
+          .filter((entry): entry is [string, string] => typeof entry[1] === "string"),
+      );
+    }
   }
   return backend;
 }
@@ -2227,6 +2245,9 @@ function builtInSubsessionBackend(id: string): ResolvedSubsessionBackend {
   }
   if (id === "codex-cli") {
     return { id, kind: "codex-cli" };
+  }
+  if (id === "dsh-cli") {
+    return { id, kind: "dsh-cli", command: "dsh", profile: "headless" };
   }
   return { id, kind: "noop" };
 }

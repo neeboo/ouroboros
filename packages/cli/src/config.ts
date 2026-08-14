@@ -93,6 +93,8 @@ export interface AgentBackendConfig {
   kind: string;
   agent?: string;
   agentCommand?: string;
+  command?: string;
+  profile?: string;
   approval?: string;
   format?: string;
   env?: Record<string, string>;
@@ -370,6 +372,8 @@ function agentBackendValue(value: unknown): AgentBackendConfig | undefined {
     kind,
     ...optionalStringField(record, "agent"),
     ...optionalStringField(record, "agentCommand"),
+    ...optionalStringField(record, "command"),
+    ...optionalStringField(record, "profile"),
     ...optionalStringField(record, "approval"),
     ...optionalStringField(record, "format"),
     ...optionalStringRecordField(record, "env"),

@@ -38,6 +38,9 @@ export function resolveExecutionRoute(input: {
 }
 
 function modelForBackend(backend: ResolvedAgentBackend, model: ResolvedModelPreference | null) {
+  if (backend.kind === "dsh-cli") {
+    return null;
+  }
   if (!model) {
     return null;
   }

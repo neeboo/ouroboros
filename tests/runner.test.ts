@@ -6566,6 +6566,108 @@ describe("runner", () => {
     });
   });
 
+  test("resolves DeepSeek Harness backends without inheriting an Ouroboros model", () => {
+    const task = {
+      id: "task_dsh",
+      runId: "run_dsh",
+      parentId: null,
+      cycleId: "task_dsh",
+      status: "todo" as const,
+      role: "worker",
+      goal: "Use DeepSeek Harness",
+      prompt: "Inspect the repository.",
+      dependsOn: [],
+      doneWhen: [],
+      config: { agentBackend: "deepseek-harness" },
+      worktreePath: null,
+      sessionRef: null,
+      contextVersion: 1,
+    };
+    const run = {
+      id: "run_dsh",
+      projectId: null,
+      projectRoot: null,
+      goal: "Compare executors",
+      status: "todo" as const,
+      context: {
+        modelDefaults: { global: { model: "gpt-5.6" } },
+        agentBackends: {
+          "deepseek-harness": {
+            kind: "dsh-cli",
+            command: "/opt/deepseek/bin/dsh",
+            profile: "headless",
+            env: { DSH_HOME: "/tmp/dsh-home" },
+          },
+        },
+      },
+    };
+
+    expect(resolveExecutionRoute({ run, task })).toEqual({
+      role: "worker",
+      executionMode: "generic",
+      backend: {
+        id: "deepseek-harness",
+        kind: "dsh-cli",
+        command: "/opt/deepseek/bin/dsh",
+        profile: "headless",
+        env: { DSH_HOME: "/tmp/dsh-home" },
+        source: "task",
+      },
+      model: null,
+    });
+    expect(resolveAgentBackend({
+      run: { ...run, context: {} },
+      task: { ...task, config: { agentBackend: "dsh-cli" } },
+    })).toMatchObject({
+      id: "dsh-cli",
+      kind: "dsh-cli",
+      command: "dsh",
+      profile: "headless",
+      source: "task",
+    });
+  });
+
+  test("rejects a DeepSeek Harness backend with a non-headless profile", () => {
+    const task = {
+      id: "task_dsh_invalid",
+      runId: "run_dsh_invalid",
+      parentId: null,
+      cycleId: "task_dsh_invalid",
+      status: "todo" as const,
+      role: "worker",
+      goal: "Use DeepSeek Harness",
+      prompt: "Inspect the repository.",
+      dependsOn: [],
+      doneWhen: [],
+      config: { agentBackend: "deepseek-harness" },
+      worktreePath: null,
+      sessionRef: null,
+      contextVersion: 1,
+    };
+    const run = {
+      id: "run_dsh_invalid",
+      projectId: null,
+      projectRoot: null,
+      goal: "Compare executors",
+      status: "todo" as const,
+      context: {
+        agentBackends: {
+          "deepseek-harness": {
+            kind: "dsh-cli",
+            command: "dsh",
+            profile: "interactive",
+          },
+        },
+      },
+    };
+
+    expect(resolveAgentBackend({ run, task })).toEqual({
+      id: "noop",
+      kind: "noop",
+      source: "cli-executor",
+    });
+  });
+
   test("resolves execution route with backend model and execution mode", () => {
     const run = {
       id: "run_1",

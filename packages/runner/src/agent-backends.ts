@@ -1,7 +1,7 @@
 import type { Run, Task } from "@ouroboros/harness";
 import type { AcpxBuiltInAgent, ApprovalMode } from "./executors/types";
 
-export type AgentBackendKind = "acpx" | "codex-cli" | "codex-resumable" | "noop";
+export type AgentBackendKind = "acpx" | "codex-cli" | "codex-resumable" | "dsh-cli" | "noop";
 export type AgentBackendSource = "task" | "role-default" | "run-default" | "cli-agent-backend" | "cli-executor";
 
 export interface ResolvedAgentBackend {
@@ -12,6 +12,8 @@ export interface ResolvedAgentBackend {
   agentCommand?: string;
   approval?: ApprovalMode;
   format?: string;
+  command?: string;
+  profile?: "headless";
   env?: Record<string, string>;
 }
 
@@ -90,7 +92,7 @@ function normalizeBackendDefinition(
   definition: Record<string, unknown>,
 ): ResolvedAgentBackend | null {
   const kind = stringOrNull(definition.kind);
-  if (kind !== "acpx" && kind !== "codex-cli" && kind !== "codex-resumable" && kind !== "noop") {
+  if (kind !== "acpx" && kind !== "codex-cli" && kind !== "codex-resumable" && kind !== "dsh-cli" && kind !== "noop") {
     return null;
   }
   const backend: ResolvedAgentBackend = { id, kind, source };
@@ -119,6 +121,18 @@ function normalizeBackendDefinition(
       backend.env = env;
     }
   }
+  if (kind === "dsh-cli") {
+    const profile = stringOrNull(definition.profile) ?? "headless";
+    if (profile !== "headless") {
+      return null;
+    }
+    backend.command = stringOrNull(definition.command) ?? "dsh";
+    backend.profile = profile;
+    const env = stringRecordOrNull(definition.env);
+    if (env) {
+      backend.env = env;
+    }
+  }
   return backend;
 }
 
@@ -131,6 +145,9 @@ function builtInBackend(id: string, source: AgentBackendSource): ResolvedAgentBa
   }
   if (id === "claude-code") {
     return { id, kind: "acpx", agent: "claude", source };
+  }
+  if (id === "dsh-cli") {
+    return { id, kind: "dsh-cli", command: "dsh", profile: "headless", source };
   }
   const agent = acpxAgent(id);
   return agent ? { id, kind: "acpx", agent, source } : null;
