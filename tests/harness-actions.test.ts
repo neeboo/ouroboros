@@ -5524,7 +5524,7 @@ describe("Harness actions", () => {
     expect(JSON.stringify(event)).not.toContain("subsession-secret");
   });
 
-  test("startSubsession resolves the built-in DeepSeek Harness backend", () => {
+  test("startSubsession rejects one-shot DeepSeek Harness backends", () => {
     const worktreePath = join(dir, "dsh-worker-tree");
     const runId = harness.createRun({
       goal: "Run DeepSeek Harness research",
@@ -5568,14 +5568,12 @@ describe("Harness actions", () => {
       { subsessionRunner: runner },
     );
 
-    expect(result).toMatchObject({ status: "done", actionType: "startSubsession" });
-    expect(calls).toHaveLength(1);
-    expect(calls[0]?.backend).toEqual({
-      id: "dsh-cli",
-      kind: "dsh-cli",
-      command: "dsh",
-      profile: "headless",
+    expect(result).toMatchObject({
+      status: "blocked",
+      actionType: "startSubsession",
+      summary: "Unknown subsession backend: dsh-cli",
     });
+    expect(calls).toHaveLength(0);
   });
 
   test("collectSubsessions and cancelSubsessions update recorded child thread evidence", () => {
