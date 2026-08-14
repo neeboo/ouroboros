@@ -1171,8 +1171,8 @@ if (args.includes("self-improve-daemon")) {
 
       const sourceA = await readFile(mainPath, "utf8");
       const sourceB = sourceA.replace(
-        "function selfIterationDesignerPrompt() {\r\n  return [",
-        "function selfIterationDesignerPrompt() {\r\n  return [\r\n    \"COMMIT_B_DESIGNER_SENTINEL\",",
+        /function selfIterationDesignerPrompt\(\) \{\r?\n  return \[/,
+        (match) => `${match}\n    "COMMIT_B_DESIGNER_SENTINEL",`,
       );
       expect(sourceB).not.toBe(sourceA);
       await writeFile(mainPath, sourceB);
@@ -2036,9 +2036,10 @@ if (args.includes("self-improve-daemon")) {
       const launchRunId = launch.runId;
       const overviewResponse = await fetch(`${launch.dashboardUrl}/api/runs/${launch.runId}/overview`);
       const overview = await overviewResponse.json();
-      for (let index = 0; index < 400 && !existsSync(codexInvocationLog); index += 1) {
+      for (let index = 0; index < 800 && !existsSync(codexInvocationLog); index += 1) {
         await Bun.sleep(10);
       }
+      expect(existsSync(codexInvocationLog)).toBe(true);
       const codexInvocations = (await readFile(codexInvocationLog, "utf8"))
         .trim()
         .split("\n")
@@ -16153,7 +16154,9 @@ if (args.includes("self-improve-daemon")) {
     const args = rawArgs as string[];
     const configArgs = args.includes("--config") ? [] : ["--config", join(dir, "missing-config.toml")];
     const cleanProcessEnv = Object.fromEntries(
-      Object.entries(process.env).filter(([key]) => key === "CODEX_SANDBOX" || !key.startsWith("CODEX_")),
+      Object.entries(process.env).filter(
+        ([key]) => (key === "CODEX_SANDBOX" || !key.startsWith("CODEX_")) && key !== "LINEAR_API_KEY",
+      ),
     );
     const mainEntry = join(import.meta.dir, "..", "packages", "cli", "src", "main.ts");
     const proc = Bun.spawn({
@@ -16182,7 +16185,9 @@ if (args.includes("self-improve-daemon")) {
     const configArgs = rawArgs.includes("--config") ? [] : ["--config", join(dir, "missing-config.toml")];
     const mainEntry = join(import.meta.dir, "..", "packages", "cli", "src", "main.ts");
     const cleanProcessEnv = Object.fromEntries(
-      Object.entries(process.env).filter(([key]) => key === "CODEX_SANDBOX" || !key.startsWith("CODEX_")),
+      Object.entries(process.env).filter(
+        ([key]) => (key === "CODEX_SANDBOX" || !key.startsWith("CODEX_")) && key !== "LINEAR_API_KEY",
+      ),
     );
     const proc = Bun.spawn({
       cmd: ["bun", mainEntry, ...configArgs, ...rawArgs],
