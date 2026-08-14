@@ -167,4 +167,85 @@ describe("route executor", () => {
       stdin: "Plan the task",
     });
   });
+
+  test("creates DeepSeek Harness executors from explicit DSH routes", async () => {
+    const calls: Array<{ cmd: string[]; cwd?: string; env?: Record<string, string | undefined> }> = [];
+    const route: ResolvedExecutionRoute = {
+      role: "worker",
+      backend: {
+        id: "deepseek-harness",
+        kind: "dsh-cli",
+        command: "/custom/dsh",
+        profile: "headless",
+        env: { DSH_HOME: "/tmp/dsh-home" },
+        source: "task",
+      },
+      model: null,
+      executionMode: "generic",
+    };
+    const executor = createRouteExecutor({
+      cwd: "/repo/.ouroboros/worktrees/task_1",
+      route,
+      sandbox: "workspace-write",
+      runCommand: async ({ cmd, cwd, env }) => {
+        calls.push({ cmd, cwd, env });
+        return {
+          exitCode: 0,
+          stdout: '{"status":"done","summary":"dsh route ok","changedFiles":[],"checks":[],"artifacts":[],"problems":[]}',
+          stderr: "",
+        };
+      },
+    });
+
+    const output = await executor({
+      prompt: "Implement the task",
+      sessionName: "task_1",
+      run: runFixture,
+      task: taskFixture,
+      route,
+    });
+
+    expect(output.summary).toBe("dsh route ok");
+    expect(calls).toEqual([{
+      cmd: ["/custom/dsh", "--profile", "headless", "Implement the task"],
+      cwd: "/repo/.ouroboros/worktrees/task_1",
+      env: { DSH_HOME: "/tmp/dsh-home", DSH_PERMISSION_MODE: "workspace-write" },
+    }]);
+  });
+
+  test("blocks DSH host capabilities before launching the executor", async () => {
+    let calls = 0;
+    const route: ResolvedExecutionRoute = {
+      role: "verifier",
+      backend: {
+        id: "dsh-cli",
+        kind: "dsh-cli",
+        command: "dsh",
+        profile: "headless",
+        source: "task",
+      },
+      model: null,
+      executionMode: "generic",
+    };
+    const executor = createRouteExecutor({
+      cwd: "/repo",
+      route,
+      hostExecutionCapabilities: { schemaVersion: 1 },
+      runCommand: async () => {
+        calls += 1;
+        return { exitCode: 0, stdout: "", stderr: "" };
+      },
+    });
+
+    const output = await executor({
+      prompt: "Verify the task",
+      sessionName: "task_1",
+      run: runFixture,
+      task: { ...taskFixture, role: "verifier" },
+      route,
+    });
+
+    expect(output).toMatchObject({ status: "blocked", summary: expect.stringContaining("host execution capabilities") });
+    expect(calls).toBe(0);
+  });
 });

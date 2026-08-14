@@ -1,5 +1,6 @@
 import { createAcpxAgentExecutor } from "./executors/acpx";
 import { createCodexCliExecutor } from "./executors/codex-cli";
+import { createDshCliExecutor } from "./executors/dsh-cli";
 import type { ApprovalMode, AttemptReplayCache, BrowserProcessPolicy, CodexSandbox, RunCommand, WorktreeEvidenceProbe } from "./executors/types";
 import type { ResolvedAgentBackend } from "./agent-backends";
 import type { ResolvedExecutionRoute } from "./execution-routing";
@@ -63,6 +64,19 @@ export function createRouteExecutor(options: RouteExecutorOptions): TaskExecutor
   }
   if (backend.kind === "codex-resumable") {
     throw new Error("codex-resumable routes must use the resumable client path");
+  }
+  if (backend.kind === "dsh-cli") {
+    return createDshCliExecutor({
+      cwd: options.cwd,
+      command: backend.command,
+      profile: backend.profile,
+      sandbox: options.sandbox ?? "read-only",
+      env: backend.env,
+      timeoutMs: options.timeoutMs,
+      idleTimeoutMs: options.idleTimeoutMs,
+      runCommand: options.runCommand,
+      hostExecutionCapabilities: options.hostExecutionCapabilities,
+    });
   }
   return createCodexCliExecutor({
     cwd: options.cwd,

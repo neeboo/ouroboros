@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { chmod, cp, mkdir, mkdtemp, readdir, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
-import { existsSync } from "node:fs";
+import { existsSync, realpathSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { homedir, tmpdir } from "node:os";
 import {
@@ -6515,6 +6515,66 @@ if (args.includes("self-improve-daemon")) {
     expect(result.tasks[0].attemptId).toBeString();
     expect(result.tasks[0].sessionName).toBe(`task-${task.id}`);
     expect(readyAfterRun).toBeNull();
+  });
+
+  test("runs an explicit task through the DeepSeek Harness CLI executor", async () => {
+    await runCli("init");
+    const run = await runCliJson("create-run", "--goal", "Exercise the DSH route", "--project-root", dir);
+    const task = await runCliJson(
+      "create-task",
+      "--run-id",
+      run.id,
+      "--role",
+      "worker",
+      "--goal",
+      "Use DeepSeek Harness",
+      "--prompt",
+      "Return the required structured result.",
+    );
+    const binDir = join(dir, "dsh-bin");
+    const tracePath = join(dir, "dsh-trace.json");
+    await mkdir(binDir, { recursive: true });
+    await writeFile(join(binDir, "dsh"), [
+      "#!/usr/bin/env bun",
+      "import { writeFileSync } from 'node:fs';",
+      "writeFileSync(process.env.DSH_TEST_TRACE_PATH, JSON.stringify({ args: Bun.argv.slice(2), cwd: process.cwd(), permission: process.env.DSH_PERMISSION_MODE }));",
+      "console.log(JSON.stringify({ status: 'done', summary: 'dsh cli route complete', changedFiles: [], checks: [], artifacts: [], problems: [] }));",
+    ].join("\n"));
+    await chmod(join(binDir, "dsh"), 0o755);
+
+    const result = await runCliJson(
+      "run-next",
+      "--run-id",
+      run.id,
+      "--executor",
+      "dsh-cli",
+      "--cwd",
+      dir,
+      "--start-hook",
+      "none",
+      "--sandbox",
+      "workspace-write",
+      {
+        PATH: `${binDir}:${process.env.PATH ?? ""}`,
+        DSH_TEST_TRACE_PATH: tracePath,
+      },
+    );
+    const trace = JSON.parse(await readFile(tracePath, "utf8"));
+    const attempt = new Harness(dbPath).getAttempt(result.tasks[0].attemptId)!;
+
+    expect(result.tasks).toHaveLength(1);
+    expect(result.tasks[0].taskId).toBe(task.id);
+    expect(trace).toMatchObject({
+      args: ["--profile", "headless", expect.stringContaining("Return the required structured result")],
+      permission: "workspace-write",
+    });
+    expect(realpathSync(trace.cwd)).toBe(realpathSync(dir));
+    expect(attempt.input.route).toMatchObject({
+      backend: { id: "dsh-cli", kind: "dsh-cli", profile: "headless" },
+      model: null,
+      executionMode: "generic",
+    });
+    expect(attempt.output).toMatchObject({ status: "done", summary: "dsh cli route complete" });
   });
 
   test("runs the context summary stop hook after verifier attempts from the CLI", async () => {

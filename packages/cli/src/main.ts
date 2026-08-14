@@ -1437,8 +1437,10 @@ function parseSandbox(raw: string): CodexSandbox {
   return raw;
 }
 
-function parseExecutorName(raw: string) {
-  if (raw !== "noop" && raw !== "acpx-codex" && raw !== "codex-cli" && raw !== "codex-resumable") {
+type CliExecutorName = "noop" | "acpx-codex" | "codex-cli" | "codex-resumable" | "dsh-cli";
+
+function parseExecutorName(raw: string): CliExecutorName {
+  if (raw !== "noop" && raw !== "acpx-codex" && raw !== "codex-cli" && raw !== "codex-resumable" && raw !== "dsh-cli") {
     fail(`unsupported executor: ${raw}`);
   }
   return raw;
@@ -1476,7 +1478,7 @@ function cliExecutorName() {
   return parseExecutorName(required(parsed, "executor"));
 }
 
-function usesCodexResumablePath(executorName: "noop" | "acpx-codex" | "codex-cli" | "codex-resumable") {
+function usesCodexResumablePath(executorName: CliExecutorName) {
   return executorName === "codex-resumable" || flag(parsed, "agent-backend") === "codex-resumable";
 }
 
@@ -1711,7 +1713,7 @@ function acceptGuardrailProposal(input: { runId: string; proposalId: string; acc
   };
 }
 
-function executorFactory(_executorName: "noop" | "acpx-codex" | "codex-cli" | "codex-resumable") {
+function executorFactory(_executorName: CliExecutorName) {
   const replayCache = createDurableAttemptReplayCache({ harness });
   return (input: {
     run: NonNullable<ReturnType<Harness["getRun"]>>;
@@ -1735,7 +1737,7 @@ function executorFactory(_executorName: "noop" | "acpx-codex" | "codex-cli" | "c
     });
 }
 
-function attemptInputFactory(_executorName: "noop" | "acpx-codex" | "codex-cli" | "codex-resumable") {
+function attemptInputFactory(_executorName: CliExecutorName) {
   return (input: {
     run: NonNullable<ReturnType<Harness["getRun"]>>;
     task: NonNullable<ReturnType<Harness["getTask"]>>;
@@ -1753,7 +1755,7 @@ function attemptInputFactory(_executorName: "noop" | "acpx-codex" | "codex-cli" 
 function resolveCliExecutionRoute(input: {
   run: NonNullable<ReturnType<Harness["getRun"]>>;
   task: NonNullable<ReturnType<Harness["getTask"]>>;
-  cliExecutor: "noop" | "acpx-codex" | "codex-cli" | "codex-resumable";
+  cliExecutor: CliExecutorName;
 }) {
   return resolveExecutionRoute({
     run: input.run,
