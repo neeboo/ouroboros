@@ -1,5 +1,6 @@
 import type { AttemptOutput } from "@ouroboros/harness";
 import type { TaskExecutor } from "../types";
+import type { DshCommandResolver } from "../dsh-readiness";
 
 export type ApprovalMode = "approve-all" | "approve-reads" | "deny-all";
 export type BrowserProcessPolicy = "allow" | "deny";
@@ -103,5 +104,6 @@ export interface DshCliExecutorOptions {
   timeoutMs?: number;
   idleTimeoutMs?: number;
   runCommand?: RunCommand;
+  resolveCommand?: DshCommandResolver;
   hostExecutionCapabilities?: unknown;
 }

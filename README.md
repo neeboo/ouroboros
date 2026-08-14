@@ -319,6 +319,20 @@ orbs run-next \
 
 This first adapter is intentionally one-shot. Ouroboros starts `dsh --profile headless` in the exact task worktree, keeps the frozen task and verifier contracts, and accepts only a structured `AttemptOutput` result. `danger-full-access`, unsupported DSH profiles, oversized command arguments, and tasks requesting Ouroboros host execution capabilities fail before DSH can act. DSH owns its model selection through its profile, so Ouroboros model defaults are not forwarded. ACP session recovery and HarnessRevision-backed DSH skills are planned after real task evidence shows where DSH improves the executor portfolio.
 
+Inspect readiness without starting a task or contacting a provider:
+
+```bash
+# built-in command resolved from the execution child PATH
+orbs doctor-agent --agent dsh-cli
+
+# named backend from a TOML file; the entry must be dsh-cli/headless
+orbs doctor-agent --agent deepseek-harness --config ./config.toml
+```
+
+The receipt identifies the configured command, resolution mode, selected executable, canonical path when available, installation state, observed version, version/help probe status, callability, readiness, and `lifecycle: "one-shot"`. A bare `dsh` selects the first executable PATH candidate in deterministic order; an explicit path stays explicit. A symlink or wrapper is reported as the selected executable, with its canonical path shown separately when resolvable, and is never represented as an inferred underlying program. Only `[selectedPath, "--version"]` and `[selectedPath, "--help"]` run, with empty stdin and bounded timeouts. Provider calls, model inference calls, paid spend, and task execution are explicitly recorded as zero. Missing, timeout, malformed, nonzero, and spawn-failure cases return bounded redacted evidence.
+
+This inspection does not add model routing, sessions, ACP, plugins, dependencies, schema changes, or paid infrastructure. Rollback removes the DSH doctor branch, readiness helper, focused tests, and documentation while retaining the existing explicit one-shot adapter and Codex defaults.
+
 ### Self-Iteration Backend Default
 
 Self-iteration runs keep `designer`, `planner`, `worker`, `verifier`, `outcome-review`, and `goal-review` on `codex-resumable` by default. Claude Code remains available only through an explicit task-level `config.agentBackend = "claude-code"`. Claude failures recover to Codex; Codex failures continue as bounded Codex repair tasks under the repair budget. This policy is finite and does not rotate backends automatically or retry forever. Configure it through `ouroboros.toml`:

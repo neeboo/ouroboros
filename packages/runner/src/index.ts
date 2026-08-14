@@ -46,6 +46,7 @@ export {
   DSH_PROMPT_ARGUMENT_MAX_CHARACTERS,
   DSH_PROMPT_ARGUMENT_MAX_UTF8_BYTES,
 } from "./executors/dsh-cli";
+export { inspectDshReadiness, resolveDshCommand } from "./dsh-readiness";
 export { createCodexResumableClient } from "./executors/codex-resumable";
 export { defaultCodexBin, resolveDefaultCodexBin } from "./executors/codex-bin";
 export { createRouteExecutor } from "./route-executor";
@@ -153,6 +154,16 @@ export type {
   RunCommandInput,
   WorktreeEvidenceProbe,
 } from "./executors/types";
+export type {
+  DshCommandResolution,
+  DshCommandResolver,
+  DshInstallationState,
+  DshProbeReceipt,
+  DshReadinessReceipt,
+  DshResolutionMode,
+  InspectDshReadinessInput,
+  ResolveDshCommandInput,
+} from "./dsh-readiness";
 export type { RouteExecutorOptions } from "./route-executor";
 export type {
   CodexResumableClientOptions,

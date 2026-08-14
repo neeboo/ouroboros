@@ -44,6 +44,7 @@ import {
   createAcpxSubsessionRunner,
   createCollectSubsessionsHook,
   createRouteExecutor,
+  inspectDshReadiness,
   hostExecutionCapabilityAttemptInput,
   reconcileDeferredDesignAuthority,
   reconcileGoalReviewRepairBudget,
@@ -640,7 +641,28 @@ if (parsed.command === "help" || flag(parsed, "help") !== undefined) {
     break;
   }
   case "doctor-agent": {
-    printJson(await doctorAgent(parseDoctorAgentId(required(parsed, "agent"))));
+    const agentId = required(parsed, "agent");
+    if (agentId === "dsh-cli") {
+      printJson(await inspectDshReadiness({
+        backendId: "dsh-cli",
+        command: "dsh",
+        cwd: process.cwd(),
+        profile: "headless",
+      }));
+      break;
+    }
+    const configuredDsh = await configuredDshDoctorBackend(agentId);
+    if (configuredDsh) {
+      printJson(await inspectDshReadiness({
+        backendId: agentId,
+        command: configuredDsh.command,
+        cwd: process.cwd(),
+        env: configuredDsh.env,
+        profile: configuredDsh.profile,
+      }));
+      break;
+    }
+    printJson(await doctorAgent(parseDoctorAgentId(agentId)));
     break;
   }
   case "linear-check": {
@@ -1465,6 +1487,32 @@ function parseDoctorAgentId(raw: string) {
     fail(`unsupported doctor agent: ${raw}`);
   }
   return agent.id;
+}
+
+async function configuredDshDoctorBackend(agentId: string) {
+  if (!flag(parsed, "config")) {
+    return null;
+  }
+  if (buildAgentMatrix().some((agent) => agent.id === agentId)) {
+    return null;
+  }
+  const config = await loadOuroborosConfig(flag(parsed, "config")!);
+  const backend = config.agentBackends?.[agentId];
+  if (!backend) {
+    return null;
+  }
+  if (backend.kind !== "dsh-cli") {
+    fail(`doctor-agent configured backend ${agentId} must have kind dsh-cli`);
+  }
+  const profile = backend.profile ?? "headless";
+  if (profile !== "headless") {
+    fail(`doctor-agent DSH backend ${agentId} must use the headless profile`);
+  }
+  return {
+    command: backend.command ?? "dsh",
+    profile: profile as "headless",
+    env: backend.env,
+  };
 }
 
 function cliExecutorName() {
