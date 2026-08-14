@@ -51,6 +51,18 @@ function executorInput(prompt = "Implement the bounded task and return the requi
   };
 }
 
+function availableDshResolution() {
+  return {
+    configuredCommand: "/opt/deepseek/bin/dsh",
+    resolutionMode: "explicit" as const,
+    selectedPath: "/opt/deepseek/bin/dsh",
+    canonicalPath: "/opt/deepseek/bin/dsh",
+    installationState: "available" as const,
+    callable: true,
+    diagnostic: null,
+  };
+}
+
 describe("DeepSeek Harness CLI executor", () => {
   test("runs headless DSH in the exact task worktree and parses AttemptOutput", async () => {
     const calls: RunCommandInput[] = [];
@@ -61,6 +73,15 @@ describe("DeepSeek Harness CLI executor", () => {
       profile: "headless",
       sandbox: "workspace-write",
       env: { DSH_HOME: "/tmp/dsh-home" },
+      resolveCommand: () => ({
+        configuredCommand: "/opt/deepseek/bin/dsh",
+        resolutionMode: "explicit",
+        selectedPath: "/opt/deepseek/bin/dsh",
+        canonicalPath: "/opt/deepseek/bin/dsh",
+        installationState: "available",
+        callable: true,
+        diagnostic: null,
+      }),
       runCommand: async (input) => {
         calls.push(input);
         return {
@@ -121,6 +142,7 @@ describe("DeepSeek Harness CLI executor", () => {
     let calls = 0;
     const executor = createDshCliExecutor({
       cwd: taskFixture.worktreePath,
+      resolveCommand: availableDshResolution,
       runCommand: async () => {
         calls += 1;
         return { exitCode: 0, stdout: "", stderr: "" };
@@ -136,9 +158,41 @@ describe("DeepSeek Harness CLI executor", () => {
     expect(calls).toBe(0);
   });
 
+  test("launches the resolver-selected executable while retaining one-shot arguments", async () => {
+    const calls: RunCommandInput[] = [];
+    const selectedPath = "/tmp/selected-dsh-wrapper";
+    const executor = createDshCliExecutor({
+      cwd: taskFixture.worktreePath,
+      command: "dsh",
+      profile: "headless",
+      resolveCommand: () => ({
+        configuredCommand: "dsh",
+        resolutionMode: "path",
+        selectedPath,
+        canonicalPath: "/tmp/canonical-dsh-wrapper",
+        installationState: "available",
+        callable: true,
+        diagnostic: null,
+      }),
+      runCommand: async (input) => {
+        calls.push(input);
+        return {
+          exitCode: 0,
+          stdout: '{"status":"done","summary":"selected dsh","changedFiles":[],"checks":[],"artifacts":[],"problems":[]}',
+          stderr: "",
+        };
+      },
+    });
+
+    await executor(executorInput());
+
+    expect(calls[0]?.cmd).toEqual([selectedPath, "--profile", "headless", executorInput().prompt]);
+  });
+
   test("bounds and redacts malformed or failed DSH output", async () => {
     const malformed = createDshCliExecutor({
       cwd: taskFixture.worktreePath,
+      resolveCommand: availableDshResolution,
       runCommand: async () => ({
         exitCode: 0,
         stdout: `not-json Authorization: Bearer dsh-secret ${"z".repeat(20_000)}`,
@@ -147,6 +201,7 @@ describe("DeepSeek Harness CLI executor", () => {
     });
     const failed = createDshCliExecutor({
       cwd: taskFixture.worktreePath,
+      resolveCommand: availableDshResolution,
       runCommand: async () => ({
         exitCode: 9,
         stdout: "",
@@ -167,6 +222,7 @@ describe("DeepSeek Harness CLI executor", () => {
   test("converts a missing DSH binary into bounded blocked evidence", async () => {
     const executor = createDshCliExecutor({
       cwd: taskFixture.worktreePath,
+      resolveCommand: availableDshResolution,
       runCommand: async () => {
         throw new Error("spawn dsh ENOENT Authorization: Bearer missing-binary-secret");
       },

@@ -253,6 +253,20 @@ bun run orbs -- run-next \
 
 第一版只做单次执行。Ouroboros 会在任务自己的隔离工作区中启动 `dsh --profile headless`，继续管理已经冻结的任务和验收合同，并且只接受结构化的 `AttemptOutput` 结果。危险权限、不支持的 DSH profile、超长命令参数，以及需要 Ouroboros 宿主执行能力的任务，都会在 DSH 开始工作前被阻断。DSH 使用自己 profile 中的模型配置，不继承 Ouroboros 的模型默认值。等真实任务证明 DSH 带来稳定收益后，再接 ACP 可恢复会话，并把 HarnessRevision 中的项目知识、能力包和 ORBS 工具提供给 DSH。
 
+可以只检查 DSH 是否就绪，不启动任务，也不联系模型或提供商：
+
+```bash
+# 检查内置 dsh 命令
+bun run orbs -- doctor-agent --agent dsh-cli
+
+# 检查配置文件中的命名后端；它必须是 dsh-cli 且使用 headless
+bun run orbs -- doctor-agent --agent deepseek-harness --config ./config.toml
+```
+
+检查收据包含后端 id、配置命令、解析模式、选中的可执行文件、可取得时的规范路径、安装状态、版本、版本和帮助探针状态、可调用性、就绪状态，以及 `lifecycle: "one-shot"`。裸命令会按执行子进程使用的 PATH 顺序选择第一个可执行候选；显式路径保持显式。符号链接或包装脚本仍按被选中的命令记录，规范路径单独展示，收据不会把包装脚本冒充成它可能调用的底层程序。探针只执行 `[selectedPath, "--version"]` 和 `[selectedPath, "--help"]`，使用空标准输入和有上限的超时；提供商调用、模型推理、付费支出和任务启动都会明确记录为零。命令缺失、不可执行、启动失败、超时、版本或帮助输出异常、非零退出，都会返回长度受限且已脱敏的诊断收据。
+
+这项检查不会增加模型路由、会话、ACP、插件、依赖、数据库结构或付费基础设施。回滚时删除 DSH doctor 分支、readiness 辅助模块、专项测试和文档条目，保留现有显式单次 DSH 适配器以及 Codex 默认路由。
+
 ## 常用命令
 
 ```bash

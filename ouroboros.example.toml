@@ -83,6 +83,14 @@ approval = "approve-all"
 ["agentBackends"."codex-resumable"]
 kind = "codex-resumable"
 
+# Optional DeepSeek Harness adapter. It is explicit and one-shot; it is not a
+# default for any role. Inspect it without starting a task:
+# orbs doctor-agent --agent deepseek-harness --config ./ouroboros.example.toml
+["agentBackends"."deepseek-harness"]
+kind = "dsh-cli"
+command = "dsh"
+profile = "headless"
+
 # Concrete integration boundary inherited by every self-iteration child run.
 # A fresh self-iteration root without an explicit boundary falls back to this
 # shape so design-spawned planner runs never inherit a null boundary.

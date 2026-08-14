@@ -187,6 +187,15 @@ describe("route executor", () => {
       cwd: "/repo/.ouroboros/worktrees/task_1",
       route,
       sandbox: "workspace-write",
+      resolveDshCommand: () => ({
+        configuredCommand: "/custom/dsh",
+        resolutionMode: "explicit",
+        selectedPath: "/custom/dsh",
+        canonicalPath: "/custom/dsh",
+        installationState: "available",
+        callable: true,
+        diagnostic: null,
+      }),
       runCommand: async ({ cmd, cwd, env }) => {
         calls.push({ cmd, cwd, env });
         return {

@@ -1,6 +1,6 @@
 # Agent Backends
 
-Ouroboros now treats **Codex** and **Claude Code** as the only supported agent backends.
+Ouroboros supports **Codex**, **Claude Code**, and an explicitly selected DeepSeek Harness CLI adapter.
 
 Hermes support is deprecated and removed from the default smoke matrix, doctor path, docs, and backend-specific runtime handling. OpenCode, OpenClaw, Reasonix, and other ACP servers are not supported backends for Orbs. The generic `agentCommand` escape hatch remains for local experiments, but using it means the operator owns the smoke test, cwd safety, auth setup, output contract, and failure recovery.
 
@@ -28,6 +28,7 @@ ACP/acpx events, tool calls, diffs, and stream chunks are observability only. Th
 | `codex` / `acpx-codex` | `acpx` | Codex through acpx named sessions. Useful for ACP smoke and subsessions. |
 | `codex-cli` | `codex-cli` | One-shot Codex CLI compatibility path. |
 | `claude-code` | `acpx` agent `claude` | Explicitly routed Claude Code tasks; not the self-iteration default. |
+| `dsh-cli` | `dsh-cli` | Explicit, one-shot DeepSeek Harness command; never a default route. |
 | `noop` | `noop` | Tests and dry plumbing. |
 
 Built-in acpx agent ids are limited to `codex` and `claude`. `claude-code` is the Orbs alias for acpx `claude`.
@@ -53,6 +54,7 @@ Backend selection lives in `run.context` and `task.config`.
     "codex-resumable": { "kind": "codex-resumable" },
     "codex": { "kind": "acpx", "agent": "codex" },
     "claude-code": { "kind": "acpx", "agent": "claude", "approval": "approve-all" },
+    "deepseek-harness": { "kind": "dsh-cli", "command": "dsh", "profile": "headless" },
     "noop": { "kind": "noop" }
   }
 }
@@ -85,6 +87,7 @@ Supported backend kinds are:
 - `acpx`
 - `codex-cli`
 - `codex-resumable`
+- `dsh-cli`
 - `noop`
 
 For `acpx`, `agent` is the semantic agent/provider identity (`codex` or `claude`), while `agentCommand` is only the transport used to start an adapter. The fields may be declared together: routing and model inheritance use `agent`, and execution prefers `agentCommand`. When `agent` is omitted, the reserved backend ids `claude-code`, `claude`, `codex`, and `acpx-codex` supply their built-in semantic identity even if the definition replaces the built-in transport with `agentCommand`. Other raw backends are never classified from command text; a custom raw Claude backend must declare `agent: "claude"` explicitly. `agentCommand` remains an experimental path outside the supported production matrix.
@@ -131,7 +134,17 @@ Agent readiness checks should start with a doctor:
 ```bash
 orbs doctor-agent --agent codex
 orbs doctor-agent --agent claude-code
+orbs doctor-agent --agent dsh-cli
+orbs doctor-agent --agent deepseek-harness --config ./config.toml
 ```
+
+The DSH doctor is a zero-inference inspection. The built-in id inspects `dsh`; a named id is accepted only when the referenced config entry has `kind = "dsh-cli"` and `profile = "headless"`. It invokes the selected executable exactly twice, with empty stdin and the bounded command arrays `[selectedPath, "--version"]` and `[selectedPath, "--help"]`. It never sends a prompt, profile boot request, task input, model, provider, or credential.
+
+The JSON receipt reports `backendId`, `configuredCommand`, `resolutionMode`, `installationState`, `selectedPath`, `canonicalPath` when available, `observedVersion`, both probe statuses, `callable`, `readiness`, and `lifecycle: "one-shot"`. Its evidence states `providerCalls: 0`, `modelInferenceCalls: 0`, `paidSpendUsd: 0`, and `taskExecutionStarted: false`. Missing, non-executable, spawn-failure, timeout, malformed, and nonzero probes return bounded redacted diagnostics and do not start a task.
+
+For a bare command, the resolver uses the same child environment and cwd semantics as execution and selects the first executable candidate in PATH order. An explicit path is never replaced by PATH discovery. Symlinks expose the selected configured path and, separately, a canonical path when the host can resolve one. A wrapper remains the selected executable; the receipt does not claim an underlying program. The probe does not add sessions, ACP, plugins, resumable behavior, dependencies, or schema changes.
+
+Rollback is local and reversible: remove the DSH doctor branch, the shared readiness helper, its focused tests, and these documentation entries. The existing one-shot `dsh-cli` adapter and Codex defaults remain.
 
 Run the read-only smoke before routing real work:
 

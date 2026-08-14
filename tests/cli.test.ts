@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { chmod, cp, mkdir, mkdtemp, readdir, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { existsSync, realpathSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { homedir, tmpdir } from "node:os";
 import {
   applyHarnessAction,
@@ -6490,6 +6490,142 @@ if (args.includes("self-improve-daemon")) {
         "scope: ACP/acpx doctor only; no task session, prompt smoke, or write probe enabled",
       ]),
     );
+  });
+
+  test("runs the built-in DSH doctor with only version and help probes", async () => {
+    const binDir = join(dir, "dsh-doctor-bin");
+    const tracePath = join(dir, "dsh-doctor-trace.jsonl");
+    await mkdir(binDir, { recursive: true });
+    await writeFile(join(binDir, "dsh"), [
+      "#!/usr/bin/env bun",
+      "import { appendFileSync } from 'node:fs';",
+      "const args = Bun.argv.slice(2);",
+      "appendFileSync(process.env.DSH_DOCTOR_TRACE_PATH, JSON.stringify({ args, stdin: '' }) + '\\n');",
+      "if (args.length !== 1 || !['--version', '--help'].includes(args[0])) process.exit(9);",
+      "console.log(args[0] === '--version' ? 'dsh 0.1.0-rc.7' : 'Usage: dsh [options]');",
+    ].join("\n"));
+    await chmod(join(binDir, "dsh"), 0o755);
+
+    const result = await runCliJson("doctor-agent", "--agent", "dsh-cli", {
+      PATH: `${binDir}:${process.env.PATH ?? ""}`,
+      DSH_DOCTOR_TRACE_PATH: tracePath,
+    });
+    const trace = (await readFile(tracePath, "utf8")).trim().split("\n").map((line) => JSON.parse(line));
+
+    expect(result).toMatchObject({
+      backendId: "dsh-cli",
+      configuredCommand: "dsh",
+      resolutionMode: "path",
+      selectedPath: join(binDir, "dsh"),
+      observedVersion: "0.1.0-rc.7",
+      versionProbeStatus: "passed",
+      helpProbeStatus: "passed",
+      callable: true,
+      readiness: true,
+      lifecycle: "one-shot",
+      evidence: { providerCalls: 0, modelInferenceCalls: 0, paidSpendUsd: 0, taskExecutionStarted: false },
+    });
+    expect(result.probes.map((probe: { command: string[] }) => probe.command)).toEqual([
+      [join(binDir, "dsh"), "--version"],
+      [join(binDir, "dsh"), "--help"],
+    ]);
+    expect(trace).toEqual([
+      { args: ["--version"], stdin: "" },
+      { args: ["--help"], stdin: "" },
+    ]);
+  });
+
+  test("runs a named headless DSH backend from an explicit config command", async () => {
+    const command = join(dir, "configured-dsh");
+    const tracePath = join(dir, "configured-dsh-trace.jsonl");
+    await writeFile(command, [
+      "#!/usr/bin/env bun",
+      "import { appendFileSync } from 'node:fs';",
+      "appendFileSync(process.env.DSH_DOCTOR_TRACE_PATH, JSON.stringify(Bun.argv.slice(2)) + '\\n');",
+      "console.log(Bun.argv[2] === '--version' ? 'v0.2.0' : 'Usage: configured-dsh');",
+    ].join("\n"));
+    await chmod(command, 0o755);
+    const configPath = join(dir, "dsh-doctor.toml");
+    await writeFile(configPath, [
+      '["agentBackends"."configured-dsh"]',
+      'kind = "dsh-cli"',
+      `command = "${command}"`,
+      'profile = "headless"',
+      '["agentBackends"."configured-dsh".env]',
+      `DSH_DOCTOR_TRACE_PATH = "${tracePath}"`,
+    ].join("\n"));
+
+    const result = await runCliJson(
+      "doctor-agent",
+      "--agent",
+      "configured-dsh",
+      "--config",
+      configPath,
+    );
+
+    expect(result).toMatchObject({
+      backendId: "configured-dsh",
+      configuredCommand: command,
+      resolutionMode: "explicit",
+      selectedPath: command,
+      observedVersion: "0.2.0",
+      readiness: true,
+      lifecycle: "one-shot",
+    });
+    expect((await readFile(tracePath, "utf8")).trim().split("\n").map((line) => JSON.parse(line))).toEqual([
+      ["--version"],
+      ["--help"],
+    ]);
+  });
+
+  test("returns bounded missing DSH doctor evidence without starting a task", async () => {
+    const result = await runCliJson("doctor-agent", "--agent", "dsh-cli", {
+      PATH: `${dir}:${dirname(process.execPath)}:/usr/bin:/bin`,
+      HOME: dir,
+    });
+
+    expect(result).toMatchObject({
+      backendId: "dsh-cli",
+      installationState: "missing",
+      callable: false,
+      readiness: false,
+      versionProbeStatus: "not-run",
+      helpProbeStatus: "not-run",
+      evidence: { providerCalls: 0, modelInferenceCalls: 0, taskExecutionStarted: false },
+    });
+  });
+
+  test("rejects unsupported and non-headless configured DSH doctor entries", async () => {
+    const configPath = join(dir, "invalid-dsh-doctor.toml");
+    await writeFile(configPath, [
+      '["agentBackends"."wrong-kind"]',
+      'kind = "acpx"',
+      'agent = "claude"',
+      '',
+      '["agentBackends"."interactive-dsh"]',
+      'kind = "dsh-cli"',
+      'profile = "tui"',
+    ].join("\n"));
+
+    const wrongKind = await runCliRaw(
+      "doctor-agent",
+      "--agent",
+      "wrong-kind",
+      "--config",
+      configPath,
+    );
+    const nonHeadless = await runCliRaw(
+      "doctor-agent",
+      "--agent",
+      "interactive-dsh",
+      "--config",
+      configPath,
+    );
+
+    expect(wrongKind.exitCode).not.toBe(0);
+    expect(wrongKind.stderr).toContain("must have kind dsh-cli");
+    expect(nonHeadless.exitCode).not.toBe(0);
+    expect(nonHeadless.stderr).toContain("must use the headless profile");
   });
 
   test("runs the next task with the noop executor", async () => {
@@ -16037,7 +16173,9 @@ if (args.includes("self-improve-daemon")) {
   }
 
   async function runCliJson(...args: Array<string | Record<string, string>>) {
-    return JSON.parse(await runCli(...args));
+    const raw = await runCli(...args);
+    const lines = raw.split("\n").map((line) => line.trim()).filter(Boolean);
+    return JSON.parse(lines.at(-1) ?? raw);
   }
 
   async function runDefaultCliRaw(cwd: string, ...rawArgs: string[]) {

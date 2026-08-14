@@ -1,6 +1,7 @@
 import type { AttemptOutput } from "@ouroboros/harness";
 import { boundedDiagnosticText, sha256Text } from "../bounded-diagnostic";
 import { promptBudgetBlockedOutput, promptBudgetEvidence } from "../prompt-budget";
+import { resolveDshCommand } from "../dsh-readiness";
 import type { TaskExecutor } from "../types";
 import { commandProblem, runLocalCommand } from "./command";
 import { parseAttemptOutput } from "./output";
@@ -14,6 +15,7 @@ export function createDshCliExecutor(options: DshCliExecutorOptions): TaskExecut
   const profile = options.profile ?? "headless";
   const sandbox = options.sandbox ?? "read-only";
   const runCommand = options.runCommand ?? runLocalCommand;
+  const resolveCommand = options.resolveCommand ?? resolveDshCommand;
 
   return async ({ prompt, sessionName, recorder }) => {
     if (profile !== "headless") {
@@ -35,6 +37,23 @@ export function createDshCliExecutor(options: DshCliExecutorOptions): TaskExecut
         "DeepSeek Harness host execution capabilities are unsupported",
         "dsh host capability boundary",
         "DSH CLI executor cannot yet enforce Ouroboros host execution capabilities.",
+      );
+    }
+    const resolution = resolveCommand({ command, cwd: options.cwd, env: options.env });
+    if (!resolution.callable || !resolution.selectedPath) {
+      return blockedOutput(
+        "DeepSeek Harness executable is not callable",
+        "dsh command readiness",
+        resolution.diagnostic ?? `DSH command is unavailable: ${resolution.configuredCommand}`,
+        [{
+          kind: "dsh_command_resolution",
+          configuredCommand: resolution.configuredCommand,
+          resolutionMode: resolution.resolutionMode,
+          selectedPath: resolution.selectedPath,
+          canonicalPath: resolution.canonicalPath,
+          installationState: resolution.installationState,
+          callable: resolution.callable,
+        }],
       );
     }
     const oversizedPrompt = promptBudgetEvidence(prompt, "DeepSeek Harness CLI start");
@@ -69,7 +88,7 @@ export function createDshCliExecutor(options: DshCliExecutorOptions): TaskExecut
     let result;
     try {
       result = await runCommand({
-        cmd: [command, "--profile", profile, prompt],
+        cmd: [resolution.selectedPath, "--profile", profile, prompt],
         stdin: "",
         cwd: options.cwd,
         env: { ...options.env, DSH_PERMISSION_MODE: sandbox },
@@ -144,13 +163,13 @@ function dshPromptArgumentEvidence(prompt: string) {
   };
 }
 
-function blockedOutput(summary: string, checkName: string, problem: string): AttemptOutput {
+function blockedOutput(summary: string, checkName: string, problem: string, artifacts: unknown[] = []): AttemptOutput {
   return {
     status: "blocked",
     summary,
     changedFiles: [],
     checks: [{ name: checkName, status: "failed" }],
-    artifacts: [],
+    artifacts,
     problems: [boundedDiagnosticText(problem).text],
   };
 }

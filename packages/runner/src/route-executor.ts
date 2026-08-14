@@ -2,6 +2,7 @@ import { createAcpxAgentExecutor } from "./executors/acpx";
 import { createCodexCliExecutor } from "./executors/codex-cli";
 import { createDshCliExecutor } from "./executors/dsh-cli";
 import type { ApprovalMode, AttemptReplayCache, BrowserProcessPolicy, CodexSandbox, RunCommand, WorktreeEvidenceProbe } from "./executors/types";
+import type { DshCommandResolver } from "./dsh-readiness";
 import type { ResolvedAgentBackend } from "./agent-backends";
 import type { ResolvedExecutionRoute } from "./execution-routing";
 import type { TaskExecutor } from "./types";
@@ -17,6 +18,7 @@ export interface RouteExecutorOptions {
   timeoutMs?: number;
   idleTimeoutMs?: number;
   runCommand?: RunCommand;
+  resolveDshCommand?: DshCommandResolver;
   replayCache?: AttemptReplayCache;
   worktreeEvidence?: WorktreeEvidenceProbe;
   hostExecutionCapabilities?: unknown;
@@ -75,6 +77,7 @@ export function createRouteExecutor(options: RouteExecutorOptions): TaskExecutor
       timeoutMs: options.timeoutMs,
       idleTimeoutMs: options.idleTimeoutMs,
       runCommand: options.runCommand,
+      resolveCommand: options.resolveDshCommand,
       hostExecutionCapabilities: options.hostExecutionCapabilities,
     });
   }
