@@ -41,6 +41,11 @@ export type {
   AcpxSubsessionSpawnResult,
 } from "./acpx-subsessions";
 export { createCodexCliExecutor } from "./executors/codex-cli";
+export {
+  createDshCliExecutor,
+  DSH_PROMPT_ARGUMENT_MAX_CHARACTERS,
+  DSH_PROMPT_ARGUMENT_MAX_UTF8_BYTES,
+} from "./executors/dsh-cli";
 export { createCodexResumableClient } from "./executors/codex-resumable";
 export { defaultCodexBin, resolveDefaultCodexBin } from "./executors/codex-bin";
 export { createRouteExecutor } from "./route-executor";
@@ -143,6 +148,7 @@ export type {
   CodexCliExecutorOptions,
   CodexSandbox,
   CommandResult,
+  DshCliExecutorOptions,
   RunCommand,
   RunCommandInput,
   WorktreeEvidenceProbe,

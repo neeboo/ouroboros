@@ -93,3 +93,15 @@ export interface CodexCliExecutorOptions {
   taskRole?: string;
   verifierContract?: unknown;
 }
+
+export interface DshCliExecutorOptions {
+  cwd: string;
+  command?: string;
+  profile?: "headless";
+  sandbox?: CodexSandbox;
+  env?: Record<string, string | undefined>;
+  timeoutMs?: number;
+  idleTimeoutMs?: number;
+  runCommand?: RunCommand;
+  hostExecutionCapabilities?: unknown;
+}
