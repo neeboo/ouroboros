@@ -13,6 +13,7 @@ export interface CommandResult {
 export interface RunCommandInput {
   cmd: string[];
   stdin: string;
+  cwd?: string;
   env?: Record<string, string | undefined>;
   inheritEnv?: boolean;
   timeoutMs?: number;

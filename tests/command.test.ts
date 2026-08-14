@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -16,6 +16,22 @@ const testBunPath = `${testHome}/.bun/bin`;
 const testLocalBinPath = `${testHome}/.local/bin`;
 
 describe("command runner", () => {
+  test("runs a command in the requested task worktree", async () => {
+    const taskWorktree = mkdtempSync(join(tmpdir(), "ouroboros-command-cwd-"));
+    try {
+      const result = await runLocalCommand({
+        cmd: [process.execPath, "-e", "console.log(process.cwd())"],
+        stdin: "",
+        cwd: taskWorktree,
+      });
+
+      expect(result.exitCode).toBe(0);
+      expect(realpathSync(result.stdout.trim())).toBe(realpathSync(taskWorktree));
+    } finally {
+      rmSync(taskWorktree, { recursive: true, force: true });
+    }
+  });
+
   test("can replace the inherited environment for a host-owned subprocess", async () => {
     const previous = process.env.ORBS_BROWSER_HOST_SECRET;
     process.env.ORBS_BROWSER_HOST_SECRET = "must-not-cross-host-boundary";

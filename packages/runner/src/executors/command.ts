@@ -7,6 +7,7 @@ const IDLE_STARTUP_GRACE_MS = 500;
 export const runLocalCommand: RunCommand = async (input) => {
   const proc = Bun.spawn({
     cmd: input.cmd,
+    cwd: input.cwd,
     env: commandEnv(input.env, input.inheritEnv),
     stdin: "pipe",
     stdout: "pipe",
