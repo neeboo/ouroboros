@@ -1677,7 +1677,7 @@ function inheritedControlContext(
     inherited.harnessRevision = trustedSourceHarnessRevision(harness, db, sourceRun, projectId);
   }
   if (context.source === "self-improve" || context.source === "self-improvement-assessment") {
-    inherited.agentDefaults = codexOnlyAgentDefaults(context.agentDefaults);
+    inherited.agentDefaults = codexOnlyAgentDefaults(context.agentDefaults, context.agentBackends);
   }
   return inherited;
 }

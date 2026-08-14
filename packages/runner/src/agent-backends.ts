@@ -29,18 +29,30 @@ const CODEX_ONLY_AGENT_ROLES = [
 
 // Self-iteration is a Codex-owned control loop. Normalize both known roles and
 // any configured extension roles so a stale run or local config cannot route a
-// newly derived cycle back to Claude through either role or global fallback.
-export function codexOnlyAgentDefaults(value: unknown) {
+// newly derived cycle back to an unapproved backend. The explicit Worker
+// exception is deliberately checked through the same resolver used at runtime.
+export function codexOnlyAgentDefaults(value: unknown, backendDefinitions?: unknown) {
   const defaults = objectOrNull(value) ?? {};
   const configuredRoles = objectOrNull(defaults.roles) ?? {};
+  const configuredWorker = stringOrNull(configuredRoles.worker);
+  const workerBackend = isDshWorkerBackend(configuredWorker, backendDefinitions)
+    ? configuredWorker
+    : "codex-resumable";
   const roles = Object.fromEntries(
     [...new Set([...CODEX_ONLY_AGENT_ROLES, ...Object.keys(configuredRoles)])]
-      .map((role) => [role, "codex-resumable"]),
+      .map((role) => [role, role === "worker" ? workerBackend : "codex-resumable"]),
   );
   return {
     global: "codex-resumable",
     roles,
   };
+}
+
+function isDshWorkerBackend(id: string | null, backendDefinitions: unknown) {
+  if (!id) {
+    return false;
+  }
+  return backendById({ agentBackends: backendDefinitions }, id, "role-default")?.kind === "dsh-cli";
 }
 
 export function resolveAgentBackend(input: {

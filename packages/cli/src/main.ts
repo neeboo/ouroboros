@@ -1636,7 +1636,7 @@ function withSelfIterationConfigDefaults(
         ...mergedModelRoles,
       },
     },
-    agentDefaults: codexOnlyAgentDefaults(merged.agentDefaults),
+    agentDefaults: codexOnlyAgentDefaults(merged.agentDefaults, merged.agentBackends),
   };
 }
 
@@ -3522,7 +3522,7 @@ function selfImprovementControlContext(context: Record<string, unknown>, project
         .filter((key) => context[key] !== undefined)
         .map((key) => [key, context[key]]),
     ),
-    agentDefaults: codexOnlyAgentDefaults(context.agentDefaults),
+    agentDefaults: codexOnlyAgentDefaults(context.agentDefaults, context.agentBackends),
     ...(activeHarnessRevision ? { harnessRevision: activeHarnessRevision } : {}),
   };
 }

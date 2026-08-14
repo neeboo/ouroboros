@@ -28,7 +28,7 @@ ACP/acpx events, tool calls, diffs, and stream chunks are observability only. Th
 | `codex` / `acpx-codex` | `acpx` | Codex through acpx named sessions. Useful for ACP smoke and subsessions. |
 | `codex-cli` | `codex-cli` | One-shot Codex CLI compatibility path. |
 | `claude-code` | `acpx` agent `claude` | Explicitly routed Claude Code tasks; not the self-iteration default. |
-| `dsh-cli` | `dsh-cli` | Explicit, one-shot DeepSeek Harness command; never a default route. |
+| `dsh-cli` | `dsh-cli` | Explicit, one-shot DeepSeek Harness command; the only self-iteration Worker role-default exception when it resolves as valid `dsh-cli`. |
 | `noop` | `noop` | Tests and dry plumbing. |
 
 Built-in acpx agent ids are limited to `codex` and `claude`. `claude-code` is the Orbs alias for acpx `claude`.
@@ -159,9 +159,15 @@ A passed smoke proves only read-only ACP execution in the temporary cwd. Write w
 
 ## Recommended Role Routing
 
-Self-iteration runs keep `designer`, `planner`, `worker`, `verifier`, `outcome-review`, and `goal-review` on `codex-resumable` by default. Claude Code is supported only for a task with an explicit `config.agentBackend = "claude-code"`.
+Self-iteration runs keep `designer`, `planner`, `verifier`, `repair`, `outcome-review`, `goal-review`, extension roles, the global fallback, and recovery on `codex-resumable`. Codex is also the implicit Worker default, governance route, and verification route. Claude Code is supported only for a task with an explicit `config.agentBackend = "claude-code"`.
+
+There is one explicit Worker exception: when the Worker role default names the built-in `dsh-cli`, or names a backend definition that resolves through the normal backend resolver to `kind = "dsh-cli"` with `profile = "headless"`, self-iteration preserves that id in the bootstrap root, assessment child, and design child contexts. The child Worker must then resolve from the inherited role default; no task-level override is needed. The attempt remains inspectable with `source = "role-default"`, `model = null`, the frozen `agentBackends` definitions, and the exact task worktree.
+
+Omitted, unknown, invalid-profile, shadowed built-in, and explicitly non-DSH Worker selections normalize to `codex-resumable`. This exception does not add automatic backend rotation, sessions, ACP resume, plugins, MCP, memory, provider scoring, or HarnessRevision changes. DSH remains a one-shot, reversible adapter boundary; Codex is the fallback and recovery target.
 
 Recovery is finite and Codex-first: Claude Code executor failures return to Codex, while Codex executor failures continue as bounded Codex repair tasks. The recovery record preserves the source worktree and task contract and includes `fromBackend`, `toBackend`, `sourceAttemptId`, `terminalReason`, and `generation`. It never means automatic backend rotation or unlimited retry.
+
+Rollback target: `cfdb008a6804d5248fd1b440ab0ab7de88addefd`. Restoring the frozen Codex-only Worker normalization at that revision removes the explicit Worker exception while retaining the existing one-shot DSH adapter, readiness checks, and Codex governance defaults.
 
 For the shortest operational recipe, start with `docs/default-runbook.md`.
 

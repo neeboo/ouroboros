@@ -41,6 +41,7 @@ import {
 } from "../packages/cli/src/linear-intake";
 import { Database } from "bun:sqlite";
 import { defaultCodexBin } from "../packages/runner/src/executors/codex-bin";
+import { codexOnlyAgentDefaults } from "../packages/runner/src/agent-backends";
 import { protectedPromptContractFingerprintForSource } from "../packages/runner/src/prompt";
 import {
   listEvolutionRecords,
@@ -1403,6 +1404,303 @@ if (args.includes("self-improve-daemon")) {
         repair: "codex-resumable",
       },
     });
+  });
+
+  test("self-iteration bootstrap preserves an explicit DeepSeek Harness worker default", async () => {
+    await runCli("init");
+    const configPath = join(dir, "self-iterate-dsh-worker.toml");
+    await writeFile(
+      configPath,
+      [
+        "[agentDefaults]",
+        'global = "codex-resumable"',
+        "",
+        "[agentDefaults.roles]",
+        'worker = "deepseek-harness"',
+        'verifier = "claude-code"',
+        "",
+        '["agentBackends"."deepseek-harness"]',
+        'kind = "dsh-cli"',
+        'command = "dsh"',
+        'profile = "headless"',
+        "",
+        '["agentBackends"."claude-code"]',
+        'kind = "acpx"',
+        'agent = "claude"',
+      ].join("\n"),
+    );
+
+    const result = await runCliJson("self-iterate", "--config", configPath);
+    const overview = await runCliJson("run-overview", "--run-id", result.runId);
+
+    expect(overview.run.context.agentDefaults).toEqual({
+      global: "codex-resumable",
+      roles: {
+        designer: "codex-resumable",
+        planner: "codex-resumable",
+        worker: "deepseek-harness",
+        verifier: "codex-resumable",
+        "goal-review": "codex-resumable",
+        "outcome-review": "codex-resumable",
+        repair: "codex-resumable",
+      },
+    });
+    expect(overview.run.context.agentBackends).toMatchObject({
+      "deepseek-harness": { kind: "dsh-cli", command: "dsh", profile: "headless" },
+    });
+  });
+
+  test("self-iteration preserves only Worker backends that resolve as valid DSH CLI routes", () => {
+    const dsh = { kind: "dsh-cli", command: "dsh", profile: "headless" };
+    const everyRoleIsCodex = (value: ReturnType<typeof codexOnlyAgentDefaults>) => {
+      expect(value.global).toBe("codex-resumable");
+      expect(Object.values(value.roles)).toEqual([
+        "codex-resumable",
+        "codex-resumable",
+        "codex-resumable",
+        "codex-resumable",
+        "codex-resumable",
+        "codex-resumable",
+        "codex-resumable",
+      ]);
+    };
+
+    expect(codexOnlyAgentDefaults(
+      { roles: { worker: "deepseek-harness", designer: "claude-code", extension: "claude-code" } },
+      { "deepseek-harness": dsh },
+    ).roles.worker).toBe("deepseek-harness");
+    expect(codexOnlyAgentDefaults({ roles: { worker: "dsh-cli" } }, {}).roles.worker).toBe("dsh-cli");
+
+    for (const [worker, backends] of [
+      [undefined, {}],
+      ["unknown", {}],
+      ["codex-resumable", { "codex-resumable": { kind: "codex-resumable" } }],
+      ["other", { other: { kind: "acpx", agent: "codex" } }],
+      ["deepseek-harness", { "deepseek-harness": { ...dsh, profile: "interactive" } }],
+      ["dsh-cli", { "dsh-cli": { kind: "acpx", agent: "codex" } }],
+    ] as const) {
+      const normalized = codexOnlyAgentDefaults({ roles: worker === undefined ? {} : { worker } }, backends);
+      everyRoleIsCodex({
+        ...normalized,
+        roles: Object.fromEntries(Object.keys(normalized.roles).map((role) => [role, normalized.roles[role]])),
+      });
+    }
+  });
+
+  test("uses the production createRunsFromDesign path for later-generation DSH Worker routing", async () => {
+    const tracePath = join(dir, "self-iteration-routing-trace.jsonl");
+    const dshCommand = join(dir, "fake-dsh");
+    const codexCommand = join(dir, "fake-designer-codex");
+    const workerCodexCommand = join(dir, "fake-worker-codex");
+    const dshConfig = join(dir, "self-iterate-dsh-fixture.toml");
+    const candidateWorktrees = Array.from({ length: 3 }, (_, index) => join(dir, `candidate-worktree-${index}`));
+    const controlWorktrees = Array.from({ length: 3 }, (_, index) => join(dir, `control-worktree-${index}`));
+
+    await writeFile(
+      dshCommand,
+      [
+        "#!/usr/bin/env bun",
+        "import { appendFileSync } from 'node:fs';",
+        "const argv = Bun.argv.slice(2);",
+        "const prompt = argv.at(-1) ?? '';",
+        "appendFileSync(process.env.FAKE_ROUTE_TRACE!, JSON.stringify({ kind: 'dsh', argv, cwd: process.cwd(), providerCalls: 0, modelInferenceCalls: 0, paidSpendUsd: 0 }) + '\\n');",
+        "console.log(JSON.stringify({ status: 'done', summary: 'fake dsh worker', changedFiles: [], checks: [{ name: 'fake dsh', status: 'passed' }], artifacts: [], problems: [], promptLength: prompt.length }));",
+      ].join("\n"),
+    );
+    await writeFile(
+      codexCommand,
+      [
+        "#!/usr/bin/env bun",
+        "import { writeFileSync } from 'node:fs';",
+        "const outputFlag = Bun.argv.indexOf('--output-last-message');",
+        "const outputPath = outputFlag >= 0 ? Bun.argv[outputFlag + 1] : '';",
+        "const output = { status: 'done', summary: 'fake designer routed accepted proposal', changedFiles: [], checks: [{ name: 'production design route', status: 'passed' }], artifacts: [], problems: [], actions: [{ type: 'createRunsFromDesign', payload: { proposalId: process.env.FAKE_PROPOSAL_ID, runs: [{ goal: 'Plan the later-generation worker route', prompt: 'Plan the later-generation worker route.', doneWhen: ['production child created'] }] } }] };",
+        "if (outputPath) writeFileSync(outputPath, JSON.stringify(output));",
+        "console.log(JSON.stringify({ type: 'session.started', session_id: `fake-designer-${process.pid}` }));",
+        "console.log(JSON.stringify({ type: 'agent.message', message: JSON.stringify(output) }));",
+      ].join("\n"),
+    );
+    await writeFile(
+      workerCodexCommand,
+      [
+        "#!/usr/bin/env bun",
+        "import { writeFileSync } from 'node:fs';",
+        "const outputFlag = Bun.argv.indexOf('--output-last-message');",
+        "const outputPath = outputFlag >= 0 ? Bun.argv[outputFlag + 1] : '';",
+        "const output = { status: 'done', summary: 'fake codex worker', changedFiles: [], checks: [{ name: 'fake codex', status: 'passed' }], artifacts: [], problems: [] };",
+        "if (outputPath) writeFileSync(outputPath, JSON.stringify(output));",
+        "console.log(JSON.stringify({ type: 'session.started', session_id: `fake-worker-${process.pid}` }));",
+        "console.log(JSON.stringify({ type: 'agent.message', message: JSON.stringify(output) }));",
+      ].join("\n"),
+    );
+    await chmod(dshCommand, 0o755);
+    await chmod(codexCommand, 0o755);
+    await chmod(workerCodexCommand, 0o755);
+    await writeFile(
+      dshConfig,
+      [
+        "[agentDefaults]",
+        'global = "codex-resumable"',
+        "",
+        "[agentDefaults.roles]",
+        'worker = "deepseek-harness"',
+        "",
+        '["agentBackends"."deepseek-harness"]',
+        'kind = "dsh-cli"',
+        `command = ${JSON.stringify(dshCommand)}`,
+        'profile = "headless"',
+      ].join("\n"),
+    );
+    for (const worktree of [...candidateWorktrees, ...controlWorktrees]) {
+      await mkdir(worktree, { recursive: true });
+    }
+
+    const roots: Array<{ kind: "candidate" | "control"; runId: string; taskId: string; worktree: string }> = [];
+    for (let index = 0; index < 3; index += 1) {
+      roots.push({ kind: "candidate", ...(await runCliJson("self-iterate", "--config", dshConfig)), worktree: candidateWorktrees[index] });
+      roots.push({ kind: "control", ...(await runCliJson("self-iterate")), worktree: controlWorktrees[index] });
+    }
+
+    const harness = new Harness(dbPath);
+    const fixtureRuns: Array<{
+      kind: "candidate" | "control";
+      root: NonNullable<ReturnType<Harness["getRun"]>>;
+      child: NonNullable<ReturnType<Harness["getRun"]>>;
+      taskId: string;
+      worktree: string;
+    }> = [];
+    for (const fixture of roots) {
+      const root = harness.getRun(fixture.runId)!;
+      const fixtureDb = new Database(dbPath);
+      fixtureDb.query("update runs set context_json = json_remove(context_json, '$.controlPlaneRuntime') where id = $runId").run({ $runId: root.id });
+      fixtureDb.close();
+      const proposal = harness.createDesignProposal({
+        projectId: root.projectId!,
+        charterId: root.context.founderCharterId as string,
+        runId: root.id,
+        taskId: fixture.taskId,
+        title: `Route ${fixture.kind} Worker`,
+        problem: "A later-generation Worker route needs production-path evidence.",
+        recommendation: "Preserve the explicit Worker backend in the design child.",
+        proposal: {
+          problem: "A later-generation Worker route needs production-path evidence.",
+          recommendation: "Preserve the explicit Worker backend in the design child.",
+          evaluationContract: {
+            baseline: ["descendant Worker route is not exercised"],
+            successMetrics: ["descendant Worker route is exercised"],
+            guardMetrics: ["Codex remains the governance default"],
+            requiredEvidence: ["child attempt backend and fake command trace"],
+          },
+          investment: { reversibility: "easy" as const, portfolio: "core" as const, oneTimeCost: 0, recurringCost: 0, timeBudget: "fixture" },
+        },
+        status: "proposed",
+      });
+      harness.recordDesignDecision({
+        proposalId: proposal.id,
+        decision: "approved",
+        actorKind: "human",
+        actorRef: "fixture-reviewer",
+        charterId: proposal.charterId,
+        authority: { disposition: "automatic" },
+      });
+      harness.updateDesignProposalStatus({ proposalId: proposal.id, status: "accepted" });
+
+      const design = await runCliRaw(
+        "run-loop",
+        "--run-id", root.id,
+        "--executor", "codex-resumable",
+        "--codex-bin", codexCommand,
+        "--cwd", dir,
+        "--sandbox", "read-only",
+        "--start-hook", "none",
+        "--max-rounds", "1",
+        "--tasks", "1",
+        { FAKE_PROPOSAL_ID: proposal.id, CODEX_SANDBOX: "" },
+      );
+      expect(design.exitCode, `${fixture.kind} design failed\n${design.stdout}\n${design.stderr}`).toBe(0);
+      const child = harness.listRuns({ limit: 100 }).find((run) => run.context.designProposalId === proposal.id);
+      expect(child).toBeDefined();
+      const planner = harness.getRunOverview({ runId: child!.id, eventLimit: 0 }).tasks.find((task) => task.role === "planner");
+      expect(planner).toBeDefined();
+      harness.recordAttempt({
+        taskId: planner!.id,
+        input: { fixture: "production-createRunsFromDesign" },
+        output: { status: "done", summary: "fixture planner completed", changedFiles: [], checks: [], artifacts: [], problems: [] },
+      });
+      const worktree = realpathSync(fixture.worktree);
+      const taskId = harness.createTask({
+        runId: child!.id,
+        role: "worker",
+        goal: `Run production-path ${fixture.kind} Worker`,
+        prompt: `production path task prompt ${fixture.kind}`,
+        doneWhen: ["fake command returns done AttemptOutput"],
+        worktreePath: worktree,
+      });
+      fixtureRuns.push({ kind: fixture.kind, root, child: child!, taskId, worktree });
+    }
+
+    for (const fixture of fixtureRuns) {
+      const rootContext = harness.getRun(fixture.root.id)!.context;
+      const childContext = harness.getRun(fixture.child.id)!.context;
+      expect(childContext.parentRunId).toBe(fixture.root.id);
+      expect(childContext.source).toBe("design");
+      expect(childContext.agentDefaults).toEqual(
+        codexOnlyAgentDefaults(rootContext.agentDefaults, rootContext.agentBackends),
+      );
+      const childRoles = (childContext.agentDefaults as { roles: Record<string, string> }).roles;
+      if (fixture.kind === "candidate") {
+        expect(childRoles.worker).toBe("deepseek-harness");
+        expect(childContext.agentBackends).toEqual(rootContext.agentBackends);
+      } else {
+        expect(childRoles.worker).toBe("codex-resumable");
+      }
+
+      const args = fixture.kind === "candidate"
+        ? ["run-loop", "--run-id", fixture.child.id, "--executor", "dsh-cli", "--cwd", fixture.worktree, "--start-hook", "none", "--max-rounds", "1", "--tasks", "1", { FAKE_ROUTE_TRACE: tracePath }]
+        : ["run-loop", "--run-id", fixture.child.id, "--executor", "codex-resumable", "--codex-bin", workerCodexCommand, "--cwd", fixture.worktree, "--sandbox", "read-only", "--start-hook", "none", "--max-rounds", "1", "--tasks", "1", { CODEX_SANDBOX: "" }];
+      const execution = await runCliRaw(...args);
+      expect(execution.exitCode, `${fixture.kind} fixture failed\n${execution.stdout}\n${execution.stderr}`).toBe(0);
+
+      const overview = harness.getRunOverview({ runId: fixture.child.id, eventLimit: 0 });
+      const session = overview.sessions.find((candidate) => candidate.taskId === fixture.taskId);
+      expect(session).toBeDefined();
+      const attempt = harness.getAttempt(session!.attemptId)!;
+      expect(attempt.input.backend).toMatchObject(
+        fixture.kind === "candidate"
+          ? { id: "deepseek-harness", kind: "dsh-cli", source: "role-default" }
+          : { id: "codex-resumable", kind: "codex-resumable", source: "role-default" },
+      );
+      expect(attempt.input.cwd).toBe(fixture.worktree);
+      if (fixture.kind === "candidate") {
+        expect(attempt.input.model).toBeNull();
+      }
+      expect(attempt.output).toMatchObject({ status: "done" });
+      if (fixture.kind === "candidate") {
+        expect(attempt.input.backend).toEqual({
+          id: "deepseek-harness",
+          kind: "dsh-cli",
+          command: dshCommand,
+          profile: "headless",
+          source: "role-default",
+        });
+      }
+    }
+
+    const trace = (await readFile(tracePath, "utf8"))
+      .trim()
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as { argv: string[]; cwd: string; providerCalls: number; modelInferenceCalls: number; paidSpendUsd: number });
+    const candidateAttempts = fixtureRuns.filter((fixture) => fixture.kind === "candidate").map((fixture) => {
+      const overview = harness.getRunOverview({ runId: fixture.child.id, eventLimit: 0 });
+      return harness.getAttempt(overview.sessions.find((session) => session.taskId === fixture.taskId)!.attemptId)!;
+    });
+    expect(trace).toHaveLength(3);
+    for (const [index, attempt] of candidateAttempts.entries()) {
+      const entry = trace[index];
+      expect(entry).toMatchObject({ cwd: realpathSync(candidateWorktrees[index]), providerCalls: 0, modelInferenceCalls: 0, paidSpendUsd: 0 });
+      expect(entry.argv).toEqual(["--profile", "headless", attempt.input.prompt as string]);
+    }
   });
 
   test("self-iteration bootstrap keeps explicit designer model defaults from config", async () => {
