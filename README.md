@@ -4,9 +4,9 @@
 
 English · [简体中文](./zh_CN.md)
 
-Imagine a production system makes the same mistake for the third time. An agent can patch the code again. The tests can pass again. But if the next agent cannot see what happened, cannot reuse the fix, and cannot change the way future work is done, the system has learned nothing.
+Imagine a software project makes the same mistake for the third time. An agent can patch the code again. The tests can pass again. But if the next agent cannot see what happened, cannot reuse the fix, and cannot change the way future work is done, the project has learned nothing.
 
-Ouroboros exists to make that learning durable. It is a local-first **meta self-improvement system**: it improves its own way of working, and it helps other systems, such as Hodor, design and operate their own self-improvement loops. The CLI is shortened to `orbs`.
+Ouroboros exists to make that learning durable. It is a local-first **meta self-improvement system**: it improves its own way of working, and it gives other software projects a governed way to improve theirs. The CLI is shortened to `orbs`.
 
 ## What Self-Improvement Means
 
@@ -30,12 +30,12 @@ Ouroboros keeps this recursive method intentionally small. It can repeat at thre
 
 ## Why Ouroboros
 
-Suppose Hodor discovers from real production episodes that one part of its media workflow is slow, expensive, or unreliable. Ouroboros helps it turn that evidence into a bounded design, deliver the change, measure the result, and retain or roll it back. At the same time, Ouroboros watches its own failures: weak planning, lost context, repeated repairs, stale tools, or a scheduler that stops making progress. Those become candidates for improving Ouroboros itself.
+Suppose a target project discovers that one part of its workflow is slow, expensive, or unreliable. Ouroboros helps the project turn that evidence into a bounded design, deliver the change, measure the result, and retain or roll it back. At the same time, Ouroboros watches its own failures: weak planning, lost context, repeated repairs, stale tools, or a scheduler that stops making progress. Those become candidates for improving Ouroboros itself.
 
 This gives Ouroboros two connected responsibilities:
 
 - **Improve Ouroboros:** make its planning, execution, verification, memory, tools, and resource decisions better over time.
-- **Enable target systems:** give Hodor and other projects a governed way to observe outcomes, propose changes, verify them, and inherit successful capabilities.
+- **Enable target systems:** give other projects a governed way to observe outcomes, propose changes, verify them, and inherit successful capabilities.
 
 Long-running agent work needs this control because common failures happen between prompts:
 
@@ -50,10 +50,10 @@ Ouroboros keeps the control plane local and explicit. SQLite stores durable stat
 
 ## What Each Generation Must Inherit
 
-Every run needs two kinds of context. For Hodor, they look like this:
+Every run needs two kinds of context:
 
-- **Project knowledge:** production rules, cost records, past incidents, goals, and constraints from Hodor's own work.
-- **ORBS capabilities:** the callable tools, prompts, reusable skills, and safety rules available to the agents working on Hodor.
+- **Project knowledge:** the project's domain rules, operating history, past incidents, goals, and constraints.
+- **ORBS capabilities:** the callable tools, prompts, reusable skills, and safety rules available to the agents working on that project.
 
 Ouroboros now has a versioned operating framework (`HarnessRevision`). An approved revision binds prompts, project knowledge, reusable skills, tools, and agent policy by content hash. New runs freeze that revision, verify every component before startup, and record what was actually loaded. This is the mechanism that turns a proven change into capability inherited by the next generation. Project-wide activation of the first revision remains an explicit governed action, so old runs do not silently change underneath ongoing work.
 
@@ -98,7 +98,6 @@ Active areas:
 
 Read the fuller product and system design:
 
-- [Ouroboros and Hodor: Meta Self-Improvement](./docs/ouroboros-hodor-meta-self-improvement.md)
 - [Designing Self-Evolution for a Target System](./docs/target-system-evolution.md)
 
 ## Install
