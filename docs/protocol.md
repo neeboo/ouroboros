@@ -107,12 +107,19 @@ Planner-created tasks may also persist a frozen verifier contract in task config
   "verifierContract": {
     "successCriteria": ["The worker evidence satisfies the scoped task goal."],
     "deterministicChecks": [],
-    "agentReviewRubric": ["Check the worker output against the frozen task scope."]
+    "agentReviewRubric": ["Check the worker output against the frozen task scope."],
+    "executionEnvironment": {
+      "schemaVersion": 1,
+      "runtime": { "kind": "bun", "version": "1.3.5" },
+      "network": { "mode": "deny" }
+    }
   }
 }
 ```
 
 `verifierContract` is optional for backward compatibility. When present on planner output, the create-tasks hook stores it in `config_json`; the create-verifier hook reads it from task config, includes it in the verifier prompt, and cites it on the `created_verifier_task` artifact.
+
+`executionEnvironment` is an optional strict verifier-only contract. The host reads the selected Bun executable, exact version, and executable hash before any start hook or model process. `network.mode: "deny"` requires the host to deny DNS, TCP, and HTTP in the execution sandbox and record real failed probes. A successful attempt stores the complete host receipt in attempt input and adds only its content hash to verifier artifacts. Agent-authored network claims cannot replace this receipt. V1 supports direct and resumable Codex execution on macOS. DeepSeek Harness and Claude routes fail before model startup until they can enforce and attest the same boundary. A missing exact runtime also fails before startup; Ouroboros never installs or downloads it automatically.
 
 ### Attempt
 

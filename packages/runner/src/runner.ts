@@ -13,6 +13,12 @@ import {
 } from "./prompt-budget";
 import { resolveExecutionRoute } from "./execution-routing";
 import { hostExecutionCapabilityAttemptInput } from "./executors/host-execution-capabilities";
+import {
+  blockedVerifierExecutionEnvironmentOutput,
+  prepareVerifierExecutionEnvironment,
+  verifierExecutionEnvironmentAttemptInput,
+  withVerifierExecutionEnvironmentReceipt,
+} from "./verifier-execution-environment";
 import type {
   RunNextReadyTaskInput,
   RunReadyTasksInput,
@@ -35,6 +41,26 @@ export async function runNextReadyTask(input: RunNextReadyTaskInput) {
 
   const cwd = task.worktreePath
     ?? (run.projectId ? input.harness.getProject(run.projectId)?.rootPath ?? process.cwd() : process.cwd());
+  const route = resolveExecutionRoute({ run, task });
+  let verifierExecutionEnvironment;
+  try {
+    verifierExecutionEnvironment = prepareVerifierExecutionEnvironment({
+      verifierContract: task.config?.verifierContract,
+      role: task.role,
+      backendKind: route.backend.kind,
+      cwd,
+      databasePath: input.harness.dbPath,
+      hostExecutionCapabilities: task.config?.hostExecutionCapabilities,
+      host: input.verifierExecutionEnvironmentHost,
+    });
+  } catch (error) {
+    const attemptId = input.harness.recordAttempt({
+      taskId: task.id,
+      input: { verifierExecutionEnvironmentValidation: "failed", route, model: route.model },
+      output: blockedVerifierExecutionEnvironmentOutput(error),
+    });
+    return { taskId: task.id, attemptId, stopDecision: "exit" as const };
+  }
   let loadedHarnessRevision;
   try {
     loadedHarnessRevision = loadFrozenHarnessRevision({ harness: input.harness, run, cwd });
@@ -69,7 +95,6 @@ export async function runNextReadyTask(input: RunNextReadyTaskInput) {
     loadedHarnessRevision: loadedHarnessRevision?.harnessRevision ?? null,
   });
   const sessionName = task.sessionRef ?? defaultSessionName(task.id);
-  const route = resolveExecutionRoute({ run, task });
   const oversized = promptBudgetEvidence(prompt, "task executor start");
   if (oversized) {
     const attemptId = input.harness.recordAttempt({
@@ -86,6 +111,7 @@ export async function runNextReadyTask(input: RunNextReadyTaskInput) {
       route,
       model: route.model,
       ...hostCapabilityInput,
+      ...verifierExecutionEnvironmentAttemptInput(verifierExecutionEnvironment),
       ...harnessRevisionAttemptInput(loadedHarnessRevision),
     },
   });
@@ -112,6 +138,7 @@ export async function runNextReadyTask(input: RunNextReadyTaskInput) {
     output = stopHookErrorOutput(rawOutput, error);
     decision = "exit";
   }
+  output = withVerifierExecutionEnvironmentReceipt(output, verifierExecutionEnvironment);
   input.harness.finishAttempt({ attemptId, output });
   applyPostAttemptRunEffects(input.harness, input.runId, task, output);
   if (decision === "retry") {
@@ -139,6 +166,32 @@ export async function runReadyTasks(input: RunReadyTasksInput) {
     tasks.map(async (task) => {
       const sessionName = task.sessionRef ?? defaultSessionName(task.id);
       const cwd = task.worktreePath ?? input.cwd ?? process.cwd();
+      const route = resolveExecutionRoute({
+        run,
+        task,
+        cliAgentBackend: input.cliAgentBackend,
+        cliExecutor: input.cliExecutor,
+        globalModel: input.model,
+      });
+      let verifierExecutionEnvironment;
+      try {
+        verifierExecutionEnvironment = prepareVerifierExecutionEnvironment({
+          verifierContract: task.config?.verifierContract,
+          role: task.role,
+          backendKind: route.backend.kind,
+          cwd,
+          databasePath: input.harness.dbPath,
+          hostExecutionCapabilities: task.config?.hostExecutionCapabilities,
+          host: input.verifierExecutionEnvironmentHost,
+        });
+      } catch (error) {
+        const attemptId = input.harness.recordAttempt({
+          taskId: task.id,
+          input: { sessionName, cwd, verifierExecutionEnvironmentValidation: "failed", route, model: route.model },
+          output: blockedVerifierExecutionEnvironmentOutput(error),
+        });
+        return { taskId: task.id, attemptId, sessionName, stopDecision: "exit" as const };
+      }
       let loadedHarnessRevision;
       try {
         loadedHarnessRevision = loadFrozenHarnessRevision({ harness: input.harness, run, cwd });
@@ -192,13 +245,6 @@ export async function runReadyTasks(input: RunReadyTasksInput) {
         template: input.harness.getPromptTemplate("task")?.contentMd,
         loadedHarnessRevision: loadedHarnessRevision?.harnessRevision ?? null,
       });
-      const route = resolveExecutionRoute({
-        run,
-        task,
-        cliAgentBackend: input.cliAgentBackend,
-        cliExecutor: input.cliExecutor,
-        globalModel: input.model,
-      });
       const oversized = promptBudgetEvidence(prompt, "task executor start");
       if (oversized) {
         const blocked = promptBudgetBlockedOutput(oversized);
@@ -228,6 +274,7 @@ export async function runReadyTasks(input: RunReadyTasksInput) {
           model: route.model,
           ...(input.attemptInput?.(factoryInput) ?? {}),
           ...hostCapabilityInput,
+          ...verifierExecutionEnvironmentAttemptInput(verifierExecutionEnvironment),
           ...harnessRevisionAttemptInput(loadedHarnessRevision),
         },
       });
@@ -254,6 +301,7 @@ export async function runReadyTasks(input: RunReadyTasksInput) {
         output = stopHookErrorOutput(rawOutput, error);
         decision = "exit";
       }
+      output = withVerifierExecutionEnvironmentReceipt(output, verifierExecutionEnvironment);
       output.checks = [...(startResult.checks ?? []), ...(output.checks ?? [])];
       output.artifacts = [...(startResult.artifacts ?? []), ...(output.artifacts ?? [])];
       input.harness.finishAttempt({ attemptId, output });

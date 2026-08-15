@@ -6,6 +6,7 @@ import type { DshCommandResolver } from "./dsh-readiness";
 import type { ResolvedAgentBackend } from "./agent-backends";
 import type { ResolvedExecutionRoute } from "./execution-routing";
 import type { TaskExecutor } from "./types";
+import { parseVerifierExecutionEnvironment } from "./verifier-execution-environment";
 
 export interface RouteExecutorOptions {
   cwd: string;
@@ -29,6 +30,18 @@ export interface RouteExecutorOptions {
 
 export function createRouteExecutor(options: RouteExecutorOptions): TaskExecutor {
   const backend = options.route.backend;
+  let verifierExecutionEnvironment;
+  try {
+    verifierExecutionEnvironment = parseVerifierExecutionEnvironment(options.verifierContract, options.taskRole ?? options.route.role);
+  } catch (error) {
+    return unsupportedVerifierEnvironmentOutput(error instanceof Error ? error.message : String(error), backend.kind);
+  }
+  if (verifierExecutionEnvironment && backend.kind !== "codex-cli" && backend.kind !== "codex-resumable") {
+    return unsupportedVerifierEnvironmentOutput(
+      `backend ${backend.kind} cannot enforce the frozen verifier execution environment`,
+      backend.kind,
+    );
+  }
   if (backend.kind === "noop") {
     return async ({ task }) => ({
       status: "done" as const,
@@ -95,8 +108,19 @@ export function createRouteExecutor(options: RouteExecutorOptions): TaskExecutor
     idleTimeoutMs: options.idleTimeoutMs,
     runCommand: options.runCommand,
     hostExecutionCapabilities: options.hostExecutionCapabilities,
-    taskRole: options.taskRole,
+    taskRole: options.taskRole ?? options.route.role,
     verifierContract: options.verifierContract,
+  });
+}
+
+function unsupportedVerifierEnvironmentOutput(problem: string, backend: string): TaskExecutor {
+  return async () => ({
+    status: "blocked" as const,
+    summary: "Verifier execution environment is unsupported by the selected backend",
+    changedFiles: [],
+    checks: [{ name: "verifier execution environment route", status: "failed" as const, evidence: problem }],
+    artifacts: [{ kind: "verifier_execution_environment_route", backend, supported: false }],
+    problems: [problem],
   });
 }
 

@@ -65,15 +65,21 @@ export function createCodexResumableClient(options: CodexResumableClientOptions)
       if (oversized) {
         return oversized;
       }
-      const hostExecution = await prepareCodexHostExecution({
-        cwd: options.cwd,
-        sandbox,
-        browserProcessPolicy: options.browserProcessPolicy,
-        injectedRunCommand: options.runCommand,
-        hostExecutionCapabilities: options.hostExecutionCapabilities,
-        taskRole: options.taskRole,
-        verifierContract: options.verifierContract,
-      });
+      let hostExecution;
+      try {
+        hostExecution = await prepareCodexHostExecution({
+          cwd: options.cwd,
+          sandbox,
+          browserProcessPolicy: options.browserProcessPolicy,
+          injectedRunCommand: options.runCommand,
+          hostExecutionCapabilities: options.hostExecutionCapabilities,
+          taskRole: options.taskRole,
+          verifierContract: options.verifierContract,
+          backendKind: "codex-resumable",
+        });
+      } catch (error) {
+        return blockedCapabilityResult(blockedHostPreparationOutput(error));
+      }
       const modelArgs = options.model ? ["-m", options.model] : [];
       const reasoningArgs = options.reasoningEffort ? ["-c", `model_reasoning_effort=${JSON.stringify(options.reasoningEffort)}`] : [];
       const stdoutObserver = createStdoutObserver(input);
@@ -121,15 +127,21 @@ export function createCodexResumableClient(options: CodexResumableClientOptions)
       if (oversized) {
         return oversized;
       }
-      const hostExecution = await prepareCodexHostExecution({
-        cwd: options.cwd,
-        sandbox,
-        browserProcessPolicy: options.browserProcessPolicy,
-        injectedRunCommand: options.runCommand,
-        hostExecutionCapabilities: options.hostExecutionCapabilities,
-        taskRole: options.taskRole,
-        verifierContract: options.verifierContract,
-      });
+      let hostExecution;
+      try {
+        hostExecution = await prepareCodexHostExecution({
+          cwd: options.cwd,
+          sandbox,
+          browserProcessPolicy: options.browserProcessPolicy,
+          injectedRunCommand: options.runCommand,
+          hostExecutionCapabilities: options.hostExecutionCapabilities,
+          taskRole: options.taskRole,
+          verifierContract: options.verifierContract,
+          backendKind: "codex-resumable",
+        });
+      } catch (error) {
+        return blockedCapabilityResult(blockedHostPreparationOutput(error));
+      }
       const modelArgs = options.model ? ["-m", options.model] : [];
       const reasoningArgs = options.reasoningEffort ? ["-c", `model_reasoning_effort=${JSON.stringify(options.reasoningEffort)}`] : [];
       const stdoutObserver = createStdoutObserver(input);
@@ -182,6 +194,18 @@ function blockedCapabilityResult(output: AttemptOutput): CodexResumableResult {
     stderr: "",
     events: [],
     output,
+  };
+}
+
+function blockedHostPreparationOutput(error: unknown): AttemptOutput {
+  const problem = error instanceof Error ? error.message : String(error);
+  return {
+    status: "blocked",
+    summary: "codex host execution preparation failed",
+    changedFiles: [],
+    checks: [{ name: "codex host execution preparation", status: "failed", evidence: problem }],
+    artifacts: [],
+    problems: [problem],
   };
 }
 

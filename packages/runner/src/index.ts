@@ -48,6 +48,7 @@ export {
 } from "./executors/dsh-cli";
 export { inspectDshReadiness, resolveDshCommand } from "./dsh-readiness";
 export { createCodexResumableClient } from "./executors/codex-resumable";
+export { prepareCodexHostExecution, protectedCodexConfig } from "./executors/codex-host-execution";
 export { defaultCodexBin, resolveDefaultCodexBin } from "./executors/codex-bin";
 export { createRouteExecutor } from "./route-executor";
 export {
@@ -61,6 +62,20 @@ export { resolveExecutionRoute } from "./execution-routing";
 export { resolveModelPreference } from "./model-preferences";
 export { readHostCapabilityReadback } from "./host-capability-readback";
 export type { HostCapabilityReadback, HostReadbackForTask } from "./host-capability-readback";
+export {
+  assertPersistedVerifierExecutionEnvironmentReceipt,
+  blockedVerifierExecutionEnvironmentOutput,
+  parseVerifierExecutionEnvironment,
+  prepareVerifierExecutionEnvironment,
+  verifierExecutionEnvironmentAttemptInput,
+  withVerifierExecutionEnvironmentReceipt,
+} from "./verifier-execution-environment";
+export type {
+  PreparedVerifierExecutionEnvironment,
+  VerifierExecutionEnvironmentHost,
+  VerifierExecutionEnvironmentReceiptV1,
+  VerifierExecutionEnvironmentV1,
+} from "./verifier-execution-environment";
 export {
   descendantPidsFromPsOutputForTest,
   runLocalCommand,

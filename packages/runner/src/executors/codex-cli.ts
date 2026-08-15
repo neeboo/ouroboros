@@ -26,15 +26,21 @@ export function createCodexCliExecutor(options: CodexCliExecutorOptions): TaskEx
     if (oversizedPrompt) {
       return promptBudgetBlockedOutput(oversizedPrompt);
     }
-    const hostExecution = await prepareCodexHostExecution({
-      cwd: options.cwd,
-      sandbox,
-      browserProcessPolicy: options.browserProcessPolicy,
-      injectedRunCommand: options.runCommand,
-      hostExecutionCapabilities: options.hostExecutionCapabilities,
-      taskRole: options.taskRole,
-      verifierContract: options.verifierContract,
-    });
+    let hostExecution;
+    try {
+      hostExecution = await prepareCodexHostExecution({
+        cwd: options.cwd,
+        sandbox,
+        browserProcessPolicy: options.browserProcessPolicy,
+        injectedRunCommand: options.runCommand,
+        hostExecutionCapabilities: options.hostExecutionCapabilities,
+        taskRole: options.taskRole,
+        verifierContract: options.verifierContract,
+        backendKind: "codex-cli",
+      });
+    } catch (error) {
+      return blockedHostPreparationOutput(error);
+    }
     const modelArgs = options.model ? ["-m", options.model] : [];
     const reasoningArgs = options.reasoningEffort ? ["-c", `model_reasoning_effort=${JSON.stringify(options.reasoningEffort)}`] : [];
     let result;
@@ -84,6 +90,18 @@ export function createCodexCliExecutor(options: CodexCliExecutorOptions): TaskEx
       summary: "codex cli executor produced invalid output",
       checkName: "codex output parse",
     });
+  };
+}
+
+function blockedHostPreparationOutput(error: unknown) {
+  const problem = error instanceof Error ? error.message : String(error);
+  return {
+    status: "blocked" as const,
+    summary: "codex host execution preparation failed",
+    changedFiles: [],
+    checks: [{ name: "codex host execution preparation", status: "failed" as const, evidence: problem }],
+    artifacts: [],
+    problems: [problem],
   };
 }
 

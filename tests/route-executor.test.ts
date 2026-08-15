@@ -29,6 +29,59 @@ const taskFixture = {
 };
 
 describe("route executor", () => {
+  test.each([
+    {
+      name: "Claude",
+      route: {
+        role: "verifier",
+        backend: { id: "claude-code", kind: "acpx", source: "task", agent: "claude" },
+        model: null,
+        executionMode: "generic",
+      } as ResolvedExecutionRoute,
+    },
+    {
+      name: "DeepSeek Harness",
+      route: {
+        role: "verifier",
+        backend: { id: "deepseek-harness", kind: "dsh-cli", source: "task", command: "dsh", profile: "headless" },
+        model: null,
+        executionMode: "generic",
+      } as ResolvedExecutionRoute,
+    },
+  ])("fails $name closed before launch when offline runtime equivalence is unsupported", async ({ route }) => {
+    let calls = 0;
+    const executor = createRouteExecutor({
+      cwd: "/repo",
+      route,
+      taskRole: "verifier",
+      verifierContract: {
+        executionEnvironment: {
+          schemaVersion: 1,
+          runtime: { kind: "bun", version: "1.3.5" },
+          network: { mode: "deny" },
+        },
+      },
+      runCommand: async () => {
+        calls += 1;
+        return { exitCode: 0, stdout: "", stderr: "" };
+      },
+    });
+
+    const output = await executor({
+      prompt: "Verify offline",
+      sessionName: "task_verifier",
+      run: runFixture,
+      task: { ...taskFixture, role: "verifier" },
+      route,
+    });
+
+    expect(calls).toBe(0);
+    expect(output).toMatchObject({
+      status: "blocked",
+      problems: [expect.stringContaining(`backend ${route.backend.kind} cannot enforce`)],
+    });
+  });
+
   test("creates acpx executors from resolved routes", async () => {
     const calls: Array<{ cmd: string[]; stdin: string }> = [];
     const route: ResolvedExecutionRoute = {

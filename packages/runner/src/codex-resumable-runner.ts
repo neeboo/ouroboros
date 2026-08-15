@@ -52,6 +52,15 @@ import type { ResolvedExecutionRoute } from "./execution-routing";
 import type { AttemptInputFactory, ExecutorEventRecorder, StartHook, StartHookResult, StopHook, StopHookResult, TaskExecutorFactory } from "./types";
 import type { AttemptReplayCache } from "./executors/types";
 import type { HostCapabilityReadback, HostReadbackForTask } from "./host-capability-readback";
+import {
+  assertPersistedVerifierExecutionEnvironmentReceipt,
+  blockedVerifierExecutionEnvironmentOutput,
+  prepareVerifierExecutionEnvironment,
+  preparedVerifierExecutionEnvironmentFromAttempt,
+  verifierExecutionEnvironmentAttemptInput,
+  withVerifierExecutionEnvironmentReceipt,
+  type VerifierExecutionEnvironmentHost,
+} from "./verifier-execution-environment";
 
 const DEFAULT_RUNNING_ATTEMPT_STALE_MS = 5 * 60 * 1000;
 const DEFAULT_GENERIC_ATTEMPT_IDLE_TIMEOUT_MS = 5 * 60 * 1000;
@@ -79,6 +88,7 @@ export interface CodexResumableOrchestrationInput {
   genericExecutorFactory?: TaskExecutorFactory;
   genericAttemptInput?: AttemptInputFactory;
   hostReadbackForTask?: HostReadbackForTask;
+  verifierExecutionEnvironmentHost?: VerifierExecutionEnvironmentHost;
   codexOptions?: Partial<CodexResumableClientOptions>;
   ownerId?: string;
   pid?: number;
@@ -437,6 +447,12 @@ class CodexResumableOrchestrator {
     if (hostExecutionCapabilityProblem(hostCapabilityInput)) {
       return this.blockNewAttemptForHostExecutionCapability({ run, task, sessionName, cwd, route, hostCapabilityInput });
     }
+    let verifierExecutionEnvironment;
+    try {
+      verifierExecutionEnvironment = this.verifierExecutionEnvironmentFor(run, task, cwd, route);
+    } catch (error) {
+      return this.blockNewAttemptForVerifierExecutionEnvironment({ run, task, sessionName, cwd, route, error });
+    }
     this.harness.clearRunPause(run.id);
     let loadedHarnessRevision: LoadedHarnessRevision | null;
     try {
@@ -477,6 +493,7 @@ class CodexResumableOrchestrator {
       ...(hostCapabilityReadback ? { hostCapabilityReadback } : {}),
       ...harnessRevisionAttemptInput(loadedHarnessRevision),
       ...hostCapabilityInput,
+      ...verifierExecutionEnvironmentAttemptInput(verifierExecutionEnvironment),
     };
     if ((startResult.problems ?? []).length > 0) {
       const attemptId = this.harness.recordAttempt({
@@ -509,6 +526,13 @@ class CodexResumableOrchestrator {
         task.config?.hostExecutionCapabilities,
         { role: task.role, verifierContract: task.config?.verifierContract },
       );
+      const currentVerifierExecutionEnvironment = this.verifierExecutionEnvironmentFor(
+        run,
+        task,
+        cwd,
+        this.resolveRoute(run, task),
+      );
+      assertPersistedVerifierExecutionEnvironmentReceipt(existingAttempt.input, currentVerifierExecutionEnvironment);
       const loadedHarnessRevision = loadFrozenHarnessRevision({ harness: this.harness, run, cwd });
       assertPersistedHarnessRevisionAttestation(existingAttempt.input, loadedHarnessRevision);
     } catch (error) {
@@ -706,6 +730,9 @@ class CodexResumableOrchestrator {
         return { taskId: task.id, attemptId: attempt.id, sessionName, status: "blocked" as const, codexSessionId: null };
       }
       try {
+        const route = this.resolveRoute(run, task);
+        const currentVerifierExecutionEnvironment = this.verifierExecutionEnvironmentFor(run, task, cwd, route);
+        assertPersistedVerifierExecutionEnvironmentReceipt(attempt.input, currentVerifierExecutionEnvironment);
         const loadedHarnessRevision = loadFrozenHarnessRevision({ harness: this.harness, run, cwd });
         assertPersistedHarnessRevisionAttestation(attempt.input, loadedHarnessRevision);
       } catch (error) {
@@ -887,6 +914,12 @@ class CodexResumableOrchestrator {
         if (hostExecutionCapabilityProblem(hostCapabilityInput)) {
           return this.blockNewAttemptForHostExecutionCapability({ run, task, sessionName, cwd, route, hostCapabilityInput });
         }
+        let verifierExecutionEnvironment;
+        try {
+          verifierExecutionEnvironment = this.verifierExecutionEnvironmentFor(run, task, cwd, route);
+        } catch (error) {
+          return this.blockNewAttemptForVerifierExecutionEnvironment({ run, task, sessionName, cwd, route, error });
+        }
         const baseInput = {
           prompt,
           sessionName,
@@ -896,6 +929,7 @@ class CodexResumableOrchestrator {
           ...(hostCapabilityReadback ? { hostCapabilityReadback } : {}),
           ...harnessRevisionAttemptInput(loadedHarnessRevision),
           ...hostCapabilityInput,
+          ...verifierExecutionEnvironmentAttemptInput(verifierExecutionEnvironment),
         };
         const startResult = await applyStartHooks({
           hooks: this.input.startHooks ?? [],
@@ -1027,19 +1061,25 @@ class CodexResumableOrchestrator {
     codexSessionId: string | null;
     startResult?: StartHookResult;
   }) {
-    const { output, decision } = await this.applyStopHooks({
+    const stopResult = await this.applyStopHooks({
       run: input.run,
       task: input.task,
       sessionName: input.sessionName,
       prompt: input.prompt,
       output: withCodexArtifacts(input.rawOutput, input.codexSessionId),
     });
+    const output = stopResult.output;
+    const decision = stopResult.decision;
     const persistedStartResult = input.startResult ?? startHookEvidenceFromAttempt(this.harness.getAttempt(input.attemptId));
-    const finishedOutput: AttemptOutput = {
+    const outputWithStartEvidence: AttemptOutput = {
       ...output,
       checks: [...(persistedStartResult.checks ?? []), ...(output.checks ?? [])],
       artifacts: [...(persistedStartResult.artifacts ?? []), ...(output.artifacts ?? [])],
     };
+    const finishedOutput = withVerifierExecutionEnvironmentReceipt(
+      outputWithStartEvidence,
+      preparedVerifierExecutionEnvironmentFromAttempt(this.harness.getAttempt(input.attemptId)?.input ?? {}),
+    );
     this.harness.finishAttempt({ attemptId: input.attemptId, output: finishedOutput });
     const finishedAttempt = this.harness.getAttempt(input.attemptId);
     applyPostAttemptRunEffects(this.harness, input.run.id, input.task, finishedAttempt?.output ?? finishedOutput);
@@ -1113,6 +1153,9 @@ class CodexResumableOrchestrator {
         timeoutMs: this.genericHardMs,
         idleTimeoutMs: this.genericIdleMs,
         replayCache: this.replayCache,
+        hostExecutionCapabilities: factoryInput.task.config?.hostExecutionCapabilities,
+        taskRole: factoryInput.task.role,
+        verifierContract: factoryInput.task.config?.verifierContract,
         dshProfileIsolation: factoryInput.task.config?.dshProfileIsolation === "base-headless"
           ? "base-headless"
           : undefined,
@@ -1151,15 +1194,21 @@ class CodexResumableOrchestrator {
     } finally {
       clearInterval(heartbeat);
     }
-    const { output, decision } = await this.applyStopHooks({
+    const stopResult = await this.applyStopHooks({
       run: input.run,
       task: input.task,
       sessionName: input.sessionName,
       prompt: input.prompt,
       output: rawOutput,
     });
+    let output = stopResult.output;
+    const decision = stopResult.decision;
     output.checks = [...(input.startResult.checks ?? []), ...(output.checks ?? [])];
     output.artifacts = [...(input.startResult.artifacts ?? []), ...(output.artifacts ?? [])];
+    output = withVerifierExecutionEnvironmentReceipt(
+      output,
+      preparedVerifierExecutionEnvironmentFromAttempt(this.harness.getAttempt(attemptId)?.input ?? {}),
+    );
     this.harness.finishAttempt({ attemptId, output });
     const finishedAttempt = this.harness.getAttempt(attemptId);
     applyPostAttemptRunEffects(this.harness, input.run.id, input.task, finishedAttempt?.output ?? output);
@@ -1261,6 +1310,58 @@ class CodexResumableOrchestrator {
     });
     this.upsertAttemptThread({ runId: input.run.id, task: input.task, attemptId, sessionName: input.sessionName, cwd: input.cwd, status: "blocked" });
     return { taskId: input.task.id, attemptId, sessionName: input.sessionName, status: "blocked" as const, codexSessionId: null };
+  }
+
+  private verifierExecutionEnvironmentFor(
+    _run: NonNullable<ReturnType<Harness["getRun"]>>,
+    task: Task,
+    cwd: string,
+    route: ResolvedExecutionRoute,
+  ) {
+    return prepareVerifierExecutionEnvironment({
+      verifierContract: task.config?.verifierContract,
+      role: task.role,
+      backendKind: route.backend.kind,
+      cwd,
+      databasePath: this.harness.dbPath,
+      hostExecutionCapabilities: task.config?.hostExecutionCapabilities,
+      host: this.input.verifierExecutionEnvironmentHost,
+    });
+  }
+
+  private blockNewAttemptForVerifierExecutionEnvironment(input: {
+    run: NonNullable<ReturnType<Harness["getRun"]>>;
+    task: Task;
+    sessionName: string;
+    cwd: string;
+    route: ResolvedExecutionRoute;
+    error: unknown;
+  }) {
+    const attemptId = this.harness.recordAttempt({
+      taskId: input.task.id,
+      input: {
+        sessionName: input.sessionName,
+        cwd: input.cwd,
+        executor: input.route.backend.kind,
+        verifierExecutionEnvironmentValidation: "failed",
+      },
+      output: blockedVerifierExecutionEnvironmentOutput(input.error),
+    });
+    this.upsertAttemptThread({
+      runId: input.run.id,
+      task: input.task,
+      attemptId,
+      sessionName: input.sessionName,
+      cwd: input.cwd,
+      status: "blocked",
+    });
+    return {
+      taskId: input.task.id,
+      attemptId,
+      sessionName: input.sessionName,
+      status: "blocked" as const,
+      codexSessionId: null,
+    };
   }
 
   private blockLeasedTaskPreparationFailure(input: {

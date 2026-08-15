@@ -11,6 +11,10 @@ import {
   resolveHostExecutionCapabilities,
   type ResolvedHostExecutionCapabilities,
 } from "./host-execution-capabilities";
+import {
+  prepareVerifierExecutionEnvironment,
+  type PreparedVerifierExecutionEnvironment,
+} from "../verifier-execution-environment";
 
 const DARWIN_BROWSER_EXECUTABLES = [
   "/usr/bin/open",
@@ -32,10 +36,23 @@ export interface CodexHostExecutionInput {
   hostExecutionCapabilities?: unknown;
   taskRole?: string;
   verifierContract?: unknown;
+  backendKind?: "codex-cli" | "codex-resumable";
 }
 
 export async function prepareCodexHostExecution(input: CodexHostExecutionInput) {
-  if (process.platform !== "darwin" || (input.browserProcessPolicy !== "deny" && input.hostExecutionCapabilities === undefined)) return null;
+  const verifierExecutionEnvironment = prepareVerifierExecutionEnvironment({
+    verifierContract: input.verifierContract,
+    role: input.taskRole ?? "unknown",
+    backendKind: input.backendKind ?? "codex-cli",
+    cwd: input.cwd,
+    databasePath: ":memory:",
+    hostExecutionCapabilities: input.hostExecutionCapabilities,
+  });
+  if (process.platform !== "darwin" || (
+    input.browserProcessPolicy !== "deny"
+    && input.hostExecutionCapabilities === undefined
+    && !verifierExecutionEnvironment
+  )) return null;
   const capabilities = input.hostExecutionCapabilities === undefined
     ? undefined
     : resolveHostExecutionCapabilities({
@@ -66,6 +83,7 @@ export async function prepareCodexHostExecution(input: CodexHostExecutionInput) 
     sandbox: input.sandbox,
     sourceAuthPath,
     capabilities,
+    verifierExecutionEnvironment,
   }));
   await atomicPrivateWrite(join(runtimeRoot, "rules", "default.rules"), capabilities?.browser ? "" : browserExecRules());
   let browserCleanup: (() => Promise<void>) | undefined;
@@ -88,7 +106,8 @@ export async function prepareCodexHostExecution(input: CodexHostExecutionInput) 
     CODEX_HOME: runtimeRoot,
     ORBS_BROWSER_PROCESS_POLICY: capabilities?.browser ? "allow" : "deny",
     ...capabilityEnvironment(capabilities),
-    ...clearedAmbientProxyEnvironment(capabilities),
+    ...verifierEnvironmentProcessEnvironment(verifierExecutionEnvironment),
+    ...clearedAmbientProxyEnvironment(capabilities, Boolean(verifierExecutionEnvironment)),
   };
   return {
     outputDir,
@@ -113,6 +132,7 @@ export function protectedCodexConfig(input: {
   sandbox: CodexSandbox;
   sourceAuthPath: string;
   capabilities?: ResolvedHostExecutionCapabilities;
+  verifierExecutionEnvironment?: PreparedVerifierExecutionEnvironment | null;
 }) {
   if (input.sandbox === "danger-full-access") {
     throw new Error("danger-full-access is prohibited for protected Codex execution");
@@ -131,7 +151,7 @@ export function protectedCodexConfig(input: {
     ...(input.capabilities?.loopback ? [`${tomlString(input.capabilities.loopback.socketDirectory)} = "read"`] : []),
     ...writableCapabilityPaths(input.capabilities).map((path) => `${tomlString(path)} = "write"`),
   ].join("\n");
-  const network = networkProfile(input.capabilities);
+  const network = networkProfile(input.capabilities, Boolean(input.verifierExecutionEnvironment));
   return [
     `default_permissions = ${tomlString(profile)}`,
     "allow_login_shell = false",
@@ -153,7 +173,7 @@ export function protectedCodexConfig(input: {
     "",
     "[shell_environment_policy]",
     'inherit = "none"',
-    `set = ${tomlInlineStringTable(protectedShellEnvironment(input.capabilities))}`,
+    `set = ${tomlInlineStringTable(protectedShellEnvironment(input.capabilities, input.verifierExecutionEnvironment))}`,
     "",
   ].join("\n");
 }
@@ -165,12 +185,20 @@ function writableCapabilityPaths(capabilities: ResolvedHostExecutionCapabilities
   ];
 }
 
-function networkProfile(capabilities: ResolvedHostExecutionCapabilities | undefined) {
+function networkProfile(capabilities: ResolvedHostExecutionCapabilities | undefined, denyAll = false) {
   const sockets = [
     capabilities?.postgres?.unixSocketPath,
     capabilities?.browser?.socketPath,
     ...(capabilities?.loopback?.sockets.map((entry) => entry.path) ?? []),
   ].filter((value): value is string => Boolean(value));
+  if (denyAll) {
+    if (sockets.length > 0) throw new Error("verifier network deny cannot expose host sockets");
+    return [
+      "",
+      "[permissions.__PROFILE__.network]",
+      "enabled = false",
+    ];
+  }
   if (sockets.length === 0) return [];
   return [
     "",
@@ -211,7 +239,10 @@ function capabilityEnvironment(capabilities: ResolvedHostExecutionCapabilities |
   };
 }
 
-function protectedShellEnvironment(capabilities: ResolvedHostExecutionCapabilities | undefined) {
+function protectedShellEnvironment(
+  capabilities: ResolvedHostExecutionCapabilities | undefined,
+  verifierExecutionEnvironment?: PreparedVerifierExecutionEnvironment | null,
+) {
   const runtimeHome = capabilities?.browser?.homeDirectory
     ?? capabilities?.loopback?.socketDirectory
     ?? tmpdir();
@@ -223,6 +254,7 @@ function protectedShellEnvironment(capabilities: ResolvedHostExecutionCapabiliti
     TMPDIR: process.env.TMPDIR ?? tmpdir(),
     ORBS_BROWSER_PROCESS_POLICY: capabilities?.browser ? "allow" : "deny",
     ...capabilityEnvironment(capabilities),
+    ...verifierEnvironmentProcessEnvironment(verifierExecutionEnvironment),
     ...(capabilities?.postgres ? {
       [capabilities.postgres.environmentVariable]: process.env[capabilities.postgres.environmentVariable],
     } : {}),
@@ -235,9 +267,22 @@ const AMBIENT_PROXY_VARIABLES = [
   "GIT_SSH_COMMAND",
 ];
 
-function clearedAmbientProxyEnvironment(capabilities: ResolvedHostExecutionCapabilities | undefined) {
-  if (!capabilities) return {};
+function clearedAmbientProxyEnvironment(capabilities: ResolvedHostExecutionCapabilities | undefined, force = false) {
+  if (!capabilities && !force) return {};
   return Object.fromEntries(AMBIENT_PROXY_VARIABLES.map((key) => [key, undefined]));
+}
+
+function verifierEnvironmentProcessEnvironment(prepared?: PreparedVerifierExecutionEnvironment | null) {
+  if (!prepared) return {};
+  const runtime = prepared.receipt.runtime;
+  return {
+    PATH: `${dirname(runtime.path)}:/usr/bin:/bin`,
+    ORBS_FROZEN_RUNTIME_KIND: runtime.kind,
+    ORBS_FROZEN_RUNTIME_PATH: runtime.path,
+    ORBS_FROZEN_RUNTIME_VERSION: runtime.version,
+    ORBS_FROZEN_RUNTIME_SHA256: runtime.sha256,
+    ORBS_NETWORK_POLICY: prepared.receipt.network.mode,
+  };
 }
 
 function resolvedPathBrowserExecutables() {

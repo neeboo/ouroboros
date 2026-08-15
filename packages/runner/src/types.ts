@@ -1,6 +1,7 @@
 import type { AttemptOutput, Harness, Lesson, Run, Task } from "@ouroboros/harness";
 import type { ResolvedExecutionRoute } from "./execution-routing";
 import type { HostCapabilityReadback } from "./host-capability-readback";
+import type { VerifierExecutionEnvironmentHost } from "./verifier-execution-environment";
 
 export interface PromptInput {
   run: Run;
@@ -35,6 +36,7 @@ export interface RunNextReadyTaskInput {
   executor: TaskExecutor;
   stopHooks?: StopHook[];
   stopHooksByRole?: StopHooksByRole;
+  verifierExecutionEnvironmentHost?: VerifierExecutionEnvironmentHost;
 }
 
 export interface RunNextReadyTaskResult {
@@ -70,6 +72,7 @@ export interface RunReadyTasksInput {
   startHooks?: StartHook[];
   stopHooks?: StopHook[];
   stopHooksByRole?: StopHooksByRole;
+  verifierExecutionEnvironmentHost?: VerifierExecutionEnvironmentHost;
 }
 
 export interface RunReadyTasksResult {

@@ -55,6 +55,7 @@ import {
   superviseCodexDaemon,
   superviseCodexRuns,
   runUntilIdle,
+  type VerifierExecutionEnvironmentHost,
 } from "../packages/runner/src";
 
 function requiredOutputExample(prompt: string): Record<string, unknown> {
@@ -409,6 +410,174 @@ describe("runner", () => {
         problems: ["synthetic preparation crash after lease"],
       }),
     ]);
+  });
+
+  test("fails a frozen verifier before hooks and executor startup when Bun differs", async () => {
+    const runId = harness.createRun({ goal: "Verify under an exact offline runtime" });
+    const taskId = harness.createTask({
+      runId,
+      role: "verifier",
+      goal: "Verify exact runtime",
+      prompt: "Verify without network.",
+      config: {
+        verifierContract: {
+          executionEnvironment: {
+            schemaVersion: 1,
+            runtime: { kind: "bun", version: "1.3.11" },
+            network: { mode: "deny" },
+          },
+        },
+      },
+    });
+    let hookCalls = 0;
+    let executorCalls = 0;
+    const verifierExecutionEnvironmentHost: VerifierExecutionEnvironmentHost = {
+      platform: "darwin",
+      which: (name) => name === "bun" ? "/opt/orbs/bin/bun" : "/usr/bin/sandbox-exec",
+      realpath: (path) => path,
+      readFile: () => Buffer.from("bun-v1.3.5"),
+      run: () => ({ exitCode: 0, stdout: "1.3.5\n", stderr: "" }),
+    };
+
+    const [result] = await runReadyTasks({
+      harness,
+      runId,
+      limit: 1,
+      cliExecutor: "codex-resumable",
+      verifierExecutionEnvironmentHost,
+      startHooks: [() => { hookCalls += 1; return {}; }],
+      executorFactory: () => {
+        executorCalls += 1;
+        return async () => doneOutput({ summary: "must not run" });
+      },
+    });
+
+    expect(hookCalls).toBe(0);
+    expect(executorCalls).toBe(0);
+    expect(result).toMatchObject({ taskId, stopDecision: "exit" });
+    expect(harness.getAttempt(result.attemptId)).toMatchObject({
+      status: "blocked",
+      output: {
+        summary: "Verifier execution environment validation failed before task startup.",
+        problems: [expect.stringContaining("requires Bun 1.3.11 but host resolved 1.3.5")],
+      },
+    });
+  });
+
+  test("attaches a host receipt even when agent output falsely claims zero network", async () => {
+    const runId = harness.createRun({ goal: "Require host-owned offline evidence" });
+    const taskId = harness.createTask({
+      runId,
+      role: "verifier",
+      goal: "Verify offline",
+      prompt: "Verify without network.",
+      config: {
+        verifierContract: {
+          executionEnvironment: {
+            schemaVersion: 1,
+            runtime: { kind: "bun", version: "1.3.5" },
+            network: { mode: "deny" },
+          },
+        },
+      },
+    });
+    const verifierExecutionEnvironmentHost: VerifierExecutionEnvironmentHost = {
+      platform: "darwin",
+      which: (name) => name === "bun" ? "/opt/orbs/bin/bun" : "/usr/bin/sandbox-exec",
+      realpath: (path) => path,
+      readFile: (path) => Buffer.from(path.includes("sandbox") ? "sandbox-v1" : "bun-v1.3.5"),
+      run: (input) => input.cmd.includes("--version")
+        ? { exitCode: 0, stdout: "1.3.5\n", stderr: "" }
+        : {
+            exitCode: 77,
+            stdout: `${JSON.stringify({ denied: true, kind: input.cmd.at(-1), failureCode: "sandbox-denied" })}\n`,
+            stderr: "",
+          },
+    };
+
+    const [result] = await runReadyTasks({
+      harness,
+      runId,
+      limit: 1,
+      cliExecutor: "codex-resumable",
+      verifierExecutionEnvironmentHost,
+      executorFactory: () => async () => ({
+        status: "done",
+        summary: "Agent claims no network was used",
+        changedFiles: [],
+        checks: [{ name: "agent network claim", status: "passed", evidence: "externalNetworkCallsMade=0" }],
+        artifacts: [{ kind: "agent_network_claim", externalNetworkCallsMade: 0 }],
+        problems: [],
+      }),
+    });
+
+    const attempt = harness.getAttempt(result.attemptId)!;
+    const receipt = attempt.input.verifierExecutionEnvironmentReceipt as Record<string, unknown>;
+    expect(receipt).toMatchObject({
+      kind: "verifier_execution_environment_receipt",
+      runtime: { version: "1.3.5" },
+      network: { mode: "deny" },
+    });
+    expect(attempt.output.artifacts).toContainEqual({
+      kind: "verifier_execution_environment_receipt_ref",
+      receiptSha256: receipt.receiptSha256,
+      contractSha256: receipt.contractSha256,
+    });
+    expect(attempt.output.checks).toContainEqual(expect.objectContaining({
+      name: "host-owned verifier execution environment",
+      status: "passed",
+      evidence: receipt.receiptSha256,
+    }));
+  });
+
+  test("does not run an agent that would claim zero network when a host deny probe succeeds", async () => {
+    const runId = harness.createRun({ goal: "Reject unverifiable offline claims" });
+    const taskId = harness.createTask({
+      runId,
+      role: "verifier",
+      goal: "Verify offline",
+      prompt: "Claim no network.",
+      config: {
+        verifierContract: {
+          executionEnvironment: {
+            schemaVersion: 1,
+            runtime: { kind: "bun", version: "1.3.5" },
+            network: { mode: "deny" },
+          },
+        },
+      },
+    });
+    let executorCalls = 0;
+    const [result] = await runReadyTasks({
+      harness,
+      runId,
+      limit: 1,
+      cliExecutor: "codex-resumable",
+      verifierExecutionEnvironmentHost: {
+        platform: "darwin",
+        which: (name) => name === "bun" ? "/opt/orbs/bin/bun" : "/usr/bin/sandbox-exec",
+        realpath: (path) => path,
+        readFile: () => Buffer.from("runtime"),
+        run: (input) => input.cmd.includes("--version")
+          ? { exitCode: 0, stdout: "1.3.5\n", stderr: "" }
+          : { exitCode: 0, stdout: JSON.stringify({ denied: false, kind: input.cmd.at(-1) }), stderr: "" },
+      },
+      executorFactory: () => {
+        executorCalls += 1;
+        return async () => ({
+          status: "done",
+          summary: "externalNetworkCallsMade=0",
+          artifacts: [{ externalNetworkCallsMade: 0 }],
+        });
+      },
+    });
+
+    expect(executorCalls).toBe(0);
+    expect(result.taskId).toBe(taskId);
+    expect(harness.getAttempt(result.attemptId)?.output).toMatchObject({
+      status: "blocked",
+      problems: [expect.stringContaining("network deny dns probe did not fail")],
+    });
   });
 
   test("recovers an orphaned verifier lease and continues its dependent task chain", async () => {
@@ -2141,6 +2310,83 @@ describe("runner", () => {
       env_key: "OPENAI_API_KEY",
     });
     expect(attempt.output.artifacts).toContainEqual({ kind: "codex_session", sessionId: "session_runner" });
+  });
+
+  test("resumable verifier persists the host receipt and blocks resume after runtime drift", async () => {
+    const runId = harness.createRun({ goal: "attest offline verifier execution" });
+    const taskId = harness.createTask({
+      runId,
+      role: "verifier",
+      goal: "verify offline under frozen Bun",
+      prompt: "Verify under the frozen environment.",
+      config: {
+        verifierContract: {
+          executionEnvironment: {
+            schemaVersion: 1,
+            runtime: { kind: "bun", version: "1.3.5" },
+            network: { mode: "deny" },
+          },
+        },
+      },
+    });
+    let actualVersion = "1.3.5";
+    let resumeCalls = 0;
+    const verifierExecutionEnvironmentHost: VerifierExecutionEnvironmentHost = {
+      platform: "darwin",
+      which: (name) => name === "bun" ? "/opt/orbs/bin/bun" : "/usr/bin/sandbox-exec",
+      realpath: (path) => path,
+      readFile: (path) => Buffer.from(path.includes("sandbox") ? "sandbox-v1" : `bun-${actualVersion}`),
+      run: (input) => input.cmd.includes("--version")
+        ? { exitCode: 0, stdout: `${actualVersion}\n`, stderr: "" }
+        : {
+            exitCode: 77,
+            stdout: `${JSON.stringify({ denied: true, kind: input.cmd.at(-1), failureCode: "sandbox-denied" })}\n`,
+            stderr: "",
+          },
+    };
+    const clientFactory = () => ({
+      start: async () => ({
+        status: "running" as const,
+        sessionId: "session_frozen_environment",
+        outputPath: join(dir, "frozen-environment.json"),
+        stdout: "",
+        stderr: "",
+        events: [],
+      }),
+      resume: async () => {
+        resumeCalls += 1;
+        throw new Error("resume must not start after runtime drift");
+      },
+    });
+
+    const started = await startCodexResumableAttempt({
+      harness,
+      taskId,
+      cwd: dir,
+      verifierExecutionEnvironmentHost,
+      clientFactory,
+    });
+    expect(started.status).toBe("running");
+    const receipt = harness.getAttempt(started.attemptId)?.input.verifierExecutionEnvironmentReceipt as Record<string, unknown>;
+    expect(receipt).toMatchObject({
+      kind: "verifier_execution_environment_receipt",
+      runtime: { version: "1.3.5" },
+      network: { mode: "deny" },
+    });
+
+    actualVersion = "1.3.6";
+    const resumed = await resumeCodexResumableAttempt({
+      harness,
+      attemptId: started.attemptId,
+      cwd: dir,
+      verifierExecutionEnvironmentHost,
+      clientFactory,
+    });
+    expect(resumed.status).toBe("blocked");
+    expect(resumeCalls).toBe(0);
+    expect(harness.getAttempt(started.attemptId)?.output.problems).toEqual([
+      expect.stringContaining("requires Bun 1.3.5 but host resolved 1.3.6"),
+    ]);
   });
 
   test("a bounded loop starts the continuation materialized by its terminal goal review", async () => {
@@ -8148,6 +8394,11 @@ describe("runner", () => {
         },
       ],
       agentReviewRubric: ["review against persisted task config"],
+      executionEnvironment: {
+        schemaVersion: 1,
+        runtime: { kind: "bun", version: "1.3.5" },
+        network: { mode: "deny" },
+      },
     };
     const workerTask = harness.createTask({
       runId,
