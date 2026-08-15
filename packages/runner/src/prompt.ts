@@ -8,6 +8,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { PromptInput } from "./types";
 import { compactAttemptEvidence } from "./bounded-diagnostic";
+import { renderHostCapabilityReadback } from "./host-capability-readback";
 import { prettyJson, renderPromptTemplate } from "./template";
 
 const MAX_PROMPT_LESSONS = 12;
@@ -322,6 +323,7 @@ export function buildTaskPrompt(
     renderFrozenHarnessRevisionManifest(frozenHarnessRevision),
     frozenLinearImplementationGate,
     frozenTargetEvolutionContract,
+    renderHostCapabilityReadback(input.hostCapabilityReadback),
   ].filter(Boolean);
   const prompt = renderPromptTemplate(template, {
     runGoal: sealText(input.run.goal),

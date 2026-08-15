@@ -48,8 +48,9 @@ import {
 import { createDurableAttemptReplayCache } from "./executors/replay";
 import { resolveExecutionRoute } from "./execution-routing";
 import type { ResolvedExecutionRoute } from "./execution-routing";
-import type { ExecutorEventRecorder, StartHook, StartHookResult, StopHook, StopHookResult, TaskExecutorFactory } from "./types";
+import type { AttemptInputFactory, ExecutorEventRecorder, StartHook, StartHookResult, StopHook, StopHookResult, TaskExecutorFactory } from "./types";
 import type { AttemptReplayCache } from "./executors/types";
+import type { HostCapabilityReadback, HostReadbackForTask } from "./host-capability-readback";
 
 const DEFAULT_RUNNING_ATTEMPT_STALE_MS = 5 * 60 * 1000;
 const DEFAULT_GENERIC_ATTEMPT_IDLE_TIMEOUT_MS = 5 * 60 * 1000;
@@ -75,6 +76,8 @@ export interface CodexResumableOrchestrationInput {
   model?: string;
   clientFactory?: CodexResumableClientFactory;
   genericExecutorFactory?: TaskExecutorFactory;
+  genericAttemptInput?: AttemptInputFactory;
+  hostReadbackForTask?: HostReadbackForTask;
   codexOptions?: Partial<CodexResumableClientOptions>;
   ownerId?: string;
   pid?: number;
@@ -165,8 +168,24 @@ export async function runCodexResumableLoop(input: RunCodexResumableLoopInput) {
       if (drain.status === "done") {
         const reviewed = await orchestrator.startReadyAttempts({ runId: input.runId, limit: input.limit });
         if (reviewed.length > 0) {
-          rounds.push({ index, tasks: reviewed, goalReview: drain, reclaimed, reconciledVerifiers, reconciledRepairs });
           if (reviewed.some((task) => task.status === "running")) {
+            rounds.push({ index, tasks: reviewed, goalReview: drain, reclaimed, reconciledVerifiers, reconciledRepairs });
+            break;
+          }
+          // A terminal goal review may atomically materialize the next task. Give
+          // that durable handoff one bounded start opportunity even when this is
+          // the loop's final round; do not recursively drain again here.
+          const continuations = await orchestrator.startReadyAttempts({ runId: input.runId, limit: input.limit });
+          rounds.push({
+            index,
+            tasks: reviewed,
+            continuations,
+            goalReview: drain,
+            reclaimed,
+            reconciledVerifiers,
+            reconciledRepairs,
+          });
+          if (continuations.some((task) => task.status === "running")) {
             break;
           }
           continue;
@@ -403,7 +422,8 @@ class CodexResumableOrchestrator {
     } catch (error) {
       return this.blockNewAttemptForHarnessRevision({ run, task, sessionName, cwd, route, error });
     }
-    const prompt = this.promptForTask(run, task, loadedHarnessRevision);
+    const hostCapabilityReadback = await this.hostReadbackForTask(run, task, cwd);
+    const prompt = this.promptForTask(run, task, loadedHarnessRevision, hostCapabilityReadback);
     const oversized = promptBudgetEvidence(prompt, "runner client start");
     if (oversized) {
       const attemptId = this.harness.recordAttempt({
@@ -431,6 +451,8 @@ class CodexResumableOrchestrator {
       sessionName,
       executor: route.backend.kind,
       ...attemptInputForRoute(route, cwd),
+      ...(this.input.genericAttemptInput?.({ run, task, sessionName, cwd, route }) ?? {}),
+      ...(hostCapabilityReadback ? { hostCapabilityReadback } : {}),
       ...harnessRevisionAttemptInput(loadedHarnessRevision),
       ...hostCapabilityInput,
     };
@@ -781,7 +803,8 @@ class CodexResumableOrchestrator {
         } catch (error) {
           return this.blockNewAttemptForHarnessRevision({ run, task, sessionName, cwd, route, error });
         }
-        const prompt = this.promptForTask(run, task, loadedHarnessRevision);
+        const hostCapabilityReadback = await this.hostReadbackForTask(run, task, cwd);
+        const prompt = this.promptForTask(run, task, loadedHarnessRevision, hostCapabilityReadback);
         const oversized = promptBudgetEvidence(prompt, "runner client start");
         if (oversized) {
           const attemptId = this.harness.recordAttempt({
@@ -809,6 +832,8 @@ class CodexResumableOrchestrator {
           sessionName,
           executor: route.backend.kind,
           ...attemptInputForRoute(route, cwd),
+          ...(this.input.genericAttemptInput?.({ run, task, sessionName, cwd, route }) ?? {}),
+          ...(hostCapabilityReadback ? { hostCapabilityReadback } : {}),
           ...harnessRevisionAttemptInput(loadedHarnessRevision),
           ...hostCapabilityInput,
         };
@@ -1085,6 +1110,7 @@ class CodexResumableOrchestrator {
     run: NonNullable<ReturnType<Harness["getRun"]>>,
     task: Task,
     loadedHarnessRevision: LoadedHarnessRevision | null = null,
+    hostCapabilityReadback: HostCapabilityReadback | null = null,
   ) {
     return buildTaskPrompt({
       run,
@@ -1093,7 +1119,16 @@ class CodexResumableOrchestrator {
       lessons: this.harness.listLessons({ runId: run.id }),
       template: this.harness.getPromptTemplate("task")?.contentMd,
       loadedHarnessRevision: loadedHarnessRevision?.harnessRevision ?? null,
+      hostCapabilityReadback,
     });
+  }
+
+  private async hostReadbackForTask(
+    run: NonNullable<ReturnType<Harness["getRun"]>>,
+    task: Task,
+    cwd: string,
+  ) {
+    return this.input.hostReadbackForTask?.({ run, task, cwd }) ?? null;
   }
 
   private blockNewAttemptForHarnessRevision(input: {

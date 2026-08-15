@@ -51,6 +51,7 @@ import {
   reconcileTerminalDesignDeliveries,
   resolveExecutionRoute,
   readRepairBudget,
+  readHostCapabilityReadback,
   resumeCodexResumableAttempt,
   runCodexAutopilot,
   runCodexResumableLoop,
@@ -1782,7 +1783,7 @@ function executorFactory(_executorName: CliExecutorName) {
       hostExecutionCapabilities: input.task.config?.hostExecutionCapabilities,
       taskRole: input.task.role,
       verifierContract: input.task.config?.verifierContract,
-      dshProfileIsolation: dshProfileIsolationForTask(input.task),
+      dshProfileIsolation: dshProfileIsolationForTask(input.task, input.route),
     });
 }
 
@@ -1793,7 +1794,7 @@ function attemptInputFactory(_executorName: CliExecutorName) {
     cwd: string;
     route: ResolvedExecutionRoute;
   }) => {
-    const dshProfileIsolation = dshProfileIsolationForTask(input.task);
+    const dshProfileIsolation = dshProfileIsolationForTask(input.task, input.route);
     return {
       ...attemptInputForRoute(input.route, input.cwd),
       ...(dshProfileIsolation ? { dshProfileIsolation } : {}),
@@ -1805,8 +1806,18 @@ function attemptInputFactory(_executorName: CliExecutorName) {
   };
 }
 
-function dshProfileIsolationForTask(task: NonNullable<ReturnType<Harness["getTask"]>>) {
+function dshProfileIsolationForTask(
+  task: NonNullable<ReturnType<Harness["getTask"]>>,
+  route?: ResolvedExecutionRoute,
+) {
   if (task.config?.dshProfileIsolation === "base-headless") {
+    return "base-headless" as const;
+  }
+  if (
+    route?.backend.kind === "dsh-cli"
+    && task.role === "worker"
+    && task.config?.goalReviewContinuation !== undefined
+  ) {
     return "base-headless" as const;
   }
   if (task.role !== "worker" || !task.parentId || !task.goal.startsWith("Repair:")) {
@@ -1822,11 +1833,11 @@ function dshProfileIsolationForTask(task: NonNullable<ReturnType<Harness["getTas
     .reverse()
     .find((session) => sourceTaskIds.has(session.taskId));
   const sourceAttempt = sourceSession ? harness.getAttempt(sourceSession.attemptId) : null;
-  const route = sourceAttempt?.input.route;
-  if (!route || typeof route !== "object" || Array.isArray(route)) {
+  const sourceRoute = sourceAttempt?.input.route;
+  if (!sourceRoute || typeof sourceRoute !== "object" || Array.isArray(sourceRoute)) {
     return undefined;
   }
-  const backend = (route as Record<string, unknown>).backend;
+  const backend = (sourceRoute as Record<string, unknown>).backend;
   if (!backend || typeof backend !== "object" || Array.isArray(backend)) {
     return undefined;
   }
@@ -1872,6 +1883,8 @@ function codexRunnerInput(defaultStopHooks?: string) {
     cliExecutor: "codex-resumable" as const,
     model: flag(parsed, "model"),
     genericExecutorFactory: executorFactory("codex-resumable"),
+    genericAttemptInput: attemptInputFactory("codex-resumable"),
+    hostReadbackForTask: readHostCapabilityReadback,
     codexOptions: {
       sandbox: parseCodexResumableSandbox(),
       browserProcessPolicy: parseBrowserProcessPolicy(),

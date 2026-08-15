@@ -1,5 +1,6 @@
 import type { AttemptOutput, Harness, Lesson, Run, Task } from "@ouroboros/harness";
 import type { ResolvedExecutionRoute } from "./execution-routing";
+import type { HostCapabilityReadback } from "./host-capability-readback";
 
 export interface PromptInput {
   run: Run;
@@ -7,6 +8,7 @@ export interface PromptInput {
   dependencyAttempts: unknown[];
   lessons?: Lesson[];
   template?: string;
+  hostCapabilityReadback?: HostCapabilityReadback | null;
 }
 
 export interface ExecutorEventRecorder {

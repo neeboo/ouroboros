@@ -8682,6 +8682,81 @@ if (args.includes("self-improve-daemon")) {
     expect(harness.getTask(repairId)?.config?.dshProfileIsolation).toBeUndefined();
   });
 
+  test("goal-review continuations routed to DSH start with the isolated base profile", async () => {
+    await runCli("init");
+    const harness = new Harness(dbPath);
+    const worktree = join(dir, "goal-review-dsh-continuation");
+    const pollutedHome = join(dir, "goal-review-polluted-dsh-home");
+    const dshCommand = join(dir, "fake-dsh-goal-review-continuation");
+    const codexBin = join(dir, "fake-codex-goal-review-continuation");
+    await mkdir(worktree, { recursive: true });
+    await mkdir(join(pollutedHome, "profiles", "headless"), { recursive: true });
+    await writeFile(
+      join(pollutedHome, "profiles", "headless", "package.json"),
+      JSON.stringify({ dsh: { profile: { bundles: ["@hodor/project-plugin"] } } }),
+    );
+    await writeFile(
+      dshCommand,
+      [
+        "#!/usr/bin/env bun",
+        "import { readFileSync } from 'node:fs';",
+        "const home = process.env.DSH_HOME ?? '';",
+        `if (home === ${JSON.stringify(pollutedHome)}) process.exit(21);`,
+        "const profile = JSON.parse(readFileSync(`${home}/profiles/headless/package.json`, 'utf8'));",
+        "const bundles = profile?.dsh?.profile?.bundles ?? [];",
+        "if (JSON.stringify(bundles) !== JSON.stringify(['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-headless'])) process.exit(22);",
+        "console.log(JSON.stringify({ status: 'done', summary: 'task 3 ran with isolated DSH', changedFiles: ['docker-compose.yml'], checks: [{ name: 'docker and postgres evidence', status: 'passed' }], artifacts: [{ kind: 'host_evidence' }], problems: [] }));",
+      ].join("\n"),
+    );
+    await writeFile(
+      codexBin,
+      [
+        "#!/usr/bin/env bun",
+        "console.log(JSON.stringify({ type: 'session.started', session_id: 'session_goal_review_handoff' }));",
+        "console.log(JSON.stringify({ type: 'agent.message', message: JSON.stringify({ status: 'done', runDecision: 'continue', summary: 'create task 3', changedFiles: [], checks: [], artifacts: [], problems: [], nextTasks: [{ role: 'worker', goal: 'Task 3 Docker and PostgreSQL receipt', prompt: 'Run the frozen Docker and PostgreSQL evidence contract.' }] }) }));",
+      ].join("\n"),
+    );
+    await chmod(dshCommand, 0o755);
+    await chmod(codexBin, 0o755);
+    const runId = harness.createRun({
+      goal: "Complete Docker and PostgreSQL task 3",
+      context: {
+        agentDefaults: { global: "codex-resumable", roles: { worker: "deepseek-harness" } },
+        agentBackends: {
+          "codex-resumable": { kind: "codex-resumable" },
+          "deepseek-harness": {
+            kind: "dsh-cli",
+            command: dshCommand,
+            profile: "headless",
+            env: { DSH_HOME: pollutedHome },
+          },
+        },
+      },
+    });
+
+    const result = await runCliJson(
+      "run-loop",
+      "--run-id", runId,
+      "--executor", "codex-resumable",
+      "--codex-bin", codexBin,
+      "--cwd", worktree,
+      "--start-hook", "none",
+      "--max-rounds", "1",
+      "--tasks", "1",
+    );
+
+    const overview = harness.getRunOverview({ runId, eventLimit: 0 });
+    const worker = overview.tasks.find((task) => task.role === "worker")!;
+    const workerSession = overview.sessions.find((session) => session.taskId === worker.id)!;
+    const attempt = harness.getAttempt(workerSession.attemptId)!;
+    expect(result.rounds[0]?.continuations).toEqual([
+      expect.objectContaining({ taskId: worker.id, status: "done" }),
+    ]);
+    expect(attempt.status).toBe("done");
+    expect(attempt.input.dshProfileIsolation).toBe("base-headless");
+    expect(attempt.output.summary).toBe("task 3 ran with isolated DSH");
+  });
+
   test("generic DSH run-loop creates a verifier and marks empty worker evidence as requiring independent readback", async () => {
     await runCli("init");
     const harness = new Harness(dbPath);
@@ -9165,8 +9240,11 @@ if (args.includes("self-improve-daemon")) {
       [
         "#!/usr/bin/env bun",
         "const prompt = await new Response(Bun.stdin.stream()).text();",
-        "if (!prompt.includes('Role: goal-review')) process.exit(2);",
-        "console.log(JSON.stringify({ status: 'done', runDecision: 'continue', summary: 'more work remains', changedFiles: [], checks: [], artifacts: [], problems: [], nextTasks: [{ role: 'planner', goal: 'Plan the gap', prompt: 'Choose the next gap.', doneWhen: ['gap planned'] }] }));",
+        "if (prompt.includes('Role: goal-review')) {",
+        "  console.log(JSON.stringify({ status: 'done', runDecision: 'continue', summary: 'more work remains', changedFiles: [], checks: [], artifacts: [], problems: [], nextTasks: [{ role: 'planner', goal: 'Plan the gap', prompt: 'Choose the next gap.', doneWhen: ['gap planned'] }] }));",
+        "} else if (prompt.includes('Role: planner')) {",
+        "  console.log(JSON.stringify({ status: 'done', summary: 'gap planned', changedFiles: [], checks: [{ name: 'gap planned', status: 'passed' }], artifacts: [], problems: [] }));",
+        "} else process.exit(2);",
       ].join("\n"),
     );
     await chmod(codexBin, 0o755);
@@ -9184,12 +9262,15 @@ if (args.includes("self-improve-daemon")) {
       "--max-rounds",
       "1",
     );
-    const next = await runCliJson("next-task", "--run-id", run.id);
+    const overview = await runCliJson("run-overview", "--run-id", run.id);
+    const planner = overview.tasks.find((task: { role: string }) => task.role === "planner");
 
-    expect(next).toMatchObject({
+    expect(planner).toMatchObject({
       role: "planner",
       goal: "Plan the gap",
+      status: "done",
     });
+    expect(overview.sessions).toContainEqual(expect.objectContaining({ taskId: planner.id, status: "done" }));
   });
 
   test("run-loop retries a blocked goal review in the same cycle before creating a new one", async () => {

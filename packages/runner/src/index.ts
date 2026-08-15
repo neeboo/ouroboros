@@ -59,6 +59,8 @@ export { parseAttemptOutput } from "./executors/output";
 export { codexOnlyAgentDefaults, resolveAgentBackend } from "./agent-backends";
 export { resolveExecutionRoute } from "./execution-routing";
 export { resolveModelPreference } from "./model-preferences";
+export { readHostCapabilityReadback } from "./host-capability-readback";
+export type { HostCapabilityReadback, HostReadbackForTask } from "./host-capability-readback";
 export {
   descendantPidsFromPsOutputForTest,
   runLocalCommand,

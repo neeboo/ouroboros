@@ -41,6 +41,7 @@ import {
   recordSignalAction,
   reconcileDeferredDesignAuthority,
   reconcileTerminalBlockedVerifierRepair,
+  readHostCapabilityReadback,
   resolveAgentBackend,
   resolveExecutionRoute,
   resolveModelPreference,
@@ -2140,6 +2141,152 @@ describe("runner", () => {
       env_key: "OPENAI_API_KEY",
     });
     expect(attempt.output.artifacts).toContainEqual({ kind: "codex_session", sessionId: "session_runner" });
+  });
+
+  test("a bounded loop starts the continuation materialized by its terminal goal review", async () => {
+    const runId = harness.createRun({ goal: "Continue after terminal goal review" });
+    const startedRoles: string[] = [];
+
+    const result = await runCodexResumableLoop({
+      harness,
+      runId,
+      limit: 1,
+      maxRounds: 1,
+      maxTries: 3,
+      cwd: dir,
+      stopHooksByRole: {
+        "goal-review": [
+          createGoalReviewDecisionHook({ harness }),
+          createTasksFromOutputHook({ harness }),
+        ],
+      },
+      clientFactory: ({ task }) => ({
+        start: async () => {
+          startedRoles.push(task!.role);
+          return {
+            status: "done" as const,
+            sessionId: `session_${task!.role}`,
+            outputPath: join(dir, `${task!.role}.json`),
+            stdout: "",
+            stderr: "",
+            events: [],
+            output: task!.role === "goal-review"
+              ? {
+                  status: "done" as const,
+                  runDecision: "continue" as const,
+                  summary: "Created the next bounded delivery task.",
+                  changedFiles: [],
+                  checks: [],
+                  artifacts: [],
+                  problems: [],
+                  nextTasks: [{
+                    role: "worker" as const,
+                    goal: "Run task 3",
+                    prompt: "Execute the frozen task 3 contract.",
+                  }],
+                }
+              : {
+                  status: "done" as const,
+                  summary: "Task 3 started in the same bounded handoff.",
+                  changedFiles: [],
+                  checks: [],
+                  artifacts: [],
+                  problems: [],
+                },
+          };
+        },
+        resume: async () => { throw new Error("unused"); },
+      }),
+    });
+
+    const overview = harness.getRunOverview({ runId, eventLimit: 0 });
+    const worker = overview.tasks.find((task) => task.role === "worker");
+    expect(startedRoles).toEqual(["goal-review", "worker"]);
+    expect(worker?.status).toBe("done");
+    expect(worker && harness.listLatestAttemptsForTasks([worker.id])).toHaveLength(1);
+    expect(result.rounds[0]?.continuations).toEqual([
+      expect.objectContaining({ taskId: worker?.id, status: "done" }),
+    ]);
+  });
+
+  test("persists host-owned Docker readback and tells sandboxed tasks how to interpret socket denial", async () => {
+    const runId = harness.createRun({ goal: "Collect real Docker and PostgreSQL evidence" });
+    const taskId = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Run the frozen Docker stack",
+      prompt: "Use the Docker daemon and record the PostgreSQL receipt.",
+    });
+    let observedPrompt = "";
+
+    await runCodexResumableLoop({
+      harness,
+      runId,
+      limit: 1,
+      maxRounds: 1,
+      maxTries: 3,
+      cwd: dir,
+      hostReadbackForTask: async () => ({
+        docker: {
+          status: "available",
+          source: "host-owned-preflight",
+          serverVersion: "29.1.3",
+        },
+      }),
+      clientFactory: () => ({
+        start: async ({ prompt }) => {
+          observedPrompt = prompt;
+          return {
+            status: "done" as const,
+            sessionId: "session_host_docker_readback",
+            outputPath: join(dir, "host-docker-readback.json"),
+            stdout: "",
+            stderr: "",
+            events: [],
+            output: { status: "done" as const, summary: "Used host-owned Docker evidence" },
+          };
+        },
+        resume: async () => { throw new Error("unused"); },
+      }),
+    });
+
+    expect(observedPrompt).toContain("## Host-Owned Capability Readback");
+    expect(observedPrompt).toContain('"serverVersion": "29.1.3"');
+    expect(observedPrompt).toContain("sandbox socket denial means this task lacks direct Docker capability");
+    const taskSession = harness.getRunOverview({ runId, eventLimit: 0 }).sessions.find((session) => session.taskId === taskId)!;
+    expect(harness.getAttempt(taskSession.attemptId)?.input.hostCapabilityReadback).toEqual({
+      docker: {
+        status: "available",
+        source: "host-owned-preflight",
+        serverVersion: "29.1.3",
+      },
+    });
+  });
+
+  test("host-owned Docker readback uses docker info and never persists command diagnostics", async () => {
+    const runId = harness.createRun({ goal: "Verify Docker availability" });
+    const taskId = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Run Docker evidence",
+      prompt: "Collect the bounded evidence.",
+    });
+    const commands: string[][] = [];
+    const readback = await readHostCapabilityReadback({
+      run: harness.getRun(runId)!,
+      task: harness.getTask(taskId)!,
+      cwd: dir,
+      runCommand: async (input) => {
+        commands.push(input.cmd);
+        return { exitCode: 0, stdout: "29.1.3\n", stderr: "host-only diagnostic must not persist" };
+      },
+    });
+
+    expect(commands).toEqual([["docker", "info", "--format", "{{.ServerVersion}}"]]);
+    expect(readback).toEqual({
+      docker: { status: "available", source: "host-owned-preflight", serverVersion: "29.1.3" },
+    });
+    expect(JSON.stringify(readback)).not.toContain("host-only diagnostic");
   });
 
   test("runner-owned goal review applies the browser process deny policy", async () => {
