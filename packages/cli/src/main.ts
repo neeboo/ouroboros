@@ -1657,7 +1657,6 @@ interface TargetSystemEvidenceBundleV1 {
     source: string;
     summary: string;
     evidence: unknown[];
-    payload: Record<string, unknown>;
     payloadSha256: string;
   }>;
   blockedSignals: Array<{
@@ -1721,13 +1720,27 @@ function buildTargetSystemEvidenceBundle(input: {
   goal: string;
 }): TargetSystemEvidenceBundleV1 {
   const authoritativePath = resolve(parsed.db);
-  const referencedSignals = referencedIds(input.goal, "signal").map((id) => {
+  const rawReferencedSignals = referencedIds(input.goal, "signal").map((id) => {
     const signal = harness.getStrategySignal({ id });
     if (!signal) fail(`referenced strategy signal not found in authoritative database: ${id}`);
     if (signal.projectId !== input.targetProjectId) {
       fail(`referenced strategy signal belongs to another project: ${id}`);
     }
-    return {
+    return signal;
+  });
+  const referencedSignals = rawReferencedSignals.map((signal) => ({
+      id: signal.id,
+      projectId: signal.projectId,
+      status: signal.status,
+      source: signal.source,
+      summary: signal.summary,
+      evidence: signal.evidence,
+      payloadSha256: canonicalEvolutionValueSha256(signal.payload),
+    }));
+  const blockedSignals = rawReferencedSignals
+    .filter((signal) => signal.source.startsWith("blocked-run-outcome:")
+      || signal.payload.outcome === "blocked-evidence-conflict")
+    .map((signal) => ({
       id: signal.id,
       projectId: signal.projectId,
       status: signal.status,
@@ -1736,12 +1749,7 @@ function buildTargetSystemEvidenceBundle(input: {
       evidence: signal.evidence,
       payload: signal.payload,
       payloadSha256: canonicalEvolutionValueSha256(signal.payload),
-    };
-  });
-  const blockedSignals = referencedSignals.filter((signal) =>
-    signal.source.startsWith("blocked-run-outcome:")
-    || signal.payload.outcome === "blocked-evidence-conflict"
-  );
+    }));
   const acceptedProposals = referencedIds(input.goal, "design").map((id) => {
     const proposal = harness.getDesignProposal({ id });
     if (!proposal) fail(`referenced design proposal not found in authoritative database: ${id}`);

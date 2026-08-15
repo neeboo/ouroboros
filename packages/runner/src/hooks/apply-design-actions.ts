@@ -20,6 +20,7 @@ import {
   type Run,
   type StrategySignal,
   type Task,
+  canonicalEvolutionValueSha256,
   freezeResourceAllocationV0,
   parseDesignResourceRequestV0,
   parseEvolutionCausalHypothesis,
@@ -396,6 +397,7 @@ function applyProposeDesignWithDb(
   }
   requireContractEvidence(contract);
   assertProductionComparisonHasNoPlaceholders(contract.comparison);
+  assertTargetSystemAuthoritativeComparison(sourceRun.context, contract.comparison);
   const investment = proposalData.investment as Record<string, unknown> | undefined;
   if (!investment) {
     throw new Error("proposeDesign payload.proposal.investment must be present");
@@ -488,6 +490,36 @@ function assertProductionComparisonHasNoPlaceholders(value: unknown) {
   }
   if (problems.length > 0) {
     throw new Error(`placeholder comparison fields are forbidden in a real design proposal: ${problems.join(", ")}`);
+  }
+}
+
+function assertTargetSystemAuthoritativeComparison(
+  runContext: Record<string, unknown>,
+  comparison: unknown,
+) {
+  const rawBundle = runContext.targetSystemEvidenceBundle;
+  if (!rawBundle || typeof rawBundle !== "object" || Array.isArray(rawBundle)) return;
+  const bundle = rawBundle as Record<string, unknown>;
+  const bundleSha256 = bundle.bundleSha256;
+  if (typeof bundleSha256 !== "string") {
+    throw new Error("target-system authoritative evidence bundle is missing bundleSha256");
+  }
+  const { bundleSha256: _ignored, ...bundleBody } = bundle;
+  if (canonicalEvolutionValueSha256(bundleBody) !== bundleSha256) {
+    throw new Error("target-system authoritative evidence bundle hash mismatch");
+  }
+  const acceptedProposals = bundle.acceptedProposals;
+  if (!Array.isArray(acceptedProposals) || acceptedProposals.length === 0) return;
+  const comparisonSha256 = canonicalEvolutionValueSha256(comparison);
+  const matches = acceptedProposals.some((entry) => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) return false;
+    const record = entry as Record<string, unknown>;
+    return typeof record.comparisonSha256 === "string"
+      && record.comparisonSha256 === comparisonSha256
+      && canonicalEvolutionValueSha256(record.comparison) === comparisonSha256;
+  });
+  if (!matches) {
+    throw new Error("target-system authoritative evidence bundle comparison must be copied exactly into proposeDesign");
   }
 }
 

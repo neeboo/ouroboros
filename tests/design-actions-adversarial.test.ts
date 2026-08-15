@@ -2460,6 +2460,66 @@ describe("design-action transition coordinator (production authority path)", () 
     expect(harness.listRuns().filter((run) => run.projectId === projectId)).toHaveLength(1);
   });
 
+  test("rejects a well-formed comparison hash that drifts from the authoritative evidence bundle", async () => {
+    const projectId = harness.createProject({ name: "target-authoritative-comparison", rootPath: join(dir, "target-authoritative-comparison") });
+    const frozenProposal = targetEvolutionEnvelope(projectId);
+    const frozenComparison = frozenProposal.evaluationContract.comparison;
+    const bundleBody = {
+      schemaVersion: 1,
+      targetProjectId: projectId,
+      authoritativeDatabase: { path: join(dir, "authoritative.db"), bindingSha256: "c".repeat(64) },
+      referencedSignals: [],
+      blockedSignals: [],
+      acceptedProposals: [{
+        id: "design_frozen_authoritative_comparison",
+        projectId,
+        status: "accepted",
+        approvedDecisionIds: ["decision_frozen_authoritative_comparison"],
+        comparison: frozenComparison,
+        comparisonSha256: canonicalEvolutionValueSha256(frozenComparison),
+      }],
+    };
+    const runId = harness.createRun({
+      goal: "reject a research output hash substituted for the frozen corpus hash",
+      projectId,
+      context: {
+        source: "target-system-design",
+        targetSystemEvidenceBundle: {
+          ...bundleBody,
+          bundleSha256: canonicalEvolutionValueSha256(bundleBody),
+        },
+      },
+    });
+    const taskId = harness.createTask({
+      runId,
+      role: "designer",
+      goal: "propose from authoritative comparison evidence",
+      prompt: "copy the accepted comparison exactly",
+    });
+    seedActiveCharter(projectId);
+    const signalId = seedActiveSignal(projectId);
+    const driftedProposal = targetEvolutionEnvelope(projectId);
+    driftedProposal.evidenceRefs = [signalId];
+    driftedProposal.evaluationContract.comparison = {
+      ...driftedProposal.evaluationContract.comparison,
+      corpusSnapshotSha256: "0679ef6f3d928221ef32f37f4666cf198ed10892078b53e34032af6eeda1034b",
+    };
+    const output = parseAttemptOutput(JSON.stringify({
+      status: "done",
+      summary: "substituted a valid research output hash",
+      actions: [{
+        type: "proposeDesign",
+        payload: { projectId, title: "Drifted comparison", proposal: driftedProposal },
+      }],
+    }));
+
+    const result = await runHook(output, runId, taskId);
+
+    expect(result.decision).toBe("exit");
+    expect(result.problems ?? []).toContainEqual(expect.stringMatching(/authoritative evidence bundle.*comparison/i));
+    expect(harness.listDesignProposals({ projectId })).toHaveLength(0);
+  });
+
   test("direct conflict: cited signal that names a conflicting peer routes to human-required checkpoint with no delivery run", async () => {
     const { runId, taskId } = setupRunAndTask();
     const projectId = harness.createProject({ name: "ouroboros", rootPath: dir });
