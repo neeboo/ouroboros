@@ -110,6 +110,248 @@ describe("Harness actions", () => {
     expect(overview.tasks).toContainEqual(expect.objectContaining({ role: "goal-review", status: "todo" }));
   });
 
+  test("prepareRunDrain closes a bounded target-system Designer continuation that explicitly quiesces", () => {
+    const runId = harness.createRun({
+      goal: "Design one governed target-system delivery",
+      context: {
+        source: "target-system-design",
+        repairReplanBudget: { limit: 3, used: 0, entries: [] },
+      },
+    });
+    const recoveryTaskId = harness.createTask({
+      runId,
+      role: "designer",
+      goal: "Recover one rejected fixed design action",
+      prompt: "Use fixed design actions or stop without mutation.",
+      config: {
+        forbidImplementation: true,
+        forbidBrowser: true,
+        readOnly: true,
+        designActionRecovery: {
+          rootTaskId: "task_original_designer",
+          sourceTaskId: "task_original_designer",
+          sourceAttemptId: "attempt_original_designer",
+          count: 1,
+          limit: 1,
+        },
+      },
+    });
+    harness.recordAttempt({
+      taskId: recoveryTaskId,
+      input: { executor: "codex-resumable", sandbox: "read-only" },
+      output: {
+        status: "done",
+        summary: "Recorded the corrected evidence signal.",
+        changedFiles: [],
+        checks: [],
+        artifacts: [],
+        problems: [],
+        designActions: [{ type: "recordSignal", payload: { id: "signal_recovery" } }],
+        nextTasks: [],
+        nextRuns: [],
+      },
+    });
+    const continuationTaskId = harness.createTask({
+      runId,
+      role: "designer",
+      goal: "Decide whether the corrected signal justifies a proposal",
+      prompt: "Propose through fixed actions or return a justified no-action result.",
+      dependsOn: [recoveryTaskId],
+      config: {
+        forbidImplementation: true,
+        forbidBrowser: true,
+        readOnly: true,
+        designContinuation: {
+          kind: "after-recordSignal",
+          signalId: "signal_recovery",
+          sourceTaskId: recoveryTaskId,
+          actionIndex: 0,
+        },
+      },
+    });
+    const continuationAttemptId = harness.recordAttempt({
+      taskId: continuationTaskId,
+      input: { executor: "codex-resumable", sandbox: "read-only" },
+      output: {
+        status: "done",
+        summary: "No design action: current evidence does not authorize a delivery run.",
+        changedFiles: [],
+        checks: [],
+        artifacts: [],
+        problems: ["The accepted evidence remains insufficient for a governed proposal."],
+        designActions: [],
+        nextTasks: [],
+        nextRuns: [],
+      },
+    });
+
+    const result = applyHarnessAction(harness, {
+      type: "prepareRunDrain",
+      runId,
+      reason: "no ready work after the bounded Designer continuation",
+    });
+    const overview = harness.getRunOverview({ runId, eventLimit: 0 });
+
+    expect(result).toMatchObject({
+      status: "done",
+      actionType: "prepareRunDrain",
+      summary: expect.stringContaining("quiescent"),
+    });
+    expect(overview.run).toMatchObject({
+      status: "blocked",
+      context: {
+        targetSystemDesignQuiescence: {
+          schemaVersion: 1,
+          decision: "no-design-action",
+          sourceTaskId: continuationTaskId,
+          sourceAttemptId: continuationAttemptId,
+          recoveryTaskId,
+          recoveryRootTaskId: "task_original_designer",
+        },
+        repairReplanBudget: { limit: 3, used: 0, entries: [] },
+      },
+    });
+    expect(overview.tasks.filter((task) => task.role === "goal-review")).toHaveLength(0);
+    expect(overview.tasks.filter((task) => task.role === "planner" || task.role === "worker")).toHaveLength(0);
+    expect(applyHarnessAction(harness, {
+      type: "updateRunContext",
+      runId,
+      contextPatch: { targetSystemDesignQuiescence: null },
+    })).toMatchObject({ status: "blocked", problems: [expect.stringContaining("targetSystemDesignQuiescence")] });
+  });
+
+  test("prepareRunDrain does not create a second goal review after governed next tasks were rejected", () => {
+    const runId = harness.createRun({
+      goal: "Stop one rejected target-system Goal Review loop",
+      context: {
+        source: "target-system-design",
+        repairReplanBudget: { limit: 3, used: 0, entries: [] },
+      },
+    });
+    const recoveryTaskId = harness.createTask({
+      runId,
+      role: "designer",
+      goal: "Recover one rejected fixed design action",
+      prompt: "Use fixed design actions or stop without mutation.",
+      config: {
+        forbidImplementation: true,
+        forbidBrowser: true,
+        readOnly: true,
+        designActionRecovery: {
+          rootTaskId: "task_original_designer",
+          sourceTaskId: "task_original_designer",
+          sourceAttemptId: "attempt_original_designer",
+          count: 1,
+          limit: 1,
+        },
+      },
+    });
+    harness.recordAttempt({
+      taskId: recoveryTaskId,
+      input: { executor: "codex-resumable", sandbox: "read-only" },
+      output: {
+        status: "done",
+        summary: "Recorded the corrected evidence signal.",
+        changedFiles: [],
+        checks: [],
+        artifacts: [],
+        problems: [],
+        designActions: [{ type: "recordSignal", payload: { id: "signal_recovery" } }],
+        nextTasks: [],
+        nextRuns: [],
+      },
+    });
+    const continuationTaskId = harness.createTask({
+      runId,
+      role: "designer",
+      goal: "Decide whether the corrected signal justifies a proposal",
+      prompt: "Propose through fixed actions or return a justified no-action result.",
+      dependsOn: [recoveryTaskId],
+      config: {
+        forbidImplementation: true,
+        forbidBrowser: true,
+        readOnly: true,
+        designContinuation: {
+          kind: "after-recordSignal",
+          signalId: "signal_recovery",
+          sourceTaskId: recoveryTaskId,
+          actionIndex: 0,
+        },
+      },
+    });
+    const continuationAttemptId = harness.recordAttempt({
+      taskId: continuationTaskId,
+      input: { executor: "codex-resumable", sandbox: "read-only" },
+      output: {
+        status: "done",
+        summary: "No design action: current evidence does not authorize a delivery run.",
+        changedFiles: [],
+        checks: [],
+        artifacts: [],
+        problems: ["The accepted evidence remains insufficient for a governed proposal."],
+        designActions: [],
+        nextTasks: [],
+        nextRuns: [],
+      },
+    });
+    const reviewTaskId = harness.createTask({
+      runId,
+      role: "goal-review",
+      goal: "Review whether the design root should continue",
+      prompt: "Do not bypass governed design actions.",
+      dependsOn: [continuationTaskId],
+    });
+    harness.recordAttempt({
+      taskId: reviewTaskId,
+      input: { executor: "codex-resumable" },
+      output: {
+        status: "done",
+        runDecision: "continue",
+        summary: "Requested a Planner, but the governed Designer gate reused its exhausted recovery.",
+        changedFiles: [],
+        checks: [],
+        artifacts: [{
+          kind: "reused_designer_recovery",
+          taskId: recoveryTaskId,
+          sourceTaskId: "task_original_designer",
+        }],
+        problems: [],
+        designActions: [],
+        nextTasks: [{ role: "planner", goal: "Invalid direct plan", prompt: "Bypass the design gate." }],
+        nextRuns: [],
+      },
+    });
+
+    const first = applyHarnessAction(harness, {
+      type: "prepareRunDrain",
+      runId,
+      reason: "governed Goal Review produced no legal continuation",
+    });
+    const replay = applyHarnessAction(harness, {
+      type: "prepareRunDrain",
+      runId,
+      reason: "replayed drain after the same terminal Designer fingerprint",
+    });
+    const overview = harness.getRunOverview({ runId, eventLimit: 0 });
+
+    expect(first).toMatchObject({ status: "done", summary: expect.stringContaining("quiescent") });
+    expect(replay).toMatchObject({ status: "done", summary: expect.stringContaining("already quiescent") });
+    expect(overview.run).toMatchObject({
+      status: "blocked",
+      context: {
+        targetSystemDesignQuiescence: {
+          sourceTaskId: continuationTaskId,
+          sourceAttemptId: continuationAttemptId,
+          recoveryTaskId,
+          goalReviewTaskIds: [reviewTaskId],
+        },
+        repairReplanBudget: { limit: 3, used: 0, entries: [] },
+      },
+    });
+    expect(overview.tasks.filter((task) => task.role === "goal-review")).toHaveLength(1);
+    expect(overview.tasks.filter((task) => task.role === "planner" || task.role === "worker")).toHaveLength(0);
+  });
+
   test("repair exhaustion stops after the final verifier without creating goal review work", () => {
     const runId = harness.createRun({
       goal: "Stop at the final verifier verdict",

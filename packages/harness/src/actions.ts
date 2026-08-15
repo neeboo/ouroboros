@@ -415,6 +415,7 @@ const FROZEN_DESIGN_CONTEXT_KEYS = new Set([
   "activeHarnessRevision",
   "harnessRevision",
   "resourceAllocation",
+  "targetSystemDesignQuiescence",
 ]);
 
 function frozenDesignContextKeys(keys: Iterable<string>): string[] {
@@ -5602,6 +5603,214 @@ function applyInterruptAttempt(
   });
 }
 
+type TargetSystemDesignQuiescence = {
+  schemaVersion: 1;
+  decision: "no-design-action";
+  fingerprint: string;
+  sourceTaskId: string;
+  sourceAttemptId: string;
+  recoveryTaskId: string;
+  recoveryRootTaskId: string;
+  goalReviewTaskIds: string[];
+  summary: string;
+  recordedAt: string;
+};
+
+function closeTargetSystemDesignQuiescence(
+  harness: Harness,
+  runId: string,
+): HarnessActionResult | null {
+  return harness.runInImmediateTransaction((db) => {
+    const overview = harness.getRunOverviewWithDb(db, { runId, eventLimit: 0 });
+    const run = overview.run;
+    if (!run || run.context.source !== "target-system-design" || run.context.retired === true) {
+      return null;
+    }
+    if (overview.tasks.some((task) => task.status === "todo" || task.status === "running")) {
+      return null;
+    }
+    const hasActiveDesignChild = harness.listRunsWithDb(db, { statuses: ["todo", "running"], limit: 1000 }).some(
+      (candidate) => candidate.context.parentRunId === runId
+        && candidate.context.source === "design"
+        && candidate.context.retired !== true,
+    );
+    if (hasActiveDesignChild) {
+      return null;
+    }
+
+    const sourceSession = [...overview.sessions].reverse().find((session) =>
+      session.role === "designer"
+      && session.status === "done"
+      && session.output.status === "done"
+      && Array.isArray(session.output.designActions)
+      && session.output.designActions.length === 0
+      && Array.isArray(session.output.nextTasks)
+      && session.output.nextTasks.length === 0
+      && Array.isArray(session.output.nextRuns)
+      && session.output.nextRuns.length === 0
+      && Array.isArray(session.output.changedFiles)
+      && session.output.changedFiles.length === 0
+      && typeof session.output.summary === "string"
+      && session.output.summary.trim().length > 0,
+    );
+    if (!sourceSession) {
+      return null;
+    }
+    const sourceTask = overview.tasks.find((task) => task.id === sourceSession.taskId);
+    if (!sourceTask || sourceTask.status !== "done") {
+      return null;
+    }
+
+    const directRecovery = readDesignerActionRecovery(sourceTask);
+    const continuation = readDesignerSignalContinuation(sourceTask);
+    const recoveryTask = directRecovery
+      ? sourceTask
+      : continuation
+        ? overview.tasks.find((task) => task.id === continuation.sourceTaskId) ?? null
+        : null;
+    const recovery = recoveryTask ? readDesignerActionRecovery(recoveryTask) : null;
+    if (
+      !recoveryTask
+      || !recovery
+      || recoveryTask.config?.forbidImplementation !== true
+      || recoveryTask.config?.forbidBrowser !== true
+      || recoveryTask.config?.readOnly !== true
+      || (continuation && !sourceTask.dependsOn.includes(recoveryTask.id))
+    ) {
+      return null;
+    }
+
+    const sourceTaskIndex = overview.tasks.findIndex((task) => task.id === sourceTask.id);
+    if (sourceTaskIndex < 0) {
+      return null;
+    }
+    const laterTasks = overview.tasks.slice(sourceTaskIndex + 1);
+    if (laterTasks.some((task) => task.role !== "goal-review")) {
+      return null;
+    }
+    const goalReviewTaskIds = laterTasks.map((task) => task.id);
+    for (const reviewTask of laterTasks) {
+      const reviewSession = [...overview.sessions].reverse().find((session) => session.taskId === reviewTask.id);
+      if (!reviewSession || reviewSession.status === "blocked") {
+        continue;
+      }
+      const decision = resolveRunDecision(reviewSession.output);
+      if (decision === "complete" || decision === "defer") {
+        return null;
+      }
+      const proposedTasks = reviewSession.output.nextTasks ?? [];
+      const governedRejection = (reviewSession.output.artifacts ?? []).some((artifact) => {
+        if (!artifact || typeof artifact !== "object" || Array.isArray(artifact)) {
+          return false;
+        }
+        const kind = (artifact as Record<string, unknown>).kind;
+        return kind === "reused_designer_recovery" || kind === "designer_recovery_exhausted";
+      });
+      if (proposedTasks.length > 0 && !governedRejection) {
+        return null;
+      }
+    }
+
+    const fingerprintInput = JSON.stringify({
+      schemaVersion: 1,
+      runId,
+      sourceTaskId: sourceTask.id,
+      sourceAttemptId: sourceSession.attemptId,
+      recoveryTaskId: recoveryTask.id,
+      recoveryRootTaskId: recovery.rootTaskId,
+      summary: sourceSession.output.summary,
+      problems: sourceSession.output.problems ?? [],
+    });
+    const fingerprint = createHash("sha256").update(fingerprintInput).digest("hex");
+    const existing = run.context.targetSystemDesignQuiescence;
+    const existingRecord = existing && typeof existing === "object" && !Array.isArray(existing)
+      ? existing as Record<string, unknown>
+      : null;
+    const reused = existingRecord?.schemaVersion === 1
+      && existingRecord.decision === "no-design-action"
+      && existingRecord.fingerprint === fingerprint
+      && existingRecord.sourceTaskId === sourceTask.id
+      && existingRecord.sourceAttemptId === sourceSession.attemptId;
+    const quiescence: TargetSystemDesignQuiescence = reused
+      ? existingRecord as unknown as TargetSystemDesignQuiescence
+      : {
+          schemaVersion: 1,
+          decision: "no-design-action",
+          fingerprint,
+          sourceTaskId: sourceTask.id,
+          sourceAttemptId: sourceSession.attemptId,
+          recoveryTaskId: recoveryTask.id,
+          recoveryRootTaskId: recovery.rootTaskId,
+          goalReviewTaskIds,
+          summary: sourceSession.output.summary,
+          recordedAt: sourceSession.finishedAt ?? new Date().toISOString(),
+        };
+    if (!reused || run.status !== "blocked") {
+      harness.updateRunWithDb(db, {
+        runId,
+        status: "blocked",
+        contextPatch: { targetSystemDesignQuiescence: quiescence },
+      });
+    }
+    return doneResult(
+      "prepareRunDrain",
+      reused
+        ? `Run ${runId} is already quiescent at Designer attempt ${sourceSession.attemptId}.`
+        : `Run ${runId} is quiescent after bounded Designer attempt ${sourceSession.attemptId}.`,
+      [
+        { name: "target-system design root", status: "passed", evidence: runId },
+        { name: "bounded Designer recovery", status: "passed", evidence: `${recoveryTask.id}:1/1` },
+        { name: "mutation-free continuation", status: "passed", evidence: sourceSession.attemptId },
+        { name: "active governed work", status: "passed", evidence: "0" },
+        { name: "repair budget", status: "passed", evidence: "unchanged" },
+      ],
+      [{
+        kind: "target_system_design_quiescence",
+        runId,
+        status: "blocked",
+        reused,
+        ...quiescence,
+      }],
+    );
+  });
+}
+
+function readDesignerActionRecovery(task: Task) {
+  const raw = task.config?.designActionRecovery;
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    return null;
+  }
+  const record = raw as Record<string, unknown>;
+  if (
+    typeof record.rootTaskId !== "string"
+    || typeof record.sourceTaskId !== "string"
+    || typeof record.sourceAttemptId !== "string"
+    || record.count !== 1
+    || record.limit !== 1
+  ) {
+    return null;
+  }
+  return {
+    rootTaskId: record.rootTaskId,
+    sourceTaskId: record.sourceTaskId,
+    sourceAttemptId: record.sourceAttemptId,
+    count: 1,
+    limit: 1,
+  } as const;
+}
+
+function readDesignerSignalContinuation(task: Task) {
+  const raw = task.config?.designContinuation;
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    return null;
+  }
+  const record = raw as Record<string, unknown>;
+  if (record.kind !== "after-recordSignal" || typeof record.sourceTaskId !== "string") {
+    return null;
+  }
+  return { kind: "after-recordSignal" as const, sourceTaskId: record.sourceTaskId };
+}
+
 function prepareRunDrain(harness: Harness, action: Extract<HarnessAction, { type: "prepareRunDrain" }>): HarnessActionResult {
   const maxTries = action.maxTries ?? 3;
   const run = harness.getRun(action.runId);
@@ -5651,6 +5860,11 @@ function prepareRunDrain(harness: Harness, action: Extract<HarnessAction, { type
         status: child.status,
       })),
     );
+  }
+
+  const quiescence = closeTargetSystemDesignQuiescence(harness, action.runId);
+  if (quiescence) {
+    return quiescence;
   }
 
   const initialOverview = harness.getRunOverview({ runId: action.runId, eventLimit: 0 });
