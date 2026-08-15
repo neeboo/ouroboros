@@ -8223,6 +8223,71 @@ describe("Control-plane watchdog contract", () => {
     expect(harness.getRunOverview({ runId: childRunId, eventLimit: 0 }).tasks.length).toBeGreaterThan(0);
   });
 
+  test("classifies a running attempt with a dead owner pid as an orphaned lease", () => {
+    const runId = createWatchedRun();
+    const taskId = harness.createTask({
+      runId,
+      role: "designer",
+      goal: "Research only",
+      prompt: "Inspect durable evidence.",
+      config: { readOnly: true, forbidBrowser: true, forbidImplementation: true },
+    });
+    harness.leaseReadyTasks({ runId, limit: 1, sessionForTask: () => "dead-owner" });
+    const attemptId = harness.startAttempt({
+      taskId,
+      input: { executor: "codex-resumable", codexSessionId: "missing-rollout" },
+    });
+    harness.upsertExecutionThread({
+      id: `thread_${attemptId}`,
+      runId,
+      taskId,
+      attemptId,
+      ownerType: "runner",
+      ownerId: "dead-owner",
+      role: "designer",
+      status: "running",
+      pid: 99_999_999,
+      sessionName: "dead-owner",
+      agentSessionId: "missing-rollout",
+    });
+
+    const observation = observeWatchdogTree({
+      rootRunId: runId,
+      rootRun: harness.getRun(runId),
+      overview: harness.getRunOverview({ runId, eventLimit: 0 }),
+      harness,
+      now: Date.now(),
+      daemonIntervalMs: 1500,
+      inboxEvents: [],
+      scheduledReviews: [],
+    });
+
+    expect(observation.fault).toMatchObject({
+      kind: "orphaned-leases",
+      selectedAction: "reclaimRunningTasks",
+      affectedRunIds: [runId],
+    });
+    const reclaimed = applyHarnessAction(harness, {
+      type: "reclaimRunningTasks",
+      runId,
+      reason: "watchdog detected dead execution owner",
+    });
+    expect(reclaimed.status).toBe("done");
+    expect(harness.getAttempt(attemptId)?.status).toBe("blocked");
+    expect(harness.getRunOverview({ runId, eventLimit: 0 }).tasks).toContainEqual(
+      expect.objectContaining({
+        role: "designer",
+        status: "todo",
+        parentId: taskId,
+        config: expect.objectContaining({
+          readOnly: true,
+          forbidBrowser: true,
+          forbidImplementation: true,
+        }),
+      }),
+    );
+  });
+
   test("canonical fingerprint is deterministic across row iteration orders", () => {
     const runId = createWatchedRun();
     // Insert multiple tasks; their row order in SQLite is insertion order, but

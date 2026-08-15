@@ -68,6 +68,7 @@ export const runLocalCommand: RunCommand = async (input) => {
           exitCode: 124,
           stdout,
           stderr: appendProblem(stderr, `command idle timed out after ${idleMs}ms`),
+          terminationReason: "idle-timeout",
         }, true);
       }, deadlineMs);
     };
@@ -79,6 +80,7 @@ export const runLocalCommand: RunCommand = async (input) => {
           exitCode: 124,
           stdout,
           stderr: appendProblem(stderr, `command timed out after ${input.timeoutMs}ms`),
+          terminationReason: "hard-timeout",
         }, true);
       }, input.timeoutMs);
     }

@@ -560,10 +560,16 @@ function classifyFault(input: {
       const hasRunningAttempt = sessions.some(
         (session) => session.taskId === task.id && session.status === "running",
       );
-      const hasRunningThread = threads.some(
+      const runningThreads = threads.filter(
         (thread) => thread.taskId === task.id && thread.status === "running",
       );
-      if (!hasRunningAttempt && !hasRunningThread) {
+      const hasRunningThread = runningThreads.some(
+        (thread) => thread.pid !== null && processIsAlive(thread.pid),
+      );
+      const hasDeadOwner = runningThreads.some(
+        (thread) => thread.pid !== null && !processIsAlive(thread.pid),
+      );
+      if ((!hasRunningAttempt && !hasRunningThread) || (hasRunningAttempt && hasDeadOwner && !hasRunningThread)) {
         orphanedLeases.push({ runId: run.id, taskId: task.id });
       }
     }
@@ -654,6 +660,15 @@ function classifyFault(input: {
     },
     affectedRunIds: [...allRunIds, rootRunId],
   };
+}
+
+function processIsAlive(pid: number) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /**

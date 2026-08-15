@@ -228,7 +228,7 @@ async function resumableResult(input: {
 }): Promise<CodexResumableResult> {
   const events = parseJsonLines(input.result.stdout);
   const sessionId = sessionIdFromEvents(events);
-  if (input.result.exitCode === 124 && sessionId) {
+  if (input.result.exitCode === 124 && sessionId && input.result.terminationReason === undefined) {
     return {
       status: "running",
       sessionId,
@@ -252,7 +252,12 @@ async function resumableResult(input: {
         summary: `${input.commandName} failed`,
         changedFiles: [],
         checks: [{ name: input.commandName, status: "failed" }],
-        artifacts: sessionId ? [{ kind: "codex_session", sessionId }] : [],
+        artifacts: [
+          ...(sessionId ? [{ kind: "codex_session", sessionId }] : []),
+          ...(input.result.terminationReason
+            ? [{ kind: "local_process_termination", reason: input.result.terminationReason }]
+            : []),
+        ],
         problems: [commandProblem(input.result)],
       },
     };

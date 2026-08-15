@@ -199,6 +199,20 @@ describe("command runner", () => {
 
     expect(result.exitCode).toBe(124);
     expect(result.stderr).toContain("timed out");
+    expect(result.terminationReason).toBe("hard-timeout");
+  });
+
+  test("marks an idle-killed child as terminated instead of resumable", async () => {
+    const result = await runLocalCommand({
+      cmd: ["bun", "-e", "await new Promise((resolve) => setTimeout(resolve, 1000));"],
+      stdin: "",
+      timeoutMs: 2000,
+      idleTimeoutMs: 10,
+    });
+
+    expect(result.exitCode).toBe(124);
+    expect(result.terminationReason).toBe("idle-timeout");
+    expect(result.stderr).toContain("command idle timed out");
   });
 
   test("cleans up the process tree when a command failure requests cleanup", async () => {

@@ -2521,13 +2521,15 @@ describe("runner", () => {
     expect(thread?.status).toBe("blocked");
   });
 
-  test("runner-owned codex loop orphans running attempts when the owner pid is gone", async () => {
+  test("runner-owned codex loop blocks a dead lease and starts one same-role recovery", async () => {
     const runId = harness.createRun({ goal: "Recover dead owner" });
     const taskId = harness.createTask({
       runId,
-      role: "worker",
-      goal: "Recover stale running attempt",
-      prompt: "Continue.",
+      role: "designer",
+      goal: "Research only",
+      prompt: "Inspect evidence without implementation.",
+      doneWhen: ["Report the root cause."],
+      config: { readOnly: true, forbidBrowser: true, forbidImplementation: true },
     });
     const attemptId = harness.startAttempt({
       taskId,
@@ -2540,10 +2542,79 @@ describe("runner", () => {
       attemptId,
       ownerType: "runner",
       ownerId: "dead-owner-test",
-      role: "worker",
+      role: "designer",
       status: "running",
       pid: 99999999,
       sessionName: "dead-owner",
+    });
+
+    let startCalls = 0;
+    let resumeCalls = 0;
+    const result = await runCodexResumableLoop({
+      harness,
+      runId,
+      limit: 1,
+      maxRounds: 1,
+      maxTries: 3,
+      cwd: dir,
+      clientFactory: () => ({
+        start: async () => {
+          startCalls += 1;
+          return {
+            status: "done" as const,
+            sessionId: "recovery-session",
+            outputPath: join(dir, "recovery-output.json"),
+            stdout: "",
+            stderr: "",
+            events: [],
+            output: {
+              status: "done" as const,
+              summary: "Recovered from durable evidence",
+              changedFiles: [],
+              checks: [],
+              artifacts: [],
+              problems: [],
+            },
+          };
+        },
+        resume: async () => {
+          resumeCalls += 1;
+          throw new Error("dead owner session must not be resumed");
+        },
+      }),
+    });
+
+    const attempt = harness.getAttempt(attemptId)!;
+    const task = harness.getTask(taskId)!;
+    const thread = harness.getRunOverview({ runId, eventLimit: 1 }).threads.find((candidate) => candidate.attemptId === attemptId)!;
+
+    const recovery = harness.getRunOverview({ runId, eventLimit: 0 }).tasks.find(
+      (candidate) => candidate.parentId === taskId && candidate.config?.deadAttemptRecovery,
+    )!;
+    expect(startCalls).toBe(1);
+    expect(resumeCalls).toBe(0);
+    expect(result.rounds[0].tasks[0]).toMatchObject({ taskId: recovery.id, status: "done" });
+    expect(attempt.status).toBe("blocked");
+    expect(task.status).toBe("blocked");
+    expect(attempt.output?.problems).toContain("running attempt owner exited without terminal output");
+    expect(thread.status).toBe("orphaned");
+    expect(recovery).toMatchObject({
+      role: "designer",
+      status: "done",
+      doneWhen: ["Report the root cause."],
+      config: { readOnly: true, forbidBrowser: true, forbidImplementation: true },
+    });
+  });
+
+  test("run-loop terminalizes a killed resumable child instead of returning a running task", async () => {
+    const runId = harness.createRun({ goal: "Research a production failure" });
+    const taskId = harness.createTask({
+      runId,
+      role: "designer",
+      goal: "Research only",
+      prompt: "Read evidence only.",
+      doneWhen: ["Identify the root cause."],
+      config: { readOnly: true, forbidBrowser: true, forbidImplementation: true },
     });
 
     const result = await runCodexResumableLoop({
@@ -2554,34 +2625,51 @@ describe("runner", () => {
       maxTries: 3,
       cwd: dir,
       clientFactory: () => ({
-        start: async () => {
-          throw new Error("start should not be called");
-        },
+        start: async () => ({
+          status: "blocked" as const,
+          sessionId: "killed-session",
+          outputPath: join(dir, "killed-output.json"),
+          stdout: "",
+          stderr: "command idle timed out after 300000ms",
+          events: [],
+          output: {
+            status: "blocked" as const,
+            summary: "codex exec failed",
+            changedFiles: [],
+            checks: [{ name: "codex exec", status: "failed" }],
+            artifacts: [
+              { kind: "codex_session", sessionId: "killed-session" },
+              { kind: "local_process_termination", reason: "idle-timeout" },
+            ],
+            problems: ["command idle timed out after 300000ms"],
+          },
+        }),
         resume: async () => {
-          throw new Error("resume should not be called");
+          throw new Error("killed child must not be resumed");
         },
       }),
     });
 
-    const attempt = harness.getAttempt(attemptId)!;
-    const task = harness.getTask(taskId)!;
-    const thread = harness.getRunOverview({ runId, eventLimit: 1 }).threads.find((candidate) => candidate.attemptId === attemptId)!;
-
-    expect(result.rounds[0].tasks[0]).toMatchObject({
-      taskId,
-      attemptId,
-      status: "blocked",
-      codexSessionId: null,
-    });
-    expect(attempt.status).toBe("blocked");
-    expect(task.status).toBe("blocked");
-    expect(attempt.output?.problems).toContain(
-      "running attempt is missing an agent session id; automatic retry is disabled because this attempt cannot be resumed safely",
+    expect(result.rounds[0].tasks).toEqual([
+      expect.objectContaining({ taskId, status: "blocked", codexSessionId: "killed-session" }),
+    ]);
+    const sourceAttempt = harness.listLatestAttemptsForTasks([taskId])[0]!;
+    expect(sourceAttempt.status).toBe("blocked");
+    expect(harness.getRunOverview({ runId, eventLimit: 0 }).tasks).toContainEqual(
+      expect.objectContaining({
+        role: "designer",
+        status: "todo",
+        parentId: taskId,
+        config: expect.objectContaining({
+          readOnly: true,
+          forbidBrowser: true,
+          forbidImplementation: true,
+        }),
+      }),
     );
-    expect(thread.status).toBe("orphaned");
   });
 
-  test("runner-owned codex loop recovers missing codexSessionId from thread agent session id", async () => {
+  test("runner-owned codex loop recovers missing codexSessionId from a live thread agent session id", async () => {
     const runId = harness.createRun({ goal: "Recover runner session" });
     const taskId = harness.createTask({
       runId,
@@ -2602,33 +2690,9 @@ describe("runner", () => {
       ownerId: "recoverable-owner",
       role: "worker",
       status: "running",
-      pid: 99999999,
+      pid: process.pid,
       sessionName: "recoverable",
       agentSessionId: "session_from_thread",
-      worktreePath: dir,
-    });
-
-    const missingTaskId = harness.createTask({
-      runId,
-      role: "worker",
-      goal: "Missing session",
-      prompt: "Continue without a session.",
-    });
-    const missingAttemptId = harness.startAttempt({
-      taskId: missingTaskId,
-      input: { sessionName: "missing", executor: "codex-resumable", cwd: dir },
-    });
-    harness.upsertExecutionThread({
-      id: `thread_${missingAttemptId}`,
-      runId,
-      taskId: missingTaskId,
-      attemptId: missingAttemptId,
-      ownerType: "runner",
-      ownerId: "missing-owner",
-      role: "worker",
-      status: "running",
-      pid: 99999999,
-      sessionName: "missing",
       worktreePath: dir,
     });
 
@@ -2636,7 +2700,7 @@ describe("runner", () => {
     const result = await runCodexResumableLoop({
       harness,
       runId,
-      limit: 2,
+      limit: 1,
       maxRounds: 1,
       maxTries: 3,
       cwd: dir,
@@ -2667,22 +2731,121 @@ describe("runner", () => {
     });
 
     const recoveredAttempt = harness.getAttempt(recoveredAttemptId)!;
-    const missingAttempt = harness.getAttempt(missingAttemptId)!;
-    const missingTask = harness.getTask(missingTaskId)!;
-
     expect(resumedSessions).toEqual(["session_from_thread"]);
     expect(result.rounds[0].tasks).toContainEqual(
       expect.objectContaining({ attemptId: recoveredAttemptId, status: "done", codexSessionId: "session_from_thread" }),
     );
-    expect(result.rounds[0].tasks).toContainEqual(
-      expect.objectContaining({ attemptId: missingAttemptId, status: "blocked", codexSessionId: null }),
-    );
     expect(recoveredAttempt.input.codexSessionId).toBe("session_from_thread");
-    expect(missingAttempt.status).toBe("blocked");
-    expect(missingTask.status).toBe("blocked");
-    expect(missingAttempt.output.problems).toContain(
-      "running attempt is missing an agent session id; automatic retry is disabled because this attempt cannot be resumed safely",
+  });
+
+  test("runner-owned codex loop terminalizes a missing rollout and schedules bounded same-role recovery", async () => {
+    const runId = harness.createRun({ goal: "Recover missing rollout" });
+    const taskId = harness.createTask({
+      runId,
+      role: "designer",
+      goal: "Research only",
+      prompt: "Inspect the existing durable evidence.",
+      doneWhen: ["Report the evidence-backed gap."],
+      config: { readOnly: true, forbidBrowser: true, forbidImplementation: true },
+      worktreePath: dir,
+    });
+    const attemptId = harness.startAttempt({
+      taskId,
+      input: {
+        sessionName: "missing-rollout",
+        executor: "codex-resumable",
+        cwd: dir,
+        codexSessionId: "session_missing",
+        sandbox: "read-only",
+      },
+    });
+    const eventId = harness.recordAttemptEvent({
+      attemptId,
+      sequence: 1,
+      stream: "codex-json",
+      payload: { type: "item.completed", marker: "DO_NOT_COPY_EVENT_BODY" },
+    });
+    harness.upsertExecutionThread({
+      id: `thread_${attemptId}`,
+      runId,
+      taskId,
+      attemptId,
+      ownerType: "runner",
+      ownerId: "live-owner",
+      role: "designer",
+      status: "running",
+      pid: process.pid,
+      sessionName: "missing-rollout",
+      agentSessionId: "session_missing",
+      worktreePath: dir,
+    });
+    let startCalls = 0;
+    let resumeCalls = 0;
+
+    const result = await runCodexResumableLoop({
+      harness,
+      runId,
+      limit: 1,
+      maxRounds: 1,
+      maxTries: 3,
+      cwd: dir,
+      clientFactory: () => ({
+        start: async () => {
+          startCalls += 1;
+          throw new Error("recovery starts on the next bounded tick");
+        },
+        resume: async () => {
+          resumeCalls += 1;
+          return {
+            status: "blocked" as const,
+            sessionId: "session_missing",
+            outputPath: join(dir, "missing-rollout.json"),
+            stdout: "",
+            stderr: "thread/resume failed: no rollout found for thread id session_missing",
+            events: [],
+            output: {
+              status: "blocked" as const,
+              summary: "codex exec resume failed",
+              changedFiles: [],
+              checks: [{ name: "codex exec resume", status: "failed" }],
+              artifacts: [{ kind: "codex_session", sessionId: "session_missing" }],
+              problems: ["thread/resume failed: no rollout found for thread id session_missing"],
+            },
+          };
+        },
+      }),
+    });
+
+    expect(resumeCalls).toBe(1);
+    expect(startCalls).toBe(0);
+    expect(result.rounds[0].tasks).toContainEqual(
+      expect.objectContaining({ attemptId, status: "blocked", codexSessionId: "session_missing" }),
     );
+    expect(harness.getAttempt(attemptId)?.status).toBe("blocked");
+    const recovery = harness.getRunOverview({ runId, eventLimit: 0 }).tasks.find(
+      (task) => task.parentId === taskId && task.config?.deadAttemptRecovery,
+    )!;
+    expect(recovery).toMatchObject({
+      role: "designer",
+      status: "todo",
+      doneWhen: ["Report the evidence-backed gap."],
+      worktreePath: dir,
+      config: {
+        readOnly: true,
+        forbidBrowser: true,
+        forbidImplementation: true,
+        sandbox: "read-only",
+        deadAttemptRecovery: {
+          count: 1,
+          limit: 1,
+          sourceTaskId: taskId,
+          sourceAttemptId: attemptId,
+          durableEventRefs: [eventId],
+        },
+      },
+    });
+    expect(recovery.prompt).toContain(eventId);
+    expect(recovery.prompt).not.toContain("DO_NOT_COPY_EVENT_BODY");
   });
 
   test("direct codex resume recovers missing codexSessionId from thread agent session id", async () => {

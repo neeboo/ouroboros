@@ -9,6 +9,7 @@ export interface CommandResult {
   exitCode: number;
   stdout: string;
   stderr: string;
+  terminationReason?: "hard-timeout" | "idle-timeout";
 }
 
 export interface RunCommandInput {

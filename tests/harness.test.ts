@@ -928,6 +928,146 @@ describe("Harness", () => {
     ]);
   });
 
+  test("blocks dead running attempts and creates one bounded same-role recovery from durable event refs", () => {
+    const runId = harness.createRun({ goal: "Research a control-plane gap" });
+    const taskId = harness.createTask({
+      runId,
+      role: "designer",
+      goal: "Research only",
+      prompt: "Inspect evidence without implementation.",
+      doneWhen: ["Report the evidence-backed root cause."],
+      config: {
+        readOnly: true,
+        forbidBrowser: true,
+        forbidImplementation: true,
+        verifierContract: { requiredArtifacts: ["durable event refs"] },
+      },
+      worktreePath: "/tmp/research-only-worktree",
+    });
+    const [leased] = harness.leaseReadyTasks({
+      runId,
+      limit: 1,
+      sessionForTask: () => "research-only",
+    });
+    expect(leased?.id).toBe(taskId);
+    const attemptId = harness.startAttempt({
+      taskId,
+      input: { executor: "codex-resumable", sandbox: "read-only", codexSessionId: "missing-rollout" },
+    });
+    const firstEventId = harness.recordAttemptEvent({
+      attemptId,
+      sequence: 1,
+      stream: "codex-json",
+      payload: { type: "item.completed", marker: "OLD_BODY_MARKER" },
+    });
+    const finalEventId = harness.recordAttemptEvent({
+      attemptId,
+      sequence: 2,
+      stream: "system",
+      text: "LATEST_ROOT_CAUSE without terminal output",
+    });
+    harness.upsertExecutionThread({
+      id: `thread_${attemptId}`,
+      runId,
+      taskId,
+      attemptId,
+      ownerType: "runner",
+      ownerId: "dead-owner",
+      role: "designer",
+      status: "running",
+      pid: 99_999_999,
+      sessionName: "research-only",
+      agentSessionId: "missing-rollout",
+      worktreePath: "/tmp/research-only-worktree",
+    });
+
+    const reclaimed = harness.reclaimRunningTasksWithoutAttempts({ runId, maxRecoveries: 1 });
+
+    expect(reclaimed).toEqual([
+      expect.objectContaining({
+        taskId,
+        sourceAttemptId: attemptId,
+        recoveryTaskId: expect.stringMatching(/^task_recovery_/),
+        status: "todo",
+        recoveryCount: 1,
+        recoveryLimit: 1,
+      }),
+    ]);
+    expect(harness.getAttempt(attemptId)).toMatchObject({
+      status: "blocked",
+      output: {
+        summary: "Running attempt owner exited without terminal output",
+        artifacts: [expect.objectContaining({
+          kind: "dead_execution_lease",
+          attemptId,
+          durableEventRefs: [firstEventId, finalEventId],
+        })],
+      },
+    });
+    expect(harness.getTask(taskId)?.status).toBe("blocked");
+
+    const recoveryTaskId = reclaimed[0]!.recoveryTaskId!;
+    const recovery = harness.getTask(recoveryTaskId)!;
+    expect(recovery).toMatchObject({
+      role: "designer",
+      status: "todo",
+      parentId: taskId,
+      doneWhen: ["Report the evidence-backed root cause."],
+      worktreePath: "/tmp/research-only-worktree",
+      config: {
+        readOnly: true,
+        forbidBrowser: true,
+        forbidImplementation: true,
+        verifierContract: { requiredArtifacts: ["durable event refs"] },
+        deadAttemptRecovery: {
+          count: 1,
+          limit: 1,
+          sourceTaskId: taskId,
+          sourceAttemptId: attemptId,
+          durableEventRefs: [firstEventId, finalEventId],
+        },
+      },
+    });
+    expect(recovery.prompt).toContain(attemptId);
+    expect(recovery.prompt).toContain(firstEventId);
+    expect(recovery.prompt).toContain(finalEventId);
+    expect(recovery.prompt).not.toContain("OLD_BODY_MARKER");
+    expect(recovery.prompt).not.toContain("LATEST_ROOT_CAUSE");
+    expect(harness.reclaimRunningTasksWithoutAttempts({ runId, maxRecoveries: 1 })).toEqual([]);
+    expect(harness.getRunOverview({ runId, eventLimit: 0 }).tasks.filter(
+      (task) => task.config?.deadAttemptRecovery && task.parentId === taskId,
+    )).toHaveLength(1);
+
+    harness.leaseReadyTasks({ runId, limit: 1, sessionForTask: () => "bounded-recovery" });
+    const recoveryAttemptId = harness.startAttempt({
+      taskId: recoveryTaskId,
+      input: { executor: "codex-resumable", sandbox: "read-only" },
+    });
+    harness.upsertExecutionThread({
+      id: `thread_${recoveryAttemptId}`,
+      runId,
+      taskId: recoveryTaskId,
+      attemptId: recoveryAttemptId,
+      ownerType: "runner",
+      ownerId: "second-dead-owner",
+      role: "designer",
+      status: "running",
+      pid: 99_999_998,
+      sessionName: "bounded-recovery",
+    });
+    expect(harness.reclaimRunningTasksWithoutAttempts({ runId, maxRecoveries: 1 })).toEqual([
+      expect.objectContaining({
+        taskId: recoveryTaskId,
+        sourceAttemptId: recoveryAttemptId,
+        recoveryTaskId: null,
+        status: "blocked",
+        recoveryCount: 1,
+        recoveryLimit: 1,
+      }),
+    ]);
+    expect(harness.getRunOverview({ runId, eventLimit: 0 }).tasks).toHaveLength(2);
+  });
+
   test("updates running attempt input for resumable session ids", () => {
     const runId = harness.createRun({ goal: "Build loop" });
     const taskId = harness.createTask({

@@ -565,6 +565,15 @@ class CodexResumableOrchestrator {
       return { attemptId, status: "running" as const, codexSessionId: resumedSessionId };
     }
     const codexSessionId: string = result.sessionId ?? sessionId;
+    const recoveredControlPlaneFailure = this.finishRecoverableControlPlaneFailure({
+      attemptId,
+      task,
+      rawOutput: result.output,
+      codexSessionId,
+    });
+    if (recoveredControlPlaneFailure) {
+      return { attemptId, status: "blocked" as const, codexSessionId: result.sessionId };
+    }
     const output = await this.finishCodexAttempt({
       attemptId,
       run,
@@ -759,6 +768,15 @@ class CodexResumableOrchestrator {
         return { taskId: task.id, attemptId: attempt.id, sessionName, status: "running" as const, codexSessionId: resumedSessionId };
       }
       const codexSessionId: string = result.sessionId ?? sessionId;
+      const recoveredControlPlaneFailure = this.finishRecoverableControlPlaneFailure({
+        attemptId: attempt.id,
+        task,
+        rawOutput: result.output,
+        codexSessionId,
+      });
+      if (recoveredControlPlaneFailure) {
+        return { taskId: task.id, attemptId: attempt.id, sessionName, status: "blocked" as const, codexSessionId: result.sessionId };
+      }
       const output = await this.finishCodexAttempt({
         attemptId: attempt.id,
         run,
@@ -934,6 +952,15 @@ class CodexResumableOrchestrator {
         });
       }
       return { taskId: input.task.id, attemptId, sessionName: input.sessionName, status: "running" as const, codexSessionId: sessionId };
+    }
+    const recoveredControlPlaneFailure = this.finishRecoverableControlPlaneFailure({
+      attemptId,
+      task: input.task,
+      rawOutput: result.output,
+      codexSessionId: result.sessionId,
+    });
+    if (recoveredControlPlaneFailure) {
+      return { taskId: input.task.id, attemptId, sessionName: input.sessionName, status: "blocked" as const, codexSessionId: result.sessionId };
     }
     const output = await this.finishCodexAttempt({
       attemptId,
@@ -1233,6 +1260,34 @@ class CodexResumableOrchestrator {
       status: "blocked" as const,
       codexSessionId: null,
     };
+  }
+
+  private finishRecoverableControlPlaneFailure(input: {
+    attemptId: string;
+    task: Task;
+    rawOutput: AttemptOutput;
+    codexSessionId: string | null;
+  }) {
+    if (!isRecoverableResumableControlPlaneFailure(input.rawOutput)) {
+      return null;
+    }
+    const reason = resumableControlPlaneFailureReason(input.rawOutput);
+    const recovered = this.harness.recoverRunningAttempt({
+      attemptId: input.attemptId,
+      reason,
+      maxRecoveries: 1,
+      output: input.rawOutput,
+    });
+    if (!recovered) {
+      return null;
+    }
+    this.updateAttemptThread({
+      attemptId: input.attemptId,
+      status: "orphaned",
+      agentSessionId: input.codexSessionId,
+      heartbeat: true,
+    });
+    return input.rawOutput;
   }
 
   private resolveRoute(run: NonNullable<ReturnType<Harness["getRun"]>>, task: Task) {
@@ -1924,6 +1979,36 @@ function processIsAlive(pid: number) {
   } catch {
     return false;
   }
+}
+
+function isRecoverableResumableControlPlaneFailure(output: AttemptOutput) {
+  if (output.status !== "blocked") {
+    return false;
+  }
+  if ((output.artifacts ?? []).some((artifact) => (
+    artifact != null
+    && typeof artifact === "object"
+    && (artifact as Record<string, unknown>).kind === "local_process_termination"
+  ))) {
+    return true;
+  }
+  return (output.problems ?? []).some((problem) => /no rollout found for thread id/i.test(problem));
+}
+
+function resumableControlPlaneFailureReason(output: AttemptOutput) {
+  const missingRollout = [...(output.problems ?? [])].reverse().find((problem) =>
+    /no rollout found for thread id/i.test(problem)
+  );
+  if (missingRollout) {
+    return "resumable session rollout is missing; source attempt was terminalized before bounded same-role recovery";
+  }
+  const termination = (output.artifacts ?? []).find((artifact) => (
+    artifact != null
+    && typeof artifact === "object"
+    && (artifact as Record<string, unknown>).kind === "local_process_termination"
+  )) as Record<string, unknown> | undefined;
+  const reason = typeof termination?.reason === "string" ? termination.reason : "child-exited";
+  return `local resumable child exited without terminal output (${reason}); source attempt was terminalized before bounded same-role recovery`;
 }
 
 function directResumeClaimFromAttempt(attempt: Attempt) {

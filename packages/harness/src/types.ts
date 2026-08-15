@@ -409,6 +409,8 @@ export interface ReclaimedRunningTask {
   recoveryCount: number;
   recoveryLimit: number;
   attemptId: string | null;
+  sourceAttemptId?: string;
+  recoveryTaskId?: string | null;
 }
 
 export interface BlockedUnfinishedTask {

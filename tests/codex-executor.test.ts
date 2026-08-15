@@ -1348,6 +1348,40 @@ describe("codex cli executor", () => {
     });
   });
 
+  test("resumable client blocks when the local child was killed without terminal output", async () => {
+    const client = createCodexResumableClient({
+      cwd: "/repo",
+      codexBin: "/custom/codex",
+      runCommand: async () => ({
+        exitCode: 124,
+        stdout: [
+          JSON.stringify({ type: "thread.started", thread_id: "session_killed" }),
+          JSON.stringify({ type: "agent.message.delta", delta: "durable progress" }),
+        ].join("\n"),
+        stderr: "command idle timed out after 300000ms",
+        terminationReason: "idle-timeout",
+      }),
+    });
+
+    const result = await client.start({
+      prompt: "Research without implementation.",
+      sessionName: "research-only",
+    });
+
+    expect(result).toMatchObject({
+      status: "blocked",
+      sessionId: "session_killed",
+      output: {
+        status: "blocked",
+        summary: "codex exec failed",
+        artifacts: [
+          { kind: "codex_session", sessionId: "session_killed" },
+          { kind: "local_process_termination", reason: "idle-timeout" },
+        ],
+      },
+    });
+  });
+
   test("resumable client extracts nested session ids from codex json events", async () => {
     const client = createCodexResumableClient({
       cwd: "/repo",

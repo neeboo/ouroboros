@@ -759,6 +759,161 @@ export class Harness {
     });
   }
 
+  recoverRunningAttempt(input: {
+    attemptId: string;
+    reason: string;
+    maxRecoveries?: number;
+    output?: AttemptOutput;
+  }) {
+    if (input.maxRecoveries !== undefined && (!Number.isInteger(input.maxRecoveries) || input.maxRecoveries < 0)) {
+      throw new Error("maxRecoveries must be a non-negative integer");
+    }
+    return withDatabase(this.dbPath, (db) =>
+      db.transaction(() => this.recoverRunningAttemptWithDb(db, input)).immediate(),
+    );
+  }
+
+  recoverRunningAttemptWithDb(db: HarnessDatabase, input: {
+    attemptId: string;
+    reason: string;
+    maxRecoveries?: number;
+    output?: AttemptOutput;
+  }): ReclaimedRunningTask | null {
+    const row = db.query(
+      `
+      select tasks.*, attempts.input_json as source_attempt_input_json,
+             execution_threads.pid as owner_pid
+      from attempts
+      join tasks on tasks.id = attempts.task_id
+      left join execution_threads on execution_threads.attempt_id = attempts.id
+        and execution_threads.status = 'running'
+      where attempts.id = $attemptId
+        and attempts.status = 'running'
+        and tasks.status = 'running'
+      limit 1
+      `,
+    ).get({ $attemptId: input.attemptId }) as (TaskRow & {
+      source_attempt_input_json: string;
+      owner_pid: number | null;
+    }) | null;
+    if (!row) {
+      return null;
+    }
+    const task = taskFromRow(row);
+    const previousRecovery = task.config?.deadAttemptRecovery;
+    const previousCount = typeof previousRecovery === "object" && previousRecovery !== null
+      && Number.isInteger((previousRecovery as { count?: unknown }).count)
+      && Number((previousRecovery as { count: number }).count) >= 0
+      ? Number((previousRecovery as { count: number }).count)
+      : 0;
+    const requestedLimit = input.maxRecoveries ?? 1;
+    const recoveryLimit = typeof previousRecovery === "object" && previousRecovery !== null
+      && Number.isInteger((previousRecovery as { limit?: unknown }).limit)
+      && Number((previousRecovery as { limit: number }).limit) >= 0
+      ? Number((previousRecovery as { limit: number }).limit)
+      : requestedLimit;
+    const canRetry = previousCount < recoveryLimit;
+    const recoveryCount = canRetry ? previousCount + 1 : recoveryLimit;
+    const eventRows = db.query(
+      `select id from attempt_events where attempt_id = $attemptId order by sequence desc limit 8`,
+    ).all({ $attemptId: input.attemptId }) as Array<{ id: string }>;
+    const durableEventRefs = eventRows.map((event) => event.id).reverse();
+    const output: AttemptOutput = input.output
+      ? {
+          ...input.output,
+          status: "blocked",
+          artifacts: [
+            ...(input.output.artifacts ?? []),
+            {
+              kind: "resumable_control_plane_failure",
+              taskId: task.id,
+              attemptId: input.attemptId,
+              ownerPid: row.owner_pid,
+              durableEventRefs,
+              reason: input.reason,
+            },
+          ],
+          problems: [...(input.output.problems ?? []), input.reason],
+        }
+      : {
+          status: "blocked",
+          summary: "Running attempt owner exited without terminal output",
+          changedFiles: [],
+          checks: [{ name: "execution owner pid", status: "failed", evidence: String(row.owner_pid) }],
+          artifacts: [{
+            kind: "dead_execution_lease",
+            taskId: task.id,
+            attemptId: input.attemptId,
+            ownerPid: row.owner_pid,
+            durableEventRefs,
+          }],
+          problems: [input.reason],
+        };
+    this.finishAttemptWithDb(db, { attemptId: input.attemptId, output });
+    db.query(
+      `
+      update execution_threads
+      set status = 'orphaned', interrupt_reason = $reason,
+          interrupted_at = coalesce(interrupted_at, current_timestamp), updated_at = current_timestamp
+      where attempt_id = $attemptId and status = 'running'
+      `,
+    ).run({ $attemptId: input.attemptId, $reason: input.reason });
+
+    let recoveryTaskId: string | null = null;
+    if (canRetry) {
+      recoveryTaskId = `task_recovery_${input.attemptId.replace(/^attempt_/, "")}`;
+      const sourceAttemptInput = JSON.parse(row.source_attempt_input_json) as Record<string, unknown>;
+      const inheritedExecutionContract = Object.fromEntries(
+        ["sandbox", "permissionMode", "browserProcessPolicy", "forbidBrowser", "forbidImplementation"]
+          .flatMap((key) => sourceAttemptInput[key] === undefined ? [] : [[key, sourceAttemptInput[key]]]),
+      );
+      const eventList = durableEventRefs.length > 0 ? durableEventRefs.join(", ") : "none recorded";
+      this.createTaskWithDb(db, {
+        id: recoveryTaskId,
+        runId: task.runId,
+        parentId: task.id,
+        cycleId: task.cycleId,
+        role: task.role,
+        goal: task.goal,
+        prompt: [
+          `Recover the interrupted ${task.role} task under its existing frozen contract.`,
+          `Source task: ${task.id}`,
+          `Source attempt: ${input.attemptId}`,
+          `Durable event refs: ${eventList}`,
+          `Latest control-plane failure: ${input.reason}`,
+          "Continue from those persisted event references. Do not repeat the full evidence scan and do not broaden the role or permissions.",
+          "Return one structured terminal result.",
+        ].join("\n"),
+        dependsOn: task.dependsOn,
+        doneWhen: task.doneWhen,
+        worktreePath: task.worktreePath,
+        config: {
+          ...inheritedExecutionContract,
+          ...(task.config ?? {}),
+          deadAttemptRecovery: {
+            count: recoveryCount,
+            limit: recoveryLimit,
+            sourceTaskId: task.id,
+            sourceAttemptId: input.attemptId,
+            durableEventRefs,
+          },
+        },
+      });
+    }
+    return {
+      taskId: task.id,
+      sessionRef: task.sessionRef,
+      worktreePath: task.worktreePath,
+      reason: input.reason,
+      status: canRetry ? "todo" : "blocked",
+      recoveryCount,
+      recoveryLimit,
+      attemptId: null,
+      sourceAttemptId: input.attemptId,
+      recoveryTaskId,
+    };
+  }
+
   reclaimRunningTasksWithoutAttempts(input: ReclaimRunningTasksInput): ReclaimedRunningTask[] {
     return withDatabase(this.dbPath, (db) => {
       ensureExecutionThreads(db);
@@ -859,6 +1014,39 @@ export class Harness {
             recoveryLimit: storedLimit,
             attemptId,
           });
+        }
+
+        const runningAttemptRows = db
+          .query(
+            `
+            select tasks.*,
+                   attempts.id as source_attempt_id,
+                   execution_threads.pid as owner_pid
+            from tasks
+            join attempts on attempts.task_id = tasks.id and attempts.status = 'running'
+            join execution_threads on execution_threads.attempt_id = attempts.id
+              and execution_threads.status = 'running'
+            where tasks.run_id = $runId
+              and tasks.status = 'running'
+            order by tasks.created_at, tasks.id, attempts.started_at, attempts.id
+            `,
+          )
+          .all({ $runId: input.runId }) as Array<TaskRow & {
+            source_attempt_id: string;
+            owner_pid: number | null;
+          }>;
+        for (const row of runningAttemptRows) {
+          if (row.owner_pid === null || processIsAlive(row.owner_pid)) {
+            continue;
+          }
+          const recovered = this.recoverRunningAttemptWithDb(db, {
+            attemptId: row.source_attempt_id,
+            reason: "running attempt owner exited without terminal output",
+            maxRecoveries: recoveryLimit,
+          });
+          if (recovered) {
+            reclaimed.push(recovered);
+          }
         }
         return reclaimed;
       }).immediate();
@@ -1464,75 +1652,77 @@ export class Harness {
   }
 
   finishAttempt(input: FinishAttemptInput) {
+    return withDatabase(this.dbPath, (db) =>
+      db.transaction(() => this.finishAttemptWithDb(db, input))(),
+    );
+  }
+
+  finishAttemptWithDb(db: HarnessDatabase, input: FinishAttemptInput) {
     const output = normalizeAttemptOutput(input.output);
     if (output.status !== "done" && output.status !== "blocked") {
       throw new Error("attempt output status must be 'done' or 'blocked'");
     }
 
     const problems = output.problems ?? [];
-    return withDatabase(this.dbPath, (db) => {
-      db.transaction(() => {
-        db.query(
-          `
-          update attempts
-          set status = $status,
-              output_json = $outputJson,
-              checks_json = $checksJson,
-              artifacts_json = $artifactsJson,
-              error = $error,
-              finished_at = current_timestamp
-          where id = $attemptId and status = 'running'
-          `,
-        ).run({
-          $status: output.status,
-          $outputJson: toJson(output),
-          $checksJson: toJson(output.checks ?? []),
-          $artifactsJson: toJson(output.artifacts ?? []),
-          $error: problems.length > 0 ? problems.join("\n") : null,
-          $attemptId: input.attemptId,
-        });
-        const attemptRow = db.query("select * from attempts where id = $attemptId").get({
-          $attemptId: input.attemptId,
-        }) as AttemptRow | null;
-        if (!attemptRow) {
-          throw new Error(`attempt not found: ${input.attemptId}`);
-        }
-        db.query(
-          `
-          update tasks
-          set status = $status, updated_at = current_timestamp
-          where id = $taskId
-          `,
-        ).run({
-          $status: output.status,
-          $taskId: attemptRow.task_id,
-        });
-        const taskRow = db.query("select * from tasks where id = $taskId").get({ $taskId: attemptRow.task_id }) as
-          | TaskRow
-          | null;
-        if (taskRow) {
-          const lesson = lessonForAttempt(output);
-          db.query(
-            `
-            insert into lessons (
-              id, run_id, task_id, attempt_id, kind, summary, evidence_json
-            )
-            values (
-              $id, $runId, $taskId, $attemptId, $kind, $summary, $evidenceJson
-            )
-            `,
-          ).run({
-            $id: makeId("lesson"),
-            $runId: taskRow.run_id,
-            $taskId: attemptRow.task_id,
-            $attemptId: input.attemptId,
-            $kind: lesson.kind,
-            $summary: lesson.summary,
-            $evidenceJson: toJson(lesson.evidence),
-          });
-        }
-      })();
+    db.query(
+      `
+      update attempts
+      set status = $status,
+          output_json = $outputJson,
+          checks_json = $checksJson,
+          artifacts_json = $artifactsJson,
+          error = $error,
+          finished_at = current_timestamp
+      where id = $attemptId and status = 'running'
+      `,
+    ).run({
+      $status: output.status,
+      $outputJson: toJson(output),
+      $checksJson: toJson(output.checks ?? []),
+      $artifactsJson: toJson(output.artifacts ?? []),
+      $error: problems.length > 0 ? problems.join("\n") : null,
+      $attemptId: input.attemptId,
     });
+    const attemptRow = db.query("select * from attempts where id = $attemptId").get({
+      $attemptId: input.attemptId,
+    }) as AttemptRow | null;
+    if (!attemptRow) {
+      throw new Error(`attempt not found: ${input.attemptId}`);
+    }
+    db.query(
+      `
+      update tasks
+      set status = $status, updated_at = current_timestamp
+      where id = $taskId
+      `,
+    ).run({
+      $status: output.status,
+      $taskId: attemptRow.task_id,
+    });
+    const taskRow = db.query("select * from tasks where id = $taskId").get({ $taskId: attemptRow.task_id }) as
+      | TaskRow
+      | null;
+    if (taskRow) {
+      const lesson = lessonForAttempt(output);
+      db.query(
+        `
+        insert into lessons (
+          id, run_id, task_id, attempt_id, kind, summary, evidence_json
+        )
+        values (
+          $id, $runId, $taskId, $attemptId, $kind, $summary, $evidenceJson
+        )
+        `,
+      ).run({
+        $id: makeId("lesson"),
+        $runId: taskRow.run_id,
+        $taskId: attemptRow.task_id,
+        $attemptId: input.attemptId,
+        $kind: lesson.kind,
+        $summary: lesson.summary,
+        $evidenceJson: toJson(lesson.evidence),
+      });
+    }
   }
 
   updateAttemptInput(input: UpdateAttemptInputInput) {
@@ -3080,6 +3270,15 @@ export class Harness {
         ).run({ $contentMd: DEFAULT_TASK_PROMPT_TEMPLATE });
       }
     });
+  }
+}
+
+function processIsAlive(pid: number) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
   }
 }
 
