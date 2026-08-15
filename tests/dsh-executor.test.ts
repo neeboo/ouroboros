@@ -69,6 +69,99 @@ function availableDshResolution() {
 }
 
 describe("DeepSeek Harness CLI executor", () => {
+  test("defaults every DSH task to a hashed base-only offline profile receipt", async () => {
+    const events: Array<Record<string, unknown>> = [];
+    let processPolicy = "";
+    const executor = createDshCliExecutor({
+      cwd: taskFixture.worktreePath,
+      command: "/opt/deepseek/bin/dsh",
+      profile: "headless",
+      sandbox: "workspace-write",
+      env: {
+        HODOR_APPLICATION_BASE_URL: "https://production.invalid",
+        HODOR_APPLICATION_TOKEN: "must-not-reach-the-task",
+        LINEAR_API_KEY: "must-not-reach-the-task",
+        DEEPSEEK_API_KEY: "approved-model-key",
+      },
+      resolveCommand: availableDshResolution,
+      runCommand: async (input) => {
+        const home = input.env?.DSH_HOME ?? "";
+        const profile = JSON.parse(readFileSync(`${home}/profiles/headless/package.json`, "utf8"));
+        expect(profile.dsh.profile.bundles).toEqual(["@deepseek-ai/dsh-base", "@deepseek-ai/dsh-headless"]);
+        expect(input.env?.HODOR_APPLICATION_BASE_URL).toBeUndefined();
+        expect(input.env?.HODOR_APPLICATION_TOKEN).toBeUndefined();
+        expect(input.env?.LINEAR_API_KEY).toBeUndefined();
+        expect(input.env?.DEEPSEEK_API_KEY).toBe("approved-model-key");
+        expect(input.inheritEnv).toBe(false);
+        const patchIndex = input.cmd.indexOf("--patch");
+        processPolicy = readFileSync(input.cmd[patchIndex + 1]!, "utf8");
+        return {
+          exitCode: 0,
+          stdout: '{"status":"done","summary":"offline task entered","changedFiles":[],"checks":[],"artifacts":[],"problems":[]}',
+          stderr: "",
+        };
+      },
+    });
+
+    const output = await executor({
+      ...executorInput(),
+      attemptId: "attempt_offline_profile",
+      recorder: { stdout() {}, stderr() {}, event: (event) => events.push(event) },
+    });
+
+    expect(output.status).toBe("done");
+    expect(processPolicy).toContain("networkMode: deny");
+    expect(output.artifacts).toContainEqual(expect.objectContaining({
+      kind: "dsh_execution_profile_receipt",
+      attemptId: "attempt_offline_profile",
+      profile: "headless",
+      mode: "base-headless",
+      enabledPlugins: ["@deepseek-ai/dsh-base", "@deepseek-ai/dsh-headless"],
+      profileSha256: expect.stringMatching(/^[a-f0-9]{64}$/),
+      profilePatchSha256: expect.stringMatching(/^[a-f0-9]{64}$/),
+      processPolicyPatchSha256: expect.stringMatching(/^[a-f0-9]{64}$/),
+      network: { mode: "deny", enforcement: "dsh-sandbox-local" },
+      preflight: {
+        passed: true,
+        projectPluginsLoaded: false,
+        ambientCredentialsInherited: false,
+        targetCredentialsInherited: false,
+        modelCredentialNames: ["DEEPSEEK_API_KEY"],
+      },
+    }));
+    expect(events).toContainEqual(expect.objectContaining({
+      type: "dsh.profile.preflight",
+      attemptId: "attempt_offline_profile",
+      enabledPlugins: ["@deepseek-ai/dsh-base", "@deepseek-ai/dsh-headless"],
+      networkMode: "deny",
+    }));
+  });
+
+  test("fails before DSH boot when a task requires project plugins without an explicit host configuration", async () => {
+    let calls = 0;
+    const executor = createDshCliExecutor({
+      cwd: taskFixture.worktreePath,
+      command: "/opt/deepseek/bin/dsh",
+      profile: "headless",
+      sandbox: "workspace-write",
+      requiredPlugins: ["@hodor/hodor-project"],
+      resolveCommand: availableDshResolution,
+      runCommand: async () => {
+        calls += 1;
+        throw new Error("DSH must not start");
+      },
+    });
+
+    const output = await executor(executorInput());
+
+    expect(calls).toBe(0);
+    expect(output).toMatchObject({
+      status: "blocked",
+      summary: "DeepSeek Harness project plugins require an explicit host configuration",
+    });
+    expect(output.problems?.join("\n")).toContain("@hodor/hodor-project");
+  });
+
   test("uses an ephemeral base-only headless profile for fixed DSH repair work", async () => {
     let isolatedHome = "";
     const executor = createDshCliExecutor({
@@ -148,12 +241,18 @@ describe("DeepSeek Harness CLI executor", () => {
     expect(calls[0]).toMatchObject({
       stdin: "",
       cwd: taskFixture.worktreePath,
-      env: { DSH_HOME: "/tmp/dsh-home", DSH_PERMISSION_MODE: "workspace-write" },
+      env: { DSH_PERMISSION_MODE: "workspace-write" },
     });
+    expect(calls[0]?.env?.DSH_HOME).toContain("ouroboros-dsh-");
+    expect(calls[0]?.env?.HODOR_APPLICATION_TOKEN).toBeUndefined();
     expect(calls[0]?.cmd.slice(0, 3)).toEqual(["/opt/deepseek/bin/dsh", "--profile", "headless"]);
     expect(calls[0]?.cmd.at(-1)).toBe(executorInput().prompt);
     expect(calls[0]?.cmd).toContain("--patch");
-    expect(events.map((event) => event.type)).toEqual(["dsh.attempt.started", "dsh.attempt.terminal"]);
+    expect(events.map((event) => event.type)).toEqual([
+      "dsh.attempt.started",
+      "dsh.profile.preflight",
+      "dsh.attempt.terminal",
+    ]);
     expect(JSON.stringify(events)).not.toContain(executorInput().prompt);
   });
 
@@ -195,8 +294,35 @@ describe("DeepSeek Harness CLI executor", () => {
     expect(policyRunner).toContain("/Applications/Codex.app/Contents/Resources/codex");
     expect(policyRunner).toContain("deny process-exec");
     expect(policyRunner).toContain("deny file-read");
+    expect(policyRunner).toContain("deny network*");
+    expect(policyRunner).toContain("allowedEnvironment");
+    expect(policyRunner).not.toContain("env: process.env");
     expect(existsSync(policyPatchPath)).toBe(false);
     expect(existsSync(policyRunnerPath)).toBe(false);
+  });
+
+  test.skipIf(process.platform !== "darwin")("denies loopback TCP from DSH tool subprocesses", () => {
+    let connections = 0;
+    const server = Bun.listen({
+      hostname: "127.0.0.1",
+      port: 0,
+      socket: {
+        open() { connections += 1; },
+        data() {},
+      },
+    });
+    try {
+      const profile = darwinDshProcessProfile({ workspaceRoot: taskFixture.worktreePath });
+      const denied = Bun.spawnSync({
+        cmd: ["/usr/bin/sandbox-exec", "-p", profile, "/usr/bin/nc", "-z", "127.0.0.1", String(server.port)],
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      expect(denied.exitCode).not.toBe(0);
+      expect(connections).toBe(0);
+    } finally {
+      server.stop(true);
+    }
   });
 
   test.skipIf(process.platform !== "darwin")("denies an embedded-agent executable before a harmless sentinel can run", async () => {

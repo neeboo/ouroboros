@@ -8749,6 +8749,140 @@ if (args.includes("self-improve-daemon")) {
     )).toBe(true);
   });
 
+  test("run-loop starts an ordinary DSH Worker with the base-only offline profile receipt", async () => {
+    await runCli("init");
+    const harness = new Harness(dbPath);
+    const worktree = join(dir, "ordinary-offline-dsh-worktree");
+    const pollutedHome = join(dir, "ordinary-offline-polluted-home");
+    const dshCommand = join(dir, "fake-dsh-ordinary-offline");
+    await mkdir(worktree, { recursive: true });
+    await mkdir(join(pollutedHome, "profiles", "headless"), { recursive: true });
+    await writeFile(
+      join(pollutedHome, "profiles", "headless", "package.json"),
+      JSON.stringify({ dsh: { profile: { bundles: ["@hodor/hodor-project", "@hodor/hodor-content"] } } }),
+    );
+    await writeFile(
+      dshCommand,
+      [
+        "#!/usr/bin/env bun",
+        "import { readFileSync } from 'node:fs';",
+        "const home = process.env.DSH_HOME ?? '';",
+        `if (home === ${JSON.stringify(pollutedHome)}) process.exit(21);`,
+        "const profile = JSON.parse(readFileSync(`${home}/profiles/headless/package.json`, 'utf8'));",
+        "const bundles = profile?.dsh?.profile?.bundles ?? [];",
+        "if (JSON.stringify(bundles) !== JSON.stringify(['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-headless'])) process.exit(22);",
+        "if (process.env.HODOR_APPLICATION_TOKEN || process.env.HODOR_APPLICATION_BASE_URL) process.exit(23);",
+        "console.log(JSON.stringify({ status: 'done', summary: 'ordinary offline DSH entered task', changedFiles: [], checks: [{ name: 'offline profile boot', status: 'passed' }], artifacts: [], problems: [] }));",
+      ].join("\n"),
+    );
+    await chmod(dshCommand, 0o755);
+    const runId = harness.createRun({
+      goal: "Run an ordinary offline DSH task",
+      context: {
+        agentDefaults: { global: "codex-resumable", roles: { worker: "deepseek-harness" } },
+        agentBackends: {
+          "deepseek-harness": {
+            kind: "dsh-cli",
+            command: dshCommand,
+            profile: "headless",
+            env: {
+              DSH_HOME: pollutedHome,
+              HODOR_APPLICATION_BASE_URL: "https://production.invalid",
+              HODOR_APPLICATION_TOKEN: "must-not-reach-task",
+            },
+          },
+        },
+      },
+    });
+    const workerId = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Build offline fixture evidence",
+      prompt: "Use only local fixtures.",
+      worktreePath: worktree,
+    });
+
+    await runCliJson(
+      "run-loop",
+      "--run-id", runId,
+      "--executor", "dsh-cli",
+      "--cwd", worktree,
+      "--start-hook", "none",
+      "--max-rounds", "1",
+      "--tasks", "1",
+    );
+
+    const session = harness.getRunOverview({ runId, eventLimit: 0 }).sessions.find((candidate) => candidate.taskId === workerId)!;
+    const attempt = harness.getAttempt(session.attemptId)!;
+    expect(attempt.status).toBe("done");
+    expect(attempt.input.dshProfileIsolation).toBe("base-headless");
+    expect(attempt.output.artifacts).toContainEqual(expect.objectContaining({
+      kind: "dsh_execution_profile_receipt",
+      attemptId: attempt.id,
+      mode: "base-headless",
+      enabledPlugins: ["@deepseek-ai/dsh-base", "@deepseek-ai/dsh-headless"],
+      network: { mode: "deny", enforcement: "dsh-sandbox-local" },
+      preflight: expect.objectContaining({
+        passed: true,
+        projectPluginsLoaded: false,
+        ambientCredentialsInherited: false,
+        targetCredentialsInherited: false,
+      }),
+    }));
+  });
+
+  test("run-loop fails closed before boot when a DSH task requires unconfigured project plugins", async () => {
+    await runCli("init");
+    const harness = new Harness(dbPath);
+    const worktree = join(dir, "required-dsh-plugin-worktree");
+    const marker = join(dir, "required-dsh-plugin-started");
+    const dshCommand = join(dir, "fake-dsh-required-project-plugin");
+    await mkdir(worktree, { recursive: true });
+    await writeFile(
+      dshCommand,
+      [
+        "#!/bin/sh",
+        `printf started > ${JSON.stringify(marker)}`,
+        "exit 0",
+      ].join("\n"),
+    );
+    await chmod(dshCommand, 0o755);
+    const runId = harness.createRun({
+      goal: "Fail closed without project plugin configuration",
+      context: {
+        agentDefaults: { global: "codex-resumable", roles: { worker: "deepseek-harness" } },
+        agentBackends: {
+          "deepseek-harness": { kind: "dsh-cli", command: dshCommand, profile: "headless" },
+        },
+      },
+    });
+    const workerId = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Use the target project plugin",
+      prompt: "This task explicitly requires the project plugin.",
+      worktreePath: worktree,
+      config: { dshRequiredPlugins: ["@hodor/hodor-project"] },
+    });
+
+    await runCliJson(
+      "run-loop",
+      "--run-id", runId,
+      "--executor", "dsh-cli",
+      "--cwd", worktree,
+      "--start-hook", "none",
+      "--max-rounds", "1",
+      "--tasks", "1",
+    );
+
+    const session = harness.getRunOverview({ runId, eventLimit: 0 }).sessions.find((candidate) => candidate.taskId === workerId)!;
+    const attempt = harness.getAttempt(session.attemptId)!;
+    expect(attempt.status).toBe("blocked");
+    expect(attempt.input.dshRequiredPlugins).toEqual(["@hodor/hodor-project"]);
+    expect(attempt.output.summary).toBe("DeepSeek Harness project plugins require an explicit host configuration");
+    expect(existsSync(marker)).toBe(false);
+  });
+
   test("run-loop isolates a legacy fixed DSH repair from project plugins before starting it", async () => {
     await runCli("init");
     const harness = new Harness(dbPath);

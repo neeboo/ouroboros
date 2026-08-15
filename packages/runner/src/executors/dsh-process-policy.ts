@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { chmod, lstat, mkdir, realpath, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
@@ -13,6 +13,8 @@ const NESTED_CODEX_PATH_PATTERN = "(^|/)codex$";
 
 export interface DshProcessPolicyBundle {
   patchPath: string;
+  patchSha256: string;
+  networkMode: "deny";
   cleanup(): Promise<void>;
 }
 
@@ -26,9 +28,12 @@ export async function prepareDshProcessPolicy(): Promise<DshProcessPolicyBundle 
   const runnerPath = join(directory, "runner.mjs");
   const patchPath = join(directory, "cordis.patch.yml");
   await writeFile(runnerPath, darwinDshPolicyRunnerSource(), { mode: 0o600, flag: "wx" });
-  await writeFile(patchPath, dshPolicyPatch(process.execPath, runnerPath), { mode: 0o600, flag: "wx" });
+  const patch = dshPolicyPatch(process.execPath, runnerPath);
+  await writeFile(patchPath, patch, { mode: 0o600, flag: "wx" });
   return {
     patchPath,
+    patchSha256: createHash("sha256").update(patch).digest("hex"),
+    networkMode: "deny",
     cleanup: () => rm(directory, { recursive: true, force: true }),
   };
 }
@@ -41,6 +46,7 @@ export function darwinDshProcessProfile(input: {
   const forms = [
     "(version 1)",
     "(allow default)",
+    "(deny network*)",
     "(deny file-write*)",
     `(allow file-write* (literal ${sbplString("/dev/null")}))`,
   ];
@@ -61,6 +67,7 @@ export function darwinDshProcessProfile(input: {
 function dshPolicyPatch(runtimeExecutable: string, runnerPath: string) {
   return [
     `# ORBS_DSH_POLICY_RUNNER=${runnerPath}`,
+    "# networkMode: deny",
     "- id: sandbox",
     "  name: '@deepseek-ai/dsh-sandbox-local'",
     "  config:",
@@ -100,6 +107,7 @@ const quote = (value) => JSON.stringify(String(value));
 const forms = [
   "(version 1)",
   "(allow default)",
+  "(deny network*)",
   "(deny file-write*)",
   "(allow file-write* (literal \\\"/dev/null\\\"))",
 ];
@@ -114,9 +122,17 @@ for (const executable of PROTECTED) {
 }
 forms.push("(deny file-read* (regex #" + quote(NESTED_CODEX) + "))");
 forms.push("(deny process-exec (regex #" + quote(NESTED_CODEX) + "))");
+const allowedEnvironment = new Set([
+  "PATH", "HOME", "TMPDIR", "LANG", "LC_ALL", "LC_CTYPE", "SHELL", "USER", "LOGNAME", "TERM", "CI", "NO_COLOR",
+  "PROTO_HOME", "BUN_INSTALL", "NVM_BIN", "NVM_DIR", "PNPM_HOME",
+]);
+const childEnvironment = {};
+for (const [key, value] of Object.entries(process.env)) {
+  if (allowedEnvironment.has(key) && value !== undefined) childEnvironment[key] = value;
+}
 const child = spawn("/usr/bin/sandbox-exec", ["-p", forms.join(" "), "--", ...command], {
   stdio: "inherit",
-  env: process.env,
+  env: childEnvironment,
 });
 for (const signal of ["SIGINT", "SIGTERM"]) {
   process.on(signal, () => child.kill(signal));

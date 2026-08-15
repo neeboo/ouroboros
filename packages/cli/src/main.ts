@@ -1827,7 +1827,8 @@ function executorFactory(_executorName: CliExecutorName) {
       hostExecutionCapabilities: input.task.config?.hostExecutionCapabilities,
       taskRole: input.task.role,
       verifierContract: input.task.config?.verifierContract,
-      dshProfileIsolation: dshProfileIsolationForTask(input.task, input.route),
+      dshProfileIsolation: dshProfileIsolationForRoute(input.route),
+      dshRequiredPlugins: stringArrayConfig(input.task.config?.dshRequiredPlugins),
     });
   };
 }
@@ -1839,10 +1840,12 @@ function attemptInputFactory(_executorName: CliExecutorName) {
     cwd: string;
     route: ResolvedExecutionRoute;
   }) => {
-    const dshProfileIsolation = dshProfileIsolationForTask(input.task, input.route);
+    const dshProfileIsolation = dshProfileIsolationForRoute(input.route);
+    const dshRequiredPlugins = stringArrayConfig(input.task.config?.dshRequiredPlugins);
     return {
       ...attemptInputForRoute(input.route, input.cwd),
       ...(dshProfileIsolation ? { dshProfileIsolation } : {}),
+      ...(dshRequiredPlugins?.length ? { dshRequiredPlugins } : {}),
       ...hostExecutionCapabilityAttemptInput(input.task.config?.hostExecutionCapabilities, {
         role: input.task.role,
         verifierContract: input.task.config?.verifierContract,
@@ -1851,44 +1854,16 @@ function attemptInputFactory(_executorName: CliExecutorName) {
   };
 }
 
-function dshProfileIsolationForTask(
-  task: NonNullable<ReturnType<Harness["getTask"]>>,
-  route?: ResolvedExecutionRoute,
-) {
-  if (task.config?.dshProfileIsolation === "base-headless") {
-    return "base-headless" as const;
+function dshProfileIsolationForRoute(route?: ResolvedExecutionRoute) {
+  return route?.backend.kind === "dsh-cli" ? "base-headless" as const : undefined;
+}
+
+function stringArrayConfig(value: unknown) {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value) || value.some((item) => typeof item !== "string" || item.trim().length === 0)) {
+    return ["<invalid dshRequiredPlugins configuration>"];
   }
-  if (
-    route?.backend.kind === "dsh-cli"
-    && task.role === "worker"
-    && task.config?.goalReviewContinuation !== undefined
-  ) {
-    return "base-headless" as const;
-  }
-  if (task.role !== "worker" || !task.parentId || !task.goal.startsWith("Repair:")) {
-    return undefined;
-  }
-  const verifier = harness.getTask(task.parentId);
-  if (!verifier || verifier.role !== "verifier" || verifier.runId !== task.runId) {
-    return undefined;
-  }
-  const sourceTaskIds = new Set(verifier.dependsOn);
-  const overview = harness.getRunOverview({ runId: task.runId, eventLimit: 0 });
-  const sourceSession = [...overview.sessions]
-    .reverse()
-    .find((session) => sourceTaskIds.has(session.taskId));
-  const sourceAttempt = sourceSession ? harness.getAttempt(sourceSession.attemptId) : null;
-  const sourceRoute = sourceAttempt?.input.route;
-  if (!sourceRoute || typeof sourceRoute !== "object" || Array.isArray(sourceRoute)) {
-    return undefined;
-  }
-  const backend = (sourceRoute as Record<string, unknown>).backend;
-  if (!backend || typeof backend !== "object" || Array.isArray(backend)) {
-    return undefined;
-  }
-  return (backend as Record<string, unknown>).kind === "dsh-cli"
-    ? "base-headless" as const
-    : undefined;
+  return [...new Set(value.map((item) => item.trim()))].sort();
 }
 
 function resolveCliExecutionRoute(input: {

@@ -1156,9 +1156,10 @@ class CodexResumableOrchestrator {
         hostExecutionCapabilities: factoryInput.task.config?.hostExecutionCapabilities,
         taskRole: factoryInput.task.role,
         verifierContract: factoryInput.task.config?.verifierContract,
-        dshProfileIsolation: factoryInput.task.config?.dshProfileIsolation === "base-headless"
+        dshProfileIsolation: factoryInput.route.backend.kind === "dsh-cli"
           ? "base-headless"
           : undefined,
+        dshRequiredPlugins: stringArrayConfig(factoryInput.task.config?.dshRequiredPlugins),
       }));
     const executor = executorFactory({
       run: input.run,
@@ -1708,6 +1709,14 @@ function attemptInputForRoute(route: ResolvedExecutionRoute, cwd: string) {
     cwd,
     model: route.model,
   };
+}
+
+function stringArrayConfig(value: unknown) {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value) || value.some((item) => typeof item !== "string" || item.trim().length === 0)) {
+    return ["<invalid dshRequiredPlugins configuration>"];
+  }
+  return [...new Set(value.map((item) => item.trim()))].sort();
 }
 
 function codexAttemptInput(input: {
