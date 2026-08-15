@@ -80,6 +80,7 @@ export interface IntegrationReadiness {
 export type HarnessAction =
   | { type: "reclaimRunningTasks"; runId: string; reason?: string }
   | { type: "retryTask"; taskId: string; reason?: string }
+  | { type: "reconcileRunEvidence"; runId: string; reason: string }
   | {
       type: "materializeDesignerActionRecovery";
       runId: string;
@@ -435,6 +436,14 @@ export function parseHarnessAction(value: unknown): HarnessAction {
   if (type === "retryTask") {
     return { type, taskId: stringField(record, "taskId"), reason: optionalStringField(record, "reason") };
   }
+  if (type === "reconcileRunEvidence") {
+    assertOnlyFields(record, type, ["type", "runId", "reason"]);
+    return {
+      type,
+      runId: stringField(record, "runId"),
+      reason: stringField(record, "reason"),
+    };
+  }
   if (type === "materializeDesignerActionRecovery") {
     assertOnlyFields(record, type, ["type", "runId", "sourceTaskId", "sourceAttemptId", "reason"]);
     return {
@@ -691,7 +700,7 @@ export function parseHarnessAction(value: unknown): HarnessAction {
     };
   }
   throw new Error(
-    "harness action type must be reclaimRunningTasks, retryTask, materializeDesignerActionRecovery, markRunTodo, updateRunContext, amendRunContract, retireRun, retireTask, prepareRunDrain, completeSystemTask, integrateVerifiedRun, pushExactGitRef, createExactGitRef, commitExactGitIndex, registerEvolutionProfile, recordProductionEpisode, registerHarnessVariant, activateHarnessRevision, freezeMatchedExperiment, interruptAttemptAndCreateTask, interruptRunningAttemptsAndCreateTask, acceptGuardrailProposal, startSubsession, collectSubsessions, cancelSubsessions, or runWatchdogPass",
+    "harness action type must be reclaimRunningTasks, retryTask, reconcileRunEvidence, materializeDesignerActionRecovery, markRunTodo, updateRunContext, amendRunContract, retireRun, retireTask, prepareRunDrain, completeSystemTask, integrateVerifiedRun, pushExactGitRef, createExactGitRef, commitExactGitIndex, registerEvolutionProfile, recordProductionEpisode, registerHarnessVariant, activateHarnessRevision, freezeMatchedExperiment, interruptAttemptAndCreateTask, interruptRunningAttemptsAndCreateTask, acceptGuardrailProposal, startSubsession, collectSubsessions, cancelSubsessions, or runWatchdogPass",
   );
 }
 
@@ -732,6 +741,10 @@ export function applyHarnessAction(
     return applyDesignerActionRecoveryAtomically(harness, action);
   }
 
+  if (action.type === "reconcileRunEvidence") {
+    return applyRunEvidenceReconciliationAtomically(harness, action);
+  }
+
   if (action.type === "integrateVerifiedRun") {
     const replay = findIntegrationReplay(harness, action, options);
     if (replay) {
@@ -769,6 +782,7 @@ type EvolutionAction = Extract<
 
 type HarnessRevisionActivationAction = Extract<HarnessAction, { type: "activateHarnessRevision" }>;
 type DesignerActionRecoveryAction = Extract<HarnessAction, { type: "materializeDesignerActionRecovery" }>;
+type RunEvidenceReconciliationAction = Extract<HarnessAction, { type: "reconcileRunEvidence" }>;
 
 function isEvolutionAction(action: HarnessAction): action is EvolutionAction {
   return action.type === "registerEvolutionProfile"
@@ -910,6 +924,101 @@ function applyDesignerActionRecoveryAtomically(
     });
     return { ...result, eventId };
   }
+}
+
+function applyRunEvidenceReconciliationAtomically(
+  harness: Harness,
+  action: RunEvidenceReconciliationAction,
+): HarnessActionResult & { eventId: string } {
+  try {
+    return harness.runInImmediateTransaction((db) => {
+      const overview = harness.getRunOverviewWithDb(db, { runId: action.runId, eventLimit: 0 });
+      const run = overview.run;
+      if (!run) throw new Error(`run not found: ${action.runId}`);
+      const completion = describeRunCompletionReadiness(overview);
+      const reasons = [...new Set(completion.blockers.map((blocker) => blocker.reason))].sort();
+      if (reasons.length === 0) {
+        throw new Error(`run ${action.runId} has no machine-verifiable evidence blocker to reconcile`);
+      }
+      const currentConflict = objectRecordOrNull(run.context.evidenceConflict);
+      const reused = run.status === "blocked"
+        && currentConflict?.status === "blocked"
+        && equalStringLists(currentConflict.reasons, reasons);
+      const reconciledAt = reused && typeof currentConflict?.reconciledAt === "string"
+        ? currentConflict.reconciledAt
+        : new Date().toISOString();
+      if (!reused) {
+        harness.updateRunWithDb(db, {
+          runId: run.id,
+          status: "blocked",
+          contextPatch: {
+            evidenceConflict: {
+              schemaVersion: 1,
+              status: "blocked",
+              reasons,
+              reconciledAt,
+              reason: action.reason,
+            },
+            pendingVerificationReason: reasons.join("; "),
+          },
+        });
+        const parentRunId = typeof run.context.parentRunId === "string" ? run.context.parentRunId : null;
+        if (parentRunId && harness.getRunWithDb(db, parentRunId)) {
+          harness.updateRunWithDb(db, {
+            runId: parentRunId,
+            contextPatch: {
+              designEvidenceCorrectionRequired: {
+                schemaVersion: 1,
+                sourceRunId: run.id,
+                reasons,
+                reconciledAt,
+              },
+            },
+          });
+        }
+      }
+      const result = doneResult(
+        action.type,
+        reused
+          ? `Run ${run.id} evidence-conflict reconciliation reused.`
+          : `Run ${run.id} blocked after evidence-conflict reconciliation.`,
+        [
+          { name: "completion evidence blockers", status: "passed", evidence: reasons.join("; ") },
+          { name: "run status", status: "passed", evidence: "blocked" },
+        ],
+        [{ kind: "run_evidence_reconciliation", runId: run.id, status: "blocked", reasons, reused }],
+      );
+      const eventId = harness.recordHarnessActionEventWithDb(db, {
+        actionType: action.type,
+        status: result.status,
+        request: safeRequest(action),
+        result: resultToRecord(result),
+      });
+      return { ...result, eventId };
+    });
+  } catch (error) {
+    const problem = limitUtf8Output(errorMessage(error), 4_096);
+    const result = blockedResult(action.type, `${action.type} blocked: ${problem}`, [problem]);
+    const eventId = harness.recordHarnessActionEvent({
+      actionType: action.type,
+      status: result.status,
+      request: safeRequest(action),
+      result: resultToRecord(result),
+    });
+    return { ...result, eventId };
+  }
+}
+
+function objectRecordOrNull(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
+
+function equalStringLists(value: unknown, expected: string[]) {
+  return Array.isArray(value)
+    && value.length === expected.length
+    && value.every((item, index) => item === expected[index]);
 }
 
 function materializeDesignerActionRecoveryWithDb(
@@ -2018,7 +2127,7 @@ function applyParsedHarnessAction(
   harness: Harness,
   action: Exclude<
     HarnessAction,
-    SubsessionAction | EvolutionAction | HarnessRevisionActivationAction | DesignerActionRecoveryAction
+    SubsessionAction | EvolutionAction | HarnessRevisionActivationAction | DesignerActionRecoveryAction | RunEvidenceReconciliationAction
   >,
   options: HarnessActionOptions,
 ): HarnessActionResult {

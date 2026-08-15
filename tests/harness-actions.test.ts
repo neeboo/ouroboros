@@ -110,6 +110,103 @@ describe("Harness actions", () => {
     expect(overview.tasks).toContainEqual(expect.objectContaining({ role: "goal-review", status: "todo" }));
   });
 
+  test("atomically rejudges a falsely completed assessment with conflicting receipt evidence", () => {
+    const projectId = harness.createProject({ name: "receipt-conflict", rootPath: dir });
+    const parentRunId = harness.createRun({
+      projectId,
+      goal: "Design an offline verifier environment",
+      context: { source: "target-system-design" },
+    });
+    const runId = harness.createRun({
+      projectId,
+      goal: "Assess the offline verifier environment",
+      context: {
+        source: "design",
+        parentRunId,
+        designEvaluationContract: {
+          requiredEvidence: [
+            "Runtime identity receipt",
+            "Host network-denial receipt",
+            "Offline verifier execution receipt",
+          ],
+        },
+      },
+    });
+    const plannerId = harness.createTask({
+      runId,
+      role: "planner",
+      goal: "Assess the environment",
+      prompt: "Assess.",
+    });
+    harness.recordAttempt({
+      taskId: plannerId,
+      input: { executor: "codex-resumable" },
+      output: {
+        status: "done",
+        summary: "Host Bun is 1.3.5.",
+        checks: ["Host Bun 1.3.5 at /opt/bin/bun."],
+        artifacts: ["assessment-receipt:sha256:d6aa390d0d80e10ce30d7556187489f6e4a24f7a7aaed7a7c550e30683dc706d"],
+        problems: [],
+      },
+    });
+    const reviewId = harness.createTask({
+      runId,
+      role: "goal-review",
+      goal: "Review the assessment",
+      prompt: "Review.",
+      dependsOn: [plannerId],
+    });
+    harness.recordAttempt({
+      taskId: reviewId,
+      input: { executor: "codex-resumable" },
+      output: {
+        status: "done",
+        runDecision: "complete",
+        summary: "Current host lacks Bun.",
+        checks: ["command -v bun and bun --version exited 127; Bun is unavailable"],
+        artifacts: [],
+        problems: [],
+      },
+    });
+    harness.runInTransaction((db) => {
+      db.query("update runs set status = 'done' where id = $runId").run({ $runId: runId });
+    });
+    const taskCount = harness.getRunOverview({ runId }).tasks.length;
+
+    const request = {
+      type: "reconcileRunEvidence" as const,
+      runId,
+      reason: "Goal Review contradicted Planner runtime evidence and lacked a readable receipt.",
+    };
+    const first = applyHarnessAction(harness, request);
+    const replay = applyHarnessAction(harness, request);
+
+    expect(first).toMatchObject({
+      status: "done",
+      actionType: "reconcileRunEvidence",
+      artifacts: [expect.objectContaining({ kind: "run_evidence_reconciliation", runId, status: "blocked" })],
+    });
+    expect(replay).toMatchObject({ status: "done", actionType: "reconcileRunEvidence" });
+    expect(replay.summary).toMatch(/reused/i);
+    expect(harness.getRun(runId)).toMatchObject({
+      status: "blocked",
+      context: {
+        evidenceConflict: expect.objectContaining({
+          schemaVersion: 1,
+          status: "blocked",
+          reasons: expect.arrayContaining([
+            expect.stringMatching(/evidence conflict/i),
+            expect.stringMatching(/structured.*receipt/i),
+          ]),
+        }),
+      },
+    });
+    expect(harness.getRun(parentRunId)?.context).toMatchObject({
+      designEvidenceCorrectionRequired: expect.objectContaining({ sourceRunId: runId }),
+    });
+    expect(harness.getRunOverview({ runId }).tasks).toHaveLength(taskCount);
+  });
+
   test("prepareRunDrain closes a bounded target-system Designer continuation that explicitly quiesces", () => {
     const runId = harness.createRun({
       goal: "Design one governed target-system delivery",
@@ -6520,6 +6617,29 @@ describe("Founder charter authority evaluator", () => {
       reversibility: "hard",
       productionDeployment: true,
       schemaMigration: true,
+    });
+
+    const result = evaluate({ charter, proposal });
+
+    expect(result.disposition).toBe("automatic");
+    expect(result.reasons.some((reason) => reason.kind === "cost-requires-human-decision")).toBe(false);
+  });
+
+  test("cost-only policy keeps explicit zero-dollar reversible local tooling automatic", () => {
+    const charter = makeCharter({
+      authority: {
+        autoResearch: true,
+        autoReversibleExperiments: true,
+        humanApprovalPolicy: "cost-only",
+        requireHumanFor: [],
+      },
+    });
+    const proposal = makeProposal({
+      oneTimeCost: 0,
+      recurringCost: 0,
+      reversibility: "easy",
+      unplannedDependency: true,
+      productionDeployment: false,
     });
 
     const result = evaluate({ charter, proposal });

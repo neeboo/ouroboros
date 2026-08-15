@@ -395,6 +395,7 @@ function applyProposeDesignWithDb(
     throw new Error("proposeDesign payload.proposal.evaluationContract must be present");
   }
   requireContractEvidence(contract);
+  assertProductionComparisonHasNoPlaceholders(contract.comparison);
   const investment = proposalData.investment as Record<string, unknown> | undefined;
   if (!investment) {
     throw new Error("proposeDesign payload.proposal.investment must be present");
@@ -452,6 +453,42 @@ function applyProposeDesignWithDb(
       checkpointDecisionId: transition.checkpointDecisionId ?? null,
     },
   };
+}
+
+function assertProductionComparisonHasNoPlaceholders(value: unknown) {
+  if (value === undefined) return;
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("target-evolution comparison must be an object");
+  }
+  const comparison = value as Record<string, unknown>;
+  const equalBudget = comparison.equalBudget && typeof comparison.equalBudget === "object" && !Array.isArray(comparison.equalBudget)
+    ? comparison.equalBudget as Record<string, unknown>
+    : {};
+  const problems: string[] = [];
+  const placeholderRef = (item: unknown) => typeof item === "string"
+    && (/(?:^|[_:-])example(?:$|[_:-])/i.test(item) || /^<[^>]+>$/.test(item.trim()));
+  if (placeholderRef(comparison.controlRef)) problems.push("controlRef");
+  for (const [field, raw] of [
+    ["developmentEvidenceRefs", comparison.developmentEvidenceRefs],
+    ["holdoutEvidenceRefs", comparison.holdoutEvidenceRefs],
+    ["unrelatedEvidenceRefs", comparison.unrelatedEvidenceRefs],
+  ] as const) {
+    if (Array.isArray(raw) && raw.some(placeholderRef)) problems.push(field);
+  }
+  for (const [field, raw] of [
+    ["corpusSnapshotSha256", comparison.corpusSnapshotSha256],
+    ["toolPolicySha256", equalBudget.toolPolicySha256],
+  ] as const) {
+    if (typeof raw === "string" && (/^0{64}$/.test(raw) || /^1{64}$/.test(raw))) problems.push(field);
+  }
+  if (placeholderRef(equalBudget.model)) problems.push("equalBudget.model");
+  if (typeof comparison.primaryMetric === "string"
+    && /^(?:primary|main|target)(?: outcome)? metric$/i.test(comparison.primaryMetric.trim())) {
+    problems.push("primaryMetric");
+  }
+  if (problems.length > 0) {
+    throw new Error(`placeholder comparison fields are forbidden in a real design proposal: ${problems.join(", ")}`);
+  }
 }
 
 interface AuthorityTransitionResult {

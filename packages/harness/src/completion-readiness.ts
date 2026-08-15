@@ -1,4 +1,8 @@
-import type { RunOverview, Task } from "./types";
+import { createHash } from "node:crypto";
+import type { ObservableSession, RunOverview, Task } from "./types";
+
+const SHA256 = /^[0-9a-f]{64}$/;
+const RECEIPT_EVIDENCE = /(?:runtime identity|network-denial|offline verifier execution) receipt/i;
 
 export interface CompletionVerificationContractV1 {
   schemaVersion: 1;
@@ -21,9 +25,19 @@ export interface RunCompletionReadiness {
 
 export function describeRunCompletionReadiness(overview: RunOverview): RunCompletionReadiness {
   const workers = overview.tasks.filter((task) => task.role === "worker");
-  const required = overview.run?.context.source === "design" && workers.length > 0;
+  const requiredEvidence = readRequiredEvidence(overview.run?.context.designEvaluationContract);
+  const receiptGatedAssessment = overview.run?.context.source === "design"
+    && requiredEvidence.some((item) => RECEIPT_EVIDENCE.test(item));
+  const required = overview.run?.context.source === "design" && (workers.length > 0 || receiptGatedAssessment);
   if (!required) {
     return { required: false, verifiedWorkerTaskIds: [], blockers: [] };
+  }
+
+  const assessmentBlockers = receiptGatedAssessment
+    ? describeAssessmentEvidenceBlockers(overview)
+    : [];
+  if (workers.length === 0) {
+    return { required, verifiedWorkerTaskIds: [], blockers: assessmentBlockers };
   }
 
   const taskById = new Map(overview.tasks.map((task) => [task.id, task]));
@@ -63,10 +77,9 @@ export function describeRunCompletionReadiness(overview: RunOverview): RunComple
     }
   }
 
-  const requiredEvidence = readRequiredEvidence(overview.run?.context.designEvaluationContract);
   const heads = workers.filter((worker) => !supersededWorkerIds.has(worker.id));
   const verifiedWorkerTaskIds: string[] = [];
-  const blockers: CompletionVerificationBlocker[] = [];
+  const blockers: CompletionVerificationBlocker[] = [...assessmentBlockers];
   for (const worker of heads) {
     const verifier = latestVerifierForWorker(overview, worker.id);
     if (worker.status !== "done" || !isPassingVerifier(overview, worker, verifier, requiredEvidence)) {
@@ -80,6 +93,131 @@ export function describeRunCompletionReadiness(overview: RunOverview): RunComple
     verifiedWorkerTaskIds.push(worker.id);
   }
   return { required, verifiedWorkerTaskIds, blockers };
+}
+
+function describeAssessmentEvidenceBlockers(overview: RunOverview): CompletionVerificationBlocker[] {
+  const taskId = [...overview.tasks].reverse().find((task) => task.role === "goal-review")?.id
+    ?? [...overview.tasks].reverse().find((task) => task.role === "planner")?.id
+    ?? overview.run?.id
+    ?? "assessment";
+  const blockers: CompletionVerificationBlocker[] = [];
+  const validated = overview.sessions.flatMap((session) => {
+    const receipt = validateEnvironmentReceipt(session);
+    return receipt ? [{ session, receipt }] : [];
+  });
+  if (validated.length === 0) {
+    blockers.push({
+      taskId,
+      verifierTaskId: null,
+      reason: "structured machine receipt readback is missing for the frozen runtime, network-denial, and offline verifier evidence",
+    });
+  }
+
+  const identities = new Set(validated.map(({ receipt }) => canonicalJson(receiptIdentity(receipt))));
+  if (identities.size > 1 || hasLegacyRuntimeContradiction(overview.sessions)) {
+    blockers.push({
+      taskId,
+      verifierTaskId: null,
+      reason: "evidence conflict: assessment sessions report mutually exclusive runtime identity or capability results",
+    });
+  }
+  return blockers;
+}
+
+function validateEnvironmentReceipt(session: ObservableSession): Record<string, unknown> | null {
+  const receipt = session.verifierExecutionEnvironmentReceipt;
+  if (!receipt || receipt.kind !== "verifier_execution_environment_receipt" || receipt.schemaVersion !== 1) return null;
+  const receiptSha256 = receipt.receiptSha256;
+  const contractSha256 = receipt.contractSha256;
+  if (typeof receiptSha256 !== "string" || !SHA256.test(receiptSha256)) return null;
+  if (typeof contractSha256 !== "string" || !SHA256.test(contractSha256)) return null;
+  const { receiptSha256: _receiptSha256, ...body } = receipt;
+  if (sha256(canonicalJson(body)) !== receiptSha256) return null;
+
+  const runtime = objectOrNull(receipt.runtime);
+  const network = objectOrNull(receipt.network);
+  const boundary = objectOrNull(receipt.boundary);
+  if (runtime?.kind !== "bun"
+    || typeof runtime.path !== "string" || runtime.path.length === 0
+    || typeof runtime.version !== "string" || runtime.version.length === 0
+    || typeof runtime.sha256 !== "string" || !SHA256.test(runtime.sha256)
+    || runtime.exitCode !== 0
+    || network?.mode !== "deny"
+    || typeof network.implementation !== "string" || network.implementation.length === 0
+    || typeof network.profileSha256 !== "string" || !SHA256.test(network.profileSha256)
+    || typeof network.policyExecutableSha256 !== "string" || !SHA256.test(network.policyExecutableSha256)
+    || typeof boundary?.worktreePath !== "string" || boundary.worktreePath.length === 0
+    || typeof boundary.databasePath !== "string" || boundary.databasePath.length === 0) {
+    return null;
+  }
+  const probes = Array.isArray(network.probes) ? network.probes : [];
+  const deniedKinds = new Set(probes.flatMap((probe) => {
+    const record = objectOrNull(probe);
+    return record
+      && (record.kind === "dns" || record.kind === "tcp" || record.kind === "http")
+      && record.denied === true
+      && typeof record.exitCode === "number"
+      && record.exitCode !== 0
+      ? [record.kind]
+      : [];
+  }));
+  if (!["dns", "tcp", "http"].every((kind) => deniedKinds.has(kind))) return null;
+
+  const ref = (session.output.artifacts ?? []).find((artifact) => {
+    const record = objectOrNull(artifact);
+    return record?.kind === "verifier_execution_environment_receipt_ref"
+      && record.receiptSha256 === receiptSha256
+      && record.contractSha256 === contractSha256;
+  });
+  return ref ? receipt : null;
+}
+
+function receiptIdentity(receipt: Record<string, unknown>) {
+  const runtime = objectOrNull(receipt.runtime)!;
+  const network = objectOrNull(receipt.network)!;
+  const boundary = objectOrNull(receipt.boundary)!;
+  return {
+    contractSha256: receipt.contractSha256,
+    runtime: { path: runtime.path, version: runtime.version, sha256: runtime.sha256 },
+    network: {
+      implementation: network.implementation,
+      profileSha256: network.profileSha256,
+      policyExecutableSha256: network.policyExecutableSha256,
+    },
+    boundary: { worktreePath: boundary.worktreePath, databasePath: boundary.databasePath },
+  };
+}
+
+function hasLegacyRuntimeContradiction(sessions: ObservableSession[]) {
+  const text = sessions.map((session) => canonicalJson({
+    summary: session.output.summary,
+    checks: session.output.checks,
+    problems: session.output.problems,
+  })).join("\n");
+  const present = /\b(?:host\s+)?bun\s+(?:is\s+)?v?\d+\.\d+\.\d+\b/i.test(text);
+  const absent = /(?:bun[^\n]{0,80}(?:exit(?:ed)?\s*127|unavailable|not found)|(?:lacks|without)\s+bun)/i.test(text);
+  return present && absent;
+}
+
+function objectOrNull(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
+
+function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  if (value && typeof value === "object") {
+    return `{${Object.entries(value as Record<string, unknown>)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, item]) => `${JSON.stringify(key)}:${canonicalJson(item)}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value) ?? "null";
+}
+
+function sha256(value: string) {
+  return createHash("sha256").update(value).digest("hex");
 }
 
 export function assertRunCompletionReady(overview: RunOverview) {

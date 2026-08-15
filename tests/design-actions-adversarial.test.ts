@@ -2418,6 +2418,48 @@ describe("design-action transition coordinator (production authority path)", () 
     }
   });
 
+  test("rejects target-evolution comparison placeholders before persistence or authority approval", async () => {
+    const projectId = harness.createProject({ name: "target-placeholder", rootPath: join(dir, "target-placeholder") });
+    const runId = harness.createRun({ goal: "reject placeholder comparison", projectId });
+    const taskId = harness.createTask({
+      runId,
+      role: "designer",
+      goal: "propose a production comparison",
+      prompt: "propose",
+    });
+    seedActiveCharter(projectId);
+    const signalId = seedActiveSignal(projectId);
+    const proposal = targetEvolutionEnvelope(projectId);
+    proposal.evidenceRefs = [signalId];
+    proposal.evaluationContract.comparison = {
+      ...proposal.evaluationContract.comparison,
+      controlRef: "control_example",
+      developmentEvidenceRefs: ["development_evidence_example"],
+      corpusSnapshotSha256: "0".repeat(64),
+      equalBudget: {
+        ...proposal.evaluationContract.comparison.equalBudget,
+        model: "<model>",
+        toolPolicySha256: "1".repeat(64),
+      },
+      primaryMetric: "primary outcome metric",
+    };
+    const output = parseAttemptOutput(JSON.stringify({
+      status: "done",
+      summary: "placeholder proposal",
+      actions: [{
+        type: "proposeDesign",
+        payload: { projectId, title: "Placeholder target evolution", proposal },
+      }],
+    }));
+
+    const result = await runHook(output, runId, taskId);
+
+    expect(result.decision).toBe("exit");
+    expect(result.problems ?? []).toContainEqual(expect.stringMatching(/placeholder.*comparison/i));
+    expect(harness.listDesignProposals({ projectId })).toHaveLength(0);
+    expect(harness.listRuns().filter((run) => run.projectId === projectId)).toHaveLength(1);
+  });
+
   test("direct conflict: cited signal that names a conflicting peer routes to human-required checkpoint with no delivery run", async () => {
     const { runId, taskId } = setupRunAndTask();
     const projectId = harness.createProject({ name: "ouroboros", rootPath: dir });

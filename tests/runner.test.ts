@@ -6083,6 +6083,66 @@ describe("runner", () => {
     expect(run.context.pendingVerificationTaskIds).toEqual([repairId]);
   });
 
+  test("goal review blocks an assessment when structured receipts are missing and runtime evidence conflicts", async () => {
+    const runId = harness.createRun({
+      goal: "Assess an exact offline verifier environment",
+      context: {
+        source: "design",
+        designEvaluationContract: {
+          requiredEvidence: [
+            "Runtime identity receipt",
+            "Host network-denial receipt",
+            "Offline verifier execution receipt",
+          ],
+        },
+      },
+    });
+    const plannerId = harness.createTask({
+      runId,
+      role: "planner",
+      goal: "Assess host runtime",
+      prompt: "Assess.",
+    });
+    harness.recordAttempt({
+      taskId: plannerId,
+      input: { executor: "codex-resumable" },
+      output: {
+        status: "done",
+        summary: "Host Bun is 1.3.5.",
+        checks: ["Host Bun 1.3.5 at /opt/bin/bun."],
+        artifacts: ["assessment-receipt:sha256:d6aa390d0d80e10ce30d7556187489f6e4a24f7a7aaed7a7c550e30683dc706d"],
+        problems: [],
+      },
+    });
+    harness.createTask({
+      runId,
+      role: "goal-review",
+      goal: "Review assessment evidence",
+      prompt: "Review.",
+      dependsOn: [plannerId],
+    });
+
+    await runReadyTasks({
+      harness,
+      runId,
+      limit: 1,
+      executorFactory: () => async () => ({
+        status: "done",
+        runDecision: "complete",
+        summary: "Current host lacks Bun.",
+        changedFiles: [],
+        checks: ["command -v bun and bun --version exited 127; Bun is unavailable"],
+        artifacts: [],
+        problems: [],
+      }),
+    });
+
+    const run = harness.getRun(runId)!;
+    expect(run.status).toBe("blocked");
+    expect(run.context.pendingVerificationReason).toMatch(/evidence conflict/i);
+    expect(run.context.pendingVerificationReason).toMatch(/structured machine receipt/i);
+  });
+
   test("runner keeps dependency attempts empty for tasks without dependencies", async () => {
     const runId = harness.createRun({ goal: "Build loop" });
     harness.createTask({

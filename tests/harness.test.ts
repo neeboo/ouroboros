@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { chmod, mkdtemp, rm, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -27,6 +28,51 @@ describe("Harness", () => {
   afterEach(async () => {
     await rm(dir, { recursive: true, force: true });
   });
+
+  function environmentReceipt(version = "1.3.5", worktreePath = join(dir, "assessment")) {
+    const body = {
+      kind: "verifier_execution_environment_receipt",
+      schemaVersion: 1,
+      contractSha256: "c".repeat(64),
+      runtime: {
+        kind: "bun",
+        path: `/opt/bun-${version}`,
+        version,
+        sha256: version === "1.3.5" ? "a".repeat(64) : "b".repeat(64),
+        command: [`/opt/bun-${version}`, "--version"],
+        exitCode: 0,
+      },
+      network: {
+        mode: "deny",
+        implementation: "darwin-sandbox-exec-deny-network-v1",
+        policyExecutablePath: "/usr/bin/sandbox-exec",
+        policyExecutableSha256: "d".repeat(64),
+        profileSha256: "e".repeat(64),
+        probes: ["dns", "tcp", "http"].map((kind) => ({
+          kind,
+          command: ["/usr/bin/sandbox-exec", kind],
+          exitCode: 77,
+          denied: true,
+          failureCode: "sandbox-denied",
+        })),
+      },
+      boundary: { worktreePath, databasePath: join(dir, "ouroboros.db") },
+    };
+    const canonical = (value: unknown): string => {
+      if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
+      if (value && typeof value === "object") {
+        return `{${Object.entries(value as Record<string, unknown>)
+          .sort(([left], [right]) => left.localeCompare(right))
+          .map(([key, item]) => `${JSON.stringify(key)}:${canonical(item)}`)
+          .join(",")}}`;
+      }
+      return JSON.stringify(value) ?? "null";
+    };
+    return {
+      ...body,
+      receiptSha256: createHash("sha256").update(canonical(body)).digest("hex"),
+    };
+  }
 
   function createBlockedVerifierRepairGraph() {
     const runId = harness.createRun({ goal: "Build loop" });
@@ -384,6 +430,140 @@ describe("Harness", () => {
     expect(() => harness.updateRunStatus({ runId, status: "done" })).toThrow(
       /latest repair lineage.*has no passing verifier/i,
     );
+    expect(harness.getRun(runId)?.status).toBe("todo");
+  });
+
+  test("prevents completing a receipt-gated assessment with string-only and conflicting runtime evidence", () => {
+    const runId = harness.createRun({
+      goal: "Assess an exact offline verifier environment",
+      context: {
+        source: "design",
+        designEvaluationContract: {
+          requiredEvidence: [
+            "Runtime identity receipt",
+            "Host network-denial receipt",
+            "Offline verifier execution receipt",
+          ],
+        },
+      },
+    });
+    const plannerId = harness.createTask({
+      runId,
+      role: "planner",
+      goal: "Assess the environment",
+      prompt: "Assess.",
+    });
+    harness.recordAttempt({
+      taskId: plannerId,
+      input: { executor: "codex-resumable" },
+      output: {
+        status: "done",
+        summary: "Host Bun is 1.3.5.",
+        checks: ["Host Bun is 1.3.5 at /opt/bin/bun."],
+        artifacts: ["assessment-receipt:sha256:d6aa390d0d80e10ce30d7556187489f6e4a24f7a7aaed7a7c550e30683dc706d"],
+        problems: [],
+      },
+    });
+    const reviewId = harness.createTask({
+      runId,
+      role: "goal-review",
+      goal: "Review the assessment",
+      prompt: "Review.",
+      dependsOn: [plannerId],
+    });
+    harness.recordAttempt({
+      taskId: reviewId,
+      input: { executor: "codex-resumable" },
+      output: {
+        status: "done",
+        runDecision: "complete",
+        summary: "Current host lacks Bun.",
+        checks: ["command -v bun and bun --version exited 127; Bun is unavailable"],
+        artifacts: [],
+        problems: [],
+      },
+    });
+
+    expect(() => harness.updateRunStatus({ runId, status: "done" })).toThrow(/evidence conflict/i);
+    expect(() => harness.updateRunStatus({ runId, status: "done" })).toThrow(/structured.*receipt/i);
+    expect(harness.getRun(runId)?.status).toBe("todo");
+  });
+
+  test("completes a receipt-gated assessment only after exact structured receipt readback", () => {
+    const runId = harness.createRun({
+      goal: "Assess an exact offline verifier environment",
+      context: {
+        source: "design",
+        designEvaluationContract: {
+          requiredEvidence: [
+            "Runtime identity receipt",
+            "Host network-denial receipt",
+            "Offline verifier execution receipt",
+          ],
+        },
+      },
+    });
+    const verifierId = harness.createTask({
+      runId,
+      role: "verifier",
+      goal: "Verify the environment",
+      prompt: "Verify.",
+    });
+    const receipt = environmentReceipt();
+    harness.recordAttempt({
+      taskId: verifierId,
+      input: { verifierExecutionEnvironmentReceipt: receipt },
+      output: {
+        status: "done",
+        summary: "Host-owned environment receipt verified.",
+        checks: [{ name: "host-owned verifier execution environment", status: "passed", evidence: receipt.receiptSha256 }],
+        artifacts: [{
+          kind: "verifier_execution_environment_receipt_ref",
+          receiptSha256: receipt.receiptSha256,
+          contractSha256: receipt.contractSha256,
+        }],
+        problems: [],
+      },
+    });
+
+    harness.updateRunStatus({ runId, status: "done" });
+
+    expect(harness.getRun(runId)?.status).toBe("done");
+  });
+
+  test("blocks mutually inconsistent structured runtime receipt identities", () => {
+    const runId = harness.createRun({
+      goal: "Compare environment receipts",
+      context: {
+        source: "design",
+        designEvaluationContract: { requiredEvidence: ["Runtime identity receipt"] },
+      },
+    });
+    for (const version of ["1.3.5", "1.3.11"]) {
+      const taskId = harness.createTask({
+        runId,
+        role: "verifier",
+        goal: `Verify Bun ${version}`,
+        prompt: "Verify.",
+      });
+      const receipt = environmentReceipt(version);
+      harness.recordAttempt({
+        taskId,
+        input: { verifierExecutionEnvironmentReceipt: receipt },
+        output: {
+          status: "done",
+          summary: `Bun ${version} verified.`,
+          artifacts: [{
+            kind: "verifier_execution_environment_receipt_ref",
+            receiptSha256: receipt.receiptSha256,
+            contractSha256: receipt.contractSha256,
+          }],
+          problems: [],
+        },
+      });
+    }
+
+    expect(() => harness.updateRunStatus({ runId, status: "done" })).toThrow(/evidence conflict/i);
     expect(harness.getRun(runId)?.status).toBe("todo");
   });
 

@@ -2410,6 +2410,9 @@ export class Harness {
             attemptId: attempt.id,
             status: attempt.status,
             output: attempt.output,
+            verifierExecutionEnvironmentReceipt: objectOrNull(
+              attempt.input.verifierExecutionEnvironmentReceipt,
+            ),
             model: objectOrNull(attempt.input.model),
             backend: objectOrNull(attempt.input.backend),
             sessionName: stringOrNull(attempt.input.sessionName),

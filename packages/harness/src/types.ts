@@ -271,6 +271,7 @@ export interface ObservableSession {
   attemptId: string;
   status: Exclude<Status, "todo">;
   output: Partial<AttemptOutput>;
+  verifierExecutionEnvironmentReceipt: Record<string, unknown> | null;
   model: Record<string, unknown> | null;
   backend: Record<string, unknown> | null;
   sessionName: string | null;
