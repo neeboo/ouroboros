@@ -7,6 +7,7 @@ import { promptBudgetBlockedOutput, promptBudgetEvidence } from "../prompt-budge
 import { resolveDshCommand } from "../dsh-readiness";
 import type { TaskExecutor } from "../types";
 import { commandProblem, runLocalCommand } from "./command";
+import { prepareDshProcessPolicy } from "./dsh-process-policy";
 import { parseAttemptOutput } from "./output";
 import type { DshCliExecutorOptions } from "./types";
 
@@ -79,11 +80,13 @@ export function createDshCliExecutor(options: DshCliExecutorOptions): TaskExecut
     }
 
     let isolatedHome: string | null = null;
+    let processPolicy: Awaited<ReturnType<typeof prepareDshProcessPolicy>> = null;
     let result;
     try {
       if (options.isolatedProfile === "base-headless") {
         isolatedHome = await createIsolatedHeadlessHome();
       }
+      processPolicy = await prepareDshProcessPolicy();
       recorder?.event({
         type: "dsh.attempt.started",
         sessionName,
@@ -95,7 +98,13 @@ export function createDshCliExecutor(options: DshCliExecutorOptions): TaskExecut
         profileIsolation: options.isolatedProfile ?? null,
       });
       result = await runCommand({
-        cmd: [resolution.selectedPath, "--profile", profile, prompt],
+        cmd: [
+          resolution.selectedPath,
+          "--profile",
+          profile,
+          ...(processPolicy ? ["--patch", processPolicy.patchPath] : []),
+          prompt,
+        ],
         stdin: "",
         cwd: options.cwd,
         env: {
@@ -132,6 +141,7 @@ export function createDshCliExecutor(options: DshCliExecutorOptions): TaskExecut
       if (isolatedHome) {
         await rm(isolatedHome, { recursive: true, force: true });
       }
+      await processPolicy?.cleanup();
     }
 
     if (result.exitCode !== 0) {

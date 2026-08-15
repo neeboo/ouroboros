@@ -1,7 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import { existsSync, readFileSync } from "node:fs";
+import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { createDshCliExecutor } from "../packages/runner/src";
 import type { ResolvedExecutionRoute, RunCommandInput } from "../packages/runner/src";
+import { darwinDshProcessProfile } from "../packages/runner/src/executors/dsh-process-policy";
 
 const runFixture = {
   id: "run_dsh",
@@ -142,13 +146,119 @@ describe("DeepSeek Harness CLI executor", () => {
     expect(output).toMatchObject({ status: "done", summary: "dsh route ok", changedFiles: ["src/a.ts"] });
     expect(calls).toHaveLength(1);
     expect(calls[0]).toMatchObject({
-      cmd: ["/opt/deepseek/bin/dsh", "--profile", "headless", executorInput().prompt],
       stdin: "",
       cwd: taskFixture.worktreePath,
       env: { DSH_HOME: "/tmp/dsh-home", DSH_PERMISSION_MODE: "workspace-write" },
     });
+    expect(calls[0]?.cmd.slice(0, 3)).toEqual(["/opt/deepseek/bin/dsh", "--profile", "headless"]);
+    expect(calls[0]?.cmd.at(-1)).toBe(executorInput().prompt);
+    expect(calls[0]?.cmd).toContain("--patch");
     expect(events.map((event) => event.type)).toEqual(["dsh.attempt.started", "dsh.attempt.terminal"]);
     expect(JSON.stringify(events)).not.toContain(executorInput().prompt);
+  });
+
+  test.skipIf(process.platform !== "darwin")("installs a host-owned process policy before DSH can run nested Codex", async () => {
+    let policyPatch = "";
+    let policyRunner = "";
+    let policyPatchPath = "";
+    let policyRunnerPath = "";
+    const executor = createDshCliExecutor({
+      cwd: taskFixture.worktreePath,
+      command: "/opt/deepseek/bin/dsh",
+      profile: "headless",
+      sandbox: "workspace-write",
+      resolveCommand: availableDshResolution,
+      runCommand: async (input) => {
+        const patchIndex = input.cmd.indexOf("--patch");
+        expect(patchIndex).toBeGreaterThan(0);
+        const patchPath = input.cmd[patchIndex + 1];
+        expect(patchPath).toBeString();
+        policyPatchPath = patchPath!;
+        policyPatch = readFileSync(patchPath!, "utf8");
+        const runnerMatch = policyPatch.match(/ORBS_DSH_POLICY_RUNNER=([^\n]+)/);
+        expect(runnerMatch?.[1]).toBeString();
+        policyRunnerPath = runnerMatch![1]!;
+        policyRunner = readFileSync(policyRunnerPath, "utf8");
+        return {
+          exitCode: 0,
+          stdout: '{"status":"done","summary":"nested agent policy active","changedFiles":[],"checks":[],"artifacts":[],"problems":[]}',
+          stderr: "",
+        };
+      },
+    });
+
+    const output = await executor(executorInput());
+
+    expect(output.status).toBe("done");
+    expect(policyPatch).toContain("@deepseek-ai/dsh-sandbox-local");
+    expect(policyRunner).toContain("/Applications/ChatGPT.app/Contents/Resources/codex");
+    expect(policyRunner).toContain("/Applications/Codex.app/Contents/Resources/codex");
+    expect(policyRunner).toContain("deny process-exec");
+    expect(policyRunner).toContain("deny file-read");
+    expect(existsSync(policyPatchPath)).toBe(false);
+    expect(existsSync(policyRunnerPath)).toBe(false);
+  });
+
+  test.skipIf(process.platform !== "darwin")("denies an embedded-agent executable before a harmless sentinel can run", async () => {
+    const directory = await mkdtemp(join(homedir(), ".orbs-dsh-process-policy-"));
+    const outsideDirectory = await mkdtemp(join(homedir(), ".orbs-dsh-process-policy-outside-"));
+    const protectedExecutable = join(directory, "embedded-codex-fixture");
+    const allowedExecutable = join(directory, "ordinary-tool-fixture");
+    const protectedMarker = join(directory, "protected-ran");
+    const allowedMarker = join(directory, "allowed-ran");
+    const outsideMarker = join(outsideDirectory, "outside-ran");
+    await writeFile(protectedExecutable, `#!/bin/sh\nprintf protected > ${JSON.stringify(protectedMarker)}\n`);
+    await writeFile(allowedExecutable, `#!/bin/sh\nprintf allowed > ${JSON.stringify(allowedMarker)}\n`);
+    await chmod(protectedExecutable, 0o755);
+    await chmod(allowedExecutable, 0o755);
+    const profile = darwinDshProcessProfile({
+      workspaceRoot: directory,
+      protectedExecutables: [protectedExecutable],
+    });
+
+    try {
+      const denied = Bun.spawnSync({
+        cmd: [
+          "/usr/bin/sandbox-exec",
+          "-p",
+          profile,
+          "--",
+          "/bin/sh",
+          "-c",
+          `p=${JSON.stringify(protectedExecutable)}; "$p"`,
+        ],
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      const allowed = Bun.spawnSync({
+        cmd: ["/usr/bin/sandbox-exec", "-p", profile, "--", allowedExecutable],
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      const outsideWrite = Bun.spawnSync({
+        cmd: [
+          "/usr/bin/sandbox-exec",
+          "-p",
+          profile,
+          "--",
+          "/bin/sh",
+          "-c",
+          `printf outside > ${JSON.stringify(outsideMarker)}`,
+        ],
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+
+      expect(denied.exitCode).not.toBe(0);
+      expect(existsSync(protectedMarker)).toBe(false);
+      expect(allowed.exitCode).toBe(0);
+      expect(readFileSync(allowedMarker, "utf8")).toBe("allowed");
+      expect(outsideWrite.exitCode).not.toBe(0);
+      expect(existsSync(outsideMarker)).toBe(false);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+      await rm(outsideDirectory, { recursive: true, force: true });
+    }
   });
 
   test("fails closed before DSH for unsupported permissions and host capabilities", async () => {
@@ -228,7 +338,9 @@ describe("DeepSeek Harness CLI executor", () => {
 
     await executor(executorInput());
 
-    expect(calls[0]?.cmd).toEqual([selectedPath, "--profile", "headless", executorInput().prompt]);
+    expect(calls[0]?.cmd.slice(0, 3)).toEqual([selectedPath, "--profile", "headless"]);
+    expect(calls[0]?.cmd).toContain("--patch");
+    expect(calls[0]?.cmd.at(-1)).toBe(executorInput().prompt);
   });
 
   test("bounds and redacts malformed or failed DSH output", async () => {

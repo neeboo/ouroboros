@@ -1699,7 +1699,9 @@ if (args.includes("self-improve-daemon")) {
     for (const [index, attempt] of candidateAttempts.entries()) {
       const entry = trace[index];
       expect(entry).toMatchObject({ cwd: realpathSync(candidateWorktrees[index]), providerCalls: 0, modelInferenceCalls: 0, paidSpendUsd: 0 });
-      expect(entry.argv).toEqual(["--profile", "headless", attempt.input.prompt as string]);
+      expect(entry.argv.slice(0, 2)).toEqual(["--profile", "headless"]);
+      expect(entry.argv).toContain("--patch");
+      expect(entry.argv.at(-1)).toBe(attempt.input.prompt as string);
     }
   });
 
@@ -6999,10 +7001,10 @@ if (args.includes("self-improve-daemon")) {
 
     expect(result.tasks).toHaveLength(1);
     expect(result.tasks[0].taskId).toBe(task.id);
-    expect(trace).toMatchObject({
-      args: ["--profile", "headless", expect.stringContaining("Return the required structured result")],
-      permission: "workspace-write",
-    });
+    expect(trace).toMatchObject({ permission: "workspace-write" });
+    expect(trace.args.slice(0, 2)).toEqual(["--profile", "headless"]);
+    expect(trace.args).toContain("--patch");
+    expect(trace.args.at(-1)).toContain("Return the required structured result");
     expect(realpathSync(trace.cwd)).toBe(realpathSync(dir));
     expect(attempt.input.route).toMatchObject({
       backend: { id: "dsh-cli", kind: "dsh-cli", profile: "headless" },

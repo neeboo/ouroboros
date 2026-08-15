@@ -215,11 +215,14 @@ describe("route executor", () => {
     });
 
     expect(output.summary).toBe("dsh route ok");
-    expect(calls).toEqual([{
-      cmd: ["/custom/dsh", "--profile", "headless", "Implement the task"],
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toMatchObject({
       cwd: "/repo/.ouroboros/worktrees/task_1",
       env: { DSH_HOME: "/tmp/dsh-home", DSH_PERMISSION_MODE: "workspace-write" },
-    }]);
+    });
+    expect(calls[0]?.cmd.slice(0, 3)).toEqual(["/custom/dsh", "--profile", "headless"]);
+    expect(calls[0]?.cmd).toContain("--patch");
+    expect(calls[0]?.cmd.at(-1)).toBe("Implement the task");
   });
 
   test("blocks DSH host capabilities before launching the executor", async () => {
