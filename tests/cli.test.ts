@@ -604,7 +604,7 @@ describe("CLI", () => {
     });
     expect(result.runnerCommand).toContain(`run-loop --run-id ${result.runId}`);
     expect(result.runnerCommand).toContain("--executor codex-resumable");
-    expect(result.runnerCommand).toContain("--sandbox workspace-write");
+    expect(result.runnerCommand).toContain("--sandbox read-only");
     expect(result.runnerCommand).toContain("--tasks auto");
     expect(result.runnerCommand).toContain(`--worktree-root ${join(targetRoot, ".ouroboros/worktrees")}`);
     expect(result.runnerCommand).toContain("--start-hook git-worktree");
@@ -639,6 +639,12 @@ describe("CLI", () => {
       runId: result.runId,
       role: "designer",
       status: "todo",
+      config: {
+        readOnly: true,
+        forbidImplementation: true,
+        forbidBrowser: true,
+        browserProcessPolicy: "deny",
+      },
     });
     expect(overview.tasks[0].prompt).toContain(charter.id);
     expect(overview.tasks[0].prompt).toContain(targetProjectId);

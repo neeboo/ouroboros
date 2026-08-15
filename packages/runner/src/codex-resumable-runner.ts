@@ -1503,7 +1503,7 @@ class CodexResumableOrchestrator {
     }
     return createCodexResumableClient({
       cwd: input.cwd,
-      sandbox: "workspace-write",
+      sandbox: input.task?.config?.readOnly === true ? "read-only" : "workspace-write",
       ...this.input.codexOptions,
       browserProcessPolicy: input.task?.role === "goal-review" ? "deny" : this.input.codexOptions?.browserProcessPolicy,
       hostExecutionCapabilities: input.task?.config?.hostExecutionCapabilities,

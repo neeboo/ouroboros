@@ -392,7 +392,7 @@ if (parsed.command === "help" || flag(parsed, "help") !== undefined) {
         "--cwd",
         result.targetProject.rootPath,
         "--sandbox",
-        "workspace-write",
+        "read-only",
         "--codex-bin",
         codexBin,
         "--stop-hook",
@@ -2081,6 +2081,12 @@ async function createTargetSystemDesignBootstrap(input: {
     goal: `Design a bounded self-evolution system for ${targetProject.name}`,
     prompt: targetSystemDesignerPrompt({ kernelProject, targetProject, charterId: targetCharter.id }),
     doneWhen: TARGET_SYSTEM_DESIGN_DONE_WHEN,
+    config: {
+      readOnly: true,
+      forbidImplementation: true,
+      forbidBrowser: true,
+      browserProcessPolicy: "deny",
+    },
   });
   return {
     runId,
