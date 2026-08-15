@@ -7012,6 +7012,43 @@ if (args.includes("self-improve-daemon")) {
     expect(attempt.output).toMatchObject({ status: "done", summary: "dsh cli route complete" });
   });
 
+  test("does not apply the short streaming idle timeout to a silent bounded DSH turn", async () => {
+    await runCli("init");
+    const run = await runCliJson("create-run", "--goal", "Run a bounded silent DSH turn", "--project-root", dir);
+    const task = await runCliJson(
+      "create-task",
+      "--run-id", run.id,
+      "--role", "worker",
+      "--goal", "Complete after a silent reasoning interval",
+      "--prompt", "Return the result after bounded reasoning.",
+    );
+    const binDir = join(dir, "silent-dsh-bin");
+    await mkdir(binDir, { recursive: true });
+    await writeFile(join(binDir, "dsh"), [
+      "#!/usr/bin/env bun",
+      "console.error('dsh turn started');",
+      "await Bun.sleep(100);",
+      "console.log(JSON.stringify({ status: 'done', summary: 'silent bounded turn completed', changedFiles: [], checks: [], artifacts: [], problems: [] }));",
+    ].join("\n"));
+    await chmod(join(binDir, "dsh"), 0o755);
+
+    const result = await runCliJson(
+      "run-next",
+      "--run-id", run.id,
+      "--executor", "dsh-cli",
+      "--cwd", dir,
+      "--start-hook", "none",
+      "--sandbox", "workspace-write",
+      "--idle-timeout-ms", "20",
+      "--timeout-ms", "1000",
+      { PATH: `${binDir}:${process.env.PATH ?? ""}` },
+    );
+    const attempt = new Harness(dbPath).getAttempt(result.tasks[0].attemptId)!;
+
+    expect(result.tasks[0].taskId).toBe(task.id);
+    expect(attempt.output).toMatchObject({ status: "done", summary: "silent bounded turn completed" });
+  });
+
   test("runs the context summary stop hook after verifier attempts from the CLI", async () => {
     await runCli("init");
     const run = await runCliJson("create-run", "--goal", "Bootstrap ouroboros");

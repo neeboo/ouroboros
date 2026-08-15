@@ -1769,22 +1769,24 @@ function executorFactory(_executorName: CliExecutorName) {
     task: NonNullable<ReturnType<Harness["getTask"]>>;
     cwd: string;
     route: ResolvedExecutionRoute;
-  }) =>
-    createRouteExecutor({
+  }) => {
+    const hardTimeoutMs = genericHardTimeoutMs();
+    return createRouteExecutor({
       cwd: input.cwd,
       route: input.route,
       approval: parseApproval(flag(parsed, "approval") ?? "approve-reads"),
       browserProcessPolicy: input.task.role === "goal-review" ? "deny" : parseBrowserProcessPolicy(),
       sandbox: parseSandbox(flag(parsed, "sandbox") ?? "read-only"),
       codexBin: flag(parsed, "codex-bin"),
-      timeoutMs: genericHardTimeoutMs(),
-      idleTimeoutMs: genericIdleTimeoutMs(),
+      timeoutMs: hardTimeoutMs,
+      idleTimeoutMs: input.route.backend.kind === "dsh-cli" ? hardTimeoutMs : genericIdleTimeoutMs(),
       replayCache,
       hostExecutionCapabilities: input.task.config?.hostExecutionCapabilities,
       taskRole: input.task.role,
       verifierContract: input.task.config?.verifierContract,
       dshProfileIsolation: dshProfileIsolationForTask(input.task, input.route),
     });
+  };
 }
 
 function attemptInputFactory(_executorName: CliExecutorName) {
