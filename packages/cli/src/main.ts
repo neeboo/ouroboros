@@ -2,6 +2,7 @@
 import {
   acceptGuardrailProposal as acceptGuardrailProposalInContext,
   applyHarnessAction,
+  canonicalEvolutionValueSha256,
   describeIntegrationReadiness,
   describeRunCompletionReadiness,
   diagnoseRunOverview,
@@ -1603,6 +1604,7 @@ function targetSystemDesignerPrompt(input: {
   targetProject: NonNullable<ReturnType<Harness["getProject"]>>;
   charterId: string;
   researchEvidenceLinks: ResearchEvidenceLinkV1[];
+  evidenceBundle: TargetSystemEvidenceBundleV1;
 }) {
   const researchEvidence = input.researchEvidenceLinks.length === 0
     ? ["- no project-owned research evidence links are currently registered"]
@@ -1623,9 +1625,15 @@ function targetSystemDesignerPrompt(input: {
     "",
     "Durable target-owned research evidence is frozen below as references only:",
     ...researchEvidence,
-    `Refresh the project index with: orbs list-research-evidence --project-id ${input.targetProject.id}`,
-    `Read any original artifact with: orbs show-research-evidence --project-id ${input.targetProject.id} --signal-id <signal_id> --artifact-id <artifact_id>`,
+    "",
+    "The following host-built evidence bundle is authoritative for this design. Its bundleSha256 binds the complete JSON object except bundleSha256:",
+    JSON.stringify(input.evidenceBundle, null, 2),
+    "Do not read any control database discovered inside the target worktree. In particular, do not inspect .orbs/harness.db, .git/orbs, or another locally discovered database.",
+    `Refresh the project index only with: ${authoritativeEvidenceCommand(input.evidenceBundle, "list-research-evidence", "--project-id", input.targetProject.id)}`,
+    `Read any original artifact only with: ${authoritativeEvidenceCommand(input.evidenceBundle, "show-research-evidence", "--project-id", input.targetProject.id, "--signal-id", "<signal_id>", "--artifact-id", "<artifact_id>")}`,
     "Read the original evaluation-contract artifact before constructing comparison. If it lacks a precise corpus snapshot and hash, propose the smallest zero-cost evidence-building step; do not claim the research is absent.",
+    "When acceptedProposals is non-empty, copy its comparison exactly. Never substitute an output hash, placeholder hash, example reference, or newly invented metric.",
+    "When exactFileBoundary is present, preserve exactPaths byte-for-byte as the only candidate file list. The host must remove every unexpectedPaths entry before delivery; do not replace the list with newly invented paths.",
     "",
     "Return either a justified quiescent result with no actions, or one fixed proposeDesign action.",
     `For proposeDesign, payload.projectId must equal ${input.targetProject.id}. The proposal must include the complete target-evolution group: evolutionPack, causalHypothesis, and evaluationContract.comparison.`,
@@ -1633,6 +1641,206 @@ function targetSystemDesignerPrompt(input: {
     "Do not create delivery tasks or runs from this design step. Do not use createTasks, createRuns, or generic nextRuns to bypass authority.",
     "Only an accepted stored proposal with an approved authority decision may later create delivery runs through the fixed createRunsFromDesign action.",
   ].join("\n");
+}
+
+interface TargetSystemEvidenceBundleV1 {
+  schemaVersion: 1;
+  targetProjectId: string;
+  authoritativeDatabase: {
+    path: string;
+    bindingSha256: string;
+  };
+  referencedSignals: Array<{
+    id: string;
+    projectId: string | null;
+    status: string;
+    source: string;
+    summary: string;
+    evidence: unknown[];
+    payload: Record<string, unknown>;
+    payloadSha256: string;
+  }>;
+  blockedSignals: Array<{
+    id: string;
+    projectId: string | null;
+    status: string;
+    source: string;
+    summary: string;
+    evidence: unknown[];
+    payload: Record<string, unknown>;
+    payloadSha256: string;
+  }>;
+  acceptedProposals: Array<{
+    id: string;
+    projectId: string | null;
+    status: string;
+    approvedDecisionIds: string[];
+    comparison: unknown;
+    comparisonSha256: string;
+  }>;
+  exactFileBoundary?: {
+    sourceRunId: string;
+    sourceWorkerTaskId: string;
+    sourceWorkerAttemptId: string;
+    expectedFileCount: number;
+    exactPaths: string[];
+    unexpectedRepairAttemptId: string | null;
+    unexpectedPaths: string[];
+    policy: {
+      removeUnexpectedPathsBeforeDelivery: true;
+      requireWorkerPerFileSha256: true;
+      oldRunMustRemainBlocked: true;
+    };
+  };
+  bundleSha256: string;
+}
+
+function authoritativeEvidenceCommand(
+  bundle: TargetSystemEvidenceBundleV1,
+  command: string,
+  ...args: string[]
+) {
+  return ["orbs", "--db", bundle.authoritativeDatabase.path, command, ...args].map(shellQuote).join(" ");
+}
+
+function referencedIds(text: string, prefix: "signal" | "design") {
+  return [...new Set(text.match(new RegExp(`\\b${prefix}_[A-Za-z0-9_]+\\b`, "g")) ?? [])];
+}
+
+function evidenceAttemptIds(evidence: unknown[]) {
+  return evidence.flatMap((entry) => {
+    if (typeof entry !== "string") return [];
+    const match = /^attempt:(attempt_[A-Za-z0-9_]+)$/.exec(entry);
+    return match ? [match[1]!] : [];
+  });
+}
+
+function buildTargetSystemEvidenceBundle(input: {
+  targetProjectId: string;
+  charterId: string;
+  goal: string;
+}): TargetSystemEvidenceBundleV1 {
+  const authoritativePath = resolve(parsed.db);
+  const referencedSignals = referencedIds(input.goal, "signal").map((id) => {
+    const signal = harness.getStrategySignal({ id });
+    if (!signal) fail(`referenced strategy signal not found in authoritative database: ${id}`);
+    if (signal.projectId !== input.targetProjectId) {
+      fail(`referenced strategy signal belongs to another project: ${id}`);
+    }
+    return {
+      id: signal.id,
+      projectId: signal.projectId,
+      status: signal.status,
+      source: signal.source,
+      summary: signal.summary,
+      evidence: signal.evidence,
+      payload: signal.payload,
+      payloadSha256: canonicalEvolutionValueSha256(signal.payload),
+    };
+  });
+  const blockedSignals = referencedSignals.filter((signal) =>
+    signal.source.startsWith("blocked-run-outcome:")
+    || signal.payload.outcome === "blocked-evidence-conflict"
+  );
+  const acceptedProposals = referencedIds(input.goal, "design").map((id) => {
+    const proposal = harness.getDesignProposal({ id });
+    if (!proposal) fail(`referenced design proposal not found in authoritative database: ${id}`);
+    if (proposal.projectId !== input.targetProjectId) {
+      fail(`referenced design proposal belongs to another project: ${id}`);
+    }
+    if (proposal.status !== "accepted") {
+      fail(`referenced design proposal is not accepted: ${id}`);
+    }
+    const approvedDecisionIds = harness.listDesignDecisions({ proposalId: id })
+      .filter((decision) => decision.decision === "approved")
+      .map((decision) => decision.id);
+    if (approvedDecisionIds.length === 0) {
+      fail(`referenced accepted design proposal has no approved decision: ${id}`);
+    }
+    const comparison = proposal.proposal.evaluationContract.comparison;
+    if (!comparison) fail(`referenced accepted design proposal has no comparison: ${id}`);
+    return {
+      id: proposal.id,
+      projectId: proposal.projectId,
+      status: proposal.status,
+      approvedDecisionIds,
+      comparison,
+      comparisonSha256: canonicalEvolutionValueSha256(comparison),
+    };
+  });
+  const exactFileBoundary = deriveExactTargetFileBoundary(blockedSignals);
+  const authoritativeDatabase = {
+    path: authoritativePath,
+    bindingSha256: canonicalEvolutionValueSha256({
+      path: authoritativePath,
+      targetProjectId: input.targetProjectId,
+      charterId: input.charterId,
+    }),
+  };
+  const body = {
+    schemaVersion: 1 as const,
+    targetProjectId: input.targetProjectId,
+    authoritativeDatabase,
+    referencedSignals,
+    blockedSignals,
+    acceptedProposals,
+    ...(exactFileBoundary ? { exactFileBoundary } : {}),
+  };
+  return {
+    ...body,
+    bundleSha256: canonicalEvolutionValueSha256(body),
+  };
+}
+
+function deriveExactTargetFileBoundary(
+  blockedSignals: TargetSystemEvidenceBundleV1["blockedSignals"],
+): TargetSystemEvidenceBundleV1["exactFileBoundary"] | undefined {
+  for (const signal of blockedSignals) {
+    const evidenceBoundary = recordValue(signal.payload.evidenceBoundary);
+    const expectedFileCount = evidenceBoundary.expectedFileCount;
+    if (!Number.isInteger(expectedFileCount) || Number(expectedFileCount) <= 0) continue;
+    const attempts = evidenceAttemptIds(signal.evidence)
+      .map((attemptId) => harness.getAttempt(attemptId))
+      .filter((attempt): attempt is NonNullable<ReturnType<Harness["getAttempt"]>> => attempt !== null)
+      .map((attempt) => ({ attempt, task: harness.getTask(attempt.taskId) }))
+      .filter((entry) => entry.task?.role === "worker" && entry.attempt.status === "done");
+    const source = attempts.find((entry) => {
+      const paths = entry.attempt.output.changedFiles ?? [];
+      return paths.length === Number(expectedFileCount) && new Set(paths).size === paths.length;
+    });
+    if (!source || !source.task) {
+      fail(`blocked signal ${signal.id} has no done Worker attempt with exactly ${expectedFileCount} changed files`);
+    }
+    const exactPaths = [...(source.attempt.output.changedFiles ?? [])];
+    const exactSet = new Set(exactPaths);
+    const repair = attempts.find((entry) => {
+      if (entry.attempt.id === source.attempt.id) return false;
+      const paths = entry.attempt.output.changedFiles ?? [];
+      return paths.length > exactPaths.length && exactPaths.every((path) => paths.includes(path));
+    });
+    const unexpectedPaths = repair
+      ? (repair.attempt.output.changedFiles ?? []).filter((path) => !exactSet.has(path))
+      : [];
+    const sourceRun = harness.getRun(source.task.runId);
+    if (!sourceRun || sourceRun.projectId !== signal.projectId) {
+      fail(`blocked signal ${signal.id} Worker evidence is not owned by the target project`);
+    }
+    return {
+      sourceRunId: source.task.runId,
+      sourceWorkerTaskId: source.task.id,
+      sourceWorkerAttemptId: source.attempt.id,
+      expectedFileCount: Number(expectedFileCount),
+      exactPaths,
+      unexpectedRepairAttemptId: repair?.attempt.id ?? null,
+      unexpectedPaths,
+      policy: {
+        removeUnexpectedPathsBeforeDelivery: true,
+        requireWorkerPerFileSha256: true,
+        oldRunMustRemainBlocked: true,
+      },
+    };
+  }
+  return undefined;
 }
 
 function cliCommand(command: string, ...args: string[]) {
@@ -2086,6 +2294,11 @@ async function createTargetSystemDesignBootstrap(input: {
   }
   const config = await loadCliConfig();
   const researchEvidenceLinks = listResearchEvidenceLinks(harness, { projectId: targetProject.id, limit: 100 });
+  const targetSystemEvidenceBundle = buildTargetSystemEvidenceBundle({
+    targetProjectId: targetProject.id,
+    charterId: targetCharter.id,
+    goal: input.goal,
+  });
   const runId = harness.createRun({
     goal: input.goal,
     projectId: targetProject.id,
@@ -2101,6 +2314,7 @@ async function createTargetSystemDesignBootstrap(input: {
         cycle: { kind: "design", index: 0 },
       },
       researchEvidenceLinks,
+      targetSystemEvidenceBundle,
     }, config),
   });
   const taskId = harness.createTask({
@@ -2112,6 +2326,7 @@ async function createTargetSystemDesignBootstrap(input: {
       targetProject,
       charterId: targetCharter.id,
       researchEvidenceLinks,
+      evidenceBundle: targetSystemEvidenceBundle,
     }),
     doneWhen: TARGET_SYSTEM_DESIGN_DONE_WHEN,
     config: {
@@ -2119,6 +2334,7 @@ async function createTargetSystemDesignBootstrap(input: {
       forbidImplementation: true,
       forbidBrowser: true,
       browserProcessPolicy: "deny",
+      targetSystemEvidenceBundle,
     },
   });
   return {

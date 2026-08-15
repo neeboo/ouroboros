@@ -660,6 +660,188 @@ describe("CLI", () => {
     expect(overview.tasks[0].prompt).toContain("quiescent");
   });
 
+  test("binds target-system design evidence to the authoritative database instead of a stale target-worktree database", async () => {
+    await runCli("init");
+    const setupHarness = new Harness(dbPath);
+    const kernelRoot = join(dir, "kernel-authoritative-evidence");
+    const targetRoot = join(dir, "target-authoritative-evidence");
+    await mkdir(kernelRoot, { recursive: true });
+    await mkdir(join(targetRoot, ".orbs"), { recursive: true });
+    await writeFile(join(targetRoot, ".orbs", "harness.db"), "stale-local-control-database");
+    const kernelProjectId = setupHarness.createProject({ name: "Kernel", rootPath: kernelRoot });
+    const targetProjectId = setupHarness.createProject({ name: "Target", rootPath: targetRoot });
+    setupHarness.createFounderCharter({
+      projectId: targetProjectId,
+      mission: "Use only authoritative evidence when repairing a blocked evidence chain.",
+      activate: true,
+    });
+
+    const exactPaths = [
+      "config/evolution/target-evolution-pack-v4/matched-corpus-manifest.json",
+      "config/evolution/target-evolution-pack-v4/sealed-holdout-commitment.json",
+      "config/evolution/target-evolution-pack-v4/control-equal-budget-receipt.json",
+      "config/evolution/target-evolution-pack-v4/offline-fixture-tool-policy-receipt.json",
+      "tests/evolution/target-evolution-pack-v4/verify-and-replay.mjs",
+      "tests/evolution/target-evolution-pack-v4/receipts/fixture-replay.json",
+      "tests/evolution/target-evolution-pack-v4/receipts/unrelated-regression-replay.json",
+    ];
+    const unexpectedPath = "config/evolution/target-evolution-pack-v4/corpus-canonicalization-receipt.json";
+    const sourceRunId = setupHarness.createRun({
+      projectId: targetProjectId,
+      goal: "Blocked seven-file evidence delivery",
+      context: { source: "design" },
+    });
+    const workerTaskId = setupHarness.createTask({
+      runId: sourceRunId,
+      role: "worker",
+      goal: "Create the frozen seven files",
+      prompt: "Create only the frozen files.",
+    });
+    const workerAttemptId = setupHarness.startAttempt({ taskId: workerTaskId, input: {} });
+    setupHarness.finishAttempt({
+      attemptId: workerAttemptId,
+      output: { status: "done", summary: "Seven files created.", changedFiles: exactPaths, checks: [], artifacts: [], problems: [] },
+    });
+    const repairTaskId = setupHarness.createTask({
+      runId: sourceRunId,
+      role: "worker",
+      goal: "Repair the frozen evidence delivery",
+      prompt: "Repair the evidence delivery.",
+    });
+    const repairAttemptId = setupHarness.startAttempt({ taskId: repairTaskId, input: {} });
+    setupHarness.finishAttempt({
+      attemptId: repairAttemptId,
+      output: {
+        status: "done",
+        summary: "Repair added one unexpected path.",
+        changedFiles: [...exactPaths.slice(0, 4), unexpectedPath, ...exactPaths.slice(4)],
+        checks: [],
+        artifacts: [],
+        problems: [],
+      },
+    });
+    setupHarness.updateRunStatus({ runId: sourceRunId, status: "blocked" });
+
+    const signalId = "signal_blocked_authoritative_bundle";
+    setupHarness.createStrategySignal({
+      id: signalId,
+      projectId: targetProjectId,
+      signalClass: "system",
+      source: `blocked-run-outcome:${sourceRunId}`,
+      title: "Seven-file evidence delivery stopped at the host boundary",
+      summary: "The Worker produced seven files without per-file hashes and the Repair added an eighth path.",
+      observationTime: "2026-08-15T21:51:03.465Z",
+      confidence: 1,
+      evidence: [`run:${sourceRunId}`, `task:${workerTaskId}`, `attempt:${workerAttemptId}`, `task:${repairTaskId}`, `attempt:${repairAttemptId}`],
+      payload: {
+        outcome: "blocked-evidence-conflict",
+        evidenceBoundary: {
+          expectedFileCount: 7,
+          workerPerFileSha256Receipt: false,
+          repairUnexpectedFileCount: 1,
+          oldRunPolicy: "do-not-resume",
+        },
+      },
+    });
+
+    const corpusSnapshotSha256 = "66cf98c66504430f9ead4767354ded32935ee33629513cd78724b6962d0b16ac";
+    const toolPolicySha256 = "5636de84f820f29f5f4fb6f2db825e66c8259b630984c6acab641934a16f9853";
+    const proposal = setupHarness.createDesignProposal({
+      id: "design_authoritative_bundle",
+      projectId: targetProjectId,
+      title: "Frozen matched comparison",
+      problem: "The evidence chain needs a deterministic matched comparison.",
+      recommendation: "Preserve the accepted comparison while repairing only its evidence chain.",
+      status: "accepted",
+      proposal: {
+        problem: "The evidence chain needs a deterministic matched comparison.",
+        recommendation: "Preserve the accepted comparison while repairing only its evidence chain.",
+        evaluationContract: {
+          baseline: ["evidence chain incomplete"],
+          successMetrics: ["evidence chain complete"],
+          guardMetrics: ["no eighth file"],
+          requiredEvidence: ["host receipt"],
+          comparison: {
+            controlRef: "artifact:target-control-policy-v1",
+            developmentEvidenceRefs: ["fixture:development-a"],
+            holdoutEvidenceRefs: ["fixture:sealed-holdout"],
+            unrelatedEvidenceRefs: ["fixture:unrelated"],
+            corpusSnapshotSha256,
+            equalBudget: {
+              model: "gpt-5.6-luna",
+              reasoningEffort: "high",
+              wallClockMs: 300_000,
+              maxAttempts: 2,
+              maxTokens: 20_000,
+              toolPolicySha256,
+              concurrency: 1,
+            },
+            primaryMetric: "matched offline replay pass rate",
+            minimumUplift: 0,
+            maximumGuardRegression: 0,
+          },
+        },
+        investment: { reversibility: "easy", portfolio: "core", oneTimeCost: 0, recurringCost: 0 },
+      },
+    });
+    const decision = setupHarness.recordDesignDecision({
+      proposalId: proposal.id,
+      decision: "approved",
+      actorKind: "auto",
+      actorRef: "authority-evaluator",
+      reasons: ["Zero-cost evidence-chain repair."],
+    });
+
+    const result = await runCliJson(
+      "design-target-system",
+      "--kernel-project-id", kernelProjectId,
+      "--target-project-id", targetProjectId,
+      "--goal", `Review ${signalId} against accepted proposal ${proposal.id}`,
+    );
+    const overview = await runCliJson("run-overview", "--run-id", result.runId);
+    const bundle = overview.run.context.targetSystemEvidenceBundle;
+
+    expect(bundle).toMatchObject({
+      schemaVersion: 1,
+      targetProjectId,
+      authoritativeDatabase: { path: resolve(dbPath) },
+      blockedSignals: [{ id: signalId, projectId: targetProjectId, payload: expect.any(Object) }],
+      acceptedProposals: [{
+        id: proposal.id,
+        projectId: targetProjectId,
+        status: "accepted",
+        approvedDecisionIds: [decision.id],
+        comparison: { corpusSnapshotSha256, equalBudget: { toolPolicySha256 } },
+      }],
+      exactFileBoundary: {
+        sourceRunId,
+        sourceWorkerTaskId: workerTaskId,
+        sourceWorkerAttemptId: workerAttemptId,
+        expectedFileCount: 7,
+        exactPaths,
+        unexpectedRepairAttemptId: repairAttemptId,
+        unexpectedPaths: [unexpectedPath],
+        policy: {
+          removeUnexpectedPathsBeforeDelivery: true,
+          requireWorkerPerFileSha256: true,
+        },
+      },
+    });
+    expect(bundle.bundleSha256).toMatch(/^[a-f0-9]{64}$/);
+    expect(bundle.authoritativeDatabase.bindingSha256).toMatch(/^[a-f0-9]{64}$/);
+    expect(overview.tasks[0].config.targetSystemEvidenceBundle).toEqual(bundle);
+    expect(overview.tasks[0].prompt).toContain(resolve(dbPath));
+    expect(overview.tasks[0].prompt).toContain(`orbs --db ${resolve(dbPath)} list-research-evidence`);
+    expect(overview.tasks[0].prompt).toContain(corpusSnapshotSha256);
+    expect(overview.tasks[0].prompt).toContain(toolPolicySha256);
+    expect(overview.tasks[0].prompt).toContain(workerAttemptId);
+    expect(overview.tasks[0].prompt).toContain(unexpectedPath);
+    expect(overview.tasks[0].prompt).toContain("Do not read any control database discovered inside the target worktree");
+    expect(overview.tasks[0].prompt).not.toContain("1".repeat(64));
+    expect(overview.tasks[0].prompt).not.toContain("0679ef6f3d928221ef32f37f4666cf198ed10892078b53e34032af6eeda1034b");
+    expect(await readFile(join(targetRoot, ".orbs", "harness.db"), "utf8")).toBe("stale-local-control-database");
+  });
+
   test("target-system Designer discovers linked research refs and can read each original artifact", async () => {
     await runCli("init");
     const setupHarness = new Harness(dbPath);

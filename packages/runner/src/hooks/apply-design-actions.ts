@@ -1804,6 +1804,7 @@ const PROTECTED_DESIGN_CONTEXT_KEYS = [
   "linearIntake",
   "activeHarnessRevision",
   "harnessRevision",
+  "targetSystemEvidenceBundle",
 ] as const;
 
 interface DesignDeliveryPlan {

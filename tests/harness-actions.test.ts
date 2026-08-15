@@ -597,6 +597,64 @@ describe("Harness actions", () => {
     })).toMatchObject({ status: "blocked", problems: [expect.stringContaining("targetSystemDesignQuiescence")] });
   });
 
+  test("prepareRunDrain creates a read-only target-system Goal Review bound to authoritative evidence", () => {
+    const evidenceBundle = {
+      schemaVersion: 1,
+      targetProjectId: "project_target",
+      authoritativeDatabase: { path: "/authoritative/harness.db", bindingSha256: "a".repeat(64) },
+      blockedSignals: [{ id: "signal_blocked", payload: { outcome: "blocked-evidence-conflict" } }],
+      acceptedProposals: [],
+      bundleSha256: "b".repeat(64),
+    };
+    const runId = harness.createRun({
+      goal: "Repair one target-system evidence chain",
+      context: {
+        source: "target-system-design",
+        targetSystemEvidenceBundle: evidenceBundle,
+        repairReplanBudget: { limit: 3, used: 0, entries: [] },
+      },
+    });
+    const designerTaskId = harness.createTask({
+      runId,
+      role: "designer",
+      goal: "Propose from authoritative evidence",
+      prompt: "Use only the evidence bundle.",
+      config: { readOnly: true, forbidImplementation: true },
+    });
+    harness.recordAttempt({
+      taskId: designerTaskId,
+      input: { executor: "codex-resumable", sandbox: "read-only" },
+      output: {
+        status: "blocked",
+        summary: "Fixed action rejected a placeholder comparison.",
+        changedFiles: [],
+        checks: [],
+        artifacts: [],
+        problems: ["placeholder comparison fields are forbidden in a real design proposal: toolPolicySha256"],
+      },
+    });
+
+    const result = applyHarnessAction(harness, { type: "prepareRunDrain", runId });
+    const overview = harness.getRunOverview({ runId, eventLimit: 0 });
+    const review = overview.tasks.find((task) => task.role === "goal-review");
+
+    expect(result.status).toBe("done");
+    expect(review).toMatchObject({
+      role: "goal-review",
+      status: "todo",
+      config: {
+        readOnly: true,
+        forbidImplementation: true,
+        forbidBrowser: true,
+        forbidProjectCommands: true,
+        targetSystemEvidenceBundle: evidenceBundle,
+      },
+    });
+    expect(review?.prompt).toContain("authoritative evidence bundle");
+    expect(review?.prompt).toContain("Do not run project tests, builds, installs, or repository-wide scans");
+    expect(review?.prompt).not.toContain("production-collaboration");
+  });
+
   test("prepareRunDrain does not create a second goal review after governed next tasks were rejected", () => {
     const runId = harness.createRun({
       goal: "Stop one rejected target-system Goal Review loop",

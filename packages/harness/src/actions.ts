@@ -477,6 +477,7 @@ const FROZEN_DESIGN_CONTEXT_KEYS = new Set([
   "resourceAllocation",
   "targetSystemDesignQuiescence",
   "researchEvidenceLinks",
+  "targetSystemEvidenceBundle",
 ]);
 
 function frozenDesignContextKeys(keys: Iterable<string>): string[] {
@@ -8519,14 +8520,34 @@ function createGoalReviewTask(
   overview: ReturnType<Harness["getRunOverview"]>,
 ) {
   const sourceTask = selectGoalReviewSourceTask(harness, runId, overview);
+  const targetSystemDesign = overview.run?.context.source === "target-system-design";
+  const evidenceBundle = targetSystemDesign ? overview.run?.context.targetSystemEvidenceBundle : undefined;
+  const prompt = targetSystemDesign
+    ? [
+        "Review only the target-system Designer decision and its fixed-action validation against the authoritative evidence bundle below.",
+        "Do not run project tests, builds, installs, or repository-wide scans. Do not inspect a database discovered inside the target worktree.",
+        "Do not create a Planner or Worker on this design root. A rejected fixed design action may only produce one bounded read-only Designer correction; an accepted proposal proceeds through authority and createRunsFromDesign.",
+        "Authoritative evidence bundle:",
+        JSON.stringify(evidenceBundle ?? null, null, 2),
+      ].join("\n")
+    : GOAL_REVIEW_TASK_PROMPT;
   const taskId = harness.createTask({
     runId,
     role: "goal-review",
     goal: GOAL_REVIEW_TASK_GOAL,
-    prompt: GOAL_REVIEW_TASK_PROMPT,
+    prompt,
     dependsOn: sourceTask?.status === "done" ? [sourceTask.id] : [],
     worktreePath: sourceTask?.worktreePath ?? null,
     doneWhen: GOAL_REVIEW_TASK_DONE_WHEN,
+    config: targetSystemDesign
+      ? {
+          readOnly: true,
+          forbidImplementation: true,
+          forbidBrowser: true,
+          forbidProjectCommands: true,
+          ...(evidenceBundle !== undefined ? { targetSystemEvidenceBundle: evidenceBundle } : {}),
+        }
+      : undefined,
   });
   return { taskId, sourceTask };
 }

@@ -6843,6 +6843,87 @@ describe("runner", () => {
     expect(harness.getTask(reviewTaskId)?.status).toBe("done");
   });
 
+  test("goal review cannot turn a placeholder comparison rejection into a Planner", async () => {
+    const evidenceBundle = {
+      schemaVersion: 1,
+      targetProjectId: "project_target",
+      authoritativeDatabase: { path: "/authoritative/harness.db", bindingSha256: "a".repeat(64) },
+      blockedSignals: [],
+      acceptedProposals: [],
+      bundleSha256: "b".repeat(64),
+    };
+    const runId = harness.createRun({
+      goal: "Repair one rejected target-system design proposal",
+      context: {
+        source: "target-system-design",
+        targetSystemEvidenceBundle: evidenceBundle,
+        repairReplanBudget: { limit: 3, used: 0, entries: [] },
+      },
+    });
+    const designerTaskId = harness.createTask({
+      runId,
+      role: "designer",
+      goal: "Use the authoritative evidence bundle",
+      prompt: "Read only the frozen evidence bundle and emit proposeDesign.",
+      doneWhen: ["a valid proposal is emitted"],
+      config: { readOnly: true, forbidImplementation: true, targetSystemEvidenceBundle: evidenceBundle },
+    });
+    const designerAttemptId = harness.recordAttempt({
+      taskId: designerTaskId,
+      input: { executor: "codex-resumable", sandbox: "read-only" },
+      output: {
+        status: "blocked",
+        summary: "Proposal used a placeholder comparison hash.",
+        changedFiles: [],
+        checks: [{ name: "design action authority", status: "failed" }],
+        artifacts: [],
+        problems: ["placeholder comparison fields are forbidden in a real design proposal: toolPolicySha256"],
+      },
+    });
+    const reviewTaskId = harness.createTask({
+      runId,
+      role: "goal-review",
+      goal: "Review the rejected design action",
+      prompt: "Use only the authoritative evidence bundle.",
+      config: { readOnly: true, forbidImplementation: true, targetSystemEvidenceBundle: evidenceBundle },
+    });
+
+    await runNextReadyTask({
+      harness,
+      runId,
+      stopHooksByRole: { "goal-review": [createTasksFromOutputHook({ harness })] },
+      executor: async () => ({
+        status: "done",
+        runDecision: "continue",
+        summary: "Requested a Planner after the rejected proposal.",
+        changedFiles: [],
+        checks: [],
+        artifacts: [],
+        problems: [],
+        nextTasks: [{ role: "planner", goal: "Inspect the target database", prompt: "Run project tests and inspect local databases." }],
+      }),
+    });
+
+    const overview = harness.getRunOverview({ runId, eventLimit: 0 });
+    const recoveries = overview.tasks.filter((task) => task.config?.designActionRecovery !== undefined);
+    expect(overview.tasks.filter((task) => task.role === "planner")).toEqual([]);
+    expect(recoveries).toHaveLength(1);
+    expect(recoveries[0]).toMatchObject({
+      role: "designer",
+      parentId: designerTaskId,
+      config: {
+        readOnly: true,
+        forbidImplementation: true,
+        targetSystemEvidenceBundle: evidenceBundle,
+        designActionRecovery: { sourceAttemptId: designerAttemptId, count: 1, limit: 1 },
+      },
+    });
+    expect(recoveries[0]?.prompt).toContain("placeholder comparison fields");
+    expect(recoveries[0]?.prompt).toContain("Do not run project tests");
+    expect(harness.getTask(reviewTaskId)?.status).toBe("done");
+    expect(harness.getRun(runId)?.context.repairReplanBudget).toEqual({ limit: 3, used: 0, entries: [] });
+  });
+
   test("goal review stop hook does not append stale next tasks when work appeared while the review was running", async () => {
     const runId = harness.createRun({ goal: "Finish one canonical delivery" });
     const reviewTaskId = harness.createTask({

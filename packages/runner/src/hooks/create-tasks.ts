@@ -332,9 +332,7 @@ function materializeTargetSystemDesignerRecovery(input: {
   const sourceSession = [...initialOverview.sessions].reverse().find((session) =>
     session.role === "designer"
     && session.status === "blocked"
-    && (session.output.problems ?? []).some((problem) =>
-      typeof problem === "string" && /agent output action \d+ .*payload\./i.test(problem)
-    )
+    && designerFixedActionRejected(session.output.problems)
   );
   if (!sourceSession) {
     return null;
@@ -346,9 +344,7 @@ function materializeTargetSystemDesignerRecovery(input: {
       session.attemptId === sourceSession.attemptId
       && session.role === "designer"
       && session.status === "blocked"
-      && (session.output.problems ?? []).some((problem) =>
-        typeof problem === "string" && /agent output action \d+ .*payload\./i.test(problem)
-      )
+      && designerFixedActionRejected(session.output.problems)
     );
     const sourceTask = overview.tasks.find((candidate) => candidate.id === sourceSession.taskId);
     if (!durableSourceSession || !sourceTask) {
@@ -396,6 +392,7 @@ function materializeTargetSystemDesignerRecovery(input: {
         `Latest validation failure: ${latestProblem.slice(0, 4096)}`,
         "Use an exact UTC timestamp ending in Z when the action schema requires observationTime.",
         "Remain read-only. Do not implement business code, create a Worker, create a Planner, or bypass proposeDesign, authority, and createRunsFromDesign.",
+        "Do not run project tests, builds, installs, or repository-wide scans. Read only the frozen authoritative evidence bundle and the cited fixed-action failure.",
         "Original Designer instruction:",
         sourceTask.prompt.slice(0, 16_384),
       ].join("\n"),
@@ -450,6 +447,13 @@ function materializeTargetSystemDesignerRecovery(input: {
       repairBudgetCharged: false,
     }],
   };
+}
+
+function designerFixedActionRejected(problems: unknown[] | undefined) {
+  return (problems ?? []).some((problem) => typeof problem === "string" && (
+    /agent output action \d+/i.test(problem)
+    || /placeholder comparison fields are forbidden in a real design proposal/i.test(problem)
+  ));
 }
 
 function resolvePlannedDependencies(input: {
