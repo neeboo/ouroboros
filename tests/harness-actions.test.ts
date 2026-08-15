@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 import {
   applyHarnessAction,
   canonicalHarnessRevisionContentSha256,
+  canonicalResearchEvidenceArtifactSha256,
   canonicalEvolutionRecordSha256,
   canonicalEvolutionValueSha256,
   describeAuthorityEvaluation,
@@ -21,6 +22,8 @@ import {
   parseHarnessVariant,
   parseMatchedExperiment,
   parseProductionEpisode,
+  listResearchEvidenceLinks,
+  readResearchEvidenceArtifact,
   withDatabase,
   type HarnessDatabase,
   type HarnessRevisionV1,
@@ -108,6 +111,180 @@ describe("Harness actions", () => {
     });
     expect(overview.run?.status).toBe("todo");
     expect(overview.tasks).toContainEqual(expect.objectContaining({ role: "goal-review", status: "todo" }));
+  });
+
+  test("links completed research artifacts by immutable reference and keeps them project scoped", () => {
+    const projectId = harness.createProject({ name: "target", rootPath: dir });
+    const otherProjectId = harness.createProject({ name: "other", rootPath: join(dir, "other") });
+    const runId = harness.createRun({
+      projectId,
+      goal: "Research the target system without implementation",
+      context: {
+        source: "human-frozen-research",
+        researchOnly: true,
+        forbidImplementation: true,
+      },
+    });
+    const taskId = harness.createTask({
+      runId,
+      role: "designer",
+      goal: "Produce durable research contracts",
+      prompt: "Research only.",
+      config: {
+        researchOnly: true,
+        forbidWrites: true,
+        forbidActions: true,
+        deadAttemptRecovery: {
+          durableEventRefs: ["event_research_source"],
+        },
+      },
+    });
+    const attemptId = harness.startAttempt({ taskId, input: { executor: "codex-resumable" } });
+    harness.recordAttemptEvent({
+      id: "event_research_source",
+      attemptId,
+      sequence: 1,
+      stream: "system",
+      text: "durable research source",
+    });
+    const artifacts = [
+      { id: "evaluation-contract", title: "Evaluation", corpus: "requires a frozen corpus snapshot" },
+      { id: "agent-gateway-contract", title: "Gateway", detail: "ORIGINAL_REPORT_BODY_MUST_NOT_BE_COPIED" },
+    ];
+    harness.finishAttempt({
+      attemptId,
+      output: {
+        status: "done",
+        summary: "Research contracts completed without mutation.",
+        changedFiles: [],
+        checks: [
+          { name: "research-only", result: "pass" },
+          { name: "side-effects", result: "pass" },
+        ],
+        artifacts,
+        problems: [],
+      },
+    });
+    harness.updateRunStatus({ runId, status: "done" });
+
+    const request = {
+      type: "linkResearchEvidence",
+      projectId,
+      sourceRunId: runId,
+      sourceTaskId: taskId,
+      sourceAttemptId: attemptId,
+      expiresAt: "2030-01-01T00:00:00.000Z",
+      artifacts: artifacts.map((artifact) => ({
+        artifactId: artifact.id,
+        sha256: canonicalResearchEvidenceArtifactSha256(artifact),
+        evidenceGrade: "B",
+      })),
+    } as const;
+    const first = applyHarnessAction(harness, request as never);
+    const replay = applyHarnessAction(harness, request as never);
+    const links = listResearchEvidenceLinks(harness, { projectId });
+
+    expect(first).toMatchObject({ status: "done", actionType: "linkResearchEvidence" });
+    expect(replay).toMatchObject({ status: "done", actionType: "linkResearchEvidence" });
+    expect(replay.summary).toMatch(/reused/i);
+    expect(links).toHaveLength(1);
+    expect(links[0]).toMatchObject({
+      projectId,
+      sourceRunId: runId,
+      sourceTaskId: taskId,
+      sourceAttemptId: attemptId,
+      eventRefs: ["event_research_source"],
+      evaluationContractArtifactRef: expect.objectContaining({ artifactId: "evaluation-contract" }),
+    });
+    expect(JSON.stringify(links[0])).not.toContain("ORIGINAL_REPORT_BODY_MUST_NOT_BE_COPIED");
+    expect(listResearchEvidenceLinks(harness, { projectId: otherProjectId })).toEqual([]);
+    expect(() => readResearchEvidenceArtifact(harness, {
+      projectId: otherProjectId,
+      signalId: links[0]!.signalId,
+      artifactId: "agent-gateway-contract",
+    })).toThrow(/project/i);
+    expect(readResearchEvidenceArtifact(harness, {
+      projectId,
+      signalId: links[0]!.signalId,
+      artifactId: "agent-gateway-contract",
+    })).toMatchObject({
+      ref: expect.objectContaining({ artifactId: "agent-gateway-contract" }),
+      artifact: artifacts[1],
+    });
+    const attemptBeforeTamper = harness.getAttempt(attemptId)!;
+    withDatabase(join(dir, "ouroboros.db"), (db) => {
+      db.query("update attempts set output_json = $output where id = $id").run({
+        $id: attemptId,
+        $output: JSON.stringify({
+          ...attemptBeforeTamper.output,
+          artifacts: [artifacts[0], { ...artifacts[1], detail: "tampered" }],
+        }),
+      });
+    });
+    expect(() => readResearchEvidenceArtifact(harness, {
+      projectId,
+      signalId: links[0]!.signalId,
+      artifactId: "agent-gateway-contract",
+    })).toThrow(/hash drift/i);
+  });
+
+  test("research evidence linking rejects hash drift and research with side effects", () => {
+    const projectId = harness.createProject({ name: "target", rootPath: dir });
+    const makeResearch = (changedFiles: string[]) => {
+      const runId = harness.createRun({
+        projectId,
+        goal: "Research only",
+        context: { researchOnly: true, forbidImplementation: true },
+      });
+      const taskId = harness.createTask({
+        runId,
+        role: "designer",
+        goal: "Research",
+        prompt: "Research only.",
+        config: { researchOnly: true, forbidWrites: true, forbidActions: true },
+      });
+      const attemptId = harness.recordAttempt({
+        taskId,
+        input: {},
+        output: {
+          status: "done",
+          summary: "Research completed.",
+          changedFiles,
+          checks: [
+            { name: "research-only", result: "pass" },
+            { name: "side-effects", result: "pass" },
+          ],
+          artifacts: [{ id: "evaluation-contract", value: 1 }],
+          problems: [],
+        },
+      });
+      harness.updateRunStatus({ runId, status: "done" });
+      return { runId, taskId, attemptId };
+    };
+    const clean = makeResearch([]);
+    const dirty = makeResearch(["src/business.ts"]);
+    const actionFor = (source: typeof clean, sha256: string) => ({
+      type: "linkResearchEvidence",
+      projectId,
+      sourceRunId: source.runId,
+      sourceTaskId: source.taskId,
+      sourceAttemptId: source.attemptId,
+      expiresAt: "2030-01-01T00:00:00.000Z",
+      artifacts: [{ artifactId: "evaluation-contract", sha256, evidenceGrade: "B" }],
+    });
+
+    expect(applyHarnessAction(harness, actionFor(clean, "f".repeat(64)) as never)).toMatchObject({
+      status: "blocked",
+      problems: [expect.stringMatching(/hash/i)],
+    });
+    expect(applyHarnessAction(harness, actionFor(
+      dirty,
+      canonicalResearchEvidenceArtifactSha256({ id: "evaluation-contract", value: 1 }),
+    ) as never)).toMatchObject({
+      status: "blocked",
+      problems: [expect.stringMatching(/changedFiles|side effect/i)],
+    });
+    expect(listResearchEvidenceLinks(harness, { projectId })).toEqual([]);
   });
 
   test("atomically rejudges a falsely completed assessment with conflicting receipt evidence", () => {

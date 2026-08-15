@@ -8,6 +8,7 @@ import {
   canonicalHarnessRevisionContentSha256,
   canonicalEvolutionRecordSha256,
   canonicalEvolutionValueSha256,
+  canonicalResearchEvidenceArtifactSha256,
   checkpointDatabase,
   expectedEvolutionRecordId,
   Harness,
@@ -657,6 +658,125 @@ describe("CLI", () => {
     expect(overview.tasks[0].prompt).toContain("comparison");
     expect(overview.tasks[0].prompt).toContain("createRunsFromDesign");
     expect(overview.tasks[0].prompt).toContain("quiescent");
+  });
+
+  test("target-system Designer discovers linked research refs and can read each original artifact", async () => {
+    await runCli("init");
+    const setupHarness = new Harness(dbPath);
+    const kernelRoot = join(dir, "kernel-linked-evidence");
+    const targetRoot = join(dir, "target-linked-evidence");
+    await mkdir(kernelRoot, { recursive: true });
+    await mkdir(targetRoot, { recursive: true });
+    const kernelProjectId = setupHarness.createProject({ name: "Kernel", rootPath: kernelRoot });
+    const targetProjectId = setupHarness.createProject({ name: "Target", rootPath: targetRoot });
+    setupHarness.createFounderCharter({
+      projectId: targetProjectId,
+      mission: "Use durable research evidence before proposing target changes.",
+      activate: true,
+    });
+    const sourceRunId = setupHarness.createRun({
+      projectId: targetProjectId,
+      goal: "Frozen target research",
+      context: { researchOnly: true, forbidImplementation: true },
+    });
+    const sourceTaskId = setupHarness.createTask({
+      runId: sourceRunId,
+      role: "designer",
+      goal: "Produce target research artifacts",
+      prompt: "Research only.",
+      config: {
+        researchOnly: true,
+        forbidWrites: true,
+        forbidActions: true,
+        deadAttemptRecovery: { durableEventRefs: ["event_cli_research"] },
+      },
+    });
+    const sourceAttemptId = setupHarness.startAttempt({ taskId: sourceTaskId, input: {} });
+    setupHarness.recordAttemptEvent({
+      id: "event_cli_research",
+      attemptId: sourceAttemptId,
+      sequence: 1,
+      stream: "system",
+      text: "source evidence",
+    });
+    const evaluationArtifact = {
+      id: "evaluation-contract",
+      comparison: { corpusSnapshot: null, stopCondition: "build the missing corpus evidence at zero cost" },
+      privateBody: "FULL_RESEARCH_BODY_IS_READ_ONLY_ON_DEMAND",
+    };
+    setupHarness.finishAttempt({
+      attemptId: sourceAttemptId,
+      output: {
+        status: "done",
+        summary: "Research completed.",
+        changedFiles: [],
+        checks: [
+          { name: "research-only", result: "pass" },
+          { name: "side-effects", result: "pass" },
+        ],
+        artifacts: [evaluationArtifact],
+        problems: [],
+      },
+    });
+    setupHarness.updateRunStatus({ runId: sourceRunId, status: "done" });
+    const linked = applyHarnessAction(setupHarness, {
+      type: "linkResearchEvidence",
+      projectId: targetProjectId,
+      sourceRunId,
+      sourceTaskId,
+      sourceAttemptId,
+      expiresAt: "2030-01-01T00:00:00.000Z",
+      artifacts: [{
+        artifactId: "evaluation-contract",
+        sha256: canonicalResearchEvidenceArtifactSha256(evaluationArtifact),
+        evidenceGrade: "B",
+      }],
+    } as never);
+    expect(linked.status).toBe("done");
+
+    const listed = await runCliJson(
+      "list-research-evidence",
+      "--project-id",
+      targetProjectId,
+    );
+    expect(listed.links).toHaveLength(1);
+    expect(listed.links[0]).toMatchObject({
+      projectId: targetProjectId,
+      sourceRunId,
+      sourceAttemptId,
+      artifacts: [expect.objectContaining({ artifactId: "evaluation-contract" })],
+    });
+    expect(JSON.stringify(listed)).not.toContain("FULL_RESEARCH_BODY_IS_READ_ONLY_ON_DEMAND");
+    const shown = await runCliJson(
+      "show-research-evidence",
+      "--project-id",
+      targetProjectId,
+      "--signal-id",
+      listed.links[0].signalId,
+      "--artifact-id",
+      "evaluation-contract",
+    );
+    expect(shown.artifact).toEqual(evaluationArtifact);
+
+    const result = await runCliJson(
+      "design-target-system",
+      "--kernel-project-id",
+      kernelProjectId,
+      "--target-project-id",
+      targetProjectId,
+      "--goal",
+      "Design from linked research",
+    );
+    const overview = await runCliJson("run-overview", "--run-id", result.runId);
+    expect(overview.run.context.researchEvidenceLinks).toEqual(listed.links);
+    expect(overview.tasks).toHaveLength(1);
+    expect(overview.tasks[0]).toMatchObject({ role: "designer", config: { readOnly: true, forbidImplementation: true } });
+    expect(overview.tasks[0].prompt).toContain("list-research-evidence");
+    expect(overview.tasks[0].prompt).toContain("show-research-evidence");
+    expect(overview.tasks[0].prompt).toContain(listed.links[0].signalId);
+    expect(overview.tasks[0].prompt).toContain("evaluation-contract");
+    expect(overview.tasks[0].prompt).not.toContain("FULL_RESEARCH_BODY_IS_READ_ONLY_ON_DEMAND");
+    expect(overview.tasks.some((task: { role: string }) => task.role === "worker")).toBe(false);
   });
 
   test("design-target-system fails closed for invalid project identity without creating runs", async () => {

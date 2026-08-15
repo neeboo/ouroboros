@@ -6,12 +6,14 @@ import {
   describeRunCompletionReadiness,
   diagnoseRunOverview,
   Harness,
+  listResearchEvidenceLinks,
   makeId,
   proposeGuardrailsFromLessons as buildGuardrailProposalsFromLessons,
   refreshGuardrailProposalsForRun,
   readableList,
   readableValue,
   readSelfImprovementQuiescence,
+  readResearchEvidenceArtifact,
   parseHarnessRevisionV1,
   requireStrictIsoTimestamp,
 } from "@ouroboros/harness";
@@ -24,6 +26,7 @@ import type {
   ExecutionThread,
   HarnessDatabase,
   FounderCharter,
+  ResearchEvidenceLinkV1,
   RunOverview,
 } from "@ouroboros/harness";
 import {
@@ -1305,6 +1308,29 @@ if (parsed.command === "help" || flag(parsed, "help") !== undefined) {
     console.log(formatListSignals({ signals, totalCount }));
     break;
   }
+  case "list-research-evidence": {
+    const projectId = required(parsed, "project-id");
+    const links = listResearchEvidenceLinks(harness, {
+      projectId,
+      includeExpired: flag(parsed, "include-expired") === "true",
+      limit: parsePositiveInteger(flag(parsed, "limit") ?? "100", "--limit"),
+    });
+    printJson({ projectId, totalCount: links.length, links });
+    break;
+  }
+  case "show-research-evidence": {
+    const projectId = required(parsed, "project-id");
+    try {
+      printJson(readResearchEvidenceArtifact(harness, {
+        projectId,
+        signalId: required(parsed, "signal-id"),
+        artifactId: required(parsed, "artifact-id"),
+      }));
+    } catch (error) {
+      fail((error as Error).message);
+    }
+    break;
+  }
   case "show-design": {
     const proposalId = required(parsed, "proposal-id");
     const proposal = harness.getDesignProposal({ id: proposalId });
@@ -1415,6 +1441,8 @@ function printHelp() {
     "  explain-attempt      Explain an attempt from captured events",
     "  design-status        Print active charter, current proposal, and outcome review state",
     "  list-signals         List strategy signals filtered by class and status",
+    "  list-research-evidence List project-owned immutable research artifact references",
+    "  show-research-evidence Read one linked original research artifact with hash verification",
     "  show-design          Print a design proposal with decisions and outcomes",
     "  list-design-outcomes List design outcomes filtered by proposal, stage, or due status",
     "  show-evolution-record Read one project-scoped evolution record and its successful action audit",
@@ -1565,7 +1593,15 @@ function targetSystemDesignerPrompt(input: {
   kernelProject: NonNullable<ReturnType<Harness["getProject"]>>;
   targetProject: NonNullable<ReturnType<Harness["getProject"]>>;
   charterId: string;
+  researchEvidenceLinks: ResearchEvidenceLinkV1[];
 }) {
+  const researchEvidence = input.researchEvidenceLinks.length === 0
+    ? ["- no project-owned research evidence links are currently registered"]
+    : input.researchEvidenceLinks.flatMap((link) => [
+        `- signal ${link.signalId}; source run ${link.sourceRunId}; attempt ${link.sourceAttemptId}; expires ${link.expiresAt}`,
+        ...link.artifacts.map((artifact) =>
+          `  - artifact ${artifact.artifactId}; sha256 ${artifact.sha256}; grade ${artifact.evidenceGrade}`),
+      ]);
   return [
     `Act as the Ouroboros Evolution Kernel Designer for target project ${input.targetProject.name} (${input.targetProject.id}).`,
     `The kernel project is ${input.kernelProject.name} (${input.kernelProject.id}); it supplies the reusable control lifecycle but does not own the target's domain decisions.`,
@@ -1575,6 +1611,12 @@ function targetSystemDesignerPrompt(input: {
     `- target-scoped strategy signals for project ${input.targetProject.id}`,
     "- target-scoped evidence, lessons, repository state, and due outcomes",
     `- the target-system contract in ${TARGET_SYSTEM_EVOLUTION_DOC}`,
+    "",
+    "Durable target-owned research evidence is frozen below as references only:",
+    ...researchEvidence,
+    `Refresh the project index with: orbs list-research-evidence --project-id ${input.targetProject.id}`,
+    `Read any original artifact with: orbs show-research-evidence --project-id ${input.targetProject.id} --signal-id <signal_id> --artifact-id <artifact_id>`,
+    "Read the original evaluation-contract artifact before constructing comparison. If it lacks a precise corpus snapshot and hash, propose the smallest zero-cost evidence-building step; do not claim the research is absent.",
     "",
     "Return either a justified quiescent result with no actions, or one fixed proposeDesign action.",
     `For proposeDesign, payload.projectId must equal ${input.targetProject.id}. The proposal must include the complete target-evolution group: evolutionPack, causalHypothesis, and evaluationContract.comparison.`,
@@ -2059,6 +2101,7 @@ async function createTargetSystemDesignBootstrap(input: {
     fail(`active founder charter not found for target project: ${targetProject.id}`);
   }
   const config = await loadCliConfig();
+  const researchEvidenceLinks = listResearchEvidenceLinks(harness, { projectId: targetProject.id, limit: 100 });
   const runId = harness.createRun({
     goal: input.goal,
     projectId: targetProject.id,
@@ -2073,13 +2116,19 @@ async function createTargetSystemDesignBootstrap(input: {
         targetProjectId: targetProject.id,
         cycle: { kind: "design", index: 0 },
       },
+      researchEvidenceLinks,
     }, config),
   });
   const taskId = harness.createTask({
     runId,
     role: "designer",
     goal: `Design a bounded self-evolution system for ${targetProject.name}`,
-    prompt: targetSystemDesignerPrompt({ kernelProject, targetProject, charterId: targetCharter.id }),
+    prompt: targetSystemDesignerPrompt({
+      kernelProject,
+      targetProject,
+      charterId: targetCharter.id,
+      researchEvidenceLinks,
+    }),
     doneWhen: TARGET_SYSTEM_DESIGN_DONE_WHEN,
     config: {
       readOnly: true,

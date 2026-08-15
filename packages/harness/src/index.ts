@@ -22,6 +22,17 @@ export {
 } from "./goal-review";
 export { applyHarnessAction, parseHarnessAction, describeIntegrationReadiness } from "./actions";
 export {
+  canonicalResearchEvidenceArtifactSha256,
+  listResearchEvidenceLinks,
+  parseResearchEvidenceLinkPayload,
+  readResearchEvidenceArtifact,
+} from "./research-evidence";
+export type {
+  ResearchEvidenceArtifactRef,
+  ResearchEvidenceGrade,
+  ResearchEvidenceLinkV1,
+} from "./research-evidence";
+export {
   assertRunCompletionReady,
   completionVerificationContract,
   describeRunCompletionReadiness,

@@ -15,6 +15,14 @@ import {
 import { Harness } from "./harness";
 import { makeId } from "./ids";
 import { parseHarnessRevisionV1 } from "./harness-revision";
+import { requireStrictIsoTimestamp } from "./iso-timestamp";
+import {
+  canonicalResearchEvidenceArtifactSha256,
+  parseResearchEvidenceLinkPayload,
+  type ResearchEvidenceArtifactRef,
+  type ResearchEvidenceGrade,
+  type ResearchEvidenceLinkV1,
+} from "./research-evidence";
 import { filterOuroborosRuntimePaths, isOuroborosRuntimePath } from "./runtime-paths";
 import {
   advanceAfterRepair,
@@ -81,6 +89,19 @@ export type HarnessAction =
   | { type: "reclaimRunningTasks"; runId: string; reason?: string }
   | { type: "retryTask"; taskId: string; reason?: string }
   | { type: "reconcileRunEvidence"; runId: string; reason: string }
+  | {
+      type: "linkResearchEvidence";
+      projectId: string;
+      sourceRunId: string;
+      sourceTaskId: string;
+      sourceAttemptId: string;
+      expiresAt: string;
+      artifacts: Array<{
+        artifactId: string;
+        sha256: string;
+        evidenceGrade: ResearchEvidenceGrade;
+      }>;
+    }
   | {
       type: "materializeDesignerActionRecovery";
       runId: string;
@@ -417,6 +438,7 @@ const FROZEN_DESIGN_CONTEXT_KEYS = new Set([
   "harnessRevision",
   "resourceAllocation",
   "targetSystemDesignQuiescence",
+  "researchEvidenceLinks",
 ]);
 
 function frozenDesignContextKeys(keys: Iterable<string>): string[] {
@@ -442,6 +464,26 @@ export function parseHarnessAction(value: unknown): HarnessAction {
       type,
       runId: stringField(record, "runId"),
       reason: stringField(record, "reason"),
+    };
+  }
+  if (type === "linkResearchEvidence") {
+    assertOnlyFields(record, type, [
+      "type",
+      "projectId",
+      "sourceRunId",
+      "sourceTaskId",
+      "sourceAttemptId",
+      "expiresAt",
+      "artifacts",
+    ]);
+    return {
+      type,
+      projectId: exactSafeIdentifierField(record, "projectId"),
+      sourceRunId: exactSafeIdentifierField(record, "sourceRunId"),
+      sourceTaskId: exactSafeIdentifierField(record, "sourceTaskId"),
+      sourceAttemptId: exactSafeIdentifierField(record, "sourceAttemptId"),
+      expiresAt: requireStrictIsoTimestamp(record.expiresAt, "expiresAt"),
+      artifacts: researchEvidenceArtifactRequests(record.artifacts),
     };
   }
   if (type === "materializeDesignerActionRecovery") {
@@ -700,7 +742,7 @@ export function parseHarnessAction(value: unknown): HarnessAction {
     };
   }
   throw new Error(
-    "harness action type must be reclaimRunningTasks, retryTask, reconcileRunEvidence, materializeDesignerActionRecovery, markRunTodo, updateRunContext, amendRunContract, retireRun, retireTask, prepareRunDrain, completeSystemTask, integrateVerifiedRun, pushExactGitRef, createExactGitRef, commitExactGitIndex, registerEvolutionProfile, recordProductionEpisode, registerHarnessVariant, activateHarnessRevision, freezeMatchedExperiment, interruptAttemptAndCreateTask, interruptRunningAttemptsAndCreateTask, acceptGuardrailProposal, startSubsession, collectSubsessions, cancelSubsessions, or runWatchdogPass",
+    "harness action type must be reclaimRunningTasks, retryTask, reconcileRunEvidence, linkResearchEvidence, materializeDesignerActionRecovery, markRunTodo, updateRunContext, amendRunContract, retireRun, retireTask, prepareRunDrain, completeSystemTask, integrateVerifiedRun, pushExactGitRef, createExactGitRef, commitExactGitIndex, registerEvolutionProfile, recordProductionEpisode, registerHarnessVariant, activateHarnessRevision, freezeMatchedExperiment, interruptAttemptAndCreateTask, interruptRunningAttemptsAndCreateTask, acceptGuardrailProposal, startSubsession, collectSubsessions, cancelSubsessions, or runWatchdogPass",
   );
 }
 
@@ -745,6 +787,10 @@ export function applyHarnessAction(
     return applyRunEvidenceReconciliationAtomically(harness, action);
   }
 
+  if (action.type === "linkResearchEvidence") {
+    return applyResearchEvidenceLinkAtomically(harness, action);
+  }
+
   if (action.type === "integrateVerifiedRun") {
     const replay = findIntegrationReplay(harness, action, options);
     if (replay) {
@@ -783,6 +829,7 @@ type EvolutionAction = Extract<
 type HarnessRevisionActivationAction = Extract<HarnessAction, { type: "activateHarnessRevision" }>;
 type DesignerActionRecoveryAction = Extract<HarnessAction, { type: "materializeDesignerActionRecovery" }>;
 type RunEvidenceReconciliationAction = Extract<HarnessAction, { type: "reconcileRunEvidence" }>;
+type ResearchEvidenceLinkAction = Extract<HarnessAction, { type: "linkResearchEvidence" }>;
 
 function isEvolutionAction(action: HarnessAction): action is EvolutionAction {
   return action.type === "registerEvolutionProfile"
@@ -1007,6 +1054,193 @@ function applyRunEvidenceReconciliationAtomically(
     });
     return { ...result, eventId };
   }
+}
+
+function applyResearchEvidenceLinkAtomically(
+  harness: Harness,
+  action: ResearchEvidenceLinkAction,
+): HarnessActionResult & { eventId: string } {
+  try {
+    return harness.runInImmediateTransaction((db) => {
+      const overview = harness.getRunOverviewWithDb(db, { runId: action.sourceRunId, eventLimit: 0 });
+      const run = overview.run;
+      if (!run) throw new Error(`source run not found: ${action.sourceRunId}`);
+      if (run.projectId !== action.projectId) {
+        throw new Error(`source run project does not match explicit projectId ${action.projectId}`);
+      }
+      if (run.status !== "done") throw new Error(`source run must be done: ${run.status}`);
+      if (run.context.researchOnly !== true || run.context.forbidImplementation !== true) {
+        throw new Error("source run must be frozen research-only with implementation forbidden");
+      }
+      const task = overview.tasks.find((candidate) => candidate.id === action.sourceTaskId);
+      if (!task || task.runId !== run.id) throw new Error(`source task does not belong to run: ${action.sourceTaskId}`);
+      if (task.status !== "done") throw new Error(`source task must be done: ${task.status}`);
+      if (task.config?.researchOnly !== true || task.config?.forbidWrites !== true || task.config?.forbidActions !== true) {
+        throw new Error("source task must freeze researchOnly, forbidWrites, and forbidActions");
+      }
+      const session = overview.sessions.find((candidate) => candidate.attemptId === action.sourceAttemptId);
+      if (!session || session.taskId !== task.id) {
+        throw new Error(`source attempt does not belong to task: ${action.sourceAttemptId}`);
+      }
+      if (session.status !== "done" || session.output.status !== "done") {
+        throw new Error(`source attempt must be done: ${session.status}`);
+      }
+      const output = session.output;
+      if (!Array.isArray(output.changedFiles) || output.changedFiles.length !== 0) {
+        throw new Error("research evidence source changedFiles must be empty; side effects are forbidden");
+      }
+      if ((output.designActions?.length ?? 0) > 0 || (output.nextTasks?.length ?? 0) > 0 || (output.nextRuns?.length ?? 0) > 0) {
+        throw new Error("research evidence source must not create actions, tasks, or runs");
+      }
+      if (!hasPassedResearchCheck(output.checks, "research-only") || !hasPassedResearchCheck(output.checks, "side-effects")) {
+        throw new Error("research-only and side-effects checks must both pass");
+      }
+      const outputArtifacts = Array.isArray(output.artifacts) ? output.artifacts : [];
+      const identified = outputArtifacts.flatMap((artifact, artifactIndex) => {
+        const id = researchArtifactId(artifact);
+        return id ? [{ artifactId: id, artifactIndex, artifact }] : [];
+      });
+      if (identified.length === 0) throw new Error("research output must contain identified machine artifacts");
+      if (new Set(identified.map((artifact) => artifact.artifactId)).size !== identified.length) {
+        throw new Error("research artifact ids must be unique");
+      }
+      if (action.artifacts.length !== identified.length) {
+        throw new Error("research artifact manifest must cover every identified machine artifact");
+      }
+      const expectedById = new Map(action.artifacts.map((artifact) => [artifact.artifactId, artifact]));
+      if (expectedById.size !== action.artifacts.length) throw new Error("research artifact manifest ids must be unique");
+      const artifactRefs: ResearchEvidenceArtifactRef[] = identified.map(({ artifactId, artifactIndex, artifact }) => {
+        const expected = expectedById.get(artifactId);
+        if (!expected) throw new Error(`research artifact missing from manifest: ${artifactId}`);
+        const actualSha256 = canonicalResearchEvidenceArtifactSha256(artifact);
+        if (actualSha256 !== expected.sha256) throw new Error(`research artifact hash mismatch: ${artifactId}`);
+        return { artifactId, artifactIndex, sha256: actualSha256, evidenceGrade: expected.evidenceGrade };
+      });
+      const eventRefs = durableResearchEventRefs(task.config?.deadAttemptRecovery);
+      if (eventRefs.length === 0) throw new Error("research evidence source must reference durable attempt events");
+      for (const eventRef of eventRefs) {
+        const exists = db.query("select 1 as found from attempt_events where id = $id").get({ $id: eventRef }) as { found: number } | null;
+        if (!exists) throw new Error(`durable research event not found: ${eventRef}`);
+      }
+      const observedAt = normalizedEvidenceTimestamp(session.finishedAt);
+      const expiresAtMs = Date.parse(action.expiresAt);
+      if (expiresAtMs <= Date.parse(observedAt) || expiresAtMs <= Date.now()) {
+        throw new Error("expiresAt must be later than the research observation and current time");
+      }
+      const signalId = `signal_research_${stableFingerprint({
+        projectId: action.projectId,
+        sourceRunId: run.id,
+        sourceTaskId: task.id,
+        sourceAttemptId: session.attemptId,
+      }).slice(0, 32)}`;
+      const existing = harness.getStrategySignalWithDb(db, { id: signalId });
+      const existingLink = existing
+        ? parseResearchEvidenceLinkPayload(existing.id, existing.projectId, existing.payload)
+        : null;
+      const link: ResearchEvidenceLinkV1 = {
+        schemaVersion: 1,
+        signalId,
+        projectId: action.projectId,
+        sourceRunId: run.id,
+        sourceTaskId: task.id,
+        sourceAttemptId: session.attemptId,
+        outputSha256: stableFingerprint(output),
+        observedAt,
+        linkedAt: existingLink?.linkedAt ?? new Date().toISOString(),
+        expiresAt: action.expiresAt,
+        eventRefs,
+        artifacts: artifactRefs,
+        evaluationContractArtifactRef: artifactRefs.find((artifact) => artifact.artifactId === "evaluation-contract") ?? null,
+      };
+      if (!link.evaluationContractArtifactRef) {
+        throw new Error("research evidence must include an identified evaluation-contract artifact");
+      }
+      const reused = existingLink !== null;
+      if (existing) {
+        if (!existingLink || stableFingerprint(existingLink) !== stableFingerprint(link)) {
+          throw new Error(`research evidence link conflicts with existing signal: ${signalId}`);
+        }
+      } else {
+        harness.createStrategySignalWithDb(db, {
+          id: signalId,
+          projectId: action.projectId,
+          signalClass: "system",
+          source: `research-evidence-link:${session.attemptId}`,
+          title: "Completed research artifacts available for target design",
+          summary: `Read ${artifactRefs.length} immutable research artifact references from completed run ${run.id}.`,
+          observationTime: observedAt,
+          confidence: 0.9,
+          evidence: artifactRefs.map((artifact) => ({
+            kind: "research-artifact-ref",
+            ref: `${signalId}:${artifact.artifactId}`,
+            sha256: artifact.sha256,
+            evidenceGrade: artifact.evidenceGrade,
+          })),
+          expiresAt: action.expiresAt,
+          runId: run.id,
+          taskId: task.id,
+          attemptId: session.attemptId,
+          payload: { kind: "research-evidence-link", link },
+        });
+      }
+      const result = doneResult(
+        action.type,
+        reused ? `Research evidence link ${signalId} reused.` : `Research evidence link ${signalId} created.`,
+        [
+          { name: "research-only source", status: "passed", evidence: session.attemptId },
+          { name: "artifact manifest", status: "passed", evidence: `${artifactRefs.length} immutable references` },
+          { name: "project ownership", status: "passed", evidence: action.projectId },
+        ],
+        [{ kind: "research_evidence_link", signalId, projectId: action.projectId, artifactCount: artifactRefs.length, reused }],
+      );
+      const eventId = harness.recordHarnessActionEventWithDb(db, {
+        actionType: action.type,
+        status: result.status,
+        request: safeRequest(action),
+        result: resultToRecord(result),
+      });
+      return { ...result, eventId };
+    });
+  } catch (error) {
+    const problem = limitUtf8Output(errorMessage(error), 4_096);
+    const result = blockedResult(action.type, `${action.type} blocked: ${problem}`, [problem]);
+    const eventId = harness.recordHarnessActionEvent({
+      actionType: action.type,
+      status: result.status,
+      request: safeRequest(action),
+      result: resultToRecord(result),
+    });
+    return { ...result, eventId };
+  }
+}
+
+function hasPassedResearchCheck(checks: unknown[] | undefined, name: string) {
+  return Array.isArray(checks) && checks.some((check) => {
+    const record = objectRecordOrNull(check);
+    return record?.name === name && (record.result === "pass" || record.status === "passed");
+  });
+}
+
+function researchArtifactId(value: unknown) {
+  const record = objectRecordOrNull(value);
+  return typeof record?.id === "string" && /^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$/.test(record.id)
+    ? record.id
+    : null;
+}
+
+function durableResearchEventRefs(value: unknown) {
+  const record = objectRecordOrNull(value);
+  const refs = Array.isArray(record?.durableEventRefs) ? record.durableEventRefs : [];
+  if (!refs.every((ref) => typeof ref === "string" && /^event_[A-Za-z0-9._-]+$/.test(ref))) return [];
+  return (refs as string[]).filter((ref, index, all) => all.indexOf(ref) === index);
+}
+
+function normalizedEvidenceTimestamp(value: string | null) {
+  if (!value) throw new Error("research source attempt has no finished timestamp");
+  const normalized = value.includes("T") ? value : `${value.replace(" ", "T")}Z`;
+  const timestamp = new Date(normalized);
+  if (!Number.isFinite(timestamp.valueOf())) throw new Error("research source attempt finished timestamp is invalid");
+  return timestamp.toISOString();
 }
 
 function objectRecordOrNull(value: unknown): Record<string, unknown> | null {
@@ -2127,7 +2361,7 @@ function applyParsedHarnessAction(
   harness: Harness,
   action: Exclude<
     HarnessAction,
-    SubsessionAction | EvolutionAction | HarnessRevisionActivationAction | DesignerActionRecoveryAction | RunEvidenceReconciliationAction
+    SubsessionAction | EvolutionAction | HarnessRevisionActivationAction | DesignerActionRecoveryAction | RunEvidenceReconciliationAction | ResearchEvidenceLinkAction
   >,
   options: HarnessActionOptions,
 ): HarnessActionResult {
@@ -9675,6 +9909,26 @@ function followUpTaskField(record: Record<string, unknown>, key: string) {
     prompt: stringField(value, "prompt"),
     doneWhen: optionalStringArrayField(value, "doneWhen"),
   };
+}
+
+function researchEvidenceArtifactRequests(value: unknown): ResearchEvidenceLinkAction["artifacts"] {
+  if (!Array.isArray(value) || value.length === 0 || value.length > 200) {
+    throw new Error("artifacts must be a non-empty array of at most 200 research artifact references");
+  }
+  return value.map((entry, index) => {
+    const record = objectRecord(entry, `artifacts[${index}]`);
+    assertOnlyFields(record, `artifacts[${index}]`, ["artifactId", "sha256", "evidenceGrade"]);
+    const artifactId = exactSafeIdentifierField(record, "artifactId");
+    const sha256 = exactNonEmptyStringField(record, "sha256");
+    if (!/^[0-9a-f]{64}$/.test(sha256) || /^0+$/.test(sha256)) {
+      throw new Error(`artifacts[${index}].sha256 must be a non-zero lowercase SHA-256`);
+    }
+    const evidenceGrade = exactNonEmptyStringField(record, "evidenceGrade");
+    if (evidenceGrade !== "A" && evidenceGrade !== "B" && evidenceGrade !== "C" && evidenceGrade !== "D") {
+      throw new Error(`artifacts[${index}].evidenceGrade must be A, B, C, or D`);
+    }
+    return { artifactId, sha256, evidenceGrade };
+  });
 }
 
 function optionalFollowUpTaskField(record: Record<string, unknown>, key: string) {
