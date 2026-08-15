@@ -7512,8 +7512,9 @@ describe("runner", () => {
       executor: async () => ({
         status: "done",
         summary: "Implemented contracted worker",
-        artifacts: [],
-        checks: [],
+        changedFiles: ["packages/runner/src/runner.ts"],
+        artifacts: [{ kind: "worker_diff_readback" }],
+        checks: [{ name: "runner tests", status: "passed" }],
         problems: [],
       }),
       stopHooks: [createVerifierTaskHook({ harness })],
@@ -7987,6 +7988,74 @@ describe("runner", () => {
       used: 1,
       entries: [expect.objectContaining({ taskId: verifierId, kind: "repair" })],
     });
+  });
+
+  test("run loop reconciles a terminal done worker with empty evidence into one real verifier attempt", async () => {
+    const runId = harness.createRun({ goal: "Recover a missed worker verifier handoff" });
+    const workerId = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Repair authentication",
+      prompt: "Repair authentication.",
+      worktreePath: "/repo/.ouroboros/worktrees/task_auth_repair",
+    });
+    harness.recordAttempt({
+      taskId: workerId,
+      input: { executor: "dsh-cli", cwd: "/repo/.ouroboros/worktrees/task_auth_repair" },
+      output: {
+        status: "done",
+        summary: "modified authentication and ran 15 plus 25 checks",
+        changedFiles: [],
+        checks: [],
+        artifacts: [],
+        problems: [],
+      },
+    });
+    const startedRoles: string[] = [];
+
+    const result = await runCodexResumableLoop({
+      harness,
+      runId,
+      maxRounds: 1,
+      limit: 1,
+      maxTries: 3,
+      cwd: dir,
+      reconcileTerminalDoneWorkerVerifiers: true,
+      clientFactory: ({ task }) => {
+        startedRoles.push(task?.role ?? "missing");
+        return {
+          start: async () => ({
+            status: "done" as const,
+            sessionId: "session_reconciled_verifier",
+            outputPath: join(dir, "reconciled-verifier.json"),
+            stdout: "",
+            stderr: "",
+            events: [],
+            output: {
+              status: "done" as const,
+              summary: "independently verified worktree and checks",
+              changedFiles: [],
+              checks: [{ name: "15 plus 25 plus lint", status: "passed" as const }],
+              artifacts: [{ kind: "independent_worktree_readback" }],
+              problems: [],
+            },
+          }),
+          resume: async () => {
+            throw new Error("resume should not be called");
+          },
+        };
+      },
+    });
+
+    const overview = harness.getRunOverview({ runId, eventLimit: 0 });
+    const verifiers = overview.tasks.filter((task) => task.role === "verifier" && task.dependsOn.includes(workerId));
+    expect(verifiers).toHaveLength(1);
+    expect(verifiers[0]).toMatchObject({ status: "done", worktreePath: "/repo/.ouroboros/worktrees/task_auth_repair" });
+    expect(verifiers[0]?.config?.sourceEvidence).toMatchObject({ status: "incomplete", requiresIndependentReadback: true });
+    expect(startedRoles).toEqual(["verifier"]);
+    expect(result.rounds[0]?.reconciledVerifiers).toEqual([
+      expect.objectContaining({ workerTaskId: workerId, verifierTaskId: verifiers[0]?.id, decision: "continue" }),
+    ]);
   });
 
   test("replaying an existing verifier repair restores a missing budget charge", async () => {

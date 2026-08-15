@@ -6,6 +6,65 @@ import type { StopHook } from "../types";
 
 const DEFAULT_SOURCE_ROLES = new Set(["worker"]);
 
+export interface TerminalDoneWorkerVerifierReconciliation {
+  workerTaskId: string;
+  workerAttemptId: string;
+  verifierTaskId: string;
+  decision: "continue" | "retry" | "exit";
+  artifacts: unknown[];
+  problems: string[];
+}
+
+export async function reconcileTerminalDoneWorkerVerifiers(options: {
+  harness: Harness;
+  runId: string;
+}): Promise<TerminalDoneWorkerVerifierReconciliation[]> {
+  const overview = options.harness.getRunOverview({ runId: options.runId, eventLimit: 0 });
+  if (!overview.run || overview.run.status !== "todo") {
+    return [];
+  }
+  const results: TerminalDoneWorkerVerifierReconciliation[] = [];
+  for (const worker of overview.tasks.filter((task) =>
+    task.role === "worker"
+    && task.status === "done"
+    && !overview.tasks.some((candidate) => candidate.role === "verifier" && candidate.dependsOn.includes(task.id))
+  )) {
+    const session = [...overview.sessions]
+      .reverse()
+      .find((candidate) => candidate.taskId === worker.id && candidate.status === "done");
+    if (!session) {
+      continue;
+    }
+    const attempt = options.harness.getAttempt(session.attemptId);
+    if (!attempt || attempt.output.status !== "done") {
+      continue;
+    }
+    const hookResult = await createVerifierTaskHook({ harness: options.harness })({
+      run: overview.run,
+      task: worker,
+      sessionName: session.sessionName ?? `task-${worker.id}`,
+      prompt: typeof attempt.input.prompt === "string" ? attempt.input.prompt : worker.prompt,
+      output: attempt.output,
+    });
+    const verifier = options.harness
+      .getRunOverview({ runId: options.runId, eventLimit: 0 })
+      .tasks
+      .find((candidate) => candidate.role === "verifier" && candidate.dependsOn.includes(worker.id));
+    if (!verifier) {
+      continue;
+    }
+    results.push({
+      workerTaskId: worker.id,
+      workerAttemptId: attempt.id,
+      verifierTaskId: verifier.id,
+      decision: hookResult.decision ?? "exit",
+      artifacts: hookResult.artifacts ?? [],
+      problems: hookResult.problems ?? [],
+    });
+  }
+  return results;
+}
+
 export function createVerifierTaskHook(options: { harness: Harness; sourceRoles?: string[] }): StopHook {
   const sourceRoles = new Set(options.sourceRoles ?? DEFAULT_SOURCE_ROLES);
   return ({ run, task, output }) => {
@@ -14,6 +73,7 @@ export function createVerifierTaskHook(options: { harness: Harness; sourceRoles?
     }
 
     const verifierContract = verifierContractFromTask(task);
+    const sourceEvidence = sourceEvidenceAssessment(output);
     const template = options.harness.getPromptTemplate("verifier-task")?.contentMd;
     try {
       return options.harness.runInImmediateTransaction((db) => {
@@ -83,7 +143,11 @@ export function createVerifierTaskHook(options: { harness: Harness; sourceRoles?
           };
         }
 
-        const prompt = buildVerifierPrompt(template, task.id, task.worktreePath, output, verifierContract);
+        const prompt = buildVerifierPrompt(template, task.id, task.worktreePath, output, verifierContract, sourceEvidence);
+        const config = {
+          ...(verifierContract ? { verifierContract } : {}),
+          ...(sourceEvidence ? { sourceEvidence } : {}),
+        };
         const taskId = options.harness.createTaskWithDb(db, {
           runId: run.id,
           role: "verifier",
@@ -96,7 +160,7 @@ export function createVerifierTaskHook(options: { harness: Harness; sourceRoles?
             "relevant checks are rerun or explained",
             "verification result is returned as structured JSON",
           ],
-          ...(verifierContract ? { config: { verifierContract } } : {}),
+          ...(Object.keys(config).length > 0 ? { config } : {}),
         });
 
         return {
@@ -109,6 +173,7 @@ export function createVerifierTaskHook(options: { harness: Harness; sourceRoles?
               sourceWorktreePath: task.worktreePath,
               ...artifactVerifierContract(verifierContract),
             },
+            ...(sourceEvidence ? [{ kind: "source_evidence_incomplete", ...sourceEvidence }] : []),
           ],
         };
       });
@@ -144,6 +209,7 @@ function buildVerifierPrompt(
   sourceTaskWorktreePath: string | null,
   output: AttemptOutput,
   verifierContract: Record<string, unknown> | undefined,
+  sourceEvidence: ReturnType<typeof sourceEvidenceAssessment>,
 ) {
   const sourceOutput = {
     ...compactAttemptEvidence(output),
@@ -151,6 +217,15 @@ function buildVerifierPrompt(
   };
   const contractSection = verifierContract
     ? ["## Frozen Verifier Contract", "```json", prettyJson(verifierContract), "```"].join("\n")
+    : "";
+  const sourceEvidenceSection = sourceEvidence
+    ? [
+        "## Required Independent Source Readback",
+        "The structured worker evidence is incomplete. Treat summary claims as untrusted until independently reproduced from the frozen worktree.",
+        "```json",
+        prettyJson(sourceEvidence),
+        "```",
+      ].join("\n")
     : "";
   const rendered = renderPromptTemplate(template ?? DEFAULT_VERIFIER_TASK_PROMPT_TEMPLATE, {
     sourceTaskId,
@@ -169,7 +244,22 @@ function buildVerifierPrompt(
     prettyJson(sourceOutput),
     "```",
   ].join("\n");
-  return fitPromptAroundFrozenSections(rendered, [boundedEvidenceSection, contractSection]);
+  return fitPromptAroundFrozenSections(rendered, [boundedEvidenceSection, contractSection, sourceEvidenceSection]);
+}
+
+function sourceEvidenceAssessment(output: AttemptOutput) {
+  const missing = [
+    ...((output.changedFiles?.length ?? 0) === 0 ? ["changedFiles"] : []),
+    ...((output.checks?.length ?? 0) === 0 ? ["checks"] : []),
+    ...((output.artifacts?.length ?? 0) === 0 ? ["artifacts"] : []),
+  ];
+  return missing.length > 0
+    ? {
+        status: "incomplete" as const,
+        missing,
+        requiresIndependentReadback: true as const,
+      }
+    : undefined;
 }
 
 function verifierContractFromTask(task: { config?: { verifierContract?: unknown } }) {

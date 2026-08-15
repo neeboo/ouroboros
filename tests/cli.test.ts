@@ -8674,11 +8674,73 @@ if (args.includes("self-improve-daemon")) {
     const attempt = harness.getAttempt(session.attemptId)!;
     expect(attempt.status).toBe("done");
     expect(attempt.input.dshProfileIsolation).toBe("base-headless");
-    expect(attempt.output).toMatchObject({
-      summary: "legacy DSH repair used isolated profile",
-      artifacts: [{ kind: "dsh_profile_isolation", mode: "base-headless" }],
+    expect(attempt.output.summary).toBe("legacy DSH repair used isolated profile");
+    expect(attempt.output.artifacts).toContainEqual({
+      kind: "dsh_profile_isolation",
+      mode: "base-headless",
     });
     expect(harness.getTask(repairId)?.config?.dshProfileIsolation).toBeUndefined();
+  });
+
+  test("generic DSH run-loop creates a verifier and marks empty worker evidence as requiring independent readback", async () => {
+    await runCli("init");
+    const harness = new Harness(dbPath);
+    const worktree = join(dir, "dsh-empty-evidence-worktree");
+    const dshCommand = join(dir, "fake-dsh-empty-evidence");
+    await mkdir(worktree, { recursive: true });
+    await writeFile(
+      dshCommand,
+      [
+        "#!/usr/bin/env bun",
+        "console.log(JSON.stringify({ status: 'done', summary: 'modified src/auth.ts and ran 15 tests', changedFiles: [], checks: [], artifacts: [], problems: [] }));",
+      ].join("\n"),
+    );
+    await chmod(dshCommand, 0o755);
+    const runId = harness.createRun({
+      goal: "Verify every DSH delivery",
+      context: {
+        agentDefaults: { global: "codex-resumable", roles: { worker: "deepseek-harness", verifier: "codex-resumable" } },
+        agentBackends: {
+          "deepseek-harness": { kind: "dsh-cli", command: dshCommand, profile: "headless" },
+          "codex-resumable": { kind: "codex-resumable" },
+        },
+      },
+    });
+    const workerId = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Repair authentication",
+      prompt: "Repair authentication.",
+      worktreePath: worktree,
+    });
+
+    await runCliJson(
+      "run-loop",
+      "--run-id", runId,
+      "--executor", "dsh-cli",
+      "--cwd", worktree,
+      "--start-hook", "none",
+      "--max-rounds", "1",
+      "--tasks", "1",
+    );
+
+    const overview = harness.getRunOverview({ runId, eventLimit: 0 });
+    const verifier = overview.tasks.find((task) => task.role === "verifier" && task.dependsOn.includes(workerId));
+    expect(verifier).toBeDefined();
+    expect(verifier?.status).toBe("todo");
+    expect(verifier?.prompt).toContain("structured worker evidence is incomplete");
+    expect(verifier?.config?.sourceEvidence).toEqual({
+      status: "incomplete",
+      missing: ["changedFiles", "checks", "artifacts"],
+      requiresIndependentReadback: true,
+    });
+    const workerAttempt = overview.sessions.find((session) => session.taskId === workerId)!;
+    expect(harness.getAttempt(workerAttempt.attemptId)?.output.artifacts).toContainEqual({
+      kind: "source_evidence_incomplete",
+      status: "incomplete",
+      missing: ["changedFiles", "checks", "artifacts"],
+      requiresIndependentReadback: true,
+    });
   });
 
   test("run-loop reviews the goal when the queue is empty and can complete the run", async () => {
@@ -9364,6 +9426,26 @@ if (args.includes("self-improve-daemon")) {
       "--output-json",
       '{"status":"done","summary":"newer work done","changedFiles":[],"checks":[],"artifacts":[],"problems":[]}',
     );
+    const setupHarness = new Harness(dbPath);
+    const verifierId = setupHarness.createTask({
+      runId: run.id,
+      role: "verifier",
+      goal: "Verify newer work",
+      prompt: "Independently verify the newer work.",
+      dependsOn: [newerWorker.id],
+    });
+    setupHarness.recordAttempt({
+      taskId: verifierId,
+      input: { executor: "fixture" },
+      output: {
+        status: "done",
+        summary: "newer work independently verified",
+        changedFiles: [],
+        checks: [{ name: "fixture verification", status: "passed" }],
+        artifacts: [{ kind: "fixture_verifier_readback" }],
+        problems: [],
+      },
+    });
     const codexBin = join(dir, "fake-codex-fresh-review");
     await writeFile(
       codexBin,
@@ -9457,6 +9539,26 @@ if (args.includes("self-improve-daemon")) {
       "--output-json",
       '{"status":"done","summary":"newer worker completed","changedFiles":["src/supervisor.ts"],"checks":[],"artifacts":[],"problems":[]}',
     );
+    const setupHarness = new Harness(dbPath);
+    const verifierId = setupHarness.createTask({
+      runId: run.id,
+      role: "verifier",
+      goal: "Verify the supervisor repair",
+      prompt: "Independently verify the supervisor repair.",
+      dependsOn: [newerWorker.id],
+    });
+    setupHarness.recordAttempt({
+      taskId: verifierId,
+      input: { executor: "fixture" },
+      output: {
+        status: "done",
+        summary: "supervisor repair independently verified",
+        changedFiles: ["src/supervisor.ts"],
+        checks: [{ name: "fixture verification", status: "passed" }],
+        artifacts: [{ kind: "fixture_verifier_readback" }],
+        problems: [],
+      },
+    });
     const codexBin = join(dir, "fake-codex-fresh-review-after-non-terminal");
     await writeFile(
       codexBin,

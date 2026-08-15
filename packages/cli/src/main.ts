@@ -929,7 +929,7 @@ if (parsed.command === "help" || flag(parsed, "help") !== undefined) {
       startHooks: startHooks(),
       executorFactory: executorFactory(executorName),
       attemptInput: attemptInputFactory(executorName),
-      stopHooksByRole: stopHooksByRole(),
+      stopHooksByRole: stopHooksByRole(DEFAULT_STOP_HOOKS),
     });
     printJson(result);
     break;
@@ -1866,6 +1866,7 @@ function codexRunnerInput(defaultStopHooks?: string) {
     worktreeForTask: worktreeForTask(),
     startHooks: startHooks(),
     stopHooksByRole: stopHooksByRole(defaultStopHooks),
+    reconcileTerminalDoneWorkerVerifiers: stopHookNames.includes("create-verifier"),
     reconcileTerminalBlockedVerifierRepairs: stopHookNames.includes("create-repair"),
     cliAgentBackend: flag(parsed, "agent-backend"),
     cliExecutor: "codex-resumable" as const,

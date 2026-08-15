@@ -39,6 +39,7 @@ import { createCodexResumableClient, sessionIdFromEvents } from "./executors/cod
 import type { CodexResumableClientOptions, CodexResumableResult } from "./executors/codex-resumable";
 import { childToolchainEnvEvidence } from "./executors/proxy-env";
 import { reconcileTerminalBlockedVerifierRepair } from "./hooks/create-repair";
+import { reconcileTerminalDoneWorkerVerifiers } from "./hooks/create-verifier";
 import { createRouteExecutor } from "./route-executor";
 import {
   assertPersistedHostExecutionCapabilityAttestation,
@@ -83,6 +84,7 @@ export interface CodexResumableOrchestrationInput {
   genericAttemptHeartbeatMs?: number;
   shouldStop?: () => boolean;
   reconcileTerminalBlockedVerifierRepairs?: boolean;
+  reconcileTerminalDoneWorkerVerifiers?: boolean;
 }
 
 type RuntimeGenerationState = "current" | "stale" | "draining-for-reload" | "reloaded" | "reload-failed";
@@ -119,6 +121,9 @@ export async function runCodexResumableLoop(input: RunCodexResumableLoopInput) {
     if (input.shouldStop?.()) {
       break;
     }
+    const reconciledVerifiers = input.reconcileTerminalDoneWorkerVerifiers
+      ? await reconcileTerminalDoneWorkerVerifiers({ harness: input.harness, runId: input.runId })
+      : [];
     const reconciledRepairs = input.reconcileTerminalBlockedVerifierRepairs
       ? await reconcileTerminalBlockedVerifierRepair({ harness: input.harness, runId: input.runId })
       : [];
@@ -132,7 +137,7 @@ export async function runCodexResumableLoop(input: RunCodexResumableLoopInput) {
       maxRunningContinuations: input.maxTries,
     });
     if (resumed.length > 0) {
-      rounds.push({ index, tasks: resumed, reclaimed, reconciledRepairs });
+      rounds.push({ index, tasks: resumed, reclaimed, reconciledVerifiers, reconciledRepairs });
       if (resumed.some((task) => task.status === "running")) {
         break;
       }
@@ -148,7 +153,7 @@ export async function runCodexResumableLoop(input: RunCodexResumableLoopInput) {
       const overviewBeforeReview = input.harness.getRunOverview({ runId: input.runId, eventLimit: 0 });
       const integration = maybeIntegrateCompletedRun(input, overviewBeforeReview);
       if (integration?.some((result) => result.status === "done")) {
-        rounds.push({ index, tasks: started, integration, reclaimed, reconciledRepairs });
+        rounds.push({ index, tasks: started, integration, reclaimed, reconciledVerifiers, reconciledRepairs });
         continue;
       }
       const drain = applyHarnessAction(input.harness, {
@@ -160,7 +165,7 @@ export async function runCodexResumableLoop(input: RunCodexResumableLoopInput) {
       if (drain.status === "done") {
         const reviewed = await orchestrator.startReadyAttempts({ runId: input.runId, limit: input.limit });
         if (reviewed.length > 0) {
-          rounds.push({ index, tasks: reviewed, goalReview: drain, reclaimed, reconciledRepairs });
+          rounds.push({ index, tasks: reviewed, goalReview: drain, reclaimed, reconciledVerifiers, reconciledRepairs });
           if (reviewed.some((task) => task.status === "running")) {
             break;
           }
@@ -169,7 +174,7 @@ export async function runCodexResumableLoop(input: RunCodexResumableLoopInput) {
       }
       break;
     }
-    rounds.push({ index, tasks: started, reclaimed, reconciledRepairs });
+    rounds.push({ index, tasks: started, reclaimed, reconciledVerifiers, reconciledRepairs });
     if (started.some((task) => task.status === "running")) {
       break;
     }

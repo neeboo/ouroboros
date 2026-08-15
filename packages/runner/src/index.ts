@@ -97,7 +97,11 @@ export {
 } from "./hooks/repair-budget";
 export { createRunsFromOutputHook } from "./hooks/create-runs";
 export { createTasksFromOutputHook } from "./hooks/create-tasks";
-export { createVerifierTaskHook } from "./hooks/create-verifier";
+export {
+  createVerifierTaskHook,
+  reconcileTerminalDoneWorkerVerifiers,
+  type TerminalDoneWorkerVerifierReconciliation,
+} from "./hooks/create-verifier";
 export { createGitWorktreeHook } from "./hooks/git-worktree";
 export { createGoalReviewDecisionHook, inferExplicitRunDecision } from "./hooks/goal-review";
 export {
