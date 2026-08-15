@@ -77,6 +77,15 @@ describe("terminal design delivery reconciliation", () => {
       prompt: "Verify src/feature.ts.",
       dependsOn: [workerTaskId],
       worktreePath,
+      doneWhen: ["harness action event"],
+      config: {
+        completionContract: {
+          schemaVersion: 1,
+          sourceTaskId: workerTaskId,
+          sourceDoneWhen: [],
+          requiredEvidence: ["harness action event"],
+        },
+      },
     });
     harness.recordAttempt({
       taskId: verifierTaskId,
@@ -232,6 +241,15 @@ describe("terminal design delivery reconciliation", () => {
       prompt: "Verify src/legacy.ts.",
       dependsOn: [workerTaskId],
       worktreePath: recordedWorktreePath,
+      doneWhen: ["harness action event"],
+      config: {
+        completionContract: {
+          schemaVersion: 1,
+          sourceTaskId: workerTaskId,
+          sourceDoneWhen: [],
+          requiredEvidence: ["harness action event"],
+        },
+      },
     });
     harness.recordAttempt({
       taskId: verifierTaskId,
@@ -311,6 +329,15 @@ describe("terminal design delivery reconciliation", () => {
       prompt: "Verify src/feature.ts.",
       dependsOn: [workerTaskId],
       worktreePath,
+      doneWhen: ["harness action event"],
+      config: {
+        completionContract: {
+          schemaVersion: 1,
+          sourceTaskId: workerTaskId,
+          sourceDoneWhen: [],
+          requiredEvidence: ["harness action event"],
+        },
+      },
     });
     harness.recordAttempt({
       taskId: verifierTaskId,
@@ -441,6 +468,15 @@ describe("terminal design delivery reconciliation", () => {
       prompt: "Verify the frozen checks.",
       dependsOn: [workerTaskId],
       worktreePath: missingWorktreePath,
+      doneWhen: ["harness action event"],
+      config: {
+        completionContract: {
+          schemaVersion: 1,
+          sourceTaskId: workerTaskId,
+          sourceDoneWhen: [],
+          requiredEvidence: ["harness action event"],
+        },
+      },
     });
     harness.recordAttempt({
       taskId: verifierTaskId,

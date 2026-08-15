@@ -23,6 +23,12 @@ export interface ModelPreference {
 export interface TaskConfig {
   modelPreference?: ModelPreference;
   verifierContract?: Record<string, unknown>;
+  completionContract?: {
+    schemaVersion: 1;
+    sourceTaskId: string;
+    sourceDoneWhen: string[];
+    requiredEvidence: string[];
+  };
   [key: string]: unknown;
 }
 

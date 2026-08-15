@@ -1,4 +1,10 @@
-import { DEFAULT_VERIFIER_TASK_PROMPT_TEMPLATE, type AttemptOutput, type Harness } from "@ouroboros/harness";
+import {
+  DEFAULT_VERIFIER_TASK_PROMPT_TEMPLATE,
+  completionVerificationContract,
+  type AttemptOutput,
+  type CompletionVerificationContractV1,
+  type Harness,
+} from "@ouroboros/harness";
 import { boundedDiagnosticText, compactAttemptEvidence } from "../bounded-diagnostic";
 import { fitPromptAroundFrozenSections, HandoffContractTooLargeError } from "../prompt-budget";
 import { prettyJson, renderPromptTemplate } from "../template";
@@ -78,6 +84,7 @@ export function createVerifierTaskHook(options: { harness: Harness; sourceRoles?
     try {
       return options.harness.runInImmediateTransaction((db) => {
         const overview = options.harness.getRunOverviewWithDb(db, { runId: run.id, eventLimit: 0 });
+        const completionContract = completionVerificationContract(overview, task);
         const existingVerifiers = overview.tasks
           .filter((candidate) => candidate.role === "verifier" && candidate.dependsOn.includes(task.id));
         if (existingVerifiers.length > 1) {
@@ -95,6 +102,7 @@ export function createVerifierTaskHook(options: { harness: Harness; sourceRoles?
         const existingVerifier = existingVerifiers[0];
         if (existingVerifier) {
           const existingContract = existingVerifier.config?.verifierContract;
+          const existingCompletionContract = existingVerifier.config?.completionContract;
           if (stableJson(existingContract) !== stableJson(verifierContract)) {
             return {
               decision: "exit" as const,
@@ -106,9 +114,38 @@ export function createVerifierTaskHook(options: { harness: Harness; sourceRoles?
               }],
             };
           }
+          const hasAttempt = overview.sessions.some((session) => session.taskId === existingVerifier.id);
+          if (
+            existingCompletionContract === undefined
+            && existingVerifier.status === "todo"
+            && !hasAttempt
+          ) {
+            db.query(
+              `update tasks
+               set config_json = $configJson, done_when_json = $doneWhenJson, updated_at = current_timestamp
+               where id = $taskId and status = 'todo'`,
+            ).run({
+              $taskId: existingVerifier.id,
+              $configJson: JSON.stringify({ ...(existingVerifier.config ?? {}), completionContract }),
+              $doneWhenJson: JSON.stringify(uniqueStrings([
+                ...existingVerifier.doneWhen,
+                ...task.doneWhen,
+                ...completionContract.requiredEvidence,
+              ])),
+            });
+          } else if (stableJson(existingCompletionContract) !== stableJson(completionContract)) {
+            return {
+              decision: "exit" as const,
+              problems: [`existing verifier ${existingVerifier.id} has a different frozen completion contract`],
+              artifacts: [{
+                kind: "conflicting_completion_contract",
+                taskId: existingVerifier.id,
+                sourceTaskId: task.id,
+              }],
+            };
+          }
           let sourceWorktreePath = existingVerifier.worktreePath;
           if (task.worktreePath && !sourceWorktreePath) {
-            const hasAttempt = overview.sessions.some((session) => session.taskId === existingVerifier.id);
             if (existingVerifier.status !== "todo" || hasAttempt) {
               return {
                 decision: "exit" as const,
@@ -143,9 +180,18 @@ export function createVerifierTaskHook(options: { harness: Harness; sourceRoles?
           };
         }
 
-        const prompt = buildVerifierPrompt(template, task.id, task.worktreePath, output, verifierContract, sourceEvidence);
+        const prompt = buildVerifierPrompt(
+          template,
+          task.id,
+          task.worktreePath,
+          output,
+          verifierContract,
+          completionContract,
+          sourceEvidence,
+        );
         const config = {
           ...(verifierContract ? { verifierContract } : {}),
+          completionContract,
           ...(sourceEvidence ? { sourceEvidence } : {}),
         };
         const taskId = options.harness.createTaskWithDb(db, {
@@ -155,11 +201,13 @@ export function createVerifierTaskHook(options: { harness: Harness; sourceRoles?
           prompt,
           dependsOn: [task.id],
           worktreePath: task.worktreePath,
-          doneWhen: [
+          doneWhen: uniqueStrings([
+            ...task.doneWhen,
+            ...completionContract.requiredEvidence,
             "source task output is checked against real changed files and artifacts",
             "relevant checks are rerun or explained",
             "verification result is returned as structured JSON",
-          ],
+          ]),
           ...(Object.keys(config).length > 0 ? { config } : {}),
         });
 
@@ -209,6 +257,7 @@ function buildVerifierPrompt(
   sourceTaskWorktreePath: string | null,
   output: AttemptOutput,
   verifierContract: Record<string, unknown> | undefined,
+  completionContract: CompletionVerificationContractV1,
   sourceEvidence: ReturnType<typeof sourceEvidenceAssessment>,
 ) {
   const sourceOutput = {
@@ -218,6 +267,13 @@ function buildVerifierPrompt(
   const contractSection = verifierContract
     ? ["## Frozen Verifier Contract", "```json", prettyJson(verifierContract), "```"].join("\n")
     : "";
+  const completionContractSection = [
+    "## Frozen Completion Contract",
+    "The verifier must evaluate this exact source lineage and every required evidence item.",
+    "```json",
+    prettyJson(completionContract),
+    "```",
+  ].join("\n");
   const sourceEvidenceSection = sourceEvidence
     ? [
         "## Required Independent Source Readback",
@@ -244,7 +300,16 @@ function buildVerifierPrompt(
     prettyJson(sourceOutput),
     "```",
   ].join("\n");
-  return fitPromptAroundFrozenSections(rendered, [boundedEvidenceSection, contractSection, sourceEvidenceSection]);
+  return fitPromptAroundFrozenSections(rendered, [
+    boundedEvidenceSection,
+    contractSection,
+    completionContractSection,
+    sourceEvidenceSection,
+  ]);
+}
+
+function uniqueStrings(values: string[]) {
+  return [...new Set(values)];
 }
 
 function sourceEvidenceAssessment(output: AttemptOutput) {

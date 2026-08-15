@@ -210,6 +210,136 @@ describe("Harness", () => {
     expect(harness.getRun(runId)?.status).toBe("todo");
   });
 
+  test("prevents marking a design delivery done without a passing verifier for the latest repair lineage", () => {
+    const requiredEvidence = ["FROZEN_REQUIRED_EVIDENCE"];
+    const runId = harness.createRun({
+      goal: "Deliver a frozen design",
+      context: {
+        source: "design",
+        designEvaluationContract: { requiredEvidence },
+      },
+    });
+    const workerId = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Implement the frozen delivery",
+      prompt: "Implement.",
+      worktreePath: join(dir, "delivery-worktree"),
+      doneWhen: ["SOURCE_DONE_WHEN"],
+    });
+    recordTaskStatus(workerId, "done", "implementation finished");
+    const verifierId = harness.createTask({
+      runId,
+      role: "verifier",
+      goal: "Verify the frozen delivery",
+      prompt: "Verify.",
+      dependsOn: [workerId],
+      worktreePath: join(dir, "delivery-worktree"),
+      doneWhen: requiredEvidence,
+    });
+    recordTaskStatus(verifierId, "blocked", "frozen verification failed");
+    const repairId = harness.createTask({
+      runId,
+      parentId: verifierId,
+      role: "worker",
+      goal: "Repair: Verify the frozen delivery",
+      prompt: "Repair without changing the contract.",
+      dependsOn: [workerId],
+      worktreePath: join(dir, "delivery-worktree"),
+      doneWhen: ["SOURCE_DONE_WHEN", ...requiredEvidence],
+    });
+    recordTaskStatus(repairId, "blocked", "command timed out after 1800000ms; exit code 124");
+
+    expect(() => harness.updateRunStatus({ runId, status: "done" })).toThrow(
+      /latest repair lineage.*has no passing verifier/i,
+    );
+    expect(harness.getRun(runId)?.status).toBe("todo");
+  });
+
+  test("allows design delivery completion only after the latest repair has an exact passing verifier", () => {
+    const requiredEvidence = ["FROZEN_REQUIRED_EVIDENCE"];
+    const worktreePath = join(dir, "recovered-delivery-worktree");
+    const runId = harness.createRun({
+      goal: "Deliver a recovered frozen design",
+      context: {
+        source: "design",
+        designEvaluationContract: { requiredEvidence },
+      },
+    });
+    const workerId = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Implement the frozen delivery",
+      prompt: "Implement.",
+      worktreePath,
+      doneWhen: ["SOURCE_DONE_WHEN"],
+    });
+    recordTaskStatus(workerId, "done", "implementation finished");
+    const verifierId = harness.createTask({
+      runId,
+      role: "verifier",
+      goal: "Verify the frozen delivery",
+      prompt: "Verify.",
+      dependsOn: [workerId],
+      worktreePath,
+      doneWhen: requiredEvidence,
+    });
+    recordTaskStatus(verifierId, "blocked", "frozen verification failed");
+    const repairId = harness.createTask({
+      runId,
+      parentId: verifierId,
+      role: "worker",
+      goal: "Repair: Verify the frozen delivery",
+      prompt: "Repair.",
+      dependsOn: [workerId],
+      worktreePath,
+      doneWhen: ["SOURCE_DONE_WHEN", ...requiredEvidence],
+    });
+    recordTaskStatus(repairId, "blocked", "command timed out after 1800000ms; exit code 124");
+    const recoveryId = harness.createTask({
+      runId,
+      parentId: repairId,
+      role: "worker",
+      goal: "Recover timed out repair",
+      prompt: "Continue the same repair.",
+      dependsOn: [workerId],
+      worktreePath,
+      doneWhen: ["SOURCE_DONE_WHEN", ...requiredEvidence],
+    });
+    recordTaskStatus(recoveryId, "done", "bounded repair recovery finished");
+    const passingVerifierId = harness.createTask({
+      runId,
+      role: "verifier",
+      goal: "Verify recovered repair",
+      prompt: "Verify the exact frozen contract.",
+      dependsOn: [recoveryId],
+      worktreePath,
+      doneWhen: ["SOURCE_DONE_WHEN", ...requiredEvidence],
+      config: {
+        completionContract: {
+          schemaVersion: 1,
+          sourceTaskId: recoveryId,
+          sourceDoneWhen: ["SOURCE_DONE_WHEN", ...requiredEvidence],
+          requiredEvidence,
+        },
+      },
+    });
+    harness.recordAttempt({
+      taskId: passingVerifierId,
+      input: {},
+      output: {
+        status: "done",
+        summary: "all frozen evidence independently passed",
+        checks: [{ name: "frozen contract", status: "passed" }],
+        artifacts: [],
+        problems: [],
+      },
+    });
+
+    expect(() => harness.updateRunStatus({ runId, status: "done" })).not.toThrow();
+    expect(harness.getRun(runId)?.status).toBe("done");
+  });
+
   test("reopens a done run when a new active task is created", () => {
     const runId = harness.createRun({ goal: "Build loop" });
     harness.updateRunStatus({ runId, status: "done" });

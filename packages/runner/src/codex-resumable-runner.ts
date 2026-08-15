@@ -1,6 +1,7 @@
 import {
   applyHarnessAction,
   describeIntegrationReadiness,
+  describeRunCompletionReadiness,
   diagnoseRunOverview,
   GOAL_REVIEW_TASK_DONE_WHEN,
   GOAL_REVIEW_TASK_GOAL,
@@ -1691,6 +1692,19 @@ function applyPostAttemptRunEffects(
   output: AttemptOutput,
 ) {
   if (task.role === "goal-review" && output.status === "done" && output.runDecision === "complete") {
+    const completion = describeRunCompletionReadiness(harness.getRunOverview({ runId, eventLimit: 0 }));
+    if (completion.blockers.length > 0) {
+      harness.updateRun({
+        runId,
+        status: "blocked",
+        contextPatch: {
+          pendingVerificationTaskIds: completion.blockers.map((blocker) => blocker.taskId),
+          pendingVerificationReason: completion.blockers.map((blocker) => blocker.reason).join("; "),
+          goalReviewRefreshedAt: new Date().toISOString(),
+        },
+      });
+      return;
+    }
     const readiness = describeIntegrationReadiness(harness, runId);
     if (readiness.unintegrated.length > 0) {
       harness.updateRun({

@@ -29,9 +29,22 @@ export async function reconcileTerminalBlockedVerifierRepair(options: {
   const overview = options.harness.getRunOverview({ runId: options.runId, eventLimit: 0 });
   if (
     !overview.run
-    || overview.run.status !== "todo"
+    || !["todo", "done", "blocked"].includes(overview.run.status)
     || overview.tasks.some((task) => task.status === "todo" || task.status === "running")
   ) {
+    return [];
+  }
+  const timedOutRepair = [...overview.tasks].reverse().find((task) => {
+    if (task.role !== "worker" || task.status !== "blocked" || !task.parentId) return false;
+    const parent = overview.tasks.find((candidate) => candidate.id === task.parentId);
+    if (parent?.role !== "verifier") return false;
+    const session = [...overview.sessions].reverse().find((candidate) => candidate.taskId === task.id);
+    return Boolean(session?.status === "blocked" && isBoundedRepairTimeout(session.output));
+  });
+  if (timedOutRepair) {
+    return [reconcileTimedOutRepair(options.harness, overview, timedOutRepair, options.budgetLimit)];
+  }
+  if (overview.run.status !== "todo") {
     return [];
   }
   const verifier = [...overview.tasks]
@@ -67,6 +80,153 @@ export async function reconcileTerminalBlockedVerifierRepair(options: {
     artifacts: result.artifacts ?? [],
     problems: result.problems ?? [],
   }];
+}
+
+function reconcileTimedOutRepair(
+  harness: Harness,
+  snapshot: ReturnType<Harness["getRunOverview"]>,
+  timedOutRepair: Task,
+  budgetLimit = DEFAULT_REPAIR_REPLAN_BUDGET_LIMIT,
+): TerminalBlockedVerifierRepairReconciliation {
+  const proposedTaskId = makeId("task");
+  const snapshotSession = [...snapshot.sessions].reverse().find((candidate) => candidate.taskId === timedOutRepair.id);
+  const snapshotAttempt = snapshotSession ? harness.getAttempt(snapshotSession.attemptId) : null;
+  const atomic = harness.runInImmediateTransaction((db) => {
+    const overview = harness.getRunOverviewWithDb(db, { runId: timedOutRepair.runId, eventLimit: 0 });
+    const repair = overview.tasks.find((task) => task.id === timedOutRepair.id);
+    const session = [...overview.sessions].reverse().find((candidate) => candidate.taskId === timedOutRepair.id);
+    const attempt = session ? harness.getAttemptWithDb(db, session.attemptId) : null;
+    const existing = overview.tasks.find((task) => task.role === "worker" && task.parentId === timedOutRepair.id);
+    const storedBudget = readRepairBudget(overview.run?.context ?? {});
+    const reconciled = reconcileGoalReviewRepairBudget(storedBudget, overview);
+    const charge = chargeRepairBudgetState(reconciled.nextBudget, {
+      limit: budgetLimit,
+      taskId: timedOutRepair.id,
+      attemptId: attempt?.id,
+      kind: "repair",
+      summary: `Recover timed out repair: ${timedOutRepair.goal}`,
+      rootTaskId: timedOutRepair.parentId ?? undefined,
+      rootCause: attempt ? latestRootCause(attempt.output) : "repair timeout",
+    });
+    if (!repair || repair.status !== "blocked" || !attempt || !isBoundedRepairTimeout(attempt.output)) {
+      return { taskId: null, existing: null, charge, conflict: "timed out repair evidence changed" };
+    }
+    if (existing) {
+      if (charge.charged || reconciled.chargedTaskIds.length > 0) {
+        harness.updateRunWithDb(db, {
+          runId: timedOutRepair.runId,
+          contextPatch: { repairReplanBudget: charge.nextBudget },
+        });
+      }
+      return { taskId: null, existing: charge.allowed ? existing : null, charge, conflict: null };
+    }
+    if (!charge.allowed || !charge.charged) {
+      harness.updateRunWithDb(db, {
+        runId: timedOutRepair.runId,
+        contextPatch: { repairReplanBudget: charge.nextBudget },
+      });
+      return { taskId: null, existing: null, charge, conflict: null };
+    }
+
+    const inheritedExecutionContract = Object.fromEntries(
+      ["sandbox", "permissionMode", "browserProcessPolicy", "forbidBrowser", "forbidImplementation", "hostExecutionCapabilities"]
+        .flatMap((key) => attempt.input[key] === undefined ? [] : [[key, attempt.input[key]]]),
+    );
+    const taskId = harness.createTaskWithDb(db, {
+      id: proposedTaskId,
+      runId: timedOutRepair.runId,
+      parentId: timedOutRepair.id,
+      cycleId: timedOutRepair.cycleId,
+      role: "worker",
+      goal: `Recover timed out repair: ${timedOutRepair.goal}`,
+      prompt: buildRepairTimeoutRecoveryPrompt(timedOutRepair, attempt.id, attempt.output),
+      dependsOn: timedOutRepair.dependsOn,
+      doneWhen: timedOutRepair.doneWhen,
+      worktreePath: timedOutRepair.worktreePath,
+      config: {
+        ...inheritedExecutionContract,
+        ...(timedOutRepair.config ?? {}),
+        repairTimeoutRecovery: {
+          sourceTaskId: timedOutRepair.id,
+          sourceAttemptId: attempt.id,
+          budgetUsed: charge.nextBudget.used,
+          budgetLimit: charge.nextBudget.limit,
+        },
+      },
+    });
+    harness.updateRunWithDb(db, {
+      runId: timedOutRepair.runId,
+      status: "todo",
+      contextPatch: {
+        repairReplanBudget: charge.nextBudget,
+        pendingVerificationTaskIds: [taskId],
+        pendingVerificationReason: `bounded recovery created for timed out repair ${timedOutRepair.id}`,
+      },
+    });
+    return { taskId, existing: null, charge, conflict: null };
+  });
+
+  const recoveryTask = atomic.existing ?? (atomic.taskId ? harness.getTask(atomic.taskId) : null);
+  const originalVerifierId = timedOutRepair.parentId ?? "unknown";
+  if (recoveryTask) {
+    return {
+      verifierTaskId: originalVerifierId,
+      verifierAttemptId: snapshotAttempt?.id ?? "unknown",
+      decision: recoveryTask.status === "todo" || recoveryTask.status === "running" ? "continue" : "exit",
+      artifacts: [{
+        kind: "created_repair_timeout_recovery",
+        taskId: recoveryTask.id,
+        sourceRepairTaskId: timedOutRepair.id,
+        sourceRepairAttemptId: snapshotAttempt?.id ?? null,
+        sourceWorktreePath: timedOutRepair.worktreePath,
+        reused: Boolean(atomic.existing),
+        budgetUsed: atomic.charge.nextBudget.used,
+        budgetLimit: atomic.charge.nextBudget.limit,
+      }],
+      problems: [],
+    };
+  }
+  return {
+    verifierTaskId: originalVerifierId,
+    verifierAttemptId: snapshotAttempt?.id ?? "unknown",
+    decision: "exit",
+    artifacts: [{
+      kind: atomic.conflict ? "repair_timeout_recovery_conflict" : "repair_budget_exhausted",
+      sourceRepairTaskId: timedOutRepair.id,
+      reason: atomic.conflict ?? atomic.charge.reason,
+      budgetUsed: atomic.charge.nextBudget.used,
+      budgetLimit: atomic.charge.nextBudget.limit,
+    }],
+    problems: atomic.conflict ? [atomic.conflict] : [],
+  };
+}
+
+function buildRepairTimeoutRecoveryPrompt(task: Task, attemptId: string, output: AttemptOutput) {
+  const rootCause = boundedDiagnosticText(latestRootCause(output), 2_000).text;
+  const frozenContract = [
+    "## Frozen Timed Repair Recovery",
+    `Source repair task: ${task.id}`,
+    `Source repair attempt: ${attemptId}`,
+    `Source worktree: ${task.worktreePath ?? "not recorded"}`,
+    "Continue only the existing repair. Do not replan, weaken verification, or broaden permissions.",
+    "## Frozen Completion Criteria",
+    ...task.doneWhen.map((item) => `- ${item}`),
+    "## Frozen Task Configuration",
+    "```json",
+    prettyJson(task.config ?? {}),
+    "```",
+  ].join("\n");
+  const prompt = [
+    `Recover the timed out repair ${task.id} in its existing worktree.`,
+    `Latest bounded failure: ${rootCause}`,
+    "Return structured changedFiles, checks, artifacts, and problems. A new independent verifier will run after this task succeeds.",
+  ].join("\n");
+  return fitPromptAroundFrozenSections(prompt, [frozenContract]);
+}
+
+function isBoundedRepairTimeout(output: AttemptOutput) {
+  const text = [output.summary, ...(output.problems ?? [])].join("\n").toLowerCase();
+  return text.includes("timed out") || text.includes("timeout") || text.includes("exit code 124") || text.includes("exit 124");
 }
 
 export function createRepairTaskHook(options: {

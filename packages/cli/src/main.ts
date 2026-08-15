@@ -3,6 +3,7 @@ import {
   acceptGuardrailProposal as acceptGuardrailProposalInContext,
   applyHarnessAction,
   describeIntegrationReadiness,
+  describeRunCompletionReadiness,
   diagnoseRunOverview,
   Harness,
   makeId,
@@ -4813,6 +4814,18 @@ export function buildDashboardDesignTimelineForCli(
 
 function applyCliPostAttemptRunEffects(runId: string, task: Pick<Task, "role">, output: AttemptOutput) {
   if (task.role === "goal-review" && output.status === "done" && output.runDecision === "complete") {
+    const completion = describeRunCompletionReadiness(harness.getRunOverview({ runId, eventLimit: 0 }));
+    if (completion.blockers.length > 0) {
+      harness.updateRun({
+        runId,
+        status: "blocked",
+        contextPatch: {
+          pendingVerificationTaskIds: completion.blockers.map((blocker) => blocker.taskId),
+          pendingVerificationReason: completion.blockers.map((blocker) => blocker.reason).join("; "),
+        },
+      });
+      return;
+    }
     const readiness = describeIntegrationReadiness(harness, runId);
     if (readiness.unintegrated.length > 0) {
       harness.updateRun({

@@ -22,6 +22,16 @@ export {
 } from "./goal-review";
 export { applyHarnessAction, parseHarnessAction, describeIntegrationReadiness } from "./actions";
 export {
+  assertRunCompletionReady,
+  completionVerificationContract,
+  describeRunCompletionReadiness,
+} from "./completion-readiness";
+export type {
+  CompletionVerificationBlocker,
+  CompletionVerificationContractV1,
+  RunCompletionReadiness,
+} from "./completion-readiness";
+export {
   advanceAfterRepair,
   buildWatchdogFingerprint,
   computeWatchdogEligibility,

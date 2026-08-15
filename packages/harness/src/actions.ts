@@ -3,6 +3,7 @@ import { chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync,
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { tmpdir } from "node:os";
 import { acceptGuardrailProposal, proposeGuardrailsFromLessons } from "./guardrails";
+import { describeRunCompletionReadiness } from "./completion-readiness";
 import type { HarnessDatabase } from "./database";
 import {
   GOAL_REVIEW_TASK_DONE_WHEN,
@@ -5425,6 +5426,14 @@ function prepareRunDrain(harness: Harness, action: Extract<HarnessAction, { type
     );
   }
   if (run.status === "done") {
+    const completion = describeRunCompletionReadiness(harness.getRunOverview({ runId: action.runId, eventLimit: 0 }));
+    if (completion.blockers.length > 0) {
+      return blockedResult(
+        action.type,
+        `Run ${action.runId} has an unresolved frozen verification lineage despite its stored done status.`,
+        completion.blockers.map((blocker) => blocker.reason),
+      );
+    }
     return doneResult(action.type, `Run ${action.runId} is already done.`, [
       { name: "run status", status: "passed", evidence: "done" },
     ], [{ kind: "run", runId: action.runId, status: "done" }]);
@@ -5666,6 +5675,36 @@ function prepareRunDrain(harness: Harness, action: Extract<HarnessAction, { type
   }
   const completedReview = goalReviewInvalidated ? null : selectCompletedGoalReview(overview);
   if (completedReview) {
+    const completion = describeRunCompletionReadiness(harness.getRunOverview({ runId: action.runId, eventLimit: 0 }));
+    if (completion.blockers.length > 0) {
+      harness.updateRun({
+        runId: action.runId,
+        status: "blocked",
+        contextPatch: {
+          pendingVerificationTaskIds: completion.blockers.map((blocker) => blocker.taskId),
+          pendingVerificationReason: completion.blockers.map((blocker) => blocker.reason).join("; "),
+        },
+      });
+      checks.push({
+        name: "pending verification",
+        status: "failed",
+        evidence: completion.blockers.map((blocker) => blocker.taskId).join(","),
+      });
+      artifacts.push(...completion.blockers.map((blocker) => ({
+        kind: "pending_verification",
+        taskId: blocker.taskId,
+        verifierTaskId: blocker.verifierTaskId,
+        reason: blocker.reason,
+      })));
+      return {
+        status: "blocked",
+        actionType: action.type,
+        summary: `Run ${action.runId} has an unresolved frozen verification lineage.`,
+        checks,
+        artifacts,
+        problems: completion.blockers.map((blocker) => blocker.reason),
+      };
+    }
     const readiness = describeIntegrationReadiness(harness, action.runId);
     if (readiness.unintegrated.length > 0) {
       harness.updateRun({
@@ -6933,6 +6972,33 @@ function ensureGoalReviewTask(
       ? inferExplicitRunDecision(lastBlockedSession.output) === "complete"
       : false;
     if (textualCompletion) {
+      const completion = describeRunCompletionReadiness(harness.getRunOverview({ runId, eventLimit: 0 }));
+      if (completion.blockers.length > 0) {
+        harness.updateRun({
+          runId,
+          status: "blocked",
+          contextPatch: {
+            pendingVerificationTaskIds: completion.blockers.map((blocker) => blocker.taskId),
+            pendingVerificationReason: completion.blockers.map((blocker) => blocker.reason).join("; "),
+          },
+        });
+        return {
+          status: "blocked" as const,
+          summary: `Goal-review task ${blockedReview.id} cannot complete an unresolved verification lineage.`,
+          checks: [{
+            name: "pending verification",
+            status: "failed" as const,
+            evidence: completion.blockers.map((blocker) => blocker.taskId).join(","),
+          }],
+          artifacts: completion.blockers.map((blocker) => ({
+            kind: "pending_verification",
+            taskId: blocker.taskId,
+            verifierTaskId: blocker.verifierTaskId,
+            reason: blocker.reason,
+          })),
+          problems: completion.blockers.map((blocker) => blocker.reason),
+        };
+      }
       harness.updateRunStatus({ runId, status: "done" });
       return {
         status: "done" as const,

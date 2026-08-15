@@ -15,6 +15,7 @@ import {
 } from "./default-prompts";
 import { makeId } from "./ids";
 import { toJson } from "./json";
+import { assertRunCompletionReady } from "./completion-readiness";
 import {
   attemptEventFromRow,
   attemptFromRow,
@@ -603,6 +604,12 @@ export class Harness {
   }
 
   updateRunStatusWithDb(db: HarnessDatabase, input: UpdateRunStatusInput) {
+    if (input.status === "done") {
+      const current = this.getRunWithDb(db, input.runId);
+      if (current && current.status !== "done") {
+        assertRunCompletionReady(this.getRunOverviewWithDb(db, { runId: input.runId, eventLimit: 0 }));
+      }
+    }
     db.query(
       `
       update runs
@@ -626,6 +633,9 @@ export class Harness {
     }
     const current = runFromRow(existing);
     const nextContext = input.contextPatch ? { ...current.context, ...input.contextPatch } : current.context;
+    if (input.status === "done" && current.status !== "done") {
+      assertRunCompletionReady(this.getRunOverviewWithDb(db, { runId: input.runId, eventLimit: 0 }));
+    }
     db.query(
       `
       update runs
@@ -856,6 +866,11 @@ export class Harness {
       const row = db.query("select * from attempts where id = $id").get({ $id: id }) as AttemptRow | null;
       return row ? attemptFromRow(row) : null;
     });
+  }
+
+  getAttemptWithDb(db: HarnessDatabase, id: string) {
+    const row = db.query("select * from attempts where id = $id").get({ $id: id }) as AttemptRow | null;
+    return row ? attemptFromRow(row) : null;
   }
 
   listRunningAttempts(input: ListRunningAttemptsInput) {

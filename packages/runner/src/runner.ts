@@ -1,4 +1,4 @@
-import { describeIntegrationReadiness } from "@ouroboros/harness";
+import { describeIntegrationReadiness, describeRunCompletionReadiness } from "@ouroboros/harness";
 import type { AttemptOutput, Harness, Task } from "@ouroboros/harness";
 import { buildTaskPrompt } from "./prompt";
 import {
@@ -359,6 +359,18 @@ function applyPostAttemptRunEffects(
   output: { status: string; runDecision?: string },
 ) {
   if (task.role === "goal-review" && output.status === "done" && output.runDecision === "complete") {
+    const completion = describeRunCompletionReadiness(harness.getRunOverview({ runId, eventLimit: 0 }));
+    if (completion.blockers.length > 0) {
+      harness.updateRun({
+        runId,
+        status: "blocked",
+        contextPatch: {
+          pendingVerificationTaskIds: completion.blockers.map((blocker) => blocker.taskId),
+          pendingVerificationReason: completion.blockers.map((blocker) => blocker.reason).join("; "),
+        },
+      });
+      return;
+    }
     const readiness = describeIntegrationReadiness(harness, runId);
     if (readiness.unintegrated.length > 0) {
       harness.updateRun({

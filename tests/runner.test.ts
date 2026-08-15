@@ -5583,6 +5583,107 @@ describe("runner", () => {
     expect(run.context.pendingIntegrationReason).toMatch(/not integrated/);
   });
 
+  test("goal review cannot complete after a blocked verifier and timed out repair", async () => {
+    const worktreePath = join(dir, "timed-out-repair-worktree");
+    const requiredEvidence = ["FROZEN_REQUIRED_EVIDENCE"];
+    const runId = harness.createRun({
+      goal: "Reject a false delivery completion",
+      context: {
+        source: "design",
+        designEvaluationContract: { requiredEvidence },
+      },
+    });
+    const workerId = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Implement frozen work",
+      prompt: "Implement.",
+      worktreePath,
+      doneWhen: ["SOURCE_DONE_WHEN"],
+    });
+    harness.recordAttempt({
+      taskId: workerId,
+      input: { executor: "test" },
+      output: {
+        status: "done",
+        summary: "implemented",
+        changedFiles: ["src/change.ts"],
+        checks: [{ name: "source", status: "passed" }],
+        artifacts: [],
+        problems: [],
+      },
+    });
+    const verifierId = harness.createTask({
+      runId,
+      role: "verifier",
+      goal: "Verify frozen work",
+      prompt: "Verify.",
+      dependsOn: [workerId],
+      worktreePath,
+      doneWhen: requiredEvidence,
+    });
+    harness.recordAttempt({
+      taskId: verifierId,
+      input: { executor: "test" },
+      output: {
+        status: "blocked",
+        summary: "verification failed",
+        changedFiles: [],
+        checks: [{ name: "frozen evidence", status: "failed" }],
+        artifacts: [],
+        problems: ["permission mode and contract reference failed"],
+      },
+    });
+    const repairId = harness.createTask({
+      runId,
+      parentId: verifierId,
+      role: "worker",
+      goal: "Repair frozen work",
+      prompt: "Repair.",
+      dependsOn: [workerId],
+      worktreePath,
+      doneWhen: ["SOURCE_DONE_WHEN", ...requiredEvidence],
+    });
+    harness.recordAttempt({
+      taskId: repairId,
+      input: { executor: "dsh-cli" },
+      output: {
+        status: "blocked",
+        summary: "repair timed out",
+        changedFiles: [],
+        checks: [{ name: "repair", status: "failed" }],
+        artifacts: [],
+        problems: ["command timed out after 1800000ms; exit code 124"],
+      },
+    });
+    harness.createTask({
+      runId,
+      role: "goal-review",
+      goal: "Review completion",
+      prompt: "Return complete.",
+    });
+
+    await runReadyTasks({
+      harness,
+      runId,
+      limit: 1,
+      executorFactory: () => async () => ({
+        status: "done",
+        runDecision: "complete",
+        summary: "equivalent entry passed but frozen checks did not",
+        changedFiles: [],
+        checks: [{ name: "equivalent entry", status: "passed" }],
+        artifacts: [],
+        problems: [],
+      }),
+    });
+
+    const run = harness.getRun(runId)!;
+    expect(run.status).toBe("blocked");
+    expect(run.context.pendingVerificationReason).toMatch(/latest repair lineage.*passing verifier/i);
+    expect(run.context.pendingVerificationTaskIds).toEqual([repairId]);
+  });
+
   test("runner keeps dependency attempts empty for tasks without dependencies", async () => {
     const runId = harness.createRun({ goal: "Build loop" });
     harness.createTask({
@@ -7832,7 +7933,7 @@ describe("runner", () => {
 
     const verifier = harness.nextReadyTask(runId)!;
     const attempt = harness.getAttempt(result!.attemptId)!;
-    expect(verifier.config).toEqual({ verifierContract });
+    expect(verifier.config).toEqual(expect.objectContaining({ verifierContract }));
     expect(verifier.prompt).toContain("## Frozen Verifier Contract");
     expect(verifier.prompt).toContain("## Runtime File Guardrail");
     expect(verifier.prompt).toContain(".ouroboros/");
@@ -7885,7 +7986,7 @@ describe("runner", () => {
     expect(verifier.prompt).toContain('"amendmentPolicy": "explicit-only"');
     expect(verifier.prompt).toMatch(/[a-f0-9]{64}/);
     expect(verifier.prompt).not.toContain("VERIFIER_HISTORICAL_STDOUT_SENTINEL");
-    expect(verifier.config).toEqual({ verifierContract });
+    expect(verifier.config).toEqual(expect.objectContaining({ verifierContract }));
   });
 
   test("verifier handoff rejects an oversized frozen contract without creating a task", async () => {
@@ -8298,6 +8399,222 @@ describe("runner", () => {
       used: 1,
       entries: [expect.objectContaining({ taskId: verifierId, kind: "repair" })],
     });
+  });
+
+  test("concurrent reconciliation recovers one timed out repair from an invalidly completed run", async () => {
+    const worktreePath = "/tmp/ouroboros-timeout-recovery-source";
+    const requiredEvidence = ["FROZEN_REQUIRED_EVIDENCE"];
+    const runId = harness.createRun({
+      goal: "Recover the same frozen delivery after a repair timeout",
+      context: {
+        repairReplanBudget: {
+          limit: 3,
+          used: 2,
+          entries: [
+            {
+              taskId: "task_previous_replan",
+              kind: "replan",
+              summary: "previous bounded replan",
+              chargedAt: "2026-08-15T00:00:00.000Z",
+            },
+            {
+              taskId: "task_previous_verifier",
+              kind: "repair",
+              summary: "previous verifier repair",
+              chargedAt: "2026-08-15T00:01:00.000Z",
+            },
+          ],
+        },
+      },
+    });
+    const workerId = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Implement frozen delivery",
+      prompt: "Implement.",
+      worktreePath,
+      doneWhen: ["SOURCE_DONE_WHEN"],
+    });
+    harness.recordAttempt({
+      taskId: workerId,
+      input: { cwd: worktreePath },
+      output: {
+        status: "done",
+        summary: "implementation done",
+        changedFiles: ["src/change.ts"],
+        checks: [],
+        artifacts: [],
+        problems: [],
+      },
+    });
+    const verifierId = harness.createTask({
+      runId,
+      role: "verifier",
+      goal: "Verify frozen delivery",
+      prompt: "Verify.",
+      dependsOn: [workerId],
+      worktreePath,
+      doneWhen: requiredEvidence,
+      config: { verifierContract: { checks: ["frozen-check"] }, permissionMode: "read-only" },
+    });
+    harness.recordAttempt({
+      taskId: verifierId,
+      input: { cwd: worktreePath },
+      output: {
+        status: "blocked",
+        summary: "verification failed",
+        changedFiles: [],
+        checks: [{ name: "frozen-check", status: "failed" }],
+        artifacts: [],
+        problems: ["permission mode and matched comparison failed"],
+      },
+    });
+    const repairId = harness.createTask({
+      runId,
+      parentId: verifierId,
+      role: "worker",
+      goal: "Repair: Verify frozen delivery",
+      prompt: "Repair under the frozen contract.",
+      dependsOn: [workerId],
+      worktreePath,
+      doneWhen: ["SOURCE_DONE_WHEN", ...requiredEvidence],
+      config: { verifierContract: { checks: ["frozen-check"] }, permissionMode: "read-only" },
+    });
+    harness.recordAttempt({
+      taskId: repairId,
+      input: { cwd: worktreePath, executor: "dsh-cli" },
+      output: {
+        status: "blocked",
+        summary: "repair timed out",
+        changedFiles: [],
+        checks: [{ name: "repair", status: "failed" }],
+        artifacts: [],
+        problems: ["command timed out after 1800000ms; exit code 124"],
+      },
+    });
+    harness.updateRunStatus({ runId, status: "done" });
+    harness.updateRun({
+      runId,
+      contextPatch: {
+        source: "design",
+        designEvaluationContract: { requiredEvidence },
+      },
+    });
+
+    await Promise.all([
+      reconcileTerminalBlockedVerifierRepair({ harness, runId }),
+      reconcileTerminalBlockedVerifierRepair({ harness, runId }),
+    ]);
+
+    const overview = harness.getRunOverview({ runId, eventLimit: 0 });
+    const recoveries = overview.tasks.filter((task) => task.role === "worker" && task.parentId === repairId);
+    expect(recoveries).toHaveLength(1);
+    expect(recoveries[0]).toMatchObject({
+      status: "todo",
+      worktreePath,
+      dependsOn: [workerId],
+      doneWhen: ["SOURCE_DONE_WHEN", ...requiredEvidence],
+      config: { verifierContract: { checks: ["frozen-check"] }, permissionMode: "read-only" },
+    });
+    expect(harness.getRun(runId)?.status).toBe("todo");
+    expect(harness.getRun(runId)?.context.repairReplanBudget).toMatchObject({
+      used: 3,
+      entries: [
+        expect.anything(),
+        expect.anything(),
+        expect.objectContaining({ taskId: repairId, kind: "repair" }),
+      ],
+    });
+  });
+
+  test("a successful bounded repair freezes the run evidence into a new verifier before completion", async () => {
+    const requiredEvidence = ["MATCHED_COMPARISON", "INDEPENDENT_READBACK"];
+    const worktreePath = "/tmp/ouroboros-frozen-repair-verifier";
+    const runId = harness.createRun({
+      goal: "Verify the latest repair lineage",
+      context: { source: "design", designEvaluationContract: { requiredEvidence } },
+    });
+    const sourceWorkerId = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Implement delivery",
+      prompt: "Implement.",
+      worktreePath,
+      doneWhen: ["SOURCE_DONE_WHEN"],
+    });
+    harness.recordAttempt({
+      taskId: sourceWorkerId,
+      input: {},
+      output: { status: "done", summary: "done", changedFiles: ["src/a.ts"], checks: [], artifacts: [], problems: [] },
+    });
+    const blockedVerifierId = harness.createTask({
+      runId,
+      role: "verifier",
+      goal: "Verify delivery",
+      prompt: "Verify.",
+      dependsOn: [sourceWorkerId],
+      worktreePath,
+      doneWhen: requiredEvidence,
+    });
+    harness.recordAttempt({
+      taskId: blockedVerifierId,
+      input: {},
+      output: { status: "blocked", summary: "failed", changedFiles: [], checks: [], artifacts: [], problems: ["failed"] },
+    });
+    const repairId = harness.createTask({
+      runId,
+      parentId: blockedVerifierId,
+      role: "worker",
+      goal: "Repair delivery",
+      prompt: "Repair.",
+      dependsOn: [sourceWorkerId],
+      worktreePath,
+      doneWhen: ["SOURCE_DONE_WHEN", ...requiredEvidence],
+      config: { verifierContract: { checks: ["matched", "readback"] } },
+    });
+    const repairOutput = {
+      status: "done" as const,
+      summary: "repair completed",
+      changedFiles: ["src/a.ts"],
+      checks: [{ name: "repair", status: "passed" }],
+      artifacts: [{ kind: "repair_evidence" }],
+      problems: [],
+    };
+    harness.recordAttempt({ taskId: repairId, input: {}, output: repairOutput });
+
+    await createVerifierTaskHook({ harness })({
+      run: harness.getRun(runId)!,
+      task: harness.getTask(repairId)!,
+      sessionName: "repair-session",
+      prompt: "repair prompt",
+      output: repairOutput,
+    });
+
+    const verifier = harness.getRunOverview({ runId, eventLimit: 0 }).tasks.find(
+      (task) => task.role === "verifier" && task.dependsOn.includes(repairId),
+    )!;
+    expect(verifier.config?.completionContract).toEqual({
+      schemaVersion: 1,
+      sourceTaskId: repairId,
+      sourceDoneWhen: ["SOURCE_DONE_WHEN", ...requiredEvidence],
+      requiredEvidence,
+    });
+    expect(verifier.doneWhen).toEqual(expect.arrayContaining(requiredEvidence));
+    expect(verifier.prompt).toContain("Frozen Completion Contract");
+    harness.recordAttempt({
+      taskId: verifier.id,
+      input: {},
+      output: {
+        status: "done",
+        summary: "latest repair independently verified",
+        changedFiles: [],
+        checks: [{ name: "frozen completion", status: "passed" }],
+        artifacts: [],
+        problems: [],
+      },
+    });
+
+    expect(() => harness.updateRunStatus({ runId, status: "done" })).not.toThrow();
   });
 
   test("run loop reconciles a terminal done worker with empty evidence into one real verifier attempt", async () => {
