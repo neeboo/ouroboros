@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { existsSync, readFileSync } from "node:fs";
-import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { createDshCliExecutor } from "../packages/runner/src";
@@ -258,6 +258,37 @@ describe("DeepSeek Harness CLI executor", () => {
     } finally {
       await rm(directory, { recursive: true, force: true });
       await rm(outsideDirectory, { recursive: true, force: true });
+    }
+  });
+
+  test.skipIf(process.platform !== "darwin")("denies a nested codex executable from any path before it can run", async () => {
+    const directory = await mkdtemp(join(homedir(), ".orbs-dsh-nested-codex-"));
+    const nestedCodex = join(directory, "tools", "codex");
+    const marker = join(directory, "nested-codex-ran");
+    await mkdir(join(directory, "tools"));
+    await writeFile(nestedCodex, `#!/bin/sh\nprintf nested > ${JSON.stringify(marker)}\n`);
+    await chmod(nestedCodex, 0o755);
+    const profile = darwinDshProcessProfile({ workspaceRoot: directory });
+
+    try {
+      const result = Bun.spawnSync({
+        cmd: [
+          "/usr/bin/sandbox-exec",
+          "-p",
+          profile,
+          "--",
+          "/bin/sh",
+          "-c",
+          `p=${JSON.stringify(nestedCodex)}; "$p"`,
+        ],
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+
+      expect(result.exitCode).not.toBe(0);
+      expect(existsSync(marker)).toBe(false);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
     }
   });
 

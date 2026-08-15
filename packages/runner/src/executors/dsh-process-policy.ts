@@ -9,6 +9,7 @@ const DARWIN_EMBEDDED_CODEX_EXECUTABLES = [
 ] as const;
 
 const POLICY_FAILURE_MARKER = "orbs-dsh-agent-policy:";
+const NESTED_CODEX_PATH_PATTERN = "(^|/)codex$";
 
 export interface DshProcessPolicyBundle {
   patchPath: string;
@@ -52,6 +53,8 @@ export function darwinDshProcessProfile(input: {
     forms.push(`(deny file-read* (literal ${sbplString(executable)}))`);
     forms.push(`(deny process-exec (literal ${sbplString(executable)}))`);
   }
+  forms.push(`(deny file-read* (regex #${sbplString(NESTED_CODEX_PATH_PATTERN)}))`);
+  forms.push(`(deny process-exec (regex #${sbplString(NESTED_CODEX_PATH_PATTERN)}))`);
   return forms.join(" ");
 }
 
@@ -77,6 +80,7 @@ import { tmpdir } from "node:os";
 
 const FAILURE = ${JSON.stringify(POLICY_FAILURE_MARKER)};
 const PROTECTED = ${JSON.stringify(DARWIN_EMBEDDED_CODEX_EXECUTABLES)};
+const NESTED_CODEX = ${JSON.stringify(NESTED_CODEX_PATH_PATTERN)};
 const args = process.argv.slice(2);
 const separator = args.indexOf("--");
 if (separator < 0 || separator === args.length - 1) {
@@ -108,6 +112,8 @@ for (const executable of PROTECTED) {
   forms.push("(deny file-read* (literal " + quote(executable) + "))");
   forms.push("(deny process-exec (literal " + quote(executable) + "))");
 }
+forms.push("(deny file-read* (regex #" + quote(NESTED_CODEX) + "))");
+forms.push("(deny process-exec (regex #" + quote(NESTED_CODEX) + "))");
 const child = spawn("/usr/bin/sandbox-exec", ["-p", forms.join(" "), "--", ...command], {
   stdio: "inherit",
   env: process.env,
