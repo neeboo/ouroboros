@@ -1519,15 +1519,10 @@ describe("codex cli executor", () => {
       });
       expect(open.exitCode).not.toBe(0);
 
-      const chrome = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
-      if (await Bun.file(chrome).exists()) {
-        const browser = await runLocalCommand({
-          cmd: [codexBin, "sandbox", "-P", "orbs-workspace", "-C", dir, "/bin/sh", "-c", `p=${JSON.stringify(chrome)}; "$p" --version`],
-          stdin: "",
-          env: execution!.env,
-        });
-        expect(browser.exitCode).not.toBe(0);
-      }
+      // Browser process execution is covered with an observable fake executable in
+      // browser-process-policy.test.ts. Never launch a user's installed browser from
+      // this credential/filesystem sandbox test: a non-zero exit can still mean the
+      // real app started and crashed after inheriting Seatbelt.
     } finally {
       await rm(dir, { recursive: true, force: true });
       await rm(outside, { force: true });

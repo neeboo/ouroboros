@@ -4,7 +4,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   applyBrowserProcessPolicy,
-  withBrowserProcessPolicy,
 } from "../packages/runner/src/executors/browser-process-policy";
 import { runLocalCommand } from "../packages/runner/src/executors/command";
 
@@ -60,31 +59,30 @@ describe("browser process policy", () => {
     }
   });
 
-  test.skipIf(process.platform !== "darwin")("denies browser executables launched by nested child processes", async () => {
+  test.skipIf(process.platform !== "darwin")("denies browser executables before exec through absolute, indirect, and concatenated shell paths", async () => {
     const dir = await mkdtemp(join(tmpdir(), "orbs-browser-policy-"));
     const fakeBrowser = join(dir, "Google Chrome");
     const marker = join(dir, "browser-launched.txt");
-    const previousSandbox = process.env.CODEX_SANDBOX;
     await writeFile(fakeBrowser, `#!/bin/sh\nprintf launched > ${JSON.stringify(marker)}\n`);
     await chmod(fakeBrowser, 0o755);
 
     try {
-      process.env.CODEX_SANDBOX = "seatbelt";
-      const runCommand = withBrowserProcessPolicy(runLocalCommand, "deny");
-      const result = await runCommand({
-        cmd: ["/bin/sh", "-c", `${JSON.stringify(fakeBrowser)} >/dev/null 2>&1; printf guarded`],
-        stdin: "",
-      });
+      const commands = [
+        `${JSON.stringify(fakeBrowser)} >/dev/null 2>&1`,
+        `p=${JSON.stringify(fakeBrowser)}; "$p" >/dev/null 2>&1`,
+        `base=${JSON.stringify(join(dir, "Google"))}; "$base Chrome" >/dev/null 2>&1`,
+      ];
+      for (const command of commands) {
+        const result = await runLocalCommand({
+          cmd: applyBrowserProcessPolicy(["/bin/sh", "-c", command], "deny"),
+          stdin: "",
+        });
 
-      expect(result.exitCode).not.toBe(0);
-      expect(result.stderr).not.toContain("sandbox_init");
-      await expect(access(marker)).rejects.toThrow();
-    } finally {
-      if (previousSandbox === undefined) {
-        delete process.env.CODEX_SANDBOX;
-      } else {
-        process.env.CODEX_SANDBOX = previousSandbox;
+        expect(result.exitCode).not.toBe(0);
+        expect(result.stderr).not.toContain("sandbox_init");
+        await expect(access(marker)).rejects.toThrow();
       }
+    } finally {
       await rm(dir, { recursive: true, force: true });
     }
   });

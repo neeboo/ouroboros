@@ -845,10 +845,87 @@ describe("Harness", () => {
         sessionRef: `task-${taskId}`,
         worktreePath: null,
         reason: "running task has no running attempt",
+        status: "todo",
+        recoveryCount: 1,
+        recoveryLimit: 3,
+        attemptId: null,
       },
     ]);
     expect(harness.getTask(taskId)?.status).toBe("todo");
     expect(harness.nextReadyTask(runId)?.id).toBe(taskId);
+  });
+
+  test("bounds orphaned lease recovery and preserves the frozen verifier contract", () => {
+    const runId = harness.createRun({ goal: "Verify a frozen delivery" });
+    const verifierContract = {
+      deterministicChecks: ["bun test"],
+      requiredArtifacts: ["remote SHA readback"],
+    };
+    const taskId = harness.createTask({
+      runId,
+      role: "verifier",
+      goal: "Verify the delivery",
+      prompt: "Verify against the frozen contract.",
+      config: { verifierContract },
+      worktreePath: "/tmp/frozen-verifier-worktree",
+    });
+
+    for (let recovery = 1; recovery <= 2; recovery += 1) {
+      expect(harness.leaseReadyTasks({
+        runId,
+        limit: 1,
+        sessionForTask: (task) => `task-${task.id}`,
+      }).map((task) => task.id)).toEqual([taskId]);
+
+      expect(harness.reclaimRunningTasksWithoutAttempts({ runId, maxRecoveries: 2 })).toEqual([
+        expect.objectContaining({
+          taskId,
+          status: "todo",
+          recoveryCount: recovery,
+          recoveryLimit: 2,
+        }),
+      ]);
+      expect(harness.getTask(taskId)).toMatchObject({
+        status: "todo",
+        worktreePath: "/tmp/frozen-verifier-worktree",
+        config: {
+          verifierContract,
+          orphanedLeaseRecovery: { count: recovery, limit: 2 },
+        },
+      });
+    }
+
+    expect(harness.leaseReadyTasks({
+      runId,
+      limit: 1,
+      sessionForTask: (task) => `task-${task.id}`,
+    }).map((task) => task.id)).toEqual([taskId]);
+
+    const exhausted = harness.reclaimRunningTasksWithoutAttempts({ runId, maxRecoveries: 2 });
+    expect(exhausted).toEqual([
+      expect.objectContaining({
+        taskId,
+        status: "blocked",
+        recoveryCount: 2,
+        recoveryLimit: 2,
+        attemptId: expect.stringMatching(/^attempt_/),
+      }),
+    ]);
+    expect(harness.getTask(taskId)).toMatchObject({
+      status: "blocked",
+      worktreePath: "/tmp/frozen-verifier-worktree",
+      config: {
+        verifierContract,
+        orphanedLeaseRecovery: { count: 2, limit: 2 },
+      },
+    });
+    expect(harness.listLatestAttemptsForTasks([taskId])).toEqual([
+      expect.objectContaining({
+        taskId,
+        status: "blocked",
+        summary: "orphaned task lease recovery exhausted",
+      }),
+    ]);
   });
 
   test("updates running attempt input for resumable session ids", () => {

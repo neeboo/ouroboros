@@ -359,6 +359,129 @@ describe("runner", () => {
     expect(harness.getRunOverview({ runId, eventLimit: 0 }).tasks[0]?.status).toBe("todo");
   });
 
+  test("records a blocked attempt when preparation throws after leasing a verifier", async () => {
+    const verifierContract = {
+      deterministicChecks: ["bun test"],
+      requiredArtifacts: ["remote SHA readback"],
+    };
+    const runId = harness.createRun({ goal: "Recover verifier preparation failures" });
+    const taskId = harness.createTask({
+      runId,
+      role: "verifier",
+      goal: "Verify the frozen delivery",
+      prompt: "Verify the delivery.",
+      config: { verifierContract },
+    });
+    let clientCalls = 0;
+
+    const result = await runCodexResumableLoop({
+      harness,
+      runId,
+      maxRounds: 1,
+      limit: 1,
+      maxTries: 3,
+      cwd: dir,
+      worktreeForTask: () => "/tmp/frozen-verifier-worktree",
+      startHooks: [async () => {
+        throw new Error("synthetic preparation crash after lease");
+      }],
+      clientFactory: () => {
+        clientCalls += 1;
+        throw new Error("client must not start");
+      },
+    });
+
+    expect(clientCalls).toBe(0);
+    expect(result.rounds[0]?.tasks).toEqual([
+      expect.objectContaining({ taskId, status: "blocked", attemptId: expect.stringMatching(/^attempt_/) }),
+    ]);
+    expect(harness.getTask(taskId)).toMatchObject({
+      status: "blocked",
+      worktreePath: "/tmp/frozen-verifier-worktree",
+      config: { verifierContract },
+    });
+    expect(harness.listLatestAttemptsForTasks([taskId])).toEqual([
+      expect.objectContaining({
+        taskId,
+        status: "blocked",
+        problems: ["synthetic preparation crash after lease"],
+      }),
+    ]);
+  });
+
+  test("recovers an orphaned verifier lease and continues its dependent task chain", async () => {
+    const runId = harness.createRun({ goal: "Continue after an orphaned verifier lease" });
+    const verifierId = harness.createTask({
+      runId,
+      role: "verifier",
+      goal: "Verify task 2",
+      prompt: "Verify the frozen result.",
+      config: { verifierContract: { deterministicChecks: ["bun test"] } },
+    });
+    const task3 = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Task 3",
+      prompt: "Continue task 3.",
+      dependsOn: [verifierId],
+    });
+    const task4 = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Task 4",
+      prompt: "Continue task 4.",
+      dependsOn: [task3],
+    });
+    const task5 = harness.createTask({
+      runId,
+      role: "verifier",
+      goal: "Task 5",
+      prompt: "Complete task 5.",
+      dependsOn: [task4],
+    });
+    expect(harness.leaseReadyTasks({
+      runId,
+      limit: 1,
+      sessionForTask: (task) => `task-${task.id}`,
+    }).map((task) => task.id)).toEqual([verifierId]);
+    expect(harness.listLatestAttemptsForTasks([verifierId])).toEqual([]);
+
+    const result = await runCodexResumableLoop({
+      harness,
+      runId,
+      maxRounds: 4,
+      limit: 1,
+      maxTries: 3,
+      cwd: dir,
+      clientFactory: () => ({
+        start: async () => ({
+          status: "done" as const,
+          sessionId: "session_recovered_chain",
+          outputPath: join(dir, "recovered-chain.json"),
+          stdout: "",
+          stderr: "",
+          events: [],
+          output: { status: "done" as const, summary: "task completed after lease recovery" },
+        }),
+        resume: async () => { throw new Error("unused"); },
+      }),
+    });
+
+    expect(result.rounds[0]?.reclaimed).toEqual([
+      expect.objectContaining({ taskId: verifierId, status: "todo", recoveryCount: 1 }),
+    ]);
+    expect(result.rounds.flatMap((round) => round.tasks).map((task) => task.taskId)).toEqual([
+      verifierId,
+      task3,
+      task4,
+      task5,
+    ]);
+    for (const taskId of [verifierId, task3, task4, task5]) {
+      expect(harness.getTask(taskId)?.status).toBe("done");
+      expect(harness.listLatestAttemptsForTasks([taskId])).toHaveLength(1);
+    }
+  });
+
   test("stale root runtime generations block descendant leases even when child context is legacy", () => {
     const rootRunId = harness.createRun({
       goal: "Self-improvement root",

@@ -117,7 +117,10 @@ export async function runCodexResumableLoop(input: RunCodexResumableLoopInput) {
     if (input.shouldStop?.()) {
       break;
     }
-    const reclaimed = input.harness.reclaimRunningTasksWithoutAttempts({ runId: input.runId });
+    const reclaimed = input.harness.reclaimRunningTasksWithoutAttempts({
+      runId: input.runId,
+      maxRecoveries: input.maxTries,
+    });
     const resumed = await orchestrator.resumeRunningAttempts({
       runId: input.runId,
       limit: input.limit,
@@ -759,62 +762,71 @@ class CodexResumableOrchestrator {
     });
     return Promise.all(leased.map(async (task) => {
       const sessionName = task.sessionRef ?? `task-${task.id}`;
-      const route = this.resolveRoute(run, task);
       const cwd = task.worktreePath ?? this.cwd;
-      let loadedHarnessRevision: LoadedHarnessRevision | null;
       try {
-        loadedHarnessRevision = loadFrozenHarnessRevision({ harness: this.harness, run, cwd });
+        const route = this.resolveRoute(run, task);
+        let loadedHarnessRevision: LoadedHarnessRevision | null;
+        try {
+          loadedHarnessRevision = loadFrozenHarnessRevision({ harness: this.harness, run, cwd });
+        } catch (error) {
+          return this.blockNewAttemptForHarnessRevision({ run, task, sessionName, cwd, route, error });
+        }
+        const prompt = this.promptForTask(run, task, loadedHarnessRevision);
+        const oversized = promptBudgetEvidence(prompt, "runner client start");
+        if (oversized) {
+          const attemptId = this.harness.recordAttempt({
+            taskId: task.id,
+            input: {
+              ...promptBudgetAttemptInput(oversized),
+              sessionName,
+              executor: route.backend.kind,
+              ...attemptInputForRoute(route, cwd),
+            },
+            output: promptBudgetBlockedOutput(oversized),
+          });
+          this.upsertAttemptThread({ runId: run.id, task, attemptId, sessionName, cwd, status: "blocked" });
+          return { taskId: task.id, attemptId, sessionName, status: "blocked" as const, codexSessionId: null };
+        }
+        const hostCapabilityInput = hostExecutionCapabilityAttemptInput(task.config?.hostExecutionCapabilities, {
+          role: task.role,
+          verifierContract: task.config?.verifierContract,
+        });
+        if (hostExecutionCapabilityProblem(hostCapabilityInput)) {
+          return this.blockNewAttemptForHostExecutionCapability({ run, task, sessionName, cwd, route, hostCapabilityInput });
+        }
+        const baseInput = {
+          prompt,
+          sessionName,
+          executor: route.backend.kind,
+          ...attemptInputForRoute(route, cwd),
+          ...harnessRevisionAttemptInput(loadedHarnessRevision),
+          ...hostCapabilityInput,
+        };
+        const startResult = await applyStartHooks({
+          hooks: this.input.startHooks ?? [],
+          run,
+          task,
+          sessionName,
+          cwd,
+        });
+        if ((startResult.problems ?? []).length > 0) {
+          const attemptId = this.harness.recordAttempt({
+            taskId: task.id,
+            input: { ...baseInput, startHooks: true },
+            output: blockedByStartHooks(startResult),
+          });
+          this.upsertAttemptThread({ runId: run.id, task, attemptId, sessionName, cwd, status: "blocked" });
+          return { taskId: task.id, attemptId, sessionName, status: "blocked" as const, codexSessionId: null };
+        }
+        return this.runStartedAttempt({ run, task, sessionName, prompt, cwd, route, startResult, baseInput });
       } catch (error) {
-        return this.blockNewAttemptForHarnessRevision({ run, task, sessionName, cwd, route, error });
+        const stillOrphaned = this.harness.getTask(task.id)?.status === "running"
+          && !this.harness.listRunningAttempts({ runId: run.id }).some((attempt) => attempt.taskId === task.id);
+        if (stillOrphaned) {
+          return this.blockLeasedTaskPreparationFailure({ run, task, sessionName, cwd, error });
+        }
+        throw error;
       }
-      const prompt = this.promptForTask(run, task, loadedHarnessRevision);
-      const oversized = promptBudgetEvidence(prompt, "runner client start");
-      if (oversized) {
-        const attemptId = this.harness.recordAttempt({
-          taskId: task.id,
-          input: {
-            ...promptBudgetAttemptInput(oversized),
-            sessionName,
-            executor: route.backend.kind,
-            ...attemptInputForRoute(route, cwd),
-          },
-          output: promptBudgetBlockedOutput(oversized),
-        });
-        this.upsertAttemptThread({ runId: run.id, task, attemptId, sessionName, cwd, status: "blocked" });
-        return { taskId: task.id, attemptId, sessionName, status: "blocked" as const, codexSessionId: null };
-      }
-      const hostCapabilityInput = hostExecutionCapabilityAttemptInput(task.config?.hostExecutionCapabilities, {
-        role: task.role,
-        verifierContract: task.config?.verifierContract,
-      });
-      if (hostExecutionCapabilityProblem(hostCapabilityInput)) {
-        return this.blockNewAttemptForHostExecutionCapability({ run, task, sessionName, cwd, route, hostCapabilityInput });
-      }
-      const baseInput = {
-        prompt,
-        sessionName,
-        executor: route.backend.kind,
-        ...attemptInputForRoute(route, cwd),
-        ...harnessRevisionAttemptInput(loadedHarnessRevision),
-        ...hostCapabilityInput,
-      };
-      const startResult = await applyStartHooks({
-        hooks: this.input.startHooks ?? [],
-        run,
-        task,
-        sessionName,
-        cwd,
-      });
-      if ((startResult.problems ?? []).length > 0) {
-        const attemptId = this.harness.recordAttempt({
-          taskId: task.id,
-          input: { ...baseInput, startHooks: true },
-          output: blockedByStartHooks(startResult),
-        });
-        this.upsertAttemptThread({ runId: run.id, task, attemptId, sessionName, cwd, status: "blocked" });
-        return { taskId: task.id, attemptId, sessionName, status: "blocked" as const, codexSessionId: null };
-      }
-      return this.runStartedAttempt({ run, task, sessionName, prompt, cwd, route, startResult, baseInput });
     }));
   }
 
@@ -1132,6 +1144,47 @@ class CodexResumableOrchestrator {
     });
     this.upsertAttemptThread({ runId: input.run.id, task: input.task, attemptId, sessionName: input.sessionName, cwd: input.cwd, status: "blocked" });
     return { taskId: input.task.id, attemptId, sessionName: input.sessionName, status: "blocked" as const, codexSessionId: null };
+  }
+
+  private blockLeasedTaskPreparationFailure(input: {
+    run: NonNullable<ReturnType<Harness["getRun"]>>;
+    task: Task;
+    sessionName: string;
+    cwd: string;
+    error: unknown;
+  }) {
+    const problem = redactSensitiveText(errorMessage(input.error));
+    const attemptId = this.harness.recordAttempt({
+      taskId: input.task.id,
+      input: {
+        sessionName: input.sessionName,
+        cwd: input.cwd,
+        preparation: "failed-after-lease",
+      },
+      output: {
+        status: "blocked",
+        summary: "task preparation failed after its lease was recorded",
+        changedFiles: [],
+        checks: [{ name: "attempt preparation", status: "failed", evidence: problem }],
+        artifacts: [{ type: "leased_task_preparation_failure", taskId: input.task.id }],
+        problems: [problem],
+      },
+    });
+    this.upsertAttemptThread({
+      runId: input.run.id,
+      task: input.task,
+      attemptId,
+      sessionName: input.sessionName,
+      cwd: input.cwd,
+      status: "blocked",
+    });
+    return {
+      taskId: input.task.id,
+      attemptId,
+      sessionName: input.sessionName,
+      status: "blocked" as const,
+      codexSessionId: null,
+    };
   }
 
   private resolveRoute(run: NonNullable<ReturnType<Harness["getRun"]>>, task: Task) {

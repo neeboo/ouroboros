@@ -397,6 +397,7 @@ export interface ListRunningAttemptsInput {
 
 export interface ReclaimRunningTasksInput {
   runId: string;
+  maxRecoveries?: number;
 }
 
 export interface ReclaimedRunningTask {
@@ -404,6 +405,10 @@ export interface ReclaimedRunningTask {
   sessionRef: string | null;
   worktreePath: string | null;
   reason: string;
+  status: Extract<Status, "todo" | "blocked">;
+  recoveryCount: number;
+  recoveryLimit: number;
+  attemptId: string | null;
 }
 
 export interface BlockedUnfinishedTask {

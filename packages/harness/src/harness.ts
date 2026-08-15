@@ -762,37 +762,58 @@ export class Harness {
   reclaimRunningTasksWithoutAttempts(input: ReclaimRunningTasksInput): ReclaimedRunningTask[] {
     return withDatabase(this.dbPath, (db) => {
       ensureExecutionThreads(db);
-      const rows = db
-        .query(
-          `
-          select tasks.*
-          from tasks
-          left join attempts on attempts.task_id = tasks.id and attempts.status = 'running'
-          where tasks.run_id = $runId
-            and tasks.status = 'running'
-            and attempts.id is null
-          order by tasks.created_at, tasks.id
-          `,
-        )
-        .all({ $runId: input.runId }) as TaskRow[];
-      const reclaimed = rows.map(taskFromRow).map((task) => ({
-        taskId: task.id,
-        sessionRef: task.sessionRef,
-        worktreePath: task.worktreePath,
-        reason: "running task has no running attempt",
-      }));
-      if (reclaimed.length === 0) {
-        return reclaimed;
+      const recoveryLimit = input.maxRecoveries ?? 3;
+      if (!Number.isInteger(recoveryLimit) || recoveryLimit < 0) {
+        throw new Error("maxRecoveries must be a non-negative integer");
       }
       return db.transaction(() => {
-        for (const task of reclaimed) {
+        const rows = db
+          .query(
+            `
+            select tasks.*
+            from tasks
+            left join attempts on attempts.task_id = tasks.id and attempts.status = 'running'
+            where tasks.run_id = $runId
+              and tasks.status = 'running'
+              and attempts.id is null
+            order by tasks.created_at, tasks.id
+            `,
+          )
+          .all({ $runId: input.runId }) as TaskRow[];
+        const reclaimed: ReclaimedRunningTask[] = [];
+        for (const task of rows.map(taskFromRow)) {
+          const previousRecovery = task.config?.orphanedLeaseRecovery;
+          const previousCount = typeof previousRecovery === "object" && previousRecovery !== null
+            && Number.isInteger((previousRecovery as { count?: unknown }).count)
+            && Number((previousRecovery as { count: number }).count) >= 0
+            ? Number((previousRecovery as { count: number }).count)
+            : 0;
+          const storedLimit = typeof previousRecovery === "object" && previousRecovery !== null
+            && Number.isInteger((previousRecovery as { limit?: unknown }).limit)
+            && Number((previousRecovery as { limit: number }).limit) >= 0
+            ? Number((previousRecovery as { limit: number }).limit)
+            : recoveryLimit;
+          const canRetry = previousCount < storedLimit;
+          const recoveryCount = canRetry ? previousCount + 1 : storedLimit;
+          const recovery = { count: recoveryCount, limit: storedLimit };
+          const config = { ...(task.config ?? {}), orphanedLeaseRecovery: recovery };
+          const reason = canRetry
+            ? "running task has no running attempt"
+            : `orphaned task lease recovery exhausted (${storedLimit}/${storedLimit})`;
+          let attemptId: string | null = null;
           db.query(
             `
             update tasks
-            set status = 'todo', updated_at = current_timestamp
+            set status = $status,
+                config_json = $configJson,
+                updated_at = current_timestamp
             where id = $taskId and status = 'running'
             `,
-          ).run({ $taskId: task.taskId });
+          ).run({
+            $taskId: task.id,
+            $status: canRetry ? "todo" : "running",
+            $configJson: toJson(config),
+          });
           db.query(
             `
             update execution_threads
@@ -802,10 +823,45 @@ export class Harness {
                 updated_at = current_timestamp
             where task_id = $taskId and attempt_id is null and status = 'running'
             `,
-          ).run({ $taskId: task.taskId, $reason: task.reason });
+          ).run({ $taskId: task.id, $reason: reason });
+          if (!canRetry) {
+            attemptId = this.recordAttemptWithDb(db, {
+              taskId: task.id,
+              input: {
+                recovery: "orphaned-lease",
+                recoveryCount,
+                recoveryLimit: storedLimit,
+                sessionRef: task.sessionRef,
+                worktreePath: task.worktreePath,
+              },
+              output: {
+                status: "blocked",
+                summary: "orphaned task lease recovery exhausted",
+                changedFiles: [],
+                checks: [{ name: "orphaned lease recovery budget", status: "failed" }],
+                artifacts: [{
+                  type: "orphaned_lease_recovery",
+                  taskId: task.id,
+                  recoveryCount,
+                  recoveryLimit: storedLimit,
+                }],
+                problems: [reason],
+              },
+            });
+          }
+          reclaimed.push({
+            taskId: task.id,
+            sessionRef: task.sessionRef,
+            worktreePath: task.worktreePath,
+            reason,
+            status: canRetry ? "todo" : "blocked",
+            recoveryCount,
+            recoveryLimit: storedLimit,
+            attemptId,
+          });
         }
         return reclaimed;
-      })();
+      }).immediate();
     });
   }
 
