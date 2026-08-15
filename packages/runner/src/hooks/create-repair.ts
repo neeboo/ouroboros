@@ -201,7 +201,15 @@ export function createRepairTaskHook(options: {
       ?? sourceSession?.cwd
       ?? task.worktreePath
       ?? null;
+    const sourceAttempt = sourceSession ? options.harness.getAttempt(sourceSession.attemptId) : null;
+    const dshProfileIsolation = sourceAttempt && attemptUsedDsh(sourceAttempt.input)
+      ? "base-headless" as const
+      : undefined;
     const verifierContract = verifierContractFromTask(task);
+    const repairConfig = {
+      ...(verifierContract ? { verifierContract } : {}),
+      ...(dshProfileIsolation ? { dshProfileIsolation } : {}),
+    };
     let prompt: string;
     try {
       prompt = buildRepairPrompt(
@@ -284,7 +292,7 @@ export function createRepairTaskHook(options: {
           "relevant checks pass",
           "the repair output describes changed files and validation",
         ]),
-        ...(verifierContract ? { config: { verifierContract } } : {}),
+        ...(Object.keys(repairConfig).length > 0 ? { config: repairConfig } : {}),
       });
       options.harness.updateRunWithDb(db, {
         runId: run.id,
@@ -343,6 +351,20 @@ export function createRepairTaskHook(options: {
       ],
     };
   };
+}
+
+function attemptUsedDsh(input: Record<string, unknown>) {
+  const route = input.route;
+  if (!route || typeof route !== "object" || Array.isArray(route)) {
+    return false;
+  }
+  const backend = (route as Record<string, unknown>).backend;
+  return Boolean(
+    backend
+    && typeof backend === "object"
+    && !Array.isArray(backend)
+    && (backend as Record<string, unknown>).kind === "dsh-cli",
+  );
 }
 
 function recursiveRepairBranch(

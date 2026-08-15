@@ -7716,6 +7716,59 @@ describe("runner", () => {
     });
   });
 
+  test("fixed repair records base-only DSH isolation when its source ran through DSH", async () => {
+    const runId = harness.createRun({ goal: "Repair a DSH-delivered change" });
+    const sourceTaskId = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Implement through DSH",
+      prompt: "Implement.",
+      worktreePath: "/repo/.ouroboros/worktrees/task_dsh_source",
+    });
+    harness.recordAttempt({
+      taskId: sourceTaskId,
+      input: {
+        route: {
+          backend: { kind: "dsh-cli", id: "deepseek-harness" },
+          executionMode: "generic",
+        },
+      },
+      output: { status: "done", summary: "DSH source done", changedFiles: [], checks: [], artifacts: [], problems: [] },
+    });
+    const verifierTaskId = harness.createTask({
+      runId,
+      role: "verifier",
+      goal: "Verify DSH source",
+      prompt: "Verify.",
+      dependsOn: [sourceTaskId],
+      config: { verifierContract: { deterministicChecks: ["bun test"] } },
+    });
+
+    const result = await createRepairTaskHook({ harness })({
+      run: harness.getRun(runId)!,
+      task: harness.getTask(verifierTaskId)!,
+      sessionName: "verify-dsh-source",
+      prompt: "Verify.",
+      output: {
+        status: "blocked",
+        summary: "DSH loader needs an isolated repair profile",
+        changedFiles: [],
+        checks: [{ name: "dsh loader", status: "failed" }],
+        artifacts: [],
+        problems: ["project plugins failed during DSH boot"],
+      },
+    });
+
+    const repair = harness.getRunOverview({ runId }).tasks.find((task) => task.parentId === verifierTaskId)!;
+    expect(result.decision).toBe("continue");
+    expect(repair.config).toEqual({
+      verifierContract: { deterministicChecks: ["bun test"] },
+      dshProfileIsolation: "base-headless",
+    });
+    expect(JSON.stringify(repair.config)).not.toContain("TOKEN");
+    expect(repair.worktreePath).toBe("/repo/.ouroboros/worktrees/task_dsh_source");
+  });
+
   test("automatic repair reconciles historical goal-review repairs before charging the shared budget", async () => {
     const runId = harness.createRun({
       goal: "Bound mixed automatic and goal-review repairs",

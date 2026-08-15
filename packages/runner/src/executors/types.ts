@@ -106,4 +106,5 @@ export interface DshCliExecutorOptions {
   runCommand?: RunCommand;
   resolveCommand?: DshCommandResolver;
   hostExecutionCapabilities?: unknown;
+  isolatedProfile?: "base-headless";
 }

@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { existsSync, readFileSync } from "node:fs";
 import { createDshCliExecutor } from "../packages/runner/src";
 import type { ResolvedExecutionRoute, RunCommandInput } from "../packages/runner/src";
 
@@ -64,6 +65,47 @@ function availableDshResolution() {
 }
 
 describe("DeepSeek Harness CLI executor", () => {
+  test("uses an ephemeral base-only headless profile for fixed DSH repair work", async () => {
+    let isolatedHome = "";
+    const executor = createDshCliExecutor({
+      cwd: taskFixture.worktreePath,
+      command: "/opt/deepseek/bin/dsh",
+      profile: "headless",
+      sandbox: "workspace-write",
+      isolatedProfile: "base-headless",
+      env: {
+        DSH_HOME: "/tmp/polluted-global-dsh-home",
+        DEEPSEEK_API_KEY: "host-owned-key-not-written-to-profile",
+      },
+      resolveCommand: availableDshResolution,
+      runCommand: async (input) => {
+        isolatedHome = input.env?.DSH_HOME ?? "";
+        expect(isolatedHome).not.toBe("/tmp/polluted-global-dsh-home");
+        const profile = JSON.parse(readFileSync(`${isolatedHome}/profiles/headless/package.json`, "utf8"));
+        expect(profile).toEqual({
+          name: "dsh-profile-headless",
+          private: true,
+          dependencies: {},
+          dsh: { profile: { bundles: ["@deepseek-ai/dsh-base", "@deepseek-ai/dsh-headless"] } },
+        });
+        expect(readFileSync(`${isolatedHome}/profiles/headless/cordis.patch.yml`, "utf8")).toBe("[]\n");
+        expect(JSON.stringify(profile)).not.toContain("hodor");
+        expect(JSON.stringify(profile)).not.toContain("host-owned-key");
+        return {
+          exitCode: 0,
+          stdout: '{"status":"done","summary":"isolated repair started","changedFiles":[],"checks":[],"artifacts":[],"problems":[]}',
+          stderr: "",
+        };
+      },
+    });
+
+    const output = await executor(executorInput());
+
+    expect(output).toMatchObject({ status: "done", summary: "isolated repair started" });
+    expect(isolatedHome).toContain("ouroboros-dsh-");
+    expect(existsSync(isolatedHome)).toBe(false);
+  });
+
   test("runs headless DSH in the exact task worktree and parses AttemptOutput", async () => {
     const calls: RunCommandInput[] = [];
     const events: Array<Record<string, unknown>> = [];

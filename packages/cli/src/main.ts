@@ -1782,6 +1782,7 @@ function executorFactory(_executorName: CliExecutorName) {
       hostExecutionCapabilities: input.task.config?.hostExecutionCapabilities,
       taskRole: input.task.role,
       verifierContract: input.task.config?.verifierContract,
+      dshProfileIsolation: dshProfileIsolationForTask(input.task),
     });
 }
 
@@ -1791,13 +1792,47 @@ function attemptInputFactory(_executorName: CliExecutorName) {
     task: NonNullable<ReturnType<Harness["getTask"]>>;
     cwd: string;
     route: ResolvedExecutionRoute;
-  }) => ({
-    ...attemptInputForRoute(input.route, input.cwd),
-    ...hostExecutionCapabilityAttemptInput(input.task.config?.hostExecutionCapabilities, {
-      role: input.task.role,
-      verifierContract: input.task.config?.verifierContract,
-    }),
-  });
+  }) => {
+    const dshProfileIsolation = dshProfileIsolationForTask(input.task);
+    return {
+      ...attemptInputForRoute(input.route, input.cwd),
+      ...(dshProfileIsolation ? { dshProfileIsolation } : {}),
+      ...hostExecutionCapabilityAttemptInput(input.task.config?.hostExecutionCapabilities, {
+        role: input.task.role,
+        verifierContract: input.task.config?.verifierContract,
+      }),
+    };
+  };
+}
+
+function dshProfileIsolationForTask(task: NonNullable<ReturnType<Harness["getTask"]>>) {
+  if (task.config?.dshProfileIsolation === "base-headless") {
+    return "base-headless" as const;
+  }
+  if (task.role !== "worker" || !task.parentId || !task.goal.startsWith("Repair:")) {
+    return undefined;
+  }
+  const verifier = harness.getTask(task.parentId);
+  if (!verifier || verifier.role !== "verifier" || verifier.runId !== task.runId) {
+    return undefined;
+  }
+  const sourceTaskIds = new Set(verifier.dependsOn);
+  const overview = harness.getRunOverview({ runId: task.runId, eventLimit: 0 });
+  const sourceSession = [...overview.sessions]
+    .reverse()
+    .find((session) => sourceTaskIds.has(session.taskId));
+  const sourceAttempt = sourceSession ? harness.getAttempt(sourceSession.attemptId) : null;
+  const route = sourceAttempt?.input.route;
+  if (!route || typeof route !== "object" || Array.isArray(route)) {
+    return undefined;
+  }
+  const backend = (route as Record<string, unknown>).backend;
+  if (!backend || typeof backend !== "object" || Array.isArray(backend)) {
+    return undefined;
+  }
+  return (backend as Record<string, unknown>).kind === "dsh-cli"
+    ? "base-headless" as const
+    : undefined;
 }
 
 function resolveCliExecutionRoute(input: {

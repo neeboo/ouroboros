@@ -1014,6 +1014,9 @@ class CodexResumableOrchestrator {
         timeoutMs: this.genericHardMs,
         idleTimeoutMs: this.genericIdleMs,
         replayCache: this.replayCache,
+        dshProfileIsolation: factoryInput.task.config?.dshProfileIsolation === "base-headless"
+          ? "base-headless"
+          : undefined,
       }));
     const executor = executorFactory({
       run: input.run,

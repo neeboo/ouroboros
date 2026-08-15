@@ -8584,6 +8584,103 @@ if (args.includes("self-improve-daemon")) {
     )).toBe(true);
   });
 
+  test("run-loop isolates a legacy fixed DSH repair from project plugins before starting it", async () => {
+    await runCli("init");
+    const harness = new Harness(dbPath);
+    const worktree = join(dir, "legacy-dsh-repair-worktree");
+    const pollutedHome = join(dir, "polluted-dsh-home");
+    const dshCommand = join(dir, "fake-dsh-isolated-repair");
+    await mkdir(worktree, { recursive: true });
+    await mkdir(join(pollutedHome, "profiles", "headless"), { recursive: true });
+    await writeFile(
+      join(pollutedHome, "profiles", "headless", "package.json"),
+      JSON.stringify({ dsh: { profile: { bundles: ["@hodor/hodor-studio"] } } }),
+    );
+    await writeFile(
+      dshCommand,
+      [
+        "#!/usr/bin/env bun",
+        "import { readFileSync } from 'node:fs';",
+        "const home = process.env.DSH_HOME ?? '';",
+        `if (home === ${JSON.stringify(pollutedHome)}) process.exit(21);`,
+        "const profile = JSON.parse(readFileSync(`${home}/profiles/headless/package.json`, 'utf8'));",
+        "const bundles = profile?.dsh?.profile?.bundles ?? [];",
+        "if (JSON.stringify(bundles) !== JSON.stringify(['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-headless'])) process.exit(22);",
+        "if (process.env.HODOR_APPLICATION_TOKEN || process.env.HODOR_APPLICATION_BASE_URL) process.exit(23);",
+        "console.log(JSON.stringify({ status: 'done', summary: 'legacy DSH repair used isolated profile', changedFiles: [], checks: [{ name: 'isolated DSH profile', status: 'passed' }], artifacts: [{ kind: 'dsh_profile_isolation', mode: 'base-headless' }], problems: [] }));",
+      ].join("\n"),
+    );
+    await chmod(dshCommand, 0o755);
+    const runId = harness.createRun({
+      goal: "Recover a legacy DSH repair",
+      context: {
+        agentDefaults: { global: "codex-resumable", roles: { worker: "deepseek-harness" } },
+        agentBackends: {
+          "deepseek-harness": {
+            kind: "dsh-cli",
+            command: dshCommand,
+            profile: "headless",
+            env: { DSH_HOME: pollutedHome },
+          },
+        },
+      },
+    });
+    const sourceId = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Implement through DSH",
+      prompt: "Implement.",
+      worktreePath: worktree,
+    });
+    harness.recordAttempt({
+      taskId: sourceId,
+      input: { route: { backend: { kind: "dsh-cli", id: "deepseek-harness" } }, cwd: worktree },
+      output: { status: "done", summary: "source done", changedFiles: [], checks: [], artifacts: [], problems: [] },
+    });
+    const verifierId = harness.createTask({
+      runId,
+      role: "verifier",
+      goal: "Verify DSH source",
+      prompt: "Verify.",
+      dependsOn: [sourceId],
+      worktreePath: worktree,
+    });
+    harness.recordAttempt({
+      taskId: verifierId,
+      input: { executor: "test", cwd: worktree },
+      output: { status: "blocked", summary: "DSH boot failed", changedFiles: [], checks: [], artifacts: [], problems: ["project plugin boot failure"] },
+    });
+    const repairId = harness.createTask({
+      runId,
+      parentId: verifierId,
+      role: "worker",
+      goal: "Repair: Verify DSH source",
+      prompt: "Repair the source without project plugins.",
+      dependsOn: [sourceId],
+      worktreePath: worktree,
+    });
+
+    await runCliJson(
+      "run-loop",
+      "--run-id", runId,
+      "--executor", "dsh-cli",
+      "--cwd", worktree,
+      "--start-hook", "none",
+      "--max-rounds", "1",
+      "--tasks", "1",
+    );
+
+    const session = harness.getRunOverview({ runId, eventLimit: 0 }).sessions.find((candidate) => candidate.taskId === repairId)!;
+    const attempt = harness.getAttempt(session.attemptId)!;
+    expect(attempt.status).toBe("done");
+    expect(attempt.input.dshProfileIsolation).toBe("base-headless");
+    expect(attempt.output).toMatchObject({
+      summary: "legacy DSH repair used isolated profile",
+      artifacts: [{ kind: "dsh_profile_isolation", mode: "base-headless" }],
+    });
+    expect(harness.getTask(repairId)?.config?.dshProfileIsolation).toBeUndefined();
+  });
+
   test("run-loop reviews the goal when the queue is empty and can complete the run", async () => {
     await runCli("init");
     const run = await runCliJson("create-run", "--goal", "Bootstrap ouroboros");

@@ -1,4 +1,7 @@
 import type { AttemptOutput } from "@ouroboros/harness";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { boundedDiagnosticText, sha256Text } from "../bounded-diagnostic";
 import { promptBudgetBlockedOutput, promptBudgetEvidence } from "../prompt-budget";
 import { resolveDshCommand } from "../dsh-readiness";
@@ -75,23 +78,39 @@ export function createDshCliExecutor(options: DshCliExecutorOptions): TaskExecut
       };
     }
 
-    recorder?.event({
-      type: "dsh.attempt.started",
-      sessionName,
-      profile,
-      cwd: options.cwd,
-      permissionMode: sandbox,
-      promptCharacters: prompt.length,
-      promptSha256: sha256Text(prompt),
-    });
-
+    let isolatedHome: string | null = null;
     let result;
     try {
+      if (options.isolatedProfile === "base-headless") {
+        isolatedHome = await createIsolatedHeadlessHome();
+      }
+      recorder?.event({
+        type: "dsh.attempt.started",
+        sessionName,
+        profile,
+        cwd: options.cwd,
+        permissionMode: sandbox,
+        promptCharacters: prompt.length,
+        promptSha256: sha256Text(prompt),
+        profileIsolation: options.isolatedProfile ?? null,
+      });
       result = await runCommand({
         cmd: [resolution.selectedPath, "--profile", profile, prompt],
         stdin: "",
         cwd: options.cwd,
-        env: { ...options.env, DSH_PERMISSION_MODE: sandbox },
+        env: {
+          ...options.env,
+          ...(isolatedHome
+            ? {
+                DSH_HOME: isolatedHome,
+                DSH_AGENTS_HOME: join(isolatedHome, "agents"),
+                HODOR_APPLICATION_BASE_URL: undefined,
+                HODOR_APPLICATION_TOKEN: undefined,
+                HODOR_AGENT_GATEWAY_TOKEN: undefined,
+              }
+            : {}),
+          DSH_PERMISSION_MODE: sandbox,
+        },
         timeoutMs: options.timeoutMs,
         idleTimeoutMs: options.idleTimeoutMs,
       });
@@ -109,6 +128,10 @@ export function createDshCliExecutor(options: DshCliExecutorOptions): TaskExecut
         "dsh cli start",
         diagnostic.text,
       );
+    } finally {
+      if (isolatedHome) {
+        await rm(isolatedHome, { recursive: true, force: true });
+      }
     }
 
     if (result.exitCode !== 0) {
@@ -145,6 +168,30 @@ export function createDshCliExecutor(options: DshCliExecutorOptions): TaskExecut
     });
     return output;
   };
+}
+
+async function createIsolatedHeadlessHome() {
+  const home = await mkdtemp(join(tmpdir(), "ouroboros-dsh-"));
+  const profileDir = join(home, "profiles", "headless");
+  try {
+    await mkdir(profileDir, { recursive: true, mode: 0o700 });
+    await mkdir(join(home, "agents"), { recursive: true, mode: 0o700 });
+    await writeFile(join(profileDir, "package.json"), `${JSON.stringify({
+      name: "dsh-profile-headless",
+      private: true,
+      dependencies: {},
+      dsh: {
+        profile: {
+          bundles: ["@deepseek-ai/dsh-base", "@deepseek-ai/dsh-headless"],
+        },
+      },
+    }, null, 2)}\n`, { mode: 0o600 });
+    await writeFile(join(profileDir, "cordis.patch.yml"), "[]\n", { mode: 0o600 });
+    return home;
+  } catch (error) {
+    await rm(home, { recursive: true, force: true });
+    throw error;
+  }
 }
 
 function dshPromptArgumentEvidence(prompt: string) {
