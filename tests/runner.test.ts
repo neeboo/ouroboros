@@ -8,6 +8,7 @@ import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import {
   acceptGuardrailProposal,
+  applyHarnessAction,
   Harness,
   type AttemptOutput,
   type HarnessRevisionComponentKind,
@@ -6922,6 +6923,67 @@ describe("runner", () => {
     expect(recoveries[0]?.prompt).toContain("Do not run project tests");
     expect(harness.getTask(reviewTaskId)?.status).toBe("done");
     expect(harness.getRun(runId)?.context.repairReplanBudget).toEqual({ limit: 3, used: 0, entries: [] });
+  });
+
+  test("a target-system Goal Review cannot materialize recovery after the run is retired", async () => {
+    const runId = harness.createRun({
+      goal: "Retire stale target-system evidence acquisition",
+      context: { source: "target-system-design" },
+    });
+    const designerTaskId = harness.createTask({
+      runId,
+      role: "designer",
+      goal: "Use authoritative evidence",
+      prompt: "Emit a fixed proposal only.",
+    });
+    harness.recordAttempt({
+      taskId: designerTaskId,
+      input: { executor: "codex-resumable" },
+      output: {
+        status: "blocked",
+        summary: "Fixed proposal rejected.",
+        changedFiles: [],
+        checks: [],
+        artifacts: [],
+        problems: ["placeholder comparison fields are forbidden in a real design proposal: toolPolicySha256"],
+      },
+    });
+    const reviewTaskId = harness.createTask({
+      runId,
+      role: "goal-review",
+      goal: "Review the rejected proposal",
+      prompt: "Do not create business work.",
+    });
+
+    const result = await runNextReadyTask({
+      harness,
+      runId,
+      stopHooks: [createTasksFromOutputHook({ harness })],
+      executor: async () => {
+        const retired = applyHarnessAction(harness, {
+          type: "retireRun",
+          runId,
+          reason: "superseded evidence acquisition",
+        });
+        expect(retired.status).toBe("done");
+        return {
+          status: "done",
+          runDecision: "continue",
+          summary: "Stale review proposed more work after retirement.",
+          changedFiles: [],
+          checks: [],
+          artifacts: [],
+          problems: [],
+          nextTasks: [{ role: "planner", goal: "Stale follow-up", prompt: "Must not be created." }],
+        };
+      },
+    });
+
+    const overview = harness.getRunOverview({ runId, eventLimit: 0 });
+    expect(result?.stopDecision).toBe("exit");
+    expect(overview.run).toMatchObject({ status: "blocked", context: { retired: true } });
+    expect(overview.tasks.map((task) => task.id).sort()).toEqual([designerTaskId, reviewTaskId].sort());
+    expect(harness.getAttempt(result!.attemptId)?.status).toBe("blocked");
   });
 
   test("goal review stop hook does not append stale next tasks when work appeared while the review was running", async () => {

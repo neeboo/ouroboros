@@ -340,6 +340,9 @@ function materializeTargetSystemDesignerRecovery(input: {
 
   const result = input.harness.runInImmediateTransaction((db) => {
     const overview = input.harness.getRunOverviewWithDb(db, { runId: input.run.id, eventLimit: 0 });
+    if (overview.run?.context.retired === true) {
+      return { status: "retired" as const, taskId: null, sourceTaskId: sourceSession.taskId };
+    }
     const durableSourceSession = [...overview.sessions].reverse().find((session) =>
       session.attemptId === sourceSession.attemptId
       && session.role === "designer"
@@ -423,6 +426,17 @@ function materializeTargetSystemDesignerRecovery(input: {
       decision: "exit" as const,
       problems: ["Designer recovery source changed during goal-review materialization"],
       artifacts: [{ kind: "designer_recovery_conflict", sourceTaskId: result.sourceTaskId }],
+    };
+  }
+  if (result.status === "retired") {
+    return {
+      decision: "exit" as const,
+      checks: [{
+        name: "retired run task suppression",
+        status: "passed" as const,
+        evidence: input.run.id,
+      }],
+      artifacts: [{ kind: "retired_run_task_suppressed", runId: input.run.id }],
     };
   }
   if (result.status === "exhausted") {
