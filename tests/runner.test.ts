@@ -40,6 +40,7 @@ import {
   recordDesignOutcomeAction,
   recordSignalAction,
   reconcileDeferredDesignAuthority,
+  reconcileTerminalBlockedVerifierRepair,
   resolveAgentBackend,
   resolveExecutionRoute,
   resolveModelPreference,
@@ -7883,6 +7884,53 @@ describe("runner", () => {
     );
     expect(repairs).toHaveLength(1);
     expect(harness.getRun(runId)!.context.repairReplanBudget).toMatchObject({
+      used: 1,
+      entries: [expect.objectContaining({ taskId: verifierId, kind: "repair" })],
+    });
+  });
+
+  test("concurrent terminal verifier reconciliation materializes one fixed repair", async () => {
+    const runId = harness.createRun({ goal: "Recover one missed verifier stop hook" });
+    const workerId = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Implement once",
+      prompt: "Implement.",
+      worktreePath: "/tmp/ouroboros-reconciled-source",
+    });
+    harness.recordAttempt({
+      taskId: workerId,
+      input: { cwd: "/tmp/ouroboros-reconciled-source" },
+      output: { status: "done", summary: "done", changedFiles: [], checks: [], artifacts: [], problems: [] },
+    });
+    const verifierId = harness.createTask({
+      runId,
+      role: "verifier",
+      goal: "Verify once",
+      prompt: "Verify.",
+      dependsOn: [workerId],
+    });
+    harness.recordAttempt({
+      taskId: verifierId,
+      input: { cwd: "/tmp/ouroboros-reconciled-source" },
+      output: {
+        status: "blocked",
+        summary: "repair required",
+        changedFiles: [],
+        checks: [],
+        artifacts: [],
+        problems: ["one durable repair"],
+      },
+    });
+
+    await Promise.all([
+      reconcileTerminalBlockedVerifierRepair({ harness, runId }),
+      reconcileTerminalBlockedVerifierRepair({ harness, runId }),
+    ]);
+
+    const overview = harness.getRunOverview({ runId, eventLimit: 0 });
+    expect(overview.tasks.filter((task) => task.role === "worker" && task.parentId === verifierId)).toHaveLength(1);
+    expect(harness.getRun(runId)?.context.repairReplanBudget).toMatchObject({
       used: 1,
       entries: [expect.objectContaining({ taskId: verifierId, kind: "repair" })],
     });

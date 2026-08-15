@@ -8474,6 +8474,116 @@ if (args.includes("self-improve-daemon")) {
     expect(harness.getTask(task.id)?.status).toBe("done");
   });
 
+  test("run-loop reconciles a terminal blocked verifier into one fixed repair before goal review", async () => {
+    await runCli("init");
+    const harness = new Harness(dbPath);
+    const sourceWorktree = join(dir, "reconciled-verifier-source");
+    await mkdir(sourceWorktree);
+    const runId = harness.createRun({ goal: "Recover a missed verifier stop hook" });
+    const workerId = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Implement the frozen source change",
+      prompt: "Implement the source change.",
+      worktreePath: sourceWorktree,
+      doneWhen: ["SOURCE_FROZEN_CRITERION"],
+    });
+    harness.recordAttempt({
+      taskId: workerId,
+      input: { cwd: sourceWorktree, executor: "test" },
+      output: {
+        status: "done",
+        summary: "source implementation done",
+        changedFiles: ["src/source.ts"],
+        checks: [],
+        artifacts: [],
+        problems: [],
+      },
+    });
+    const verifierId = harness.createTask({
+      runId,
+      role: "verifier",
+      goal: "Verify the frozen source change",
+      prompt: "Verify the source change.",
+      dependsOn: [workerId],
+      worktreePath: sourceWorktree,
+      doneWhen: ["VERIFIER_FROZEN_CRITERION"],
+      config: { verifierContract: { checks: ["frozen-check"] } },
+    });
+    harness.recordAttempt({
+      taskId: verifierId,
+      input: { cwd: sourceWorktree, executor: "codex-resumable" },
+      output: {
+        status: "blocked",
+        summary: "verification found a repairable defect",
+        changedFiles: [],
+        checks: [{ name: "frozen-check", status: "failed" }],
+        artifacts: [],
+        problems: ["LATEST_REPAIR_ROOT_CAUSE"],
+        nextTasks: [{
+          role: "worker",
+          goal: "UNTRUSTED_VERIFIER_PROPOSED_GOAL",
+          prompt: "UNTRUSTED_VERIFIER_PROPOSED_PROMPT",
+        }],
+      },
+    });
+    const codexBin = join(dir, "fake-codex-reconciled-verifier");
+    await writeFile(
+      codexBin,
+      [
+        "#!/usr/bin/env bun",
+        "const prompt = await new Response(Bun.stdin.stream()).text();",
+        "if (!prompt.includes('Role: worker')) process.exit(2);",
+        "if (!prompt.includes('LATEST_REPAIR_ROOT_CAUSE')) process.exit(3);",
+        "if (!prompt.includes('SOURCE_FROZEN_CRITERION')) process.exit(4);",
+        "if (!prompt.includes('VERIFIER_FROZEN_CRITERION')) process.exit(5);",
+        "if (prompt.includes('UNTRUSTED_VERIFIER_PROPOSED_PROMPT')) process.exit(6);",
+        "console.log(JSON.stringify({ type: 'session.started', session_id: 'session_reconciled_repair' }));",
+        "console.log(JSON.stringify({ type: 'agent.message', message: '{\"status\":\"done\",\"summary\":\"fixed repair completed\",\"changedFiles\":[\"src/source.ts\"],\"checks\":[],\"artifacts\":[],\"problems\":[]}' }));",
+      ].join("\n"),
+    );
+    await chmod(codexBin, 0o755);
+
+    await runCliJson(
+      "run-loop",
+      "--run-id",
+      runId,
+      "--executor",
+      "codex-resumable",
+      "--codex-bin",
+      codexBin,
+      "--cwd",
+      sourceWorktree,
+      "--sandbox",
+      "read-only",
+      "--start-hook",
+      "none",
+      "--max-rounds",
+      "1",
+    );
+
+    const overview = harness.getRunOverview({ runId, eventLimit: 0 });
+    const repairs = overview.tasks.filter((task) => task.role === "worker" && task.parentId === verifierId);
+    expect(repairs).toHaveLength(1);
+    expect(repairs[0]).toMatchObject({
+      status: "done",
+      worktreePath: sourceWorktree,
+      dependsOn: [workerId],
+      config: { verifierContract: { checks: ["frozen-check"] } },
+    });
+    expect(repairs[0]?.goal).toBe("Repair: Verify the frozen source change");
+    expect(overview.tasks.some((task) => task.goal === "UNTRUSTED_VERIFIER_PROPOSED_GOAL")).toBe(false);
+    expect(harness.getRun(runId)?.context.repairReplanBudget).toMatchObject({
+      used: 1,
+      entries: [expect.objectContaining({ taskId: verifierId, kind: "repair" })],
+    });
+    expect(overview.sessions.some((session) =>
+      session.taskId === repairs[0]?.id
+      && session.status === "done"
+      && session.codexSessionId === "session_reconciled_repair"
+    )).toBe(true);
+  });
+
   test("run-loop reviews the goal when the queue is empty and can complete the run", async () => {
     await runCli("init");
     const run = await runCliJson("create-run", "--goal", "Bootstrap ouroboros");

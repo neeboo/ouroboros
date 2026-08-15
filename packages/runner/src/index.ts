@@ -80,7 +80,11 @@ export type {
 export { createContextSubagentHook, createContextSummaryHook } from "./hooks/context-summary";
 export { createCollectSubsessionsHook } from "./hooks/collect-subsessions";
 export type { CollectSubsessionsHookOptions } from "./hooks/collect-subsessions";
-export { createRepairTaskHook, DEFAULT_REPAIR_REPLAN_BUDGET_LIMIT } from "./hooks/create-repair";
+export {
+  createRepairTaskHook,
+  DEFAULT_REPAIR_REPLAN_BUDGET_LIMIT,
+  reconcileTerminalBlockedVerifierRepair,
+} from "./hooks/create-repair";
 export {
   chargeRepairBudget,
   chargeRepairBudgetState,

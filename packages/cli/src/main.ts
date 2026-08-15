@@ -912,7 +912,7 @@ if (parsed.command === "help" || flag(parsed, "help") !== undefined) {
     const maxRounds = parsePositiveInteger(flag(parsed, "max-rounds") ?? "10", "--max-rounds");
     const maxTries = parsePositiveInteger(flag(parsed, "max-tries") ?? String(DEFAULT_MAX_TRIES), "--max-tries");
     if (usesCodexResumablePath(executorName)) {
-      printJson(await runCodexResumableLoop({ ...codexRunnerInput(), runId, maxRounds, limit, maxTries }));
+      printJson(await runCodexResumableLoop({ ...codexRunnerInput(DEFAULT_STOP_HOOKS), runId, maxRounds, limit, maxTries }));
       break;
     }
     const result = await runUntilIdle({
@@ -1824,12 +1824,14 @@ function attemptInputForRoute(route: ResolvedExecutionRoute, cwd: string) {
 }
 
 function codexRunnerInput(defaultStopHooks?: string) {
+  const stopHookNames = (flag(parsed, "stop-hook") ?? defaultStopHooks)?.split(",") ?? [];
   return {
     harness,
     cwd: runnerCwd(),
     worktreeForTask: worktreeForTask(),
     startHooks: startHooks(),
     stopHooksByRole: stopHooksByRole(defaultStopHooks),
+    reconcileTerminalBlockedVerifierRepairs: stopHookNames.includes("create-repair"),
     cliAgentBackend: flag(parsed, "agent-backend"),
     cliExecutor: "codex-resumable" as const,
     model: flag(parsed, "model"),

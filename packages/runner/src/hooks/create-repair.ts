@@ -13,6 +13,62 @@ import {
 
 export const DEFAULT_REPAIR_REPLAN_BUDGET_LIMIT = 3;
 
+export interface TerminalBlockedVerifierRepairReconciliation {
+  verifierTaskId: string;
+  verifierAttemptId: string;
+  decision: "continue" | "retry" | "exit";
+  artifacts: unknown[];
+  problems: string[];
+}
+
+export async function reconcileTerminalBlockedVerifierRepair(options: {
+  harness: Harness;
+  runId: string;
+  budgetLimit?: number;
+}): Promise<TerminalBlockedVerifierRepairReconciliation[]> {
+  const overview = options.harness.getRunOverview({ runId: options.runId, eventLimit: 0 });
+  if (
+    !overview.run
+    || overview.run.status !== "todo"
+    || overview.tasks.some((task) => task.status === "todo" || task.status === "running")
+  ) {
+    return [];
+  }
+  const verifier = [...overview.tasks]
+    .reverse()
+    .find((task) => task.role === "verifier" && task.status === "blocked");
+  if (!verifier) {
+    return [];
+  }
+  const session = [...overview.sessions]
+    .reverse()
+    .find((candidate) => candidate.taskId === verifier.id && candidate.status === "blocked");
+  if (!session || session.output.status !== "blocked") {
+    return [];
+  }
+  const attempt = options.harness.getAttempt(session.attemptId);
+  if (!attempt) {
+    return [];
+  }
+  const result = await createRepairTaskHook({
+    harness: options.harness,
+    budgetLimit: options.budgetLimit,
+  })({
+    run: overview.run,
+    task: verifier,
+    sessionName: session.sessionName ?? `task-${verifier.id}`,
+    prompt: typeof attempt.input.prompt === "string" ? attempt.input.prompt : verifier.prompt,
+    output: attempt.output,
+  });
+  return [{
+    verifierTaskId: verifier.id,
+    verifierAttemptId: attempt.id,
+    decision: result.decision ?? "exit",
+    artifacts: result.artifacts ?? [],
+    problems: result.problems ?? [],
+  }];
+}
+
 export function createRepairTaskHook(options: {
   harness: Harness;
   budgetLimit?: number;
@@ -135,7 +191,16 @@ export function createRepairTaskHook(options: {
       };
     }
 
-    const sourceWorktreePath = sourceTask?.worktreePath ?? task.worktreePath ?? null;
+    const sourceSession = sourceTask
+      ? [...options.harness.getRunOverview({ runId: run.id, eventLimit: 0 }).sessions]
+        .reverse()
+        .find((candidate) => candidate.taskId === sourceTask.id)
+      : null;
+    const sourceWorktreePath = sourceTask?.worktreePath
+      ?? sourceSession?.worktreePath
+      ?? sourceSession?.cwd
+      ?? task.worktreePath
+      ?? null;
     const verifierContract = verifierContractFromTask(task);
     let prompt: string;
     try {

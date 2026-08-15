@@ -38,6 +38,7 @@ import { applyStartHooks } from "./runner";
 import { createCodexResumableClient, sessionIdFromEvents } from "./executors/codex-resumable";
 import type { CodexResumableClientOptions, CodexResumableResult } from "./executors/codex-resumable";
 import { childToolchainEnvEvidence } from "./executors/proxy-env";
+import { reconcileTerminalBlockedVerifierRepair } from "./hooks/create-repair";
 import { createRouteExecutor } from "./route-executor";
 import {
   assertPersistedHostExecutionCapabilityAttestation,
@@ -81,6 +82,7 @@ export interface CodexResumableOrchestrationInput {
   genericAttemptHardTimeoutMs?: number;
   genericAttemptHeartbeatMs?: number;
   shouldStop?: () => boolean;
+  reconcileTerminalBlockedVerifierRepairs?: boolean;
 }
 
 type RuntimeGenerationState = "current" | "stale" | "draining-for-reload" | "reloaded" | "reload-failed";
@@ -117,6 +119,9 @@ export async function runCodexResumableLoop(input: RunCodexResumableLoopInput) {
     if (input.shouldStop?.()) {
       break;
     }
+    const reconciledRepairs = input.reconcileTerminalBlockedVerifierRepairs
+      ? await reconcileTerminalBlockedVerifierRepair({ harness: input.harness, runId: input.runId })
+      : [];
     const reclaimed = input.harness.reclaimRunningTasksWithoutAttempts({
       runId: input.runId,
       maxRecoveries: input.maxTries,
@@ -127,7 +132,7 @@ export async function runCodexResumableLoop(input: RunCodexResumableLoopInput) {
       maxRunningContinuations: input.maxTries,
     });
     if (resumed.length > 0) {
-      rounds.push({ index, tasks: resumed, reclaimed });
+      rounds.push({ index, tasks: resumed, reclaimed, reconciledRepairs });
       if (resumed.some((task) => task.status === "running")) {
         break;
       }
@@ -143,7 +148,7 @@ export async function runCodexResumableLoop(input: RunCodexResumableLoopInput) {
       const overviewBeforeReview = input.harness.getRunOverview({ runId: input.runId, eventLimit: 0 });
       const integration = maybeIntegrateCompletedRun(input, overviewBeforeReview);
       if (integration?.some((result) => result.status === "done")) {
-        rounds.push({ index, tasks: started, integration, reclaimed });
+        rounds.push({ index, tasks: started, integration, reclaimed, reconciledRepairs });
         continue;
       }
       const drain = applyHarnessAction(input.harness, {
@@ -155,7 +160,7 @@ export async function runCodexResumableLoop(input: RunCodexResumableLoopInput) {
       if (drain.status === "done") {
         const reviewed = await orchestrator.startReadyAttempts({ runId: input.runId, limit: input.limit });
         if (reviewed.length > 0) {
-          rounds.push({ index, tasks: reviewed, goalReview: drain, reclaimed });
+          rounds.push({ index, tasks: reviewed, goalReview: drain, reclaimed, reconciledRepairs });
           if (reviewed.some((task) => task.status === "running")) {
             break;
           }
@@ -164,7 +169,7 @@ export async function runCodexResumableLoop(input: RunCodexResumableLoopInput) {
       }
       break;
     }
-    rounds.push({ index, tasks: started, reclaimed });
+    rounds.push({ index, tasks: started, reclaimed, reconciledRepairs });
     if (started.some((task) => task.status === "running")) {
       break;
     }
