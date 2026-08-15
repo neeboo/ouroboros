@@ -644,6 +644,122 @@ export class Harness {
     return this.getRunWithDb(db, input.runId);
   }
 
+  reconcileDrainedResearchRecoveryRun(input: { runId: string }) {
+    return withDatabase(this.dbPath, (db) =>
+      db.transaction(() => this.reconcileDrainedResearchRecoveryRunWithDb(db, input.runId)).immediate(),
+    );
+  }
+
+  reconcileDrainedResearchRecoveryRunWithDb(db: HarnessDatabase, runId: string) {
+    const runRow = db.query("select * from runs where id = $runId").get({ $runId: runId }) as RunRow | null;
+    if (!runRow || (runRow.status !== "todo" && runRow.status !== "running")) {
+      return false;
+    }
+    const run = runFromRow(runRow);
+    if (run.context.researchOnly !== true || run.context.forbidImplementation !== true) {
+      return false;
+    }
+
+    const taskRows = db.query(
+      "select * from tasks where run_id = $runId order by created_at, id",
+    ).all({ $runId: runId }) as TaskRow[];
+    if (taskRows.length === 0 || taskRows.some((row) => row.status === "todo" || row.status === "running")) {
+      return false;
+    }
+    const tasks = taskRows.map(taskFromRow);
+    if (tasks.some((task) => task.role !== "designer"
+      || task.config?.researchOnly !== true
+      || task.config?.forbidBrowser !== true
+      || task.config?.forbidWrites !== true
+      || task.config?.forbidActions !== true)) {
+      return false;
+    }
+
+    const runningAttempt = db.query(
+      `
+      select 1
+      from attempts
+      join tasks on tasks.id = attempts.task_id
+      where tasks.run_id = $runId and attempts.status = 'running'
+      limit 1
+      `,
+    ).get({ $runId: runId });
+    if (runningAttempt) {
+      return false;
+    }
+    const runningThread = db.query(
+      `
+      select 1
+      from execution_threads
+      left join attempts on attempts.id = execution_threads.attempt_id
+      where execution_threads.run_id = $runId
+        and execution_threads.status = 'running'
+        and (execution_threads.attempt_id is null or attempts.status = 'running')
+      limit 1
+      `,
+    ).get({ $runId: runId });
+    if (runningThread) {
+      return false;
+    }
+
+    for (const recoveryTask of [...tasks].reverse()) {
+      if (recoveryTask.status !== "done") continue;
+      const recovery = recoveryTask.config?.deadAttemptRecovery;
+      if (!isDeadAttemptRecovery(recovery)) continue;
+      if (recoveryTask.parentId !== recovery.sourceTaskId) continue;
+      const sourceTask = tasks.find((task) => task.id === recovery.sourceTaskId);
+      if (!sourceTask || sourceTask.status !== "blocked" || sourceTask.role !== recoveryTask.role) continue;
+      if (toJson(sourceTask.doneWhen) !== toJson(recoveryTask.doneWhen)) continue;
+
+      const sourceAttemptRow = db.query(
+        "select * from attempts where id = $attemptId and task_id = $taskId and status = 'blocked'",
+      ).get({ $attemptId: recovery.sourceAttemptId, $taskId: sourceTask.id }) as AttemptRow | null;
+      if (!sourceAttemptRow) continue;
+      const recoveryAttemptRow = db.query(
+        `
+        select * from attempts
+        where task_id = $taskId and status = 'done'
+        order by finished_at desc, id desc
+        limit 1
+        `,
+      ).get({ $taskId: recoveryTask.id }) as AttemptRow | null;
+      if (!recoveryAttemptRow) continue;
+      const output = attemptFromRow(recoveryAttemptRow).output;
+      if ((output.changedFiles?.length ?? 0) > 0
+        || (output.nextTasks?.length ?? 0) > 0
+        || (output.nextRuns?.length ?? 0) > 0
+        || (output.designActions?.length ?? 0) > 0) {
+        continue;
+      }
+
+      const nextContext = {
+        ...run.context,
+        researchRecoveryClosure: {
+          kind: "bounded-dead-attempt-recovery",
+          sourceTaskId: sourceTask.id,
+          sourceAttemptId: recovery.sourceAttemptId,
+          recoveryTaskId: recoveryTask.id,
+          recoveryAttemptId: recoveryAttemptRow.id,
+          recoveryCount: recovery.count,
+          recoveryLimit: recovery.limit,
+        },
+      };
+      const updated = db.query(
+        `
+        update runs
+        set status = 'done', context_json = $contextJson, updated_at = current_timestamp
+        where id = $runId
+          and status in ('todo', 'running')
+          and not exists (
+            select 1 from tasks where run_id = $runId and status in ('todo', 'running')
+          )
+        `,
+      ).run({ $runId: runId, $contextJson: toJson(nextContext) });
+      return updated.changes === 1;
+    }
+    return false;
+  }
+
   clearRunPause(runId: string) {
     return this.updateRun({
       runId,
@@ -1601,6 +1717,7 @@ export class Harness {
         $summary: lesson.summary,
         $evidenceJson: toJson(lesson.evidence),
       });
+      this.reconcileDrainedResearchRecoveryRunWithDb(db, taskRow.run_id);
     }
     return id;
   }
@@ -1722,6 +1839,7 @@ export class Harness {
         $summary: lesson.summary,
         $evidenceJson: toJson(lesson.evidence),
       });
+      this.reconcileDrainedResearchRecoveryRunWithDb(db, taskRow.run_id);
     }
   }
 
@@ -3845,6 +3963,27 @@ function normalizeAttemptOutput(output: RecordAttemptInput["output"]) {
     summary: readableValue(output.summary),
     problems: readableList(output.problems),
   };
+}
+
+function isDeadAttemptRecovery(value: unknown): value is {
+  count: number;
+  limit: number;
+  sourceTaskId: string;
+  sourceAttemptId: string;
+  durableEventRefs: string[];
+} {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const record = value as Record<string, unknown>;
+  return Number.isInteger(record.count)
+    && Number(record.count) >= 1
+    && Number.isInteger(record.limit)
+    && Number(record.limit) >= Number(record.count)
+    && typeof record.sourceTaskId === "string"
+    && record.sourceTaskId.length > 0
+    && typeof record.sourceAttemptId === "string"
+    && record.sourceAttemptId.length > 0
+    && Array.isArray(record.durableEventRefs)
+    && record.durableEventRefs.every((ref) => typeof ref === "string" && ref.length > 0);
 }
 
 function lessonForAttempt(output: RecordAttemptInput["output"]) {

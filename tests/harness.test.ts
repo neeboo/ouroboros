@@ -1068,6 +1068,104 @@ describe("Harness", () => {
     expect(harness.getRunOverview({ runId, eventLimit: 0 }).tasks).toHaveLength(2);
   });
 
+  test("atomically completes a drained research-only run after its bounded dead-attempt recovery succeeds", () => {
+    const runId = harness.createRun({
+      goal: "Research a control-plane gap without implementation",
+      context: {
+        researchOnly: true,
+        forbidImplementation: true,
+        stopPolicy: "Stop after the research report; do not create implementation work.",
+      },
+    });
+    const sourceTaskId = harness.createTask({
+      runId,
+      role: "designer",
+      goal: "Produce the research report",
+      prompt: "Inspect durable evidence only.",
+      doneWhen: ["Return the bounded research report."],
+      config: {
+        researchOnly: true,
+        forbidBrowser: true,
+        forbidWrites: true,
+        forbidActions: true,
+      },
+    });
+    harness.leaseReadyTasks({ runId, limit: 1, sessionForTask: () => "dead-research" });
+    const sourceAttemptId = harness.startAttempt({
+      taskId: sourceTaskId,
+      input: { executor: "codex-resumable", sandbox: "read-only" },
+    });
+    harness.upsertExecutionThread({
+      id: `thread_${sourceAttemptId}`,
+      runId,
+      taskId: sourceTaskId,
+      attemptId: sourceAttemptId,
+      ownerType: "runner",
+      ownerId: "dead-research-owner",
+      role: "designer",
+      status: "running",
+      pid: 99_999_997,
+      sessionName: "dead-research",
+    });
+    const [reclaimed] = harness.reclaimRunningTasksWithoutAttempts({ runId, maxRecoveries: 1 });
+    const recoveryTaskId = reclaimed!.recoveryTaskId!;
+    harness.leaseReadyTasks({ runId, limit: 1, sessionForTask: () => "bounded-research-recovery" });
+    const recoveryAttemptId = harness.startAttempt({
+      taskId: recoveryTaskId,
+      input: { executor: "codex-resumable", sandbox: "read-only" },
+    });
+    harness.upsertExecutionThread({
+      id: `thread_${recoveryAttemptId}`,
+      runId,
+      taskId: recoveryTaskId,
+      attemptId: recoveryAttemptId,
+      ownerType: "runner",
+      ownerId: "bounded-research-owner",
+      role: "designer",
+      status: "running",
+      pid: process.pid,
+      sessionName: "bounded-research-recovery",
+    });
+
+    harness.finishAttempt({
+      attemptId: recoveryAttemptId,
+      output: {
+        status: "done",
+        summary: "Recovered the complete research report from durable evidence.",
+        changedFiles: [],
+        checks: [{ name: "research contract", status: "passed" }],
+        artifacts: [{ kind: "research_report", sourceAttemptId }],
+        problems: ["Known limitation: the report needs later expert validation."],
+        nextTasks: [],
+        nextRuns: [],
+        designActions: [],
+      },
+    });
+
+    expect(harness.getRun(runId)?.status).toBe("done");
+    harness.updateRunStatus({ runId, status: "todo" });
+    expect(harness.reconcileDrainedResearchRecoveryRun({ runId })).toBe(true);
+    expect(harness.reconcileDrainedResearchRecoveryRun({ runId })).toBe(false);
+
+    const overview = harness.getRunOverview({ runId, eventLimit: 0 });
+    expect(harness.getRun(runId)?.status).toBe("done");
+    expect(harness.getRun(runId)?.context.researchRecoveryClosure).toEqual({
+      kind: "bounded-dead-attempt-recovery",
+      sourceTaskId,
+      sourceAttemptId,
+      recoveryTaskId,
+      recoveryAttemptId,
+      recoveryCount: 1,
+      recoveryLimit: 1,
+    });
+    expect(overview.tasks.map((task) => [task.role, task.status])).toEqual([
+      ["designer", "blocked"],
+      ["designer", "done"],
+    ]);
+    expect(overview.tasks.filter((task) => ["planner", "worker", "goal-review"].includes(task.role))).toEqual([]);
+    expect(harness.listLatestAttemptsForTasks([sourceTaskId, recoveryTaskId])).toHaveLength(2);
+  });
+
   test("updates running attempt input for resumable session ids", () => {
     const runId = harness.createRun({ goal: "Build loop" });
     const taskId = harness.createTask({
