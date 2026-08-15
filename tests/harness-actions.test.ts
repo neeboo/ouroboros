@@ -113,6 +113,109 @@ describe("Harness actions", () => {
     expect(overview.tasks).toContainEqual(expect.objectContaining({ role: "goal-review", status: "todo" }));
   });
 
+  test("records one bounded blocked-run strategy signal atomically and reuses it", () => {
+    const projectId = harness.createProject({ name: "blocked-signal-target", rootPath: dir });
+    const otherProjectId = harness.createProject({ name: "blocked-signal-other", rootPath: join(dir, "other") });
+    const sourceRunId = harness.createRun({ projectId, goal: "Preserve one blocked delivery outcome" });
+    harness.updateRunStatus({ runId: sourceRunId, status: "blocked" });
+    const request = {
+      type: "recordSignal",
+      projectId,
+      sourceRunId,
+      signalClass: "system",
+      source: `blocked-run-outcome:${sourceRunId}`,
+      title: "Offline evidence delivery stopped at the host verification boundary",
+      summary: "Seven files exist, but the source Worker omitted per-file hashes and the Repair added an eighth path. The old run must not resume.",
+      observationTime: "2026-08-15T21:51:03.465Z",
+      confidence: 1,
+      evidence: [
+        `run:${sourceRunId}`,
+        "task:task_worker",
+        "attempt:attempt_worker",
+        "action:action_stage_blocked",
+        `commit:${"d".repeat(40)}`,
+        `sha256:${"a".repeat(64)}`,
+      ],
+      expiresAt: "2026-09-15T21:51:03.465Z",
+      payload: {
+        dshIsolation: "passed",
+        expectedFileCount: 7,
+        workerPerFileSha256Receipt: false,
+        repairUnexpectedFileCount: 1,
+        sealedDescriptorReceipt: false,
+        oldRunPolicy: "do-not-resume",
+        sideEffectCounters: {
+          paidUsd: 0,
+          realProviderCalls: 0,
+          pancatWrites: 0,
+          productionPublishes: 0,
+          realAssetDeletes: 0,
+          crossProjectMemoryReads: 0,
+          crossProjectMemoryWrites: 0,
+        },
+      },
+    } as const;
+
+    const first = applyHarnessAction(harness, request);
+    const replay = applyHarnessAction(harness, request);
+    const signalArtifact = first.artifacts.find((artifact) => artifact.kind === "strategy_signal");
+    const signalId = signalArtifact?.signalId as string;
+    const signal = harness.getStrategySignal({ id: signalId });
+    const events = harness.listHarnessActionEvents({ limit: 10 }).filter(
+      (event) => event.actionType === "recordSignal" && event.status === "done",
+    );
+
+    expect(first).toMatchObject({ status: "done", actionType: "recordSignal" });
+    expect(replay).toMatchObject({ status: "done", actionType: "recordSignal" });
+    expect(first.artifacts).toContainEqual(expect.objectContaining({
+      kind: "strategy_signal",
+      signalId: expect.stringMatching(/^signal_blocked_/),
+      signalSha256: expect.stringMatching(/^[0-9a-f]{64}$/),
+      reused: false,
+    }));
+    expect(replay.artifacts).toContainEqual(expect.objectContaining({
+      kind: "strategy_signal",
+      signalId,
+      signalSha256: signalArtifact?.signalSha256,
+      reused: true,
+    }));
+    expect(signal).toMatchObject({
+      id: signalId,
+      projectId,
+      signalClass: "system",
+      runId: sourceRunId,
+      evidence: request.evidence,
+      payload: request.payload,
+    });
+    expect(harness.listStrategySignals({ projectId }).filter((candidate) => candidate.id === signalId)).toHaveLength(1);
+    expect(events).toHaveLength(2);
+    expect(JSON.stringify(events)).not.toContain("sealed holdout");
+
+    expect(applyHarnessAction(harness, { ...request, projectId: otherProjectId })).toMatchObject({
+      status: "blocked",
+      actionType: "recordSignal",
+      problems: [expect.stringMatching(/project/i)],
+    });
+    const activeRunId = harness.createRun({ projectId, goal: "Still active" });
+    expect(applyHarnessAction(harness, {
+      ...request,
+      sourceRunId: activeRunId,
+      source: `blocked-run-outcome:${activeRunId}`,
+    })).toMatchObject({
+      status: "blocked",
+      actionType: "recordSignal",
+      problems: [expect.stringMatching(/blocked/i)],
+    });
+    expect(applyHarnessAction(harness, {
+      ...request,
+      summary: "Authorization: Bearer blocked-signal-secret",
+    })).toMatchObject({
+      status: "blocked",
+      actionType: "invalid",
+      problems: [expect.stringMatching(/credential/i)],
+    });
+  });
+
   test("links completed research artifacts by immutable reference and keeps them project scoped", () => {
     const projectId = harness.createProject({ name: "target", rootPath: dir });
     const otherProjectId = harness.createProject({ name: "other", rootPath: join(dir, "other") });

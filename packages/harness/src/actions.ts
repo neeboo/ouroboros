@@ -90,6 +90,20 @@ export type HarnessAction =
   | { type: "retryTask"; taskId: string; reason?: string }
   | { type: "reconcileRunEvidence"; runId: string; reason: string }
   | {
+      type: "recordSignal";
+      projectId: string;
+      sourceRunId: string;
+      signalClass: "system";
+      source: string;
+      title: string;
+      summary: string;
+      observationTime: string;
+      confidence: number;
+      evidence: string[];
+      expiresAt?: string;
+      payload: Record<string, unknown>;
+    }
+  | {
       type: "linkResearchEvidence";
       projectId: string;
       sourceRunId: string;
@@ -490,6 +504,56 @@ export function parseHarnessAction(value: unknown): HarnessAction {
       reason: stringField(record, "reason"),
     };
   }
+  if (type === "recordSignal") {
+    assertOnlyFields(record, type, [
+      "type",
+      "projectId",
+      "sourceRunId",
+      "signalClass",
+      "source",
+      "title",
+      "summary",
+      "observationTime",
+      "confidence",
+      "evidence",
+      "expiresAt",
+      "payload",
+    ]);
+    const projectId = exactSafeIdentifierField(record, "projectId");
+    const sourceRunId = exactSafeIdentifierField(record, "sourceRunId");
+    if (record.signalClass !== "system") {
+      throw new Error("recordSignal signalClass must be system");
+    }
+    const source = exactBoundedTextField(record, "source", 256);
+    if (source !== `blocked-run-outcome:${sourceRunId}`) {
+      throw new Error("recordSignal source must bind the blocked sourceRunId");
+    }
+    const observationTime = requireStrictIsoTimestamp(record.observationTime, "observationTime");
+    const expiresAt = record.expiresAt === undefined
+      ? undefined
+      : requireStrictIsoTimestamp(record.expiresAt, "expiresAt");
+    if (expiresAt && Date.parse(expiresAt) <= Date.parse(observationTime)) {
+      throw new Error("recordSignal expiresAt must be later than observationTime");
+    }
+    const confidence = record.confidence;
+    if (typeof confidence !== "number" || !Number.isFinite(confidence) || confidence < 0 || confidence > 1) {
+      throw new Error("recordSignal confidence must be a finite number between 0 and 1");
+    }
+    return {
+      type,
+      projectId,
+      sourceRunId,
+      signalClass: "system",
+      source,
+      title: exactBoundedTextField(record, "title", 256),
+      summary: exactBoundedTextField(record, "summary", 2_048),
+      observationTime,
+      confidence,
+      evidence: blockedRunSignalEvidence(record.evidence),
+      expiresAt,
+      payload: blockedRunSignalPayload(record.payload),
+    };
+  }
   if (type === "linkResearchEvidence") {
     assertOnlyFields(record, type, [
       "type",
@@ -816,7 +880,7 @@ export function parseHarnessAction(value: unknown): HarnessAction {
     };
   }
   throw new Error(
-    "harness action type must be reclaimRunningTasks, retryTask, reconcileRunEvidence, linkResearchEvidence, materializeDesignerActionRecovery, markRunTodo, updateRunContext, amendRunContract, retireRun, retireTask, prepareRunDrain, completeSystemTask, integrateVerifiedRun, pushExactGitRef, createExactGitRef, commitExactGitIndex, stageExactWorkerFilesForVerification, verifySealedCorpusForVerification, registerEvolutionProfile, recordProductionEpisode, registerHarnessVariant, activateHarnessRevision, freezeMatchedExperiment, interruptAttemptAndCreateTask, interruptRunningAttemptsAndCreateTask, acceptGuardrailProposal, startSubsession, collectSubsessions, cancelSubsessions, or runWatchdogPass",
+    "harness action type must be reclaimRunningTasks, retryTask, reconcileRunEvidence, recordSignal, linkResearchEvidence, materializeDesignerActionRecovery, markRunTodo, updateRunContext, amendRunContract, retireRun, retireTask, prepareRunDrain, completeSystemTask, integrateVerifiedRun, pushExactGitRef, createExactGitRef, commitExactGitIndex, stageExactWorkerFilesForVerification, verifySealedCorpusForVerification, registerEvolutionProfile, recordProductionEpisode, registerHarnessVariant, activateHarnessRevision, freezeMatchedExperiment, interruptAttemptAndCreateTask, interruptRunningAttemptsAndCreateTask, acceptGuardrailProposal, startSubsession, collectSubsessions, cancelSubsessions, or runWatchdogPass",
   );
 }
 
@@ -859,6 +923,10 @@ export function applyHarnessAction(
 
   if (action.type === "reconcileRunEvidence") {
     return applyRunEvidenceReconciliationAtomically(harness, action);
+  }
+
+  if (action.type === "recordSignal") {
+    return applyBlockedRunSignalAtomically(harness, action);
   }
 
   if (action.type === "linkResearchEvidence") {
@@ -904,6 +972,7 @@ type HarnessRevisionActivationAction = Extract<HarnessAction, { type: "activateH
 type DesignerActionRecoveryAction = Extract<HarnessAction, { type: "materializeDesignerActionRecovery" }>;
 type RunEvidenceReconciliationAction = Extract<HarnessAction, { type: "reconcileRunEvidence" }>;
 type ResearchEvidenceLinkAction = Extract<HarnessAction, { type: "linkResearchEvidence" }>;
+type BlockedRunSignalAction = Extract<HarnessAction, { type: "recordSignal" }>;
 
 function isEvolutionAction(action: HarnessAction): action is EvolutionAction {
   return action.type === "registerEvolutionProfile"
@@ -1119,6 +1188,106 @@ function applyRunEvidenceReconciliationAtomically(
     });
   } catch (error) {
     const problem = limitUtf8Output(errorMessage(error), 4_096);
+    const result = blockedResult(action.type, `${action.type} blocked: ${problem}`, [problem]);
+    const eventId = harness.recordHarnessActionEvent({
+      actionType: action.type,
+      status: result.status,
+      request: safeRequest(action),
+      result: resultToRecord(result),
+    });
+    return { ...result, eventId };
+  }
+}
+
+function applyBlockedRunSignalAtomically(
+  harness: Harness,
+  action: BlockedRunSignalAction,
+): HarnessActionResult & { eventId: string } {
+  try {
+    return harness.runInImmediateTransaction((db) => {
+      const run = harness.getRunWithDb(db, action.sourceRunId);
+      if (!run) throw new Error(`source run not found: ${action.sourceRunId}`);
+      if (run.projectId !== action.projectId) {
+        throw new Error(`source run project does not match explicit projectId ${action.projectId}`);
+      }
+      if (run.status !== "blocked") {
+        throw new Error(`recordSignal source run must be blocked: ${run.status}`);
+      }
+      const signalId = `signal_blocked_${stableFingerprint({
+        projectId: action.projectId,
+        sourceRunId: action.sourceRunId,
+      }).slice(0, 32)}`;
+      const signalRecord = {
+        projectId: action.projectId,
+        signalClass: action.signalClass,
+        source: action.source,
+        title: action.title,
+        summary: action.summary,
+        observationTime: action.observationTime,
+        confidence: action.confidence,
+        evidence: action.evidence,
+        expiresAt: action.expiresAt ?? null,
+        runId: action.sourceRunId,
+        payload: action.payload,
+      };
+      const signalSha256 = stableFingerprint(signalRecord);
+      const existing = harness.getStrategySignalWithDb(db, { id: signalId });
+      const reused = existing !== null;
+      if (existing) {
+        const existingSha256 = stableFingerprint({
+          projectId: existing.projectId,
+          signalClass: existing.signalClass,
+          source: existing.source,
+          title: existing.title,
+          summary: existing.summary,
+          observationTime: existing.observationTime,
+          confidence: existing.confidence,
+          evidence: existing.evidence,
+          expiresAt: existing.expiresAt,
+          runId: existing.runId,
+          payload: existing.payload,
+        });
+        if (existingSha256 !== signalSha256) {
+          throw new Error(`recordSignal conflicts with existing blocked-run signal: ${signalId}`);
+        }
+      } else {
+        harness.createStrategySignalWithDb(db, {
+          id: signalId,
+          ...signalRecord,
+        });
+      }
+      const readback = harness.getStrategySignalWithDb(db, { id: signalId });
+      if (!readback || readback.projectId !== action.projectId || readback.runId !== action.sourceRunId) {
+        throw new Error(`recordSignal transactional readback failed: ${signalId}`);
+      }
+      const result = doneResult(
+        action.type,
+        reused ? `Blocked-run strategy signal ${signalId} reused.` : `Blocked-run strategy signal ${signalId} recorded.`,
+        [
+          { name: "source run status", status: "passed", evidence: "blocked" },
+          { name: "project ownership", status: "passed", evidence: action.projectId },
+          { name: "bounded evidence references", status: "passed", evidence: String(action.evidence.length) },
+          { name: "transactional signal readback", status: "passed", evidence: signalSha256 },
+        ],
+        [{
+          kind: "strategy_signal",
+          signalId,
+          signalSha256,
+          projectId: action.projectId,
+          sourceRunId: action.sourceRunId,
+          reused,
+        }],
+      );
+      const eventId = harness.recordHarnessActionEventWithDb(db, {
+        actionType: action.type,
+        status: result.status,
+        request: safeRequest(action),
+        result: resultToRecord(result),
+      });
+      return { ...result, eventId };
+    });
+  } catch (error) {
+    const problem = limitUtf8Output(sanitizeEvolutionErrorText(errorMessage(error)), 4_096);
     const result = blockedResult(action.type, `${action.type} blocked: ${problem}`, [problem]);
     const eventId = harness.recordHarnessActionEvent({
       actionType: action.type,
@@ -2435,7 +2604,7 @@ function applyParsedHarnessAction(
   harness: Harness,
   action: Exclude<
     HarnessAction,
-    SubsessionAction | EvolutionAction | HarnessRevisionActivationAction | DesignerActionRecoveryAction | RunEvidenceReconciliationAction | ResearchEvidenceLinkAction
+    SubsessionAction | EvolutionAction | HarnessRevisionActivationAction | DesignerActionRecoveryAction | RunEvidenceReconciliationAction | ResearchEvidenceLinkAction | BlockedRunSignalAction
   >,
   options: HarnessActionOptions,
 ): HarnessActionResult {
@@ -10109,6 +10278,80 @@ function exactSafeIdentifierField(record: Record<string, unknown>, key: string) 
     throw new Error(`${key} must be a safe identifier of at most 200 characters`);
   }
   return value;
+}
+
+function exactBoundedTextField(record: Record<string, unknown>, key: string, maxBytes: number) {
+  const value = exactNonEmptyStringField(record, key);
+  if (value.includes("\r") || Buffer.byteLength(value, "utf8") > maxBytes) {
+    throw new Error(`${key} must be exact bounded text of at most ${maxBytes} UTF-8 bytes without carriage returns`);
+  }
+  if (sanitizeEvolutionErrorText(value) !== value) {
+    throw new Error(`${key} must not contain credentials`);
+  }
+  return value;
+}
+
+function blockedRunSignalEvidence(value: unknown) {
+  if (!Array.isArray(value) || value.length === 0 || value.length > 32) {
+    throw new Error("recordSignal evidence must contain 1-32 bounded immutable references");
+  }
+  const refs = value.map((entry, index) => {
+    if (typeof entry !== "string" || entry.trim() !== entry || Buffer.byteLength(entry, "utf8") > 256) {
+      throw new Error(`recordSignal evidence[${index}] must be an exact reference of at most 256 UTF-8 bytes`);
+    }
+    const entityRef = /^(?:run|task|attempt|action):[A-Za-z0-9][A-Za-z0-9._-]{0,199}$/.test(entry);
+    const commitRef = /^commit:[0-9a-f]{40}$/.test(entry) && !/^commit:0+$/.test(entry);
+    const digestRef = /^sha256:[0-9a-f]{64}$/.test(entry) && !/^sha256:0+$/.test(entry);
+    if (!entityRef && !commitRef && !digestRef) {
+      throw new Error(`recordSignal evidence[${index}] must be a run, task, attempt, action, commit, or sha256 reference`);
+    }
+    return entry;
+  });
+  if (new Set(refs).size !== refs.length) {
+    throw new Error("recordSignal evidence references must be unique");
+  }
+  return refs;
+}
+
+function blockedRunSignalPayload(value: unknown) {
+  const payload = objectRecord(value, "recordSignal payload");
+  const encoded = JSON.stringify(payload);
+  if (Buffer.byteLength(encoded, "utf8") > 8_192) {
+    throw new Error("recordSignal payload must be at most 8192 UTF-8 bytes");
+  }
+  validateBlockedRunSignalJson(payload, "recordSignal payload", 0);
+  return payload;
+}
+
+function validateBlockedRunSignalJson(value: unknown, label: string, depth: number): void {
+  if (depth > 6) throw new Error(`${label} exceeds the maximum nesting depth`);
+  if (value === null || typeof value === "boolean") return;
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) throw new Error(`${label} numbers must be finite`);
+    return;
+  }
+  if (typeof value === "string") {
+    if (Buffer.byteLength(value, "utf8") > 512) throw new Error(`${label} strings must be at most 512 UTF-8 bytes`);
+    if (/\bBearer\s+\S+/i.test(value) || /\w+:\/\/[^/\s@]+@/i.test(value)) {
+      throw new Error(`${label} must not contain credentials`);
+    }
+    return;
+  }
+  if (Array.isArray(value)) {
+    if (value.length > 32) throw new Error(`${label} arrays must contain at most 32 entries`);
+    value.forEach((entry, index) => validateBlockedRunSignalJson(entry, `${label}[${index}]`, depth + 1));
+    return;
+  }
+  if (!value || typeof value !== "object") throw new Error(`${label} must contain JSON values only`);
+  const entries = Object.entries(value as Record<string, unknown>);
+  if (entries.length > 64) throw new Error(`${label} objects must contain at most 64 fields`);
+  for (const [key, entry] of entries) {
+    if (!/^[A-Za-z][A-Za-z0-9_-]{0,63}$/.test(key)) throw new Error(`${label} contains an invalid field name`);
+    if (/(?:authorization|api[_-]?key|access[_-]?token|secret|password|credential)/i.test(key)) {
+      throw new Error(`${label}.${key} is a forbidden credential field`);
+    }
+    validateBlockedRunSignalJson(entry, `${label}.${key}`, depth + 1);
+  }
 }
 
 function exactAbsolutePathField(record: Record<string, unknown>, key: string) {
