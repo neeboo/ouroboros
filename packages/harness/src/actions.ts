@@ -80,6 +80,13 @@ export interface IntegrationReadiness {
 export type HarnessAction =
   | { type: "reclaimRunningTasks"; runId: string; reason?: string }
   | { type: "retryTask"; taskId: string; reason?: string }
+  | {
+      type: "materializeDesignerActionRecovery";
+      runId: string;
+      sourceTaskId: string;
+      sourceAttemptId: string;
+      reason?: string;
+    }
   | { type: "markRunTodo"; runId: string; reason?: string }
   | {
       type: "updateRunContext";
@@ -427,6 +434,16 @@ export function parseHarnessAction(value: unknown): HarnessAction {
   if (type === "retryTask") {
     return { type, taskId: stringField(record, "taskId"), reason: optionalStringField(record, "reason") };
   }
+  if (type === "materializeDesignerActionRecovery") {
+    assertOnlyFields(record, type, ["type", "runId", "sourceTaskId", "sourceAttemptId", "reason"]);
+    return {
+      type,
+      runId: stringField(record, "runId"),
+      sourceTaskId: stringField(record, "sourceTaskId"),
+      sourceAttemptId: stringField(record, "sourceAttemptId"),
+      reason: optionalStringField(record, "reason"),
+    };
+  }
   if (type === "markRunTodo") {
     return { type, runId: stringField(record, "runId"), reason: optionalStringField(record, "reason") };
   }
@@ -673,7 +690,7 @@ export function parseHarnessAction(value: unknown): HarnessAction {
     };
   }
   throw new Error(
-    "harness action type must be reclaimRunningTasks, retryTask, markRunTodo, updateRunContext, amendRunContract, retireRun, retireTask, prepareRunDrain, completeSystemTask, integrateVerifiedRun, pushExactGitRef, createExactGitRef, commitExactGitIndex, registerEvolutionProfile, recordProductionEpisode, registerHarnessVariant, activateHarnessRevision, freezeMatchedExperiment, interruptAttemptAndCreateTask, interruptRunningAttemptsAndCreateTask, acceptGuardrailProposal, startSubsession, collectSubsessions, cancelSubsessions, or runWatchdogPass",
+    "harness action type must be reclaimRunningTasks, retryTask, materializeDesignerActionRecovery, markRunTodo, updateRunContext, amendRunContract, retireRun, retireTask, prepareRunDrain, completeSystemTask, integrateVerifiedRun, pushExactGitRef, createExactGitRef, commitExactGitIndex, registerEvolutionProfile, recordProductionEpisode, registerHarnessVariant, activateHarnessRevision, freezeMatchedExperiment, interruptAttemptAndCreateTask, interruptRunningAttemptsAndCreateTask, acceptGuardrailProposal, startSubsession, collectSubsessions, cancelSubsessions, or runWatchdogPass",
   );
 }
 
@@ -708,6 +725,10 @@ export function applyHarnessAction(
 
   if (action.type === "activateHarnessRevision") {
     return applyHarnessRevisionActivationAtomically(harness, action);
+  }
+
+  if (action.type === "materializeDesignerActionRecovery") {
+    return applyDesignerActionRecoveryAtomically(harness, action);
   }
 
   if (action.type === "integrateVerifiedRun") {
@@ -746,6 +767,7 @@ type EvolutionAction = Extract<
 >;
 
 type HarnessRevisionActivationAction = Extract<HarnessAction, { type: "activateHarnessRevision" }>;
+type DesignerActionRecoveryAction = Extract<HarnessAction, { type: "materializeDesignerActionRecovery" }>;
 
 function isEvolutionAction(action: HarnessAction): action is EvolutionAction {
   return action.type === "registerEvolutionProfile"
@@ -859,6 +881,167 @@ function applyHarnessRevisionActivationAtomically(
     });
     return { ...result, eventId };
   }
+}
+
+function applyDesignerActionRecoveryAtomically(
+  harness: Harness,
+  action: DesignerActionRecoveryAction,
+): HarnessActionResult & { eventId: string } {
+  try {
+    return harness.runInImmediateTransaction((db) => {
+      const result = materializeDesignerActionRecoveryWithDb(harness, db, action);
+      const eventId = harness.recordHarnessActionEventWithDb(db, {
+        actionType: action.type,
+        status: result.status,
+        request: safeRequest(action),
+        result: resultToRecord(result),
+      });
+      return { ...result, eventId };
+    });
+  } catch (error) {
+    const problem = limitUtf8Output(sanitizeEvolutionErrorText(errorMessage(error)), 4_096);
+    const result = blockedResult(action.type, `${action.type} blocked: ${problem}`, [problem]);
+    const eventId = harness.recordHarnessActionEvent({
+      actionType: action.type,
+      status: result.status,
+      request: safeRequest(action),
+      result: resultToRecord(result),
+    });
+    return { ...result, eventId };
+  }
+}
+
+function materializeDesignerActionRecoveryWithDb(
+  harness: Harness,
+  db: HarnessDatabase,
+  action: DesignerActionRecoveryAction,
+): HarnessActionResult {
+  const overview = harness.getRunOverviewWithDb(db, { runId: action.runId, eventLimit: 0 });
+  const run = overview.run;
+  if (!run) {
+    throw new Error(`run not found: ${action.runId}`);
+  }
+  if (run.context.source !== "target-system-design" || run.context.retired === true) {
+    throw new Error(`Designer action recovery requires an active target-system-design root: ${action.runId}`);
+  }
+  const sourceTask = overview.tasks.find((task) => task.id === action.sourceTaskId);
+  if (!sourceTask || sourceTask.runId !== run.id || sourceTask.role !== "designer" || sourceTask.status !== "blocked") {
+    throw new Error(`source task must be a blocked Designer in ${run.id}: ${action.sourceTaskId}`);
+  }
+  const sourceAttempts = overview.sessions.filter((session) => session.taskId === sourceTask.id);
+  const sourceAttempt = sourceAttempts.find((session) => session.attemptId === action.sourceAttemptId);
+  if (
+    !sourceAttempt
+    || sourceAttempt.status !== "blocked"
+    || sourceAttempts.at(-1)?.attemptId !== sourceAttempt.attemptId
+  ) {
+    throw new Error(`source attempt must be the latest blocked attempt for ${sourceTask.id}: ${action.sourceAttemptId}`);
+  }
+  const validationProblem = [...(sourceAttempt.output.problems ?? [])]
+    .reverse()
+    .find((problem): problem is string =>
+      typeof problem === "string" && /agent output action \d+ .*payload\./i.test(problem)
+    );
+  if (!validationProblem || (sourceAttempt.output.changedFiles ?? []).length > 0) {
+    throw new Error(`source attempt is not an implementation-free fixed design action validation failure: ${sourceAttempt.attemptId}`);
+  }
+
+  const sourceRecovery = sourceTask.config?.designActionRecovery;
+  const rootTaskId = sourceRecovery && typeof sourceRecovery === "object" && !Array.isArray(sourceRecovery)
+    && typeof (sourceRecovery as Record<string, unknown>).rootTaskId === "string"
+    ? String((sourceRecovery as Record<string, unknown>).rootTaskId)
+    : sourceTask.id;
+  const sourceRecoveryCount = sourceRecovery && typeof sourceRecovery === "object" && !Array.isArray(sourceRecovery)
+    && Number.isInteger((sourceRecovery as Record<string, unknown>).count)
+    ? Number((sourceRecovery as Record<string, unknown>).count)
+    : 0;
+  const existing = overview.tasks.filter((task) => {
+    const recovery = task.config?.designActionRecovery;
+    return recovery && typeof recovery === "object" && !Array.isArray(recovery)
+      && (recovery as Record<string, unknown>).rootTaskId === rootTaskId;
+  });
+  if (existing.length > 1) {
+    throw new Error(`multiple Designer action recoveries already exist for ${rootTaskId}`);
+  }
+  if (existing.length === 1) {
+    const recoveryTask = existing[0]!;
+    const recovery = recoveryTask.config!.designActionRecovery as Record<string, unknown>;
+    const exact = recoveryTask.role === "designer"
+      && recoveryTask.parentId === sourceTask.id
+      && recoveryTask.goal === sourceTask.goal
+      && recoveryTask.prompt === sourceTask.prompt
+      && sameCanonicalValue(recoveryTask.doneWhen, sourceTask.doneWhen)
+      && recovery.sourceTaskId === sourceTask.id
+      && recovery.sourceAttemptId === sourceAttempt.attemptId
+      && recovery.count === 1
+      && recovery.limit === 1
+      && recoveryTask.config?.forbidImplementation === true
+      && recoveryTask.config?.forbidBrowser === true
+      && recoveryTask.config?.browserProcessPolicy === "deny"
+      && recoveryTask.config?.readOnly === true;
+    if (!exact) {
+      throw new Error(`existing Designer action recovery conflicts with ${sourceTask.id}`);
+    }
+    return doneResult(action.type, `Designer action recovery ${recoveryTask.id} reused.`, [
+      { name: "source Designer", status: "passed", evidence: sourceTask.id },
+      { name: "source fixed-action failure", status: "passed", evidence: sourceAttempt.attemptId },
+      { name: "bounded recovery", status: "passed", evidence: "1/1 reused" },
+      { name: "repair budget", status: "passed", evidence: "not charged" },
+    ], [{
+      kind: "reused_designer_recovery",
+      taskId: recoveryTask.id,
+      runId: run.id,
+      sourceTaskId: sourceTask.id,
+      sourceAttemptId: sourceAttempt.attemptId,
+      status: recoveryTask.status,
+    }]);
+  }
+  if (sourceRecoveryCount >= 1) {
+    throw new Error(`bounded Designer fixed-action recovery exhausted at 1/1 for ${rootTaskId}`);
+  }
+
+  const recoveryTaskId = makeId("task");
+  harness.createTaskWithDb(db, {
+    id: recoveryTaskId,
+    runId: run.id,
+    parentId: sourceTask.id,
+    cycleId: sourceTask.cycleId,
+    role: "designer",
+    goal: sourceTask.goal,
+    prompt: sourceTask.prompt,
+    dependsOn: sourceTask.dependsOn,
+    doneWhen: sourceTask.doneWhen,
+    worktreePath: null,
+    config: {
+      ...(sourceTask.config ?? {}),
+      ...(sourceTask.worktreePath ? { sourceWorktreePath: sourceTask.worktreePath } : {}),
+      forbidImplementation: true,
+      forbidBrowser: true,
+      browserProcessPolicy: "deny",
+      readOnly: true,
+      designActionRecovery: {
+        rootTaskId,
+        sourceTaskId: sourceTask.id,
+        sourceAttemptId: sourceAttempt.attemptId,
+        count: 1,
+        limit: 1,
+      },
+    },
+  });
+  return doneResult(action.type, `Designer action recovery ${recoveryTaskId} created.`, [
+    { name: "source Designer", status: "passed", evidence: sourceTask.id },
+    { name: "source fixed-action failure", status: "passed", evidence: sourceAttempt.attemptId },
+    { name: "bounded recovery", status: "passed", evidence: "1/1 created" },
+    { name: "read-only execution", status: "passed", evidence: "browser and implementation forbidden" },
+    { name: "repair budget", status: "passed", evidence: "not charged" },
+  ], [{
+    kind: "created_designer_recovery",
+    taskId: recoveryTaskId,
+    runId: run.id,
+    sourceTaskId: sourceTask.id,
+    sourceAttemptId: sourceAttempt.attemptId,
+    status: "todo",
+  }]);
 }
 
 function activateHarnessRevisionWithDb(
@@ -1832,7 +2015,10 @@ function integrationConvergenceRecords(harness: Harness, runId: string) {
 
 function applyParsedHarnessAction(
   harness: Harness,
-  action: Exclude<HarnessAction, SubsessionAction | EvolutionAction | HarnessRevisionActivationAction>,
+  action: Exclude<
+    HarnessAction,
+    SubsessionAction | EvolutionAction | HarnessRevisionActivationAction | DesignerActionRecoveryAction
+  >,
   options: HarnessActionOptions,
 ): HarnessActionResult {
   if (action.type === "reclaimRunningTasks") {

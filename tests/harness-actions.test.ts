@@ -5183,6 +5183,78 @@ describe("Harness actions", () => {
     expect(overview.threads).toContainEqual(expect.objectContaining({ id: threadId, status: "interrupted" }));
   });
 
+  test("materializes one audited read-only Designer recovery from a blocked fixed-action attempt", () => {
+    const runId = harness.createRun({
+      goal: "Recover one rejected design action",
+      context: {
+        source: "target-system-design",
+        repairReplanBudget: { limit: 3, used: 0, entries: [] },
+      },
+    });
+    const sourceTaskId = harness.createTask({
+      runId,
+      role: "designer",
+      goal: "Record an evidence-backed signal",
+      prompt: "Read the evidence and use fixed design actions only.",
+      doneWhen: ["signal recorded or a quiescent decision returned"],
+      worktreePath: join(dir, "designer-source"),
+    });
+    const sourceAttemptId = harness.startAttempt({ taskId: sourceTaskId, input: {} });
+    harness.finishAttempt({
+      attemptId: sourceAttemptId,
+      output: {
+        status: "blocked",
+        summary: "fixed action validation rejected the Designer output",
+        changedFiles: [],
+        checks: [],
+        artifacts: [],
+        problems: [
+          "agent output action 0 recordSignal: recordSignal payload.observationTime must be an ISO 8601 UTC timestamp in the form YYYY-MM-DDTHH:mm:ss(.sss)Z",
+        ],
+      },
+    });
+
+    const request = {
+      type: "materializeDesignerActionRecovery",
+      runId,
+      sourceTaskId,
+      sourceAttemptId,
+      reason: "Recover the rejected timestamp without changing the design contract.",
+    } as const;
+    const first = applyHarnessAction(harness, request);
+    const replay = applyHarnessAction(harness, request);
+    const overview = harness.getRunOverview({ runId, eventLimit: 0 });
+    const recoveries = overview.tasks.filter((task) => task.config?.designActionRecovery != null);
+
+    expect(first).toMatchObject({ status: "done", actionType: request.type });
+    expect(replay).toMatchObject({ status: "done", actionType: request.type });
+    expect(recoveries).toHaveLength(1);
+    expect(recoveries[0]).toMatchObject({
+      role: "designer",
+      status: "todo",
+      parentId: sourceTaskId,
+      goal: "Record an evidence-backed signal",
+      prompt: "Read the evidence and use fixed design actions only.",
+      doneWhen: ["signal recorded or a quiescent decision returned"],
+      worktreePath: null,
+      config: {
+        sourceWorktreePath: join(dir, "designer-source"),
+        forbidImplementation: true,
+        forbidBrowser: true,
+        browserProcessPolicy: "deny",
+        readOnly: true,
+        designActionRecovery: {
+          rootTaskId: sourceTaskId,
+          sourceTaskId,
+          sourceAttemptId,
+          count: 1,
+          limit: 1,
+        },
+      },
+    });
+    expect(harness.getRun(runId)?.context.repairReplanBudget).toEqual({ limit: 3, used: 0, entries: [] });
+  });
+
   test("interrupts multiple running attempts through the bulk action path and creates one follow-up task", () => {
     const runId = harness.createRun({ goal: "Interrupt a run with multiple attempts" });
     const firstTaskId = harness.createTask({
