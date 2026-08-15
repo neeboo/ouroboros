@@ -169,6 +169,27 @@ export type HarnessAction =
       commitMessage: string;
       files: ExactGitIndexFile[];
     }
+  | {
+      type: "stageExactWorkerFilesForVerification";
+      contractId: string;
+      runId: string;
+      taskId: string;
+      repoPath: string;
+      branch: string;
+      expectedParentSha: string;
+      commitMessage: string;
+    }
+  | {
+      type: "verifySealedCorpusForVerification";
+      contractId: string;
+      runId: string;
+      taskId: string;
+      repoPath: string;
+      scriptPath: string;
+      expectedRefsSha256: string;
+      expectedCorpusSnapshotSha256: string;
+      expectedCount: number;
+    }
   | { type: "registerEvolutionProfile"; runId: string; profile: EvolutionProfile }
   | { type: "recordProductionEpisode"; runId: string; episode: ProductionEpisode }
   | { type: "registerHarnessVariant"; runId: string; variant: HarnessVariant }
@@ -349,6 +370,8 @@ export interface HarnessActionOptions {
   runGit?: GitRunner;
   runCommand?: CommandRunner;
   subsessionRunner?: SubsessionRunner;
+  /** Ephemeral host input. It is never copied into an action request or result. */
+  sealedDescriptorJson?: string;
 }
 
 interface GitCommandInput {
@@ -370,6 +393,7 @@ type GitRunner = (input: GitCommandInput) => GitCommandResult;
 interface CommandRunnerInput {
   cwd: string;
   command: string;
+  stdin?: string;
   timeoutMs?: number;
   maxOutputBytes?: number;
 }
@@ -626,6 +650,56 @@ export function parseHarnessAction(value: unknown): HarnessAction {
       files: exactGitIndexFilesField(record, "files"),
     };
   }
+  if (type === "stageExactWorkerFilesForVerification") {
+    assertOnlyFields(record, type, [
+      "type",
+      "contractId",
+      "runId",
+      "taskId",
+      "repoPath",
+      "branch",
+      "expectedParentSha",
+      "commitMessage",
+    ]);
+    return {
+      type,
+      contractId: exactSafeIdentifierField(record, "contractId"),
+      runId: exactNonEmptyStringField(record, "runId"),
+      taskId: exactNonEmptyStringField(record, "taskId"),
+      repoPath: exactAbsolutePathField(record, "repoPath"),
+      branch: exactGitBranchField(record, "branch"),
+      expectedParentSha: exactGitCommitShaField(record, "expectedParentSha"),
+      commitMessage: exactCommitMessageField(record, "commitMessage"),
+    };
+  }
+  if (type === "verifySealedCorpusForVerification") {
+    assertOnlyFields(record, type, [
+      "type",
+      "contractId",
+      "runId",
+      "taskId",
+      "repoPath",
+      "scriptPath",
+      "expectedRefsSha256",
+      "expectedCorpusSnapshotSha256",
+      "expectedCount",
+    ]);
+    const expectedCount = record.expectedCount;
+    if (!Number.isSafeInteger(expectedCount) || (expectedCount as number) <= 0 || (expectedCount as number) > 1_000) {
+      throw new Error("expectedCount must be an integer between 1 and 1000");
+    }
+    return {
+      type,
+      contractId: exactSafeIdentifierField(record, "contractId"),
+      runId: exactNonEmptyStringField(record, "runId"),
+      taskId: exactNonEmptyStringField(record, "taskId"),
+      repoPath: exactAbsolutePathField(record, "repoPath"),
+      scriptPath: exactRelativeGitPathField(record, "scriptPath", "scriptPath"),
+      expectedRefsSha256: exactSha256Field(record, "expectedRefsSha256"),
+      expectedCorpusSnapshotSha256: exactSha256Field(record, "expectedCorpusSnapshotSha256"),
+      expectedCount: expectedCount as number,
+    };
+  }
   if (type === "registerEvolutionProfile") {
     assertOnlyFields(record, type, ["type", "runId", "profile"]);
     const runId = exactNonEmptyStringField(record, "runId");
@@ -742,7 +816,7 @@ export function parseHarnessAction(value: unknown): HarnessAction {
     };
   }
   throw new Error(
-    "harness action type must be reclaimRunningTasks, retryTask, reconcileRunEvidence, linkResearchEvidence, materializeDesignerActionRecovery, markRunTodo, updateRunContext, amendRunContract, retireRun, retireTask, prepareRunDrain, completeSystemTask, integrateVerifiedRun, pushExactGitRef, createExactGitRef, commitExactGitIndex, registerEvolutionProfile, recordProductionEpisode, registerHarnessVariant, activateHarnessRevision, freezeMatchedExperiment, interruptAttemptAndCreateTask, interruptRunningAttemptsAndCreateTask, acceptGuardrailProposal, startSubsession, collectSubsessions, cancelSubsessions, or runWatchdogPass",
+    "harness action type must be reclaimRunningTasks, retryTask, reconcileRunEvidence, linkResearchEvidence, materializeDesignerActionRecovery, markRunTodo, updateRunContext, amendRunContract, retireRun, retireTask, prepareRunDrain, completeSystemTask, integrateVerifiedRun, pushExactGitRef, createExactGitRef, commitExactGitIndex, stageExactWorkerFilesForVerification, verifySealedCorpusForVerification, registerEvolutionProfile, recordProductionEpisode, registerHarnessVariant, activateHarnessRevision, freezeMatchedExperiment, interruptAttemptAndCreateTask, interruptRunningAttemptsAndCreateTask, acceptGuardrailProposal, startSubsession, collectSubsessions, cancelSubsessions, or runWatchdogPass",
   );
 }
 
@@ -2560,6 +2634,14 @@ function applyParsedHarnessAction(
 
   if (action.type === "commitExactGitIndex") {
     return commitExactGitIndex(harness, action, options);
+  }
+
+  if (action.type === "stageExactWorkerFilesForVerification") {
+    return stageExactWorkerFilesForVerification(harness, action, options);
+  }
+
+  if (action.type === "verifySealedCorpusForVerification") {
+    return verifySealedCorpusForVerification(harness, action, options);
   }
 
   if (action.type === "interruptAttemptAndCreateTask") {
@@ -4459,6 +4541,332 @@ function integrateMaterializedTargetChanges(input: {
 }
 
 type ExactGitIndexCommitAction = Extract<HarnessAction, { type: "commitExactGitIndex" }>;
+type StageExactWorkerFilesAction = Extract<HarnessAction, { type: "stageExactWorkerFilesForVerification" }>;
+type VerifySealedCorpusAction = Extract<HarnessAction, { type: "verifySealedCorpusForVerification" }>;
+
+interface WorkerFileReceipt {
+  path: string;
+  sha256: string;
+}
+
+function failedHostEvidenceAction(
+  action: StageExactWorkerFilesAction | VerifySealedCorpusAction,
+  summary: string,
+  checks: HarnessActionResult["checks"],
+): HarnessActionResult {
+  return {
+    status: "blocked",
+    actionType: action.type,
+    summary,
+    checks,
+    artifacts: [],
+    problems: [summary],
+  };
+}
+
+function completedWorkerFileReceipts(
+  harness: Harness,
+  action: StageExactWorkerFilesAction | VerifySealedCorpusAction,
+  checks: HarnessActionResult["checks"],
+): { task: Task; attemptId: string; files: WorkerFileReceipt[] } | { problem: string } {
+  const run = harness.getRun(action.runId);
+  if (!run) return { problem: `Run not found: ${action.runId}.` };
+  checks.push({ name: "run exists", status: "passed", evidence: action.runId });
+  const task = harness.getTask(action.taskId);
+  if (!task || task.runId !== action.runId || task.status !== "done" || task.role !== "worker") {
+    return { problem: `Task ${action.taskId} is not a completed Worker in run ${action.runId}.` };
+  }
+  checks.push({ name: "completed worker", status: "passed", evidence: action.taskId });
+  const overview = harness.getRunOverview({ runId: action.runId, eventLimit: 0 });
+  const attempt = latestSessionForTask(overview, action.taskId);
+  if (!attempt || attempt.status !== "done" || attempt.output.status !== "done") {
+    return { problem: `Task ${action.taskId} has no completed attempt output.` };
+  }
+  const changedFiles = Array.isArray(attempt.output.changedFiles) ? attempt.output.changedFiles : [];
+  if (
+    changedFiles.length === 0 ||
+    changedFiles.length > EXACT_GIT_INDEX_MAX_FILES ||
+    changedFiles.some((path) => typeof path !== "string") ||
+    new Set(changedFiles).size !== changedFiles.length
+  ) {
+    return { problem: `Task ${action.taskId} changedFiles must be a non-empty unique bounded list.` };
+  }
+  const artifacts = Array.isArray(attempt.output.artifacts) ? attempt.output.artifacts : [];
+  const files: WorkerFileReceipt[] = [];
+  for (const rawPath of changedFiles as string[]) {
+    let path: string;
+    try {
+      path = exactRelativeGitPathField({ path: rawPath }, "path", "worker changedFiles path");
+    } catch (error) {
+      return { problem: errorMessage(error) };
+    }
+    const matches = artifacts.filter((artifact) => {
+      const value = artifact && typeof artifact === "object" && !Array.isArray(artifact)
+        ? artifact as Record<string, unknown>
+        : null;
+      return value?.kind === "file" && value.path === path && typeof value.sha256 === "string";
+    }) as Array<Record<string, unknown>>;
+    if (matches.length !== 1 || !/^[0-9a-f]{64}$/.test(String(matches[0]!.sha256))) {
+      return { problem: `Task ${action.taskId} must report exactly one lowercase SHA-256 file artifact for ${path}.` };
+    }
+    files.push({ path, sha256: String(matches[0]!.sha256) });
+  }
+  checks.push({ name: "worker file receipts", status: "passed", evidence: `${attempt.attemptId}:${files.length}` });
+  return { task, attemptId: attempt.attemptId, files };
+}
+
+function sameNullSeparatedPaths(output: string, expected: string[]) {
+  const actual = output.split("\0").filter((value) => value.length > 0);
+  return sameUniqueStrings(actual, expected);
+}
+
+function stageExactWorkerFilesForVerification(
+  harness: Harness,
+  action: StageExactWorkerFilesAction,
+  options: HarnessActionOptions,
+): HarnessActionResult {
+  const checks: HarnessActionResult["checks"] = [];
+  const evidence = completedWorkerFileReceipts(harness, action, checks);
+  if ("problem" in evidence) return failedHostEvidenceAction(action, evidence.problem, checks);
+  if (!existsSync(action.repoPath)) return failedHostEvidenceAction(action, "Repository path does not exist.", checks);
+  if (!evidence.task.worktreePath) {
+    return failedHostEvidenceAction(action, `Task ${action.taskId} has no worktree.`, checks);
+  }
+  try {
+    if (realpathSync(evidence.task.worktreePath) !== realpathSync(action.repoPath)) {
+      return failedHostEvidenceAction(action, "Task worktree does not match repoPath.", checks);
+    }
+  } catch {
+    return failedHostEvidenceAction(action, "Task worktree could not be resolved.", checks);
+  }
+  const git = options.runGit ?? defaultGitRunner;
+  const top = safeGitStep(git, action.repoPath, ["rev-parse", "--show-toplevel"]);
+  const branch = safeGitStep(git, action.repoPath, ["branch", "--show-current"]);
+  const head = safeGitStep(git, action.repoPath, ["rev-parse", "HEAD"]);
+  if (
+    !top.ok || !branch.ok || !head.ok ||
+    realpathSync(top.stdout.trim()) !== realpathSync(action.repoPath) ||
+    branch.stdout.trim() !== action.branch ||
+    head.stdout.trim() !== action.expectedParentSha
+  ) {
+    return failedHostEvidenceAction(action, "Repository identity, branch, or parent SHA does not match the frozen request.", checks);
+  }
+  checks.push({ name: "repository identity", status: "passed", evidence: `${action.branch}:${action.expectedParentSha}` });
+  const expectedPaths = evidence.files.map((file) => file.path);
+  const unstaged = safeGitStep(git, action.repoPath, ["diff", "--name-only", "-z"]);
+  const stagedBefore = safeGitStep(git, action.repoPath, ["diff", "--cached", "--name-only", "-z", action.expectedParentSha, "--"]);
+  const untracked = safeGitStep(git, action.repoPath, ["ls-files", "--others", "--exclude-standard", "-z"]);
+  const conflicts = safeGitStep(git, action.repoPath, ["ls-files", "--unmerged", "-z"]);
+  if (!unstaged.ok || unstaged.stdout.length > 0 || !conflicts.ok || conflicts.stdout.length > 0) {
+    return failedHostEvidenceAction(action, "Repository contains tracked changes or conflicts outside the exact worker additions.", checks);
+  }
+  const replay = stagedBefore.ok && sameNullSeparatedPaths(stagedBefore.stdout, expectedPaths) && untracked.ok && untracked.stdout.length === 0;
+  if (!replay && (!stagedBefore.ok || stagedBefore.stdout.length > 0 || !untracked.ok || !sameNullSeparatedPaths(untracked.stdout, expectedPaths))) {
+    return failedHostEvidenceAction(action, "Repository untracked files do not exactly match the Worker file receipt.", checks);
+  }
+  for (const file of evidence.files) {
+    const absolute = join(action.repoPath, file.path);
+    try {
+      const stat = lstatSync(absolute);
+      if (!stat.isFile() || !realpathSync(absolute).startsWith(`${realpathSync(action.repoPath)}${sep}`)) {
+        return failedHostEvidenceAction(action, `Worker artifact is not one regular in-repository file: ${file.path}.`, checks);
+      }
+    } catch {
+      return failedHostEvidenceAction(action, `Worker artifact is missing or cannot be resolved: ${file.path}.`, checks);
+    }
+    if (sha256File(absolute) !== file.sha256) {
+      return failedHostEvidenceAction(action, `Worker artifact SHA-256 does not match its receipt: ${file.path}.`, checks);
+    }
+  }
+  checks.push({ name: "exact worktree files", status: "passed", evidence: expectedPaths.join(",") });
+  if (!replay) {
+    const add = safeGitStep(git, action.repoPath, ["add", "--", ...expectedPaths]);
+    if (!add.ok) {
+      safeGitStep(git, action.repoPath, ["reset", "--mixed", action.expectedParentSha, "--", ...expectedPaths]);
+      return failedHostEvidenceAction(action, "Host could not stage the exact Worker files.", checks);
+    }
+  }
+  const staged = safeGitStep(git, action.repoPath, ["diff", "--cached", "--name-status", "-z", action.expectedParentSha, "--"]);
+  const stagedEntries = staged.ok ? parseNameStatusZ(staged.stdout) : null;
+  if (!staged.ok || !stagedEntries || stagedEntries.length !== expectedPaths.length || stagedEntries.some((entry) => entry.status !== "A") || !sameUniqueStrings(stagedEntries.map((entry) => entry.path), expectedPaths)) {
+    safeGitStep(git, action.repoPath, ["reset", "--mixed", action.expectedParentSha, "--", ...expectedPaths]);
+    return failedHostEvidenceAction(action, "Staged Git index does not exactly match the Worker file receipt.", checks);
+  }
+  const files: ExactGitIndexFile[] = [];
+  for (const file of evidence.files) {
+    const blob = safeGitStep(git, action.repoPath, ["hash-object", "--", file.path]);
+    if (!blob.ok || !/^[0-9a-f]{40}$/.test(blob.stdout.trim())) {
+      return failedHostEvidenceAction(action, `Could not read staged blob for ${file.path}.`, checks);
+    }
+    const stagedEntry = safeGitStep(git, action.repoPath, ["ls-files", "--stage", "-z", "--", file.path]);
+    const exact = { status: "A" as const, path: file.path, mode: "100644" as const, blobOid: blob.stdout.trim() };
+    if (!stagedEntry.ok || !sameExactIndexEntry(stagedEntry.stdout, exact)) {
+      return failedHostEvidenceAction(action, `Staged blob does not match ${file.path}.`, checks);
+    }
+    files.push(exact);
+  }
+  const tree = safeGitStep(git, action.repoPath, ["write-tree"]);
+  if (!tree.ok || !/^[0-9a-f]{40}$/.test(tree.stdout.trim())) {
+    return failedHostEvidenceAction(action, "Could not read staged verification tree.", checks);
+  }
+  checks.push({ name: "exact staged index", status: "passed", evidence: tree.stdout.trim() });
+  return {
+    status: "done",
+    actionType: action.type,
+    summary: `Staged ${files.length} exact Worker files for independent verification.`,
+    checks,
+    artifacts: [{
+      kind: "pre_verification_git_index",
+      contractId: action.contractId,
+      runId: action.runId,
+      workerTaskId: action.taskId,
+      workerAttemptId: evidence.attemptId,
+      repoPath: action.repoPath,
+      branch: action.branch,
+      parentSha: action.expectedParentSha,
+      treeOid: tree.stdout.trim(),
+      commitMessage: action.commitMessage,
+      files: files.map((file, index) => ({ ...file, sha256: evidence.files[index]!.sha256 })),
+      reused: replay,
+    }],
+    problems: [],
+  };
+}
+
+function shellSingleQuote(value: string) {
+  return `'${value.replaceAll("'", `'\"'\"'`)}'`;
+}
+
+function verifySealedCorpusForVerification(
+  harness: Harness,
+  action: VerifySealedCorpusAction,
+  options: HarnessActionOptions,
+): HarnessActionResult {
+  const checks: HarnessActionResult["checks"] = [];
+  const evidence = completedWorkerFileReceipts(harness, action, checks);
+  if ("problem" in evidence) return failedHostEvidenceAction(action, evidence.problem, checks);
+  const descriptorText = options.sealedDescriptorJson;
+  if (typeof descriptorText !== "string" || descriptorText.length === 0 || descriptorText.length > 64 * 1024) {
+    return failedHostEvidenceAction(action, "A bounded ephemeral sealed descriptor is required from the host.", checks);
+  }
+  let descriptor: Record<string, unknown>;
+  try {
+    descriptor = JSON.parse(descriptorText) as Record<string, unknown>;
+  } catch {
+    return failedHostEvidenceAction(action, "The ephemeral sealed descriptor is invalid JSON.", checks);
+  }
+  if (Object.keys(descriptor).join("\0") !== "entries" || !Array.isArray(descriptor.entries) || descriptor.entries.length !== action.expectedCount) {
+    return failedHostEvidenceAction(action, "The ephemeral sealed descriptor does not match the frozen count.", checks);
+  }
+  const refs: string[] = [];
+  const sealedPaths: string[] = [];
+  for (const entry of descriptor.entries) {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+      return failedHostEvidenceAction(action, "The ephemeral sealed descriptor entry is malformed.", checks);
+    }
+    const value = entry as Record<string, unknown>;
+    if (Object.keys(value).sort().join("\0") !== "path\0ref" || typeof value.ref !== "string" || !value.ref.startsWith("fixture:") || typeof value.path !== "string" || value.path.length === 0) {
+      return failedHostEvidenceAction(action, "The ephemeral sealed descriptor entry must contain only ref and path.", checks);
+    }
+    refs.push(value.ref);
+    if (!isAbsolute(value.path)) {
+      return failedHostEvidenceAction(action, "The ephemeral sealed descriptor path must be absolute.", checks);
+    }
+    try {
+      const stat = lstatSync(value.path);
+      if (!stat.isFile() || realpathSync(value.path) !== value.path) {
+        return failedHostEvidenceAction(action, "The ephemeral sealed descriptor path must be one regular non-symlink file.", checks);
+      }
+    } catch {
+      return failedHostEvidenceAction(action, "The ephemeral sealed descriptor path is unavailable.", checks);
+    }
+    sealedPaths.push(value.path);
+  }
+  const refsSha256 = createHash("sha256").update(JSON.stringify([...refs].sort())).digest("hex");
+  if (refsSha256 !== action.expectedRefsSha256) {
+    return failedHostEvidenceAction(action, "The sealed descriptor commitment does not match the frozen refs SHA-256.", checks);
+  }
+  if (!evidence.files.some((file) => file.path === action.scriptPath)) {
+    return failedHostEvidenceAction(action, "The sealed verifier script is not bound to the Worker file receipt.", checks);
+  }
+  if (process.platform !== "darwin") {
+    return failedHostEvidenceAction(action, "Host-enforced sealed verification is unavailable on this platform.", checks);
+  }
+  const runCommand = options.runCommand ?? defaultCommandRunner;
+  const sourceHome = process.env.HOME;
+  const deniedReadPaths = sourceHome
+    ? [".ssh", ".aws", ".codex", ".linear", ".config", ".zshrc", ".zprofile", ".bashrc", ".bash_profile"]
+        .map((path) => join(sourceHome, path))
+        .filter((path) => !sealedPaths.includes(path))
+    : [];
+  const profile = [
+    "(version 1)",
+    "(allow default)",
+    "(deny network*)",
+    "(deny file-write*)",
+    ...deniedReadPaths.map((path) => `(deny file-read* (subpath ${JSON.stringify(path)}))`),
+  ].join(" ");
+  const command = `/usr/bin/sandbox-exec -p ${shellSingleQuote(profile)} /usr/bin/env node ${shellSingleQuote(action.scriptPath)} --sealed-stdin`;
+  const result = runCommand({
+    cwd: action.repoPath,
+    command,
+    stdin: descriptorText,
+    timeoutMs: 30_000,
+    maxOutputBytes: 16 * 1024,
+  });
+  if (result.exitCode !== 0) {
+    return failedHostEvidenceAction(action, `Sealed verifier exited ${result.exitCode}; secret diagnostics were not persisted.`, checks);
+  }
+  const firstLine = result.stdout.split(/\r?\n/, 1)[0] ?? "";
+  let output: Record<string, unknown>;
+  try {
+    output = JSON.parse(firstLine) as Record<string, unknown>;
+  } catch {
+    return failedHostEvidenceAction(action, "Sealed verifier did not return the required structured result.", checks);
+  }
+  if (
+    output.status !== "pass" ||
+    output.refsSha256 !== action.expectedRefsSha256 ||
+    output.corpusSnapshotSha256 !== action.expectedCorpusSnapshotSha256
+  ) {
+    return failedHostEvidenceAction(action, "Sealed verifier result does not match the frozen commitment and corpus SHA-256.", checks);
+  }
+  checks.push({ name: "sealed descriptor commitment", status: "passed", evidence: `${action.expectedCount}:${action.expectedRefsSha256}` });
+  checks.push({ name: "sealed verifier result", status: "passed", evidence: action.expectedCorpusSnapshotSha256 });
+  const sideEffectCounters = {
+    paidUsd: 0,
+    realProviderCalls: 0,
+    pancatWrites: 0,
+    productionPublishes: 0,
+    realAssetDeletes: 0,
+    crossProjectMemoryReads: 0,
+    crossProjectMemoryWrites: 0,
+  };
+  return {
+    status: "done",
+    actionType: action.type,
+    summary: "Host verified the sealed corpus through ephemeral stdin with network and file writes denied.",
+    checks,
+    artifacts: [{
+      kind: "sealed_corpus_verification_receipt",
+      contractId: action.contractId,
+      runId: action.runId,
+      workerTaskId: action.taskId,
+      workerAttemptId: evidence.attemptId,
+      scriptPath: action.scriptPath,
+      scriptSha256: evidence.files.find((file) => file.path === action.scriptPath)!.sha256,
+      descriptorCount: action.expectedCount,
+      refsSha256: action.expectedRefsSha256,
+      corpusSnapshotSha256: action.expectedCorpusSnapshotSha256,
+      networkPolicy: "sandbox-exec:deny-network",
+      fileWritePolicy: "sandbox-exec:deny-file-write",
+      command: `node ${action.scriptPath} --sealed-stdin`,
+      exitCode: 0,
+      sideEffectCounters,
+    }],
+    problems: [],
+  };
+}
 
 type ExactGitIndexCommitStatus =
   | "committed"
@@ -4485,7 +4893,8 @@ function commitExactGitIndex(
   }
   checks.push({ name: "run exists", status: "passed", evidence: action.runId });
 
-  const frozen = frozenGitIndexCommitContract(run.context, action.contractId);
+  const frozen = frozenGitIndexCommitContract(run.context, action.contractId)
+    ?? stagedGitIndexCommitContract(harness, action);
   if (!frozen || !sameGitIndexCommitContract(frozen, action)) {
     return failedGitIndexCommit(
       action,
@@ -6116,6 +6525,41 @@ function closeTargetSystemDesignQuiescence(
       }],
     );
   });
+}
+
+function stagedGitIndexCommitContract(
+  harness: Harness,
+  action: ExactGitIndexCommitAction,
+): Record<string, unknown> | null {
+  const event = harness.listHarnessActionEvents({ limit: 500 }).find((candidate) => {
+    if (candidate.actionType !== "stageExactWorkerFilesForVerification" || candidate.status !== "done") return false;
+    const request = candidate.request as Record<string, unknown>;
+    return request.contractId === action.contractId && request.runId === action.runId && request.taskId === action.taskId;
+  });
+  if (!event) return null;
+  const request = event.request as Record<string, unknown>;
+  const result = event.result as Record<string, unknown>;
+  const artifacts = Array.isArray(result.artifacts) ? result.artifacts : [];
+  const receipt = artifacts.find((artifact) => {
+    const value = artifact && typeof artifact === "object" && !Array.isArray(artifact)
+      ? artifact as Record<string, unknown>
+      : null;
+    return value?.kind === "pre_verification_git_index" && value.contractId === action.contractId;
+  }) as Record<string, unknown> | undefined;
+  if (!receipt || !Array.isArray(receipt.files)) return null;
+  const files = receipt.files.map((file) => {
+    const value = file as Record<string, unknown>;
+    return { status: value.status, path: value.path, mode: value.mode, blobOid: value.blobOid };
+  });
+  return {
+    runId: request.runId,
+    taskId: request.taskId,
+    repoPath: request.repoPath,
+    branch: request.branch,
+    expectedParentSha: request.expectedParentSha,
+    commitMessage: request.commitMessage,
+    files,
+  };
 }
 
 function readDesignerActionRecovery(task: Task) {
@@ -8807,6 +9251,7 @@ function defaultCommandRunner(input: CommandRunnerInput): CommandRunnerResult {
   const result = Bun.spawnSync({
     cmd: ["sh", "-lc", input.command],
     cwd: input.cwd,
+    ...(input.stdin === undefined ? {} : { stdin: Buffer.from(input.stdin, "utf8") }),
     stdout: "pipe",
     stderr: "pipe",
     env: {
@@ -9686,6 +10131,14 @@ function exactGitCommitShaField(record: Record<string, unknown>, key: string) {
   const value = exactNonEmptyStringField(record, key);
   if (!/^[0-9a-f]{40}$/.test(value) || /^0+$/.test(value)) {
     throw new Error(`${key} must be a non-zero lowercase full 40-character commit SHA`);
+  }
+  return value;
+}
+
+function exactSha256Field(record: Record<string, unknown>, key: string) {
+  const value = exactNonEmptyStringField(record, key);
+  if (!/^[0-9a-f]{64}$/.test(value) || /^0+$/.test(value)) {
+    throw new Error(`${key} must be a non-zero lowercase full 64-character SHA-256`);
   }
   return value;
 }

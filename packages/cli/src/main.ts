@@ -117,7 +117,7 @@ import { buildAgentMatrix, doctorAgent } from "../../../scripts/acpx-agent-smoke
 import { join, resolve } from "node:path";
 import { cpus, totalmem } from "node:os";
 import { createHash } from "node:crypto";
-import { realpathSync } from "node:fs";
+import { lstatSync, readFileSync, realpathSync } from "node:fs";
 import type { Task } from "@ouroboros/harness";
 
 const HOST_FIXED_NETWORK_COMMANDS = new Set([
@@ -590,13 +590,22 @@ if (parsed.command === "help" || flag(parsed, "help") !== undefined) {
   case "action": {
     harness.init();
     const action = parseObject(required(parsed, "action-json"));
+    const sealedDescriptorFile = flag(parsed, "sealed-descriptor-file");
+    let sealedDescriptorJson: string | undefined;
+    if (sealedDescriptorFile) {
+      const stat = lstatSync(sealedDescriptorFile);
+      if (!stat.isFile() || stat.size <= 0 || stat.size > 64 * 1024) {
+        throw new Error("--sealed-descriptor-file must be one non-empty regular file of at most 65536 bytes");
+      }
+      sealedDescriptorJson = readFileSync(sealedDescriptorFile, { encoding: "utf8", flag: "r" });
+    }
     const subsessionRunner = flag(parsed, "subsession-runner");
     const runner = subsessionRunner === "acpx"
       ? createAcpxSubsessionRunner()
       : subsessionRunner === "none"
         ? undefined
         : createAcpxSubsessionRunner();
-    printJson(applyHarnessAction(harness, action, { subsessionRunner: runner }));
+    printJson(applyHarnessAction(harness, action, { subsessionRunner: runner, sealedDescriptorJson }));
     break;
   }
   case "action-events": {

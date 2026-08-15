@@ -3889,6 +3889,150 @@ describe("Harness actions", () => {
     expect(readinessAfter.integratedWorkerTaskIds.has(workerTaskId)).toBe(true);
   });
 
+  describe("host-owned pre-verification evidence", () => {
+    let scenarioIndex = 0;
+    async function createOfflineWorkerScenario(extraPath?: string) {
+      const repoPath = join(dir, `repo-host-evidence-${++scenarioIndex}`);
+      await mkdir(join(repoPath, "evidence"), { recursive: true });
+      await writeFile(join(repoPath, "README.md"), "initial\n");
+      git(repoPath, ["init", "-b", "evidence-worker"]);
+      git(repoPath, ["config", "user.name", "Ouroboros Test"]);
+      git(repoPath, ["config", "user.email", "test@example.com"]);
+      git(repoPath, ["add", "README.md"]);
+      git(repoPath, ["commit", "-m", "Initial commit"]);
+      const expectedParentSha = git(repoPath, ["rev-parse", "HEAD"]).stdout.trim();
+      const path = "evidence/manifest.json";
+      const content = '{"appendOnly":true}\n';
+      await writeFile(join(repoPath, path), content);
+      if (extraPath) await writeFile(join(repoPath, extraPath), "unexpected\n");
+      const runId = harness.createRun({ goal: "Prepare sealed offline evidence" });
+      const taskId = harness.createTask({
+        runId,
+        role: "worker",
+        goal: "Create the frozen evidence file",
+        prompt: "Create only the frozen evidence file.",
+        worktreePath: repoPath,
+      });
+      harness.recordAttempt({
+        taskId,
+        input: { executor: "deepseek-harness" },
+        output: {
+          status: "done",
+          summary: "Created one evidence file",
+          changedFiles: [path],
+          checks: [{ name: "offline", status: "passed" }],
+          artifacts: [{ kind: "file", path, sha256: createHash("sha256").update(content).digest("hex") }],
+          problems: [],
+        },
+      });
+      return { repoPath, runId, taskId, path, expectedParentSha };
+    }
+
+    test("stages only the exact worker file receipt and rejects an additional untracked file", async () => {
+      const valid = await createOfflineWorkerScenario();
+      const accepted = applyHarnessAction(harness, {
+        type: "stageExactWorkerFilesForVerification",
+        contractId: "offlineCorpusV1",
+        runId: valid.runId,
+        taskId: valid.taskId,
+        repoPath: valid.repoPath,
+        branch: "evidence-worker",
+        expectedParentSha: valid.expectedParentSha,
+        commitMessage: "Add frozen offline evidence",
+      });
+      expect(accepted).toMatchObject({ status: "done", actionType: "stageExactWorkerFilesForVerification" });
+      expect(git(valid.repoPath, ["diff", "--cached", "--name-only"]).stdout.trim()).toBe(valid.path);
+      const verifierTaskId = harness.createTask({
+        runId: valid.runId,
+        role: "verifier",
+        goal: "Verify the staged evidence",
+        prompt: "Verify without changing files.",
+        dependsOn: [valid.taskId],
+      });
+      harness.recordAttempt({
+        taskId: verifierTaskId,
+        input: { executor: "test" },
+        output: {
+          status: "done",
+          summary: "Verified the staged evidence",
+          changedFiles: [],
+          checks: [{ name: "verify", status: "passed" }],
+          artifacts: [],
+          problems: [],
+        },
+      });
+      const stagedReceipt = accepted.artifacts.find((artifact) => artifact.kind === "pre_verification_git_index")!;
+      const committed = applyHarnessAction(harness, {
+        type: "commitExactGitIndex",
+        contractId: "offlineCorpusV1",
+        runId: valid.runId,
+        taskId: valid.taskId,
+        repoPath: valid.repoPath,
+        branch: "evidence-worker",
+        expectedParentSha: valid.expectedParentSha,
+        commitMessage: "Add frozen offline evidence",
+        files: (stagedReceipt.files as Array<Record<string, unknown>>).map(({ status, path, mode, blobOid }) => ({ status, path, mode, blobOid })),
+      });
+      expect(committed).toMatchObject({ status: "done", actionType: "commitExactGitIndex" });
+      expect(git(valid.repoPath, ["status", "--short"]).stdout).toBe("");
+
+      const polluted = await createOfflineWorkerScenario("evidence/unreported.json");
+      const blocked = applyHarnessAction(harness, {
+        type: "stageExactWorkerFilesForVerification",
+        contractId: "offlineCorpusV2",
+        runId: polluted.runId,
+        taskId: polluted.taskId,
+        repoPath: polluted.repoPath,
+        branch: "evidence-worker",
+        expectedParentSha: polluted.expectedParentSha,
+        commitMessage: "Add frozen offline evidence",
+      });
+      expect(blocked).toMatchObject({ status: "blocked", actionType: "stageExactWorkerFilesForVerification" });
+      expect(blocked.problems.join(" ")).toContain("exactly match");
+      expect(git(polluted.repoPath, ["diff", "--cached", "--name-only"]).stdout).toBe("");
+    });
+
+    test("runs sealed verification from ephemeral stdin and never persists the descriptor", async () => {
+      const scenario = await createOfflineWorkerScenario();
+      const sealedPath = join(dir, "private-holdout.json");
+      await writeFile(sealedPath, '{"sealed":true}\n');
+      const descriptor = JSON.stringify({ entries: [{ ref: "fixture:private-holdout", path: realpathSync(sealedPath) }] });
+      const expectedRefsSha256 = createHash("sha256").update(JSON.stringify(["fixture:private-holdout"])).digest("hex");
+      let observedStdin = "";
+      const action = {
+        type: "verifySealedCorpusForVerification",
+        contractId: "sealedCorpusV1",
+        runId: scenario.runId,
+        taskId: scenario.taskId,
+        repoPath: scenario.repoPath,
+        scriptPath: scenario.path,
+        expectedRefsSha256,
+        expectedCorpusSnapshotSha256: "b".repeat(64),
+        expectedCount: 1,
+      } as const;
+      const result = applyHarnessAction(harness, action, {
+        sealedDescriptorJson: descriptor,
+        runCommand: (input) => {
+          observedStdin = input.stdin ?? "";
+          return {
+            exitCode: 0,
+            stdout: `${JSON.stringify({ status: "pass", refsSha256: expectedRefsSha256, corpusSnapshotSha256: "b".repeat(64), sealedByteLength: 123 })}\nsealed-stdin verification passed\n`,
+            stderr: "",
+          };
+        },
+      });
+      expect(observedStdin).toBe(descriptor);
+      expect(result).toMatchObject({ status: "done", actionType: "verifySealedCorpusForVerification" });
+      expect(JSON.stringify(result)).not.toContain("private-holdout");
+      const event = harness.listHarnessActionEvents({ limit: 1 })[0]!;
+      expect(JSON.stringify(event)).not.toContain("private-holdout");
+
+      const missing = applyHarnessAction(harness, { ...action, contractId: "sealedCorpusMissing" });
+      expect(missing).toMatchObject({ status: "blocked", actionType: "verifySealedCorpusForVerification" });
+      expect(missing.problems.join(" ")).toContain("descriptor");
+    });
+  });
+
   describe("commitExactGitIndex", () => {
     async function createScenario(input: {
       changedFiles?: string[];
