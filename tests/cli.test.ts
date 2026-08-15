@@ -8755,7 +8755,12 @@ if (args.includes("self-improve-daemon")) {
     );
     await chmod(dshCommand, 0o755);
     await chmod(codexBin, 0o755);
+    const projectId = harness.createProject({
+      name: "Goal review continuation project",
+      rootPath: worktree,
+    });
     const runId = harness.createRun({
+      projectId,
       goal: "Complete Docker and PostgreSQL task 3",
       context: {
         agentDefaults: { global: "codex-resumable", roles: { worker: "deepseek-harness" } },
@@ -8770,15 +8775,23 @@ if (args.includes("self-improve-daemon")) {
         },
       },
     });
+    harness.createTask({
+      runId,
+      role: "goal-review",
+      goal: "Review the blocked Docker delivery",
+      prompt: "Create the next bounded task.",
+      worktreePath: worktree,
+    });
 
-    const result = await runCliJson(
+    await runCliJson(
       "run-loop",
       "--run-id", runId,
       "--executor", "codex-resumable",
       "--codex-bin", codexBin,
       "--cwd", worktree,
+      "--worktree-root", join(dir, "worktrees"),
       "--start-hook", "none",
-      "--max-rounds", "1",
+      "--max-rounds", "2",
       "--tasks", "1",
     );
 
@@ -8786,12 +8799,86 @@ if (args.includes("self-improve-daemon")) {
     const worker = overview.tasks.find((task) => task.role === "worker")!;
     const workerSession = overview.sessions.find((session) => session.taskId === worker.id)!;
     const attempt = harness.getAttempt(workerSession.attemptId)!;
-    expect(result.rounds[0]?.continuations).toEqual([
-      expect.objectContaining({ taskId: worker.id, status: "done" }),
-    ]);
+    expect(attempt.input.cwd).toBe(worktree);
+    expect(worker.worktreePath).toBe(worktree);
+    expect(attempt.output.problems).toEqual([]);
     expect(attempt.status).toBe("done");
     expect(attempt.input.dshProfileIsolation).toBe("base-headless");
     expect(attempt.output.summary).toBe("task 3 ran with isolated DSH");
+  });
+
+  test("goal-review continuation retries reuse the frozen source worktree instead of a stale derived path", async () => {
+    await runCli("init");
+    const harness = new Harness(dbPath);
+    const sourceWorktree = join(dir, "goal-review-source-worktree");
+    const staleDerivedWorktree = join(sourceWorktree, ".ouroboros", "worktrees", "stale-continuation");
+    const dshCommand = join(dir, "fake-dsh-source-worktree-readback");
+    await mkdir(sourceWorktree, { recursive: true });
+    await writeFile(
+      dshCommand,
+      [
+        "#!/usr/bin/env bun",
+        "console.log(JSON.stringify({ status: 'done', summary: 'reused frozen source worktree', changedFiles: [], checks: [{ name: 'cwd', status: 'passed' }], artifacts: [{ kind: 'cwd', path: process.cwd() }], problems: [] }));",
+      ].join("\n"),
+    );
+    await chmod(dshCommand, 0o755);
+    const projectId = harness.createProject({ name: "Frozen source project", rootPath: sourceWorktree });
+    const runId = harness.createRun({
+      projectId,
+      goal: "Resume the exact goal-review worktree",
+      context: {
+        agentDefaults: { global: "codex-resumable", roles: { worker: "deepseek-harness" } },
+        agentBackends: {
+          "codex-resumable": { kind: "codex-resumable" },
+          "deepseek-harness": { kind: "dsh-cli", command: dshCommand, profile: "headless" },
+        },
+      },
+    });
+    const reviewId = harness.createTask({
+      runId,
+      role: "goal-review",
+      goal: "Review",
+      prompt: "Review.",
+      worktreePath: sourceWorktree,
+    });
+    harness.recordAttempt({
+      taskId: reviewId,
+      input: { executor: "test", cwd: sourceWorktree },
+      output: { status: "done", summary: "continue", changedFiles: [], checks: [], artifacts: [], problems: [] },
+    });
+    const workerId = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Continue in source worktree",
+      prompt: "Continue.",
+      dependsOn: [reviewId],
+      worktreePath: staleDerivedWorktree,
+      config: {
+        sourceWorktreePath: sourceWorktree,
+        goalReviewContinuation: { sourceTaskId: reviewId, ordinal: 0 },
+      },
+    });
+
+    await runCliJson(
+      "run-loop",
+      "--run-id", runId,
+      "--executor", "codex-resumable",
+      "--cwd", sourceWorktree,
+      "--worktree-root", join(dir, "worktrees"),
+      "--start-hook", "none",
+      "--sandbox", "workspace-write",
+      "--max-rounds", "1",
+      "--tasks", "1",
+    );
+
+    const worker = harness.getTask(workerId)!;
+    const session = harness.getRunOverview({ runId, eventLimit: 0 }).sessions.find((candidate) => candidate.taskId === workerId)!;
+    const attempt = harness.getAttempt(session.attemptId)!;
+    expect(attempt.status).toBe("done");
+    expect(attempt.input.cwd).toBe(sourceWorktree);
+    expect(worker.worktreePath).toBe(sourceWorktree);
+    expect(attempt.output.artifacts).toContainEqual({ kind: "cwd", path: realpathSync(sourceWorktree) });
+    expect(existsSync(staleDerivedWorktree)).toBe(false);
   });
 
   test("generic DSH run-loop creates a verifier and marks empty worker evidence as requiring independent readback", async () => {

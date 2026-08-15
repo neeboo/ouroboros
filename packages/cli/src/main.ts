@@ -5085,7 +5085,11 @@ function worktreeForTask() {
   if (!root) {
     return undefined;
   }
-  return (task: { id: string; runId: string; worktreePath?: string | null }) => {
+  return (task: Task) => {
+    const sourceWorktreePath = task.config?.sourceWorktreePath;
+    if (typeof sourceWorktreePath === "string" && sourceWorktreePath.trim().length > 0) {
+      return sourceWorktreePath;
+    }
     if (task.worktreePath) {
       return task.worktreePath;
     }
