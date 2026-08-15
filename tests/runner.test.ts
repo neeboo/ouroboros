@@ -3941,6 +3941,159 @@ describe("runner", () => {
     expect(harness.getTask(secondTaskId)?.status).toBe("todo");
   });
 
+  test("daemon SIGTERM terminalizes an in-flight running result and its execution thread", async () => {
+    const runId = harness.createRun({ goal: "Interrupt one in-flight task atomically" });
+    const taskId = harness.createTask({
+      runId,
+      role: "designer",
+      goal: "Return a bounded design result",
+      prompt: "Keep the task read-only.",
+    });
+
+    const result = await superviseCodexDaemon({
+      harness,
+      runConcurrency: 1,
+      taskConcurrency: 1,
+      tickCycles: 1,
+      maxRounds: 1,
+      maxTries: 1,
+      intervalMs: 0,
+      idleMs: 0,
+      maxTicks: 0,
+      cwd: dir,
+      clientFactory: () => ({
+        start: async () => {
+          process.emit("SIGTERM");
+          return {
+            status: "running" as const,
+            sessionId: "session_interrupted_designer",
+            outputPath: join(dir, "interrupted-running.json"),
+            stdout: "",
+            stderr: "",
+            events: [],
+          };
+        },
+        resume: async () => {
+          throw new Error("resume should not be called");
+        },
+      }),
+    });
+
+    const overview = harness.getRunOverview({ runId, eventLimit: 0 });
+    expect(result.status).toBe("stopped");
+    expect(overview.tasks.find((candidate) => candidate.id === taskId)?.status).toBe("blocked");
+    expect(overview.sessions).toHaveLength(1);
+    expect(overview.sessions[0]).toMatchObject({
+      taskId,
+      status: "blocked",
+      output: {
+        status: "blocked",
+        summary: "Runner interrupted before the attempt reached a terminal result",
+        problems: ["runner interrupted by SIGTERM"],
+      },
+    });
+    expect(overview.threads).toContainEqual(expect.objectContaining({
+      taskId,
+      attemptId: overview.sessions[0]?.attemptId,
+      status: "interrupted",
+      interruptReason: "runner interrupted by SIGTERM",
+    }));
+    expect(overview.tasks.some((candidate) => candidate.status === "running")).toBe(false);
+    expect(overview.sessions.some((attempt) => attempt.status === "running")).toBe(false);
+    expect(overview.threads.some((thread) => thread.status === "running")).toBe(false);
+  });
+
+  test("run-loop blocks a legacy direct design-root Worker before resume", async () => {
+    const runId = harness.createRun({
+      goal: "Reject a stored governance bypass",
+      context: { source: "target-system-design" },
+    });
+    const taskId = "task_legacy_design_worker_resume";
+    const attemptId = "attempt_legacy_design_worker_resume";
+    harness.runInTransaction((db) => {
+      db.query(
+        `insert into tasks (
+          id, run_id, parent_id, cycle_id, status, role, goal, prompt,
+          depends_on_json, done_when_json, worktree_path, config_json
+        ) values ($taskId, $runId, null, $taskId, 'running', 'worker', 'Legacy bypass', 'Must not resume.', '[]', '[]', null, '{}')`,
+      ).run({ $taskId: taskId, $runId: runId });
+      db.query(
+        `insert into attempts (
+          id, task_id, status, input_json, output_json, checks_json, artifacts_json, error, finished_at
+        ) values ($attemptId, $taskId, 'running', $inputJson, '{}', '[]', '[]', null, null)`,
+      ).run({
+        $attemptId: attemptId,
+        $taskId: taskId,
+        $inputJson: JSON.stringify({ codexSessionId: "session_legacy_bypass", sessionName: "legacy-bypass" }),
+      });
+      db.query(
+        `insert into execution_threads (
+          id, run_id, task_id, attempt_id, owner_type, owner_id, role, status, pid,
+          session_name, agent_session_id, worktree_path
+        ) values ($threadId, $runId, $taskId, $attemptId, 'runner', 'legacy', 'worker', 'running', $pid,
+          'legacy-bypass', 'session_legacy_bypass', $worktreePath)`,
+      ).run({
+        $threadId: `thread_${attemptId}`,
+        $runId: runId,
+        $taskId: taskId,
+        $attemptId: attemptId,
+        $pid: 999999,
+        $worktreePath: dir,
+      });
+    });
+    let resumeCalls = 0;
+    const startedRoles: string[] = [];
+
+    await runCodexResumableLoop({
+      harness,
+      runId,
+      limit: 1,
+      maxRounds: 1,
+      maxTries: 1,
+      cwd: dir,
+      clientFactory: ({ task }) => ({
+        start: async () => {
+          startedRoles.push(task?.role ?? "missing");
+          return {
+            status: "done" as const,
+            sessionId: "session_goal_review_after_block",
+            outputPath: join(dir, "goal-review-after-block.json"),
+            stdout: "",
+            stderr: "",
+            events: [],
+            output: {
+              status: "done" as const,
+              runDecision: "defer" as const,
+              summary: "Stopped after the governance bypass was blocked.",
+              changedFiles: [],
+              checks: [],
+              artifacts: [],
+              problems: [],
+            },
+          };
+        },
+        resume: async () => {
+          resumeCalls += 1;
+          throw new Error("resume should not be called");
+        },
+      }),
+    });
+
+    const overview = harness.getRunOverview({ runId, eventLimit: 0 });
+    expect(resumeCalls).toBe(0);
+    expect(startedRoles).toEqual(["goal-review"]);
+    expect(overview.tasks).toContainEqual(expect.objectContaining({ id: taskId, status: "blocked" }));
+    expect(overview.sessions).toContainEqual(expect.objectContaining({ attemptId, status: "blocked" }));
+    expect(overview.threads).toContainEqual(expect.objectContaining({
+      attemptId,
+      status: "interrupted",
+      interruptReason: expect.stringContaining("target-system-design root"),
+    }));
+    expect(overview.tasks.filter((candidate) => candidate.role === "worker")).toEqual([
+      expect.objectContaining({ id: taskId, status: "blocked" }),
+    ]);
+  });
+
   test("supervisor skips paused and complete runs while draining blocked and orphaned work", async () => {
     const pausedRunId = harness.createRun({
       goal: "Paused run",
@@ -6295,6 +6448,93 @@ describe("runner", () => {
       source: "design",
       status: "todo",
     });
+  });
+
+  test("goal review converts an invalid Designer action into one bounded Designer recovery", async () => {
+    const runId = harness.createRun({
+      goal: "Design one governed target-system delivery",
+      context: {
+        source: "target-system-design",
+        repairReplanBudget: { limit: 3, used: 0, entries: [] },
+      },
+    });
+    const designerTaskId = harness.createTask({
+      runId,
+      role: "designer",
+      goal: "Propose the governed delivery",
+      prompt: "Research and emit a fixed design action. Do not implement business code.",
+      doneWhen: ["a valid fixed design action is emitted"],
+    });
+    const designerAttemptId = harness.recordAttempt({
+      taskId: designerTaskId,
+      input: { executor: "codex-resumable", sandbox: "read-only", forbidImplementation: true },
+      output: {
+        status: "blocked",
+        summary: "Designer action validation failed",
+        changedFiles: [],
+        checks: [{ name: "design action schema", status: "failed" }],
+        artifacts: [],
+        problems: [
+          "agent output action 0 recordSignal: recordSignal payload.observationTime must be an ISO 8601 UTC timestamp in the form YYYY-MM-DDTHH:mm:ss(.sss)Z",
+        ],
+      },
+    });
+    const reviewTaskId = harness.createTask({
+      runId,
+      role: "goal-review",
+      goal: "Review the failed Designer",
+      prompt: "Recover the design action without implementing the target project.",
+    });
+
+    await runNextReadyTask({
+      harness,
+      runId,
+      stopHooksByRole: {
+        "goal-review": [
+          createGoalReviewDecisionHook({ harness }),
+          createTasksFromOutputHook({ harness }),
+        ],
+      },
+      executor: async () => ({
+        status: "done",
+        runDecision: "continue",
+        summary: "The invalid signal needs correction.",
+        changedFiles: [],
+        checks: [],
+        artifacts: [],
+        problems: [],
+        nextTasks: [{
+          role: "worker",
+          goal: "Implement the target project directly",
+          prompt: "Bypass design governance and implement the business change.",
+        }],
+      }),
+    });
+
+    const overview = harness.getRunOverview({ runId, eventLimit: 0 });
+    const recoveries = overview.tasks.filter((candidate) => candidate.config?.designActionRecovery !== undefined);
+    expect(overview.tasks.filter((candidate) => candidate.role === "worker")).toEqual([]);
+    expect(recoveries).toHaveLength(1);
+    expect(recoveries[0]).toMatchObject({
+      role: "designer",
+      parentId: designerTaskId,
+      doneWhen: ["a valid fixed design action is emitted"],
+      config: {
+        forbidImplementation: true,
+        readOnly: true,
+        designActionRecovery: {
+          rootTaskId: designerTaskId,
+          sourceTaskId: designerTaskId,
+          sourceAttemptId: designerAttemptId,
+          count: 1,
+          limit: 1,
+        },
+      },
+    });
+    expect(recoveries[0]?.prompt).toContain("observationTime");
+    expect(recoveries[0]?.prompt).toContain("Do not implement business code");
+    expect(harness.getRun(runId)?.context.repairReplanBudget).toEqual({ limit: 3, used: 0, entries: [] });
+    expect(harness.getTask(reviewTaskId)?.status).toBe("done");
   });
 
   test("goal review stop hook does not append stale next tasks when work appeared while the review was running", async () => {

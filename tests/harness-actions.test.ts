@@ -5147,6 +5147,42 @@ describe("Harness actions", () => {
     );
   });
 
+  test("interrupts one running attempt without creating replacement work", () => {
+    const runId = harness.createRun({ goal: "Stop an unauthorized attempt" });
+    const taskId = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Unauthorized work",
+      prompt: "This work must stop.",
+    });
+    const attemptId = harness.startAttempt({ taskId, input: { sessionName: "unauthorized" } });
+    const threadId = harness.upsertExecutionThread({
+      runId,
+      taskId,
+      attemptId,
+      ownerType: "runner",
+      role: "worker",
+      status: "running",
+      pid: 999999,
+      sessionName: "unauthorized",
+    });
+
+    const result = applyHarnessAction(harness, {
+      type: "interruptAttemptAndCreateTask",
+      attemptId,
+      reason: "governance bypass stopped without replacement work",
+    } as never);
+    const overview = harness.getRunOverview({ runId, eventLimit: 0 });
+
+    expect(result).toMatchObject({ status: "done", actionType: "interruptAttemptAndCreateTask" });
+    expect(result.artifacts).toContainEqual(expect.objectContaining({ kind: "attempt", attemptId, status: "blocked" }));
+    expect(result.artifacts.some((artifact) => artifact.kind === "task")).toBe(false);
+    expect(overview.tasks).toHaveLength(1);
+    expect(overview.tasks[0]).toMatchObject({ id: taskId, status: "blocked" });
+    expect(overview.sessions[0]).toMatchObject({ attemptId, status: "blocked" });
+    expect(overview.threads).toContainEqual(expect.objectContaining({ id: threadId, status: "interrupted" }));
+  });
+
   test("interrupts multiple running attempts through the bulk action path and creates one follow-up task", () => {
     const runId = harness.createRun({ goal: "Interrupt a run with multiple attempts" });
     const firstTaskId = harness.createTask({

@@ -119,87 +119,108 @@ export interface RunCodexResumableLoopInput extends CodexResumableOrchestrationI
 
 export async function runCodexResumableLoop(input: RunCodexResumableLoopInput) {
   assertNoAmbientIntegrationOverrides(input);
+  let interruptedSignal: "SIGINT" | "SIGTERM" | null = null;
+  const onSigint = () => {
+    interruptedSignal = "SIGINT";
+  };
+  const onSigterm = () => {
+    interruptedSignal = "SIGTERM";
+  };
+  process.once("SIGINT", onSigint);
+  process.once("SIGTERM", onSigterm);
   const orchestrator = new CodexResumableOrchestrator(input);
   const rounds = [];
-  for (let index = 0; index < input.maxRounds; index += 1) {
-    if (input.shouldStop?.()) {
-      break;
-    }
-    const reconciledVerifiers = input.reconcileTerminalDoneWorkerVerifiers
-      ? await reconcileTerminalDoneWorkerVerifiers({ harness: input.harness, runId: input.runId })
-      : [];
-    const reconciledRepairs = input.reconcileTerminalBlockedVerifierRepairs
-      ? await reconcileTerminalBlockedVerifierRepair({ harness: input.harness, runId: input.runId })
-      : [];
-    const reclaimed = input.harness.reclaimRunningTasksWithoutAttempts({
-      runId: input.runId,
-      maxRecoveries: input.maxTries,
-    });
-    const resumed = await orchestrator.resumeRunningAttempts({
-      runId: input.runId,
-      limit: input.limit,
-      maxRunningContinuations: input.maxTries,
-    });
-    if (resumed.length > 0) {
-      rounds.push({ index, tasks: resumed, reclaimed, reconciledVerifiers, reconciledRepairs });
-      if (resumed.some((task) => task.status === "running")) {
+  try {
+    for (let index = 0; index < input.maxRounds; index += 1) {
+      if (interruptedSignal || input.shouldStop?.()) {
         break;
       }
-      continue;
-    }
-
-    if (!orchestrator.canLeaseReadyWork(input.runId)) {
-      break;
-    }
-
-    const started = await orchestrator.startReadyAttempts({ runId: input.runId, limit: input.limit });
-    if (started.length === 0) {
-      const overviewBeforeReview = input.harness.getRunOverview({ runId: input.runId, eventLimit: 0 });
-      const integration = maybeIntegrateCompletedRun(input, overviewBeforeReview);
-      if (integration?.some((result) => result.status === "done")) {
-        rounds.push({ index, tasks: started, integration, reclaimed, reconciledVerifiers, reconciledRepairs });
+      const reconciledVerifiers = input.reconcileTerminalDoneWorkerVerifiers
+        ? await reconcileTerminalDoneWorkerVerifiers({ harness: input.harness, runId: input.runId })
+        : [];
+      const reconciledRepairs = input.reconcileTerminalBlockedVerifierRepairs
+        ? await reconcileTerminalBlockedVerifierRepair({ harness: input.harness, runId: input.runId })
+        : [];
+      const reclaimed = input.harness.reclaimRunningTasksWithoutAttempts({
+        runId: input.runId,
+        maxRecoveries: input.maxTries,
+      });
+      const resumed = await orchestrator.resumeRunningAttempts({
+        runId: input.runId,
+        limit: input.limit,
+        maxRunningContinuations: input.maxTries,
+      });
+      if (resumed.length > 0) {
+        rounds.push({ index, tasks: resumed, reclaimed, reconciledVerifiers, reconciledRepairs });
+        if (resumed.some((task) => task.status === "running")) {
+          break;
+        }
         continue;
       }
-      const drain = applyHarnessAction(input.harness, {
-        type: "prepareRunDrain",
-        runId: input.runId,
-        maxTries: input.maxTries,
-        reason: "runner found no ready tasks",
-      });
-      if (drain.status === "done") {
-        const reviewed = await orchestrator.startReadyAttempts({ runId: input.runId, limit: input.limit });
-        if (reviewed.length > 0) {
-          if (reviewed.some((task) => task.status === "running")) {
-            rounds.push({ index, tasks: reviewed, goalReview: drain, reclaimed, reconciledVerifiers, reconciledRepairs });
-            break;
-          }
-          // A terminal goal review may atomically materialize the next task. Give
-          // that durable handoff one bounded start opportunity even when this is
-          // the loop's final round; do not recursively drain again here.
-          const continuations = await orchestrator.startReadyAttempts({ runId: input.runId, limit: input.limit });
-          rounds.push({
-            index,
-            tasks: reviewed,
-            continuations,
-            goalReview: drain,
-            reclaimed,
-            reconciledVerifiers,
-            reconciledRepairs,
-          });
-          if (continuations.some((task) => task.status === "running")) {
-            break;
-          }
+
+      if (!orchestrator.canLeaseReadyWork(input.runId)) {
+        break;
+      }
+
+      const started = await orchestrator.startReadyAttempts({ runId: input.runId, limit: input.limit });
+      if (started.length === 0) {
+        const overviewBeforeReview = input.harness.getRunOverview({ runId: input.runId, eventLimit: 0 });
+        const integration = maybeIntegrateCompletedRun(input, overviewBeforeReview);
+        if (integration?.some((result) => result.status === "done")) {
+          rounds.push({ index, tasks: started, integration, reclaimed, reconciledVerifiers, reconciledRepairs });
           continue;
         }
+        const drain = applyHarnessAction(input.harness, {
+          type: "prepareRunDrain",
+          runId: input.runId,
+          maxTries: input.maxTries,
+          reason: "runner found no ready tasks",
+        });
+        if (drain.status === "done") {
+          const reviewed = await orchestrator.startReadyAttempts({ runId: input.runId, limit: input.limit });
+          if (reviewed.length > 0) {
+            if (reviewed.some((task) => task.status === "running")) {
+              rounds.push({ index, tasks: reviewed, goalReview: drain, reclaimed, reconciledVerifiers, reconciledRepairs });
+              break;
+            }
+            // A terminal goal review may atomically materialize the next task. Give
+            // that durable handoff one bounded start opportunity even when this is
+            // the loop's final round; do not recursively drain again here.
+            const continuations = await orchestrator.startReadyAttempts({ runId: input.runId, limit: input.limit });
+            rounds.push({
+              index,
+              tasks: reviewed,
+              continuations,
+              goalReview: drain,
+              reclaimed,
+              reconciledVerifiers,
+              reconciledRepairs,
+            });
+            if (continuations.some((task) => task.status === "running")) {
+              break;
+            }
+            continue;
+          }
+        }
+        break;
       }
-      break;
+      rounds.push({ index, tasks: started, reclaimed, reconciledVerifiers, reconciledRepairs });
+      if (started.some((task) => task.status === "running")) {
+        break;
+      }
     }
-    rounds.push({ index, tasks: started, reclaimed, reconciledVerifiers, reconciledRepairs });
-    if (started.some((task) => task.status === "running")) {
-      break;
+    return { rounds };
+  } finally {
+    process.off("SIGINT", onSigint);
+    process.off("SIGTERM", onSigterm);
+    if (interruptedSignal) {
+      input.harness.interruptRunningAttemptsByOwner({
+        runId: input.runId,
+        pid: input.pid ?? process.pid,
+        reason: `runner interrupted by ${interruptedSignal}`,
+      });
     }
   }
-  return { rounds };
 }
 
 export interface RunCodexAutopilotInput extends RunCodexResumableLoopInput {
@@ -664,6 +685,26 @@ class CodexResumableOrchestrator {
       if (!run) return null;
       const sessionName = typeof attempt.input.sessionName === "string" ? attempt.input.sessionName : `attempt-${attempt.id}`;
       const cwd = typeof attempt.input.cwd === "string" ? attempt.input.cwd : task.worktreePath ?? this.cwd;
+      try {
+        this.harness.assertTaskExecutionAllowed({ taskId: task.id });
+      } catch (error) {
+        const reason = errorMessage(error);
+        this.harness.recoverRunningAttempt({
+          attemptId: attempt.id,
+          reason,
+          maxRecoveries: 0,
+          output: {
+            status: "blocked",
+            summary: "Stored task failed the execution governance boundary before resume",
+            changedFiles: [],
+            checks: [{ name: "task execution governance", status: "failed", evidence: reason }],
+            artifacts: [{ kind: "governance_bypass_blocked", taskId: task.id, attemptId: attempt.id }],
+            problems: [reason],
+          },
+        });
+        this.updateAttemptThread({ attemptId: attempt.id, status: "interrupted", heartbeat: true });
+        return { taskId: task.id, attemptId: attempt.id, sessionName, status: "blocked" as const, codexSessionId: null };
+      }
       try {
         const loadedHarnessRevision = loadFrozenHarnessRevision({ harness: this.harness, run, cwd });
         assertPersistedHarnessRevisionAttestation(attempt.input, loadedHarnessRevision);

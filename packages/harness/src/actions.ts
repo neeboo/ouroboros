@@ -154,7 +154,7 @@ export type HarnessAction =
       type: "interruptAttemptAndCreateTask";
       attemptId: string;
       reason: string;
-      followUpTask: {
+      followUpTask?: {
         role: string;
         goal: string;
         prompt: string;
@@ -601,7 +601,7 @@ export function parseHarnessAction(value: unknown): HarnessAction {
       type,
       attemptId: stringField(record, "attemptId"),
       reason: stringField(record, "reason"),
-      followUpTask: followUpTaskField(record, "followUpTask"),
+      followUpTask: optionalFollowUpTaskField(record, "followUpTask"),
     };
   }
   if (type === "interruptRunningAttemptsAndCreateTask") {
@@ -5127,7 +5127,9 @@ function interruptAttemptAndCreateTask(
 
   return doneResult(
     action.type,
-    `Interrupted attempt ${prepared.attempt.id} and created follow-up task ${followUpTaskId}.`,
+    followUpTaskId
+      ? `Interrupted attempt ${prepared.attempt.id} and created follow-up task ${followUpTaskId}.`
+      : `Interrupted attempt ${prepared.attempt.id} without creating replacement work.`,
     [
       { name: "attempt exists", status: "passed", evidence: prepared.attempt.id },
       { name: "attempt status", status: "passed", evidence: "blocked" },
@@ -5140,7 +5142,9 @@ function interruptAttemptAndCreateTask(
           ? prepared.matchingThreadIds.join(",")
           : "no matching execution thread",
       },
-      { name: "follow-up task created", status: "passed", evidence: followUpTaskId },
+      ...(followUpTaskId
+        ? [{ name: "follow-up task created", status: "passed" as const, evidence: followUpTaskId }]
+        : [{ name: "replacement work", status: "passed" as const, evidence: "none created" }]),
     ],
     [
       { kind: "attempt", attemptId: prepared.attempt.id, taskId: prepared.task.id, runId: prepared.run.id, status: "blocked", reason: action.reason },
@@ -5153,7 +5157,7 @@ function interruptAttemptAndCreateTask(
         status: "interrupted",
         interruptReason: action.reason,
       })),
-      {
+      ...(followUpTaskId && action.followUpTask ? [{
         kind: "task",
         taskId: followUpTaskId,
         runId: prepared.run.id,
@@ -5161,7 +5165,7 @@ function interruptAttemptAndCreateTask(
         role: action.followUpTask.role,
         status: "todo",
         reason: action.reason,
-      },
+      }] : []),
     ],
   );
 }
@@ -9162,6 +9166,10 @@ function followUpTaskField(record: Record<string, unknown>, key: string) {
     prompt: stringField(value, "prompt"),
     doneWhen: optionalStringArrayField(value, "doneWhen"),
   };
+}
+
+function optionalFollowUpTaskField(record: Record<string, unknown>, key: string) {
+  return record[key] === undefined ? undefined : followUpTaskField(record, key);
 }
 
 function optionalStringArrayField(record: Record<string, unknown>, key: string) {

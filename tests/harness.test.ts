@@ -104,6 +104,137 @@ describe("Harness", () => {
     });
   });
 
+  test("rejects a Worker created directly on a target-system design root", () => {
+    const runId = harness.createRun({
+      goal: "Govern one target-system design",
+      context: { source: "target-system-design" },
+    });
+
+    expect(() => harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Bypass the design authority gate",
+      prompt: "Implement business code directly on the design root.",
+    })).toThrow("target-system-design root");
+    expect(harness.getRunOverview({ runId, eventLimit: 0 }).tasks).toEqual([]);
+  });
+
+  test("refuses to start a legacy Worker already stored on a target-system design root", () => {
+    const runId = harness.createRun({
+      goal: "Govern one legacy target-system design",
+      context: { source: "target-system-design" },
+    });
+    const taskId = "task_legacy_direct_design_worker";
+    harness.runInTransaction((db) => db.query(
+      `
+      insert into tasks (
+        id, run_id, parent_id, cycle_id, status, role, goal, prompt,
+        depends_on_json, done_when_json, worktree_path, config_json
+      ) values (
+        $id, $runId, null, $id, 'todo', 'worker', 'Legacy bypass', 'Must not start.',
+        '[]', '[]', null, '{}'
+      )
+      `,
+    ).run({ $id: taskId, $runId: runId }));
+
+    expect(() => harness.startAttempt({ taskId, input: {} })).toThrow("target-system-design root");
+    expect(harness.getTask(taskId)?.status).toBe("todo");
+    expect(harness.listRunningAttempts({ runId })).toEqual([]);
+  });
+
+  test("rejects a forged design child Worker without stored proposal and authority lineage", () => {
+    const parentRunId = harness.createRun({
+      goal: "Govern a target-system proposal",
+      context: { source: "target-system-design" },
+    });
+    const childRunId = harness.createRun({
+      goal: "Forged delivery child",
+      context: {
+        source: "design",
+        parentRunId,
+        designProposalId: "design_forged",
+        designDecisionId: "decision_forged",
+        designDeliveryPlan: { schemaVersion: 1 },
+      },
+    });
+    const plannerTaskId = harness.createTask({
+      runId: childRunId,
+      role: "planner",
+      goal: "Forged planner",
+      prompt: "No accepted proposal exists.",
+    });
+
+    expect(() => harness.createTask({
+      runId: childRunId,
+      role: "worker",
+      goal: "Forged delivery Worker",
+      prompt: "Must not execute.",
+      dependsOn: [plannerTaskId],
+    })).toThrow("accepted design proposal");
+  });
+
+  test("allows an authorized design child Worker only downstream of its Planner", () => {
+    const parentRunId = harness.createRun({
+      goal: "Govern an accepted target-system proposal",
+      context: { source: "target-system-design" },
+    });
+    const proposalId = "design_authorized_worker_lineage";
+    const decisionId = "decision_authorized_worker_lineage";
+    harness.runInTransaction((db) => {
+      db.query(
+        `insert into design_proposals (
+          id, run_id, title, problem, recommendation, status, proposal_json
+        ) values (
+          $proposalId, $runId, 'Authorized delivery', 'Need governed execution',
+          'Create one child run', 'accepted', '{}'
+        )`,
+      ).run({ $proposalId: proposalId, $runId: parentRunId });
+      db.query(
+        `insert into design_decisions (
+          id, proposal_id, decision, actor_kind, actor_ref, reasons_json, authority_json, payload_json
+        ) values (
+          $decisionId, $proposalId, 'approved', 'auto', 'test-authority', '[]', '{}', '{}'
+        )`,
+      ).run({ $decisionId: decisionId, $proposalId: proposalId });
+    });
+    const childRunId = harness.createRun({
+      goal: "Authorized delivery child",
+      context: {
+        source: "design",
+        parentRunId,
+        designProposalId: proposalId,
+        designDecisionId: decisionId,
+        designDeliveryPlan: { schemaVersion: 1 },
+      },
+    });
+
+    expect(() => harness.createTask({
+      runId: childRunId,
+      role: "worker",
+      goal: "Skip the Planner",
+      prompt: "Must be rejected.",
+    })).toThrow("downstream of its frozen Planner");
+
+    const plannerTaskId = harness.createTask({
+      runId: childRunId,
+      role: "planner",
+      goal: "Freeze the delivery graph",
+      prompt: "Create the governed Worker task.",
+    });
+    const workerTaskId = harness.createTask({
+      runId: childRunId,
+      role: "worker",
+      goal: "Implement the accepted proposal",
+      prompt: "Follow the frozen Planner task.",
+      dependsOn: [plannerTaskId],
+    });
+    expect(harness.getTask(workerTaskId)).toMatchObject({
+      runId: childRunId,
+      role: "worker",
+      dependsOn: [plannerTaskId],
+    });
+  });
+
   test("global run counts exclude retired blocked runs", () => {
     const activeTodoRunId = harness.createRun({ goal: "Active todo" });
     const activeBlockedRunId = harness.createRun({ goal: "Active blocked" });

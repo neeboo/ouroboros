@@ -787,6 +787,7 @@ export class Harness {
 
   createTaskWithDb(db: HarnessDatabase, input: CreateTaskInput) {
     const id = input.id ?? makeId("task");
+    assertTaskGovernanceBoundaryWithDb(db, input);
     const cycleId = resolveTaskCycleId(db, {
       id,
       role: input.role,
@@ -819,6 +820,31 @@ export class Harness {
       $configJson: toJson(input.config ?? {}),
     });
     return id;
+  }
+
+  assertTaskExecutionAllowed(input: { taskId: string }) {
+    return withDatabase(this.dbPath, (db) => this.assertTaskExecutionAllowedWithDb(db, input.taskId));
+  }
+
+  assertTaskExecutionAllowedWithDb(db: HarnessDatabase, taskId: string) {
+    const taskRow = db.query("select * from tasks where id = $taskId").get({ $taskId: taskId }) as TaskRow | null;
+    if (!taskRow) {
+      throw new Error(`task not found: ${taskId}`);
+    }
+    assertTaskGovernanceBoundaryWithDb(db, {
+      id: taskRow.id,
+      runId: taskRow.run_id,
+      parentId: taskRow.parent_id,
+      cycleId: taskRow.cycle_id,
+      role: taskRow.role,
+      goal: taskRow.goal,
+      prompt: taskRow.prompt,
+      dependsOn: JSON.parse(taskRow.depends_on_json) as string[],
+      doneWhen: JSON.parse(taskRow.done_when_json) as string[],
+      worktreePath: taskRow.worktree_path,
+      config: JSON.parse(taskRow.config_json) as Record<string, unknown>,
+    });
+    return true;
   }
 
   getRun(id: string) {
@@ -890,6 +916,70 @@ export class Harness {
     });
   }
 
+  interruptRunningAttemptsByOwner(input: { runId: string; pid: number; reason: string }) {
+    return withDatabase(this.dbPath, (db) =>
+      db.transaction(() => {
+        ensureExecutionThreads(db);
+        const rows = db.query(
+          `
+          select attempts.id as attempt_id, tasks.id as task_id, execution_threads.id as thread_id
+          from execution_threads
+          join attempts on attempts.id = execution_threads.attempt_id
+          join tasks on tasks.id = attempts.task_id
+          where execution_threads.run_id = $runId
+            and execution_threads.pid = $pid
+            and execution_threads.status = 'running'
+            and attempts.status = 'running'
+            and tasks.status = 'running'
+          order by attempts.started_at, attempts.id
+          `,
+        ).all({ $runId: input.runId, $pid: input.pid }) as Array<{
+          attempt_id: string;
+          task_id: string;
+          thread_id: string;
+        }>;
+        for (const row of rows) {
+          this.finishAttemptWithDb(db, {
+            attemptId: row.attempt_id,
+            output: {
+              status: "blocked",
+              summary: "Runner interrupted before the attempt reached a terminal result",
+              changedFiles: [],
+              checks: [{ name: "runner interruption", status: "failed", evidence: input.reason }],
+              artifacts: [{
+                kind: "runner_interruption",
+                runId: input.runId,
+                taskId: row.task_id,
+                attemptId: row.attempt_id,
+                threadId: row.thread_id,
+                ownerPid: input.pid,
+              }],
+              problems: [input.reason],
+            },
+          });
+          db.query(
+            `
+            update execution_threads
+            set status = 'interrupted',
+                interrupt_reason = $reason,
+                interrupted_at = coalesce(interrupted_at, current_timestamp),
+                updated_at = current_timestamp
+            where id = $threadId and status = 'running'
+            `,
+          ).run({ $threadId: row.thread_id, $reason: input.reason });
+        }
+        return rows.map((row) => ({
+          runId: input.runId,
+          taskId: row.task_id,
+          attemptId: row.attempt_id,
+          threadId: row.thread_id,
+          status: "blocked" as const,
+          reason: input.reason,
+        }));
+      }).immediate(),
+    );
+  }
+
   recoverRunningAttempt(input: {
     attemptId: string;
     reason: string;
@@ -943,7 +1033,28 @@ export class Harness {
       && Number((previousRecovery as { limit: number }).limit) >= 0
       ? Number((previousRecovery as { limit: number }).limit)
       : requestedLimit;
-    const canRetry = previousCount < recoveryLimit;
+    let canRetry = previousCount < recoveryLimit;
+    let governanceBlocker: string | null = null;
+    if (canRetry) {
+      try {
+        assertTaskGovernanceBoundaryWithDb(db, {
+          id: task.id,
+          runId: task.runId,
+          parentId: task.parentId,
+          cycleId: task.cycleId,
+          role: task.role,
+          goal: task.goal,
+          prompt: task.prompt,
+          dependsOn: task.dependsOn,
+          doneWhen: task.doneWhen,
+          worktreePath: task.worktreePath,
+          config: task.config,
+        });
+      } catch (error) {
+        governanceBlocker = error instanceof Error ? error.message : String(error);
+        canRetry = false;
+      }
+    }
     const recoveryCount = canRetry ? previousCount + 1 : recoveryLimit;
     const eventRows = db.query(
       `select id from attempt_events where attempt_id = $attemptId order by sequence desc limit 8`,
@@ -964,7 +1075,7 @@ export class Harness {
               reason: input.reason,
             },
           ],
-          problems: [...(input.output.problems ?? []), input.reason],
+          problems: [...(input.output.problems ?? []), input.reason, ...(governanceBlocker ? [governanceBlocker] : [])],
         }
       : {
           status: "blocked",
@@ -978,17 +1089,21 @@ export class Harness {
             ownerPid: row.owner_pid,
             durableEventRefs,
           }],
-          problems: [input.reason],
+          problems: [input.reason, ...(governanceBlocker ? [governanceBlocker] : [])],
         };
     this.finishAttemptWithDb(db, { attemptId: input.attemptId, output });
     db.query(
       `
       update execution_threads
-      set status = 'orphaned', interrupt_reason = $reason,
+      set status = $status, interrupt_reason = $reason,
           interrupted_at = coalesce(interrupted_at, current_timestamp), updated_at = current_timestamp
       where attempt_id = $attemptId and status = 'running'
       `,
-    ).run({ $attemptId: input.attemptId, $reason: input.reason });
+    ).run({
+      $attemptId: input.attemptId,
+      $status: governanceBlocker ? "interrupted" : "orphaned",
+      $reason: governanceBlocker ?? input.reason,
+    });
 
     let recoveryTaskId: string | null = null;
     if (canRetry) {
@@ -1741,6 +1856,7 @@ export class Harness {
     const id = input.id ?? makeId("attempt");
     return withDatabase(this.dbPath, (db) => {
       db.transaction(() => {
+        this.assertTaskExecutionAllowedWithDb(db, input.taskId);
         const runState = db
           .query(
             `
@@ -3412,6 +3528,91 @@ function processIsAlive(pid: number) {
     return true;
   } catch {
     return false;
+  }
+}
+
+function assertTaskGovernanceBoundaryWithDb(db: HarnessDatabase, input: CreateTaskInput) {
+  if (input.role !== "worker") {
+    return;
+  }
+  const runRow = db.query("select * from runs where id = $runId").get({ $runId: input.runId }) as RunRow | null;
+  if (!runRow) {
+    throw new Error(`run not found: ${input.runId}`);
+  }
+  const run = runFromRow(runRow);
+  if (run.context.source === "target-system-design") {
+    throw new Error(
+      `target-system-design root ${run.id} cannot create or start a Worker; accepted design delivery must pass authority and createRunsFromDesign into a child run with a Planner`,
+    );
+  }
+  if (run.context.source !== "design") {
+    return;
+  }
+  const parentRunId = typeof run.context.parentRunId === "string" ? run.context.parentRunId : "";
+  const proposalId = typeof run.context.designProposalId === "string" ? run.context.designProposalId : "";
+  const decisionId = typeof run.context.designDecisionId === "string" ? run.context.designDecisionId : "";
+  const parentRow = parentRunId
+    ? db.query("select * from runs where id = $runId").get({ $runId: parentRunId }) as RunRow | null
+    : null;
+  const parent = parentRow ? runFromRow(parentRow) : null;
+  const governedDesignChild = parent?.context.source === "target-system-design"
+    || proposalId.length > 0
+    || decisionId.length > 0
+    || run.context.designDeliveryPlan !== undefined;
+  if (!governedDesignChild) {
+    return;
+  }
+  const authority = proposalId && decisionId
+    ? db.query(
+        `
+        select design_proposals.id
+        from design_proposals
+        join design_decisions on design_decisions.proposal_id = design_proposals.id
+        where design_proposals.id = $proposalId
+          and design_proposals.run_id = $parentRunId
+          and design_proposals.project_id is $projectId
+          and design_proposals.status = 'accepted'
+          and design_decisions.id = $decisionId
+          and design_decisions.decision = 'approved'
+        limit 1
+        `,
+      ).get({
+        $proposalId: proposalId,
+        $parentRunId: parentRunId,
+        $projectId: run.projectId,
+        $decisionId: decisionId,
+      }) as { id: string } | null
+    : null;
+  if (
+    !parent
+    || parent.context.source !== "target-system-design"
+    || parent.projectId !== run.projectId
+    || !authority
+  ) {
+    throw new Error(
+      `design child ${run.id} cannot create or start a Worker without an accepted design proposal and approved authority decision bound to its target-system-design parent`,
+    );
+  }
+  const tasks = (db.query("select * from tasks where run_id = $runId").all({ $runId: run.id }) as TaskRow[])
+    .map(taskFromRow);
+  const tasksById = new Map(tasks.map((task) => [task.id, task]));
+  const pending = [...(input.dependsOn ?? []), ...(input.parentId ? [input.parentId] : [])];
+  const visited = new Set<string>();
+  let plannerFound = false;
+  while (pending.length > 0 && !plannerFound) {
+    const taskId = pending.shift()!;
+    if (visited.has(taskId)) continue;
+    visited.add(taskId);
+    const ancestor = tasksById.get(taskId);
+    if (!ancestor) continue;
+    if (ancestor.role === "planner") {
+      plannerFound = true;
+      break;
+    }
+    pending.push(...ancestor.dependsOn, ...(ancestor.parentId ? [ancestor.parentId] : []));
+  }
+  if (!plannerFound) {
+    throw new Error(`design child ${run.id} Worker must be downstream of its frozen Planner task`);
   }
 }
 

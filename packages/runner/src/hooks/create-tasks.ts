@@ -38,6 +38,15 @@ export function createTasksFromOutputHook(options: { harness: Harness }): StopHo
         })),
       };
     }
+    const designRecovery = materializeTargetSystemDesignerRecovery({
+      harness: options.harness,
+      run,
+      task,
+      proposedTasks: plannedTasks,
+    });
+    if (designRecovery) {
+      return designRecovery;
+    }
     const plannedEntries = plannedTasks.map((plannedTask) => ({
       id: makeId("task"),
       plannedTask,
@@ -302,6 +311,144 @@ export function createTasksFromOutputHook(options: { harness: Harness }): StopHo
       decision: created.length > 0 ? "continue" : "exit",
       artifacts: created,
     };
+  };
+}
+
+function materializeTargetSystemDesignerRecovery(input: {
+  harness: Harness;
+  run: Parameters<StopHook>[0]["run"];
+  task: Task;
+  proposedTasks: PlannedTask[];
+}) {
+  if (
+    input.run.context.source !== "target-system-design"
+    || input.task.role !== "goal-review"
+    || input.proposedTasks.length === 0
+  ) {
+    return null;
+  }
+
+  const initialOverview = input.harness.getRunOverview({ runId: input.run.id, eventLimit: 0 });
+  const sourceSession = [...initialOverview.sessions].reverse().find((session) =>
+    session.role === "designer"
+    && session.status === "blocked"
+    && (session.output.problems ?? []).some((problem) =>
+      typeof problem === "string" && /agent output action \d+ .*payload\./i.test(problem)
+    )
+  );
+  if (!sourceSession) {
+    return null;
+  }
+
+  const result = input.harness.runInImmediateTransaction((db) => {
+    const overview = input.harness.getRunOverviewWithDb(db, { runId: input.run.id, eventLimit: 0 });
+    const durableSourceSession = [...overview.sessions].reverse().find((session) =>
+      session.attemptId === sourceSession.attemptId
+      && session.role === "designer"
+      && session.status === "blocked"
+      && (session.output.problems ?? []).some((problem) =>
+        typeof problem === "string" && /agent output action \d+ .*payload\./i.test(problem)
+      )
+    );
+    const sourceTask = overview.tasks.find((candidate) => candidate.id === sourceSession.taskId);
+    if (!durableSourceSession || !sourceTask) {
+      return { status: "conflict" as const, taskId: null, sourceTaskId: sourceSession.taskId };
+    }
+
+    const previousRecovery = sourceTask.config?.designActionRecovery;
+    const rootTaskId = previousRecovery && typeof previousRecovery === "object" && !Array.isArray(previousRecovery)
+      && typeof (previousRecovery as Record<string, unknown>).rootTaskId === "string"
+      ? String((previousRecovery as Record<string, unknown>).rootTaskId)
+      : sourceTask.id;
+    const previousCount = previousRecovery && typeof previousRecovery === "object" && !Array.isArray(previousRecovery)
+      && Number.isInteger((previousRecovery as Record<string, unknown>).count)
+      ? Number((previousRecovery as Record<string, unknown>).count)
+      : 0;
+    const existing = overview.tasks.find((candidate) => {
+      const recovery = candidate.config?.designActionRecovery;
+      return recovery && typeof recovery === "object" && !Array.isArray(recovery)
+        && (recovery as Record<string, unknown>).rootTaskId === rootTaskId;
+    });
+    if (existing && existing.id !== sourceTask.id) {
+      return { status: "reused" as const, taskId: existing.id, sourceTaskId: sourceTask.id };
+    }
+    const limit = 1;
+    if (previousCount >= limit) {
+      return { status: "exhausted" as const, taskId: null, sourceTaskId: sourceTask.id };
+    }
+
+    const latestProblem = [...(durableSourceSession.output.problems ?? [])]
+      .reverse()
+      .find((problem): problem is string => typeof problem === "string" && problem.trim().length > 0)
+      ?? "fixed design action validation failed";
+    const recoveryTaskId = makeId("task");
+    input.harness.createTaskWithDb(db, {
+      id: recoveryTaskId,
+      runId: input.run.id,
+      parentId: sourceTask.id,
+      cycleId: sourceTask.cycleId,
+      role: "designer",
+      goal: `Correct the rejected fixed design action for: ${sourceTask.goal}`,
+      prompt: [
+        "Correct the rejected fixed design action under the original Designer governance contract.",
+        `Source task: ${sourceTask.id}`,
+        `Source attempt: ${durableSourceSession.attemptId}`,
+        `Latest validation failure: ${latestProblem.slice(0, 4096)}`,
+        "Use an exact UTC timestamp ending in Z when the action schema requires observationTime.",
+        "Remain read-only. Do not implement business code, create a Worker, create a Planner, or bypass proposeDesign, authority, and createRunsFromDesign.",
+        "Original Designer instruction:",
+        sourceTask.prompt.slice(0, 16_384),
+      ].join("\n"),
+      dependsOn: sourceTask.dependsOn,
+      doneWhen: sourceTask.doneWhen,
+      worktreePath: null,
+      config: {
+        ...(sourceTask.config ?? {}),
+        ...(sourceTask.worktreePath ? { sourceWorktreePath: sourceTask.worktreePath } : {}),
+        forbidImplementation: true,
+        forbidBrowser: true,
+        browserProcessPolicy: "deny",
+        readOnly: true,
+        designActionRecovery: {
+          rootTaskId,
+          sourceTaskId: sourceTask.id,
+          sourceAttemptId: durableSourceSession.attemptId,
+          count: previousCount + 1,
+          limit,
+        },
+      },
+    });
+    return { status: "created" as const, taskId: recoveryTaskId, sourceTaskId: sourceTask.id };
+  });
+
+  if (result.status === "conflict") {
+    return {
+      decision: "exit" as const,
+      problems: ["Designer recovery source changed during goal-review materialization"],
+      artifacts: [{ kind: "designer_recovery_conflict", sourceTaskId: result.sourceTaskId }],
+    };
+  }
+  if (result.status === "exhausted") {
+    return {
+      decision: "exit" as const,
+      problems: ["bounded Designer fixed-action recovery exhausted at 1/1"],
+      artifacts: [{ kind: "designer_recovery_exhausted", sourceTaskId: result.sourceTaskId, limit: 1 }],
+    };
+  }
+  return {
+    decision: result.status === "created" ? "continue" as const : "exit" as const,
+    checks: [{
+      name: "target-system design governance",
+      status: "passed",
+      evidence: "Goal Review business task was replaced by one bounded read-only Designer recovery",
+    }],
+    artifacts: [{
+      kind: result.status === "created" ? "created_designer_recovery" : "reused_designer_recovery",
+      taskId: result.taskId,
+      sourceTaskId: result.sourceTaskId,
+      proposedRolesRejected: input.proposedTasks.map((plannedTask) => plannedTask.role),
+      repairBudgetCharged: false,
+    }],
   };
 }
 
