@@ -4429,6 +4429,53 @@ function materializeVerifierRepairRecoveryWithDb(
   if (!verifierSession || !verifierAttemptRequiresRepair(verifierSession.output)) {
     throw new Error(`Verifier ${verifier.id} does not contain a machine-readable or compatible failure verdict`);
   }
+  const frozenEvidenceConflict = runtimeIntegrationFrozenEvidenceConflict(verifierSession.output);
+  if (frozenEvidenceConflict) {
+    const activeTasks = overview.tasks.filter((task) => task.status === "todo" || task.status === "running");
+    if (activeTasks.length > 0) {
+      throw new Error(`frozen evidence conflict cannot close while tasks remain active: ${activeTasks.map((task) => task.id).join(", ")}`);
+    }
+    const fingerprint = stableFingerprint({
+      runId: run.id,
+      verifierTaskId: verifier.id,
+      verifierAttemptId: verifierSession.attemptId,
+      ...frozenEvidenceConflict,
+    });
+    const existing = objectRecordOrNull(run.context.runtimeIntegrationFrozenEvidenceConflict);
+    const reused = existing?.fingerprint === fingerprint && run.status === "blocked";
+    if (!reused) {
+      harness.updateRunWithDb(db, {
+        runId: run.id,
+        status: "blocked",
+        contextPatch: {
+          runtimeIntegrationFrozenEvidenceConflict: {
+            schemaVersion: 1,
+            fingerprint,
+            verifierTaskId: verifier.id,
+            verifierAttemptId: verifierSession.attemptId,
+            ...frozenEvidenceConflict,
+            recordedAt: normalizedEvidenceTimestamp(verifierSession.finishedAt),
+          },
+          pendingVerificationTaskIds: [verifier.id],
+          pendingVerificationReason: "Frozen offline evidence is internally inconsistent; another model Repair cannot amend the read-only evidence contract.",
+        },
+      });
+    }
+    return doneResult(action.type, `Runtime integration frozen evidence conflict ${reused ? "reused" : "recorded"}.`, [
+      { name: "frozen offline evidence", status: "failed", evidence: `${frozenEvidenceConflict.passed}/${frozenEvidenceConflict.tests} passed` },
+      { name: "Repair budget", status: "passed", evidence: "unchanged" },
+      { name: "Goal Review", status: "passed", evidence: "not created" },
+      { name: "run status", status: "passed", evidence: "blocked" },
+    ], [{
+      kind: "runtime_integration_frozen_evidence_conflict",
+      runId: run.id,
+      verifierTaskId: verifier.id,
+      verifierAttemptId: verifierSession.attemptId,
+      fingerprint,
+      ...frozenEvidenceConflict,
+      reused,
+    }]);
+  }
   const hostRecovery = objectRecordOrNull(verifier.config?.runtimeIntegrationHostEvidenceRecovery);
   let hostTask: Task | undefined;
   let plannerTaskId: string | null = null;
@@ -5266,6 +5313,40 @@ function verifierAttemptRequiresRepair(output: AttemptOutput) {
   const priorityProblem = (output.problems ?? []).some((problem) => /^P[0-3]\s*:/i.test(problem.trim()));
   if (failedCheck || priorityProblem || /fail-closed/i.test(output.summary)) return true;
   return output.verdict !== "pass";
+}
+
+function runtimeIntegrationFrozenEvidenceConflict(output: AttemptOutput) {
+  if (output.verdict !== "fail" || (output.changedFiles ?? []).length !== 0) return null;
+  const problem = (output.problems ?? []).find((entry) => entry.includes("FROZEN_OFFLINE_CONTRACT_CHECKS_FAILED"));
+  if (!problem) return null;
+  const frozenPathCheck = (output.checks ?? []).map(objectRecordOrNull).find((check) =>
+    check?.name === "frozen path git diff" && check.status === "passed"
+  );
+  const suiteCheck = (output.checks ?? []).map(objectRecordOrNull).find((check) =>
+    check?.name === "frozen offline evolution suite" && check.status === "failed"
+  );
+  const hostReceipt = (output.artifacts ?? []).map(objectRecordOrNull).find((artifact) =>
+    artifact?.kind === "runtime-integration-host-evidence-receipt"
+  );
+  const suite = objectRecordOrNull(suiteCheck?.evidence);
+  const manifestMatch = problem.match(/regenerated manifest SHA-256 is ([0-9a-f]{64}) instead of frozen ([0-9a-f]{64})/i);
+  if (!frozenPathCheck || !suite || !hostReceipt || !manifestMatch) return null;
+  const tests = suite.tests;
+  const passed = suite.passed;
+  const failed = suite.failed;
+  const skipped = suite.skipped;
+  if (![tests, passed, failed, skipped].every((value) => typeof value === "number" && Number.isInteger(value) && value >= 0)
+    || Number(failed) === 0 || Number(passed) + Number(failed) + Number(skipped) !== Number(tests)) return null;
+  return {
+    tests: Number(tests),
+    passed: Number(passed),
+    failed: Number(failed),
+    skipped: Number(skipped),
+    observedManifestSha256: manifestMatch[1]!.toLowerCase(),
+    frozenManifestSha256: manifestMatch[2]!.toLowerCase(),
+    hostEvidenceId: exactNonEmptyStringField(hostReceipt, "hostEvidenceId"),
+    hostReceiptSha256: exactNonEmptyStringField(hostReceipt, "receiptSha256"),
+  };
 }
 
 function canonicalRuntimeRecoveryHash(value: Record<string, unknown>, label: string) {

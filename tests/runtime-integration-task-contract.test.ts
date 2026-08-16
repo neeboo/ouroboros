@@ -436,6 +436,77 @@ describe("runtime integration task execution contracts", () => {
     expect(replay).toMatchObject({ status: "done", artifacts: [expect.objectContaining({ reused: true })] });
   });
 
+  test("an immutable frozen offline evidence conflict closes the run without another Repair or Goal Review", async () => {
+    const fixture = governedRuntimeFixture(harness, dir, { legacyTasks: true });
+    const graph = applyHarnessAction(harness, {
+      type: "materializeRuntimeIntegrationTaskGraphRecovery",
+      runId: fixture.runId,
+      plannerTaskId: fixture.plannerTaskId,
+    } as never);
+    const taskIds = graph.artifacts.find((artifact) => artifact.kind === "runtime_integration_task_graph_recovery")!
+      .taskIds as string[];
+    for (const taskId of taskIds.slice(0, 4)) {
+      harness.recordAttempt({ taskId, input: {}, output: completedStageOutput(harness.getTask(taskId)!.goal) });
+    }
+    const firstVerifierId = taskIds[4]!;
+    const firstVerifierAttemptId = harness.recordAttempt({
+      taskId: firstVerifierId,
+      input: { executor: "codex-resumable", sandbox: "read-only" },
+      output: capabilityOnlyVerifierFailure(),
+    });
+    const hostRecovery = applyHarnessAction(harness, {
+      type: "recoverRuntimeIntegrationHostEvidenceFailure",
+      runId: fixture.runId,
+      verifierTaskId: firstVerifierId,
+      verifierAttemptId: firstVerifierAttemptId,
+    } as never, { runCommand: (input) => successfulHostCommand(input.command) });
+    const semanticVerifierId = hostRecovery.artifacts.find((artifact) =>
+      artifact.kind === "runtime_integration_host_evidence_recovery")!.verifierTaskId as string;
+    const conflictAttemptId = harness.recordAttempt({
+      taskId: semanticVerifierId,
+      input: { executor: "codex-resumable", sandbox: "read-only" },
+      output: frozenOfflineEvidenceConflict(),
+    });
+    const budgetBefore = harness.getRun(fixture.runId)!.context.repairReplanBudget;
+
+    const reconciliation = await reconcileTerminalBlockedVerifierRepair({ harness, runId: fixture.runId });
+    const replay = await reconcileTerminalBlockedVerifierRepair({ harness, runId: fixture.runId });
+    const overview = harness.getRunOverview({ runId: fixture.runId, eventLimit: 0 });
+    const signals = harness.listStrategySignals({ projectId: overview.run!.projectId! });
+
+    expect(reconciliation).toEqual([expect.objectContaining({
+      verifierTaskId: semanticVerifierId,
+      verifierAttemptId: conflictAttemptId,
+      decision: "exit",
+      artifacts: expect.arrayContaining([expect.objectContaining({
+        kind: "runtime_integration_frozen_evidence_conflict",
+        observedManifestSha256: "6".repeat(64),
+        frozenManifestSha256: "8".repeat(64),
+      })]),
+    })]);
+    expect(replay).toEqual([]);
+    expect(overview.run).toMatchObject({
+      status: "blocked",
+      context: {
+        repairReplanBudget: budgetBefore,
+        runtimeIntegrationFrozenEvidenceConflict: expect.objectContaining({
+          verifierTaskId: semanticVerifierId,
+          verifierAttemptId: conflictAttemptId,
+        }),
+      },
+    });
+    expect(overview.tasks.filter((task) => task.role === "worker" && task.parentId === semanticVerifierId)).toHaveLength(0);
+    expect(overview.tasks.filter((task) => task.role === "goal-review")).toHaveLength(0);
+    expect(signals).toContainEqual(expect.objectContaining({
+      runId: fixture.runId,
+      payload: expect.objectContaining({
+        defectKind: "runtime-integration-frozen-evidence-conflict",
+        verifierTaskId: semanticVerifierId,
+      }),
+    }));
+    expect(signals).toHaveLength(1);
+  });
+
   test("a no-write semantic DSH timeout continues the same charged recovery and replaces its pending Verifier", async () => {
     const fixture = governedRuntimeFixture(harness, dir, { legacyTasks: true });
     harness.updateRun({
@@ -1564,6 +1635,30 @@ function frozenRuntimeIdentityFailure() {
     artifacts: [{ kind: "consumed-host-evidence-receipt" }],
     problems: [
       'message: Runtime uses v5 identifiers; frozen delivery requires version 6 and v6 runtime receipt identifiers.; extra: {"code":"FROZEN_DELIVERY_CONTRACT_MISMATCH"}',
+    ],
+  };
+}
+
+function frozenOfflineEvidenceConflict() {
+  return {
+    status: "blocked" as const,
+    verdict: "fail" as const,
+    summary: "The frozen offline evidence suite is internally inconsistent and cannot authorize delivery.",
+    changedFiles: [],
+    checks: [
+      { name: "repository heads", status: "passed" as const },
+      { name: "authorized changed paths", status: "passed" as const },
+      { name: "frozen path git diff", status: "passed" as const, evidence: "config/evolution/** and tests/evolution/** have no diff from the expected backend HEAD" },
+      { name: "host evidence receipt", status: "passed" as const },
+      { name: "frozen offline evolution suite", status: "failed" as const, evidence: { tests: 98, passed: 90, failed: 8, skipped: 0 } },
+    ],
+    artifacts: [{
+      kind: "runtime-integration-host-evidence-receipt",
+      receiptSha256: "a".repeat(64),
+      hostEvidenceId: `host-evidence:${"b".repeat(64)}`,
+    }],
+    problems: [
+      `message: Eight frozen checks remain failed. The regenerated manifest SHA-256 is ${"6".repeat(64)} instead of frozen ${"8".repeat(64)}.; extra: {"priority":"P1","code":"FROZEN_OFFLINE_CONTRACT_CHECKS_FAILED"}`,
     ],
   };
 }

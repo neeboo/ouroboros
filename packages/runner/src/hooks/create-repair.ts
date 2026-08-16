@@ -112,11 +112,50 @@ export async function reconcileTerminalBlockedVerifierRepair(options: {
       verifierTaskId: verifier.id,
       reason: "materialize the bounded runtime identity Repair after host evidence passed",
     });
+    const conflict = action.artifacts.find((artifact) =>
+      artifact.kind === "runtime_integration_frozen_evidence_conflict"
+    );
+    let artifacts = action.artifacts;
+    if (conflict && overview.run.projectId) {
+      const observedManifestSha256 = String(conflict.observedManifestSha256);
+      const frozenManifestSha256 = String(conflict.frozenManifestSha256);
+      const fingerprint = String(conflict.fingerprint);
+      const signal = applyHarnessAction(options.harness, {
+        type: "recordSignal",
+        projectId: overview.run.projectId,
+        sourceRunId: overview.run.id,
+        signalClass: "system",
+        source: `blocked-run-outcome:${overview.run.id}`,
+        title: "Runtime integration frozen evidence is internally inconsistent",
+        summary: "The identity-separated Verifier proved that the read-only frozen offline evidence cannot reproduce its own manifest. The delivery stopped without another model Repair or Goal Review.",
+        observationTime: normalizedAttemptTimestamp(session.finishedAt),
+        confidence: 1,
+        evidence: [
+          `run:${overview.run.id}`,
+          `task:${verifier.id}`,
+          `attempt:${attempt.id}`,
+          `sha256:${observedManifestSha256}`,
+          `sha256:${frozenManifestSha256}`,
+          `sha256:${fingerprint}`,
+        ],
+        payload: {
+          outcome: "evidence-defect",
+          defectKind: "runtime-integration-frozen-evidence-conflict",
+          verifierTaskId: verifier.id,
+          verifierAttemptId: attempt.id,
+          observedManifestSha256,
+          frozenManifestSha256,
+          repairBudgetUnchanged: true,
+          nextStep: "new-independent-evidence-contract-designer-or-quiescence",
+        },
+      });
+      artifacts = [...artifacts, ...signal.artifacts];
+    }
     return [{
       verifierTaskId: verifier.id,
       verifierAttemptId: attempt.id,
-      decision: action.status === "done" ? "continue" : "exit",
-      artifacts: action.artifacts,
+      decision: conflict ? "exit" : action.status === "done" ? "continue" : "exit",
+      artifacts,
       problems: action.problems,
     }];
   }
@@ -625,7 +664,15 @@ function runtimeIntegrationSemanticRepairFailure(task: Task, output: AttemptOutp
     .join("\n");
   return output.verdict === "fail"
     && (output.changedFiles ?? []).length === 0
-    && text.includes("FROZEN_DELIVERY_CONTRACT_MISMATCH");
+    && (text.includes("FROZEN_DELIVERY_CONTRACT_MISMATCH")
+      || text.includes("FROZEN_OFFLINE_CONTRACT_CHECKS_FAILED"));
+}
+
+function normalizedAttemptTimestamp(value: string | null | undefined) {
+  if (!value) return new Date().toISOString();
+  const normalized = value.includes("T") ? value : `${value.replace(" ", "T")}Z`;
+  const timestamp = new Date(normalized);
+  return Number.isNaN(timestamp.valueOf()) ? new Date().toISOString() : timestamp.toISOString();
 }
 
 function inheritedDshRepairConfig(config: Record<string, unknown>) {
