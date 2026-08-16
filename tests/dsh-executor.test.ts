@@ -6,7 +6,12 @@ import { join } from "node:path";
 import { createDshCliExecutor } from "../packages/runner/src";
 import type { ResolvedExecutionRoute, RunCommandInput } from "../packages/runner/src";
 import { prepareDshModelTransportBroker } from "../packages/runner/src/executors/dsh-model-transport";
-import { darwinDshHostReadProfile, darwinDshProcessProfile } from "../packages/runner/src/executors/dsh-process-policy";
+import {
+  darwinDshHostReadProfile,
+  darwinDshProcessProfile,
+  normalizeDshFilePolicy,
+  prepareDshProcessPolicy,
+} from "../packages/runner/src/executors/dsh-process-policy";
 
 const runFixture = {
   id: "run_dsh",
@@ -519,6 +524,40 @@ describe("DeepSeek Harness CLI executor", () => {
       expect(write(deniedSource).exitCode).not.toBe(0);
       expect(write(deniedDb).exitCode).not.toBe(0);
     } finally {
+      await rm(workspace, { recursive: true, force: true });
+    }
+  });
+
+  test.skipIf(process.platform !== "darwin")("prepares only the required ancestors for frozen DSH mutation paths", async () => {
+    const workspace = await mkdtemp(join(homedir(), ".orbs-dsh-write-ancestors-"));
+    const filePolicy = normalizeDshFilePolicy(frozenDshFilePolicy);
+    let bundle: Awaited<ReturnType<typeof prepareDshProcessPolicy>> = null;
+    try {
+      bundle = await prepareDshProcessPolicy({
+        workspaceRoot: workspace,
+        permissionMode: "workspace-write",
+        filePolicy,
+      });
+      expect(existsSync(join(workspace, "config"))).toBe(true);
+      expect(existsSync(join(workspace, "config", "evolution"))).toBe(true);
+      expect(existsSync(join(workspace, "tests", "evolution"))).toBe(true);
+      expect(existsSync(join(workspace, "config", "other"))).toBe(false);
+
+      const profile = darwinDshProcessProfile({
+        workspaceRoot: workspace,
+        allowedPaths: filePolicy.allowedPaths,
+        forbiddenPaths: filePolicy.forbiddenPaths,
+      });
+      const run = (script: string) => Bun.spawnSync({
+        cmd: ["/usr/bin/sandbox-exec", "-p", profile, "--", "/bin/sh", "-c", script],
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      expect(run(`mkdir -p ${JSON.stringify(join(workspace, "config", "evolution", "v5"))} && printf ok > ${JSON.stringify(join(workspace, "config", "evolution", "v5", "artifact.json"))}`).exitCode).toBe(0);
+      expect(run(`mkdir -p ${JSON.stringify(join(workspace, "config", "other"))}`).exitCode).not.toBe(0);
+      expect(run(`printf denied > ${JSON.stringify(join(workspace, "root-sibling.txt"))}`).exitCode).not.toBe(0);
+    } finally {
+      await bundle?.cleanup();
       await rm(workspace, { recursive: true, force: true });
     }
   });

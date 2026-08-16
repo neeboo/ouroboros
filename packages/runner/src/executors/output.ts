@@ -63,6 +63,7 @@ function normalizeAttemptOutput(parsed: unknown): AttemptOutput {
   const actionOutput = validateActions(record.actions);
   return {
     status: record.status,
+    verdict: validateVerifierVerdict(record.verdict),
     runDecision: mergeRunDecision(validateRunDecision(record.runDecision), actionOutput.runDecision),
     summary: readableValue(record.summary),
     changedFiles: Array.isArray(record.changedFiles) ? record.changedFiles.map(String) : [],
@@ -73,6 +74,14 @@ function normalizeAttemptOutput(parsed: unknown): AttemptOutput {
     nextRuns: [...validatePlannedRuns(record.nextRuns), ...actionOutput.nextRuns],
     designActions: actionOutput.designActions,
   };
+}
+
+function validateVerifierVerdict(value: unknown): AttemptOutput["verdict"] {
+  if (value === undefined) return undefined;
+  if (value !== "pass" && value !== "fail") {
+    throw new Error("agent output verdict must be 'pass' or 'fail'");
+  }
+  return value;
 }
 
 function looksLikeAttemptOutput(parsed: unknown) {
@@ -92,7 +101,8 @@ function looksLikeAttemptOutput(parsed: unknown) {
     "actions" in record ||
     "nextTasks" in record ||
     "nextRuns" in record ||
-    "runDecision" in record
+    "runDecision" in record ||
+    "verdict" in record
   );
 }
 

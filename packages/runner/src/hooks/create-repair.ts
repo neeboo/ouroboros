@@ -49,14 +49,18 @@ export async function reconcileTerminalBlockedVerifierRepair(options: {
   }
   const verifier = [...overview.tasks]
     .reverse()
-    .find((task) => task.role === "verifier" && task.status === "blocked");
+    .find((task) => {
+      if (task.role !== "verifier" || (task.status !== "blocked" && task.status !== "done")) return false;
+      const candidate = [...overview.sessions].reverse().find((session) => session.taskId === task.id);
+      return Boolean(candidate && verifierOutputRequiresRepair(candidate.output));
+    });
   if (!verifier) {
     return [];
   }
   const session = [...overview.sessions]
     .reverse()
-    .find((candidate) => candidate.taskId === verifier.id && candidate.status === "blocked");
-  if (!session || session.output.status !== "blocked") {
+    .find((candidate) => candidate.taskId === verifier.id && (candidate.status === "blocked" || candidate.status === "done"));
+  if (!session || !verifierOutputRequiresRepair(session.output)) {
     return [];
   }
   const attempt = options.harness.getAttempt(session.attemptId);
@@ -235,7 +239,7 @@ export function createRepairTaskHook(options: {
 }): StopHook {
   const budgetLimit = options.budgetLimit ?? DEFAULT_REPAIR_REPLAN_BUDGET_LIMIT;
   return ({ run, task, output }) => {
-    if (task.role !== "verifier" || output.status !== "blocked") {
+    if (task.role !== "verifier" || !verifierOutputRequiresRepair(output)) {
       return { decision: "exit" };
     }
     const durableExistingRepair = options.harness.getRunOverview({ runId: run.id, eventLimit: 0 }).tasks.find((candidate) =>
@@ -377,7 +381,9 @@ export function createRepairTaskHook(options: {
       ? "base-headless" as const
       : undefined;
     const verifierContract = verifierContractFromTask(task);
+    const inheritedDshConfig = sourceTask ? inheritedDshRepairConfig(sourceTask.config ?? {}) : {};
     const repairConfig = {
+      ...inheritedDshConfig,
       ...(verifierContract ? { verifierContract } : {}),
       ...(dshProfileIsolation ? { dshProfileIsolation } : {}),
     };
@@ -522,6 +528,37 @@ export function createRepairTaskHook(options: {
       ],
     };
   };
+}
+
+function inheritedDshRepairConfig(config: Record<string, unknown>) {
+  if (config.agentBackend !== "deepseek-harness") return {};
+  return Object.fromEntries([
+    "agentBackend",
+    "permissionMode",
+    "dshProfileIsolation",
+    "dshRequiredPlugins",
+    "dshModelTransport",
+    "dshToolNetwork",
+    "dshFilePolicy",
+    "offlineTestPolicy",
+    "forbidBrowser",
+    "browserProcessPolicy",
+    "sourceWorktreePath",
+    "designDeliveryRecovery",
+    "designWorkerRuntimeRecovery",
+    "designWorkerTransportRecovery",
+  ].flatMap((key) => config[key] === undefined ? [] : [[key, config[key]]]));
+}
+
+export function verifierOutputRequiresRepair(output: AttemptOutput): boolean {
+  if (output.status === "blocked" || output.verdict === "fail") return true;
+  const failedCheck = (output.checks ?? []).some((check) => {
+    if (!check || typeof check !== "object" || Array.isArray(check)) return false;
+    return (check as Record<string, unknown>).status === "failed";
+  });
+  const priorityProblem = (output.problems ?? []).some((problem) => /^P[0-3]\s*:/i.test(problem.trim()));
+  if (failedCheck || priorityProblem || /fail-closed/i.test(output.summary)) return true;
+  return output.verdict !== "pass";
 }
 
 function attemptUsedDsh(input: Record<string, unknown>) {

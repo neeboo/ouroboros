@@ -143,6 +143,12 @@ export type HarnessAction =
       reason?: string;
     }
   | {
+      type: "materializeVerifierRepairRecovery";
+      runId: string;
+      verifierTaskId: string;
+      reason?: string;
+    }
+  | {
       type: "buildVersionedCorpusManifest";
       projectId: string;
       sourceRunId: string;
@@ -682,6 +688,15 @@ export function parseHarnessAction(value: unknown): HarnessAction {
       reason: optionalStringField(record, "reason"),
     };
   }
+  if (type === "materializeVerifierRepairRecovery") {
+    assertOnlyFields(record, type, ["type", "runId", "verifierTaskId", "reason"]);
+    return {
+      type,
+      runId: stringField(record, "runId"),
+      verifierTaskId: stringField(record, "verifierTaskId"),
+      reason: optionalStringField(record, "reason"),
+    };
+  }
   if (type === "buildVersionedCorpusManifest") {
     assertOnlyFields(record, type, [
       "type",
@@ -1075,7 +1090,7 @@ export function parseHarnessAction(value: unknown): HarnessAction {
     };
   }
   throw new Error(
-    "harness action type must be reclaimRunningTasks, retryTask, reconcileRunEvidence, recordSignal, linkResearchEvidence, materializeDesignerActionRecovery, materializeDesignDeliveryRecovery, materializeDesignWorkerRuntimeRecovery, materializeDesignWorkerTransportRecovery, buildVersionedCorpusManifest, bindHostEvidenceMaintenanceReceipt, materializeHostEvidenceMaintenanceDelivery, markRunTodo, updateRunContext, amendRunContract, retireRun, retireTask, prepareRunDrain, completeSystemTask, integrateVerifiedRun, pushExactGitRef, createExactGitRef, commitExactGitIndex, stageExactWorkerFilesForVerification, materializeAttemptArtifactsForVerification, verifySealedCorpusForVerification, registerEvolutionProfile, recordProductionEpisode, registerHarnessVariant, activateHarnessRevision, freezeMatchedExperiment, interruptAttemptAndCreateTask, interruptRunningAttemptsAndCreateTask, acceptGuardrailProposal, startSubsession, collectSubsessions, cancelSubsessions, or runWatchdogPass",
+    "harness action type must be reclaimRunningTasks, retryTask, reconcileRunEvidence, recordSignal, linkResearchEvidence, materializeDesignerActionRecovery, materializeDesignDeliveryRecovery, materializeDesignWorkerRuntimeRecovery, materializeDesignWorkerTransportRecovery, materializeVerifierRepairRecovery, buildVersionedCorpusManifest, bindHostEvidenceMaintenanceReceipt, materializeHostEvidenceMaintenanceDelivery, markRunTodo, updateRunContext, amendRunContract, retireRun, retireTask, prepareRunDrain, completeSystemTask, integrateVerifiedRun, pushExactGitRef, createExactGitRef, commitExactGitIndex, stageExactWorkerFilesForVerification, materializeAttemptArtifactsForVerification, verifySealedCorpusForVerification, registerEvolutionProfile, recordProductionEpisode, registerHarnessVariant, activateHarnessRevision, freezeMatchedExperiment, interruptAttemptAndCreateTask, interruptRunningAttemptsAndCreateTask, acceptGuardrailProposal, startSubsession, collectSubsessions, cancelSubsessions, or runWatchdogPass",
   );
 }
 
@@ -1126,6 +1141,10 @@ export function applyHarnessAction(
 
   if (action.type === "materializeDesignWorkerTransportRecovery") {
     return applyDesignWorkerTransportRecoveryAtomically(harness, action);
+  }
+
+  if (action.type === "materializeVerifierRepairRecovery") {
+    return applyVerifierRepairRecoveryAtomically(harness, action);
   }
 
   if (action.type === "reconcileRunEvidence") {
@@ -1188,6 +1207,7 @@ type DesignerActionRecoveryAction = Extract<HarnessAction, { type: "materializeD
 type DesignDeliveryRecoveryAction = Extract<HarnessAction, { type: "materializeDesignDeliveryRecovery" }>;
 type DesignWorkerRuntimeRecoveryAction = Extract<HarnessAction, { type: "materializeDesignWorkerRuntimeRecovery" }>;
 type DesignWorkerTransportRecoveryAction = Extract<HarnessAction, { type: "materializeDesignWorkerTransportRecovery" }>;
+type VerifierRepairRecoveryAction = Extract<HarnessAction, { type: "materializeVerifierRepairRecovery" }>;
 type RunEvidenceReconciliationAction = Extract<HarnessAction, { type: "reconcileRunEvidence" }>;
 type ResearchEvidenceLinkAction = Extract<HarnessAction, { type: "linkResearchEvidence" }>;
 type BlockedRunSignalAction = Extract<HarnessAction, { type: "recordSignal" }>;
@@ -1397,6 +1417,34 @@ function applyDesignWorkerTransportRecoveryAtomically(
   try {
     return harness.runInImmediateTransaction((db) => {
       const result = materializeDesignWorkerTransportRecoveryWithDb(harness, db, action);
+      const eventId = harness.recordHarnessActionEventWithDb(db, {
+        actionType: action.type,
+        status: result.status,
+        request: safeRequest(action),
+        result: resultToRecord(result),
+      });
+      return { ...result, eventId };
+    });
+  } catch (error) {
+    const problem = limitUtf8Output(sanitizeEvolutionErrorText(errorMessage(error)), 4_096);
+    const result = blockedResult(action.type, `${action.type} blocked: ${problem}`, [problem]);
+    const eventId = harness.recordHarnessActionEvent({
+      actionType: action.type,
+      status: result.status,
+      request: safeRequest(action),
+      result: resultToRecord(result),
+    });
+    return { ...result, eventId };
+  }
+}
+
+function applyVerifierRepairRecoveryAtomically(
+  harness: Harness,
+  action: VerifierRepairRecoveryAction,
+): HarnessActionResult & { eventId: string } {
+  try {
+    return harness.runInImmediateTransaction((db) => {
+      const result = materializeVerifierRepairRecoveryWithDb(harness, db, action);
       const eventId = harness.recordHarnessActionEventWithDb(db, {
         actionType: action.type,
         status: result.status,
@@ -3060,6 +3108,264 @@ function materializeDesignWorkerTransportRecoveryWithDb(
     recoveryKey,
     reused: false,
   }]);
+}
+
+function materializeVerifierRepairRecoveryWithDb(
+  harness: Harness,
+  db: HarnessDatabase,
+  action: VerifierRepairRecoveryAction,
+): HarnessActionResult {
+  const overview = harness.getRunOverviewWithDb(db, { runId: action.runId, eventLimit: 0 });
+  const run = overview.run;
+  if (!run || run.context.source !== "design" || run.context.retired === true) {
+    throw new Error(`Verifier repair recovery requires an active design child: ${action.runId}`);
+  }
+  const verifier = overview.tasks.find((task) => task.id === action.verifierTaskId);
+  if (!verifier || verifier.role !== "verifier" || !["done", "blocked"].includes(verifier.status)) {
+    throw new Error(`Verifier repair recovery requires one terminal Verifier: ${action.verifierTaskId}`);
+  }
+  const verifierSession = [...overview.sessions].reverse().find((session) => session.taskId === verifier.id);
+  if (!verifierSession || !verifierAttemptRequiresRepair(verifierSession.output)) {
+    throw new Error(`Verifier ${verifier.id} does not contain a machine-readable or compatible failure verdict`);
+  }
+  if (verifier.dependsOn.length !== 1) {
+    throw new Error(`Verifier ${verifier.id} must depend on exactly one source Worker`);
+  }
+  const sourceWorker = overview.tasks.find((task) => task.id === verifier.dependsOn[0]);
+  if (!sourceWorker || sourceWorker.role !== "worker" || sourceWorker.status !== "done") {
+    throw new Error(`Verifier ${verifier.id} has no done source Worker`);
+  }
+  if (sourceWorker.config?.agentBackend !== "deepseek-harness"
+    || sourceWorker.config?.permissionMode !== "workspace-write"
+    || sourceWorker.config?.dshModelTransport !== "host-brokered-deepseek"
+    || sourceWorker.config?.dshToolNetwork !== "deny") {
+    throw new Error(`source Worker ${sourceWorker.id} lacks the frozen DSH broker and tool-deny contract`);
+  }
+  const sourceSession = [...overview.sessions].reverse().find((session) => session.taskId === sourceWorker.id);
+  const sourceAttempt = sourceSession ? harness.getAttemptWithDb(db, sourceSession.attemptId) : null;
+  const sourceAttemptCwd = typeof sourceAttempt?.input.cwd === "string" && sourceAttempt.input.cwd.trim()
+    ? sourceAttempt.input.cwd
+    : null;
+  const sourceConfigWorktree = typeof sourceWorker.config?.sourceWorktreePath === "string"
+    && sourceWorker.config.sourceWorktreePath.trim()
+    ? sourceWorker.config.sourceWorktreePath
+    : null;
+  const recoveryWorktreePath = sourceWorker.worktreePath ?? sourceAttemptCwd ?? sourceConfigWorktree;
+  if (!sourceSession || !sourceAttempt || !recoveryWorktreePath) {
+    throw new Error(`source Worker ${sourceWorker.id} lacks one durable attempt worktree binding`);
+  }
+  const executionReceipt = sourceSession?.output.artifacts?.map(objectRecordOrNull).find((artifact) =>
+    artifact?.kind === "dsh_execution_profile_receipt"
+  );
+  const modelTransport = objectRecordOrNull(executionReceipt?.modelTransport);
+  const toolSandbox = objectRecordOrNull(executionReceipt?.toolSandbox);
+  if (modelTransport?.enforcement !== "loopback-http-broker"
+    || modelTransport.credentialIsolation !== true
+    || toolSandbox?.network !== "deny"
+    || toolSandbox.credentialsInherited !== false
+    || executionReceipt?.noTargetNetworkBypass !== true) {
+    throw new Error(`source Worker ${sourceWorker.id} lacks the split DSH execution receipt`);
+  }
+  const problems = (verifierSession.output.problems ?? []).map((problem) =>
+    limitUtf8Output(sanitizeEvolutionErrorText(problem), 2_000)
+  );
+  const failedChecks = (verifierSession.output.checks ?? []).flatMap((check) => {
+    const record = objectRecordOrNull(check);
+    return record?.status === "failed" && typeof record.name === "string"
+      ? [limitUtf8Output(sanitizeEvolutionErrorText(record.name), 500)]
+      : [];
+  });
+  const findings = [...new Set([...problems, ...failedChecks])];
+  if (findings.length === 0) {
+    findings.push("Verifier omitted a required pass/fail verdict and cannot authorize completion.");
+  }
+  const recoveryKey = stableFingerprint({
+    runId: run.id,
+    verifierTaskId: verifier.id,
+    verifierAttemptId: verifierSession.attemptId,
+    sourceWorkerTaskId: sourceWorker.id,
+    findings,
+  });
+  const existing = overview.tasks.filter((task) =>
+    objectRecordOrNull(task.config?.verifierRepairRecovery)?.recoveryKey === recoveryKey
+  );
+  if (existing.length > 0) {
+    const repair = existing.find((task) => task.role === "worker");
+    const nextVerifier = existing.find((task) => task.role === "verifier");
+    if (existing.length !== 2 || !repair || !nextVerifier || !sameCanonicalValue(nextVerifier.dependsOn, [repair.id])) {
+      throw new Error(`existing Verifier repair recovery conflicts with ${recoveryKey}`);
+    }
+    return doneResult(action.type, `Verifier repair recovery ${recoveryKey} reused.`, [
+      { name: "bounded Verifier repair", status: "passed", evidence: "reused" },
+    ], [{
+      kind: "verifier_repair_recovery",
+      runId: run.id,
+      verifierTaskId: verifier.id,
+      verifierAttemptId: verifierSession.attemptId,
+      sourceWorkerTaskId: sourceWorker.id,
+      repairTaskId: repair.id,
+      nextVerifierTaskId: nextVerifier.id,
+      recoveryKey,
+      reused: true,
+    }]);
+  }
+  const activeTasks = overview.tasks.filter((task) => task.status === "todo" || task.status === "running");
+  if (activeTasks.length > 0) {
+    throw new Error(`design child ${run.id} still has active tasks: ${activeTasks.map((task) => task.id).join(", ")}`);
+  }
+
+  const rawBudget = objectRecordOrNull(run.context.repairReplanBudget) ?? {};
+  const limit = typeof rawBudget.limit === "number" && Number.isInteger(rawBudget.limit) && rawBudget.limit > 0
+    ? rawBudget.limit
+    : 3;
+  const used = typeof rawBudget.used === "number" && Number.isInteger(rawBudget.used) && rawBudget.used >= 0
+    ? rawBudget.used
+    : 0;
+  const entries = Array.isArray(rawBudget.entries) ? rawBudget.entries : [];
+  if (used >= limit) {
+    harness.updateRunWithDb(db, {
+      runId: run.id,
+      status: "blocked",
+      contextPatch: {
+        pendingVerificationTaskIds: [verifier.id],
+        pendingVerificationReason: `Verifier ${verifier.id} failed with repair budget exhausted at ${used}/${limit}`,
+      },
+    });
+    return blockedResult(action.type, `Verifier repair budget exhausted at ${used}/${limit}.`, [
+      `Verifier ${verifier.id} failed and no further Repair is allowed`,
+    ]);
+  }
+
+  const marker = {
+    schemaVersion: 1,
+    recoveryKey,
+    verifierTaskId: verifier.id,
+    verifierAttemptId: verifierSession.attemptId,
+    sourceWorkerTaskId: sourceWorker.id,
+    maxRecoveries: 1,
+    findingFingerprint: stableFingerprint(findings),
+    reason: action.reason ?? "repair one terminal Verifier failure without Goal Review",
+  };
+  const repairTaskId = makeId("task");
+  const nextVerifierTaskId = makeId("task");
+  const frozenFindings = findings.map((finding) => `- ${finding}`).join("\n");
+  const repairPrompt = [
+    `Repair the existing implementation from Worker ${sourceWorker.id} in the same frozen worktree.`,
+    "Preserve the existing files. Do not replan, modify the frozen comparison, broaden permissions, or create Goal Review tasks.",
+    "Address every independent Verifier finding with real measured evidence, receipts, and state readback:",
+    frozenFindings,
+    "Keep the DeepSeek model transport host-brokered. All model-triggered tools remain network-denied and credential-free.",
+    "Return structured changedFiles, checks, artifacts, problems, and no downstream tasks. A separate read-only Verifier is already frozen.",
+  ].join("\n\n");
+  const repairDoneWhen = [...new Set([
+    ...sourceWorker.doneWhen,
+    ...verifier.doneWhen,
+    ...findings.map((finding) => `Resolved with machine evidence: ${finding}`),
+    "The Repair output reports exact changed files, measured checks, receipts, and state restoration evidence.",
+  ])];
+  harness.createTaskWithDb(db, {
+    id: repairTaskId,
+    runId: run.id,
+    parentId: verifier.id,
+    cycleId: sourceWorker.cycleId,
+    role: "worker",
+    goal: `Repair: ${verifier.goal}`,
+    prompt: repairPrompt,
+    dependsOn: [sourceWorker.id],
+    doneWhen: repairDoneWhen,
+    worktreePath: recoveryWorktreePath,
+    config: {
+      ...sourceWorker.config,
+      permissionMode: "workspace-write",
+      dshProfileIsolation: "base-headless",
+      dshRequiredPlugins: [],
+      dshModelTransport: "host-brokered-deepseek",
+      dshToolNetwork: "deny",
+      forbidBrowser: true,
+      browserProcessPolicy: "deny",
+      verifierContract: verifier.config?.verifierContract,
+      verifierRepairRecovery: marker,
+    },
+  });
+  harness.createTaskWithDb(db, {
+    id: nextVerifierTaskId,
+    runId: run.id,
+    parentId: repairTaskId,
+    cycleId: sourceWorker.cycleId,
+    role: "verifier",
+    goal: verifier.goal,
+    prompt: [
+      verifier.prompt,
+      "Return verdict=pass only when every frozen finding is independently disproved or repaired with machine-readable evidence.",
+      "Return verdict=fail for any remaining failed check or P1 finding. Run only the frozen offline tests/evolution/** checks.",
+    ].join("\n\n"),
+    dependsOn: [repairTaskId],
+    doneWhen: verifier.doneWhen,
+    worktreePath: recoveryWorktreePath,
+    config: {
+      ...verifier.config,
+      permissionMode: "read-only",
+      readOnly: true,
+      forbidImplementation: true,
+      forbidBrowser: true,
+      browserProcessPolicy: "deny",
+      sourceTaskId: repairTaskId,
+      verdictRequired: true,
+      verifierRepairRecovery: marker,
+    },
+  });
+  const nextBudget = {
+    limit,
+    used: used + 1,
+    entries: [...entries, {
+      taskId: verifier.id,
+      attemptId: verifierSession.attemptId,
+      kind: "repair",
+      summary: `Repair: ${verifier.goal}`,
+      rootTaskId: sourceWorker.id,
+      rootCause: findings[0],
+      chargedAt: new Date().toISOString(),
+    }],
+  };
+  harness.updateRunWithDb(db, {
+    runId: run.id,
+    status: "todo",
+    contextPatch: {
+      repairReplanBudget: nextBudget,
+      verifierRepairRecovery: { ...marker, repairTaskId, nextVerifierTaskId },
+      pendingVerificationTaskIds: [nextVerifierTaskId],
+      pendingVerificationReason: `Verifier ${verifier.id} failed; bounded Repair ${repairTaskId} awaits execution`,
+    },
+  });
+  return doneResult(action.type, `Verifier repair recovery ${recoveryKey} materialized.`, [
+    { name: "Verifier semantic failure", status: "passed", evidence: `${verifier.id}:${verifierSession.attemptId}` },
+    { name: "bounded Repair budget", status: "passed", evidence: `${used + 1}/${limit}` },
+    { name: "DSH execution boundary", status: "passed", evidence: "host broker; tool network deny; zero inherited credentials" },
+    { name: "independent Verifier dependency", status: "passed", evidence: `${nextVerifierTaskId}->${repairTaskId}` },
+    { name: "Goal Review", status: "passed", evidence: "not created" },
+  ], [{
+    kind: "verifier_repair_recovery",
+    runId: run.id,
+    verifierTaskId: verifier.id,
+    verifierAttemptId: verifierSession.attemptId,
+    sourceWorkerTaskId: sourceWorker.id,
+    repairTaskId,
+    nextVerifierTaskId,
+    recoveryKey,
+    findingFingerprint: marker.findingFingerprint,
+    findingCount: findings.length,
+    budgetUsed: used + 1,
+    budgetLimit: limit,
+    reused: false,
+  }]);
+}
+
+function verifierAttemptRequiresRepair(output: AttemptOutput) {
+  if (output.status === "blocked" || output.verdict === "fail") return true;
+  const failedCheck = (output.checks ?? []).some((check) => objectRecordOrNull(check)?.status === "failed");
+  const priorityProblem = (output.problems ?? []).some((problem) => /^P[0-3]\s*:/i.test(problem.trim()));
+  if (failedCheck || priorityProblem || /fail-closed/i.test(output.summary)) return true;
+  return output.verdict !== "pass";
 }
 
 function activateHarnessRevisionWithDb(

@@ -158,6 +158,9 @@ export async function prepareDshProcessPolicy(input: {
   await ensurePrivateDirectory(base);
   const directory = join(base, randomUUID());
   await ensurePrivateDirectory(directory);
+  if (input.permissionMode === "workspace-write" && input.filePolicy && existsSync(input.workspaceRoot)) {
+    await prepareAllowedPolicyDirectories(input.workspaceRoot, input.filePolicy.allowedPaths);
+  }
   const runnerPath = join(directory, "runner.mjs");
   const patchPath = join(directory, "cordis.patch.yml");
   const toolHome = join(directory, "tool-home");
@@ -184,6 +187,39 @@ export async function prepareDshProcessPolicy(input: {
     disabledInProcessRowsSha256: createHash("sha256").update(JSON.stringify(DISABLED_DSH_IN_PROCESS_ROWS)).digest("hex"),
     cleanup: () => rm(directory, { recursive: true, force: true }),
   };
+}
+
+async function prepareAllowedPolicyDirectories(workspaceRoot: string, allowedPaths: string[]) {
+  const root = canonicalExistingDirectory(workspaceRoot);
+  for (const pattern of allowedPaths) {
+    const relativeDirectory = pattern.slice(0, -3);
+    let current = root;
+    for (const segment of relativeDirectory.split("/").filter(Boolean)) {
+      const next = join(current, segment);
+      try {
+        const stat = await lstat(next);
+        if (!stat.isDirectory() || stat.isSymbolicLink()) {
+          throw new Error(`DSH allowed path ancestor is not one real directory: ${next}`);
+        }
+      } catch (error) {
+        if (!(error instanceof Error) || !("code" in error) || error.code !== "ENOENT") throw error;
+        try {
+          await mkdir(next, { mode: 0o755 });
+        } catch (mkdirError) {
+          if (!(mkdirError instanceof Error) || !("code" in mkdirError) || mkdirError.code !== "EEXIST") throw mkdirError;
+        }
+        const stat = await lstat(next);
+        if (!stat.isDirectory() || stat.isSymbolicLink()) {
+          throw new Error(`DSH allowed path ancestor is not one real directory: ${next}`);
+        }
+      }
+      const canonical = await realpath(next);
+      if (canonical !== next || !canonical.startsWith(`${root}${sep}`)) {
+        throw new Error(`DSH allowed path ancestor escapes its workspace: ${next}`);
+      }
+      current = next;
+    }
+  }
 }
 
 export function darwinDshProcessProfile(input: {

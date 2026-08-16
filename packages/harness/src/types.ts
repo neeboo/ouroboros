@@ -120,6 +120,7 @@ export interface ExecutionThread {
 
 export interface AttemptOutput {
   status: "done" | "blocked";
+  verdict?: "pass" | "fail";
   runDecision?: "complete" | "continue" | "verify" | "defer";
   summary: string;
   changedFiles?: string[];

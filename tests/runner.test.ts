@@ -9332,6 +9332,92 @@ describe("runner", () => {
     });
   });
 
+  test("done verifier verdict fail creates one bounded repair", async () => {
+    const runId = harness.createRun({ goal: "Repair semantic verifier failure" });
+    const workerId = harness.createTask({ runId, role: "worker", goal: "Implement", prompt: "Implement." });
+    harness.recordAttempt({
+      taskId: workerId,
+      input: { executor: "test" },
+      output: { status: "done", summary: "implemented", changedFiles: ["src/change.ts"], checks: [], artifacts: [], problems: [] },
+    });
+    const verifierId = harness.createTask({
+      runId,
+      role: "verifier",
+      goal: "Verify semantics",
+      prompt: "Verify.",
+      dependsOn: [workerId],
+    });
+
+    const result = await runNextReadyTask({
+      harness,
+      runId,
+      executor: async () => ({
+        status: "done",
+        verdict: "fail",
+        summary: "fail-closed on semantic findings",
+        changedFiles: [],
+        checks: [{ name: "semantic contract", status: "failed" }],
+        artifacts: [],
+        problems: ["P1: receipt is synthetic"],
+      }),
+      stopHooks: [createRepairTaskHook({ harness })],
+    });
+
+    const repair = harness.getRunOverview({ runId, eventLimit: 0 }).tasks.find((task) => task.parentId === verifierId)!;
+    expect(result?.stopDecision).toBe("continue");
+    expect(repair).toMatchObject({ role: "worker", status: "todo", dependsOn: [workerId] });
+    expect(repair.prompt).toContain("P1: receipt is synthetic");
+    expect(harness.getRun(runId)?.context.repairReplanBudget).toMatchObject({ used: 1 });
+  });
+
+  test("verifier prompt requires a machine verdict and parser preserves it", () => {
+    const runId = harness.createRun({ goal: "Require verifier verdict" });
+    const taskId = harness.createTask({ runId, role: "verifier", goal: "Verify", prompt: "Verify." });
+    const prompt = buildTaskPrompt({
+      run: harness.getRun(runId)!,
+      task: harness.getTask(taskId)!,
+      dependencyAttempts: [],
+    });
+    expect(requiredOutputExample(prompt)).toMatchObject({ status: "done", verdict: "pass", actions: [] });
+    expect(parseAttemptOutput(JSON.stringify({
+      status: "done",
+      verdict: "fail",
+      summary: "semantic failure",
+      changedFiles: [],
+      checks: [],
+      artifacts: [],
+      problems: ["P1: failed"],
+    })).verdict).toBe("fail");
+    expect(() => parseAttemptOutput(JSON.stringify({ status: "done", verdict: "maybe", summary: "invalid" })))
+      .toThrow("agent output verdict must be 'pass' or 'fail'");
+  });
+
+  test("verifier verdict pass creates no repair and missing verdict fails closed", async () => {
+    const passedRunId = harness.createRun({ goal: "Accept explicit verifier pass" });
+    const passedVerifierId = harness.createTask({ runId: passedRunId, role: "verifier", goal: "Verify pass", prompt: "Verify." });
+    const pass = await createRepairTaskHook({ harness })({
+      run: harness.getRun(passedRunId)!,
+      task: harness.getTask(passedVerifierId)!,
+      sessionName: "pass",
+      prompt: "Verify.",
+      output: { status: "done", verdict: "pass", summary: "pass", changedFiles: [], checks: [], artifacts: [], problems: [] },
+    });
+    expect(pass.decision).toBe("exit");
+    expect(harness.getRunOverview({ runId: passedRunId, eventLimit: 0 }).tasks).toHaveLength(1);
+
+    const missingRunId = harness.createRun({ goal: "Reject missing verifier verdict" });
+    const missingVerifierId = harness.createTask({ runId: missingRunId, role: "verifier", goal: "Verify missing", prompt: "Verify." });
+    const missing = await createRepairTaskHook({ harness })({
+      run: harness.getRun(missingRunId)!,
+      task: harness.getTask(missingVerifierId)!,
+      sessionName: "missing",
+      prompt: "Verify.",
+      output: { status: "done", summary: "looks fine", changedFiles: [], checks: [], artifacts: [], problems: [] },
+    });
+    expect(missing.decision).toBe("continue");
+    expect(harness.getRunOverview({ runId: missingRunId, eventLimit: 0 }).tasks.filter((task) => task.role === "worker")).toHaveLength(1);
+  });
+
   test("fixed repair records base-only DSH isolation when its source ran through DSH", async () => {
     const runId = harness.createRun({ goal: "Repair a DSH-delivered change" });
     const sourceTaskId = harness.createTask({
@@ -9340,6 +9426,20 @@ describe("runner", () => {
       goal: "Implement through DSH",
       prompt: "Implement.",
       worktreePath: "/repo/.ouroboros/worktrees/task_dsh_source",
+      config: {
+        agentBackend: "deepseek-harness",
+        permissionMode: "workspace-write",
+        dshProfileIsolation: "base-headless",
+        dshRequiredPlugins: [],
+        dshModelTransport: "host-brokered-deepseek",
+        dshToolNetwork: "deny",
+        dshFilePolicy: {
+          schemaVersion: 1,
+          source: "frozen-design-mutation-surfaces",
+          allowedPaths: ["config/evolution/**", "tests/evolution/**"],
+          forbiddenPaths: [".git/orbs/**", ".orbs/**", ".ouroboros/**", "db/**"],
+        },
+      },
     });
     harness.recordAttempt({
       taskId: sourceTaskId,
@@ -9378,8 +9478,19 @@ describe("runner", () => {
     const repair = harness.getRunOverview({ runId }).tasks.find((task) => task.parentId === verifierTaskId)!;
     expect(result.decision).toBe("continue");
     expect(repair.config).toEqual({
+      agentBackend: "deepseek-harness",
+      permissionMode: "workspace-write",
       verifierContract: { deterministicChecks: ["bun test"] },
       dshProfileIsolation: "base-headless",
+      dshRequiredPlugins: [],
+      dshModelTransport: "host-brokered-deepseek",
+      dshToolNetwork: "deny",
+      dshFilePolicy: {
+        schemaVersion: 1,
+        source: "frozen-design-mutation-surfaces",
+        allowedPaths: ["config/evolution/**", "tests/evolution/**"],
+        forbiddenPaths: [".git/orbs/**", ".orbs/**", ".ouroboros/**", "db/**"],
+      },
     });
     expect(JSON.stringify(repair.config)).not.toContain("TOKEN");
     expect(repair.worktreePath).toBe("/repo/.ouroboros/worktrees/task_dsh_source");
@@ -9500,7 +9611,8 @@ describe("runner", () => {
       runId,
       stopHooksByRole: { verifier: [createRepairTaskHook({ harness })] },
       executor: async () => ({
-        status: "blocked",
+        status: "done",
+        verdict: "fail",
         summary: "Public receipt minting remains reachable.",
         changedFiles: [],
         checks: [{ name: "capability ownership", status: "failed", evidence: "public createAuthenticatedReceipt" }],
@@ -9510,7 +9622,8 @@ describe("runner", () => {
     });
 
     const attempt = harness.getAttempt(result!.attemptId)!;
-    expect(attempt.output.status).toBe("blocked");
+    expect(attempt.output.status).toBe("done");
+    expect(attempt.output.verdict).toBe("fail");
     expect(attempt.output.summary).toBe("Public receipt minting remains reachable.");
     expect(attempt.output.problems).toEqual(["target-project code can still mint an accepted trusted receipt"]);
     expect(attempt.output.artifacts).toContainEqual(expect.objectContaining({
@@ -9603,6 +9716,35 @@ describe("runner", () => {
       used: 1,
       entries: [expect.objectContaining({ taskId: verifierId, kind: "repair" })],
     });
+  });
+
+  test("terminal reconciliation recovers a historical done verifier with semantic failure", async () => {
+    const runId = harness.createRun({ goal: "Recover semantic verifier output" });
+    const workerId = harness.createTask({ runId, role: "worker", goal: "Implement", prompt: "Implement.", worktreePath: "/tmp/semantic-repair" });
+    harness.recordAttempt({
+      taskId: workerId,
+      input: { cwd: "/tmp/semantic-repair" },
+      output: { status: "done", summary: "done", changedFiles: ["src/change.ts"], checks: [], artifacts: [], problems: [] },
+    });
+    const verifierId = harness.createTask({ runId, role: "verifier", goal: "Verify", prompt: "Verify.", dependsOn: [workerId] });
+    harness.recordAttempt({
+      taskId: verifierId,
+      input: { cwd: "/tmp/semantic-repair" },
+      output: {
+        status: "done",
+        summary: "Independent verification completed fail-closed.",
+        changedFiles: [],
+        checks: [{ name: "semantic contract", status: "failed" }],
+        artifacts: [],
+        problems: ["P1: exact restoration is missing"],
+      },
+    });
+
+    await reconcileTerminalBlockedVerifierRepair({ harness, runId });
+
+    const overview = harness.getRunOverview({ runId, eventLimit: 0 });
+    expect(overview.tasks.filter((task) => task.role === "worker" && task.parentId === verifierId)).toHaveLength(1);
+    expect(harness.getRun(runId)?.context.repairReplanBudget).toMatchObject({ used: 1 });
   });
 
   test("concurrent reconciliation recovers one timed out repair from an invalidly completed run", async () => {

@@ -7325,6 +7325,110 @@ describe("Harness actions", () => {
     });
     expect(transportTasks).toHaveLength(2);
     expect(harness.getRun(runId)?.context.repairReplanBudget).toEqual({ limit: 3, used: 1, entries: [] });
+
+    harness.recordAttempt({
+      taskId: transportWorker.id,
+      input: { executor: "dsh-cli", cwd: "/tmp/frozen-dsh-worktree" },
+      output: {
+        status: "done",
+        summary: "DSH implementation completed through the host broker.",
+        changedFiles: ["tests/evolution/v5/example.test.mjs"],
+        checks: [{ name: "offline tests", status: "passed" }],
+        artifacts: [{
+          kind: "dsh_execution_profile_receipt",
+          modelTransport: { enforcement: "loopback-http-broker", credentialIsolation: true },
+          toolSandbox: { network: "deny", credentialsInherited: false },
+          noTargetNetworkBypass: true,
+        }],
+        problems: [],
+      },
+    });
+    const verifierProblems = [
+      "P1: required config/evolution/v5 artifact surface is missing",
+      "P1: episode admission is permissive",
+      "P1: matched comparison is asserted",
+      "P1: required evidence is incomplete",
+      "P1: professional review receipts are synthetic",
+      "P1: creative gates accept invalid states",
+      "P1: rollback does not restore target state",
+    ];
+    harness.recordAttempt({
+      taskId: transportVerifier.id,
+      input: { executor: "codex-resumable", cwd: "/tmp/frozen-dsh-worktree" },
+      output: {
+        status: "done",
+        verdict: "fail",
+        summary: "Independent verification completed fail-closed.",
+        changedFiles: [],
+        checks: verifierProblems.map((problem) => ({ name: problem, status: "failed" })),
+        artifacts: [],
+        problems: verifierProblems,
+      },
+    });
+
+    const verifierRepair = applyHarnessAction(harness, {
+      type: "materializeVerifierRepairRecovery",
+      runId,
+      verifierTaskId: transportVerifier.id,
+      reason: "repair the seven frozen verifier findings without Goal Review",
+    });
+    const verifierRepairReplay = applyHarnessAction(harness, {
+      type: "materializeVerifierRepairRecovery",
+      runId,
+      verifierTaskId: transportVerifier.id,
+      reason: "repair the seven frozen verifier findings without Goal Review",
+    });
+    const repairOverview = harness.getRunOverview({ runId, eventLimit: 0 });
+    const repairTasks = repairOverview.tasks.filter((task) => task.config?.verifierRepairRecovery);
+    const repairWorker = repairTasks.find((task) => task.role === "worker")!;
+    const repairVerifier = repairTasks.find((task) => task.role === "verifier")!;
+    expect(verifierRepair).toMatchObject({
+      status: "done",
+      actionType: "materializeVerifierRepairRecovery",
+      artifacts: [expect.objectContaining({
+        kind: "verifier_repair_recovery",
+        verifierTaskId: transportVerifier.id,
+        repairTaskId: repairWorker.id,
+        nextVerifierTaskId: repairVerifier.id,
+        reused: false,
+      })],
+    });
+    expect(repairWorker).toMatchObject({
+      status: "todo",
+      dependsOn: [transportWorker.id],
+      worktreePath: "/tmp/frozen-dsh-worktree",
+      config: {
+        agentBackend: "deepseek-harness",
+        permissionMode: "workspace-write",
+        dshModelTransport: "host-brokered-deepseek",
+        dshToolNetwork: "deny",
+        dshFilePolicy: transportWorker.config?.dshFilePolicy,
+      },
+    });
+    expect(repairWorker.prompt).toContain(verifierProblems[0]!);
+    expect(repairWorker.prompt).toContain(verifierProblems[6]!);
+    expect(repairVerifier).toMatchObject({
+      status: "todo",
+      dependsOn: [repairWorker.id],
+      worktreePath: "/tmp/frozen-dsh-worktree",
+      config: {
+        permissionMode: "read-only",
+        readOnly: true,
+        forbidImplementation: true,
+        verdictRequired: true,
+      },
+    });
+    expect(repairTasks).toHaveLength(2);
+    expect(harness.getRun(runId)?.context.repairReplanBudget).toMatchObject({ used: 2, limit: 3 });
+    expect(verifierRepairReplay).toMatchObject({
+      status: "done",
+      artifacts: [expect.objectContaining({
+        repairTaskId: repairWorker.id,
+        nextVerifierTaskId: repairVerifier.id,
+        reused: true,
+      })],
+    });
+    expect(repairOverview.tasks.filter((task) => task.role === "goal-review")).toHaveLength(1);
   });
 
   test("materializes one audited read-only Designer recovery from a blocked fixed-action attempt", () => {

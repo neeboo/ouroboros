@@ -1100,6 +1100,7 @@ function readString(record: Record<string, unknown> | null, key: string): string
 
 type RequiredOutputExample = {
   status: string;
+  verdict?: "pass" | "fail";
   summary: string;
   changedFiles: unknown[];
   checks: unknown[];
@@ -1134,6 +1135,13 @@ const DEFAULT_REQUIRED_OUTPUT: RequiredOutputExample = {
 };
 
 function requiredOutputForRole(role: string, taskConfig?: Record<string, unknown>): RequiredOutputExample {
+  if (role === "verifier") {
+    return {
+      ...DEFAULT_REQUIRED_OUTPUT,
+      verdict: "pass",
+      actions: [],
+    };
+  }
   if (role !== "designer") {
     return DEFAULT_REQUIRED_OUTPUT;
   }
