@@ -6908,6 +6908,28 @@ describe("Harness actions", () => {
           requiredEvidence: ["independent verifier receipt"],
         },
         investment: { reversibility: "easy", portfolio: "core", oneTimeCost: 0, recurringCost: 0 },
+        evolutionPack: {
+          mutationSurfaces: [
+            {
+              id: "policy",
+              evolutionTarget: "artifact",
+              layer: "policy",
+              projectId,
+              allowedPaths: ["config/evolution/**"],
+              forbiddenPaths: ["db/**"],
+              owner: "target",
+            },
+            {
+              id: "tests",
+              evolutionTarget: "harness",
+              layer: "workflow",
+              projectId,
+              allowedPaths: ["tests/evolution/**"],
+              forbiddenPaths: ["db/**"],
+              owner: "ouroboros",
+            },
+          ],
+        } as never,
       },
     });
     const decision = harness.recordDesignDecision({
@@ -7114,6 +7136,108 @@ describe("Harness actions", () => {
     });
     expect(recoveryTasks).toHaveLength(3);
     expect(overview.tasks.filter((task) => task.role === "goal-review")).toHaveLength(1);
+    expect(harness.getRun(runId)?.context.repairReplanBudget).toEqual({ limit: 3, used: 1, entries: [] });
+
+    harness.recordAttempt({
+      taskId: planner.id,
+      input: { executor: "codex-resumable", permissionMode: "read-only" },
+      output: {
+        status: "done",
+        summary: "Recovered Planner confirmed the frozen graph.",
+        changedFiles: [],
+        checks: [],
+        artifacts: [],
+        problems: [],
+      },
+    });
+    harness.recordAttempt({
+      taskId: worker.id,
+      input: { executor: "dsh-cli", permissionMode: "read-only", cwd: "/tmp/frozen-dsh-worktree" },
+      output: {
+        status: "blocked",
+        summary: "CLI fallback incorrectly overrode frozen workspace-write.",
+        changedFiles: [],
+        checks: [],
+        artifacts: [{ kind: "dsh_execution_profile_receipt", permissionMode: "read-only" }],
+        problems: ["runtime snapshot denied config/evolution/** and tests/evolution/** writes"],
+      },
+    });
+    harness.recordAttempt({
+      taskId: verifier.id,
+      input: { executor: "codex-resumable", permissionMode: "read-only", cwd: "/tmp/frozen-dsh-worktree" },
+      output: {
+        status: "blocked",
+        summary: "Verifier dependency was blocked.",
+        changedFiles: [],
+        checks: [],
+        artifacts: [],
+        problems: ["task dependencies are blocked"],
+      },
+    });
+    const runtimeRecovery = applyHarnessAction(harness, {
+      type: "materializeDesignWorkerRuntimeRecovery",
+      runId,
+      sourceWorkerTaskId: worker.id,
+      reason: "recover the frozen DSH permission route once",
+    });
+    const runtimeReplay = applyHarnessAction(harness, {
+      type: "materializeDesignWorkerRuntimeRecovery",
+      runId,
+      sourceWorkerTaskId: worker.id,
+      reason: "recover the frozen DSH permission route once",
+    });
+    const recoveredOverview = harness.getRunOverview({ runId, eventLimit: 0 });
+    const runtimeTasks = recoveredOverview.tasks.filter((task) => task.config?.designWorkerRuntimeRecovery);
+    const recoveredWorker = runtimeTasks.find((task) => task.role === "worker")!;
+    const recoveredVerifier = runtimeTasks.find((task) => task.role === "verifier")!;
+    expect(runtimeRecovery).toMatchObject({
+      status: "done",
+      actionType: "materializeDesignWorkerRuntimeRecovery",
+      artifacts: [expect.objectContaining({
+        kind: "design_worker_runtime_recovery",
+        sourceWorkerTaskId: worker.id,
+        workerTaskId: recoveredWorker.id,
+        verifierTaskId: recoveredVerifier.id,
+        reused: false,
+      })],
+    });
+    expect(recoveredWorker).toMatchObject({
+      status: "todo",
+      dependsOn: [planner.id],
+      config: {
+        agentBackend: "deepseek-harness",
+        permissionMode: "workspace-write",
+        sourceWorktreePath: "/tmp/frozen-dsh-worktree",
+        dshFilePolicy: {
+          schemaVersion: 1,
+          source: "frozen-design-mutation-surfaces",
+          allowedPaths: ["config/evolution/**", "tests/evolution/**"],
+          forbiddenPaths: [".git/orbs/**", ".orbs/**", ".ouroboros/**", "db/**"],
+        },
+      },
+    });
+    expect(recoveredVerifier).toMatchObject({
+      status: "todo",
+      dependsOn: [recoveredWorker.id],
+      config: {
+        permissionMode: "read-only",
+        sourceTaskId: recoveredWorker.id,
+        offlineTestPolicy: {
+          mode: "allowlist",
+          allowedPaths: ["tests/evolution/**"],
+          forbidTargetBusinessTests: true,
+        },
+      },
+    });
+    expect(runtimeReplay).toMatchObject({
+      status: "done",
+      artifacts: [expect.objectContaining({
+        workerTaskId: recoveredWorker.id,
+        verifierTaskId: recoveredVerifier.id,
+        reused: true,
+      })],
+    });
+    expect(runtimeTasks).toHaveLength(2);
     expect(harness.getRun(runId)?.context.repairReplanBudget).toEqual({ limit: 3, used: 1, entries: [] });
   });
 

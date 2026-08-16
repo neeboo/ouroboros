@@ -934,6 +934,7 @@ class CodexResumableOrchestrator {
           sessionName,
           executor: route.backend.kind,
           ...attemptInputForRoute(route, cwd),
+          permissionMode: permissionModeForTask(task, this.input.codexOptions?.sandbox ?? "workspace-write"),
           ...(this.input.genericAttemptInput?.({ run, task, sessionName, cwd, route }) ?? {}),
           ...(hostCapabilityReadback ? { hostCapabilityReadback } : {}),
           ...harnessRevisionAttemptInput(loadedHarnessRevision),
@@ -1158,7 +1159,7 @@ class CodexResumableOrchestrator {
         cwd: factoryInput.cwd,
         route: factoryInput.route,
         approval: "approve-reads",
-        sandbox: "read-only",
+        sandbox: permissionModeForTask(factoryInput.task, "read-only"),
         timeoutMs: this.genericHardMs,
         idleTimeoutMs: this.genericIdleMs,
         replayCache: this.replayCache,
@@ -1169,6 +1170,7 @@ class CodexResumableOrchestrator {
           ? "base-headless"
           : undefined,
         dshRequiredPlugins: stringArrayConfig(factoryInput.task.config?.dshRequiredPlugins),
+        dshFilePolicy: factoryInput.task.config?.dshFilePolicy as import("./executors/types").DshFilePolicy | undefined,
       }));
     const executor = executorFactory({
       run: input.run,
@@ -1511,10 +1513,13 @@ class CodexResumableOrchestrator {
     if (this.input.clientFactory) {
       return this.input.clientFactory(input);
     }
+    const sandbox = input.task
+      ? permissionModeForTask(input.task, this.input.codexOptions?.sandbox ?? "workspace-write")
+      : this.input.codexOptions?.sandbox ?? "workspace-write";
     return createCodexResumableClient({
       cwd: input.cwd,
-      sandbox: input.task?.config?.readOnly === true ? "read-only" : "workspace-write",
       ...this.input.codexOptions,
+      sandbox,
       browserProcessPolicy: input.task?.role === "goal-review" ? "deny" : this.input.codexOptions?.browserProcessPolicy,
       hostExecutionCapabilities: input.task?.config?.hostExecutionCapabilities,
       taskRole: input.task?.role,
@@ -1718,6 +1723,18 @@ function attemptInputForRoute(route: ResolvedExecutionRoute, cwd: string) {
     cwd,
     model: route.model,
   };
+}
+
+function permissionModeForTask(task: Task, fallback: "read-only" | "workspace-write" | "danger-full-access") {
+  const configured = task.config?.permissionMode;
+  if (configured === undefined) return task.config?.readOnly === true ? "read-only" : fallback;
+  if (configured !== "read-only" && configured !== "workspace-write") {
+    throw new Error(`task ${task.id} has invalid permissionMode`);
+  }
+  if ((task.role === "planner" || task.role === "verifier" || task.role === "goal-review") && configured !== "read-only") {
+    throw new Error(`task ${task.id} role ${task.role} cannot request ${configured}`);
+  }
+  return configured;
 }
 
 function stringArrayConfig(value: unknown) {

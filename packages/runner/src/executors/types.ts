@@ -109,4 +109,12 @@ export interface DshCliExecutorOptions {
   hostExecutionCapabilities?: unknown;
   isolatedProfile?: "base-headless";
   requiredPlugins?: string[];
+  filePolicy?: DshFilePolicy;
+}
+
+export interface DshFilePolicy {
+  schemaVersion: 1;
+  source: "frozen-design-mutation-surfaces";
+  allowedPaths: string[];
+  forbiddenPaths: string[];
 }

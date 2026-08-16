@@ -1,7 +1,7 @@
 import { createAcpxAgentExecutor } from "./executors/acpx";
 import { createCodexCliExecutor } from "./executors/codex-cli";
 import { createDshCliExecutor } from "./executors/dsh-cli";
-import type { ApprovalMode, AttemptReplayCache, BrowserProcessPolicy, CodexSandbox, RunCommand, WorktreeEvidenceProbe } from "./executors/types";
+import type { ApprovalMode, AttemptReplayCache, BrowserProcessPolicy, CodexSandbox, DshFilePolicy, RunCommand, WorktreeEvidenceProbe } from "./executors/types";
 import type { DshCommandResolver } from "./dsh-readiness";
 import type { ResolvedAgentBackend } from "./agent-backends";
 import type { ResolvedExecutionRoute } from "./execution-routing";
@@ -27,6 +27,7 @@ export interface RouteExecutorOptions {
   verifierContract?: unknown;
   dshProfileIsolation?: "base-headless";
   dshRequiredPlugins?: string[];
+  dshFilePolicy?: DshFilePolicy;
 }
 
 export function createRouteExecutor(options: RouteExecutorOptions): TaskExecutor {
@@ -96,6 +97,7 @@ export function createRouteExecutor(options: RouteExecutorOptions): TaskExecutor
       hostExecutionCapabilities: options.hostExecutionCapabilities,
       isolatedProfile: options.dshProfileIsolation ?? "base-headless",
       requiredPlugins: options.dshRequiredPlugins,
+      filePolicy: options.dshFilePolicy,
     });
   }
   return createCodexCliExecutor({

@@ -7,7 +7,12 @@ import { promptBudgetBlockedOutput, promptBudgetEvidence } from "../prompt-budge
 import { resolveDshCommand } from "../dsh-readiness";
 import type { TaskExecutor } from "../types";
 import { commandProblem, runLocalCommand } from "./command";
-import { darwinDshHostReadProfile, prepareDshProcessPolicy } from "./dsh-process-policy";
+import {
+  darwinDshHostReadProfile,
+  normalizeDshFilePolicy,
+  prepareDshProcessPolicy,
+  type NormalizedDshFilePolicy,
+} from "./dsh-process-policy";
 import { parseAttemptOutput } from "./output";
 import type { DshCliExecutorOptions } from "./types";
 
@@ -23,12 +28,14 @@ interface DshExecutionProfileReceipt {
   profile: "headless";
   mode: "base-headless";
   enabledPlugins: string[];
+  permissionMode: "read-only" | "workspace-write";
+  filePolicy: NormalizedDshFilePolicy | null;
   profileSha256: string;
   profilePatchSha256: string;
   processPolicyPatchSha256: string;
   controlPathReadPolicy: "deny";
   deniedControlPathRootsSha256: string;
-  network: { mode: "deny"; enforcement: "dsh-sandbox-local" };
+  network: { mode: "deny"; enforcement: "darwin-host-seatbelt" };
   preflight: {
     passed: true;
     projectPluginsLoaded: false;
@@ -58,6 +65,16 @@ export function createDshCliExecutor(options: DshCliExecutorOptions): TaskExecut
         "DeepSeek Harness danger-full-access is disabled",
         "dsh permission boundary",
         "DSH CLI executor refuses danger-full-access before launching the model.",
+      );
+    }
+    let filePolicy: NormalizedDshFilePolicy | null = null;
+    try {
+      filePolicy = sandbox === "workspace-write" ? normalizeDshFilePolicy(options.filePolicy) : null;
+    } catch (error) {
+      return blockedOutput(
+        "DeepSeek Harness workspace-write policy is missing or invalid",
+        "dsh file policy",
+        error instanceof Error ? error.message : String(error),
       );
     }
     if (options.hostExecutionCapabilities !== undefined && options.hostExecutionCapabilities !== null) {
@@ -123,7 +140,13 @@ export function createDshCliExecutor(options: DshCliExecutorOptions): TaskExecut
         throw new Error("DSH offline network denial is unsupported on this host and must fail closed before model execution.");
       }
       const processEnvironment = dshProcessEnvironment(options.env, isolatedProfile.home, sandbox);
-      const hostReadProfile = darwinDshHostReadProfile({ workspaceRoot: options.cwd });
+      const hostReadProfile = darwinDshHostReadProfile({
+        workspaceRoot: options.cwd,
+        permissionMode: sandbox,
+        allowedPaths: filePolicy?.allowedPaths,
+        forbiddenPaths: filePolicy?.forbiddenPaths,
+        temporaryWritePaths: [isolatedProfile.home, tmpdir()],
+      });
       const modelCredentialNames = processEnvironment.DEEPSEEK_API_KEY ? ["DEEPSEEK_API_KEY"] : [];
       profileReceipt = {
         kind: "dsh_execution_profile_receipt",
@@ -132,12 +155,14 @@ export function createDshCliExecutor(options: DshCliExecutorOptions): TaskExecut
         profile: "headless",
         mode: "base-headless",
         enabledPlugins: [...BASE_HEADLESS_PLUGINS],
+        permissionMode: sandbox,
+        filePolicy,
         profileSha256: isolatedProfile.profileSha256,
         profilePatchSha256: isolatedProfile.profilePatchSha256,
         processPolicyPatchSha256: processPolicy.patchSha256,
         controlPathReadPolicy: "deny",
         deniedControlPathRootsSha256: hostReadProfile.deniedReadPathsSha256,
-        network: { mode: "deny", enforcement: "dsh-sandbox-local" },
+        network: { mode: "deny", enforcement: "darwin-host-seatbelt" },
         preflight: {
           passed: true,
           projectPluginsLoaded: false,

@@ -240,6 +240,12 @@ describe("route executor", () => {
       cwd: "/repo/.ouroboros/worktrees/task_1",
       route,
       sandbox: "workspace-write",
+      dshFilePolicy: {
+        schemaVersion: 1,
+        source: "frozen-design-mutation-surfaces",
+        allowedPaths: ["config/evolution/**", "tests/evolution/**"],
+        forbiddenPaths: ["db/**", ".git/orbs/**", ".ouroboros/**", ".orbs/**"],
+      },
       resolveDshCommand: () => ({
         configuredCommand: "/custom/dsh",
         resolutionMode: "explicit",
@@ -269,11 +275,13 @@ describe("route executor", () => {
 
     expect(output.summary).toBe("dsh route ok");
     expect(calls).toHaveLength(1);
-    expect(calls[0]).toMatchObject({
-      cwd: "/repo/.ouroboros/worktrees/task_1",
-      env: { DSH_HOME: "/tmp/dsh-home", DSH_PERMISSION_MODE: "workspace-write" },
-    });
-    expect(calls[0]?.cmd.slice(0, 3)).toEqual(["/custom/dsh", "--profile", "headless"]);
+    expect(calls[0]?.cwd).toBe("/repo/.ouroboros/worktrees/task_1");
+    expect(calls[0]?.env?.DSH_PERMISSION_MODE).toBe("workspace-write");
+    expect(calls[0]?.env?.DSH_HOME).not.toBe("/tmp/dsh-home");
+    expect(calls[0]?.cmd.slice(0, 3)).toEqual(["/usr/bin/sandbox-exec", "-p", expect.any(String)]);
+    expect(calls[0]?.cmd).toContain("/custom/dsh");
+    expect(calls[0]?.cmd).toContain("--profile");
+    expect(calls[0]?.cmd).toContain("headless");
     expect(calls[0]?.cmd).toContain("--patch");
     expect(calls[0]?.cmd.at(-1)).toBe("Implement the task");
   });

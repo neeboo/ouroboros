@@ -9177,6 +9177,15 @@ if (args.includes("self-improve-daemon")) {
       goal: "Build offline fixture evidence",
       prompt: "Use only local fixtures.",
       worktreePath: worktree,
+      config: {
+        permissionMode: "workspace-write",
+        dshFilePolicy: {
+          schemaVersion: 1,
+          source: "frozen-design-mutation-surfaces",
+          allowedPaths: ["config/evolution/**", "tests/evolution/**"],
+          forbiddenPaths: ["db/**", ".git/orbs/**", ".ouroboros/**", ".orbs/**"],
+        },
+      },
     });
 
     await runCliJson(
@@ -9184,6 +9193,7 @@ if (args.includes("self-improve-daemon")) {
       "--run-id", runId,
       "--executor", "dsh-cli",
       "--cwd", worktree,
+      "--sandbox", "read-only",
       "--start-hook", "none",
       "--max-rounds", "1",
       "--tasks", "1",
@@ -9192,13 +9202,20 @@ if (args.includes("self-improve-daemon")) {
     const session = harness.getRunOverview({ runId, eventLimit: 0 }).sessions.find((candidate) => candidate.taskId === workerId)!;
     const attempt = harness.getAttempt(session.attemptId)!;
     expect(attempt.status).toBe("done");
+    expect(attempt.input.permissionMode).toBe("workspace-write");
     expect(attempt.input.dshProfileIsolation).toBe("base-headless");
     expect(attempt.output.artifacts).toContainEqual(expect.objectContaining({
       kind: "dsh_execution_profile_receipt",
       attemptId: attempt.id,
       mode: "base-headless",
       enabledPlugins: ["@deepseek-ai/dsh-base", "@deepseek-ai/dsh-headless"],
-      network: { mode: "deny", enforcement: "dsh-sandbox-local" },
+      permissionMode: "workspace-write",
+      filePolicy: expect.objectContaining({
+        allowedPaths: ["config/evolution/**", "tests/evolution/**"],
+        forbiddenPaths: [".git/orbs/**", ".orbs/**", ".ouroboros/**", "db/**"],
+        sha256: expect.stringMatching(/^[a-f0-9]{64}$/),
+      }),
+      network: { mode: "deny", enforcement: "darwin-host-seatbelt" },
       preflight: expect.objectContaining({
         passed: true,
         projectPluginsLoaded: false,
@@ -13668,6 +13685,50 @@ if (args.includes("self-improve-daemon")) {
 
     expect(sandboxIndex).toBeGreaterThanOrEqual(0);
     expect(args[sandboxIndex + 1]).toBe("workspace-write");
+  });
+
+  test("task-level read-only permission overrides the writable run-loop fallback", async () => {
+    await runCli("init");
+    const harness = new Harness(dbPath);
+    const runId = harness.createRun({ goal: "Preserve a frozen read-only Planner" });
+    const taskId = harness.createTask({
+      runId,
+      role: "planner",
+      goal: "Inspect without mutation",
+      prompt: "Return read-only evidence.",
+      config: { permissionMode: "read-only", readOnly: true },
+    });
+    const argsPath = join(dir, "codex-read-only-task-args.json");
+    const codexBin = join(dir, "fake-codex-read-only-task");
+    await writeFile(
+      codexBin,
+      [
+        "#!/usr/bin/env bun",
+        "import { writeFileSync } from 'node:fs';",
+        `writeFileSync(${JSON.stringify(argsPath)}, JSON.stringify(Bun.argv.slice(2)));`,
+        "const outputFlag = Bun.argv.indexOf('--output-last-message');",
+        "const outputPath = outputFlag >= 0 ? Bun.argv[outputFlag + 1] : '';",
+        "if (outputPath) writeFileSync(outputPath, JSON.stringify({ status: 'done', summary: 'read only', changedFiles: [], checks: [], artifacts: [], problems: [] }));",
+        "console.log(JSON.stringify({ type: 'session.started', session_id: 'session_read_only_task' }));",
+      ].join("\n"),
+    );
+    await chmod(codexBin, 0o755);
+
+    await runCliJson(
+      "run-loop",
+      "--run-id", runId,
+      "--executor", "codex-resumable",
+      "--codex-bin", codexBin,
+      "--cwd", dir,
+      "--sandbox", "workspace-write",
+      "--start-hook", "none",
+      "--max-rounds", "1",
+    );
+    const args = JSON.parse(await Bun.file(argsPath).text());
+    const sandboxIndex = args.indexOf("--sandbox");
+    const session = harness.getRunOverview({ runId, eventLimit: 0 }).sessions.find((candidate) => candidate.taskId === taskId)!;
+    expect(args[sandboxIndex + 1]).toBe("read-only");
+    expect(harness.getAttempt(session.attemptId)?.input.permissionMode).toBe("read-only");
   });
 
   test("autopilot blocks stale running attempts without an agent session id instead of retrying", async () => {

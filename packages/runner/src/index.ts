@@ -175,6 +175,7 @@ export type {
   CodexSandbox,
   CommandResult,
   DshCliExecutorOptions,
+  DshFilePolicy,
   RunCommand,
   RunCommandInput,
   WorktreeEvidenceProbe,

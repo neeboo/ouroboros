@@ -69,7 +69,7 @@ import {
   terminateProcessTreeSync,
   DEFAULT_REPAIR_REPLAN_BUDGET_LIMIT,
 } from "@ouroboros/runner";
-import type { CodexSandbox, ResolvedExecutionRoute, StopHook } from "@ouroboros/runner";
+import type { CodexSandbox, DshFilePolicy, ResolvedExecutionRoute, StopHook } from "@ouroboros/runner";
 import { fail, flag, parseArgs, required } from "./args";
 import { loadOuroborosConfig, resolveLinearPolling, type LinearConfig } from "./config";
 import { parseArray, parseObject, printJson } from "./json";
@@ -2110,7 +2110,7 @@ function executorFactory(_executorName: CliExecutorName) {
       route: input.route,
       approval: parseApproval(flag(parsed, "approval") ?? "approve-reads"),
       browserProcessPolicy: input.task.role === "goal-review" ? "deny" : parseBrowserProcessPolicy(),
-      sandbox: parseSandbox(flag(parsed, "sandbox") ?? "read-only"),
+      sandbox: taskPermissionMode(input.task, parseSandbox(flag(parsed, "sandbox") ?? "read-only")),
       codexBin: flag(parsed, "codex-bin"),
       timeoutMs: hardTimeoutMs,
       idleTimeoutMs: input.route.backend.kind === "dsh-cli" ? hardTimeoutMs : genericIdleTimeoutMs(),
@@ -2120,6 +2120,7 @@ function executorFactory(_executorName: CliExecutorName) {
       verifierContract: input.task.config?.verifierContract,
       dshProfileIsolation: dshProfileIsolationForRoute(input.route),
       dshRequiredPlugins: stringArrayConfig(input.task.config?.dshRequiredPlugins),
+      dshFilePolicy: dshFilePolicyConfig(input.run, input.task),
     });
   };
 }
@@ -2133,8 +2134,10 @@ function attemptInputFactory(_executorName: CliExecutorName) {
   }) => {
     const dshProfileIsolation = dshProfileIsolationForRoute(input.route);
     const dshRequiredPlugins = stringArrayConfig(input.task.config?.dshRequiredPlugins);
+    const permissionMode = taskPermissionMode(input.task, parseSandbox(flag(parsed, "sandbox") ?? "read-only"));
     return {
       ...attemptInputForRoute(input.route, input.cwd),
+      permissionMode,
       ...(dshProfileIsolation ? { dshProfileIsolation } : {}),
       ...(dshRequiredPlugins?.length ? { dshRequiredPlugins } : {}),
       ...hostExecutionCapabilityAttemptInput(input.task.config?.hostExecutionCapabilities, {
@@ -2155,6 +2158,51 @@ function stringArrayConfig(value: unknown) {
     return ["<invalid dshRequiredPlugins configuration>"];
   }
   return [...new Set(value.map((item) => item.trim()))].sort();
+}
+
+function taskPermissionMode(task: NonNullable<ReturnType<Harness["getTask"]>>, fallback: CodexSandbox): CodexSandbox {
+  const configured = task.config?.permissionMode;
+  if (configured === undefined) return fallback;
+  if (configured !== "read-only" && configured !== "workspace-write") {
+    fail(`task ${task.id} has invalid permissionMode`);
+  }
+  if ((task.role === "planner" || task.role === "verifier" || task.role === "goal-review") && configured !== "read-only") {
+    fail(`task ${task.id} role ${task.role} cannot request ${configured}`);
+  }
+  return configured;
+}
+
+function dshFilePolicyConfig(
+  run: NonNullable<ReturnType<Harness["getRun"]>>,
+  task: NonNullable<ReturnType<Harness["getTask"]>>,
+): DshFilePolicy | undefined {
+  const value = task.config?.dshFilePolicy;
+  if (value === undefined) return undefined;
+  if (run.context.source !== "design") return value as DshFilePolicy;
+  const proposal = recordValue(run.context.designProposal);
+  const pack = recordValue(proposal.evolutionPack);
+  const surfaces = Array.isArray(pack.mutationSurfaces) ? pack.mutationSurfaces.map(recordValue) : [];
+  const allowedPaths = [...new Set(surfaces.flatMap((surface) =>
+    Array.isArray(surface.allowedPaths) ? surface.allowedPaths.filter((entry): entry is string => typeof entry === "string") : []
+  ))].sort();
+  const forbiddenPaths = [...new Set([
+    ...surfaces.flatMap((surface) =>
+      Array.isArray(surface.forbiddenPaths) ? surface.forbiddenPaths.filter((entry): entry is string => typeof entry === "string") : []
+    ),
+    ".git/orbs/**",
+    ".ouroboros/**",
+    ".orbs/**",
+  ])].sort();
+  const expected: DshFilePolicy = {
+    schemaVersion: 1,
+    source: "frozen-design-mutation-surfaces",
+    allowedPaths,
+    forbiddenPaths,
+  };
+  if (JSON.stringify(value) !== JSON.stringify(expected)) {
+    fail(`task ${task.id} DSH file policy exceeds or drifts from the frozen design mutation surfaces`);
+  }
+  return expected;
 }
 
 function resolveCliExecutionRoute(input: {

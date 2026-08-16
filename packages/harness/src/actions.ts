@@ -131,6 +131,12 @@ export type HarnessAction =
       reason?: string;
     }
   | {
+      type: "materializeDesignWorkerRuntimeRecovery";
+      runId: string;
+      sourceWorkerTaskId: string;
+      reason?: string;
+    }
+  | {
       type: "buildVersionedCorpusManifest";
       projectId: string;
       sourceRunId: string;
@@ -652,6 +658,15 @@ export function parseHarnessAction(value: unknown): HarnessAction {
       reason: optionalStringField(record, "reason"),
     };
   }
+  if (type === "materializeDesignWorkerRuntimeRecovery") {
+    assertOnlyFields(record, type, ["type", "runId", "sourceWorkerTaskId", "reason"]);
+    return {
+      type,
+      runId: stringField(record, "runId"),
+      sourceWorkerTaskId: stringField(record, "sourceWorkerTaskId"),
+      reason: optionalStringField(record, "reason"),
+    };
+  }
   if (type === "buildVersionedCorpusManifest") {
     assertOnlyFields(record, type, [
       "type",
@@ -1045,7 +1060,7 @@ export function parseHarnessAction(value: unknown): HarnessAction {
     };
   }
   throw new Error(
-    "harness action type must be reclaimRunningTasks, retryTask, reconcileRunEvidence, recordSignal, linkResearchEvidence, materializeDesignerActionRecovery, materializeDesignDeliveryRecovery, buildVersionedCorpusManifest, bindHostEvidenceMaintenanceReceipt, materializeHostEvidenceMaintenanceDelivery, markRunTodo, updateRunContext, amendRunContract, retireRun, retireTask, prepareRunDrain, completeSystemTask, integrateVerifiedRun, pushExactGitRef, createExactGitRef, commitExactGitIndex, stageExactWorkerFilesForVerification, materializeAttemptArtifactsForVerification, verifySealedCorpusForVerification, registerEvolutionProfile, recordProductionEpisode, registerHarnessVariant, activateHarnessRevision, freezeMatchedExperiment, interruptAttemptAndCreateTask, interruptRunningAttemptsAndCreateTask, acceptGuardrailProposal, startSubsession, collectSubsessions, cancelSubsessions, or runWatchdogPass",
+    "harness action type must be reclaimRunningTasks, retryTask, reconcileRunEvidence, recordSignal, linkResearchEvidence, materializeDesignerActionRecovery, materializeDesignDeliveryRecovery, materializeDesignWorkerRuntimeRecovery, buildVersionedCorpusManifest, bindHostEvidenceMaintenanceReceipt, materializeHostEvidenceMaintenanceDelivery, markRunTodo, updateRunContext, amendRunContract, retireRun, retireTask, prepareRunDrain, completeSystemTask, integrateVerifiedRun, pushExactGitRef, createExactGitRef, commitExactGitIndex, stageExactWorkerFilesForVerification, materializeAttemptArtifactsForVerification, verifySealedCorpusForVerification, registerEvolutionProfile, recordProductionEpisode, registerHarnessVariant, activateHarnessRevision, freezeMatchedExperiment, interruptAttemptAndCreateTask, interruptRunningAttemptsAndCreateTask, acceptGuardrailProposal, startSubsession, collectSubsessions, cancelSubsessions, or runWatchdogPass",
   );
 }
 
@@ -1088,6 +1103,10 @@ export function applyHarnessAction(
 
   if (action.type === "materializeDesignDeliveryRecovery") {
     return applyDesignDeliveryRecoveryAtomically(harness, action);
+  }
+
+  if (action.type === "materializeDesignWorkerRuntimeRecovery") {
+    return applyDesignWorkerRuntimeRecoveryAtomically(harness, action);
   }
 
   if (action.type === "reconcileRunEvidence") {
@@ -1148,6 +1167,7 @@ type EvolutionAction = Extract<
 type HarnessRevisionActivationAction = Extract<HarnessAction, { type: "activateHarnessRevision" }>;
 type DesignerActionRecoveryAction = Extract<HarnessAction, { type: "materializeDesignerActionRecovery" }>;
 type DesignDeliveryRecoveryAction = Extract<HarnessAction, { type: "materializeDesignDeliveryRecovery" }>;
+type DesignWorkerRuntimeRecoveryAction = Extract<HarnessAction, { type: "materializeDesignWorkerRuntimeRecovery" }>;
 type RunEvidenceReconciliationAction = Extract<HarnessAction, { type: "reconcileRunEvidence" }>;
 type ResearchEvidenceLinkAction = Extract<HarnessAction, { type: "linkResearchEvidence" }>;
 type BlockedRunSignalAction = Extract<HarnessAction, { type: "recordSignal" }>;
@@ -1301,6 +1321,34 @@ function applyDesignDeliveryRecoveryAtomically(
   try {
     return harness.runInImmediateTransaction((db) => {
       const result = materializeDesignDeliveryRecoveryWithDb(harness, db, action);
+      const eventId = harness.recordHarnessActionEventWithDb(db, {
+        actionType: action.type,
+        status: result.status,
+        request: safeRequest(action),
+        result: resultToRecord(result),
+      });
+      return { ...result, eventId };
+    });
+  } catch (error) {
+    const problem = limitUtf8Output(sanitizeEvolutionErrorText(errorMessage(error)), 4_096);
+    const result = blockedResult(action.type, `${action.type} blocked: ${problem}`, [problem]);
+    const eventId = harness.recordHarnessActionEvent({
+      actionType: action.type,
+      status: result.status,
+      request: safeRequest(action),
+      result: resultToRecord(result),
+    });
+    return { ...result, eventId };
+  }
+}
+
+function applyDesignWorkerRuntimeRecoveryAtomically(
+  harness: Harness,
+  action: DesignWorkerRuntimeRecoveryAction,
+): HarnessActionResult & { eventId: string } {
+  try {
+    return harness.runInImmediateTransaction((db) => {
+      const result = materializeDesignWorkerRuntimeRecoveryWithDb(harness, db, action);
       const eventId = harness.recordHarnessActionEventWithDb(db, {
         actionType: action.type,
         status: result.status,
@@ -2408,6 +2456,7 @@ function materializeDesignDeliveryRecoveryWithDb(
       reused: true,
     }]);
   }
+
   const activeTasks = overview.tasks.filter((task) => task.status === "todo" || task.status === "running");
   if (activeTasks.length > 0) {
     throw new Error(`design child ${run.id} still has active tasks: ${activeTasks.map((task) => task.id).join(", ")}`);
@@ -2570,6 +2619,211 @@ function supersededDesignDeliveryTaskIds(tasks: Task[], sourcePlannerTaskId: str
       && task.status === "blocked")
     .map((task) => task.id)
     .sort();
+}
+
+function materializeDesignWorkerRuntimeRecoveryWithDb(
+  harness: Harness,
+  db: HarnessDatabase,
+  action: DesignWorkerRuntimeRecoveryAction,
+): HarnessActionResult {
+  const overview = harness.getRunOverviewWithDb(db, { runId: action.runId, eventLimit: 0 });
+  const run = overview.run;
+  if (!run || run.context.source !== "design" || run.context.retired === true) {
+    throw new Error(`design Worker runtime recovery requires an active design child: ${action.runId}`);
+  }
+  const sourceWorker = overview.tasks.find((task) => task.id === action.sourceWorkerTaskId);
+  if (!sourceWorker || sourceWorker.role !== "worker" || sourceWorker.status !== "blocked") {
+    throw new Error(`source DSH Worker must be blocked in ${run.id}: ${action.sourceWorkerTaskId}`);
+  }
+  if (sourceWorker.config?.agentBackend !== "deepseek-harness" || sourceWorker.config?.permissionMode !== "workspace-write") {
+    throw new Error(`source Worker ${sourceWorker.id} is not a frozen workspace-write DSH task`);
+  }
+  const sourceAttempt = overview.sessions.filter((session) => session.taskId === sourceWorker.id).at(-1);
+  if (!sourceAttempt || sourceAttempt.status !== "blocked") {
+    throw new Error(`source Worker ${sourceWorker.id} has no blocked terminal attempt`);
+  }
+  const persistedAttempt = harness.getAttemptWithDb(db, sourceAttempt.attemptId);
+  const attemptInput = objectRecordOrNull(persistedAttempt?.input);
+  const permissionReceipt = sourceAttempt.output.artifacts?.find((artifact) =>
+    objectRecordOrNull(artifact)?.kind === "dsh_execution_profile_receipt"
+  );
+  const receiptPermission = objectRecordOrNull(permissionReceipt)?.permissionMode;
+  if (attemptInput?.permissionMode === "workspace-write" && receiptPermission === "workspace-write") {
+    throw new Error(`source Worker ${sourceWorker.id} did not fail from the frozen permission-route mismatch`);
+  }
+  if (sourceWorker.dependsOn.length !== 1) {
+    throw new Error(`source Worker ${sourceWorker.id} must depend on exactly one frozen Planner`);
+  }
+  const planner = overview.tasks.find((task) => task.id === sourceWorker.dependsOn[0]);
+  if (!planner || planner.role !== "planner" || planner.status !== "done" || !planner.config?.frozenDesignPlanner) {
+    throw new Error(`source Worker ${sourceWorker.id} is not downstream of one done frozen Planner`);
+  }
+  const sourceVerifier = overview.tasks.find((task) =>
+    task.role === "verifier" && sameCanonicalValue(task.dependsOn, [sourceWorker.id])
+  );
+  if (!sourceVerifier || sourceVerifier.status !== "blocked") {
+    throw new Error(`source Worker ${sourceWorker.id} has no blocked independent Verifier descendant`);
+  }
+  const proposalId = typeof run.context.designProposalId === "string" ? run.context.designProposalId : "";
+  const storedProposal = proposalId ? harness.getDesignProposalWithDb(db, { id: proposalId }) : null;
+  const storedPack = objectRecordOrNull(storedProposal?.proposal.evolutionPack);
+  const rawSurfaces = Array.isArray(storedPack?.mutationSurfaces) ? storedPack.mutationSurfaces : [];
+  const surfaces = rawSurfaces.map((surface) => objectRecordOrNull(surface)).filter((surface): surface is Record<string, unknown> => Boolean(surface));
+  const allowedPaths = [...new Set(surfaces.flatMap((surface) =>
+    Array.isArray(surface.allowedPaths) ? surface.allowedPaths.filter((path): path is string => typeof path === "string") : []
+  ))].sort();
+  const forbiddenPaths = [...new Set([
+    ...surfaces.flatMap((surface) =>
+      Array.isArray(surface.forbiddenPaths) ? surface.forbiddenPaths.filter((path): path is string => typeof path === "string") : []
+    ),
+    ".git/orbs/**",
+    ".ouroboros/**",
+    ".orbs/**",
+  ])].sort();
+  if (!sameCanonicalValue(allowedPaths, ["config/evolution/**", "tests/evolution/**"])) {
+    throw new Error(`design Worker runtime recovery requires the exact frozen config/evolution/** and tests/evolution/** surfaces`);
+  }
+  const offlineTestPaths = allowedPaths.filter((path) => path.startsWith("tests/evolution/"));
+  if (offlineTestPaths.length === 0) throw new Error("design Worker runtime recovery requires a frozen offline evolution test surface");
+  const worktreePath = sourceWorker.worktreePath
+    ?? (typeof attemptInput?.cwd === "string" ? attemptInput.cwd : null)
+    ?? (typeof sourceWorker.config?.sourceWorktreePath === "string" ? sourceWorker.config.sourceWorktreePath : null);
+  if (!worktreePath) throw new Error(`source Worker ${sourceWorker.id} has no frozen worktree path`);
+
+  const recoveryKey = stableFingerprint({
+    runId: run.id,
+    sourceWorkerTaskId: sourceWorker.id,
+    sourceWorkerAttemptId: sourceAttempt.attemptId,
+    plannerTaskId: planner.id,
+    verifierTaskId: sourceVerifier.id,
+    allowedPaths,
+    forbiddenPaths,
+  });
+  const existing = overview.tasks.filter((task) => objectRecordOrNull(task.config?.designWorkerRuntimeRecovery)?.recoveryKey === recoveryKey);
+  if (existing.length > 0) {
+    const worker = existing.find((task) => task.role === "worker");
+    const verifier = existing.find((task) => task.role === "verifier");
+    if (existing.length !== 2 || !worker || !verifier || !sameCanonicalValue(verifier.dependsOn, [worker.id])) {
+      throw new Error(`existing design Worker runtime recovery conflicts with ${recoveryKey}`);
+    }
+    return doneResult(action.type, `Design Worker runtime recovery ${recoveryKey} reused.`, [
+      { name: "bounded runtime recovery", status: "passed", evidence: "reused" },
+      { name: "repair budget", status: "passed", evidence: "not charged" },
+    ], [{
+      kind: "design_worker_runtime_recovery",
+      runId: run.id,
+      sourceWorkerTaskId: sourceWorker.id,
+      sourceWorkerAttemptId: sourceAttempt.attemptId,
+      workerTaskId: worker.id,
+      verifierTaskId: verifier.id,
+      recoveryKey,
+      reused: true,
+    }]);
+  }
+  const priorRuntimeRecoveries = overview.tasks.filter((task) => task.config?.designWorkerRuntimeRecovery !== undefined);
+  if (sourceWorker.config?.designWorkerRuntimeRecovery !== undefined || priorRuntimeRecoveries.length > 0) {
+    throw new Error(`design child ${run.id} already used its one bounded DSH runtime recovery`);
+  }
+  const activeTasks = overview.tasks.filter((task) => task.status === "todo" || task.status === "running");
+  if (activeTasks.length > 0) {
+    throw new Error(`design child ${run.id} still has active tasks: ${activeTasks.map((task) => task.id).join(", ")}`);
+  }
+
+  const marker = {
+    schemaVersion: 1,
+    recoveryKey,
+    sourceWorkerTaskId: sourceWorker.id,
+    sourceWorkerAttemptId: sourceAttempt.attemptId,
+    sourceVerifierTaskId: sourceVerifier.id,
+    plannerTaskId: planner.id,
+    maxRecoveries: 1,
+    reason: action.reason ?? "recover one frozen DSH runtime permission mismatch",
+  };
+  const filePolicy = {
+    schemaVersion: 1,
+    source: "frozen-design-mutation-surfaces",
+    allowedPaths,
+    forbiddenPaths,
+  };
+  const offlineTestPolicy = {
+    mode: "allowlist",
+    allowedPaths: offlineTestPaths,
+    forbidTargetBusinessTests: true,
+  };
+  const workerTaskId = makeId("task");
+  const verifierTaskId = makeId("task");
+  harness.createTaskWithDb(db, {
+    id: workerTaskId,
+    runId: run.id,
+    parentId: sourceWorker.id,
+    cycleId: sourceWorker.cycleId,
+    role: "worker",
+    goal: sourceWorker.goal,
+    prompt: sourceWorker.prompt,
+    dependsOn: [planner.id],
+    doneWhen: sourceWorker.doneWhen,
+    worktreePath: null,
+    config: {
+      ...sourceWorker.config,
+      permissionMode: "workspace-write",
+      dshProfileIsolation: "base-headless",
+      dshRequiredPlugins: [],
+      forbidBrowser: true,
+      browserProcessPolicy: "deny",
+      sourceWorktreePath: worktreePath,
+      dshFilePolicy: filePolicy,
+      offlineTestPolicy,
+      designWorkerRuntimeRecovery: marker,
+    },
+  });
+  harness.createTaskWithDb(db, {
+    id: verifierTaskId,
+    runId: run.id,
+    parentId: workerTaskId,
+    cycleId: sourceWorker.cycleId,
+    role: "verifier",
+    goal: sourceVerifier.goal,
+    prompt: [
+      sourceVerifier.prompt,
+      "Only execute offline checks whose paths match tests/evolution/**.",
+      "Do not run the target project's complete test suite, typecheck, browser checks, or unrelated source inspection.",
+    ].join("\n"),
+    dependsOn: [workerTaskId],
+    doneWhen: sourceVerifier.doneWhen,
+    worktreePath: null,
+    config: {
+      ...sourceVerifier.config,
+      permissionMode: "read-only",
+      readOnly: true,
+      forbidImplementation: true,
+      forbidBrowser: true,
+      browserProcessPolicy: "deny",
+      sourceTaskId: workerTaskId,
+      sourceWorktreePath: worktreePath,
+      offlineTestPolicy,
+      designWorkerRuntimeRecovery: marker,
+    },
+  });
+  harness.updateRunWithDb(db, {
+    runId: run.id,
+    status: "todo",
+    contextPatch: { designWorkerRuntimeRecovery: { ...marker, workerTaskId, verifierTaskId } },
+  });
+  return doneResult(action.type, `Design Worker runtime recovery ${recoveryKey} materialized.`, [
+    { name: "task permission route", status: "passed", evidence: "worker=workspace-write; verifier=read-only" },
+    { name: "frozen write paths", status: "passed", evidence: allowedPaths.join(",") },
+    { name: "offline test gate", status: "passed", evidence: offlineTestPaths.join(",") },
+    { name: "repair budget", status: "passed", evidence: "not charged" },
+  ], [{
+    kind: "design_worker_runtime_recovery",
+    runId: run.id,
+    sourceWorkerTaskId: sourceWorker.id,
+    sourceWorkerAttemptId: sourceAttempt.attemptId,
+    workerTaskId,
+    verifierTaskId,
+    recoveryKey,
+    reused: false,
+  }]);
 }
 
 function activateHarnessRevisionWithDb(
@@ -10047,7 +10301,9 @@ function createGoalReviewTask(
 ) {
   const sourceTask = selectGoalReviewSourceTask(harness, runId, overview);
   const targetSystemDesign = overview.run?.context.source === "target-system-design";
+  const designDelivery = overview.run?.context.source === "design";
   const evidenceBundle = targetSystemDesign ? overview.run?.context.targetSystemEvidenceBundle : undefined;
+  const offlineTestPolicy = designDelivery ? designDeliveryOfflineTestPolicy(overview.run?.context ?? {}) : null;
   const prompt = targetSystemDesign
     ? [
         "Review only the target-system Designer decision and its fixed-action validation against the authoritative evidence bundle below.",
@@ -10056,7 +10312,13 @@ function createGoalReviewTask(
         "Authoritative evidence bundle:",
         JSON.stringify(evidenceBundle ?? null, null, 2),
       ].join("\n")
-    : GOAL_REVIEW_TASK_PROMPT;
+    : designDelivery && offlineTestPolicy
+      ? [
+          GOAL_REVIEW_TASK_PROMPT,
+          "This is a read-only design-delivery review. Do not run the target project's complete test suite, typecheck, build, browser checks, installs, or unrelated source scans.",
+          `Only the frozen offline test paths are eligible for review: ${offlineTestPolicy.allowedPaths.join(", ")}.`,
+        ].join("\n")
+      : GOAL_REVIEW_TASK_PROMPT;
   const taskId = harness.createTask({
     runId,
     role: "goal-review",
@@ -10073,7 +10335,17 @@ function createGoalReviewTask(
           forbidProjectCommands: true,
           ...(evidenceBundle !== undefined ? { targetSystemEvidenceBundle: evidenceBundle } : {}),
         }
-      : undefined,
+      : designDelivery && offlineTestPolicy
+        ? {
+            permissionMode: "read-only",
+            readOnly: true,
+            forbidImplementation: true,
+            forbidBrowser: true,
+            browserProcessPolicy: "deny",
+            forbidProjectCommands: true,
+            offlineTestPolicy,
+          }
+        : undefined,
   });
   return { taskId, sourceTask };
 }
@@ -11825,6 +12097,22 @@ function exactSafeIdentifierField(record: Record<string, unknown>, key: string) 
     throw new Error(`${key} must be a safe identifier of at most 200 characters`);
   }
   return value;
+}
+
+function designDeliveryOfflineTestPolicy(context: Record<string, unknown>) {
+  const proposal = objectRecordOrNull(context.designProposal);
+  const pack = objectRecordOrNull(proposal?.evolutionPack);
+  const surfaces = Array.isArray(pack?.mutationSurfaces)
+    ? pack.mutationSurfaces.map((surface) => objectRecordOrNull(surface)).filter((surface): surface is Record<string, unknown> => Boolean(surface))
+    : [];
+  const allowedPaths = [...new Set(surfaces.flatMap((surface) =>
+    Array.isArray(surface.allowedPaths)
+      ? surface.allowedPaths.filter((path): path is string => typeof path === "string" && path.startsWith("tests/evolution/"))
+      : []
+  ))].sort();
+  return allowedPaths.length > 0
+    ? { mode: "allowlist", allowedPaths, forbidTargetBusinessTests: true }
+    : null;
 }
 
 function closeHostReceiptDesignFailure(

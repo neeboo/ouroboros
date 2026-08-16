@@ -46,6 +46,13 @@ const routeFixture: ResolvedExecutionRoute = {
   executionMode: "generic",
 };
 
+const frozenDshFilePolicy = {
+  schemaVersion: 1 as const,
+  source: "frozen-design-mutation-surfaces" as const,
+  allowedPaths: ["config/evolution/**", "tests/evolution/**"],
+  forbiddenPaths: ["db/**", ".git/orbs/**", ".ouroboros/**", ".orbs/**"],
+};
+
 function executorInput(prompt = "Implement the bounded task and return the required JSON.") {
   return {
     prompt,
@@ -77,6 +84,7 @@ describe("DeepSeek Harness CLI executor", () => {
       command: "/opt/deepseek/bin/dsh",
       profile: "headless",
       sandbox: "workspace-write",
+      filePolicy: frozenDshFilePolicy,
       env: {
         HODOR_APPLICATION_BASE_URL: "https://production.invalid",
         HODOR_APPLICATION_TOKEN: "must-not-reach-the-task",
@@ -119,12 +127,18 @@ describe("DeepSeek Harness CLI executor", () => {
       profile: "headless",
       mode: "base-headless",
       enabledPlugins: ["@deepseek-ai/dsh-base", "@deepseek-ai/dsh-headless"],
+      permissionMode: "workspace-write",
+      filePolicy: expect.objectContaining({
+        allowedPaths: ["config/evolution/**", "tests/evolution/**"],
+        forbiddenPaths: [".git/orbs/**", ".orbs/**", ".ouroboros/**", "db/**"],
+        sha256: expect.stringMatching(/^[a-f0-9]{64}$/),
+      }),
       profileSha256: expect.stringMatching(/^[a-f0-9]{64}$/),
       profilePatchSha256: expect.stringMatching(/^[a-f0-9]{64}$/),
       processPolicyPatchSha256: expect.stringMatching(/^[a-f0-9]{64}$/),
       controlPathReadPolicy: "deny",
       deniedControlPathRootsSha256: expect.stringMatching(/^[a-f0-9]{64}$/),
-      network: { mode: "deny", enforcement: "dsh-sandbox-local" },
+      network: { mode: "deny", enforcement: "darwin-host-seatbelt" },
       preflight: {
         passed: true,
         projectPluginsLoaded: false,
@@ -150,6 +164,7 @@ describe("DeepSeek Harness CLI executor", () => {
       command: "/opt/deepseek/bin/dsh",
       profile: "headless",
       sandbox: "workspace-write",
+      filePolicy: frozenDshFilePolicy,
       requiredPlugins: ["@hodor/hodor-project"],
       resolveCommand: availableDshResolution,
       runCommand: async () => {
@@ -175,6 +190,7 @@ describe("DeepSeek Harness CLI executor", () => {
       command: "/opt/deepseek/bin/dsh",
       profile: "headless",
       sandbox: "workspace-write",
+      filePolicy: frozenDshFilePolicy,
       isolatedProfile: "base-headless",
       env: {
         DSH_HOME: "/tmp/polluted-global-dsh-home",
@@ -217,6 +233,7 @@ describe("DeepSeek Harness CLI executor", () => {
       command: "/opt/deepseek/bin/dsh",
       profile: "headless",
       sandbox: "workspace-write",
+      filePolicy: frozenDshFilePolicy,
       env: { DSH_HOME: "/tmp/dsh-home" },
       resolveCommand: () => ({
         configuredCommand: "/opt/deepseek/bin/dsh",
@@ -268,13 +285,16 @@ describe("DeepSeek Harness CLI executor", () => {
     let policyRunner = "";
     let policyPatchPath = "";
     let policyRunnerPath = "";
+    let hostProfile = "";
     const executor = createDshCliExecutor({
       cwd: taskFixture.worktreePath,
       command: "/opt/deepseek/bin/dsh",
       profile: "headless",
       sandbox: "workspace-write",
+      filePolicy: frozenDshFilePolicy,
       resolveCommand: availableDshResolution,
       runCommand: async (input) => {
+        hostProfile = input.cmd[2] ?? "";
         const patchIndex = input.cmd.indexOf("--patch");
         expect(patchIndex).toBeGreaterThan(0);
         const patchPath = input.cmd[patchIndex + 1];
@@ -297,12 +317,13 @@ describe("DeepSeek Harness CLI executor", () => {
 
     expect(output.status).toBe("done");
     expect(policyPatch).toContain("@deepseek-ai/dsh-sandbox-local");
-    expect(policyRunner).toContain("/Applications/ChatGPT.app/Contents/Resources/codex");
-    expect(policyRunner).toContain("/Applications/Codex.app/Contents/Resources/codex");
-    expect(policyRunner).toContain("deny process-exec");
-    expect(policyRunner).toContain("deny file-read");
-    expect(policyRunner).toContain("deny network*");
+    expect(hostProfile).toContain("/Applications/ChatGPT.app/Contents/Resources/codex");
+    expect(hostProfile).toContain("/Applications/Codex.app/Contents/Resources/codex");
+    expect(hostProfile).toContain("deny process-exec");
+    expect(hostProfile).toContain("deny file-read");
+    expect(hostProfile).toContain("deny network*");
     expect(policyRunner).toContain("allowedEnvironment");
+    expect(policyRunner).not.toContain('spawn("/usr/bin/sandbox-exec"');
     expect(policyRunner).not.toContain("env: process.env");
     expect(existsSync(policyPatchPath)).toBe(false);
     expect(existsSync(policyRunnerPath)).toBe(false);
@@ -330,6 +351,58 @@ describe("DeepSeek Harness CLI executor", () => {
     } finally {
       server.stop(true);
     }
+  });
+
+  test.skipIf(process.platform !== "darwin")("allows only frozen DSH mutation paths", async () => {
+    const workspace = await mkdtemp(join(homedir(), ".orbs-dsh-write-policy-"));
+    const allowedConfig = join(workspace, "config", "evolution", "allowed.json");
+    const allowedTest = join(workspace, "tests", "evolution", "allowed.test.ts");
+    const deniedSource = join(workspace, "src", "denied.ts");
+    const deniedDb = join(workspace, "db", "denied.sqlite");
+    await mkdir(join(workspace, "config", "evolution"), { recursive: true });
+    await mkdir(join(workspace, "tests", "evolution"), { recursive: true });
+    await mkdir(join(workspace, "src"), { recursive: true });
+    await mkdir(join(workspace, "db"), { recursive: true });
+    const profile = darwinDshProcessProfile({
+      workspaceRoot: workspace,
+      allowedPaths: ["config/evolution/**", "tests/evolution/**"],
+      forbiddenPaths: ["db/**", ".git/orbs/**", ".ouroboros/**", ".orbs/**"],
+    });
+    const write = (path: string) => Bun.spawnSync({
+      cmd: ["/usr/bin/sandbox-exec", "-p", profile, "--", "/bin/sh", "-c", `printf ok > ${JSON.stringify(path)}`],
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    try {
+      expect(write(allowedConfig).exitCode).toBe(0);
+      expect(write(allowedTest).exitCode).toBe(0);
+      expect(write(deniedSource).exitCode).not.toBe(0);
+      expect(write(deniedDb).exitCode).not.toBe(0);
+    } finally {
+      await rm(workspace, { recursive: true, force: true });
+    }
+  });
+
+  test("fails before DSH boot when workspace-write lacks a frozen file policy", async () => {
+    let calls = 0;
+    const executor = createDshCliExecutor({
+      cwd: taskFixture.worktreePath,
+      command: "/opt/deepseek/bin/dsh",
+      sandbox: "workspace-write",
+      resolveCommand: availableDshResolution,
+      runCommand: async () => {
+        calls += 1;
+        throw new Error("DSH must not start");
+      },
+    });
+
+    const output = await executor(executorInput());
+
+    expect(calls).toBe(0);
+    expect(output).toMatchObject({
+      status: "blocked",
+      summary: "DeepSeek Harness workspace-write policy is missing or invalid",
+    });
   });
 
   test.skipIf(process.platform !== "darwin")("denies target-local control databases before DSH can read them", async () => {
@@ -373,10 +446,12 @@ describe("DeepSeek Harness CLI executor", () => {
   test.skipIf(process.platform !== "darwin")("denies an embedded-agent executable before a harmless sentinel can run", async () => {
     const directory = await mkdtemp(join(homedir(), ".orbs-dsh-process-policy-"));
     const outsideDirectory = await mkdtemp(join(homedir(), ".orbs-dsh-process-policy-outside-"));
-    const protectedExecutable = join(directory, "embedded-codex-fixture");
-    const allowedExecutable = join(directory, "ordinary-tool-fixture");
-    const protectedMarker = join(directory, "protected-ran");
-    const allowedMarker = join(directory, "allowed-ran");
+    const allowedDirectory = join(directory, "allowed");
+    await mkdir(allowedDirectory);
+    const protectedExecutable = join(allowedDirectory, "embedded-codex-fixture");
+    const allowedExecutable = join(allowedDirectory, "ordinary-tool-fixture");
+    const protectedMarker = join(allowedDirectory, "protected-ran");
+    const allowedMarker = join(allowedDirectory, "allowed-ran");
     const outsideMarker = join(outsideDirectory, "outside-ran");
     await writeFile(protectedExecutable, `#!/bin/sh\nprintf protected > ${JSON.stringify(protectedMarker)}\n`);
     await writeFile(allowedExecutable, `#!/bin/sh\nprintf allowed > ${JSON.stringify(allowedMarker)}\n`);
@@ -384,6 +459,7 @@ describe("DeepSeek Harness CLI executor", () => {
     await chmod(allowedExecutable, 0o755);
     const profile = darwinDshProcessProfile({
       workspaceRoot: directory,
+      allowedPaths: ["allowed/**"],
       protectedExecutables: [protectedExecutable],
     });
 
@@ -429,6 +505,18 @@ describe("DeepSeek Harness CLI executor", () => {
     } finally {
       await rm(directory, { recursive: true, force: true });
       await rm(outsideDirectory, { recursive: true, force: true });
+    }
+  });
+
+  test("keeps installed browser launchers outside the DSH execution policy", () => {
+    const profile = darwinDshProcessProfile({ workspaceRoot: "/tmp/orbs-dsh-browser-deny" });
+    for (const executable of [
+      "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+      "/usr/bin/open",
+      "/usr/bin/osascript",
+    ]) {
+      expect(profile).toContain(`(deny file-read* (literal ${JSON.stringify(executable)}))`);
+      expect(profile).toContain(`(deny process-exec (literal ${JSON.stringify(executable)}))`);
     }
   });
 
@@ -478,6 +566,7 @@ describe("DeepSeek Harness CLI executor", () => {
       cwd: taskFixture.worktreePath,
       sandbox: "workspace-write",
       hostExecutionCapabilities: { schemaVersion: 1 },
+      filePolicy: frozenDshFilePolicy,
       runCommand,
     });
 
