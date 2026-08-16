@@ -1428,6 +1428,10 @@ function parseRuntimeIntegrationBoundaryInput(value: unknown): RuntimeIntegratio
   if (!repositories.every((repository, index) => repository.role === expectedRoles[index])) {
     throw new Error("boundary.repositories must be ordered backend, frontend, ainovel, dsh");
   }
+  const expectedIds = ["target-backend", "target-frontend", "ainovel-source", "dsh-source"];
+  if (!repositories.every((repository, index) => repository.id === expectedIds[index])) {
+    throw new Error("boundary.repositories must use the canonical target-backend, target-frontend, ainovel-source, and dsh-source ids");
+  }
   if (new Set(repositories.map((repository) => repository.id)).size !== repositories.length) {
     throw new Error("boundary.repositories ids must be unique");
   }

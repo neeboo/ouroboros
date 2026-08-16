@@ -12500,6 +12500,18 @@ describe("verified package delivery closeout", () => {
     expect(rejected.summary).toContain(".ainovel");
     expect(harness.getRun(sourceRunId)?.status).toBe("todo");
 
+    const detachedGraph = structuredClone(boundary);
+    detachedGraph.repositories[1]!.id = "another-frontend";
+    const detached = applyHarnessAction(harness, {
+      type: "materializeRuntimeIntegrationDesignRecovery",
+      sourceRunId,
+      sourceTaskId,
+      boundary: detachedGraph,
+    } as never);
+    expect(detached.status).toBe("blocked");
+    expect(detached.summary).toContain("canonical target-backend");
+    expect(harness.getRun(sourceRunId)?.status).toBe("todo");
+
     const result = applyHarnessAction(harness, {
       type: "materializeRuntimeIntegrationDesignRecovery",
       sourceRunId,
