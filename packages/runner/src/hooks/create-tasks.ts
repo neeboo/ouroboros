@@ -47,6 +47,23 @@ export function createTasksFromOutputHook(options: { harness: Harness }): StopHo
     if (designRecovery) {
       return designRecovery;
     }
+    if (
+      run.context.source === "design"
+      && task.role === "goal-review"
+      && plannedTasks.some((candidate) => candidate.role === "planner" || candidate.role === "worker" || candidate.role === "verifier")
+    ) {
+      return {
+        decision: "exit",
+        artifacts: [{
+          kind: "design_delivery_recovery_required",
+          runId: run.id,
+          sourceGoalReviewTaskId: task.id,
+        }],
+        problems: [
+          "goal-review cannot materialize a mixed Planner, Worker, or Verifier recovery graph for a governed design delivery; use materializeDesignDeliveryRecovery",
+        ],
+      };
+    }
     const plannedEntries = plannedTasks.map((plannedTask) => ({
       id: makeId("task"),
       plannedTask,
@@ -66,11 +83,37 @@ export function createTasksFromOutputHook(options: { harness: Harness }): StopHo
     }
 
     const prepared = plannedEntries.map(({ id, plannedTask }, index) => {
-      const dependsOn = resolved.dependsOnByIndex[index] ?? [task.id];
+      const governedPlanner = run.context.source === "design"
+        && task.role === "planner"
+        && task.config?.frozenDesignPlanner != null;
+      const resolvedDependencies = resolved.dependsOnByIndex[index] ?? [task.id];
+      const dependsOn = governedPlanner && plannedTask.role === "worker" && !resolvedDependencies.includes(task.id)
+        ? [...resolvedDependencies, task.id]
+        : resolvedDependencies;
       const sourceWorktreePath = inheritedWorktreePath(options.harness, task, dependsOn);
+      const configuredWorkerBackend = governedPlanner && plannedTask.role === "worker"
+        ? configuredRoleBackend(run.context, "worker")
+        : null;
+      const dshWorker = configuredWorkerBackend !== null
+        && configuredBackendKind(run.context, configuredWorkerBackend) === "dsh-cli";
       const config = {
         ...(plannedTask.modelPreference ? { modelPreference: plannedTask.modelPreference } : {}),
-        ...(plannedTask.verifierContract ? { verifierContract: plannedTask.verifierContract } : {}),
+        ...(plannedTask.verifierContract
+          ? { verifierContract: plannedTask.verifierContract }
+          : governedPlanner && task.config?.verifierContract
+            ? { verifierContract: task.config.verifierContract }
+            : {}),
+        ...(governedPlanner && task.config?.frozenDesignPlanner
+          ? { frozenDesignPlanner: task.config.frozenDesignPlanner }
+          : {}),
+        ...(configuredWorkerBackend ? { agentBackend: configuredWorkerBackend } : {}),
+        ...(dshWorker ? {
+          permissionMode: "workspace-write",
+          dshProfileIsolation: "base-headless",
+          dshRequiredPlugins: [],
+          forbidBrowser: true,
+          browserProcessPolicy: "deny",
+        } : {}),
         ...(sourceWorktreePath ? { sourceWorktreePath } : {}),
         ...(task.role === "goal-review" ? {
           goalReviewContinuation: { sourceTaskId: task.id, ordinal: index },
@@ -312,6 +355,24 @@ export function createTasksFromOutputHook(options: { harness: Harness }): StopHo
       artifacts: created,
     };
   };
+}
+
+function configuredRoleBackend(context: Record<string, unknown>, role: string) {
+  const defaults = context.agentDefaults;
+  if (!defaults || typeof defaults !== "object" || Array.isArray(defaults)) return null;
+  const roles = (defaults as Record<string, unknown>).roles;
+  if (!roles || typeof roles !== "object" || Array.isArray(roles)) return null;
+  const backend = (roles as Record<string, unknown>)[role];
+  return typeof backend === "string" && backend.trim().length > 0 ? backend : null;
+}
+
+function configuredBackendKind(context: Record<string, unknown>, backendName: string) {
+  const backends = context.agentBackends;
+  if (!backends || typeof backends !== "object" || Array.isArray(backends)) return null;
+  const backend = (backends as Record<string, unknown>)[backendName];
+  if (!backend || typeof backend !== "object" || Array.isArray(backend)) return null;
+  const kind = (backend as Record<string, unknown>).kind;
+  return typeof kind === "string" ? kind : null;
 }
 
 function materializeTargetSystemDesignerRecovery(input: {

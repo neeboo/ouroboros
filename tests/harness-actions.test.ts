@@ -6883,6 +6883,240 @@ describe("Harness actions", () => {
     expect(overview.threads).toContainEqual(expect.objectContaining({ id: threadId, status: "interrupted" }));
   });
 
+  test("materializes one frozen design delivery recovery as Planner to DSH Worker to Verifier", () => {
+    const projectId = harness.createProject({ name: "Governed delivery recovery", rootPath: dir });
+    const parentRunId = harness.createRun({
+      projectId,
+      goal: "Design the target change",
+      context: { source: "target-system-design", projectId },
+    });
+    const proposal = harness.createDesignProposal({
+      id: "design_delivery_recovery_fixture",
+      projectId,
+      runId: parentRunId,
+      title: "Recover one governed delivery",
+      problem: "The generated Worker lost its frozen Planner lineage.",
+      recommendation: "Create one host-bound recovery graph.",
+      status: "accepted",
+      proposal: {
+        problem: "The generated Worker lost its frozen Planner lineage.",
+        recommendation: "Create one host-bound recovery graph.",
+        evaluationContract: {
+          baseline: ["the first Planner stop hook failed"],
+          successMetrics: ["the DSH Worker completes the frozen delivery"],
+          guardMetrics: ["zero network and zero target credentials"],
+          requiredEvidence: ["independent verifier receipt"],
+        },
+        investment: { reversibility: "easy", portfolio: "core", oneTimeCost: 0, recurringCost: 0 },
+      },
+    });
+    const decision = harness.recordDesignDecision({
+      id: "decision_delivery_recovery_fixture",
+      proposalId: proposal.id,
+      decision: "approved",
+      actorKind: "auto",
+      actorRef: "authority-evaluator",
+      reasons: ["zero-cost governed recovery"],
+      authority: { disposition: "automatic" },
+    });
+    const evaluationContract = proposal.proposal.evaluationContract as Record<string, unknown>;
+    const originalPlannerGoal = "Plan the governed delivery";
+    const originalPlannerPrompt = "Freeze the delivery graph before creating work.";
+    const originalPlannerDoneWhen = ["one frozen Worker and one independent Verifier are defined"];
+    const runId = harness.createRun({
+      projectId,
+      goal: "Deliver the accepted design",
+      context: {
+        source: "design",
+        projectId,
+        parentRunId,
+        designProposalId: proposal.id,
+        designDecisionId: decision.id,
+        designEvaluationContract: evaluationContract,
+        designDeliveryPlan: {
+          schemaVersion: 1,
+          runGoal: "Deliver the accepted design",
+          planner: {
+            goal: originalPlannerGoal,
+            prompt: originalPlannerPrompt,
+            doneWhen: originalPlannerDoneWhen,
+            config: {},
+          },
+        },
+        agentDefaults: { global: "codex-resumable", roles: { worker: "deepseek-harness" } },
+        agentBackends: {
+          "codex-resumable": { kind: "codex-resumable" },
+          "deepseek-harness": { kind: "dsh-cli", command: "dsh", profile: "headless" },
+        },
+        repairReplanBudget: { limit: 3, used: 1, entries: [] },
+      },
+    });
+    const originalPlannerId = harness.createTask({
+      runId,
+      role: "planner",
+      goal: originalPlannerGoal,
+      prompt: originalPlannerPrompt,
+      doneWhen: originalPlannerDoneWhen,
+    });
+    harness.recordAttempt({
+      taskId: originalPlannerId,
+      input: { executor: "codex-resumable", permissionMode: "read-only" },
+      output: {
+        status: "blocked",
+        summary: "Planner stop hook rejected an unbound Worker.",
+        changedFiles: [],
+        checks: [],
+        artifacts: [],
+        problems: [`design child ${runId} Worker must be downstream of its frozen Planner task`],
+      },
+    });
+    const goalReviewId = harness.createTask({
+      runId,
+      role: "goal-review",
+      goal: "Review the Planner failure",
+      prompt: "Recover the frozen plan once.",
+    });
+    harness.recordAttempt({
+      taskId: goalReviewId,
+      input: { executor: "codex-resumable", permissionMode: "read-only" },
+      output: {
+        status: "done",
+        runDecision: "continue",
+        summary: "One bounded Planner continuation is required.",
+        changedFiles: [],
+        checks: [],
+        artifacts: [],
+        problems: [],
+      },
+    });
+    const continuationPlannerId = harness.createTask({
+      runId,
+      role: "planner",
+      goal: "Freeze the recovered delivery graph",
+      prompt: "Reuse the approved proposal and frozen evaluation contract.",
+      dependsOn: [goalReviewId],
+      config: { goalReviewContinuation: { sourceTaskId: goalReviewId, ordinal: 0 } },
+    });
+    harness.recordAttempt({
+      taskId: continuationPlannerId,
+      input: { executor: "codex-resumable", permissionMode: "read-only" },
+      output: {
+        status: "done",
+        summary: "The recovered implementation plan is frozen.",
+        changedFiles: [],
+        checks: [{ name: "frozen delivery plan", status: "passed" }],
+        artifacts: [],
+        problems: [],
+        nextTasks: [{
+          role: "worker",
+          goal: "Implement the frozen governed delivery",
+          prompt: "Implement only the approved target paths and return structured evidence.",
+          dependsOn: [continuationPlannerId],
+          doneWhen: ["approved files and deterministic checks are reported"],
+        }],
+      },
+    });
+    const invalidVerifierId = harness.createTask({
+      runId,
+      role: "verifier",
+      goal: "Audit current state before implementation",
+      prompt: "This task must remain blocked evidence.",
+      dependsOn: [goalReviewId],
+    });
+    harness.recordAttempt({
+      taskId: invalidVerifierId,
+      input: { executor: "codex-resumable", permissionMode: "read-only" },
+      output: {
+        status: "blocked",
+        summary: "The audit cannot substitute for final verification.",
+        changedFiles: [],
+        checks: [],
+        artifacts: [],
+        problems: ["Verifier is not downstream of the Worker."],
+      },
+    });
+
+    const result = applyHarnessAction(harness, {
+      type: "materializeDesignDeliveryRecovery",
+      runId,
+      sourcePlannerTaskId: continuationPlannerId,
+      reason: "recover the frozen Planner chain once",
+    });
+    const replay = applyHarnessAction(harness, {
+      type: "materializeDesignDeliveryRecovery",
+      runId,
+      sourcePlannerTaskId: continuationPlannerId,
+      reason: "recover the frozen Planner chain once",
+    });
+    const overview = harness.getRunOverview({ runId, eventLimit: 0 });
+    const recoveryTasks = overview.tasks.filter((task) => task.config?.designDeliveryRecovery);
+    const planner = recoveryTasks.find((task) => task.role === "planner")!;
+    const worker = recoveryTasks.find((task) => task.role === "worker")!;
+    const verifier = recoveryTasks.find((task) => task.role === "verifier")!;
+
+    expect(result).toMatchObject({
+      status: "done",
+      actionType: "materializeDesignDeliveryRecovery",
+      artifacts: [expect.objectContaining({
+        kind: "design_delivery_recovery",
+        runId,
+        plannerTaskId: planner.id,
+        workerTaskId: worker.id,
+        verifierTaskId: verifier.id,
+        supersededTaskIds: [invalidVerifierId],
+      })],
+    });
+    expect(planner).toMatchObject({
+      status: "todo",
+      config: {
+        agentBackend: "codex-resumable",
+        readOnly: true,
+        forbidImplementation: true,
+        forbidBrowser: true,
+        designDeliveryRecovery: expect.objectContaining({
+          canonicalPlannerTaskId: originalPlannerId,
+          sourcePlannerTaskId: continuationPlannerId,
+        }),
+      },
+    });
+    expect(worker).toMatchObject({
+      status: "todo",
+      dependsOn: [planner.id],
+      config: {
+        agentBackend: "deepseek-harness",
+        dshProfileIsolation: "base-headless",
+        dshRequiredPlugins: [],
+        permissionMode: "workspace-write",
+        forbidBrowser: true,
+        verifierContract: expect.any(Object),
+      },
+    });
+    expect(verifier).toMatchObject({
+      status: "todo",
+      dependsOn: [worker.id],
+      config: {
+        agentBackend: "codex-resumable",
+        readOnly: true,
+        forbidImplementation: true,
+        forbidBrowser: true,
+        verifierContract: worker.config?.verifierContract,
+      },
+    });
+    expect(replay).toMatchObject({
+      status: "done",
+      artifacts: [expect.objectContaining({
+        kind: "design_delivery_recovery",
+        plannerTaskId: planner.id,
+        workerTaskId: worker.id,
+        verifierTaskId: verifier.id,
+        reused: true,
+      })],
+    });
+    expect(recoveryTasks).toHaveLength(3);
+    expect(overview.tasks.filter((task) => task.role === "goal-review")).toHaveLength(1);
+    expect(harness.getRun(runId)?.context.repairReplanBudget).toEqual({ limit: 3, used: 1, entries: [] });
+  });
+
   test("materializes one audited read-only Designer recovery from a blocked fixed-action attempt", () => {
     const runId = harness.createRun({
       goal: "Recover one rejected design action",

@@ -1928,7 +1928,31 @@ function applyCreateRunsFromDesignWithDb(
             "Every generated task honors the frozen design evaluation contract",
             "The run can be drained by the supervisor without manual task injection",
           ],
-          plannerConfig: plannedRun.modelPreference ? { modelPreference: plannedRun.modelPreference } : {},
+          plannerConfig: {
+            ...(plannedRun.modelPreference ? { modelPreference: plannedRun.modelPreference } : {}),
+            verifierContract: {
+              schemaVersion: 1,
+              source: "frozen-design-evaluation-contract",
+              designProposalId: proposal.id,
+              designDecisionId: approval.id,
+              evaluationContract: frozenContract,
+              evaluationContractSha256: canonicalEvolutionValueSha256(frozenContract),
+            },
+            frozenDesignPlanner: {
+              schemaVersion: 1,
+              canonicalPlannerTaskId: plannerTaskId,
+              designProposalId: proposal.id,
+              designDecisionId: approval.id,
+              verifierContractSha256: canonicalEvolutionValueSha256({
+                schemaVersion: 1,
+                source: "frozen-design-evaluation-contract",
+                designProposalId: proposal.id,
+                designDecisionId: approval.id,
+                evaluationContract: frozenContract,
+                evaluationContractSha256: canonicalEvolutionValueSha256(frozenContract),
+              }),
+            },
+          },
         });
     const storedDeliveryPlan = existingRun?.context.designDeliveryPlan === undefined
       ? null

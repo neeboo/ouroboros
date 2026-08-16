@@ -1365,6 +1365,20 @@ describe("design-action transition coordinator (production authority path)", () 
         actorKind: "auto",
       }),
     });
+    const frozenPlanner = harness.getRunOverview({ runId: childRunId, eventLimit: 0 }).tasks
+      .find((candidate) => candidate.role === "planner")!;
+    expect(frozenPlanner.config).toMatchObject({
+      verifierContract: expect.objectContaining({
+        source: "frozen-design-evaluation-contract",
+        designProposalId: proposals[0].id,
+        evaluationContractSha256: expect.stringMatching(/^[0-9a-f]{64}$/),
+      }),
+      frozenDesignPlanner: expect.objectContaining({
+        canonicalPlannerTaskId: frozenPlanner.id,
+        designProposalId: proposals[0].id,
+        verifierContractSha256: expect.stringMatching(/^[0-9a-f]{64}$/),
+      }),
+    });
   });
 
   test("the same accepted proposal reuses one delivery run across Designer cycles", async () => {

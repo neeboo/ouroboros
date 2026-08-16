@@ -125,6 +125,12 @@ export type HarnessAction =
       reason?: string;
     }
   | {
+      type: "materializeDesignDeliveryRecovery";
+      runId: string;
+      sourcePlannerTaskId: string;
+      reason?: string;
+    }
+  | {
       type: "buildVersionedCorpusManifest";
       projectId: string;
       sourceRunId: string;
@@ -637,6 +643,15 @@ export function parseHarnessAction(value: unknown): HarnessAction {
       reason: optionalStringField(record, "reason"),
     };
   }
+  if (type === "materializeDesignDeliveryRecovery") {
+    assertOnlyFields(record, type, ["type", "runId", "sourcePlannerTaskId", "reason"]);
+    return {
+      type,
+      runId: stringField(record, "runId"),
+      sourcePlannerTaskId: stringField(record, "sourcePlannerTaskId"),
+      reason: optionalStringField(record, "reason"),
+    };
+  }
   if (type === "buildVersionedCorpusManifest") {
     assertOnlyFields(record, type, [
       "type",
@@ -1030,7 +1045,7 @@ export function parseHarnessAction(value: unknown): HarnessAction {
     };
   }
   throw new Error(
-    "harness action type must be reclaimRunningTasks, retryTask, reconcileRunEvidence, recordSignal, linkResearchEvidence, materializeDesignerActionRecovery, buildVersionedCorpusManifest, bindHostEvidenceMaintenanceReceipt, materializeHostEvidenceMaintenanceDelivery, markRunTodo, updateRunContext, amendRunContract, retireRun, retireTask, prepareRunDrain, completeSystemTask, integrateVerifiedRun, pushExactGitRef, createExactGitRef, commitExactGitIndex, stageExactWorkerFilesForVerification, materializeAttemptArtifactsForVerification, verifySealedCorpusForVerification, registerEvolutionProfile, recordProductionEpisode, registerHarnessVariant, activateHarnessRevision, freezeMatchedExperiment, interruptAttemptAndCreateTask, interruptRunningAttemptsAndCreateTask, acceptGuardrailProposal, startSubsession, collectSubsessions, cancelSubsessions, or runWatchdogPass",
+    "harness action type must be reclaimRunningTasks, retryTask, reconcileRunEvidence, recordSignal, linkResearchEvidence, materializeDesignerActionRecovery, materializeDesignDeliveryRecovery, buildVersionedCorpusManifest, bindHostEvidenceMaintenanceReceipt, materializeHostEvidenceMaintenanceDelivery, markRunTodo, updateRunContext, amendRunContract, retireRun, retireTask, prepareRunDrain, completeSystemTask, integrateVerifiedRun, pushExactGitRef, createExactGitRef, commitExactGitIndex, stageExactWorkerFilesForVerification, materializeAttemptArtifactsForVerification, verifySealedCorpusForVerification, registerEvolutionProfile, recordProductionEpisode, registerHarnessVariant, activateHarnessRevision, freezeMatchedExperiment, interruptAttemptAndCreateTask, interruptRunningAttemptsAndCreateTask, acceptGuardrailProposal, startSubsession, collectSubsessions, cancelSubsessions, or runWatchdogPass",
   );
 }
 
@@ -1069,6 +1084,10 @@ export function applyHarnessAction(
 
   if (action.type === "materializeDesignerActionRecovery") {
     return applyDesignerActionRecoveryAtomically(harness, action);
+  }
+
+  if (action.type === "materializeDesignDeliveryRecovery") {
+    return applyDesignDeliveryRecoveryAtomically(harness, action);
   }
 
   if (action.type === "reconcileRunEvidence") {
@@ -1128,6 +1147,7 @@ type EvolutionAction = Extract<
 
 type HarnessRevisionActivationAction = Extract<HarnessAction, { type: "activateHarnessRevision" }>;
 type DesignerActionRecoveryAction = Extract<HarnessAction, { type: "materializeDesignerActionRecovery" }>;
+type DesignDeliveryRecoveryAction = Extract<HarnessAction, { type: "materializeDesignDeliveryRecovery" }>;
 type RunEvidenceReconciliationAction = Extract<HarnessAction, { type: "reconcileRunEvidence" }>;
 type ResearchEvidenceLinkAction = Extract<HarnessAction, { type: "linkResearchEvidence" }>;
 type BlockedRunSignalAction = Extract<HarnessAction, { type: "recordSignal" }>;
@@ -1253,6 +1273,34 @@ function applyDesignerActionRecoveryAtomically(
   try {
     return harness.runInImmediateTransaction((db) => {
       const result = materializeDesignerActionRecoveryWithDb(harness, db, action);
+      const eventId = harness.recordHarnessActionEventWithDb(db, {
+        actionType: action.type,
+        status: result.status,
+        request: safeRequest(action),
+        result: resultToRecord(result),
+      });
+      return { ...result, eventId };
+    });
+  } catch (error) {
+    const problem = limitUtf8Output(sanitizeEvolutionErrorText(errorMessage(error)), 4_096);
+    const result = blockedResult(action.type, `${action.type} blocked: ${problem}`, [problem]);
+    const eventId = harness.recordHarnessActionEvent({
+      actionType: action.type,
+      status: result.status,
+      request: safeRequest(action),
+      result: resultToRecord(result),
+    });
+    return { ...result, eventId };
+  }
+}
+
+function applyDesignDeliveryRecoveryAtomically(
+  harness: Harness,
+  action: DesignDeliveryRecoveryAction,
+): HarnessActionResult & { eventId: string } {
+  try {
+    return harness.runInImmediateTransaction((db) => {
+      const result = materializeDesignDeliveryRecoveryWithDb(harness, db, action);
       const eventId = harness.recordHarnessActionEventWithDb(db, {
         actionType: action.type,
         status: result.status,
@@ -2226,6 +2274,302 @@ function materializeDesignerActionRecoveryWithDb(
     sourceAttemptId: sourceAttempt.attemptId,
     status: "todo",
   }]);
+}
+
+function materializeDesignDeliveryRecoveryWithDb(
+  harness: Harness,
+  db: HarnessDatabase,
+  action: DesignDeliveryRecoveryAction,
+): HarnessActionResult {
+  const overview = harness.getRunOverviewWithDb(db, { runId: action.runId, eventLimit: 0 });
+  const run = overview.run;
+  if (!run) throw new Error(`run not found: ${action.runId}`);
+  if (run.context.source !== "design" || run.context.retired === true) {
+    throw new Error(`design delivery recovery requires an active design child: ${action.runId}`);
+  }
+  const proposalId = typeof run.context.designProposalId === "string" ? run.context.designProposalId : "";
+  const decisionId = typeof run.context.designDecisionId === "string" ? run.context.designDecisionId : "";
+  const parentRunId = typeof run.context.parentRunId === "string" ? run.context.parentRunId : "";
+  const deliveryPlan = objectRecordOrNull(run.context.designDeliveryPlan);
+  const planPlanner = objectRecordOrNull(deliveryPlan?.planner);
+  const evaluationContract = objectRecordOrNull(run.context.designEvaluationContract);
+  if (
+    deliveryPlan?.schemaVersion !== 1
+    || typeof deliveryPlan.runGoal !== "string"
+    || !planPlanner
+    || typeof planPlanner.goal !== "string"
+    || typeof planPlanner.prompt !== "string"
+    || !Array.isArray(planPlanner.doneWhen)
+    || planPlanner.doneWhen.some((entry) => typeof entry !== "string")
+    || !proposalId
+    || !decisionId
+    || !parentRunId
+    || !evaluationContract
+  ) {
+    throw new Error(`design child ${run.id} is missing its frozen delivery or evaluation contract`);
+  }
+  const authority = db.query(
+    `
+    select design_proposals.id
+    from design_proposals
+    join design_decisions on design_decisions.proposal_id = design_proposals.id
+    where design_proposals.id = $proposalId
+      and design_proposals.run_id = $parentRunId
+      and design_proposals.project_id is $projectId
+      and design_proposals.status = 'accepted'
+      and design_decisions.id = $decisionId
+      and design_decisions.decision = 'approved'
+    limit 1
+    `,
+  ).get({
+    $proposalId: proposalId,
+    $parentRunId: parentRunId,
+    $projectId: run.projectId,
+    $decisionId: decisionId,
+  }) as { id: string } | null;
+  if (!authority) {
+    throw new Error(`design child ${run.id} is not bound to an accepted proposal and approved authority decision`);
+  }
+
+  const canonicalPlannerCandidates = overview.tasks.filter((task) =>
+    task.role === "planner"
+    && task.goal === planPlanner.goal
+    && task.prompt === planPlanner.prompt
+    && sameCanonicalValue(task.doneWhen, planPlanner.doneWhen)
+    && !task.config?.goalReviewContinuation
+    && !task.config?.designDeliveryRecovery
+  );
+  if (canonicalPlannerCandidates.length !== 1) {
+    throw new Error(`design child ${run.id} has ${canonicalPlannerCandidates.length} canonical frozen Planner tasks; expected exactly one`);
+  }
+  const canonicalPlanner = canonicalPlannerCandidates[0]!;
+  const sourcePlanner = overview.tasks.find((task) => task.id === action.sourcePlannerTaskId);
+  if (!sourcePlanner || sourcePlanner.runId !== run.id || sourcePlanner.role !== "planner" || sourcePlanner.status !== "done") {
+    throw new Error(`source Planner must be done in ${run.id}: ${action.sourcePlannerTaskId}`);
+  }
+  const sourceAttempt = overview.sessions.filter((session) => session.taskId === sourcePlanner.id).at(-1);
+  if (!sourceAttempt || sourceAttempt.status !== "done") {
+    throw new Error(`source Planner ${sourcePlanner.id} has no terminal done attempt`);
+  }
+  const nextTasks = Array.isArray(sourceAttempt.output.nextTasks) ? sourceAttempt.output.nextTasks : [];
+  if (nextTasks.length !== 1) {
+    throw new Error(`source Planner ${sourcePlanner.id} must freeze exactly one Worker task`);
+  }
+  const workerPlan = objectRecordOrNull(nextTasks[0]);
+  if (
+    workerPlan?.role !== "worker"
+    || typeof workerPlan.goal !== "string"
+    || workerPlan.goal.trim().length === 0
+    || typeof workerPlan.prompt !== "string"
+    || workerPlan.prompt.trim().length === 0
+    || (workerPlan.doneWhen !== undefined
+      && (!Array.isArray(workerPlan.doneWhen) || workerPlan.doneWhen.some((entry) => typeof entry !== "string")))
+  ) {
+    throw new Error(`source Planner ${sourcePlanner.id} did not produce a valid frozen Worker plan`);
+  }
+
+  const recoveryKey = stableFingerprint({
+    runId: run.id,
+    proposalId,
+    decisionId,
+    canonicalPlannerTaskId: canonicalPlanner.id,
+    sourcePlannerTaskId: sourcePlanner.id,
+    workerPlan,
+    evaluationContract,
+  });
+  const existingRecovery = overview.tasks.filter((task) => {
+    const marker = objectRecordOrNull(task.config?.designDeliveryRecovery);
+    return marker?.recoveryKey === recoveryKey;
+  });
+  if (existingRecovery.length > 0) {
+    const planner = existingRecovery.find((task) => task.role === "planner");
+    const worker = existingRecovery.find((task) => task.role === "worker");
+    const verifier = existingRecovery.find((task) => task.role === "verifier");
+    if (
+      existingRecovery.length !== 3
+      || !planner || !worker || !verifier
+      || !sameCanonicalValue(worker.dependsOn, [planner.id])
+      || !sameCanonicalValue(verifier.dependsOn, [worker.id])
+    ) {
+      throw new Error(`existing design delivery recovery conflicts with ${recoveryKey}`);
+    }
+    return doneResult(action.type, `Design delivery recovery ${recoveryKey} reused.`, [
+      { name: "frozen Planner", status: "passed", evidence: canonicalPlanner.id },
+      { name: "bounded recovery graph", status: "passed", evidence: "reused" },
+      { name: "repair budget", status: "passed", evidence: "not charged" },
+    ], [{
+      kind: "design_delivery_recovery",
+      runId: run.id,
+      plannerTaskId: planner.id,
+      workerTaskId: worker.id,
+      verifierTaskId: verifier.id,
+      supersededTaskIds: supersededDesignDeliveryTaskIds(overview.tasks, sourcePlanner.id),
+      recoveryKey,
+      reused: true,
+    }]);
+  }
+  const activeTasks = overview.tasks.filter((task) => task.status === "todo" || task.status === "running");
+  if (activeTasks.length > 0) {
+    throw new Error(`design child ${run.id} still has active tasks: ${activeTasks.map((task) => task.id).join(", ")}`);
+  }
+
+  const verifierContract = {
+    schemaVersion: 1,
+    source: "frozen-design-evaluation-contract",
+    designProposalId: proposalId,
+    designDecisionId: decisionId,
+    evaluationContract,
+    evaluationContractSha256: stableFingerprint(evaluationContract),
+  };
+  const verifierContractSha256 = stableFingerprint(verifierContract);
+  const agentDefaults = objectRecordOrNull(run.context.agentDefaults);
+  const roleDefaults = objectRecordOrNull(agentDefaults?.roles);
+  const workerBackend = typeof roleDefaults?.worker === "string" ? roleDefaults.worker : "";
+  const agentBackends = objectRecordOrNull(run.context.agentBackends);
+  const workerBackendConfig = objectRecordOrNull(agentBackends?.[workerBackend]);
+  if (!workerBackend || workerBackendConfig?.kind !== "dsh-cli") {
+    throw new Error(`design child ${run.id} must freeze its Worker to a configured dsh-cli backend before recovery`);
+  }
+  const marker = {
+    schemaVersion: 1,
+    recoveryKey,
+    canonicalPlannerTaskId: canonicalPlanner.id,
+    sourcePlannerTaskId: sourcePlanner.id,
+    sourcePlannerAttemptId: sourceAttempt.attemptId,
+    designProposalId: proposalId,
+    designDecisionId: decisionId,
+    verifierContractSha256,
+    worktreeMode: "isolated-task",
+    reason: action.reason ?? "recover the frozen design delivery graph once",
+  };
+  const plannerTaskId = makeId("task");
+  const workerTaskId = makeId("task");
+  const verifierTaskId = makeId("task");
+  harness.createTaskWithDb(db, {
+    id: plannerTaskId,
+    runId: run.id,
+    parentId: sourcePlanner.id,
+    cycleId: sourcePlanner.cycleId,
+    role: "planner",
+    goal: `Confirm recovered frozen plan: ${workerPlan.goal}`,
+    prompt: [
+      "Confirm the host-materialized recovery graph matches the already approved design.",
+      `Canonical Planner: ${canonicalPlanner.id}`,
+      `Source Planner: ${sourcePlanner.id}`,
+      `Frozen Worker: ${workerTaskId}`,
+      `Independent Verifier: ${verifierTaskId}`,
+      "Do not create nextTasks, change the frozen verifier contract, implement files, or use a browser.",
+      "Return a terminal read-only confirmation only.",
+    ].join("\n"),
+    dependsOn: [sourcePlanner.id],
+    doneWhen: [
+      "the host-materialized Worker and Verifier dependencies match the frozen graph",
+      "no nextTasks, nextRuns, or design actions are emitted",
+    ],
+    worktreePath: null,
+    config: {
+      agentBackend: "codex-resumable",
+      permissionMode: "read-only",
+      readOnly: true,
+      forbidImplementation: true,
+      forbidBrowser: true,
+      browserProcessPolicy: "deny",
+      verifierContract,
+      frozenDesignPlanner: marker,
+      designDeliveryRecovery: marker,
+    },
+  });
+  harness.createTaskWithDb(db, {
+    id: workerTaskId,
+    runId: run.id,
+    parentId: plannerTaskId,
+    cycleId: sourcePlanner.cycleId,
+    role: "worker",
+    goal: workerPlan.goal,
+    prompt: workerPlan.prompt,
+    dependsOn: [plannerTaskId],
+    doneWhen: Array.isArray(workerPlan.doneWhen) ? workerPlan.doneWhen as string[] : [],
+    worktreePath: null,
+    config: {
+      agentBackend: workerBackend,
+      permissionMode: "workspace-write",
+      dshProfileIsolation: "base-headless",
+      dshRequiredPlugins: [],
+      forbidBrowser: true,
+      browserProcessPolicy: "deny",
+      verifierContract,
+      frozenDesignPlanner: marker,
+      designDeliveryRecovery: marker,
+    },
+  });
+  harness.createTaskWithDb(db, {
+    id: verifierTaskId,
+    runId: run.id,
+    parentId: workerTaskId,
+    cycleId: sourcePlanner.cycleId,
+    role: "verifier",
+    goal: `Independently verify: ${workerPlan.goal}`,
+    prompt: [
+      "Verify the completed Worker against the exact frozen verifier contract in task config.",
+      `Worker task: ${workerTaskId}`,
+      "Use read-only evidence and report blockers without implementing repairs.",
+    ].join("\n"),
+    dependsOn: [workerTaskId],
+    doneWhen: [
+      "the latest Worker lineage is independently checked against every frozen criterion",
+      "all evidence is cited or the Verifier fails closed",
+    ],
+    worktreePath: null,
+    config: {
+      agentBackend: "codex-resumable",
+      permissionMode: "read-only",
+      readOnly: true,
+      forbidImplementation: true,
+      forbidBrowser: true,
+      browserProcessPolicy: "deny",
+      verifierContract,
+      sourceTaskId: workerTaskId,
+      frozenDesignPlanner: marker,
+      designDeliveryRecovery: marker,
+    },
+  });
+  harness.updateRunWithDb(db, {
+    runId: run.id,
+    status: "todo",
+    contextPatch: {
+      designDeliveryRecovery: {
+        ...marker,
+        plannerTaskId,
+        workerTaskId,
+        verifierTaskId,
+      },
+    },
+  });
+  return doneResult(action.type, `Design delivery recovery ${recoveryKey} materialized.`, [
+    { name: "accepted design authority", status: "passed", evidence: `${proposalId}:${decisionId}` },
+    { name: "frozen Planner", status: "passed", evidence: canonicalPlanner.id },
+    { name: "DSH isolation", status: "passed", evidence: "base-headless; network deny; zero target credentials" },
+    { name: "independent Verifier dependency", status: "passed", evidence: `${verifierTaskId}->${workerTaskId}` },
+    { name: "repair budget", status: "passed", evidence: "not charged" },
+  ], [{
+    kind: "design_delivery_recovery",
+    runId: run.id,
+    plannerTaskId,
+    workerTaskId,
+    verifierTaskId,
+    supersededTaskIds: supersededDesignDeliveryTaskIds(overview.tasks, sourcePlanner.id),
+    recoveryKey,
+    reused: false,
+  }]);
+}
+
+function supersededDesignDeliveryTaskIds(tasks: Task[], sourcePlannerTaskId: string) {
+  return tasks
+    .filter((task) => task.id !== sourcePlannerTaskId
+      && (task.role === "worker" || task.role === "verifier")
+      && task.status === "blocked")
+    .map((task) => task.id)
+    .sort();
 }
 
 function activateHarnessRevisionWithDb(
@@ -3495,7 +3839,10 @@ function applyParsedHarnessAction(
     return runWatchdogPass(harness, action);
   }
 
-  return prepareRunDrain(harness, action);
+  if (action.type === "prepareRunDrain") {
+    return prepareRunDrain(harness, action);
+  }
+  throw new Error(`unhandled harness action type: ${(action as { type: string }).type}`);
 }
 
 const SUBSESSION_DEFAULT_TIMEOUT_MS = 30 * 60 * 1000;

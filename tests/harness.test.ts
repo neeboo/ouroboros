@@ -310,7 +310,16 @@ describe("Harness", () => {
         parentRunId,
         designProposalId: proposalId,
         designDecisionId: decisionId,
-        designDeliveryPlan: { schemaVersion: 1 },
+        designDeliveryPlan: {
+          schemaVersion: 1,
+          runGoal: "Authorized delivery child",
+          planner: {
+            goal: "Freeze the delivery graph",
+            prompt: "Create the governed Worker task.",
+            doneWhen: [],
+            config: {},
+          },
+        },
       },
     });
 
@@ -327,6 +336,19 @@ describe("Harness", () => {
       goal: "Freeze the delivery graph",
       prompt: "Create the governed Worker task.",
     });
+    const unrelatedPlannerTaskId = harness.createTask({
+      runId: childRunId,
+      role: "planner",
+      goal: "Continue after Goal Review",
+      prompt: "This Planner is not the frozen delivery Planner.",
+    });
+    expect(() => harness.createTask({
+      runId: childRunId,
+      role: "worker",
+      goal: "Use an unfrozen continuation",
+      prompt: "Must be rejected.",
+      dependsOn: [unrelatedPlannerTaskId],
+    })).toThrow("downstream of its frozen Planner");
     const workerTaskId = harness.createTask({
       runId: childRunId,
       role: "worker",

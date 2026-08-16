@@ -3621,8 +3621,25 @@ function assertTaskGovernanceBoundaryWithDb(db: HarnessDatabase, input: CreateTa
     const ancestor = tasksById.get(taskId);
     if (!ancestor) continue;
     if (ancestor.role === "planner") {
-      plannerFound = true;
-      break;
+      const deliveryPlan = run.context.designDeliveryPlan;
+      const plannerPlan = deliveryPlan && typeof deliveryPlan === "object" && !Array.isArray(deliveryPlan)
+        ? (deliveryPlan as Record<string, unknown>).planner
+        : null;
+      const canonicalPlanner = plannerPlan && typeof plannerPlan === "object" && !Array.isArray(plannerPlan)
+        && ancestor.goal === (plannerPlan as Record<string, unknown>).goal
+        && ancestor.prompt === (plannerPlan as Record<string, unknown>).prompt
+        && JSON.stringify(ancestor.doneWhen) === JSON.stringify((plannerPlan as Record<string, unknown>).doneWhen);
+      const frozenPlanner = ancestor.config?.frozenDesignPlanner;
+      const governedRecoveryPlanner = frozenPlanner && typeof frozenPlanner === "object" && !Array.isArray(frozenPlanner)
+        && (frozenPlanner as Record<string, unknown>).schemaVersion === 1
+        && (frozenPlanner as Record<string, unknown>).designProposalId === proposalId
+        && (frozenPlanner as Record<string, unknown>).designDecisionId === decisionId
+        && typeof (frozenPlanner as Record<string, unknown>).canonicalPlannerTaskId === "string"
+        && typeof (frozenPlanner as Record<string, unknown>).verifierContractSha256 === "string";
+      if (canonicalPlanner || governedRecoveryPlanner) {
+        plannerFound = true;
+        break;
+      }
     }
     pending.push(...ancestor.dependsOn, ...(ancestor.parentId ? [ancestor.parentId] : []));
   }

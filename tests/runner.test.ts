@@ -7315,6 +7315,177 @@ describe("runner", () => {
     expect(harness.getAttempt(result!.attemptId)?.status).toBe("blocked");
   });
 
+  test("a governed design Goal Review cannot create a mixed Planner Worker Verifier recovery graph", async () => {
+    const runId = harness.createRun({
+      goal: "Recover one governed delivery through a host action",
+      context: {
+        source: "design",
+        designProposalId: "design_host_recovery",
+        designDecisionId: "decision_host_recovery",
+        designDeliveryPlan: {
+          schemaVersion: 1,
+          runGoal: "Recover one governed delivery through a host action",
+          planner: { goal: "Frozen Planner", prompt: "Freeze the graph.", doneWhen: [], config: {} },
+        },
+      },
+    });
+    const reviewTaskId = harness.createTask({
+      runId,
+      role: "goal-review",
+      goal: "Review a blocked Planner",
+      prompt: "Do not synthesize mixed recovery work.",
+    });
+
+    const result = await runNextReadyTask({
+      harness,
+      runId,
+      stopHooks: [createTasksFromOutputHook({ harness })],
+      executor: async () => ({
+        status: "done",
+        runDecision: "continue",
+        summary: "Proposed an unsafe mixed graph.",
+        changedFiles: [],
+        checks: [],
+        artifacts: [],
+        problems: [],
+        nextTasks: [
+          { role: "planner", goal: "Continuation Planner", prompt: "Plan again." },
+          { role: "verifier", goal: "Premature audit", prompt: "Audit before the Worker." },
+        ],
+      }),
+    });
+
+    const overview = harness.getRunOverview({ runId, eventLimit: 0 });
+    expect(result?.stopDecision).toBe("exit");
+    expect(overview.tasks.map((task) => task.id)).toEqual([reviewTaskId]);
+    expect(harness.getAttempt(result!.attemptId)?.output).toMatchObject({
+      artifacts: [expect.objectContaining({ kind: "design_delivery_recovery_required", runId })],
+      problems: [expect.stringContaining("materializeDesignDeliveryRecovery")],
+    });
+  });
+
+  test("a frozen design Planner forces its Worker dependency and explicit DSH route", async () => {
+    const projectId = harness.createProject({ name: "Frozen Planner route", rootPath: dir });
+    const parentRunId = harness.createRun({
+      projectId,
+      goal: "Approve one governed delivery",
+      context: { source: "target-system-design" },
+    });
+    const proposal = harness.createDesignProposal({
+      projectId,
+      runId: parentRunId,
+      title: "Use one isolated DSH Worker",
+      problem: "The delivery needs an explicit backend.",
+      recommendation: "Freeze the backend on the Worker task.",
+      status: "accepted",
+      proposal: {
+        problem: "The delivery needs an explicit backend.",
+        recommendation: "Freeze the backend on the Worker task.",
+        evaluationContract: {
+          baseline: ["no explicit DSH route"],
+          successMetrics: ["one explicit DSH Worker"],
+          guardMetrics: ["zero network and zero target credentials"],
+          requiredEvidence: ["independent verification"],
+        },
+        investment: { reversibility: "easy", portfolio: "core", oneTimeCost: 0, recurringCost: 0 },
+      },
+    });
+    const decision = harness.recordDesignDecision({
+      proposalId: proposal.id,
+      decision: "approved",
+      actorKind: "auto",
+      actorRef: "authority-evaluator",
+    });
+    const verifierContract = {
+      schemaVersion: 1,
+      source: "frozen-design-evaluation-contract",
+      designProposalId: proposal.id,
+      designDecisionId: decision.id,
+      evaluationContract: proposal.proposal.evaluationContract,
+      evaluationContractSha256: "a".repeat(64),
+    };
+    const plannerGoal = "Freeze one delivery graph";
+    const plannerPrompt = "Return one Worker under the frozen contract.";
+    const runId = harness.createRun({
+      projectId,
+      goal: "Execute the governed delivery",
+      context: {
+        source: "design",
+        parentRunId,
+        designProposalId: proposal.id,
+        designDecisionId: decision.id,
+        designDeliveryPlan: {
+          schemaVersion: 1,
+          runGoal: "Execute the governed delivery",
+          planner: { goal: plannerGoal, prompt: plannerPrompt, doneWhen: [], config: {} },
+        },
+        agentDefaults: { global: "codex-resumable", roles: { worker: "deepseek-harness" } },
+        agentBackends: {
+          "deepseek-harness": { kind: "dsh-cli", command: "dsh", profile: "headless" },
+        },
+      },
+    });
+    const plannerTaskId = harness.createTask({
+      runId,
+      role: "planner",
+      goal: plannerGoal,
+      prompt: plannerPrompt,
+      config: {
+        verifierContract,
+        frozenDesignPlanner: {
+          schemaVersion: 1,
+          canonicalPlannerTaskId: "pending",
+          designProposalId: proposal.id,
+          designDecisionId: decision.id,
+          verifierContractSha256: "b".repeat(64),
+        },
+      },
+    });
+
+    await runNextReadyTask({
+      harness,
+      runId,
+      stopHooks: [createTasksFromOutputHook({ harness })],
+      executor: async () => ({
+        status: "done",
+        summary: "One Worker is frozen.",
+        changedFiles: [],
+        checks: [],
+        artifacts: [],
+        problems: [],
+        nextTasks: [{
+          role: "worker",
+          goal: "Implement the frozen delivery",
+          prompt: "Use only the approved scope.",
+          dependsOn: [],
+          doneWhen: ["structured evidence is returned"],
+        }],
+      }),
+    });
+
+    const worker = harness.getRunOverview({ runId, eventLimit: 0 }).tasks
+      .find((candidate) => candidate.role === "worker")!;
+    expect(worker).toMatchObject({
+      dependsOn: [plannerTaskId],
+      config: {
+        agentBackend: "deepseek-harness",
+        permissionMode: "workspace-write",
+        dshProfileIsolation: "base-headless",
+        dshRequiredPlugins: [],
+        forbidBrowser: true,
+        verifierContract,
+      },
+    });
+    expect(resolveExecutionRoute({
+      run: harness.getRun(runId)!,
+      task: worker,
+      cliExecutor: "codex-resumable",
+    })).toMatchObject({
+      executionMode: "generic",
+      backend: { id: "deepseek-harness", kind: "dsh-cli", source: "task" },
+    });
+  });
+
   test("goal review stop hook does not append stale next tasks when work appeared while the review was running", async () => {
     const runId = harness.createRun({ goal: "Finish one canonical delivery" });
     const reviewTaskId = harness.createTask({
@@ -8164,6 +8335,16 @@ describe("runner", () => {
         command: "/opt/deepseek/bin/dsh",
         profile: "headless",
         env: { DSH_HOME: "/tmp/dsh-home" },
+        source: "task",
+      },
+      model: null,
+    });
+    expect(resolveExecutionRoute({ run, task, cliExecutor: "codex-resumable" })).toMatchObject({
+      role: "worker",
+      executionMode: "generic",
+      backend: {
+        id: "deepseek-harness",
+        kind: "dsh-cli",
         source: "task",
       },
       model: null,
