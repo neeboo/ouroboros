@@ -402,10 +402,12 @@ function parseDesignProposalData(
   }
   const hostReceiptCandidate = evidenceRefs.some((ref) => /^action:action_[A-Za-z0-9._-]+$/.test(ref))
     || evidenceRefs.some((ref) => /^signal_blocked_correction_[A-Za-z0-9._-]+$/.test(ref));
+  const runtimeIntegrationCandidate = evidenceRefs.some((ref) => /^signal_verified_package_[A-Za-z0-9._-]+$/.test(ref));
+  const fixedAdapterCandidate = hostReceiptCandidate || runtimeIntegrationCandidate;
   const evaluationContract = parseDesignEvaluationContract(
     record.evaluationContract,
     `${label}.evaluationContract`,
-    { preserveComparisonForHostReceiptAdapter: hostReceiptCandidate },
+    { preserveComparisonForHostReceiptAdapter: fixedAdapterCandidate },
   );
   const hasEvolutionPack = record.evolutionPack !== undefined;
   const hasCausalHypothesis = record.causalHypothesis !== undefined;
@@ -435,7 +437,7 @@ function parseDesignProposalData(
     );
   }
   const evolutionPack = hasEvolutionPack
-    ? hostReceiptCandidate
+    ? fixedAdapterCandidate
       ? structuredClone(requireObject(record.evolutionPack, `${label}.evolutionPack`)) as never
       : parseEvolutionPackV1(
         record.evolutionPack,
@@ -445,13 +447,13 @@ function parseDesignProposalData(
       )
     : undefined;
   const causalHypothesis = hasCausalHypothesis
-    ? hostReceiptCandidate
+    ? fixedAdapterCandidate
       ? structuredClone(requireObject(record.causalHypothesis, `${label}.causalHypothesis`)) as never
       : parseEvolutionCausalHypothesis(record.causalHypothesis, `${label}.causalHypothesis`)
     : undefined;
   const deliveryContracts = evolutionPack === undefined
     ? null
-    : hostReceiptCandidate
+    : fixedAdapterCandidate
       ? preserveHostReceiptDeliveryContracts(record, deliveryContractKeys, label)
       : parseEvolutionDeliveryContracts(record, expectedProjectId, evolutionPack, label);
   const investment = parseDesignInvestment(record.investment, `${label}.investment`);

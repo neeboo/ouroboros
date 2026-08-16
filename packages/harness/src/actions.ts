@@ -85,6 +85,24 @@ export interface IntegrationReadiness {
   integratedWorkerTaskIds: ReadonlySet<string>;
 }
 
+interface RuntimeIntegrationRepositoryBoundary {
+  id: string;
+  role: "backend" | "frontend" | "ainovel" | "dsh";
+  projectId: string | null;
+  repoPath: string;
+  expectedHead: string;
+  access: "isolated-write" | "new-isolated-worktree" | "read-only";
+  allowedPaths: string[];
+  readOnlyPaths: string[];
+  forbiddenPaths: string[];
+}
+
+interface RuntimeIntegrationBoundaryInput {
+  schemaVersion: 1;
+  repositories: RuntimeIntegrationRepositoryBoundary[];
+  gateway: { host: "127.0.0.1"; port: number; browserAllowed: false };
+}
+
 export type HarnessAction =
   | { type: "reclaimRunningTasks"; runId: string; reason?: string }
   | { type: "retryTask"; taskId: string; reason?: string }
@@ -183,6 +201,12 @@ export type HarnessAction =
       type: "materializeHostEvidenceMaintenanceDelivery";
       proposalId: string;
       decisionId: string;
+    }
+  | {
+      type: "materializeRuntimeIntegrationDesignRecovery";
+      sourceRunId: string;
+      sourceTaskId: string;
+      boundary: RuntimeIntegrationBoundaryInput;
     }
   | { type: "markRunTodo"; runId: string; reason?: string }
   | {
@@ -596,6 +620,7 @@ const FROZEN_DESIGN_CONTEXT_KEYS = new Set([
   "researchEvidenceLinks",
   "targetSystemEvidenceBundle",
   "verifiedPackageCloseout",
+  "runtimeIntegrationBoundary",
 ]);
 
 function frozenDesignContextKeys(keys: Iterable<string>): string[] {
@@ -794,6 +819,15 @@ export function parseHarnessAction(value: unknown): HarnessAction {
       type,
       proposalId: exactSafeIdentifierField(record, "proposalId"),
       decisionId: exactSafeIdentifierField(record, "decisionId"),
+    };
+  }
+  if (type === "materializeRuntimeIntegrationDesignRecovery") {
+    assertOnlyFields(record, type, ["type", "sourceRunId", "sourceTaskId", "boundary"]);
+    return {
+      type,
+      sourceRunId: exactSafeIdentifierField(record, "sourceRunId"),
+      sourceTaskId: exactSafeIdentifierField(record, "sourceTaskId"),
+      boundary: parseRuntimeIntegrationBoundaryInput(record.boundary),
     };
   }
   if (type === "markRunTodo") {
@@ -1213,7 +1247,7 @@ export function parseHarnessAction(value: unknown): HarnessAction {
     };
   }
   throw new Error(
-    "harness action type must be reclaimRunningTasks, retryTask, reconcileRunEvidence, recordSignal, linkResearchEvidence, materializeDesignerActionRecovery, materializeDesignDeliveryRecovery, materializeDesignWorkerRuntimeRecovery, materializeDesignWorkerTransportRecovery, materializeVerifierRepairRecovery, reconcileVerifierRepairHandoff, buildVersionedCorpusManifest, bindHostEvidenceMaintenanceReceipt, materializeHostEvidenceMaintenanceDelivery, markRunTodo, updateRunContext, amendRunContract, retireRun, retireTask, prepareRunDrain, completeSystemTask, integrateVerifiedRun, pushExactGitRef, createExactGitRef, commitExactGitIndex, stageExactWorkerFilesForVerification, materializeAttemptArtifactsForVerification, verifySealedCorpusForVerification, registerEvolutionProfile, recordProductionEpisode, registerHarnessVariant, activateHarnessRevision, freezeMatchedExperiment, interruptAttemptAndCreateTask, interruptRunningAttemptsAndCreateTask, acceptGuardrailProposal, startSubsession, collectSubsessions, cancelSubsessions, or runWatchdogPass",
+    "harness action type must be reclaimRunningTasks, retryTask, reconcileRunEvidence, recordSignal, linkResearchEvidence, materializeDesignerActionRecovery, materializeDesignDeliveryRecovery, materializeDesignWorkerRuntimeRecovery, materializeDesignWorkerTransportRecovery, materializeVerifierRepairRecovery, reconcileVerifierRepairHandoff, buildVersionedCorpusManifest, bindHostEvidenceMaintenanceReceipt, materializeHostEvidenceMaintenanceDelivery, materializeRuntimeIntegrationDesignRecovery, markRunTodo, updateRunContext, amendRunContract, retireRun, retireTask, prepareRunDrain, completeSystemTask, integrateVerifiedRun, pushExactGitRef, createExactGitRef, commitExactGitIndex, stageExactWorkerFilesForVerification, materializeAttemptArtifactsForVerification, verifySealedCorpusForVerification, registerEvolutionProfile, recordProductionEpisode, registerHarnessVariant, activateHarnessRevision, freezeMatchedExperiment, interruptAttemptAndCreateTask, interruptRunningAttemptsAndCreateTask, acceptGuardrailProposal, startSubsession, collectSubsessions, cancelSubsessions, or runWatchdogPass",
   );
 }
 
@@ -1294,6 +1328,10 @@ export function applyHarnessAction(
     return applyHostEvidenceMaintenanceDeliveryAtomically(harness, action);
   }
 
+  if (action.type === "materializeRuntimeIntegrationDesignRecovery") {
+    return applyRuntimeIntegrationDesignRecoveryAtomically(harness, action);
+  }
+
   if (action.type === "integrateVerifiedRun") {
     const replay = findIntegrationReplay(harness, action, options);
     if (replay) {
@@ -1339,12 +1377,86 @@ type VerifierRepairHandoffReconciliationAction = Extract<HarnessAction, { type: 
 type RunEvidenceReconciliationAction = Extract<HarnessAction, { type: "reconcileRunEvidence" }>;
 type ResearchEvidenceLinkAction = Extract<HarnessAction, { type: "linkResearchEvidence" }>;
 type BlockedRunSignalAction = Extract<HarnessAction, { type: "recordSignal" }>;
+type RuntimeIntegrationDesignRecoveryAction = Extract<HarnessAction, { type: "materializeRuntimeIntegrationDesignRecovery" }>;
 
 function isEvolutionAction(action: HarnessAction): action is EvolutionAction {
   return action.type === "registerEvolutionProfile"
     || action.type === "recordProductionEpisode"
     || action.type === "registerHarnessVariant"
     || action.type === "freezeMatchedExperiment";
+}
+
+function parseRuntimeIntegrationBoundaryInput(value: unknown): RuntimeIntegrationBoundaryInput {
+  const record = objectRecord(value, "boundary");
+  assertOnlyFields(record, "boundary", ["schemaVersion", "repositories", "gateway"]);
+  if (record.schemaVersion !== 1) throw new Error("boundary.schemaVersion must be 1");
+  if (!Array.isArray(record.repositories) || record.repositories.length !== 4) {
+    throw new Error("boundary.repositories must contain exactly backend, frontend, ainovel, and dsh");
+  }
+  const repositories = record.repositories.map((entry, index) => {
+    const repository = objectRecord(entry, `boundary.repositories[${index}]`);
+    assertOnlyFields(repository, `boundary.repositories[${index}]`, [
+      "id", "role", "projectId", "repoPath", "expectedHead", "access",
+      "allowedPaths", "readOnlyPaths", "forbiddenPaths",
+    ]);
+    const role = exactNonEmptyStringField(repository, "role");
+    if (!new Set(["backend", "frontend", "ainovel", "dsh"]).has(role)) {
+      throw new Error(`boundary.repositories[${index}].role is invalid`);
+    }
+    const access = exactNonEmptyStringField(repository, "access");
+    if (!new Set(["isolated-write", "new-isolated-worktree", "read-only"]).has(access)) {
+      throw new Error(`boundary.repositories[${index}].access is invalid`);
+    }
+    const projectId = repository.projectId === null
+      ? null
+      : exactSafeIdentifierField(repository, "projectId");
+    const paths = (key: "allowedPaths" | "readOnlyPaths" | "forbiddenPaths") =>
+      runtimeIntegrationPathPatterns(repository[key], `boundary.repositories[${index}].${key}`);
+    return {
+      id: exactSafeIdentifierField(repository, "id"),
+      role: role as RuntimeIntegrationRepositoryBoundary["role"],
+      projectId,
+      repoPath: exactAbsolutePathField(repository, "repoPath"),
+      expectedHead: exactGitCommitShaField(repository, "expectedHead"),
+      access: access as RuntimeIntegrationRepositoryBoundary["access"],
+      allowedPaths: paths("allowedPaths"),
+      readOnlyPaths: paths("readOnlyPaths"),
+      forbiddenPaths: paths("forbiddenPaths"),
+    };
+  });
+  const expectedRoles = ["backend", "frontend", "ainovel", "dsh"];
+  if (!repositories.every((repository, index) => repository.role === expectedRoles[index])) {
+    throw new Error("boundary.repositories must be ordered backend, frontend, ainovel, dsh");
+  }
+  if (new Set(repositories.map((repository) => repository.id)).size !== repositories.length) {
+    throw new Error("boundary.repositories ids must be unique");
+  }
+  const gateway = objectRecord(record.gateway, "boundary.gateway");
+  assertOnlyFields(gateway, "boundary.gateway", ["host", "port", "browserAllowed"]);
+  if (gateway.host !== "127.0.0.1" || gateway.port !== 10588 || gateway.browserAllowed !== false) {
+    throw new Error("boundary.gateway must freeze non-browser 127.0.0.1:10588");
+  }
+  return {
+    schemaVersion: 1,
+    repositories,
+    gateway: { host: "127.0.0.1", port: 10588, browserAllowed: false },
+  };
+}
+
+function runtimeIntegrationPathPatterns(value: unknown, label: string): string[] {
+  if (!Array.isArray(value) || value.length > 64 || value.some((entry) => typeof entry !== "string")) {
+    throw new Error(`${label} must be an array of at most 64 path patterns`);
+  }
+  const paths = (value as string[]).map((path, index) => {
+    if (path.length === 0 || path.trim() !== path || path.includes("\0") || path.includes("\\")
+      || isAbsolute(path) || path.split("/").includes("..") || Buffer.byteLength(path, "utf8") > 256
+      || !/^[A-Za-z0-9._*?/-]+$/.test(path)) {
+      throw new Error(`${label}[${index}] must be a bounded relative path pattern`);
+    }
+    return path;
+  });
+  if (new Set(paths).size !== paths.length) throw new Error(`${label} must not contain duplicates`);
+  return paths;
 }
 
 function applyEvolutionActionAtomically(
@@ -2174,6 +2286,349 @@ function applyHostEvidenceMaintenanceDeliveryAtomically(
     });
     return { ...result, eventId };
   });
+}
+
+function applyRuntimeIntegrationDesignRecoveryAtomically(
+  harness: Harness,
+  action: RuntimeIntegrationDesignRecoveryAction,
+): HarnessActionResult & { eventId: string } {
+  try {
+    const normalizedBoundary = validateRuntimeIntegrationBoundary(harness, action.boundary);
+    return harness.runInImmediateTransaction((db) => {
+      const overview = harness.getRunOverviewWithDb(db, { runId: action.sourceRunId, eventLimit: 0 });
+      const sourceRun = overview.run;
+      if (!sourceRun || !sourceRun.projectId || sourceRun.context.source !== "target-system-design") {
+        throw new Error("runtime integration recovery requires a project-bound target-system-design root");
+      }
+      const existingReceipt = objectRecordOrNull(sourceRun.context.runtimeIntegrationDesignRecovery);
+      const boundarySha256 = canonicalEvolutionValueSha256(normalizedBoundary);
+      if (existingReceipt) {
+        if (existingReceipt.boundarySha256 !== boundarySha256
+          || typeof existingReceipt.runId !== "string"
+          || typeof existingReceipt.taskId !== "string") {
+          throw new Error("runtime integration recovery conflicts with the existing frozen boundary");
+        }
+        const existingRun = harness.getRunWithDb(db, existingReceipt.runId);
+        const existingTask = existingRun
+          ? harness.getRunOverviewWithDb(db, { runId: existingRun.id, eventLimit: 0 }).tasks
+            .find((task) => task.id === existingReceipt.taskId) ?? null
+          : null;
+        if (!existingRun || !existingTask || existingTask.runId !== existingRun.id) {
+          throw new Error("runtime integration recovery receipt points to missing state");
+        }
+        const reused = doneResult(action.type, `Runtime integration Designer ${existingTask.id} recovery reused.`, [
+          { name: "frozen boundary", status: "passed", evidence: boundarySha256 },
+          { name: "single Designer", status: "passed", evidence: existingTask.id },
+        ], [{
+          kind: "runtime_integration_designer_recovery",
+          runId: existingRun.id,
+          taskId: existingTask.id,
+          sourceRunId: sourceRun.id,
+          sourceTaskId: action.sourceTaskId,
+          boundarySha256,
+          reused: true,
+        }]);
+        const eventId = harness.recordHarnessActionEventWithDb(db, {
+          actionType: action.type,
+          status: reused.status,
+          request: safeRequest(action),
+          result: resultToRecord(reused),
+        });
+        return { ...reused, eventId };
+      }
+      const sourceTask = overview.tasks.find((task) => task.id === action.sourceTaskId);
+      if (!sourceTask || sourceTask.runId !== sourceRun.id || sourceTask.role !== "designer" || sourceTask.status !== "blocked") {
+        throw new Error("runtime integration recovery source task must be the blocked Designer in the source run");
+      }
+      if (overview.tasks.some((task) => task.status === "todo" || task.status === "running")) {
+        throw new Error("runtime integration recovery source run still has active tasks");
+      }
+      const sourceSession = [...overview.sessions].reverse().find((session) =>
+        session.taskId === sourceTask.id && session.status === "blocked");
+      const sourceProblem = sourceSession
+        ? [...(sourceSession.output.problems ?? [])].reverse().find((problem) => problem.trim().length > 0)
+          ?? sourceSession.output.summary
+        : "";
+      if (!/runtime-integration-gap|failureClass/i.test(sourceProblem)) {
+        throw new Error("runtime integration recovery source has no bounded failureClass evidence");
+      }
+      const purpose = objectRecordOrNull(sourceRun.context.targetSystemEvidenceBundle)?.purpose;
+      if (purpose !== "runtime-integration-after-verified-package") {
+        throw new Error("runtime integration recovery source is not bound to a verified package handoff");
+      }
+      const verifiedPackage = objectRecord(sourceRun.context.verifiedPackageEvidence, "verifiedPackageEvidence");
+      if (verifiedPackage.packageOnly !== true || verifiedPackage.overallGoalComplete !== false
+        || typeof verifiedPackage.signalId !== "string"
+        || typeof verifiedPackage.commitSha !== "string"
+        || typeof verifiedPackage.tree !== "string"
+        || typeof verifiedPackage.remoteRef !== "string") {
+        throw new Error("runtime integration recovery has no complete verified package receipt");
+      }
+      const packageRunId = exactContextId(sourceRun.context.parentRunId, "runtime integration package run");
+      const packageRun = harness.getRunWithDb(db, packageRunId);
+      if (!packageRun || packageRun.status !== "done" || packageRun.projectId !== sourceRun.projectId) {
+        throw new Error("runtime integration package delivery is missing, non-terminal, or cross-project");
+      }
+      const packageContract = objectRecord(packageRun.context.designEvaluationContract, "package designEvaluationContract");
+      const frozenComparison = parseEvolutionComparison(
+        packageContract.comparison,
+        "runtime integration frozen comparison",
+      );
+      const signal = harness.getStrategySignalWithDb(db, { id: verifiedPackage.signalId });
+      if (!signal || signal.projectId !== sourceRun.projectId || signal.status !== "active") {
+        throw new Error("runtime integration verified-package strategy signal is missing or inactive");
+      }
+      const backend = normalizedBoundary.repositories.find((repository) => repository.role === "backend")!;
+      if (backend.projectId !== sourceRun.projectId || backend.repoPath !== realpathSync(packageRun.projectRoot ?? "")) {
+        throw new Error("runtime integration backend boundary does not bind the package delivery project");
+      }
+      const requiredMutationSurfaces = normalizedBoundary.repositories
+        .filter((repository) => repository.access !== "read-only")
+        .map((repository) => ({
+          id: `${repository.id}-runtime`,
+          evolutionTarget: "harness" as const,
+          layer: "code" as const,
+          projectId: sourceRun.projectId!,
+          allowedPaths: [...repository.allowedPaths],
+          forbiddenPaths: [...new Set([...repository.readOnlyPaths, ...repository.forbiddenPaths])],
+          owner: "target" as const,
+        }));
+      const taskGraph = [
+        { id: "backend-runtime", role: "worker", executor: "dsh-cli", repositoryId: "target-backend", dependsOn: [] },
+        { id: "ainovel-adapter", role: "worker", executor: "dsh-cli", repositoryId: "target-backend", dependsOn: ["backend-runtime"] },
+        { id: "frontend-entry", role: "worker", executor: "dsh-cli", repositoryId: "target-frontend", dependsOn: ["ainovel-adapter"] },
+        { id: "dsh-gateway", role: "worker", executor: "dsh-cli", repositoryId: "target-backend", dependsOn: ["frontend-entry"] },
+        { id: "non-browser-e2e", role: "verifier", executor: "codex-resumable", repositoryId: "target-backend", dependsOn: ["dsh-gateway"] },
+      ];
+      const runtimeIntegrationBoundary = {
+        ...normalizedBoundary,
+        boundarySha256,
+        package: {
+          commitSha: verifiedPackage.commitSha,
+          tree: verifiedPackage.tree,
+          remoteRef: verifiedPackage.remoteRef,
+          readOnlyPaths: ["config/evolution/**", "tests/evolution/**"],
+        },
+        taskGraph,
+        credentialIsolation: {
+          forbiddenPaths: [
+            "story-mesh/.ainovel/**",
+            "**/.env*",
+            "**/*api_key*",
+            "**/*token*",
+            "**/*credential*",
+            "**/*secret*",
+          ],
+          modelReceivesCredentials: false,
+          hostInjectionOnly: true,
+        },
+      };
+      const adapterBody = {
+        schemaVersion: 1,
+        signalId: verifiedPackage.signalId,
+        normalizedFailureClass: "contract-mismatch",
+        acceptedFailureClasses: ["contract-mismatch", "runtime-integration-gap"],
+        requiredMutationSurfaces,
+        frozenComparison,
+        runtimeIntegrationBoundary,
+      };
+      const runtimeIntegrationDesignAdapter = {
+        ...adapterBody,
+        adapterSha256: canonicalEvolutionValueSha256(adapterBody),
+      };
+      const recoveryKey = canonicalEvolutionValueSha256({
+        sourceRunId: sourceRun.id,
+        sourceTaskId: sourceTask.id,
+        boundarySha256,
+        packageCommitSha: verifiedPackage.commitSha,
+      });
+      const runId = `run_${createHash("sha1").update(`runtime-integration-recovery|${recoveryKey}`).digest("hex")}`;
+      const taskId = `task_${createHash("sha1").update(`runtime-integration-recovery-task|${recoveryKey}`).digest("hex")}`;
+      if (harness.getRunWithDb(db, runId)
+        || overview.tasks.some((task) => task.id === taskId)) {
+        throw new Error("runtime integration recovery stable IDs already exist without a source receipt");
+      }
+      const nextGoal = sourceRun.goal;
+      harness.createRunWithDb(db, {
+        id: runId,
+        goal: nextGoal,
+        projectId: sourceRun.projectId,
+        projectRoot: backend.repoPath,
+        context: {
+          source: "target-system-design",
+          parentRunId: packageRun.id,
+          supersedesRunId: sourceRun.id,
+          projectId: sourceRun.projectId,
+          founderCharterId: sourceRun.context.founderCharterId,
+          designCharterId: sourceRun.context.designCharterId ?? sourceRun.context.founderCharterId,
+          evolutionInstance: sourceRun.context.evolutionInstance,
+          verifiedPackageEvidence: sourceRun.context.verifiedPackageEvidence,
+          targetSystemEvidenceBundle: {
+            ...(objectRecordOrNull(sourceRun.context.targetSystemEvidenceBundle) ?? {}),
+            runtimeIntegrationBoundarySha256: boundarySha256,
+          },
+          runtimeIntegrationBoundary,
+        },
+      });
+      harness.createTaskWithDb(db, {
+        id: taskId,
+        runId,
+        role: "designer",
+        goal: nextGoal,
+        prompt: [
+          "Design one governed multi-repository runtime integration from the verified package.",
+          "The host owns repository identity, writable paths, read-only package paths, credential isolation, and the task graph below.",
+          "Do not replace, broaden, or omit these boundaries. The model owns the business mechanism and evidence plan only.",
+          JSON.stringify(runtimeIntegrationBoundary, null, 2),
+          "The Planner must preserve this order: backend-runtime -> ainovel-adapter -> frontend-entry -> dsh-gateway -> non-browser-e2e.",
+          "AINovel source inspection is read-only and may use only the public allowed paths. Never read .ainovel/** or any credential-bearing file.",
+          "The frontend must use a new isolated worktree at the frozen HEAD; never write the user's main hodor-web worktree.",
+          "Workers use DSH in separate worktrees. The final Verifier is identity-separated, read-only, browser-denied, and must verify Docker/PostgreSQL/HTTP/127.0.0.1:10588 receipts.",
+        ].join("\n"),
+        doneWhen: [
+          "one proposal is bound to the exact host runtime integration boundary",
+          "the proposal preserves the frozen v5 comparison and package paths read-only",
+          "the proposal authorizes real backend and isolated frontend runtime code and tests",
+          "AINovel credentials and local .ainovel state remain invisible to every model role",
+          "no implementation, browser, target test, or database mutation occurs in this Designer",
+        ],
+        config: {
+          readOnly: true,
+          forbidImplementation: true,
+          forbidBrowser: true,
+          browserProcessPolicy: "deny",
+          runtimeIntegrationBoundary,
+          runtimeIntegrationDesignAdapter,
+        },
+      });
+      const receipt = {
+        schemaVersion: 1,
+        recoveryKey,
+        boundarySha256,
+        sourceTaskId: sourceTask.id,
+        sourceAttemptId: sourceSession?.attemptId ?? null,
+        runId,
+        taskId,
+        retired: true,
+      };
+      harness.updateRunWithDb(db, {
+        runId: sourceRun.id,
+        contextPatch: {
+          runtimeIntegrationDesignRecovery: receipt,
+          retired: true,
+          retiredReason: "superseded-by-host-bound-runtime-integration-designer",
+        },
+      });
+      if (sourceRun.status !== "blocked") {
+        harness.updateRunStatusWithDb(db, { runId: sourceRun.id, status: "blocked" });
+      }
+      const result = doneResult(action.type, `Runtime integration Designer ${taskId} materialized with a frozen multi-repository boundary.`, [
+        { name: "source Designer failure", status: "passed", evidence: sourceTask.id },
+        { name: "repository HEAD readback", status: "passed", evidence: boundarySha256 },
+        { name: "credential isolation", status: "passed", evidence: "modelReceivesCredentials=false" },
+        { name: "single read-only Designer", status: "passed", evidence: taskId },
+      ], [{
+        kind: "runtime_integration_designer_recovery",
+        runId,
+        taskId,
+        sourceRunId: sourceRun.id,
+        sourceTaskId: sourceTask.id,
+        boundarySha256,
+        repositoryHeads: normalizedBoundary.repositories.map((repository) => ({
+          id: repository.id,
+          expectedHead: repository.expectedHead,
+        })),
+        credentialIsolation: true,
+        reused: false,
+      }]);
+      const eventId = harness.recordHarnessActionEventWithDb(db, {
+        actionType: action.type,
+        status: result.status,
+        request: safeRequest(action),
+        result: resultToRecord(result),
+      });
+      return { ...result, eventId };
+    });
+  } catch (error) {
+    const problem = limitUtf8Output(sanitizeEvolutionErrorText(errorMessage(error)), 4_096);
+    const result = blockedResult(action.type, `${action.type} blocked: ${problem}`, [problem]);
+    const eventId = harness.recordHarnessActionEvent({
+      actionType: action.type,
+      status: result.status,
+      request: safeRequest(action),
+      result: resultToRecord(result),
+    });
+    return { ...result, eventId };
+  }
+}
+
+function validateRuntimeIntegrationBoundary(
+  harness: Harness,
+  input: RuntimeIntegrationBoundaryInput,
+): RuntimeIntegrationBoundaryInput {
+  const boundary = structuredClone(input);
+  const canonicalPaths = new Set<string>();
+  const requiredWritableForbidden = [".git/orbs/**", ".orbs/**", ".ouroboros/**", "db/**"];
+  const sensitivePattern = /(?:^|\/)(?:\.ainovel)(?:\/|$)|(?:api[_-]?key|token|credential|secret)|(?:^|\/)\.env/i;
+  for (const repository of boundary.repositories) {
+    if (!existsSync(repository.repoPath) || lstatSync(repository.repoPath).isSymbolicLink()) {
+      throw new Error(`runtime repository ${repository.id} must be an existing non-symlink directory`);
+    }
+    const canonical = realpathSync(repository.repoPath);
+    if (canonicalPaths.has(canonical)) throw new Error("runtime repository paths must be distinct");
+    canonicalPaths.add(canonical);
+    repository.repoPath = canonical;
+    const head = defaultGitRunner({
+      cwd: canonical,
+      args: ["rev-parse", "HEAD"],
+      timeoutMs: 10_000,
+      maxOutputBytes: 4_096,
+    });
+    if (head.exitCode !== 0 || head.stdout.trim() !== repository.expectedHead) {
+      throw new Error(`runtime repository ${repository.id} HEAD does not match the frozen boundary`);
+    }
+    if (repository.allowedPaths.length === 0) {
+      throw new Error(`runtime repository ${repository.id} must declare bounded readable or writable paths`);
+    }
+    if (repository.allowedPaths.some((path) => sensitivePattern.test(path))) {
+      throw new Error(`runtime repository ${repository.id} allowed paths must not include .ainovel or credential material`);
+    }
+    if (repository.access !== "read-only"
+      && requiredWritableForbidden.some((path) => !repository.forbiddenPaths.includes(path))) {
+      throw new Error(`runtime repository ${repository.id} must forbid every control and database path`);
+    }
+    if (repository.projectId !== null) {
+      const project = harness.getProject(repository.projectId);
+      if (!project || realpathSync(project.rootPath) !== canonical) {
+        throw new Error(`runtime repository ${repository.id} project binding does not match its repository root`);
+      }
+    }
+  }
+  const backend = boundary.repositories[0]!;
+  const frontend = boundary.repositories[1]!;
+  const ainovel = boundary.repositories[2]!;
+  const dsh = boundary.repositories[3]!;
+  if (backend.access !== "isolated-write" || backend.projectId === null
+    || !backend.readOnlyPaths.includes("config/evolution/**")
+    || !backend.readOnlyPaths.includes("tests/evolution/**")
+    || backend.allowedPaths.some((path) => path.startsWith("config/evolution/") || path.startsWith("tests/evolution/"))) {
+    throw new Error("backend boundary must write only runtime paths and keep the v5 package read-only");
+  }
+  if (frontend.access !== "new-isolated-worktree" || frontend.projectId === null
+    || frontend.allowedPaths.some((path) => !path.startsWith("src-react/"))) {
+    throw new Error("frontend boundary must use a new isolated worktree and src-react-only paths");
+  }
+  if (ainovel.access !== "read-only" || ainovel.projectId !== null
+    || !ainovel.forbiddenPaths.includes(".ainovel/**")
+    || !ainovel.forbiddenPaths.some((path) => /token/i.test(path))
+    || !ainovel.forbiddenPaths.some((path) => /credential/i.test(path))
+    || !ainovel.forbiddenPaths.some((path) => /secret/i.test(path))) {
+    throw new Error("ainovel boundary must be public-code read-only and explicitly forbid .ainovel and credentials");
+  }
+  if (dsh.access !== "read-only" || dsh.projectId !== null) {
+    throw new Error("dsh capability source must remain read-only and project-neutral");
+  }
+  return boundary;
 }
 
 function fixtureEntry(

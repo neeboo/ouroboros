@@ -488,6 +488,18 @@ function adaptHostReceiptBoundProposal(
   rawProposal: Record<string, unknown>,
   projectId: string,
 ): Record<string, unknown> {
+  const rawRuntimeAdapter = task.config?.runtimeIntegrationDesignAdapter;
+  if (rawRuntimeAdapter && typeof rawRuntimeAdapter === "object" && !Array.isArray(rawRuntimeAdapter)) {
+    return adaptRuntimeIntegrationBoundProposal(
+      runContext,
+      rawRuntimeAdapter as Record<string, unknown>,
+      rawProposal,
+      projectId,
+    );
+  }
+  if (objectRecordOrNull(runContext.targetSystemEvidenceBundle)?.purpose === "runtime-integration-after-verified-package") {
+    throw new Error("verified-package runtime integration requires a fixed runtime integration design adapter");
+  }
   const rawAdapter = task.config?.hostReceiptDesignAdapter;
   if (!rawAdapter || typeof rawAdapter !== "object" || Array.isArray(rawAdapter)) {
     const rawPack = rawProposal.evolutionPack;
@@ -715,6 +727,76 @@ function adaptHostReceiptBoundProposal(
   }
   Object.assign(adapted, normalizedContracts);
   return adapted;
+}
+
+function adaptRuntimeIntegrationBoundProposal(
+  runContext: Record<string, unknown>,
+  adapter: Record<string, unknown>,
+  rawProposal: Record<string, unknown>,
+  projectId: string,
+): Record<string, unknown> {
+  const adapterSha256 = adapter.adapterSha256;
+  const adapterBody = Object.fromEntries(Object.entries(adapter).filter(([key]) => key !== "adapterSha256"));
+  if (adapter.schemaVersion !== 1
+    || typeof adapterSha256 !== "string"
+    || canonicalEvolutionValueSha256(adapterBody) !== adapterSha256
+    || typeof adapter.signalId !== "string"
+    || !/^signal_verified_package_[A-Za-z0-9._-]+$/.test(adapter.signalId)
+    || adapter.normalizedFailureClass !== "contract-mismatch"
+    || !Array.isArray(adapter.acceptedFailureClasses)
+    || stableCanonicalJson(adapter.acceptedFailureClasses) !== stableCanonicalJson(["contract-mismatch", "runtime-integration-gap"])
+    || !Array.isArray(adapter.requiredMutationSurfaces)
+    || !adapter.runtimeIntegrationBoundary
+    || typeof adapter.runtimeIntegrationBoundary !== "object"
+    || Array.isArray(adapter.runtimeIntegrationBoundary)
+    || stableCanonicalJson(adapter.runtimeIntegrationBoundary) !== stableCanonicalJson(runContext.runtimeIntegrationBoundary)) {
+    throw new Error("runtime integration design adapter is malformed or detached from the run boundary");
+  }
+  const rawEvidenceRefs = Array.isArray(rawProposal.evidenceRefs) ? rawProposal.evidenceRefs : [];
+  if (!rawEvidenceRefs.includes(adapter.signalId)) {
+    throw new Error("runtime integration design must cite the exact verified-package signal");
+  }
+  const rawPack = objectRecordOrNull(rawProposal.evolutionPack);
+  const rawCausal = objectRecordOrNull(rawProposal.causalHypothesis);
+  const rawEvaluation = objectRecordOrNull(rawProposal.evaluationContract);
+  if (!rawPack || !rawCausal || !rawEvaluation) {
+    throw new Error("runtime integration design must include the complete target-evolution group");
+  }
+  if (typeof rawCausal.failureClass !== "string"
+    || !(adapter.acceptedFailureClasses as unknown[]).includes(rawCausal.failureClass)) {
+    throw new Error(`runtime integration failureClass ${String(rawCausal.failureClass)} is not a controlled alias`);
+  }
+  const normalizedPack = parseEvolutionPackV1({
+    ...rawPack,
+    observation: {
+      signalSources: [{ id: adapter.signalId, kind: "external-ref" }],
+    },
+    mutationSurfaces: structuredClone(adapter.requiredMutationSurfaces),
+  }, projectId, "runtime integration adapted evolutionPack");
+  const adapted = structuredClone(rawProposal);
+  adapted.evidenceRefs = [adapter.signalId];
+  adapted.evolutionPack = normalizedPack;
+  adapted.causalHypothesis = parseEvolutionCausalHypothesis({
+    ...rawCausal,
+    failureClass: adapter.normalizedFailureClass,
+  }, "runtime integration adapted causalHypothesis");
+  adapted.evaluationContract = {
+    ...rawEvaluation,
+    comparison: structuredClone(adapter.frozenComparison),
+  };
+  const maturity = objectRecordOrNull(adapted.maturityGateContract);
+  if (!maturity) {
+    throw new Error("runtime integration design must include maturityGateContract");
+  }
+  adapted.maturityGateContract = {
+    ...maturity,
+    packRef: {
+      id: normalizedPack.id,
+      version: normalizedPack.version,
+      contentSha256: canonicalEvolutionValueSha256(normalizedPack),
+    },
+  };
+  return normalizeTargetEvolutionProposalStrict(adapted, projectId);
 }
 
 function normalizeTargetEvolutionProposalStrict(
@@ -1898,6 +1980,14 @@ function applyCreateRunsFromDesignWithDb(
       plannerTaskId = existingPlanner.id;
     }
     const existingTask = harness.getTask(plannerTaskId);
+    const runtimeIntegrationBoundary = objectRecordOrNull(proposalSourceRun.context.runtimeIntegrationBoundary);
+    const runtimeTaskGraph = Array.isArray(runtimeIntegrationBoundary?.taskGraph)
+      ? runtimeIntegrationBoundary.taskGraph
+      : null;
+    const runtimeTaskOrder = runtimeTaskGraph
+      ?.map((stage) => objectRecordOrNull(stage)?.id)
+      .filter((id): id is string => typeof id === "string")
+      .join(" -> ") ?? "";
     const requestedDeliveryPlan = hostEvidenceMaintenance
       ? designDeliveryPlan({
           runGoal: plannedRun.goal,
@@ -1922,7 +2012,16 @@ function applyCreateRunsFromDesignWithDb(
       : designDeliveryPlan({
           runGoal: plannedRun.goal,
           plannerGoal: `Plan run: ${plannedRun.goal}`,
-          plannerPrompt: plannedRun.prompt,
+          plannerPrompt: runtimeIntegrationBoundary
+            ? [
+                plannedRun.prompt,
+                "The host-frozen runtime integration boundary is authoritative and may not be broadened or replaced.",
+                `Create the exact task order: ${runtimeTaskOrder}.`,
+                "Every Worker uses its repository binding in a separate worktree; frontend uses a new isolated worktree.",
+                "AINovel public source is read-only. No model role may read .ainovel/** or credentials.",
+                "Use DSH for Workers and an identity-separated read-only Verifier for non-browser Docker/PostgreSQL/HTTP/127.0.0.1:10588 evidence.",
+              ].join("\n")
+            : plannedRun.prompt,
           plannerDoneWhen: plannedRun.doneWhen ?? [
             "Planner returns a small nextTasks graph for this run",
             "Every generated task honors the frozen design evaluation contract",
@@ -1930,6 +2029,10 @@ function applyCreateRunsFromDesignWithDb(
           ],
           plannerConfig: {
             ...(plannedRun.modelPreference ? { modelPreference: plannedRun.modelPreference } : {}),
+            ...(runtimeIntegrationBoundary ? {
+              runtimeIntegrationBoundary,
+              runtimeIntegrationTaskGraph: runtimeTaskGraph,
+            } : {}),
             verifierContract: {
               schemaVersion: 1,
               source: "frozen-design-evaluation-contract",
@@ -2139,6 +2242,7 @@ function inheritedControlContext(
       "controlPlaneRuntime",
       "goalContract",
       "founderCharterId",
+      "runtimeIntegrationBoundary",
     ]
       .filter((key) => context[key] !== undefined)
       .map((key) => [key, context[key]]),
@@ -2238,6 +2342,7 @@ const PROTECTED_DESIGN_CONTEXT_KEYS = [
   "activeHarnessRevision",
   "harnessRevision",
   "targetSystemEvidenceBundle",
+  "runtimeIntegrationBoundary",
 ] as const;
 
 interface DesignDeliveryPlan {
@@ -3931,6 +4036,13 @@ function optionalRecord(value: unknown, label: string): Record<string, unknown> 
     throw new Error(`${label} must be an object`);
   }
   return { ...(value as Record<string, unknown>) };
+}
+
+function objectRecordOrNull(value: unknown): Record<string, unknown> | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  return value as Record<string, unknown>;
 }
 
 function optionalIsoTimestamp(value: unknown, label: string): string | null | undefined {

@@ -3047,6 +3047,256 @@ describe("design-action transition coordinator (production authority path)", () 
     expect(harness.listDesignProposals({ projectId })).toHaveLength(0);
   });
 
+  test("runtime integration adapter projects the alias, multi-repository surfaces, and frozen comparison before authority", async () => {
+    const projectId = harness.createProject({ name: "runtime integration target", rootPath: dir });
+    seedActiveCharter(projectId);
+    const signalId = `signal_verified_package_${"a".repeat(32)}`;
+    harness.createStrategySignal({
+      id: signalId,
+      projectId,
+      signalClass: "system",
+      source: "verified-package-integration:run_package",
+      title: "Verified package needs runtime integration",
+      summary: "The package is verified but the runtime is not integrated.",
+      observationTime: "2026-08-16T00:00:00.000Z",
+      confidence: 1,
+      evidence: ["run:run_package"],
+      payload: { kind: "verified-package-runtime-integration-needed" },
+    });
+    const proposal = targetEvolutionEnvelope(projectId);
+    const frozenComparison = structuredClone(proposal.evaluationContract.comparison);
+    const runtimeIntegrationBoundary = {
+      schemaVersion: 1,
+      package: {
+        commitSha: "a".repeat(40),
+        tree: "b".repeat(40),
+        remoteRef: "refs/heads/codex/runtime-package",
+        readOnlyPaths: ["config/evolution/**", "tests/evolution/**"],
+      },
+      repositories: [
+        {
+          id: "target-backend",
+          role: "backend",
+          projectId,
+          repoPath: "/repos/backend",
+          expectedHead: "a".repeat(40),
+          access: "isolated-write",
+          allowedPaths: ["src/application/**", "src/http/**", "tests/runtime-integration/**"],
+          readOnlyPaths: ["config/evolution/**", "tests/evolution/**"],
+          forbiddenPaths: [".git/orbs/**", ".orbs/**", ".ouroboros/**", "db/**"],
+        },
+        {
+          id: "target-frontend",
+          role: "frontend",
+          projectId: "project_frontend",
+          repoPath: "/repos/frontend",
+          expectedHead: "c".repeat(40),
+          access: "new-isolated-worktree",
+          allowedPaths: ["src-react/features/studio-os/**", "src-react/features/canvas/**", "src-react/features/agents/**"],
+          readOnlyPaths: [],
+          forbiddenPaths: [".git/orbs/**", ".orbs/**", ".ouroboros/**", "db/**"],
+        },
+        {
+          id: "ainovel-source",
+          role: "ainovel",
+          projectId: null,
+          repoPath: "/repos/story-mesh",
+          expectedHead: "d".repeat(40),
+          access: "read-only",
+          allowedPaths: ["apps/text-worker/src/**", "docs/apis/**", "docs/architecture/**"],
+          readOnlyPaths: ["apps/text-worker/src/**", "docs/apis/**", "docs/architecture/**"],
+          forbiddenPaths: [".ainovel/**", ".env*", "**/*token*", "**/*credential*", "**/*secret*"],
+        },
+        {
+          id: "dsh-source",
+          role: "dsh",
+          projectId: null,
+          repoPath: "/repos/deepseek-harness",
+          expectedHead: "e".repeat(40),
+          access: "read-only",
+          allowedPaths: ["apps/cli/src/**", "apps/cli/config/agent-presets/**"],
+          readOnlyPaths: ["apps/cli/src/**", "apps/cli/config/agent-presets/**"],
+          forbiddenPaths: [".git/orbs/**", ".orbs/**", ".ouroboros/**"],
+        },
+      ],
+      gateway: { host: "127.0.0.1", port: 10588, browserAllowed: false },
+      taskGraph: [
+        { id: "backend-runtime", role: "worker", executor: "dsh-cli", repositoryId: "target-backend", dependsOn: [] },
+        { id: "ainovel-adapter", role: "worker", executor: "dsh-cli", repositoryId: "target-backend", dependsOn: ["backend-runtime"] },
+        { id: "frontend-entry", role: "worker", executor: "dsh-cli", repositoryId: "target-frontend", dependsOn: ["ainovel-adapter"] },
+        { id: "dsh-gateway", role: "worker", executor: "dsh-cli", repositoryId: "target-backend", dependsOn: ["frontend-entry"] },
+        { id: "non-browser-e2e", role: "verifier", executor: "codex-resumable", repositoryId: "target-backend", dependsOn: ["dsh-gateway"] },
+      ],
+      credentialIsolation: {
+        forbiddenPaths: ["story-mesh/.ainovel/**", "**/.env*", "**/*token*", "**/*credential*", "**/*secret*"],
+        modelReceivesCredentials: false,
+        hostInjectionOnly: true,
+      },
+    };
+    const requiredMutationSurfaces = [
+      {
+        id: "target-backend-runtime",
+        evolutionTarget: "harness" as const,
+        layer: "code" as const,
+        projectId,
+        allowedPaths: ["src/application/**", "src/http/**", "tests/runtime-integration/**"],
+        forbiddenPaths: ["config/evolution/**", "tests/evolution/**", ".git/orbs/**", ".orbs/**", ".ouroboros/**", "db/**"],
+        owner: "target" as const,
+      },
+      {
+        id: "target-frontend-runtime",
+        evolutionTarget: "harness" as const,
+        layer: "code" as const,
+        projectId,
+        allowedPaths: ["src-react/features/studio-os/**", "src-react/features/canvas/**", "src-react/features/agents/**"],
+        forbiddenPaths: [".git/orbs/**", ".orbs/**", ".ouroboros/**", "db/**"],
+        owner: "target" as const,
+      },
+    ];
+    const adapter = {
+      schemaVersion: 1,
+      signalId,
+      normalizedFailureClass: "contract-mismatch",
+      acceptedFailureClasses: ["contract-mismatch", "runtime-integration-gap"],
+      requiredMutationSurfaces,
+      frozenComparison,
+      runtimeIntegrationBoundary,
+    };
+    const runtimeIntegrationDesignAdapter = {
+      ...adapter,
+      adapterSha256: canonicalEvolutionValueSha256(adapter),
+    };
+    const evidenceBundle = {
+      purpose: "runtime-integration-after-verified-package",
+      signalId,
+      acceptedProposals: [],
+    };
+    const runId = harness.createRun({
+      projectId,
+      goal: "Integrate the verified package into multiple target repositories",
+      context: {
+        source: "target-system-design",
+        runtimeIntegrationBoundary,
+        targetSystemEvidenceBundle: {
+          ...evidenceBundle,
+          bundleSha256: canonicalEvolutionValueSha256(evidenceBundle),
+        },
+      },
+    });
+    const taskId = harness.createTask({
+      runId,
+      role: "designer",
+      goal: "Design runtime integration",
+      prompt: "Use the fixed runtime integration boundary.",
+      config: { runtimeIntegrationDesignAdapter },
+    });
+    proposal.evidenceRefs = [signalId];
+    proposal.causalHypothesis.failureClass = "runtime-integration-gap" as never;
+    proposal.evaluationContract.comparison = structuredClone(frozenComparison);
+    proposal.evolutionPack.mutationSurfaces = [
+      {
+        ...proposal.evolutionPack.mutationSurfaces[0]!,
+        id: "package-only",
+        allowedPaths: ["config/evolution/**", "tests/evolution/**"],
+      },
+    ];
+    const result = await runHook(parseAttemptOutput(JSON.stringify({
+      status: "done",
+      summary: "Propose bounded multi-repository runtime integration.",
+      actions: [{ type: "proposeDesign", payload: { projectId, title: "Runtime integration", proposal } }],
+    })), runId, taskId);
+
+    expect(result.problems ?? []).toEqual([]);
+    const stored = harness.listDesignProposals({ projectId })[0]!;
+    expect(stored.status).toBe("accepted");
+    expect(stored.proposal.causalHypothesis?.failureClass).toBe("contract-mismatch");
+    expect(stored.proposal.evolutionPack?.mutationSurfaces).toEqual(requiredMutationSurfaces);
+    expect(stored.proposal.evaluationContract.comparison).toEqual(frozenComparison);
+    expect(stored.proposal.evolutionPack?.mutationSurfaces.flatMap((surface) => surface.allowedPaths)).not.toContain("config/evolution/**");
+    const continuation = harness.getRunOverview({ runId, eventLimit: 0 }).tasks.find((candidate) =>
+      candidate.role === "designer" && (candidate.config?.designContinuation as Record<string, unknown> | undefined)?.kind === "after-approveDesign");
+    expect(continuation).toBeDefined();
+    const delivery = await runHook(parseAttemptOutput(JSON.stringify({
+      status: "done",
+      summary: "Create the runtime integration delivery.",
+      actions: [{
+        type: "createRunsFromDesign",
+        payload: { proposalId: stored.id, runs: [{ goal: "Integrate target runtime", prompt: "Create the frozen multi-repository graph." }] },
+      }],
+    })), runId, continuation!.id);
+    const childRunId = String((createdRunArtifacts(delivery)[0] as Record<string, unknown>).runId);
+    const child = harness.getRun(childRunId)!;
+    const planner = harness.getRunOverview({ runId: childRunId, eventLimit: 0 }).tasks[0]!;
+    expect(child.context.runtimeIntegrationBoundary).toEqual(runtimeIntegrationBoundary);
+    expect(planner.config?.runtimeIntegrationBoundary).toEqual(runtimeIntegrationBoundary);
+    expect(planner.prompt).toContain("backend-runtime -> ainovel-adapter -> frontend-entry -> dsh-gateway -> non-browser-e2e");
+    expect(harness.getRunOverview({ runId, eventLimit: 0 }).tasks.filter((candidate) => candidate.role === "goal-review")).toHaveLength(0);
+
+    const unknownRunId = harness.createRun({
+      projectId,
+      goal: "Reject an uncontrolled runtime failure class",
+      context: {
+        source: "target-system-design",
+        runtimeIntegrationBoundary,
+        targetSystemEvidenceBundle: {
+          ...evidenceBundle,
+          bundleSha256: canonicalEvolutionValueSha256(evidenceBundle),
+        },
+      },
+    });
+    const unknownTaskId = harness.createTask({
+      runId: unknownRunId,
+      role: "designer",
+      goal: "Reject unknown alias",
+      prompt: "Use only the frozen adapter aliases.",
+      config: { runtimeIntegrationDesignAdapter },
+    });
+    const unknownProposal = targetEvolutionEnvelope(projectId);
+    unknownProposal.evidenceRefs = [signalId];
+    unknownProposal.causalHypothesis.failureClass = "uncontrolled-runtime-alias" as never;
+    const unknownResult = await runHook(parseAttemptOutput(JSON.stringify({
+      status: "done",
+      summary: "Uncontrolled alias",
+      actions: [{ type: "proposeDesign", payload: { projectId, title: "Uncontrolled alias", proposal: unknownProposal } }],
+    })), unknownRunId, unknownTaskId);
+    expect(unknownResult.problems).toContainEqual(expect.stringContaining("is not a controlled alias"));
+    expect(harness.listDesignProposals({ projectId })).toHaveLength(1);
+  });
+
+  test("runtime integration adapter rejects an unknown failure class and a package-only runtime root without an adapter", async () => {
+    const projectId = harness.createProject({ name: "runtime integration reject", rootPath: dir });
+    seedActiveCharter(projectId);
+    const signalId = `signal_verified_package_${"b".repeat(32)}`;
+    harness.createStrategySignal({
+      id: signalId,
+      projectId,
+      signalClass: "system",
+      source: "verified-package-integration:run_package",
+      title: "Runtime remains open",
+      summary: "Runtime integration is not done.",
+      observationTime: "2026-08-16T00:00:00.000Z",
+      confidence: 1,
+      evidence: ["run:run_package"],
+      payload: {},
+    });
+    const proposal = targetEvolutionEnvelope(projectId);
+    proposal.evidenceRefs = [signalId];
+    proposal.causalHypothesis.failureClass = "uncontrolled-runtime-alias" as never;
+    const runId = harness.createRun({
+      projectId,
+      goal: "Reject unmanaged runtime integration",
+      context: { source: "target-system-design", targetSystemEvidenceBundle: { purpose: "runtime-integration-after-verified-package", signalId } },
+    });
+    const taskId = harness.createTask({ runId, role: "designer", goal: "Propose", prompt: "Propose." });
+    const result = await runHook(parseAttemptOutput(JSON.stringify({
+      status: "done",
+      summary: "Unmanaged runtime proposal",
+      actions: [{ type: "proposeDesign", payload: { projectId, title: "Unmanaged runtime", proposal } }],
+    })), runId, taskId);
+    expect(result.problems).toEqual([expect.stringContaining("requires a fixed runtime integration design adapter")]);
+    expect(harness.listDesignProposals({ projectId })).toHaveLength(0);
+  });
+
   test("without a host corpus receipt allows only a proposal to build the receipt", async () => {
     const projectId = harness.createProject({ name: "target-pending-versioned-comparison", rootPath: join(dir, "target-pending-versioned-comparison") });
     seedActiveCharter(projectId);
