@@ -4192,6 +4192,184 @@ describe("Harness actions", () => {
       expect(missing).toMatchObject({ status: "blocked", actionType: "verifySealedCorpusForVerification" });
       expect(missing.problems.join(" ")).toContain("descriptor");
     });
+
+    test("materializes an exact historical attempt artifact set into a fresh host worktree without consuming repair budget", async () => {
+      const repoPath = join(dir, "repo-host-attempt-materialization");
+      await mkdir(repoPath, { recursive: true });
+      await writeFile(join(repoPath, "README.md"), "initial\n");
+      git(repoPath, ["init", "-b", "main"]);
+      git(repoPath, ["config", "user.name", "Ouroboros Test"]);
+      git(repoPath, ["config", "user.email", "test@example.com"]);
+      git(repoPath, ["add", "README.md"]);
+      git(repoPath, ["commit", "-m", "Initial commit"]);
+      const expectedParentSha = git(repoPath, ["rev-parse", "HEAD"]).stdout.trim();
+      const sourceWorktreePath = join(repoPath, ".ouroboros", "worktrees", "historical-source");
+      await mkdir(join(repoPath, ".ouroboros", "worktrees"), { recursive: true });
+      git(repoPath, ["worktree", "add", "-b", "ouroboros/historical-source", sourceWorktreePath, expectedParentSha]);
+      const files = [
+        { path: "config/evolution/manifest.json", content: '{"appendOnly":true}\n' },
+        { path: "tests/evolution/replay.mjs", content: "export const passed = true;\n" },
+      ].map((file) => ({
+        ...file,
+        sha256: createHash("sha256").update(file.content).digest("hex"),
+      }));
+      for (const file of files) {
+        await mkdir(join(sourceWorktreePath, file.path, ".."), { recursive: true });
+        await writeFile(join(sourceWorktreePath, file.path), file.content);
+      }
+      await writeFile(join(sourceWorktreePath, "config/evolution/forbidden-eighth.json"), "unexpected\n");
+
+      const projectId = harness.createProject({ name: "host materialization", rootPath: repoPath });
+      const sourceRunId = harness.createRun({ projectId, goal: "Create exact historical artifacts" });
+      const sourceTaskId = harness.createTask({
+        runId: sourceRunId,
+        role: "worker",
+        goal: "Create exact historical artifacts",
+        prompt: "Create only the exact files.",
+        worktreePath: sourceWorktreePath,
+      });
+      const sourceAttemptId = harness.recordAttempt({
+        taskId: sourceTaskId,
+        input: { executor: "deepseek-harness" },
+        output: {
+          status: "done",
+          summary: "Historical files exist but their file artifacts have no hashes",
+          changedFiles: files.map((file) => file.path),
+          checks: [],
+          artifacts: [
+            { kind: "worktree", path: sourceWorktreePath, branch: "ouroboros/historical-source" },
+            ...files.map((file) => ({ kind: "file", path: file.path, description: "historical output" })),
+          ],
+          problems: [],
+        },
+      });
+
+      const targetRunId = harness.createRun({
+        projectId,
+        goal: "Recover exact historical artifacts through the host",
+        context: { repairReplanBudget: { limit: 3, used: 2, chargedTaskIds: [] } },
+      });
+      const plannerTaskId = harness.createTask({
+        runId: targetRunId,
+        role: "planner",
+        goal: "Freeze the exact materialization",
+        prompt: "Freeze exact paths and hashes.",
+      });
+      harness.recordAttempt({
+        taskId: plannerTaskId,
+        input: { executor: "test" },
+        output: { status: "done", summary: "Frozen", changedFiles: [], checks: [], artifacts: [], problems: [] },
+      });
+      const receiptTaskId = harness.createTask({
+        runId: targetRunId,
+        role: "worker",
+        goal: "Read back the historical receipt",
+        prompt: "Read only.",
+        dependsOn: [plannerTaskId],
+      });
+      const receiptAttemptId = harness.recordAttempt({
+        taskId: receiptTaskId,
+        input: { executor: "deepseek-harness" },
+        output: {
+          status: "done",
+          summary: "Host must materialize the bytes",
+          changedFiles: [],
+          checks: [],
+          artifacts: [
+            {
+              kind: "workerSha256Receipt",
+              sourceAttemptId,
+              itemCount: files.length,
+              items: files.map(({ path, sha256, content }) => ({ path, sha256, byteLength: Buffer.byteLength(content) })),
+            },
+            {
+              kind: "retrievalEvidence",
+              sourceWorkerAttemptId: sourceAttemptId,
+              sourceWorkerTaskId: sourceTaskId,
+              artifactWorktree: sourceWorktreePath,
+            },
+          ],
+          problems: [],
+        },
+      });
+      const targetWorktreePath = join(repoPath, ".ouroboros", "worktrees", "host-materialized");
+      const action = {
+        type: "materializeAttemptArtifactsForVerification",
+        contractId: "historicalExactFilesV1",
+        runId: targetRunId,
+        plannerTaskId,
+        sourceAttemptId,
+        receiptAttemptId,
+        repoPath,
+        worktreePath: targetWorktreePath,
+        branch: "ouroboros/host-materialized",
+        expectedParentSha,
+        commitMessage: "Materialize exact historical evidence",
+        files: files.map(({ path, sha256 }) => ({ path, sha256 })),
+        excludedPaths: ["config/evolution/forbidden-eighth.json"],
+      } as const;
+
+      const responseLossWorktreePath = join(repoPath, ".ouroboros", "worktrees", "host-materialized-response-loss");
+      git(repoPath, [
+        "worktree",
+        "add",
+        "-b",
+        "ouroboros/host-materialized-response-loss",
+        responseLossWorktreePath,
+        expectedParentSha,
+      ]);
+      for (const file of files) {
+        await mkdir(join(responseLossWorktreePath, file.path, ".."), { recursive: true });
+        await writeFile(join(responseLossWorktreePath, file.path), file.content);
+      }
+      const recoveredAfterResponseLoss = applyHarnessAction(harness, {
+        ...action,
+        contractId: "historicalExactFilesResponseLossV1",
+        worktreePath: responseLossWorktreePath,
+        branch: "ouroboros/host-materialized-response-loss",
+      } as never);
+      expect(recoveredAfterResponseLoss).toMatchObject({
+        status: "done",
+        actionType: "materializeAttemptArtifactsForVerification",
+      });
+      expect(recoveredAfterResponseLoss.artifacts).toContainEqual(expect.objectContaining({
+        kind: "host_attempt_artifact_materialization",
+        responseLossRecovered: true,
+      }));
+
+      const first = applyHarnessAction(harness, action as never);
+      const second = applyHarnessAction(harness, action as never);
+
+      expect(first).toMatchObject({ status: "done", actionType: "materializeAttemptArtifactsForVerification" });
+      expect(second).toMatchObject({ status: "done", actionType: "materializeAttemptArtifactsForVerification" });
+      const firstReceipt = first.artifacts.find((artifact) => artifact.kind === "host_attempt_artifact_materialization")!;
+      const secondReceipt = second.artifacts.find((artifact) => artifact.kind === "host_attempt_artifact_materialization")!;
+      expect(secondReceipt.taskId).toBe(firstReceipt.taskId);
+      expect(secondReceipt.reused).toBe(true);
+      expect(await readFile(join(targetWorktreePath, files[0]!.path), "utf8")).toBe(files[0]!.content);
+      expect(await readFile(join(targetWorktreePath, files[1]!.path), "utf8")).toBe(files[1]!.content);
+      expect(git(targetWorktreePath, ["status", "--short", "--untracked-files=all"]).stdout.split("\n").filter(Boolean).sort()).toEqual(
+        files.map((file) => `?? ${file.path}`).sort(),
+      );
+      expect(harness.getRun(targetRunId)?.context.repairReplanBudget).toMatchObject({ used: 2, limit: 3 });
+      expect(harness.getTask(String(firstReceipt.taskId))).toMatchObject({
+        role: "worker",
+        status: "done",
+        worktreePath: targetWorktreePath,
+        dependsOn: [plannerTaskId],
+      });
+      const staged = applyHarnessAction(harness, {
+        type: "stageExactWorkerFilesForVerification",
+        contractId: "historicalExactFilesV1",
+        runId: targetRunId,
+        taskId: String(firstReceipt.taskId),
+        repoPath: targetWorktreePath,
+        branch: "ouroboros/host-materialized",
+        expectedParentSha,
+        commitMessage: "Materialize exact historical evidence",
+      });
+      expect(staged).toMatchObject({ status: "done", actionType: "stageExactWorkerFilesForVerification" });
+    });
   });
 
   describe("commitExactGitIndex", () => {

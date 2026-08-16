@@ -10008,6 +10008,67 @@ describe("runner", () => {
     });
   });
 
+  test("blocked verifier requiring host artifact materialization does not consume the final repair slot", async () => {
+    const runId = harness.createRun({
+      goal: "Materialize certified attempt artifacts",
+      context: { repairReplanBudget: { limit: 3, used: 2, chargedTaskIds: [] } },
+    });
+    const sourceTask = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Read historical artifacts",
+      prompt: "Read only.",
+    });
+    harness.recordAttempt({
+      taskId: sourceTask,
+      input: { executor: "deepseek-harness" },
+      output: {
+        status: "done",
+        summary: "Host action is required",
+        changedFiles: [],
+        checks: [],
+        artifacts: [{
+          kind: "retrievalEvidence",
+          sourceWorkerAttemptId: "attempt_source",
+          targetWorktreeControlDatabaseRead: "opened read-only",
+        }],
+        problems: [],
+      },
+    });
+    const verifierTask = harness.createTask({
+      runId,
+      role: "verifier",
+      goal: "Verify host materialization",
+      prompt: "Fail closed when host materialization is missing.",
+      dependsOn: [sourceTask],
+    });
+
+    const result = await runNextReadyTask({
+      harness,
+      runId,
+      executor: async () => ({
+        status: "blocked",
+        summary: "The source read a target-local control database and no host commit exists.",
+        changedFiles: [],
+        checks: [
+          { name: "frozenControlDatabaseProhibition", status: "failed" },
+          { name: "hostCommitBoundary", status: "failed" },
+        ],
+        artifacts: [],
+        problems: ["A host-owned attempt artifact materialization action is required."],
+      }),
+      stopHooks: [createRepairTaskHook({ harness })],
+    });
+
+    expect(result?.stopDecision).toBe("exit");
+    expect(harness.getRunOverview({ runId, eventLimit: 0 }).tasks.filter((task) => task.role === "worker")).toHaveLength(1);
+    expect(harness.getRun(runId)?.context.repairReplanBudget).toMatchObject({ used: 2, limit: 3 });
+    expect(harness.getAttempt(result!.attemptId)?.output.artifacts).toContainEqual(expect.objectContaining({
+      kind: "repair_skipped_host_artifact_materialization",
+      verifierTaskId: verifierTask,
+    }));
+  });
+
   test("blocked verifier stop hook skips repair for acpx auth setup blockers", async () => {
     const runId = harness.createRun({ goal: "Prove Claude Code support" });
     const verifierTask = harness.createTask({

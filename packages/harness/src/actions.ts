@@ -194,6 +194,21 @@ export type HarnessAction =
       commitMessage: string;
     }
   | {
+      type: "materializeAttemptArtifactsForVerification";
+      contractId: string;
+      runId: string;
+      plannerTaskId: string;
+      sourceAttemptId: string;
+      receiptAttemptId: string;
+      repoPath: string;
+      worktreePath: string;
+      branch: string;
+      expectedParentSha: string;
+      commitMessage: string;
+      files: WorkerFileReceipt[];
+      excludedPaths: string[];
+    }
+  | {
       type: "verifySealedCorpusForVerification";
       contractId: string;
       runId: string;
@@ -737,6 +752,38 @@ export function parseHarnessAction(value: unknown): HarnessAction {
       commitMessage: exactCommitMessageField(record, "commitMessage"),
     };
   }
+  if (type === "materializeAttemptArtifactsForVerification") {
+    assertOnlyFields(record, type, [
+      "type",
+      "contractId",
+      "runId",
+      "plannerTaskId",
+      "sourceAttemptId",
+      "receiptAttemptId",
+      "repoPath",
+      "worktreePath",
+      "branch",
+      "expectedParentSha",
+      "commitMessage",
+      "files",
+      "excludedPaths",
+    ]);
+    return {
+      type,
+      contractId: exactSafeIdentifierField(record, "contractId"),
+      runId: exactNonEmptyStringField(record, "runId"),
+      plannerTaskId: exactNonEmptyStringField(record, "plannerTaskId"),
+      sourceAttemptId: exactNonEmptyStringField(record, "sourceAttemptId"),
+      receiptAttemptId: exactNonEmptyStringField(record, "receiptAttemptId"),
+      repoPath: exactAbsolutePathField(record, "repoPath"),
+      worktreePath: exactAbsolutePathField(record, "worktreePath"),
+      branch: exactGitBranchField(record, "branch"),
+      expectedParentSha: exactGitCommitShaField(record, "expectedParentSha"),
+      commitMessage: exactCommitMessageField(record, "commitMessage"),
+      files: exactWorkerFileReceiptsField(record, "files"),
+      excludedPaths: exactRelativeGitPathsField(record, "excludedPaths", { allowEmpty: true }),
+    };
+  }
   if (type === "verifySealedCorpusForVerification") {
     assertOnlyFields(record, type, [
       "type",
@@ -881,7 +928,7 @@ export function parseHarnessAction(value: unknown): HarnessAction {
     };
   }
   throw new Error(
-    "harness action type must be reclaimRunningTasks, retryTask, reconcileRunEvidence, recordSignal, linkResearchEvidence, materializeDesignerActionRecovery, markRunTodo, updateRunContext, amendRunContract, retireRun, retireTask, prepareRunDrain, completeSystemTask, integrateVerifiedRun, pushExactGitRef, createExactGitRef, commitExactGitIndex, stageExactWorkerFilesForVerification, verifySealedCorpusForVerification, registerEvolutionProfile, recordProductionEpisode, registerHarnessVariant, activateHarnessRevision, freezeMatchedExperiment, interruptAttemptAndCreateTask, interruptRunningAttemptsAndCreateTask, acceptGuardrailProposal, startSubsession, collectSubsessions, cancelSubsessions, or runWatchdogPass",
+    "harness action type must be reclaimRunningTasks, retryTask, reconcileRunEvidence, recordSignal, linkResearchEvidence, materializeDesignerActionRecovery, markRunTodo, updateRunContext, amendRunContract, retireRun, retireTask, prepareRunDrain, completeSystemTask, integrateVerifiedRun, pushExactGitRef, createExactGitRef, commitExactGitIndex, stageExactWorkerFilesForVerification, materializeAttemptArtifactsForVerification, verifySealedCorpusForVerification, registerEvolutionProfile, recordProductionEpisode, registerHarnessVariant, activateHarnessRevision, freezeMatchedExperiment, interruptAttemptAndCreateTask, interruptRunningAttemptsAndCreateTask, acceptGuardrailProposal, startSubsession, collectSubsessions, cancelSubsessions, or runWatchdogPass",
   );
 }
 
@@ -2810,6 +2857,10 @@ function applyParsedHarnessAction(
     return stageExactWorkerFilesForVerification(harness, action, options);
   }
 
+  if (action.type === "materializeAttemptArtifactsForVerification") {
+    return materializeAttemptArtifactsForVerification(harness, action, options);
+  }
+
   if (action.type === "verifySealedCorpusForVerification") {
     return verifySealedCorpusForVerification(harness, action, options);
   }
@@ -4712,6 +4763,7 @@ function integrateMaterializedTargetChanges(input: {
 
 type ExactGitIndexCommitAction = Extract<HarnessAction, { type: "commitExactGitIndex" }>;
 type StageExactWorkerFilesAction = Extract<HarnessAction, { type: "stageExactWorkerFilesForVerification" }>;
+type MaterializeAttemptArtifactsAction = Extract<HarnessAction, { type: "materializeAttemptArtifactsForVerification" }>;
 type VerifySealedCorpusAction = Extract<HarnessAction, { type: "verifySealedCorpusForVerification" }>;
 
 interface WorkerFileReceipt {
@@ -4720,7 +4772,7 @@ interface WorkerFileReceipt {
 }
 
 function failedHostEvidenceAction(
-  action: StageExactWorkerFilesAction | VerifySealedCorpusAction,
+  action: StageExactWorkerFilesAction | MaterializeAttemptArtifactsAction | VerifySealedCorpusAction,
   summary: string,
   checks: HarnessActionResult["checks"],
 ): HarnessActionResult {
@@ -4731,6 +4783,359 @@ function failedHostEvidenceAction(
     checks,
     artifacts: [],
     problems: [summary],
+  };
+}
+
+function materializeAttemptArtifactsForVerification(
+  harness: Harness,
+  action: MaterializeAttemptArtifactsAction,
+  options: HarnessActionOptions,
+): HarnessActionResult {
+  const checks: HarnessActionResult["checks"] = [];
+  const run = harness.getRun(action.runId);
+  if (!run || !run.projectId || !run.projectRoot) {
+    return failedHostEvidenceAction(action, `Run ${action.runId} is not bound to one target project root.`, checks);
+  }
+  if (!existsSync(action.repoPath)) {
+    return failedHostEvidenceAction(action, "Target repository path does not exist.", checks);
+  }
+  try {
+    if (realpathSync(run.projectRoot) !== realpathSync(action.repoPath)) {
+      return failedHostEvidenceAction(action, "Target repository path does not match the run project root.", checks);
+    }
+  } catch {
+    return failedHostEvidenceAction(action, "Target project root could not be resolved.", checks);
+  }
+  checks.push({ name: "target project binding", status: "passed", evidence: `${run.projectId}:${action.repoPath}` });
+
+  const planner = harness.getTask(action.plannerTaskId);
+  if (!planner || planner.runId !== action.runId || planner.role !== "planner" || planner.status !== "done") {
+    return failedHostEvidenceAction(action, `Planner ${action.plannerTaskId} is not completed in target run ${action.runId}.`, checks);
+  }
+  checks.push({ name: "frozen planner", status: "passed", evidence: planner.id });
+
+  const sourceAttempt = harness.getAttempt(action.sourceAttemptId);
+  const sourceTask = sourceAttempt ? harness.getTask(sourceAttempt.taskId) : null;
+  const sourceRun = sourceTask ? harness.getRun(sourceTask.runId) : null;
+  if (
+    !sourceAttempt || sourceAttempt.status !== "done" || sourceAttempt.output.status !== "done" ||
+    !sourceTask || sourceTask.role !== "worker" || sourceTask.status !== "done" || !sourceTask.worktreePath ||
+    !sourceRun || sourceRun.projectId !== run.projectId
+  ) {
+    return failedHostEvidenceAction(action, "Source attempt is not one completed same-project Worker artifact source.", checks);
+  }
+  const sourcePaths = Array.isArray(sourceAttempt.output.changedFiles) ? sourceAttempt.output.changedFiles : [];
+  if (!sameUniqueStrings(sourcePaths, action.files.map((file) => file.path))) {
+    return failedHostEvidenceAction(action, "Source attempt changedFiles do not exactly match the frozen materialization paths.", checks);
+  }
+  const sourceArtifacts = Array.isArray(sourceAttempt.output.artifacts) ? sourceAttempt.output.artifacts : [];
+  for (const file of action.files) {
+    const matches = sourceArtifacts.filter((artifact) => {
+      const value = artifact && typeof artifact === "object" && !Array.isArray(artifact)
+        ? artifact as Record<string, unknown>
+        : null;
+      return value?.kind === "file" && value.path === file.path;
+    });
+    if (matches.length !== 1) {
+      return failedHostEvidenceAction(action, `Source attempt must report exactly one file artifact for ${file.path}.`, checks);
+    }
+  }
+  checks.push({ name: "source attempt artifact boundary", status: "passed", evidence: `${sourceAttempt.id}:${action.files.length}` });
+
+  const receiptAttempt = harness.getAttempt(action.receiptAttemptId);
+  const receiptTask = receiptAttempt ? harness.getTask(receiptAttempt.taskId) : null;
+  if (
+    !receiptAttempt || receiptAttempt.status !== "done" || receiptAttempt.output.status !== "done" ||
+    !receiptTask || receiptTask.runId !== action.runId || receiptTask.role !== "worker" || receiptTask.status !== "done" ||
+    !receiptTask.dependsOn.includes(planner.id)
+  ) {
+    return failedHostEvidenceAction(action, "Receipt attempt is not one completed target-run Worker downstream of the frozen Planner.", checks);
+  }
+  const receiptArtifacts = Array.isArray(receiptAttempt.output.artifacts) ? receiptAttempt.output.artifacts : [];
+  const shaReceipts = receiptArtifacts.filter((artifact) => {
+    const value = artifact && typeof artifact === "object" && !Array.isArray(artifact)
+      ? artifact as Record<string, unknown>
+      : null;
+    return value?.kind === "workerSha256Receipt" && value.sourceAttemptId === action.sourceAttemptId;
+  }) as Array<Record<string, unknown>>;
+  const retrievalReceipts = receiptArtifacts.filter((artifact) => {
+    const value = artifact && typeof artifact === "object" && !Array.isArray(artifact)
+      ? artifact as Record<string, unknown>
+      : null;
+    return value?.kind === "retrievalEvidence"
+      && value.sourceWorkerAttemptId === action.sourceAttemptId
+      && value.sourceWorkerTaskId === sourceTask.id
+      && value.artifactWorktree === sourceTask.worktreePath;
+  });
+  if (shaReceipts.length !== 1 || retrievalReceipts.length !== 1) {
+    return failedHostEvidenceAction(action, "Receipt attempt does not bind one exact source attempt and artifact worktree.", checks);
+  }
+  const receiptItems = Array.isArray(shaReceipts[0]!.items) ? shaReceipts[0]!.items : [];
+  const normalizedReceiptFiles: WorkerFileReceipt[] = [];
+  try {
+    for (const item of receiptItems) {
+      const value = objectRecord(item, "workerSha256Receipt.items[]");
+      normalizedReceiptFiles.push({
+        path: exactRelativeGitPathField(value, "path", "workerSha256Receipt.items[].path"),
+        sha256: exactSha256Field(value, "sha256"),
+      });
+    }
+  } catch (error) {
+    return failedHostEvidenceAction(action, errorMessage(error), checks);
+  }
+  if (!sameWorkerFileReceipts(normalizedReceiptFiles, action.files)) {
+    return failedHostEvidenceAction(action, "Receipt attempt file hashes do not exactly match the frozen materialization request.", checks);
+  }
+  checks.push({ name: "independent SHA-256 receipt", status: "passed", evidence: receiptAttempt.id });
+
+  const git = options.runGit ?? defaultGitRunner;
+  const top = safeGitStep(git, action.repoPath, ["rev-parse", "--show-toplevel"]);
+  const head = safeGitStep(git, action.repoPath, ["rev-parse", "HEAD"]);
+  const sourceCommon = safeGitStep(git, sourceTask.worktreePath, ["rev-parse", "--path-format=absolute", "--git-common-dir"]);
+  const targetCommon = safeGitStep(git, action.repoPath, ["rev-parse", "--path-format=absolute", "--git-common-dir"]);
+  if (
+    !top.ok || !head.ok || !sourceCommon.ok || !targetCommon.ok ||
+    realpathSync(top.stdout.trim()) !== realpathSync(action.repoPath) ||
+    head.stdout.trim() !== action.expectedParentSha ||
+    realpathSync(sourceCommon.stdout.trim()) !== realpathSync(targetCommon.stdout.trim())
+  ) {
+    return failedHostEvidenceAction(action, "Source and target Git identities or expected parent SHA do not match.", checks);
+  }
+  const expectedWorktreeRoot = join(realpathSync(action.repoPath), ".ouroboros", "worktrees");
+  const resolvedWorktreeParent = realpathSync(dirname(action.worktreePath));
+  if (resolvedWorktreeParent !== expectedWorktreeRoot || action.worktreePath === sourceTask.worktreePath) {
+    return failedHostEvidenceAction(action, "Target worktree must be one fresh direct child of the target .ouroboros/worktrees root.", checks);
+  }
+
+  const requestSha256 = createHash("sha256").update(JSON.stringify({
+    contractId: action.contractId,
+    runId: action.runId,
+    plannerTaskId: action.plannerTaskId,
+    sourceAttemptId: action.sourceAttemptId,
+    receiptAttemptId: action.receiptAttemptId,
+    repoPath: action.repoPath,
+    worktreePath: action.worktreePath,
+    branch: action.branch,
+    expectedParentSha: action.expectedParentSha,
+    commitMessage: action.commitMessage,
+    files: action.files,
+    excludedPaths: action.excludedPaths,
+  })).digest("hex");
+  const materializationTaskId = `task_host_materialization_${requestSha256.slice(0, 24)}`;
+  const materializationAttemptId = `attempt_host_materialization_${requestSha256.slice(0, 24)}`;
+  const existingTask = harness.getTask(materializationTaskId);
+  if (existingTask) {
+    const existingAttempt = harness.getAttempt(materializationAttemptId);
+    if (
+      existingTask.runId !== action.runId || existingTask.role !== "worker" || existingTask.status !== "done" ||
+      existingTask.worktreePath !== action.worktreePath || !existingTask.dependsOn.includes(planner.id) ||
+      !existingAttempt || existingAttempt.status !== "done" || existingAttempt.output.status !== "done" ||
+      !verifyMaterializedFiles(action.worktreePath, action.files, action.excludedPaths, git)
+    ) {
+      return failedHostEvidenceAction(action, "Existing host materialization task conflicts with the frozen request.", checks);
+    }
+    checks.push({ name: "materialized file readback", status: "passed", evidence: requestSha256 });
+    return doneResult(action.type, `Reused host materialization ${materializationTaskId}.`, checks, [{
+      kind: "host_attempt_artifact_materialization",
+      contractId: action.contractId,
+      taskId: materializationTaskId,
+      attemptId: materializationAttemptId,
+      sourceTaskId: sourceTask.id,
+      sourceAttemptId: sourceAttempt.id,
+      receiptAttemptId: receiptAttempt.id,
+      worktreePath: action.worktreePath,
+      branch: action.branch,
+      parentSha: action.expectedParentSha,
+      commitMessage: action.commitMessage,
+      files: action.files,
+      excludedPaths: action.excludedPaths,
+      sideEffectCounters: zeroSideEffectCounters(),
+      reused: true,
+    }]);
+  }
+
+  let createdWorktree = false;
+  if (!existsSync(action.worktreePath)) {
+    mkdirSync(dirname(action.worktreePath), { recursive: true });
+    const add = safeGitStep(git, action.repoPath, ["worktree", "add", "-b", action.branch, action.worktreePath, action.expectedParentSha]);
+    if (!add.ok) {
+      return failedHostEvidenceAction(action, "Host could not create the isolated materialization worktree.", checks);
+    }
+    createdWorktree = true;
+  }
+  const worktreeTop = safeGitStep(git, action.worktreePath, ["rev-parse", "--show-toplevel"]);
+  const worktreeBranch = safeGitStep(git, action.worktreePath, ["branch", "--show-current"]);
+  const worktreeHead = safeGitStep(git, action.worktreePath, ["rev-parse", "HEAD"]);
+  const worktreeStatus = safeGitStep(git, action.worktreePath, ["status", "--porcelain=v1", "--untracked-files=all"]);
+  const responseLossRecovered = !createdWorktree
+    && verifyMaterializedFiles(action.worktreePath, action.files, action.excludedPaths, git);
+  if (
+    !worktreeTop.ok || !worktreeBranch.ok || !worktreeHead.ok || !worktreeStatus.ok ||
+    realpathSync(worktreeTop.stdout.trim()) !== realpathSync(action.worktreePath) ||
+    worktreeBranch.stdout.trim() !== action.branch || worktreeHead.stdout.trim() !== action.expectedParentSha ||
+    (worktreeStatus.stdout.length > 0 && !responseLossRecovered)
+  ) {
+    if (createdWorktree) safeGitStep(git, action.repoPath, ["worktree", "remove", "--force", action.worktreePath]);
+    return failedHostEvidenceAction(action, "Materialization worktree is not a clean exact branch at the frozen parent.", checks);
+  }
+
+  let totalBytes = 0;
+  try {
+    if (!responseLossRecovered) {
+      for (const file of action.files) {
+        const source = join(sourceTask.worktreePath, file.path);
+        const target = join(action.worktreePath, file.path);
+        const sourceStat = lstatSync(source);
+        if (
+          !sourceStat.isFile() || sourceStat.isSymbolicLink() || sourceStat.size > MAX_INTEGRATION_CLOSURE_FILE_BYTES ||
+          !realpathSync(source).startsWith(`${realpathSync(sourceTask.worktreePath)}${sep}`) ||
+          sha256File(source) !== file.sha256 || existsSync(target)
+        ) {
+          throw new Error(`Source artifact is not one exact bounded regular file: ${file.path}`);
+        }
+        totalBytes += sourceStat.size;
+        if (totalBytes > MAX_INTEGRATION_CLOSURE_TOTAL_BYTES) {
+          throw new Error("Source artifacts exceed the bounded total byte limit.");
+        }
+        mkdirSync(dirname(target), { recursive: true });
+        copyFileSync(source, target);
+        chmodSync(target, sourceStat.mode & 0o777);
+        if (sha256File(source) !== file.sha256 || sha256File(target) !== file.sha256) {
+          throw new Error(`Source artifact changed during host materialization: ${file.path}`);
+        }
+      }
+    }
+    if (!verifyMaterializedFiles(action.worktreePath, action.files, action.excludedPaths, git)) {
+      throw new Error("Materialized file readback does not match the frozen exact paths and hashes.");
+    }
+  } catch (error) {
+    if (createdWorktree) safeGitStep(git, action.repoPath, ["worktree", "remove", "--force", action.worktreePath]);
+    return failedHostEvidenceAction(action, errorMessage(error), checks);
+  }
+  checks.push({ name: "materialized file readback", status: "passed", evidence: requestSha256 });
+
+  try {
+    harness.createTask({
+      id: materializationTaskId,
+      runId: action.runId,
+      role: "worker",
+      goal: "Host-materialize the frozen attempt artifact set for independent verification",
+      prompt: "This system task is completed only from host-owned fixed-action evidence; no model execution is allowed.",
+      dependsOn: [planner.id],
+      doneWhen: [
+        "the source attempt and receipt attempt are independently bound",
+        "the exact file path and SHA-256 set is materialized into one clean isolated worktree",
+        "excluded paths are absent and all side-effect counters remain zero",
+      ],
+      worktreePath: action.worktreePath,
+      config: {
+        systemTask: true,
+        hostAttemptArtifactMaterialization: {
+          contractId: action.contractId,
+          requestSha256,
+          sourceTaskId: sourceTask.id,
+          sourceAttemptId: sourceAttempt.id,
+          receiptAttemptId: receiptAttempt.id,
+        },
+      },
+    });
+    harness.recordAttempt({
+      id: materializationAttemptId,
+      taskId: materializationTaskId,
+      input: {
+        executor: "harness-action",
+        actionType: action.type,
+        contractId: action.contractId,
+        requestSha256,
+      },
+      output: {
+        status: "done",
+        summary: `Host materialized ${action.files.length} exact historical attempt artifacts for independent verification.`,
+        changedFiles: action.files.map((file) => file.path),
+        checks,
+        artifacts: [
+          { kind: "worktree", path: action.worktreePath, branch: action.branch },
+          ...action.files.map((file) => ({ kind: "file", ...file })),
+          {
+            kind: "host_attempt_artifact_materialization",
+            contractId: action.contractId,
+            requestSha256,
+            sourceTaskId: sourceTask.id,
+            sourceAttemptId: sourceAttempt.id,
+            receiptAttemptId: receiptAttempt.id,
+            worktreePath: action.worktreePath,
+            branch: action.branch,
+            parentSha: action.expectedParentSha,
+            files: action.files,
+            excludedPaths: action.excludedPaths,
+            sideEffectCounters: zeroSideEffectCounters(),
+            responseLossRecovered,
+          },
+        ],
+        problems: [],
+      },
+    });
+  } catch (error) {
+    return failedHostEvidenceAction(action, `Host materialized files but could not persist the system task receipt: ${errorMessage(error)}`, checks);
+  }
+  return doneResult(action.type, `Host materialized ${action.files.length} exact attempt artifacts for independent verification.`, checks, [{
+    kind: "host_attempt_artifact_materialization",
+    contractId: action.contractId,
+    taskId: materializationTaskId,
+    attemptId: materializationAttemptId,
+    sourceTaskId: sourceTask.id,
+    sourceAttemptId: sourceAttempt.id,
+    receiptAttemptId: receiptAttempt.id,
+    worktreePath: action.worktreePath,
+    branch: action.branch,
+    parentSha: action.expectedParentSha,
+    commitMessage: action.commitMessage,
+    files: action.files,
+    excludedPaths: action.excludedPaths,
+    sideEffectCounters: zeroSideEffectCounters(),
+    responseLossRecovered,
+    reused: false,
+  }]);
+}
+
+function sameWorkerFileReceipts(left: WorkerFileReceipt[], right: WorkerFileReceipt[]) {
+  if (left.length !== right.length) return false;
+  const byPath = new Map(left.map((file) => [file.path, file.sha256]));
+  return right.every((file) => byPath.get(file.path) === file.sha256);
+}
+
+function verifyMaterializedFiles(
+  worktreePath: string,
+  files: WorkerFileReceipt[],
+  excludedPaths: string[],
+  git: GitRunner = defaultGitRunner,
+) {
+  try {
+    const expected = files.map((file) => file.path).sort();
+    for (const file of files) {
+      const absolute = join(worktreePath, file.path);
+      const stat = lstatSync(absolute);
+      if (!stat.isFile() || stat.isSymbolicLink() || sha256File(absolute) !== file.sha256) return false;
+    }
+    if (excludedPaths.some((path) => existsSync(join(worktreePath, path)))) return false;
+    const untracked = safeGitStep(git, worktreePath, ["ls-files", "--others", "--exclude-standard", "-z"]);
+    const modified = safeGitStep(git, worktreePath, ["diff", "--name-only", "-z"]);
+    return untracked.ok && modified.ok && modified.stdout.length === 0
+      && untracked.stdout.split("\0").filter(Boolean).sort().join("\0") === expected.join("\0");
+  } catch {
+    return false;
+  }
+}
+
+function zeroSideEffectCounters() {
+  return {
+    paidUsd: 0,
+    realProviderCalls: 0,
+    pancatWrites: 0,
+    productionPublishes: 0,
+    realAssetDeletes: 0,
+    crossProjectMemoryReads: 0,
+    crossProjectMemoryWrites: 0,
   };
 }
 
@@ -10626,6 +11031,41 @@ function followUpTaskField(record: Record<string, unknown>, key: string) {
     prompt: stringField(value, "prompt"),
     doneWhen: optionalStringArrayField(value, "doneWhen"),
   };
+}
+
+function exactWorkerFileReceiptsField(record: Record<string, unknown>, key: string): WorkerFileReceipt[] {
+  const value = record[key];
+  if (!Array.isArray(value) || value.length === 0 || value.length > EXACT_GIT_INDEX_MAX_FILES) {
+    throw new Error(`${key} must contain 1-${EXACT_GIT_INDEX_MAX_FILES} exact file SHA-256 receipts`);
+  }
+  const seen = new Set<string>();
+  return value.map((item, index) => {
+    const file = objectRecord(item, `${key}[${index}]`);
+    assertOnlyFields(file, `${key}[${index}]`, ["path", "sha256"]);
+    const path = exactRelativeGitPathField(file, "path", `${key}[${index}].path`);
+    if (seen.has(path)) throw new Error(`${key} must contain unique paths; duplicate: ${path}`);
+    seen.add(path);
+    return { path, sha256: exactSha256Field(file, "sha256") };
+  });
+}
+
+function exactRelativeGitPathsField(
+  record: Record<string, unknown>,
+  key: string,
+  options: { allowEmpty: boolean },
+) {
+  const value = record[key];
+  if (!Array.isArray(value) || (!options.allowEmpty && value.length === 0) || value.length > EXACT_GIT_INDEX_MAX_FILES) {
+    throw new Error(`${key} must be a bounded array of exact relative Git paths`);
+  }
+  const seen = new Set<string>();
+  return value.map((item, index) => {
+    const wrapper = { value: item };
+    const path = exactRelativeGitPathField(wrapper, "value", `${key}[${index}]`);
+    if (seen.has(path)) throw new Error(`${key} must contain unique paths; duplicate: ${path}`);
+    seen.add(path);
+    return path;
+  });
 }
 
 function researchEvidenceArtifactRequests(value: unknown): ResearchEvidenceLinkAction["artifacts"] {

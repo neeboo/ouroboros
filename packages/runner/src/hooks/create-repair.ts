@@ -322,6 +322,17 @@ export function createRepairTaskHook(options: {
         ],
       };
     }
+    const hostMaterialization = hostArtifactMaterializationReason(options.harness, task);
+    if (hostMaterialization) {
+      return {
+        decision: "exit",
+        artifacts: [{
+          kind: "repair_skipped_host_artifact_materialization",
+          verifierTaskId: task.id,
+          reason: hostMaterialization,
+        }],
+      };
+    }
 
     const sourceTasks = selectRepairSourceTasks(options.harness, task);
     const sourceTask = sourceTasks[0] ?? null;
@@ -613,6 +624,34 @@ function externalSetupBlockerReason(output: AttemptOutput) {
     (haystack.includes("typecheck") || haystack.includes("tsc") || haystack.includes("verification"))
   ) {
     return "local verification resource limit requires external environment change";
+  }
+  return null;
+}
+
+function hostArtifactMaterializationReason(
+  harness: Harness,
+  verifierTask: { dependsOn: string[] },
+) {
+  for (const dependencyId of verifierTask.dependsOn) {
+    const sourceTask = harness.getTask(dependencyId);
+    if (!sourceTask || sourceTask.role !== "worker") continue;
+    const sourceSession = [...harness.getRunOverview({ runId: sourceTask.runId, eventLimit: 0 }).sessions]
+      .reverse()
+      .find((candidate) => candidate.taskId === sourceTask.id && candidate.status === "done");
+    const sourceAttempt = sourceSession ? harness.getAttempt(sourceSession.attemptId) : null;
+    if (!sourceAttempt) continue;
+    const retrieval = (sourceAttempt.output.artifacts ?? []).find((artifact) => {
+      if (!artifact || typeof artifact !== "object" || Array.isArray(artifact)) return false;
+      return (artifact as Record<string, unknown>).kind === "retrievalEvidence";
+    }) as Record<string, unknown> | undefined;
+    if (
+      retrieval
+      && typeof retrieval.sourceWorkerAttemptId === "string"
+      && typeof retrieval.targetWorktreeControlDatabaseRead === "string"
+      && retrieval.targetWorktreeControlDatabaseRead.length > 0
+    ) {
+      return "host-owned attempt artifact materialization is required; model repair cannot authorize control-database evidence";
+    }
   }
   return null;
 }

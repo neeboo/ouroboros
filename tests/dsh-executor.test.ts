@@ -5,7 +5,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { createDshCliExecutor } from "../packages/runner/src";
 import type { ResolvedExecutionRoute, RunCommandInput } from "../packages/runner/src";
-import { darwinDshProcessProfile } from "../packages/runner/src/executors/dsh-process-policy";
+import { darwinDshHostReadProfile, darwinDshProcessProfile } from "../packages/runner/src/executors/dsh-process-policy";
 
 const runFixture = {
   id: "run_dsh",
@@ -93,6 +93,8 @@ describe("DeepSeek Harness CLI executor", () => {
         expect(input.env?.LINEAR_API_KEY).toBeUndefined();
         expect(input.env?.DEEPSEEK_API_KEY).toBe("approved-model-key");
         expect(input.inheritEnv).toBe(false);
+        expect(input.cmd.slice(0, 4)).toEqual(["/usr/bin/sandbox-exec", "-p", expect.any(String), "--"]);
+        expect(input.cmd[4]).toBe("/opt/deepseek/bin/dsh");
         const patchIndex = input.cmd.indexOf("--patch");
         processPolicy = readFileSync(input.cmd[patchIndex + 1]!, "utf8");
         return {
@@ -120,6 +122,8 @@ describe("DeepSeek Harness CLI executor", () => {
       profileSha256: expect.stringMatching(/^[a-f0-9]{64}$/),
       profilePatchSha256: expect.stringMatching(/^[a-f0-9]{64}$/),
       processPolicyPatchSha256: expect.stringMatching(/^[a-f0-9]{64}$/),
+      controlPathReadPolicy: "deny",
+      deniedControlPathRootsSha256: expect.stringMatching(/^[a-f0-9]{64}$/),
       network: { mode: "deny", enforcement: "dsh-sandbox-local" },
       preflight: {
         passed: true,
@@ -133,6 +137,8 @@ describe("DeepSeek Harness CLI executor", () => {
       type: "dsh.profile.preflight",
       attemptId: "attempt_offline_profile",
       enabledPlugins: ["@deepseek-ai/dsh-base", "@deepseek-ai/dsh-headless"],
+      controlPathReadPolicy: "deny",
+      deniedControlPathRootsSha256: expect.stringMatching(/^[a-f0-9]{64}$/),
       networkMode: "deny",
     }));
   });
@@ -245,7 +251,8 @@ describe("DeepSeek Harness CLI executor", () => {
     });
     expect(calls[0]?.env?.DSH_HOME).toContain("ouroboros-dsh-");
     expect(calls[0]?.env?.HODOR_APPLICATION_TOKEN).toBeUndefined();
-    expect(calls[0]?.cmd.slice(0, 3)).toEqual(["/opt/deepseek/bin/dsh", "--profile", "headless"]);
+    expect(calls[0]?.cmd.slice(0, 4)).toEqual(["/usr/bin/sandbox-exec", "-p", expect.any(String), "--"]);
+    expect(calls[0]?.cmd.slice(4, 7)).toEqual(["/opt/deepseek/bin/dsh", "--profile", "headless"]);
     expect(calls[0]?.cmd.at(-1)).toBe(executorInput().prompt);
     expect(calls[0]?.cmd).toContain("--patch");
     expect(events.map((event) => event.type)).toEqual([
@@ -322,6 +329,44 @@ describe("DeepSeek Harness CLI executor", () => {
       expect(connections).toBe(0);
     } finally {
       server.stop(true);
+    }
+  });
+
+  test.skipIf(process.platform !== "darwin")("denies target-local control databases before DSH can read them", async () => {
+    const workspace = await mkdtemp(join(homedir(), ".orbs-dsh-control-read-"));
+    const ordinaryPath = join(workspace, "README.md");
+    const controlPaths = [
+      join(workspace, ".ouroboros", "state.json"),
+      join(workspace, ".orbs", "harness.db"),
+      join(workspace, ".git", "orbs", "ouroboros.db"),
+    ];
+    await writeFile(ordinaryPath, "ordinary\n");
+    for (const path of controlPaths) {
+      await mkdir(join(path, ".."), { recursive: true });
+      await writeFile(path, "control-secret\n");
+    }
+    const profile = darwinDshHostReadProfile({ workspaceRoot: workspace });
+
+    try {
+      const ordinary = Bun.spawnSync({
+        cmd: ["/usr/bin/sandbox-exec", "-p", profile.profile, "--", "/bin/cat", ordinaryPath],
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      expect(ordinary.exitCode).toBe(0);
+      expect(ordinary.stdout.toString()).toBe("ordinary\n");
+      for (const path of controlPaths) {
+        const denied = Bun.spawnSync({
+          cmd: ["/usr/bin/sandbox-exec", "-p", profile.profile, "--", "/bin/cat", path],
+          stdout: "pipe",
+          stderr: "pipe",
+        });
+        expect(denied.exitCode).not.toBe(0);
+        expect(denied.stdout.toString()).not.toContain("control-secret");
+      }
+      expect(profile.deniedReadPathsSha256).toMatch(/^[a-f0-9]{64}$/);
+    } finally {
+      await rm(workspace, { recursive: true, force: true });
     }
   });
 
@@ -495,7 +540,8 @@ describe("DeepSeek Harness CLI executor", () => {
 
     await executor(executorInput());
 
-    expect(calls[0]?.cmd.slice(0, 3)).toEqual([selectedPath, "--profile", "headless"]);
+    expect(calls[0]?.cmd.slice(0, 4)).toEqual(["/usr/bin/sandbox-exec", "-p", expect.any(String), "--"]);
+    expect(calls[0]?.cmd.slice(4, 7)).toEqual([selectedPath, "--profile", "headless"]);
     expect(calls[0]?.cmd).toContain("--patch");
     expect(calls[0]?.cmd.at(-1)).toBe(executorInput().prompt);
   });

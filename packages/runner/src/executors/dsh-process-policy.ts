@@ -1,7 +1,8 @@
 import { createHash, randomUUID } from "node:crypto";
+import { existsSync, lstatSync, readFileSync, readdirSync, realpathSync } from "node:fs";
 import { chmod, lstat, mkdir, realpath, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
-import { basename, dirname, join } from "node:path";
+import { basename, dirname, join, resolve, sep } from "node:path";
 
 const DARWIN_EMBEDDED_CODEX_EXECUTABLES = [
   "/Applications/ChatGPT.app/Contents/Resources/codex",
@@ -16,6 +17,83 @@ export interface DshProcessPolicyBundle {
   patchSha256: string;
   networkMode: "deny";
   cleanup(): Promise<void>;
+}
+
+export interface DshHostReadProfile {
+  profile: string;
+  deniedReadPaths: string[];
+  deniedReadPathsSha256: string;
+}
+
+export function darwinDshHostReadProfile(input: { workspaceRoot: string }): DshHostReadProfile {
+  const deniedReadPaths = dshControlReadPaths(input.workspaceRoot);
+  const forms = [
+    "(version 1)",
+    "(allow default)",
+    ...deniedReadPaths.flatMap((path) => [
+      `(deny file-read* (subpath ${sbplString(path)}))`,
+      `(deny file-write* (subpath ${sbplString(path)}))`,
+    ]),
+  ];
+  return {
+    profile: forms.join(" "),
+    deniedReadPaths,
+    deniedReadPathsSha256: createHash("sha256").update(JSON.stringify(deniedReadPaths)).digest("hex"),
+  };
+}
+
+function dshControlReadPaths(workspaceRoot: string) {
+  const workspace = existsSync(workspaceRoot) ? canonicalExistingDirectory(workspaceRoot) : resolve(workspaceRoot);
+  const paths = new Set<string>([
+    join(workspace, ".ouroboros"),
+    join(workspace, ".orbs"),
+    join(workspace, ".git", "orbs"),
+  ]);
+  const gitEntry = join(workspace, ".git");
+  try {
+    const stat = lstatSync(gitEntry);
+    if (stat.isDirectory() && !stat.isSymbolicLink()) {
+      paths.add(join(realpathSync(gitEntry), "orbs"));
+    } else if (stat.isFile() && !stat.isSymbolicLink()) {
+      const match = /^gitdir:\s*(.+)\s*$/m.exec(readFileSync(gitEntry, "utf8"));
+      if (match?.[1]) {
+        const gitDir = canonicalExistingDirectory(resolve(workspace, match[1]));
+        paths.add(join(gitDir, "orbs"));
+        const commonFile = join(gitDir, "commondir");
+        if (existsSync(commonFile)) {
+          const commonDir = canonicalExistingDirectory(resolve(gitDir, readFileSync(commonFile, "utf8").trim()));
+          paths.add(join(commonDir, "orbs"));
+        }
+      }
+    }
+  } catch {
+    // A missing .git entry is valid for isolated non-Git executor fixtures.
+  }
+
+  const worktreeMarker = `${sep}.ouroboros${sep}worktrees${sep}`;
+  const markerIndex = workspace.indexOf(worktreeMarker);
+  if (markerIndex >= 0) {
+    const projectRoot = workspace.slice(0, markerIndex);
+    const worktreesRoot = join(projectRoot, ".ouroboros", "worktrees");
+    try {
+      for (const entry of readdirSync(worktreesRoot, { withFileTypes: true })) {
+        const candidate = join(worktreesRoot, entry.name);
+        if (entry.isDirectory() && realpathSync(candidate) !== workspace) paths.add(realpathSync(candidate));
+      }
+    } catch {
+      // The current worktree remains usable even if sibling enumeration is unavailable.
+    }
+  }
+  return [...paths].sort();
+}
+
+function canonicalExistingDirectory(path: string) {
+  const canonical = realpathSync(path);
+  const stat = lstatSync(canonical);
+  if (!stat.isDirectory() || stat.isSymbolicLink()) {
+    throw new Error(`DSH workspace boundary is not one real directory: ${path}`);
+  }
+  return canonical;
 }
 
 export async function prepareDshProcessPolicy(): Promise<DshProcessPolicyBundle | null> {
