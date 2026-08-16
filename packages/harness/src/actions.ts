@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { accessSync, chmodSync, constants, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { acceptGuardrailProposal, proposeGuardrailsFromLessons } from "./guardrails";
 import { completionVerificationContract, describeRunCompletionReadiness } from "./completion-readiness";
 import type { HarnessDatabase } from "./database";
@@ -24,7 +24,11 @@ import {
   type ResearchEvidenceLinkV1,
 } from "./research-evidence";
 import { filterOuroborosRuntimePaths, isOuroborosRuntimePath } from "./runtime-paths";
-import { projectRuntimeIntegrationTaskGraph, RUNTIME_INTEGRATION_TASK_GRAPH } from "./runtime-integration-tasks";
+import {
+  projectRuntimeIntegrationTaskGraph,
+  RUNTIME_INTEGRATION_TASK_GRAPH,
+  runtimeIntegrationTaskExecutionProblem,
+} from "./runtime-integration-tasks";
 import {
   advanceAfterRepair,
   blockAfterRepair,
@@ -165,6 +169,13 @@ export type HarnessAction =
       type: "materializeVerifierRepairRecovery";
       runId: string;
       verifierTaskId: string;
+      reason?: string;
+    }
+  | {
+      type: "recoverRuntimeIntegrationHostEvidenceFailure";
+      runId: string;
+      verifierTaskId: string;
+      verifierAttemptId: string;
       reason?: string;
     }
   | {
@@ -810,6 +821,16 @@ export function parseHarnessAction(value: unknown): HarnessAction {
       reason: optionalStringField(record, "reason"),
     };
   }
+  if (type === "recoverRuntimeIntegrationHostEvidenceFailure") {
+    assertOnlyFields(record, type, ["type", "runId", "verifierTaskId", "verifierAttemptId", "reason"]);
+    return {
+      type,
+      runId: stringField(record, "runId"),
+      verifierTaskId: stringField(record, "verifierTaskId"),
+      verifierAttemptId: stringField(record, "verifierAttemptId"),
+      reason: optionalStringField(record, "reason"),
+    };
+  }
   if (type === "reconcileVerifierRepairHandoff") {
     assertOnlyFields(record, type, ["type", "runId", "repairTaskId", "verifierTaskId", "reason"]);
     return {
@@ -1338,7 +1359,7 @@ export function parseHarnessAction(value: unknown): HarnessAction {
     };
   }
   throw new Error(
-    "harness action type must be reclaimRunningTasks, retryTask, reconcileRunEvidence, recordSignal, linkResearchEvidence, materializeDesignerActionRecovery, materializeDesignDeliveryRecovery, materializeDesignWorkerRuntimeRecovery, materializeDesignWorkerTransportRecovery, materializeVerifierRepairRecovery, reconcileVerifierRepairHandoff, buildVersionedCorpusManifest, bindHostEvidenceMaintenanceReceipt, materializeHostEvidenceMaintenanceDelivery, materializeRuntimeIntegrationDesignRecovery, materializeRuntimeIntegrationTaskGraphRecovery, recoverRuntimeIntegrationTaskGraphPreparationFailure, installLocalDshCli, recoverRuntimeIntegrationDshInstallationFailure, recoverRuntimeIntegrationDshRuntimeBindingFailure, markRunTodo, updateRunContext, amendRunContract, retireRun, retireTask, prepareRunDrain, completeSystemTask, integrateVerifiedRun, pushExactGitRef, createExactGitRef, commitExactGitIndex, stageExactWorkerFilesForVerification, materializeAttemptArtifactsForVerification, verifySealedCorpusForVerification, registerEvolutionProfile, recordProductionEpisode, registerHarnessVariant, activateHarnessRevision, freezeMatchedExperiment, interruptAttemptAndCreateTask, interruptRunningAttemptsAndCreateTask, acceptGuardrailProposal, startSubsession, collectSubsessions, cancelSubsessions, or runWatchdogPass",
+    "harness action type must be reclaimRunningTasks, retryTask, reconcileRunEvidence, recordSignal, linkResearchEvidence, materializeDesignerActionRecovery, materializeDesignDeliveryRecovery, materializeDesignWorkerRuntimeRecovery, materializeDesignWorkerTransportRecovery, materializeVerifierRepairRecovery, recoverRuntimeIntegrationHostEvidenceFailure, reconcileVerifierRepairHandoff, buildVersionedCorpusManifest, bindHostEvidenceMaintenanceReceipt, materializeHostEvidenceMaintenanceDelivery, materializeRuntimeIntegrationDesignRecovery, materializeRuntimeIntegrationTaskGraphRecovery, recoverRuntimeIntegrationTaskGraphPreparationFailure, installLocalDshCli, recoverRuntimeIntegrationDshInstallationFailure, recoverRuntimeIntegrationDshRuntimeBindingFailure, markRunTodo, updateRunContext, amendRunContract, retireRun, retireTask, prepareRunDrain, completeSystemTask, integrateVerifiedRun, pushExactGitRef, createExactGitRef, commitExactGitIndex, stageExactWorkerFilesForVerification, materializeAttemptArtifactsForVerification, verifySealedCorpusForVerification, registerEvolutionProfile, recordProductionEpisode, registerHarnessVariant, activateHarnessRevision, freezeMatchedExperiment, interruptAttemptAndCreateTask, interruptRunningAttemptsAndCreateTask, acceptGuardrailProposal, startSubsession, collectSubsessions, cancelSubsessions, or runWatchdogPass",
   );
 }
 
@@ -4661,6 +4682,529 @@ function verifierAttemptRequiresRepair(output: AttemptOutput) {
   return output.verdict !== "pass";
 }
 
+function runtimeHostEvidenceCommands(nodePath: string) {
+  const dockerHost = shellQuote(`unix://${join(homedir(), ".docker/run/docker.sock")}`);
+  return [
+  {
+    id: "host-node-version",
+    command: `${shellQuote(nodePath)} --version`,
+    timeoutMs: 10_000,
+  },
+  {
+    id: "docker-server",
+    command: `DOCKER_HOST=${dockerHost} docker info --format '{{.ServerVersion}}'`,
+    timeoutMs: 10_000,
+  },
+  {
+    id: "runtime-integration-tests",
+    command: [
+      `${shellQuote(nodePath)} --test`,
+      "tests/runtime-integration/ainovel-adapter.test.mjs",
+      "tests/runtime-integration/dsh-gateway.test.mjs",
+      "tests/runtime-integration/evolution-http.test.mjs",
+      "tests/runtime-integration/evolution-postgres.test.mjs",
+      "tests/runtime-integration/evolution-runtime.test.mjs",
+    ].join(" "),
+    timeoutMs: 600_000,
+  },
+  { id: "backend-runtime-readback", command: `${shellQuote(nodePath)} tests/runtime-integration/readback-backend-runtime.mjs`, timeoutMs: 120_000 },
+  { id: "ainovel-adapter-readback", command: `${shellQuote(nodePath)} tests/runtime-integration/readback-ainovel-adapter.mjs`, timeoutMs: 120_000 },
+  { id: "dsh-gateway-readback", command: `${shellQuote(nodePath)} tests/runtime-integration/readback-dsh-gateway.mjs`, timeoutMs: 120_000 },
+  {
+    id: "isolated-loopback-readback",
+    command: [
+      `image_id=$(DOCKER_HOST=${dockerHost} docker image inspect --format '{{.Id}}' hodor-agent-gateway:local)`,
+      `printf 'IMAGE_ID=%s\\n' "$image_id"`,
+      `DOCKER_HOST=${dockerHost} docker run --rm --network none --read-only --tmpfs /tmp:rw,noexec,nosuid,size=128m -v "$PWD:/workspace:ro" -w /workspace --entrypoint /usr/local/bin/bun "$image_id" tests/runtime-integration/readback-ainovel-adapter.mjs`,
+    ].join(" && "),
+    timeoutMs: 120_000,
+  },
+] as const;
+}
+
+function recoverRuntimeIntegrationHostEvidenceFailure(
+  harness: Harness,
+  action: Extract<HarnessAction, { type: "recoverRuntimeIntegrationHostEvidenceFailure" }>,
+  options: HarnessActionOptions,
+): HarnessActionResult {
+  const overview = harness.getRunOverview({ runId: action.runId, eventLimit: 0 });
+  const run = overview.run;
+  if (!run || run.context.source !== "design" || run.context.retired === true) {
+    return blockedResult(action.type, "Runtime host evidence recovery requires an active design delivery.", [action.runId]);
+  }
+  const verifier = overview.tasks.find((task) => task.id === action.verifierTaskId);
+  const session = overview.sessions.find((candidate) => candidate.attemptId === action.verifierAttemptId);
+  const attempt = session ? harness.getAttempt(session.attemptId) : null;
+  const contract = objectRecordOrNull(verifier?.config?.runtimeIntegrationExecutionContract);
+  if (!verifier || verifier.role !== "verifier" || !["done", "blocked"].includes(verifier.status)
+    || session?.taskId !== verifier.id || !["done", "blocked"].includes(session.status) || !attempt
+    || contract?.stageId !== "non-browser-e2e" || contract.role !== "verifier") {
+    return blockedResult(action.type, "Runtime host evidence recovery requires the terminal frozen final Verifier attempt.", [
+      `${action.verifierTaskId}:${action.verifierAttemptId}`,
+    ]);
+  }
+  const requiredFailureCodes = [
+    "REAL_POSTGRES_EVIDENCE_UNAVAILABLE",
+    "REAL_LOOPBACK_HTTP_EVIDENCE_UNAVAILABLE",
+    "END_TO_END_BINDING_INCOMPLETE",
+  ];
+  const failureText = [attempt.output.summary, ...(attempt.output.problems ?? [])].join("\n");
+  if (attempt.output.verdict !== "fail"
+    || requiredFailureCodes.some((code) => !failureText.includes(code))
+    || (attempt.output.changedFiles ?? []).length !== 0) {
+    return blockedResult(action.type, "Final Verifier failure is not the frozen host-capability-only fingerprint.", [
+      stableFingerprint({ verdict: attempt.output.verdict, problems: attempt.output.problems, changedFiles: attempt.output.changedFiles }),
+    ]);
+  }
+  const requiredPassedChecks = [
+    "repository-heads",
+    "frozen-package",
+    "authorized-changed-paths",
+    "ten-capability-in-process-receipts",
+    "rollback",
+    "matched-comparison-assertions",
+    "browser-and-side-effects",
+  ];
+  const passedCheckNames = new Set((attempt.output.checks ?? []).flatMap((check) => {
+    const record = objectRecordOrNull(check);
+    return record?.status === "passed" && typeof record.name === "string" ? [record.name] : [];
+  }));
+  if (requiredPassedChecks.some((name) => !passedCheckNames.has(name))) {
+    return blockedResult(action.type, "Final Verifier has unresolved non-host evidence failures.", [
+      `required passed checks: ${requiredPassedChecks.join(", ")}`,
+    ]);
+  }
+  const graphProblem = runtimeIntegrationTaskExecutionProblem({
+    runId: run.id,
+    boundary: run.context.runtimeIntegrationBoundary,
+    evidenceBundle: run.context.targetSystemEvidenceBundle,
+    task: verifier,
+    tasks: overview.tasks,
+  });
+  const gateway = verifier.dependsOn.length === 1
+    ? overview.tasks.find((task) => task.id === verifier.dependsOn[0])
+    : undefined;
+  const gatewayContract = objectRecordOrNull(gateway?.config?.runtimeIntegrationExecutionContract);
+  if (graphProblem || !gateway || gateway.status !== "done" || gatewayContract?.stageId !== "dsh-gateway") {
+    return blockedResult(action.type, "Runtime host evidence recovery lost the completed frozen task graph.", [
+      graphProblem ?? `gateway=${gateway?.id ?? "missing"}:${gateway?.status ?? "missing"}`,
+    ]);
+  }
+  const boundarySha256 = exactNonEmptyStringField(contract, "boundarySha256");
+  const bundleSha256 = exactNonEmptyStringField(contract, "bundleSha256");
+  const recoveryKey = stableFingerprint({
+    runId: run.id,
+    verifierTaskId: verifier.id,
+    verifierAttemptId: attempt.id,
+    boundarySha256,
+    bundleSha256,
+    failureCodes: requiredFailureCodes,
+  });
+  const existingReceipt = objectRecordOrNull(run.context.runtimeIntegrationHostEvidenceRecovery);
+  if (existingReceipt) {
+    if (existingReceipt.recoveryKey !== recoveryKey
+      || existingReceipt.sourceVerifierTaskId !== verifier.id
+      || existingReceipt.sourceVerifierAttemptId !== attempt.id) {
+      return blockedResult(action.type, "Runtime host evidence recovery is already bound to another failure.", [recoveryKey]);
+    }
+    const hostTaskId = exactNonEmptyStringField(existingReceipt, "hostTaskId");
+    const replacementVerifierTaskId = exactNonEmptyStringField(existingReceipt, "verifierTaskId");
+    const hostTask = overview.tasks.find((task) => task.id === hostTaskId);
+    const replacementVerifier = overview.tasks.find((task) => task.id === replacementVerifierTaskId);
+    if (!hostTask || (existingReceipt.status !== "blocked" && !replacementVerifier)) {
+      return blockedResult(action.type, "Runtime host evidence recovery receipt points to missing tasks.", [recoveryKey]);
+    }
+    if (existingReceipt.status === "blocked") {
+      return blockedResult(action.type, `Runtime host evidence recovery ${recoveryKey} remains failed closed.`, [
+        `host task ${hostTaskId} is ${hostTask.status}`,
+      ]);
+    }
+    return doneResult(action.type, `Runtime host evidence recovery ${recoveryKey} reused.`, [
+      { name: "host evidence recovery", status: "passed", evidence: "reused" },
+    ], [{
+      kind: "runtime_integration_host_evidence_recovery",
+      sourceVerifierTaskId: verifier.id,
+      sourceVerifierAttemptId: attempt.id,
+      hostTaskId,
+      verifierTaskId: replacementVerifierTaskId,
+      recoveryKey,
+      reused: true,
+    }]);
+  }
+  const active = overview.tasks.filter((task) => task.status === "todo" || task.status === "running");
+  if (active.length > 0) {
+    return blockedResult(action.type, "Runtime host evidence recovery requires a drained failed graph.", [
+      active.map((task) => task.id).join(", "),
+    ]);
+  }
+
+  const selectedNodePath = Bun.which("node");
+  if (!selectedNodePath || !isAbsolute(selectedNodePath) || !existsSync(selectedNodePath)) {
+    return blockedResult(action.type, "Runtime host evidence requires one launchable absolute Node runtime.", [
+      selectedNodePath ?? "node executable not found",
+    ]);
+  }
+  const nodePath = realpathSync(selectedNodePath);
+  const nodeSha256 = sha256File(nodePath);
+  if (!nodeSha256 || !statSync(nodePath).isFile()) {
+    return blockedResult(action.type, "Runtime host evidence Node runtime identity is invalid.", [nodePath]);
+  }
+  const commands = runtimeHostEvidenceCommands(nodePath);
+  const runCommand = options.runCommand ?? defaultCommandRunner;
+  const commandReceipts = commands.map((entry) => {
+    const result = runCommand({
+      cwd: verifier.worktreePath ?? exactNonEmptyStringField(contract, "worktreePath"),
+      command: entry.command,
+      timeoutMs: entry.timeoutMs,
+      maxOutputBytes: 8 * 1024 * 1024,
+    });
+    return {
+      id: entry.id,
+      commandSha256: stableFingerprint(entry.command),
+      exitCode: result.exitCode,
+      stdoutSha256: stableFingerprint(result.stdout),
+      stdoutBytes: Buffer.byteLength(result.stdout, "utf8"),
+      stderrSha256: stableFingerprint(result.stderr),
+      stderrBytes: Buffer.byteLength(result.stderr, "utf8"),
+      stdout: result.stdout,
+      stderr: result.stderr,
+    };
+  });
+  const nodeRuntime = commandReceipts[0]!;
+  const docker = commandReceipts[1]!;
+  const tests = commandReceipts[2]!;
+  const testCounts = parseNodeTestCounts(tests.stdout);
+  const readbacks = commandReceipts.slice(3).map((receipt) => ({
+    id: receipt.id,
+    payload: parseHostReadbackPayload(receipt.stdout, receipt.id),
+    stdoutSha256: receipt.stdoutSha256,
+    stdoutBytes: receipt.stdoutBytes,
+  }));
+  const dockerVersion = docker.stdout.trim();
+  const nodeVersion = nodeRuntime.stdout.trim();
+  const isolatedLoopback = commandReceipts.find((receipt) => receipt.id === "isolated-loopback-readback")!;
+  const containerImageId = isolatedLoopback.stdout.match(/^IMAGE_ID=(sha256:[a-f0-9]{64})$/m)?.[1] ?? null;
+  const readbackEvidencePassed = hostReadbackEvidencePasses(readbacks);
+  const directLoopbackAvailable = objectRecordOrNull(readbacks.find((entry) => entry.id === "ainovel-adapter-readback")?.payload.httpRealServer)?.available === true;
+  const testCountsPassed = testCounts.total === 54 && testCounts.failed === 0
+    && ((directLoopbackAvailable && testCounts.passed === 54 && testCounts.skipped === 0)
+      || (!directLoopbackAvailable && testCounts.passed === 53 && testCounts.skipped === 1));
+  const allPassed = commandReceipts.every((receipt) => receipt.exitCode === 0)
+    && /^v(?:2[3-9]|[3-9][0-9])\.[0-9]+\.[0-9]+$/.test(nodeVersion)
+    && /^[0-9A-Za-z.+_-]{1,64}$/.test(dockerVersion)
+    && containerImageId !== null
+    && testCountsPassed
+    && readbackEvidencePassed;
+  const hostEvidenceId = `host-evidence:${stableFingerprint({
+    recoveryKey,
+    dockerVersion,
+    testCounts,
+    readbacks: readbacks.map(({ id, stdoutSha256 }) => ({ id, stdoutSha256 })),
+  })}`;
+  const sanitizedCommands = commandReceipts.map(({ stdout: _stdout, stderr: _stderr, ...receipt }) => receipt);
+  const hostReceipt = {
+    schemaVersion: 1,
+    kind: "runtime-integration-host-evidence-receipt",
+    hostEvidenceId,
+    recoveryKey,
+    sourceVerifierTaskId: verifier.id,
+    sourceVerifierAttemptId: attempt.id,
+    boundarySha256,
+    bundleSha256,
+    repositoryId: verifier.config?.repositoryId,
+    expectedHead: verifier.config?.expectedHead,
+    worktreePath: verifier.worktreePath,
+    runtime: { executable: nodePath, version: nodeVersion || null, sha256: nodeSha256 },
+    docker: { status: docker.exitCode === 0 ? "passed" : "failed", serverVersion: dockerVersion || null, containerImageId },
+    postgres: { status: allPassed ? "passed" : "failed", schema: allPassed, insert: allPassed, query: allPassed, restartPersistence: allPassed, readback: allPassed },
+    http: { status: allPassed ? "passed" : "failed", host: "127.0.0.1", port: 10588, browser: "deny" },
+    tests: testCounts,
+    readbacks,
+    commands: sanitizedCommands,
+    credentialIsolation: { modelExecuted: false, modelCredentialsInherited: false, targetCredentialsInherited: false },
+    sideEffectCounters: { browserExecutions: 0, paidUsd: 0, realProviderCalls: 0, productionPublishes: 0, destructiveAssetOperations: 0, crossProjectMemoryAccess: 0 },
+  };
+  const hostReceiptSha256 = canonicalEvolutionValueSha256(hostReceipt);
+  const plannerTaskId = exactNonEmptyStringField(contract, "plannerTaskId");
+  const hostTaskId = `task_${createHash("sha1").update(`runtime-host-evidence|${recoveryKey}`).digest("hex")}`;
+  const replacementVerifierTaskId = `task_${createHash("sha1").update(`runtime-host-verifier|${recoveryKey}`).digest("hex")}`;
+  const marker = {
+    schemaVersion: 1,
+    recoveryKey,
+    sourceVerifierTaskId: verifier.id,
+    sourceVerifierAttemptId: attempt.id,
+    hostTaskId,
+    verifierTaskId: replacementVerifierTaskId,
+    gatewayTaskId: gateway.id,
+    plannerTaskId,
+    boundarySha256,
+    bundleSha256,
+    hostReceiptSha256,
+    maxRecoveries: 1,
+  };
+  return harness.runInImmediateTransaction((db) => {
+    const current = harness.getRunOverviewWithDb(db, { runId: run.id, eventLimit: 0 });
+    if (current.tasks.some((task) => task.status === "todo" || task.status === "running")) {
+      throw new Error("runtime host evidence recovery state changed before persistence");
+    }
+    harness.createTaskWithDb(db, {
+      id: hostTaskId,
+      runId: run.id,
+      parentId: plannerTaskId,
+      cycleId: verifier.cycleId,
+      role: "system",
+      goal: "Collect frozen runtime integration host capability evidence",
+      prompt: "This task is completed only by the audited host action. No model executor may run it.",
+      dependsOn: [gateway.id],
+      doneWhen: [
+        "Docker server identity is read back by the host",
+        "all 54 frozen runtime integration tests pass with real PostgreSQL restart persistence",
+        "127.0.0.1:10588 HTTP evidence is bound to the host receipt",
+      ],
+      worktreePath: verifier.worktreePath,
+      config: { systemTask: true, runtimeIntegrationHostEvidenceRecovery: marker },
+    });
+    harness.recordAttemptWithDb(db, {
+      taskId: hostTaskId,
+      input: {
+        executor: "harness-action",
+        actionType: action.type,
+        recoveryKey,
+        commandSetSha256: stableFingerprint(commands),
+      },
+      output: {
+        status: allPassed ? "done" : "blocked",
+        summary: allPassed
+          ? "Host-owned Docker, PostgreSQL restart-persistence, and loopback HTTP evidence passed."
+          : "Host-owned capability evidence failed closed.",
+        changedFiles: [],
+        checks: [
+          { name: "Docker host receipt", status: docker.exitCode === 0 ? "passed" : "failed", evidence: dockerVersion },
+          { name: "runtime integration tests", status: testCounts.failed === 0 && testCounts.passed === 54 ? "passed" : "failed", evidence: `${testCounts.passed}/${testCounts.total}` },
+          { name: "PostgreSQL restart persistence", status: allPassed ? "passed" : "failed", evidence: hostEvidenceId },
+          { name: "loopback HTTP 10588", status: allPassed ? "passed" : "failed", evidence: hostEvidenceId },
+          { name: "host readback payloads", status: readbackEvidencePassed ? "passed" : "failed", evidence: hostEvidenceId },
+        ],
+        artifacts: [{ ...hostReceipt, receiptSha256: hostReceiptSha256 }],
+        problems: allPassed ? [] : sanitizedCommands.filter((receipt) => receipt.exitCode !== 0).map((receipt) => `${receipt.id} exit ${receipt.exitCode}`),
+      },
+    });
+    if (!allPassed) {
+      harness.updateRunWithDb(db, {
+        runId: run.id,
+        status: "blocked",
+        contextPatch: { runtimeIntegrationHostEvidenceRecovery: { ...marker, status: "blocked" } },
+      });
+      return blockedResult(action.type, "Runtime integration host evidence failed closed.", [
+        ...sanitizedCommands.filter((receipt) => receipt.exitCode !== 0).map((receipt) => `${receipt.id} exit ${receipt.exitCode}`),
+        ...(testCounts.failed > 0 ? [`runtime tests failed ${testCounts.failed}`] : []),
+      ]);
+    }
+    const { contractSha256: _sourceContractSha256, ...sourceContractBody } = contract;
+    const replacementContractBody = {
+      ...sourceContractBody,
+      taskId: replacementVerifierTaskId,
+      hostEvidenceRecovery: {
+        recoveryKey,
+        hostTaskId,
+        hostReceiptSha256,
+        sourceVerifierTaskId: verifier.id,
+        sourceVerifierAttemptId: attempt.id,
+      },
+    };
+    const replacementContract = {
+      ...replacementContractBody,
+      contractSha256: canonicalEvolutionValueSha256(replacementContractBody),
+    };
+    harness.createTaskWithDb(db, {
+      id: replacementVerifierTaskId,
+      runId: run.id,
+      parentId: plannerTaskId,
+      cycleId: verifier.cycleId,
+      role: "verifier",
+      goal: verifier.goal,
+      prompt: [
+        verifier.prompt,
+        `Consume host evidence receipt ${hostReceiptSha256} from system task ${hostTaskId}.`,
+        "Do not rerun Docker, PostgreSQL, or loopback listeners inside the model sandbox. Independently verify the persisted host receipt, all prior frozen evidence, and return verdict=pass|fail.",
+      ].join("\n\n"),
+      dependsOn: [hostTaskId],
+      doneWhen: verifier.doneWhen,
+      worktreePath: verifier.worktreePath,
+      config: {
+        ...verifier.config,
+        runtimeIntegrationExecutionContract: replacementContract,
+        runtimeIntegrationHostEvidenceRecovery: marker,
+        hostEvidenceReceipt: { taskId: hostTaskId, receiptSha256: hostReceiptSha256, hostEvidenceId },
+        sourceTaskId: hostTaskId,
+        permissionMode: "read-only",
+        readOnly: true,
+        forbidImplementation: true,
+        forbidBrowser: true,
+        browserProcessPolicy: "deny",
+        identitySeparated: true,
+      },
+    });
+    harness.updateRunWithDb(db, {
+      runId: run.id,
+      status: "todo",
+      contextPatch: {
+        runtimeIntegrationHostEvidenceRecovery: { ...marker, status: "awaiting-verification", hostEvidenceId },
+        pendingVerificationTaskIds: [replacementVerifierTaskId],
+        pendingVerificationReason: `Host evidence ${hostTaskId} is ready for identity-separated verification`,
+      },
+    });
+    return doneResult(action.type, `Runtime host evidence recovery ${recoveryKey} materialized.`, [
+      { name: "host Docker", status: "passed", evidence: dockerVersion },
+      { name: "host PostgreSQL and HTTP", status: "passed", evidence: hostEvidenceId },
+      { name: "replacement Verifier", status: "passed", evidence: replacementVerifierTaskId },
+      { name: "repair budget", status: "passed", evidence: "unchanged" },
+      { name: "Goal Review", status: "passed", evidence: "not created" },
+    ], [{
+      kind: "runtime_integration_host_evidence_recovery",
+      sourceVerifierTaskId: verifier.id,
+      sourceVerifierAttemptId: attempt.id,
+      hostTaskId,
+      verifierTaskId: replacementVerifierTaskId,
+      hostEvidenceId,
+      hostReceiptSha256,
+      recoveryKey,
+      reused: false,
+    }]);
+  });
+}
+
+function parseNodeTestCounts(stdout: string) {
+  const read = (name: string) => Number(stdout.match(new RegExp(`(?:#|ℹ) ${name} (\\d+)`))?.[1] ?? -1);
+  return { total: read("tests"), passed: read("pass"), failed: read("fail"), skipped: read("skipped") };
+}
+
+function parseHostReadbackPayload(stdout: string, id: string): Record<string, unknown> {
+  for (let index = stdout.lastIndexOf("{"); index >= 0; index = stdout.lastIndexOf("{", index - 1)) {
+    try {
+      const candidate = JSON.parse(stdout.slice(index).trim());
+      if (candidate && typeof candidate === "object" && !Array.isArray(candidate)) {
+        const record = candidate as Record<string, unknown>;
+        const postgres = objectRecordOrNull(record.postgres);
+        const postgresRestart = objectRecordOrNull(postgres?.restartPersistence);
+        const http = objectRecordOrNull(record.http);
+        const realServer = objectRecordOrNull(http?.realServer);
+        const gatewayBinding = objectRecordOrNull(record.gatewayBinding);
+        const forwarding = objectRecordOrNull(record.forwarding);
+        const addressEnforcement = objectRecordOrNull(record.addressEnforcement);
+        return Object.fromEntries([
+          ["schemaVersion", record.schemaVersion],
+          ["kind", record.kind],
+          ["stageId", record.stageId],
+          ["runId", record.runId],
+          ["evidenceId", record.evidenceId],
+          ["repositoryHeads", record.repositoryHeads],
+          ["sideEffects", record.sideEffects],
+          ["browserDenial", record.browserDenial],
+          ["credentialIsolation", record.credentialIsolation],
+          ["postgres", postgres ? definedRecord([
+            ["available", postgres.available],
+            ["schemaCreated", postgres.schemaCreated],
+            ["evidenceReadbackMatches", postgres.evidenceReadbackMatches],
+            ["rollbackPersisted", postgres.rollbackPersisted],
+            ["readbackMatches", postgres.readbackMatches],
+            ["restartPersistence", postgresRestart ? definedRecord([
+              ["runSurvivesRestart", postgresRestart.runSurvivesRestart],
+              ["evidenceSurvivesRestart", postgresRestart.evidenceSurvivesRestart],
+              ["rollbackReceiptsAfterRestart", postgresRestart.rollbackReceiptsAfterRestart],
+            ]) : undefined],
+          ]) : undefined],
+          ["httpRealServer", realServer ? definedRecord([
+            ["available", realServer.available],
+            ["host", realServer.host],
+            ["port", realServer.port],
+            ["boundToGateway", realServer.boundToGateway],
+            ["browserExecuted", realServer.browserExecuted],
+            ["reason", typeof realServer.reason === "string" ? realServer.reason.slice(0, 300) : undefined],
+          ]) : undefined],
+          ["gatewayBinding", gatewayBinding ? definedRecord([["host", gatewayBinding.host], ["port", gatewayBinding.port]]) : undefined],
+          ["forwarding", forwarding ? definedRecord([
+            ["ok", forwarding.ok],
+            ["allBound", forwarding.allBound],
+            ["requestToResponseBound", forwarding.requestToResponseBound],
+            ["responseToDatabaseBound", forwarding.responseToDatabaseBound],
+            ["responseToHttpPathBound", forwarding.responseToHttpPathBound],
+          ]) : undefined],
+          ["addressEnforcement", addressEnforcement ? definedRecord([
+            ["validBindingAccepted", addressEnforcement.validBindingAccepted],
+            ["nonLoopbackRejected", addressEnforcement.nonLoopbackRejected],
+            ["alternatePortRejected", addressEnforcement.alternatePortRejected],
+          ]) : undefined],
+        ].filter((entry) => entry[1] !== undefined));
+      }
+    } catch {
+      // Continue searching for the outermost JSON object in stdout.
+    }
+  }
+  return { schemaVersion: 1, kind: "invalid-host-readback", id };
+}
+
+function definedRecord(entries: Array<[string, unknown]>) {
+  return Object.fromEntries(entries.filter(([, value]) => value !== undefined));
+}
+
+function hostReadbackEvidencePasses(readbacks: Array<{ id: string; payload: Record<string, unknown> }>) {
+  const byId = new Map(readbacks.map((entry) => [entry.id, entry.payload]));
+  const backend = byId.get("backend-runtime-readback");
+  const backendPostgres = objectRecordOrNull(backend?.postgres);
+  const backendRestart = objectRecordOrNull(backendPostgres?.restartPersistence);
+  const ainovel = byId.get("ainovel-adapter-readback");
+  const ainovelPostgres = objectRecordOrNull(ainovel?.postgres);
+  const ainovelRestart = objectRecordOrNull(ainovelPostgres?.restartPersistence);
+  const ainovelHttp = objectRecordOrNull(ainovel?.httpRealServer);
+  const isolated = byId.get("isolated-loopback-readback");
+  const isolatedHttp = objectRecordOrNull(isolated?.httpRealServer);
+  const gateway = byId.get("dsh-gateway-readback");
+  const gatewayBinding = objectRecordOrNull(gateway?.gatewayBinding);
+  const forwarding = objectRecordOrNull(gateway?.forwarding);
+  const address = objectRecordOrNull(gateway?.addressEnforcement);
+  return backend?.kind === "backend-runtime-worker-receipt"
+    && backendPostgres?.available === true
+    && backendPostgres.schemaCreated === true
+    && backendPostgres.evidenceReadbackMatches === true
+    && backendPostgres.rollbackPersisted === true
+    && backendRestart?.runSurvivesRestart === true
+    && backendRestart.evidenceSurvivesRestart === true
+    && typeof backendRestart.rollbackReceiptsAfterRestart === "number"
+    && backendRestart.rollbackReceiptsAfterRestart > 0
+    && ainovel?.kind === "ainovel-adapter-worker-receipt"
+    && ((ainovelHttp?.available === true
+      && ainovelHttp.host === "127.0.0.1"
+      && ainovelHttp.port === 10588
+      && ainovelHttp.boundToGateway === true
+      && ainovelHttp.browserExecuted === false)
+      || (ainovelHttp?.available === false
+        && typeof ainovelHttp.reason === "string"
+        && ainovelHttp.reason.includes("EADDRINUSE")
+        && ainovelHttp.browserExecuted === false))
+    && ainovelPostgres?.available === true
+    && ainovelPostgres.schemaCreated === true
+    && ainovelPostgres.readbackMatches === true
+    && ainovelRestart?.evidenceSurvivesRestart === true
+    && isolated?.kind === "ainovel-adapter-worker-receipt"
+    && isolatedHttp?.available === true
+    && isolatedHttp.host === "127.0.0.1"
+    && isolatedHttp.port === 10588
+    && isolatedHttp.boundToGateway === true
+    && isolatedHttp.browserExecuted === false
+    && gateway?.kind === "dsh-gateway-worker-receipt"
+    && gatewayBinding?.host === "127.0.0.1"
+    && gatewayBinding.port === 10588
+    && forwarding?.ok === true
+    && forwarding.allBound === true
+    && forwarding.requestToResponseBound === true
+    && forwarding.responseToDatabaseBound === true
+    && forwarding.responseToHttpPathBound === true
+    && address?.validBindingAccepted === true
+    && address.nonLoopbackRejected === true
+    && address.alternatePortRejected === true;
+}
+
 function reconcileVerifierRepairHandoffWithDb(
   harness: Harness,
   db: HarnessDatabase,
@@ -5897,6 +6441,10 @@ function applyParsedHarnessAction(
       { name: "run exists", status: "passed", evidence: action.runId },
       { name: "run status", status: "passed", evidence: "todo" },
     ], [{ kind: "run", runId: action.runId, previousStatus: run.status, status: "todo", reason: action.reason ?? null }]);
+  }
+
+  if (action.type === "recoverRuntimeIntegrationHostEvidenceFailure") {
+    return recoverRuntimeIntegrationHostEvidenceFailure(harness, action, options);
   }
 
   if (action.type === "bindHostEvidenceMaintenanceReceipt") {
@@ -11751,6 +12299,19 @@ function prepareRunDrain(harness: Harness, action: Extract<HarnessAction, { type
     return doneResult(action.type, `Run ${action.runId} is already done.`, [
       { name: "run status", status: "passed", evidence: "done" },
     ], [{ kind: "run", runId: action.runId, status: "done" }]);
+  }
+
+  const hostEvidenceRecovery = objectRecordOrNull(run.context.runtimeIntegrationHostEvidenceRecovery);
+  if (hostEvidenceRecovery?.status === "blocked") {
+    const hostTaskId = typeof hostEvidenceRecovery.hostTaskId === "string" ? hostEvidenceRecovery.hostTaskId : "unknown";
+    if (run.status !== "blocked") {
+      harness.updateRunStatus({ runId: action.runId, status: "blocked" });
+    }
+    return blockedResult(
+      action.type,
+      `Run ${action.runId} retains its failed host evidence terminal state.`,
+      [`host evidence task ${hostTaskId} failed; Goal Review is not permitted`],
+    );
   }
 
   const activeDesignChildren = harness.listRuns({ limit: 1000 }).filter((candidate) =>

@@ -206,6 +206,7 @@ export type {
   SuperviseCodexRunsInput,
 } from "./codex-resumable-runner";
 export { reconcileHostEvidenceMaintenance } from "./host-evidence-maintenance";
+export { reconcileRuntimeIntegrationHostEvidence } from "./runtime-integration-host-evidence";
 export type { HostEvidenceMaintenanceReconciliation } from "./host-evidence-maintenance";
 export type {
   ContextSubagent,

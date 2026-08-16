@@ -326,6 +326,16 @@ export function createRepairTaskHook(options: {
         ],
       };
     }
+    if (runtimeIntegrationHostEvidenceFailure(task, output)) {
+      return {
+        decision: "exit",
+        artifacts: [{
+          kind: "runtime_integration_host_evidence_recovery_required",
+          verifierTaskId: task.id,
+          reason: "Docker, PostgreSQL, and loopback HTTP evidence must be collected by the bounded host action",
+        }],
+      };
+    }
     const hostMaterialization = hostArtifactMaterializationReason(options.harness, task);
     if (hostMaterialization) {
       return {
@@ -528,6 +538,20 @@ export function createRepairTaskHook(options: {
       ],
     };
   };
+}
+
+function runtimeIntegrationHostEvidenceFailure(task: Task, output: AttemptOutput) {
+  const contract = task.config?.runtimeIntegrationExecutionContract;
+  if (!contract || typeof contract !== "object" || Array.isArray(contract)
+    || (contract as Record<string, unknown>).stageId !== "non-browser-e2e") return false;
+  const text = [output.summary, ...(output.problems ?? [])].join("\n");
+  return output.verdict === "fail"
+    && (output.changedFiles ?? []).length === 0
+    && [
+      "REAL_POSTGRES_EVIDENCE_UNAVAILABLE",
+      "REAL_LOOPBACK_HTTP_EVIDENCE_UNAVAILABLE",
+      "END_TO_END_BINDING_INCOMPLETE",
+    ].every((code) => text.includes(code));
 }
 
 function inheritedDshRepairConfig(config: Record<string, unknown>) {

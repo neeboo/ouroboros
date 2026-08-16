@@ -302,9 +302,28 @@ export function runtimeIntegrationTaskExecutionProblem(input: {
       const taskContract = objectOrNull(task.config?.runtimeIntegrationExecutionContract);
       return typeof taskContract?.stageId === "string" ? [[taskContract.stageId, task] as const] : [];
     }));
-    const expectedDependencies = stage.dependsOn.length === 0
+    const hostEvidenceRecovery = objectOrNull(input.task.config?.runtimeIntegrationHostEvidenceRecovery);
+    let expectedDependencies = stage.dependsOn.length === 0
       ? [plannerTaskId]
       : stage.dependsOn.map((dependency) => tasksByStage.get(dependency)?.id ?? "<missing>");
+    if (hostEvidenceRecovery) {
+      if (stage.id !== "non-browser-e2e" || input.task.role !== "verifier") {
+        throw new Error(`runtime integration host evidence recovery is final-Verifier-only for ${input.task.id}`);
+      }
+      const hostTaskId = stringValue(hostEvidenceRecovery.hostTaskId);
+      const hostTask = input.tasks.find((candidate) => candidate.id === hostTaskId);
+      const gatewayTask = tasksByStage.get("dsh-gateway");
+      const hostMarker = objectOrNull(hostTask?.config?.runtimeIntegrationHostEvidenceRecovery);
+      if (!hostTask || hostTask.role !== "system" || hostTask.status !== "done"
+        || !gatewayTask || !sameValue(hostTask.dependsOn, [gatewayTask.id])
+        || !hostMarker || hostMarker.recoveryKey !== hostEvidenceRecovery.recoveryKey
+        || hostMarker.hostReceiptSha256 !== hostEvidenceRecovery.hostReceiptSha256
+        || hostMarker.sourceVerifierTaskId !== hostEvidenceRecovery.sourceVerifierTaskId
+        || hostMarker.sourceVerifierAttemptId !== hostEvidenceRecovery.sourceVerifierAttemptId) {
+        throw new Error(`runtime integration host evidence recovery binding drifted for ${input.task.id}`);
+      }
+      expectedDependencies = [hostTaskId];
+    }
     if (!sameValue(input.task.dependsOn, expectedDependencies)) {
       throw new Error(`runtime integration execution contract dependencies drifted for ${input.task.id}`);
     }

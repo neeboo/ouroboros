@@ -42,6 +42,7 @@ import { childToolchainEnvEvidence } from "./executors/proxy-env";
 import { reconcileTerminalBlockedVerifierRepair } from "./hooks/create-repair";
 import { reconcileTerminalDoneWorkerVerifiers } from "./hooks/create-verifier";
 import { reconcileHostEvidenceMaintenance } from "./host-evidence-maintenance";
+import { reconcileRuntimeIntegrationHostEvidence } from "./runtime-integration-host-evidence";
 import {
   closeRuntimeIntegrationEvidenceFailure,
   runtimeIntegrationEvidenceBlockedOutput,
@@ -157,6 +158,14 @@ export async function runCodexResumableLoop(input: RunCodexResumableLoopInput) {
       });
       if (hostEvidenceMaintenance.length > 0) {
         rounds.push({ index, tasks: [], hostEvidenceMaintenance });
+        continue;
+      }
+      const runtimeIntegrationHostEvidence = reconcileRuntimeIntegrationHostEvidence({
+        harness: input.harness,
+        runId: input.runId,
+      });
+      if (runtimeIntegrationHostEvidence.length > 0) {
+        rounds.push({ index, tasks: [], runtimeIntegrationHostEvidence });
         continue;
       }
       const reconciledVerifiers = input.reconcileTerminalDoneWorkerVerifiers
