@@ -4800,12 +4800,20 @@ function materializeTimedOutRuntimeSemanticRepairContinuationWithDb(input: {
   if (overview.sessions.some((session) => session.taskId === pendingVerifier.id)) {
     throw new Error(`pending semantic Verifier ${pendingVerifier.id} already has an attempt`);
   }
+  const schedulingDependency = sourceVerifier.status === "done"
+    ? sourceVerifier
+    : sourceVerifier.dependsOn.length === 1
+      ? overview.tasks.find((task) => task.id === sourceVerifier.dependsOn[0] && task.status === "done")
+      : undefined;
+  if (!schedulingDependency) {
+    throw new Error(`semantic Repair source Verifier ${sourceVerifier.id} has no completed scheduling anchor`);
+  }
   const existingContinuations = overview.tasks.filter((task) => {
     const marker = objectRecordOrNull(task.config?.runtimeIntegrationSemanticRepairContinuation);
     return task.role === "worker" && marker?.sourceAttemptId === repairAttempt.id;
   });
   const existingContinuation = existingContinuations.find((task) =>
-    sameCanonicalValue(task.dependsOn, [sourceVerifier.id]) && task.status !== "blocked")
+    sameCanonicalValue(task.dependsOn, [schedulingDependency.id]) && task.status !== "blocked")
     ?? existingContinuations.find((task) => task.status === "todo")
     ?? existingContinuations[0];
   if (existingContinuation) {
@@ -4818,13 +4826,13 @@ function materializeTimedOutRuntimeSemanticRepairContinuationWithDb(input: {
     const isReplaceableLegacyPair = pairHasNoAttempt
       && ["todo", "blocked"].includes(existingContinuation.status)
       && ["todo", "blocked"].includes(verifier.status)
-      && !sameCanonicalValue(existingContinuation.dependsOn, [sourceVerifier.id]);
+      && !sameCanonicalValue(existingContinuation.dependsOn, [schedulingDependency.id]);
     if (isReplaceableLegacyPair) {
       db.query(
         "update tasks set status = 'blocked', updated_at = current_timestamp where id in ($continuationTaskId, $verifierTaskId) and status = 'todo'",
       ).run({ $continuationTaskId: existingContinuation.id, $verifierTaskId: verifier.id });
     } else {
-      if (!sameCanonicalValue(existingContinuation.dependsOn, [sourceVerifier.id])) {
+      if (!sameCanonicalValue(existingContinuation.dependsOn, [schedulingDependency.id])) {
         throw new Error(`semantic continuation ${existingContinuation.id} has an unrecoverable dependency drift`);
       }
       return semanticRepairContinuationResult(run.id, repair, repairAttempt.id, existingContinuation, verifier, true);
@@ -4852,6 +4860,7 @@ function materializeTimedOutRuntimeSemanticRepairContinuationWithDb(input: {
     replacedVerifierTaskId: pendingVerifier.id,
     continuationTaskId,
     verifierTaskId,
+    schedulingDependencyTaskId: schedulingDependency.id,
     sameBudget: true,
     maxContinuations: 1,
   };
@@ -4891,6 +4900,7 @@ function materializeTimedOutRuntimeSemanticRepairContinuationWithDb(input: {
     executor: "dsh-cli",
     semanticRepairRecoveryKey: recoveryKey,
     semanticRepairContinuationKey: continuationMarker.recoveryKey,
+    semanticRepairSchedulingDependencyTaskId: schedulingDependency.id,
   };
   const continuationContract = {
     ...continuationContractBody,
@@ -4909,7 +4919,7 @@ function materializeTimedOutRuntimeSemanticRepairContinuationWithDb(input: {
     role: "worker",
     goal: `Continue timed out semantic Repair: ${repair.goal}`,
     prompt,
-    dependsOn: [sourceVerifier.id],
+    dependsOn: [schedulingDependency.id],
     doneWhen: [
       `Only the frozen runtime identity is corrected to ${identities.packContentSha256}.`,
       "config/evolution/** and tests/evolution/** remain byte-identical.",
@@ -4947,6 +4957,7 @@ function materializeTimedOutRuntimeSemanticRepairContinuationWithDb(input: {
     executor: "codex-resumable",
     semanticRepairRecoveryKey: recoveryKey,
     semanticRepairContinuationKey: continuationMarker.recoveryKey,
+    semanticRepairSchedulingDependencyTaskId: schedulingDependency.id,
   };
   const verifierContract = {
     ...verifierContractBody,

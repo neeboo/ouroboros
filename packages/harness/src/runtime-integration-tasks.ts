@@ -383,6 +383,7 @@ function runtimeSemanticRepairContinuationExecutionProblem(input: {
     const sourceAttemptId = stringValue(marker.sourceAttemptId);
     const continuationTaskId = stringValue(marker.continuationTaskId);
     const verifierTaskId = stringValue(marker.verifierTaskId);
+    const schedulingDependencyTaskId = stringValue(marker.schedulingDependencyTaskId);
     const sourceRepair = input.tasks.find((task) => task.id === sourceRepairTaskId);
     const sourceMarker = objectOrNull(sourceRepair?.config?.runtimeIntegrationSemanticRepairRecovery);
     const plannerTaskId = stringValue(sourceMarker?.plannerTaskId);
@@ -390,11 +391,19 @@ function runtimeSemanticRepairContinuationExecutionProblem(input: {
     const sourceWorkerTaskId = stringValue(sourceMarker?.sourceWorkerTaskId);
     const sourceWorker = input.tasks.find((task) => task.id === sourceWorkerTaskId);
     const sourceVerifier = input.tasks.find((task) => task.id === sourceVerifierTaskId);
+    const schedulingDependency = input.tasks.find((task) => task.id === schedulingDependencyTaskId);
     const expectedWorktree = join(repository.repoPath, ".ouroboros", "worktrees", `${input.runId}-${repository.id}`);
     if (!sourceRepair || sourceRepair.role !== "worker" || sourceRepair.status !== "blocked" || !sourceMarker
       || !sourceVerifier || sourceVerifier.role !== "verifier" || !["done", "blocked"].includes(sourceVerifier.status)
+      || !schedulingDependency || schedulingDependency.status !== "done"
       || !sourceWorker || sourceWorker.role !== "worker" || sourceWorker.status !== "done") {
       throw new Error(`runtime semantic continuation source lineage drifted for ${input.task.id}`);
+    }
+    const validSchedulingAnchor = sourceVerifier.status === "done"
+      ? schedulingDependency.id === sourceVerifier.id
+      : sourceVerifier.dependsOn.length === 1 && sourceVerifier.dependsOn[0] === schedulingDependency.id;
+    if (!validSchedulingAnchor) {
+      throw new Error(`runtime semantic continuation scheduling anchor drifted for ${input.task.id}`);
     }
     if (marker.sameBudget !== true || marker.maxContinuations !== 1 || sourceAttemptId.length === 0) {
       throw new Error(`runtime semantic continuation budget contract drifted for ${input.task.id}`);
@@ -409,6 +418,7 @@ function runtimeSemanticRepairContinuationExecutionProblem(input: {
       [contract.boundarySha256, frozen.boundarySha256, "boundarySha256"],
       [contract.bundleSha256, frozen.bundleSha256, "bundleSha256"],
       [contract.semanticRepairContinuationKey, marker.recoveryKey, "semanticRepairContinuationKey"],
+      [contract.semanticRepairSchedulingDependencyTaskId, schedulingDependency.id, "semanticRepairSchedulingDependencyTaskId"],
       [input.task.parentId, plannerTaskId, "parentId"],
       [input.task.worktreePath, expectedWorktree, "task worktreePath"],
     ];
@@ -418,7 +428,7 @@ function runtimeSemanticRepairContinuationExecutionProblem(input: {
       if (input.task.id !== continuationTaskId
         || contract.stageId !== "runtime-semantic-repair" || contract.role !== "worker" || contract.executor !== "dsh-cli"
         || input.task.config?.executor !== "dsh-cli" || input.task.config?.permissionMode !== "workspace-write"
-        || !sameValue(input.task.dependsOn, [sourceVerifierTaskId])) {
+        || !sameValue(input.task.dependsOn, [schedulingDependency.id])) {
         throw new Error(`runtime semantic Repair continuation execution contract drifted for ${input.task.id}`);
       }
       for (const key of [

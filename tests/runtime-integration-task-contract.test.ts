@@ -509,6 +509,11 @@ describe("runtime integration task execution contracts", () => {
         problems: ["exit code: 124 stderr: command timed out after 1800000ms"],
       },
     });
+    harness.runInImmediateTransaction((db) => {
+      db.query("update tasks set status = 'blocked' where id = $taskId")
+        .run({ $taskId: semanticVerifierId });
+    });
+    const schedulingDependencyId = harness.getTask(semanticVerifierId)!.dependsOn[0]!;
 
     const reconciliation = await reconcileTerminalBlockedVerifierRepair({ harness, runId: fixture.runId });
     const after = harness.getRunOverview({ runId: fixture.runId, eventLimit: 0 });
@@ -537,7 +542,7 @@ describe("runtime integration task execution contracts", () => {
     expect(continuation).toMatchObject({
       status: "todo",
       parentId: fixture.plannerTaskId,
-      dependsOn: [semanticVerifierId],
+      dependsOn: [schedulingDependencyId],
       worktreePath: repair.worktreePath,
       config: {
         executor: "dsh-cli",
@@ -547,6 +552,9 @@ describe("runtime integration task execution contracts", () => {
           minModelRequests: 12,
           probeIntervalMs: 30_000,
         },
+        runtimeIntegrationSemanticRepairContinuation: expect.objectContaining({
+          schedulingDependencyTaskId: schedulingDependencyId,
+        }),
       },
     });
     expect(continuation.prompt).toContain("host-receipt-episodes-v6-runtime");
@@ -597,7 +605,7 @@ describe("runtime integration task execution contracts", () => {
     expect(migratedContinuation).toMatchObject({
       status: "todo",
       role: "worker",
-      dependsOn: [semanticVerifierId],
+      dependsOn: [schedulingDependencyId],
     });
     expect(migratedOverview.tasks.find((task) => task.id === migratedVerifierId)).toMatchObject({
       status: "todo",
