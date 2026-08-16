@@ -424,7 +424,14 @@ describe("runtime integration task execution contracts", () => {
     mkdirSync(join(sourceRepoPath, "node_modules", "tsdown", "dist"), { recursive: true });
     writeFileSync(join(sourceRepoPath, "node_modules", "typescript", "bin", "tsc"), "// fixture\n");
     writeFileSync(join(sourceRepoPath, "node_modules", "tsdown", "dist", "run.mjs"), "// fixture\n");
-    const fixture = governedRuntimeFixture(harness, dir, { legacyTasks: true, dshExpectedHead: expectedHead });
+    const backendHead = initializeRepository(join(dir, "backend"));
+    const frontendHead = initializeRepository(join(dir, "frontend"));
+    const fixture = governedRuntimeFixture(harness, dir, {
+      legacyTasks: true,
+      dshExpectedHead: expectedHead,
+      backendExpectedHead: backendHead,
+      frontendExpectedHead: frontendHead,
+    });
     const graph = applyHarnessAction(harness, {
       type: "materializeRuntimeIntegrationTaskGraphRecovery",
       runId: fixture.runId,
@@ -489,6 +496,58 @@ describe("runtime integration task execution contracts", () => {
       .filter((session) => replacementIds.includes(session.taskId))).toHaveLength(0);
     expect(harness.getRunOverview({ runId: fixture.runId, eventLimit: 0 }).tasks
       .filter((task) => task.role === "goal-review")).toHaveLength(0);
+
+    const replacementBackendId = replacementIds[0]!;
+    const bindingAttemptId = harness.startAttempt({ taskId: replacementBackendId, input: { readiness: "runtime-binding" } });
+    harness.finishAttempt({
+      attemptId: bindingAttemptId,
+      output: {
+        status: "blocked",
+        summary: "DeepSeek Harness runtime binding is unavailable",
+        changedFiles: [], checks: [],
+        artifacts: [{ kind: "dsh_runtime_binding_receipt", status: "blocked", diagnosticCode: "runtime-binding-denied" }],
+        problems: [`frozen task worktree does not exist: ${harness.getTask(replacementBackendId)!.worktreePath}`],
+      },
+    });
+
+    const rebound = applyHarnessAction(harness, {
+      type: "recoverRuntimeIntegrationDshRuntimeBindingFailure",
+      runId: fixture.runId,
+      taskId: replacementBackendId,
+      attemptId: bindingAttemptId,
+      reason: "materialize the frozen repository worktrees before the exact DSH runtime binding",
+    } as never);
+
+    expect(rebound.problems).toEqual([]);
+    expect(rebound.status).toBe("done");
+    const reboundArtifact = rebound.artifacts.find((candidate) => candidate.kind === "runtime_integration_dsh_runtime_binding_recovery")!;
+    const reboundIds = reboundArtifact.taskIds as string[];
+    expect(reboundIds).toHaveLength(5);
+    expect(reboundArtifact.worktrees).toEqual(expect.arrayContaining([
+      expect.objectContaining({ repositoryId: "target-backend", expectedHead: backendHead, status: "passed" }),
+      expect.objectContaining({ repositoryId: "target-frontend", expectedHead: frontendHead, status: "passed" }),
+    ]));
+    expect(replacementIds.map((id) => harness.getTask(id)?.status)).toEqual(Array(5).fill("blocked"));
+    expect(reboundIds.map((id) => harness.getTask(id)?.status)).toEqual(Array(5).fill("todo"));
+    for (const taskId of reboundIds) {
+      const task = harness.getTask(taskId)!;
+      expect(task.worktreePath).toBeTruthy();
+      expect(gitFixture(task.worktreePath!, ["rev-parse", "HEAD"])).toBe(String(task.config?.expectedHead));
+    }
+    expect(harness.getRun(fixture.runId)!.context.repairReplanBudget).toEqual(beforeBudget);
+    expect(harness.getRunOverview({ runId: fixture.runId, eventLimit: 0 }).sessions
+      .filter((session) => reboundIds.includes(session.taskId))).toHaveLength(0);
+    expect(harness.getRunOverview({ runId: fixture.runId, eventLimit: 0 }).tasks
+      .filter((task) => task.role === "goal-review")).toHaveLength(0);
+    const replay = applyHarnessAction(harness, {
+      type: "recoverRuntimeIntegrationDshRuntimeBindingFailure",
+      runId: fixture.runId,
+      taskId: replacementBackendId,
+      attemptId: bindingAttemptId,
+      reason: "materialize the frozen repository worktrees before the exact DSH runtime binding",
+    } as never);
+    expect(replay.status).toBe("done");
+    expect(replay.artifacts[0]).toMatchObject({ reused: true, taskIds: reboundIds });
   });
 
   test("maps only the frozen credential classifier vocabulary", () => {
@@ -510,7 +569,12 @@ describe("runtime integration task execution contracts", () => {
   });
 });
 
-function governedRuntimeFixture(harness: Harness, root: string, options: { legacyTasks?: boolean; dshExpectedHead?: string } = {}) {
+function governedRuntimeFixture(harness: Harness, root: string, options: {
+  legacyTasks?: boolean;
+  dshExpectedHead?: string;
+  backendExpectedHead?: string;
+  frontendExpectedHead?: string;
+} = {}) {
   const projectId = harness.createProject({ name: "runtime target", rootPath: join(root, "backend") });
   const parentRunId = harness.createRun({
     projectId,
@@ -545,14 +609,14 @@ function governedRuntimeFixture(harness: Harness, root: string, options: { legac
   const repositories = [
     {
       id: "target-backend", role: "backend", projectId, repoPath: join(root, "backend"),
-      expectedHead: "4".repeat(40), access: "isolated-write",
+      expectedHead: options.backendExpectedHead ?? "4".repeat(40), access: "isolated-write",
       allowedPaths: ["src/application/**", "tests/runtime-integration/**"],
       readOnlyPaths: ["config/evolution/**", "tests/evolution/**"],
       forbiddenPaths: [".git/orbs/**", ".orbs/**", ".ouroboros/**", "db/**"],
     },
     {
       id: "target-frontend", role: "frontend", projectId: "project_frontend", repoPath: join(root, "frontend"),
-      expectedHead: "d".repeat(40), access: "new-isolated-worktree",
+      expectedHead: options.frontendExpectedHead ?? "d".repeat(40), access: "new-isolated-worktree",
       allowedPaths: ["src-react/features/studio-os/**"], readOnlyPaths: [],
       forbiddenPaths: [".git/orbs/**", ".orbs/**", ".ouroboros/**", "db/**"],
     },
@@ -707,4 +771,16 @@ function gitFixture(cwd: string, args: string[]) {
   const result = Bun.spawnSync({ cmd: ["git", ...args], cwd, stdout: "pipe", stderr: "pipe" });
   if (result.exitCode !== 0) throw new Error(result.stderr.toString());
   return result.stdout.toString().trim();
+}
+
+function initializeRepository(path: string) {
+  mkdirSync(path, { recursive: true });
+  writeFileSync(join(path, ".gitignore"), ".ouroboros/\n");
+  writeFileSync(join(path, "README.md"), "fixture\n");
+  gitFixture(path, ["init"]);
+  gitFixture(path, ["config", "user.email", "fixture@example.test"]);
+  gitFixture(path, ["config", "user.name", "Fixture"]);
+  gitFixture(path, ["add", "."]);
+  gitFixture(path, ["commit", "-m", "fixture"]);
+  return gitFixture(path, ["rev-parse", "HEAD"]);
 }

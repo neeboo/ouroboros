@@ -74,6 +74,8 @@ export interface InspectDshReadinessInput extends ResolveDshCommandInput {
   timeoutMs?: number;
   runCommand?: RunCommand;
   resolveCommand?: DshCommandResolver;
+  commandPrefix?: string[];
+  inheritEnv?: boolean;
 }
 
 export const resolveDshCommand: DshCommandResolver = (input) => {
@@ -156,21 +158,23 @@ export async function inspectDshReadiness(input: InspectDshReadinessInput): Prom
   const timeoutMs = input.timeoutMs ?? DEFAULT_PROBE_TIMEOUT_MS;
   const probes: DshProbeReceipt[] = [];
   const versionProbe = await runDshProbe({
-    command: resolution.selectedPath,
+    command: input.commandPrefix ?? [resolution.selectedPath],
     flag: "--version",
     cwd: input.cwd,
     env: input.env,
     timeoutMs,
     runCommand,
+    inheritEnv: input.inheritEnv,
   });
   probes.push(versionProbe.receipt);
   const helpProbe = await runDshProbe({
-    command: resolution.selectedPath,
+    command: input.commandPrefix ?? [resolution.selectedPath],
     flag: "--help",
     cwd: input.cwd,
     env: input.env,
     timeoutMs,
     runCommand,
+    inheritEnv: input.inheritEnv,
   });
   probes.push(helpProbe.receipt);
 
@@ -260,14 +264,15 @@ function canonicalPath(path: string) {
 }
 
 async function runDshProbe(input: {
-  command: string;
+  command: string[];
   flag: "--version" | "--help";
   cwd: string;
   env?: Record<string, string | undefined>;
   timeoutMs: number;
   runCommand: RunCommand;
+  inheritEnv?: boolean;
 }) {
-  const command = [input.command, input.flag];
+  const command = [...input.command, input.flag];
   let result: CommandResult;
   try {
     result = await input.runCommand({
@@ -275,6 +280,7 @@ async function runDshProbe(input: {
       stdin: "",
       cwd: input.cwd,
       env: input.env,
+      inheritEnv: input.inheritEnv,
       timeoutMs: input.timeoutMs,
       idleTimeoutMs: input.timeoutMs,
     });

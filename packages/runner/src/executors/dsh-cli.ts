@@ -1,6 +1,6 @@
 import type { AttemptOutput } from "@ouroboros/harness";
 import { createHash } from "node:crypto";
-import { readFileSync, realpathSync } from "node:fs";
+import { accessSync, constants, lstatSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -61,6 +61,28 @@ interface DshExecutionProfileReceipt {
   };
 }
 
+interface DshRuntimeBindingReceipt {
+  kind: "dsh_runtime_binding_receipt";
+  schemaVersion: 1;
+  status: "passed" | "blocked";
+  diagnosticCode?: "runtime-binding-denied";
+  executablePath: string;
+  executableRealpath: string;
+  executableSha256: string;
+  interpreterPath: string;
+  interpreterSha256: string;
+  runtimeRoots: string[];
+  worktreePath: string;
+  readExecBindingSha256: string;
+  finalSpawnSandboxSha256: string;
+}
+
+interface FrozenDshRuntimeBinding {
+  commandPrefix: string[];
+  receipt: DshRuntimeBindingReceipt;
+  verify(): void;
+}
+
 export function createDshCliExecutor(options: DshCliExecutorOptions): TaskExecutor {
   const command = options.command ?? "dsh";
   const profile = options.profile ?? "headless";
@@ -109,10 +131,24 @@ export function createDshCliExecutor(options: DshCliExecutorOptions): TaskExecut
         [{ kind: "dsh_project_plugins_unconfigured", requiredPlugins }],
       );
     }
-    const injectedResolution = options.resolveCommand && options.launchabilityPreflight !== true && !options.installationReceipt
+    let runtimeBinding: FrozenDshRuntimeBinding | null = null;
+    if (options.installationReceipt) {
+      try {
+        runtimeBinding = freezeDshRuntimeBinding(options.installationReceipt, options.cwd);
+      } catch (error) {
+        const problem = error instanceof Error ? error.message : String(error);
+        return blockedOutput(
+          "DeepSeek Harness runtime binding is unavailable",
+          "dsh runtime binding",
+          problem,
+          [blockedDshRuntimeBindingReceipt(options.installationReceipt, options.cwd)],
+        );
+      }
+    }
+    const injectedResolution = options.resolveCommand && options.launchabilityPreflight !== true && !runtimeBinding
       ? resolveCommand({ command, cwd: options.cwd, env: options.env })
       : null;
-    const readiness = injectedResolution ? null : await inspectDshReadiness({
+    let readiness = injectedResolution || runtimeBinding ? null : await inspectDshReadiness({
       backendId: "dsh-cli",
       command,
       cwd: options.cwd,
@@ -138,20 +174,8 @@ export function createDshCliExecutor(options: DshCliExecutorOptions): TaskExecut
         injectedResolution.diagnostic ?? `DSH command is unavailable: ${injectedResolution.configuredCommand}`,
       );
     }
-    const selectedCommand = readiness?.selectedPath ?? injectedResolution?.selectedPath;
-    const canonicalCommand = readiness?.canonicalPath ?? injectedResolution?.canonicalPath ?? null;
+    const selectedCommand = runtimeBinding?.receipt.executablePath ?? readiness?.selectedPath ?? injectedResolution?.selectedPath;
     if (!selectedCommand) return blockedOutput("DeepSeek Harness executable is not callable", "dsh command readiness", "DSH command resolution returned no path");
-    if (options.installationReceipt) {
-      const installationProblem = installedDshDriftProblem(options.installationReceipt, canonicalCommand);
-      if (installationProblem) {
-        return blockedOutput(
-          "DeepSeek Harness installation drifted from its host receipt",
-          "dsh installation receipt",
-          installationProblem,
-          [...(readiness ? [readiness] : []), { kind: "dsh_installation_receipt_drift", problem: installationProblem }],
-        );
-      }
-    }
     const oversizedPrompt = promptBudgetEvidence(prompt, "DeepSeek Harness CLI start");
     if (oversizedPrompt) {
       return promptBudgetBlockedOutput(oversizedPrompt);
@@ -197,6 +221,46 @@ export function createDshCliExecutor(options: DshCliExecutorOptions): TaskExecut
         sandbox,
         modelTransport,
       );
+      if (runtimeBinding) {
+        readiness = await inspectDshReadiness({
+          backendId: "dsh-cli",
+          command: runtimeBinding.receipt.executablePath,
+          commandPrefix: runtimeBinding.commandPrefix,
+          cwd: options.cwd,
+          env: processEnvironment,
+          inheritEnv: false,
+          profile,
+          runCommand,
+          resolveCommand: () => ({
+            configuredCommand: runtimeBinding!.receipt.executablePath,
+            resolutionMode: "explicit",
+            selectedPath: runtimeBinding!.receipt.executablePath,
+            canonicalPath: runtimeBinding!.receipt.executableRealpath,
+            installationState: "available",
+            callable: true,
+            diagnostic: null,
+          }),
+        });
+        if (!readiness.readiness) {
+          runtimeBinding.receipt.status = "blocked";
+          runtimeBinding.receipt.diagnosticCode = "runtime-binding-denied";
+          return blockedOutput(
+            "DeepSeek Harness runtime binding failed launchability preflight",
+            "dsh runtime binding",
+            readiness.diagnostics.join("\n") || "The frozen DSH launch command failed in the final execution context.",
+            [readiness, runtimeBinding.receipt],
+          );
+        }
+        runtimeBinding.verify();
+        runtimeBinding.receipt.finalSpawnSandboxSha256 = sha256Text(JSON.stringify({
+          readExecBindingSha256: runtimeBinding.receipt.readExecBindingSha256,
+          cwd: options.cwd,
+          profileSha256: isolatedProfile.profileSha256,
+          processPolicyPatchSha256: processPolicy.patchSha256,
+          sandboxProfileSha256: processPolicy.sandboxProfileSha256,
+          environmentKeys: Object.keys(processEnvironment).filter((key) => processEnvironment[key] !== undefined).sort(),
+        }));
+      }
       const modelCredentialNames: string[] = [];
       profileReceipt = {
         kind: "dsh_execution_profile_receipt",
@@ -270,7 +334,7 @@ export function createDshCliExecutor(options: DshCliExecutorOptions): TaskExecut
       });
       result = await runCommand({
         cmd: [
-          selectedCommand,
+          ...(runtimeBinding?.commandPrefix ?? [selectedCommand]),
           "--profile",
           profile,
           ...(processPolicy ? ["--patch", processPolicy.patchPath] : []),
@@ -296,7 +360,7 @@ export function createDshCliExecutor(options: DshCliExecutorOptions): TaskExecut
         "DeepSeek Harness CLI could not start",
         "dsh cli start",
         diagnostic.text,
-        profileReceipt ? [profileReceipt] : [],
+        [...(profileReceipt ? [profileReceipt] : []), ...(runtimeBinding ? [runtimeBinding.receipt] : [])],
       );
     } finally {
       if (profileReceipt && modelTransport) profileReceipt.modelTransport = modelTransport.receipt();
@@ -318,7 +382,7 @@ export function createDshCliExecutor(options: DshCliExecutorOptions): TaskExecut
         "DeepSeek Harness CLI failed",
         "dsh headless execution",
         commandProblem(result),
-        profileReceipt ? [profileReceipt] : [],
+        [...(profileReceipt ? [profileReceipt] : []), ...(runtimeBinding ? [runtimeBinding.receipt] : [])],
       );
     }
 
@@ -341,39 +405,107 @@ export function createDshCliExecutor(options: DshCliExecutorOptions): TaskExecut
       exitCode: result.exitCode,
     });
     return profileReceipt
-      ? { ...output, artifacts: [...(output.artifacts ?? []), profileReceipt] }
+      ? { ...output, artifacts: [...(output.artifacts ?? []), profileReceipt, ...(runtimeBinding ? [runtimeBinding.receipt] : [])] }
       : output;
   };
 }
 
-function installedDshDriftProblem(receipt: Record<string, unknown>, canonicalPath: string | null) {
+function freezeDshRuntimeBinding(receipt: Record<string, unknown>, worktreePath: string): FrozenDshRuntimeBinding {
   if (receipt.kind !== "local_dsh_installation_receipt" || receipt.schemaVersion !== 1) {
-    return "DSH installation receipt schema is invalid";
+    throw new Error("DSH installation receipt schema is invalid");
   }
-  const expectedPath = typeof receipt.executableRealpath === "string" ? receipt.executableRealpath : null;
-  const expectedSha256 = typeof receipt.artifactSha256 === "string" && /^[a-f0-9]{64}$/.test(receipt.artifactSha256)
-    ? receipt.artifactSha256
-    : null;
-  if (!expectedPath || !expectedSha256 || canonicalPath !== expectedPath) {
-    return "DSH command does not resolve to the frozen installation artifact";
-  }
+  let worktreeRealpath: string;
   try {
-    if (realpathSync(expectedPath) !== expectedPath) return "DSH installation artifact realpath drifted";
-    const actualSha256 = createHash("sha256").update(readFileSync(expectedPath)).digest("hex");
-    if (actualSha256 !== expectedSha256) return "DSH installation artifact hash drifted";
-    const runtime = receipt.runtime && typeof receipt.runtime === "object" && !Array.isArray(receipt.runtime)
-      ? receipt.runtime as Record<string, unknown>
-      : null;
-    const expectedNodePath = typeof runtime?.nodePath === "string" ? runtime.nodePath : null;
-    const expectedNodeSha256 = typeof runtime?.nodeSha256 === "string" ? runtime.nodeSha256 : null;
-    if (!expectedNodePath || !expectedNodeSha256) return "DSH installation runtime receipt is missing";
-    const observedNode = Bun.which("node");
-    if (!observedNode || realpathSync(observedNode) !== expectedNodePath) return "DSH runtime node path drifted";
-    const observedNodeSha256 = createHash("sha256").update(readFileSync(expectedNodePath)).digest("hex");
-    return observedNodeSha256 === expectedNodeSha256 ? null : "DSH runtime node hash drifted";
-  } catch (error) {
-    return `DSH installation artifact readback failed: ${error instanceof Error ? error.message : String(error)}`;
+    if (!lstatSync(worktreePath).isDirectory()) throw new Error("not a directory");
+    worktreeRealpath = realpathSync(worktreePath);
+  } catch {
+    throw new Error(`frozen task worktree does not exist or is not a real directory: ${worktreePath}`);
   }
+  if (worktreeRealpath !== worktreePath) {
+    throw new Error(`frozen task worktree realpath drifted: ${worktreePath}`);
+  }
+  const executablePath = stringReceiptField(receipt, "executablePath");
+  const executableRealpath = stringReceiptField(receipt, "executableRealpath");
+  const executableSha256 = stringReceiptField(receipt, "artifactSha256");
+  const sourceRepoPath = stringReceiptField(receipt, "sourceRepoPath");
+  const runtime = recordReceiptField(receipt, "runtime");
+  const interpreterPath = stringReceiptField(runtime, "nodePath");
+  const interpreterSha256 = stringReceiptField(runtime, "nodeSha256");
+  const runtimeRoots = [realpathSync(sourceRepoPath)];
+  const verify = () => {
+    if (realpathSync(executablePath) !== executableRealpath || !statSync(executableRealpath).isFile()) {
+      throw new Error("DSH executable realpath drifted from the frozen runtime binding");
+    }
+    accessSync(executablePath, constants.X_OK);
+    accessSync(interpreterPath, constants.X_OK);
+    if (!statSync(interpreterPath).isFile()) throw new Error("DSH interpreter is not a regular file");
+    if (fileSha256(executableRealpath) !== executableSha256) throw new Error("DSH executable hash drifted from the frozen runtime binding");
+    if (fileSha256(interpreterPath) !== interpreterSha256) throw new Error("DSH interpreter hash drifted from the frozen runtime binding");
+  };
+  verify();
+  const body = {
+    executablePath,
+    executableRealpath,
+    executableSha256,
+    interpreterPath,
+    interpreterSha256,
+    runtimeRoots,
+    worktreePath: worktreeRealpath,
+  };
+  return {
+    commandPrefix: [interpreterPath, executableRealpath],
+    verify,
+    receipt: {
+      kind: "dsh_runtime_binding_receipt",
+      schemaVersion: 1,
+      status: "passed",
+      ...body,
+      readExecBindingSha256: sha256Text(JSON.stringify(body)),
+      finalSpawnSandboxSha256: "0".repeat(64),
+    },
+  };
+}
+
+function blockedDshRuntimeBindingReceipt(receipt: Record<string, unknown>, worktreePath: string): DshRuntimeBindingReceipt {
+  const runtime = receipt.runtime && typeof receipt.runtime === "object" && !Array.isArray(receipt.runtime)
+    ? receipt.runtime as Record<string, unknown>
+    : {};
+  const executablePath = typeof receipt.executablePath === "string" ? receipt.executablePath : "unavailable";
+  const executableRealpath = typeof receipt.executableRealpath === "string" ? receipt.executableRealpath : "unavailable";
+  const executableSha256 = typeof receipt.artifactSha256 === "string" ? receipt.artifactSha256 : "0".repeat(64);
+  const interpreterPath = typeof runtime.nodePath === "string" ? runtime.nodePath : "unavailable";
+  const interpreterSha256 = typeof runtime.nodeSha256 === "string" ? runtime.nodeSha256 : "0".repeat(64);
+  return {
+    kind: "dsh_runtime_binding_receipt",
+    schemaVersion: 1,
+    status: "blocked",
+    diagnosticCode: "runtime-binding-denied",
+    executablePath,
+    executableRealpath,
+    executableSha256,
+    interpreterPath,
+    interpreterSha256,
+    runtimeRoots: typeof receipt.sourceRepoPath === "string" ? [receipt.sourceRepoPath] : [],
+    worktreePath,
+    readExecBindingSha256: "0".repeat(64),
+    finalSpawnSandboxSha256: "0".repeat(64),
+  };
+}
+
+function recordReceiptField(value: Record<string, unknown>, field: string) {
+  const candidate = value[field];
+  if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) throw new Error(`DSH installation receipt ${field} is invalid`);
+  return candidate as Record<string, unknown>;
+}
+
+function stringReceiptField(value: Record<string, unknown>, field: string) {
+  const candidate = value[field];
+  if (typeof candidate !== "string" || candidate.length === 0) throw new Error(`DSH installation receipt ${field} is invalid`);
+  return candidate;
+}
+
+function fileSha256(path: string) {
+  return createHash("sha256").update(readFileSync(path)).digest("hex");
 }
 
 function dshProcessEnvironment(

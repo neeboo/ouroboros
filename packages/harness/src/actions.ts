@@ -236,6 +236,13 @@ export type HarnessAction =
       attemptId: string;
       reason: string;
     }
+  | {
+      type: "recoverRuntimeIntegrationDshRuntimeBindingFailure";
+      runId: string;
+      taskId: string;
+      attemptId: string;
+      reason: string;
+    }
   | { type: "markRunTodo"; runId: string; reason?: string }
   | {
       type: "updateRunContext";
@@ -655,6 +662,7 @@ const FROZEN_DESIGN_CONTEXT_KEYS = new Set([
   "runtimeIntegrationTaskGraphPreparationRecoveries",
   "dshInstallationReceipt",
   "runtimeIntegrationDshInstallationRecovery",
+  "runtimeIntegrationDshRuntimeBindingRecovery",
 ]);
 
 function frozenDesignContextKeys(keys: Iterable<string>): string[] {
@@ -894,6 +902,16 @@ export function parseHarnessAction(value: unknown): HarnessAction {
     };
   }
   if (type === "recoverRuntimeIntegrationDshInstallationFailure") {
+    assertOnlyFields(record, type, ["type", "runId", "taskId", "attemptId", "reason"]);
+    return {
+      type,
+      runId: exactSafeIdentifierField(record, "runId"),
+      taskId: exactSafeIdentifierField(record, "taskId"),
+      attemptId: exactSafeIdentifierField(record, "attemptId"),
+      reason: exactNonEmptyStringField(record, "reason"),
+    };
+  }
+  if (type === "recoverRuntimeIntegrationDshRuntimeBindingFailure") {
     assertOnlyFields(record, type, ["type", "runId", "taskId", "attemptId", "reason"]);
     return {
       type,
@@ -1320,7 +1338,7 @@ export function parseHarnessAction(value: unknown): HarnessAction {
     };
   }
   throw new Error(
-    "harness action type must be reclaimRunningTasks, retryTask, reconcileRunEvidence, recordSignal, linkResearchEvidence, materializeDesignerActionRecovery, materializeDesignDeliveryRecovery, materializeDesignWorkerRuntimeRecovery, materializeDesignWorkerTransportRecovery, materializeVerifierRepairRecovery, reconcileVerifierRepairHandoff, buildVersionedCorpusManifest, bindHostEvidenceMaintenanceReceipt, materializeHostEvidenceMaintenanceDelivery, materializeRuntimeIntegrationDesignRecovery, materializeRuntimeIntegrationTaskGraphRecovery, recoverRuntimeIntegrationTaskGraphPreparationFailure, installLocalDshCli, recoverRuntimeIntegrationDshInstallationFailure, markRunTodo, updateRunContext, amendRunContract, retireRun, retireTask, prepareRunDrain, completeSystemTask, integrateVerifiedRun, pushExactGitRef, createExactGitRef, commitExactGitIndex, stageExactWorkerFilesForVerification, materializeAttemptArtifactsForVerification, verifySealedCorpusForVerification, registerEvolutionProfile, recordProductionEpisode, registerHarnessVariant, activateHarnessRevision, freezeMatchedExperiment, interruptAttemptAndCreateTask, interruptRunningAttemptsAndCreateTask, acceptGuardrailProposal, startSubsession, collectSubsessions, cancelSubsessions, or runWatchdogPass",
+    "harness action type must be reclaimRunningTasks, retryTask, reconcileRunEvidence, recordSignal, linkResearchEvidence, materializeDesignerActionRecovery, materializeDesignDeliveryRecovery, materializeDesignWorkerRuntimeRecovery, materializeDesignWorkerTransportRecovery, materializeVerifierRepairRecovery, reconcileVerifierRepairHandoff, buildVersionedCorpusManifest, bindHostEvidenceMaintenanceReceipt, materializeHostEvidenceMaintenanceDelivery, materializeRuntimeIntegrationDesignRecovery, materializeRuntimeIntegrationTaskGraphRecovery, recoverRuntimeIntegrationTaskGraphPreparationFailure, installLocalDshCli, recoverRuntimeIntegrationDshInstallationFailure, recoverRuntimeIntegrationDshRuntimeBindingFailure, markRunTodo, updateRunContext, amendRunContract, retireRun, retireTask, prepareRunDrain, completeSystemTask, integrateVerifiedRun, pushExactGitRef, createExactGitRef, commitExactGitIndex, stageExactWorkerFilesForVerification, materializeAttemptArtifactsForVerification, verifySealedCorpusForVerification, registerEvolutionProfile, recordProductionEpisode, registerHarnessVariant, activateHarnessRevision, freezeMatchedExperiment, interruptAttemptAndCreateTask, interruptRunningAttemptsAndCreateTask, acceptGuardrailProposal, startSubsession, collectSubsessions, cancelSubsessions, or runWatchdogPass",
   );
 }
 
@@ -1413,6 +1431,9 @@ export function applyHarnessAction(
   if (action.type === "recoverRuntimeIntegrationDshInstallationFailure") {
     return applyRuntimeIntegrationDshInstallationRecoveryAtomically(harness, action);
   }
+  if (action.type === "recoverRuntimeIntegrationDshRuntimeBindingFailure") {
+    return applyRuntimeIntegrationDshRuntimeBindingRecovery(harness, action, options);
+  }
   if (action.type === "installLocalDshCli") {
     const result = installLocalDshCli(harness, action, options);
     const eventId = harness.recordHarnessActionEvent({
@@ -1473,6 +1494,7 @@ type RuntimeIntegrationDesignRecoveryAction = Extract<HarnessAction, { type: "ma
 type RuntimeIntegrationTaskGraphRecoveryAction = Extract<HarnessAction, { type: "materializeRuntimeIntegrationTaskGraphRecovery" }>;
 type RuntimeIntegrationTaskGraphPreparationRecoveryAction = Extract<HarnessAction, { type: "recoverRuntimeIntegrationTaskGraphPreparationFailure" }>;
 type RuntimeIntegrationDshInstallationRecoveryAction = Extract<HarnessAction, { type: "recoverRuntimeIntegrationDshInstallationFailure" }>;
+type RuntimeIntegrationDshRuntimeBindingRecoveryAction = Extract<HarnessAction, { type: "recoverRuntimeIntegrationDshRuntimeBindingFailure" }>;
 
 function isEvolutionAction(action: HarnessAction): action is EvolutionAction {
   return action.type === "registerEvolutionProfile"
@@ -6146,6 +6168,259 @@ function applyParsedHarnessAction(
     return prepareRunDrain(harness, action);
   }
   throw new Error(`unhandled harness action type: ${(action as { type: string }).type}`);
+}
+
+interface RuntimeIntegrationWorktreeBindingReceipt {
+  schemaVersion: 1;
+  repositoryId: string;
+  repositoryRoot: string;
+  worktreePath: string;
+  expectedHead: string;
+  actualHead: string;
+  commonGitDir: string;
+  branch: string;
+  status: "passed";
+  receiptSha256: string;
+}
+
+function applyRuntimeIntegrationDshRuntimeBindingRecovery(
+  harness: Harness,
+  action: RuntimeIntegrationDshRuntimeBindingRecoveryAction,
+  options: HarnessActionOptions,
+): HarnessActionResult & { eventId: string } {
+  try {
+    const git = options.runGit ?? defaultGitRunner;
+    const worktrees = materializeRuntimeIntegrationWorktrees(harness, action, git);
+    return harness.runInImmediateTransaction((db) => {
+      const result = recoverRuntimeIntegrationDshRuntimeBindingFailureWithDb(harness, db, action, worktrees, git);
+      const eventId = harness.recordHarnessActionEventWithDb(db, {
+        actionType: action.type,
+        status: result.status,
+        request: safeRequest(action),
+        result: resultToRecord(result),
+      });
+      return { ...result, eventId };
+    });
+  } catch (error) {
+    const problem = limitUtf8Output(sanitizeEvolutionErrorText(errorMessage(error)), 4_096);
+    const result = blockedResult(action.type, `${action.type} blocked: ${problem}`, [problem]);
+    const eventId = harness.recordHarnessActionEvent({
+      actionType: action.type,
+      status: result.status,
+      request: safeRequest(action),
+      result: resultToRecord(result),
+    });
+    return { ...result, eventId };
+  }
+}
+
+function materializeRuntimeIntegrationWorktrees(
+  harness: Harness,
+  action: RuntimeIntegrationDshRuntimeBindingRecoveryAction,
+  git: GitRunner,
+): RuntimeIntegrationWorktreeBindingReceipt[] {
+  const overview = harness.getRunOverview({ runId: action.runId, eventLimit: 0 });
+  const run = overview.run;
+  if (!run || run.context.source !== "design" || run.context.retired === true) {
+    throw new Error(`DSH runtime binding recovery requires an active design delivery: ${action.runId}`);
+  }
+  const existing = objectRecordOrNull(run.context.runtimeIntegrationDshRuntimeBindingRecovery);
+  if (existing) {
+    if (existing.sourceTaskId !== action.taskId || existing.sourceAttemptId !== action.attemptId || !Array.isArray(existing.worktrees)) {
+      throw new Error("DSH runtime binding recovery is already consumed by another failure");
+    }
+    return existing.worktrees.map((value, index) => {
+      const receipt = objectRecord(value, `DSH runtime binding recovery worktrees[${index}]`) as unknown as RuntimeIntegrationWorktreeBindingReceipt;
+      const { receiptSha256, ...body } = receipt;
+      if (stableFingerprint(body) !== receiptSha256) throw new Error(`stored worktree binding receipt drifted: ${String(receipt.repositoryId)}`);
+      const head = checkedGitOutput(git, receipt.worktreePath, ["rev-parse", "HEAD"], "stored worktree HEAD readback");
+      if (head !== receipt.expectedHead) throw new Error(`stored worktree binding changed: ${receipt.repositoryId}`);
+      return receipt;
+    });
+  }
+  const graphReceipt = objectRecord(run.context.runtimeIntegrationDshInstallationRecovery, "DSH installation recovery receipt");
+  const currentTaskIds = exactStringArray(graphReceipt.taskIds, "DSH installation recovery taskIds");
+  if (currentTaskIds.length !== RUNTIME_INTEGRATION_TASK_GRAPH.length || currentTaskIds[0] !== action.taskId) {
+    throw new Error("DSH runtime binding recovery only accepts the current frozen backend stage");
+  }
+  const sourceTask = overview.tasks.find((task) => task.id === action.taskId);
+  const sourceSession = overview.sessions.find((session) => session.attemptId === action.attemptId);
+  const persistedAttempt = sourceSession ? harness.getAttempt(sourceSession.attemptId) : null;
+  const evidence = [persistedAttempt?.error, ...(sourceSession?.output.problems ?? [])]
+    .filter((value): value is string => typeof value === "string" && value.length > 0)
+    .join("\n");
+  if (!sourceTask || sourceTask.status !== "blocked" || sourceSession?.taskId !== sourceTask.id || sourceSession.status !== "blocked"
+    || !/(?:runtime[- ]binding[- ]denied|frozen task worktree does not exist|posix_spawn[^\n]*ENOENT|ENOENT[^\n]*posix_spawn)/i.test(evidence)) {
+    throw new Error("DSH runtime binding recovery source is not a closed worktree/runtime-binding failure");
+  }
+  const downstreamIds = currentTaskIds.slice(1);
+  if (downstreamIds.some((taskId) => overview.tasks.find((task) => task.id === taskId)?.status !== "todo")
+    || overview.sessions.some((session) => downstreamIds.includes(session.taskId))) {
+    throw new Error("DSH runtime binding recovery requires four unstarted downstream tasks");
+  }
+  const unique = new Map<string, Task>();
+  for (const taskId of currentTaskIds) {
+    const task = overview.tasks.find((candidate) => candidate.id === taskId);
+    if (!task || !task.worktreePath) throw new Error(`runtime integration task has no frozen worktree: ${taskId}`);
+    const repositoryId = exactNonEmptyStringField(objectRecord(task.config, `${taskId}.config`), "repositoryId");
+    if (repositoryId === "target-backend" || repositoryId === "target-frontend") unique.set(repositoryId, task);
+  }
+  if (unique.size !== 2) throw new Error("runtime integration recovery requires backend and frontend worktree bindings");
+  return [...unique.entries()].map(([repositoryId, task]) => materializeFrozenRuntimeWorktree(git, action.runId, repositoryId, task));
+}
+
+function materializeFrozenRuntimeWorktree(
+  git: GitRunner,
+  runId: string,
+  repositoryId: string,
+  task: Task,
+): RuntimeIntegrationWorktreeBindingReceipt {
+  const config = objectRecord(task.config, `${task.id}.config`);
+  const repositoryRoot = realpathSync(exactAbsolutePathField(config, "repositoryRoot"));
+  const expectedHead = exactGitCommitShaField(config, "expectedHead");
+  const strategy = objectRecord(config.worktreeStrategy, `${task.id}.worktreeStrategy`);
+  const worktreePath = exactAbsolutePathField(strategy, "path");
+  if (task.worktreePath !== worktreePath || safeRealpath(String(strategy.repositoryRoot)) !== repositoryRoot || strategy.expectedHead !== expectedHead) {
+    throw new Error(`runtime integration worktree contract drifted: ${repositoryId} (task=${task.worktreePath}, strategy=${worktreePath}, root=${String(strategy.repositoryRoot)}=>${repositoryRoot}, head=${String(strategy.expectedHead)}=>${expectedHead})`);
+  }
+  const sourceCommonDir = checkedGitOutput(git, repositoryRoot, ["rev-parse", "--path-format=absolute", "--git-common-dir"], "source common Git directory");
+  checkedGitOutput(git, repositoryRoot, ["cat-file", "-e", `${expectedHead}^{commit}`], "frozen repository HEAD");
+  const branch = `codex/orbs-${runId.replace(/^run_/, "").slice(0, 12)}-${repositoryId}`;
+  if (!existsSync(worktreePath)) {
+    mkdirSync(dirname(worktreePath), { recursive: true });
+    const branchRef = git({ cwd: repositoryRoot, args: ["show-ref", "--verify", "--hash", `refs/heads/${branch}`] });
+    if (branchRef.exitCode === 0 && branchRef.stdout.trim() !== expectedHead) {
+      throw new Error(`runtime integration recovery branch drifted: ${branch}`);
+    }
+    const args = branchRef.exitCode === 0
+      ? ["worktree", "add", worktreePath, branch]
+      : ["worktree", "add", "-b", branch, worktreePath, expectedHead];
+    checkedGitOutput(git, repositoryRoot, args, `create ${repositoryId} worktree`);
+  }
+  const topLevel = realpathSync(checkedGitOutput(git, worktreePath, ["rev-parse", "--show-toplevel"], "worktree top level"));
+  if (topLevel !== realpathSync(worktreePath)) throw new Error(`runtime integration worktree top-level drifted: ${repositoryId}`);
+  const actualHead = checkedGitOutput(git, worktreePath, ["rev-parse", "HEAD"], "worktree HEAD");
+  if (actualHead !== expectedHead) throw new Error(`runtime integration worktree HEAD drifted: ${repositoryId}`);
+  const commonGitDir = realpathSync(checkedGitOutput(git, worktreePath, ["rev-parse", "--path-format=absolute", "--git-common-dir"], "worktree common Git directory"));
+  if (commonGitDir !== realpathSync(sourceCommonDir)) throw new Error(`runtime integration worktree Git boundary drifted: ${repositoryId}`);
+  const status = checkedGitOutput(git, worktreePath, ["status", "--porcelain=v1", "--untracked-files=all"], "worktree status");
+  if (status.length > 0) throw new Error(`runtime integration worktree is not clean: ${repositoryId}`);
+  const actualBranch = checkedGitOutput(git, worktreePath, ["branch", "--show-current"], "worktree branch");
+  if (actualBranch !== branch) throw new Error(`runtime integration worktree branch drifted: ${repositoryId}`);
+  const body = {
+    schemaVersion: 1 as const,
+    repositoryId,
+    repositoryRoot,
+    worktreePath: realpathSync(worktreePath),
+    expectedHead,
+    actualHead,
+    commonGitDir,
+    branch,
+    status: "passed" as const,
+  };
+  return { ...body, receiptSha256: stableFingerprint(body) };
+}
+
+function checkedGitOutput(git: GitRunner, cwd: string, args: string[], label: string) {
+  const result = git({ cwd, args });
+  if (result.exitCode !== 0) throw new Error(`${label} failed: ${limitUtf8Output(result.stderr || result.stdout, 1_024)}`);
+  return result.stdout.trim();
+}
+
+function recoverRuntimeIntegrationDshRuntimeBindingFailureWithDb(
+  harness: Harness,
+  db: HarnessDatabase,
+  action: RuntimeIntegrationDshRuntimeBindingRecoveryAction,
+  worktrees: RuntimeIntegrationWorktreeBindingReceipt[],
+  git: GitRunner,
+): HarnessActionResult {
+  const overview = harness.getRunOverviewWithDb(db, { runId: action.runId, eventLimit: 0 });
+  const run = overview.run;
+  if (!run || run.context.source !== "design" || run.context.retired === true) throw new Error("runtime binding recovery lost its design run");
+  const existing = objectRecordOrNull(run.context.runtimeIntegrationDshRuntimeBindingRecovery);
+  if (existing) {
+    if (existing.sourceTaskId !== action.taskId || existing.sourceAttemptId !== action.attemptId) {
+      throw new Error("DSH runtime binding recovery is already consumed by another failure");
+    }
+    const taskIds = exactStringArray(existing.taskIds, "DSH runtime binding recovery taskIds");
+    return doneResult(action.type, "DSH runtime binding recovery reused.", [
+      { name: "source attempt", status: "passed", evidence: action.attemptId },
+      { name: "replacement graph", status: "passed", evidence: taskIds.join(",") },
+    ], [{ kind: "runtime_integration_dsh_runtime_binding_recovery", taskIds, worktrees, reused: true }]);
+  }
+  const graphReceipt = objectRecord(run.context.runtimeIntegrationDshInstallationRecovery, "DSH installation recovery receipt");
+  const currentTaskIds = exactStringArray(graphReceipt.taskIds, "DSH installation recovery taskIds");
+  if (currentTaskIds.length !== 5 || currentTaskIds[0] !== action.taskId) throw new Error("runtime binding source graph drifted");
+  const sourceTask = overview.tasks.find((task) => task.id === action.taskId);
+  const sourceSession = overview.sessions.find((session) => session.attemptId === action.attemptId);
+  if (!sourceTask || sourceTask.status !== "blocked" || sourceSession?.taskId !== sourceTask.id || sourceSession.status !== "blocked") {
+    throw new Error("runtime binding source attempt drifted before recovery");
+  }
+  for (const receipt of worktrees) {
+    const { receiptSha256, ...receiptBody } = receipt;
+    if (stableFingerprint(receiptBody) !== receiptSha256) throw new Error(`bound worktree receipt hash drifted: ${receipt.repositoryId}`);
+    const head = checkedGitOutput(git, receipt.worktreePath, ["rev-parse", "HEAD"], "bound worktree HEAD readback");
+    if (head !== receipt.expectedHead) throw new Error(`bound worktree changed before task recovery: ${receipt.repositoryId}`);
+  }
+  const downstreamIds = currentTaskIds.slice(1);
+  if (downstreamIds.some((taskId) => overview.tasks.find((task) => task.id === taskId)?.status !== "todo")
+    || overview.sessions.some((session) => downstreamIds.includes(session.taskId))) {
+    throw new Error("runtime binding recovery downstream graph is no longer pristine");
+  }
+  const plannerTaskId = exactNonEmptyStringField(graphReceipt, "plannerTaskId");
+  const plannerAttemptId = exactNonEmptyStringField(graphReceipt, "plannerAttemptId");
+  const planner = overview.tasks.find((task) => task.id === plannerTaskId);
+  const plannerSession = overview.sessions.find((session) => session.attemptId === plannerAttemptId);
+  if (!planner || planner.role !== "planner" || planner.status !== "done" || plannerSession?.taskId !== planner.id || plannerSession.status !== "done") {
+    throw new Error("runtime binding recovery lost the frozen Planner evidence");
+  }
+  const plannedTasks = Array.isArray(plannerSession.output.nextTasks)
+    ? plannerSession.output.nextTasks.map((entry, index) => {
+        const planned = objectRecord(entry, `Planner nextTasks[${index}]`);
+        return {
+          role: exactNonEmptyStringField(planned, "role"), goal: exactNonEmptyStringField(planned, "goal"),
+          prompt: exactNonEmptyStringField(planned, "prompt"),
+          dependsOn: planned.dependsOn === undefined ? [] : exactStringArray(planned.dependsOn, `Planner nextTasks[${index}].dependsOn`),
+          doneWhen: planned.doneWhen === undefined ? [] : exactStringArray(planned.doneWhen, `Planner nextTasks[${index}].doneWhen`),
+        };
+      }) : [];
+  const boundary = objectRecord(planner.config?.runtimeIntegrationBoundary ?? run.context.runtimeIntegrationBoundary, "runtimeIntegrationBoundary");
+  const bundle = objectRecord(run.context.targetSystemEvidenceBundle ?? planner.config?.targetSystemEvidenceBundle, "targetSystemEvidenceBundle");
+  const verifierContract = objectRecord(planner.config?.verifierContract, "verifierContract");
+  const frozenPlanner = objectRecord(planner.config?.frozenDesignPlanner, "frozenDesignPlanner");
+  const installationReceipt = validateLocalDshInstallationReceipt(run.context.dshInstallationReceipt);
+  const recoveryKey = stableFingerprint({ runId: run.id, sourceTaskId: action.taskId, sourceAttemptId: action.attemptId, worktrees });
+  const replacementTaskIds = plannedTasks.map((planned) =>
+    `task_${createHash("sha1").update(`runtime-integration-dsh-runtime-binding-recovery|${recoveryKey}|${planned.goal}`).digest("hex")}`);
+  const projected = projectRuntimeIntegrationTaskGraph({
+    runId: run.id, plannerTaskId: planner.id, boundary, evidenceBundle: bundle, plannedTasks,
+    taskIds: replacementTaskIds, verifierContract, frozenDesignPlanner: frozenPlanner, dshInstallationReceipt: installationReceipt,
+  });
+  for (const taskId of downstreamIds) {
+    const retired = db.query("update tasks set status = 'blocked', updated_at = current_timestamp where id = $taskId and status = 'todo'").run({ $taskId: taskId });
+    if (retired.changes !== 1) throw new Error(`runtime binding downstream task changed before recovery: ${taskId}`);
+  }
+  for (const entry of projected) {
+    harness.createTaskWithDb(db, {
+      id: entry.id, runId: run.id, parentId: entry.parentId, cycleId: planner.cycleId, role: entry.role,
+      goal: entry.goal, prompt: entry.prompt, dependsOn: entry.dependsOn, doneWhen: entry.doneWhen,
+      worktreePath: entry.worktreePath, config: entry.config,
+    });
+  }
+  const recoveryReceipt = {
+    schemaVersion: 1, recoveryKey, sourceTaskId: action.taskId, sourceAttemptId: action.attemptId,
+    plannerTaskId, plannerAttemptId, retiredTaskIds: currentTaskIds, taskIds: replacementTaskIds,
+    worktrees, reason: limitUtf8Output(sanitizeEvolutionErrorText(action.reason), 2_048),
+  };
+  harness.updateRunWithDb(db, { runId: run.id, status: "todo", contextPatch: { runtimeIntegrationDshRuntimeBindingRecovery: recoveryReceipt } });
+  return doneResult(action.type, `DSH runtime binding recovery ${recoveryKey} materialized.`, [
+    { name: "runtime binding failure", status: "passed", evidence: action.attemptId },
+    { name: "worktree bindings", status: "passed", evidence: worktrees.map((entry) => entry.receiptSha256).join(",") },
+    { name: "old graph retired", status: "passed", evidence: currentTaskIds.join(",") },
+    { name: "replacement graph", status: "passed", evidence: replacementTaskIds.join(",") },
+    { name: "repair budget", status: "passed", evidence: "unchanged" },
+    { name: "Goal Review", status: "passed", evidence: "not created" },
+  ], [{ kind: "runtime_integration_dsh_runtime_binding_recovery", ...recoveryReceipt, reused: false }]);
 }
 
 function applyRuntimeIntegrationDshInstallationRecoveryAtomically(

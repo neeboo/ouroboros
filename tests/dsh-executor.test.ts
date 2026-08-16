@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { existsSync, readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { chmod, mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
@@ -90,6 +91,162 @@ function availableDshResolution() {
 }
 
 describe("DeepSeek Harness CLI executor", () => {
+  test("classifies a missing frozen worktree as a runtime binding failure before spawn", async () => {
+    const sourceRoot = await mkdtemp(join(homedir(), ".orbs-dsh-runtime-source-"));
+    const missingWorktree = join(sourceRoot, "missing-worktree");
+    const artifactPath = join(sourceRoot, "apps", "cli", "lib", "bin.js");
+    const executablePath = join(sourceRoot, "bin", "dsh");
+    const nodePath = realpathSync(Bun.which("node")!);
+    await mkdir(dirname(artifactPath), { recursive: true });
+    await mkdir(dirname(executablePath), { recursive: true });
+    await writeFile(artifactPath, "#!/usr/bin/env node\nconsole.log('0.1.0-rc.5')\n");
+    await chmod(artifactPath, 0o755);
+    await symlink(artifactPath, executablePath);
+    const receipt = localDshInstallationReceipt({ sourceRoot, artifactPath, executablePath, nodePath });
+    let commandCalls = 0;
+    try {
+      const executor = createDshCliExecutor({
+        cwd: missingWorktree,
+        command: executablePath,
+        profile: "headless",
+        sandbox: "workspace-write",
+        filePolicy: frozenDshFilePolicy,
+        installationReceipt: receipt,
+        env: { DEEPSEEK_API_KEY: "host-owned-key" },
+        runCommand: async () => {
+          commandCalls += 1;
+          throw new Error("must fail before command spawn");
+        },
+      });
+
+      const output = await executor(executorInput());
+
+      expect(commandCalls).toBe(0);
+      expect(output).toMatchObject({
+        status: "blocked",
+        summary: "DeepSeek Harness runtime binding is unavailable",
+        artifacts: [expect.objectContaining({
+          kind: "dsh_runtime_binding_receipt",
+          status: "blocked",
+          diagnosticCode: "runtime-binding-denied",
+        })],
+      });
+      expect(output.problems?.join("\n")).toContain("frozen task worktree does not exist");
+    } finally {
+      await rm(sourceRoot, { recursive: true, force: true });
+    }
+  });
+
+  test("uses one frozen runtime binding for readiness and final DSH spawn", async () => {
+    const sourceRoot = await mkdtemp(join(homedir(), ".orbs-dsh-runtime-binding-"));
+    const workspace = join(sourceRoot, "worktree");
+    const artifactPath = join(sourceRoot, "apps", "cli", "lib", "bin.js");
+    const executablePath = join(sourceRoot, "bin", "dsh");
+    const nodePath = realpathSync(Bun.which("node")!);
+    await mkdir(workspace, { recursive: true });
+    await mkdir(dirname(artifactPath), { recursive: true });
+    await mkdir(dirname(executablePath), { recursive: true });
+    await writeFile(artifactPath, "#!/usr/bin/env node\nconsole.log('0.1.0-rc.5')\n");
+    await chmod(artifactPath, 0o755);
+    await symlink(artifactPath, executablePath);
+    const receipt = localDshInstallationReceipt({ sourceRoot, artifactPath, executablePath, nodePath });
+    const calls: RunCommandInput[] = [];
+    try {
+      const executor = createDshCliExecutor({
+        cwd: workspace,
+        command: executablePath,
+        profile: "headless",
+        sandbox: "workspace-write",
+        filePolicy: frozenDshFilePolicy,
+        installationReceipt: receipt,
+        env: { DEEPSEEK_API_KEY: "host-owned-key" },
+        runCommand: async (input) => {
+          calls.push(input);
+          if (input.cmd.at(-1) === "--version") {
+            return { exitCode: 0, stdout: "0.1.0-rc.5\n", stderr: "" };
+          }
+          if (input.cmd.at(-1) === "--help") {
+            return { exitCode: 0, stdout: "Usage: dsh\n", stderr: "" };
+          }
+          return {
+            exitCode: 0,
+            stdout: '{"status":"done","summary":"bound","changedFiles":[],"checks":[],"artifacts":[],"problems":[]}',
+            stderr: "",
+          };
+        },
+      });
+
+      const output = await executor(executorInput());
+
+      expect(output.status).toBe("done");
+      expect(calls).toHaveLength(3);
+      for (const call of calls) {
+        expect(call.cwd).toBe(workspace);
+        expect(call.inheritEnv).toBe(false);
+        expect(call.cmd.slice(0, 2)).toEqual([nodePath, artifactPath]);
+        expect(call.env?.DSH_HOME).toMatch(/ouroboros-dsh-/);
+        expect(call.env?.DEEPSEEK_API_KEY).toMatch(/^orbs-dsh-broker-/);
+      }
+      const binding = output.artifacts?.find((artifact) =>
+        artifact && typeof artifact === "object" && (artifact as { kind?: string }).kind === "dsh_runtime_binding_receipt"
+      ) as Record<string, unknown> | undefined;
+      expect(binding).toMatchObject({
+        status: "passed",
+        executablePath,
+        executableRealpath: artifactPath,
+        interpreterPath: nodePath,
+        finalSpawnSandboxSha256: expect.stringMatching(/^[a-f0-9]{64}$/),
+        readExecBindingSha256: expect.stringMatching(/^[a-f0-9]{64}$/),
+      });
+    } finally {
+      await rm(sourceRoot, { recursive: true, force: true });
+    }
+  });
+
+  test("fails closed when the frozen DSH artifact changes after readiness", async () => {
+    const sourceRoot = await mkdtemp(join(homedir(), ".orbs-dsh-runtime-toctou-"));
+    const workspace = join(sourceRoot, "worktree");
+    const artifactPath = join(sourceRoot, "apps", "cli", "lib", "bin.js");
+    const executablePath = join(sourceRoot, "bin", "dsh");
+    const nodePath = realpathSync(Bun.which("node")!);
+    await mkdir(workspace, { recursive: true });
+    await mkdir(dirname(artifactPath), { recursive: true });
+    await mkdir(dirname(executablePath), { recursive: true });
+    await writeFile(artifactPath, "#!/usr/bin/env node\nconsole.log('0.1.0-rc.5')\n");
+    await chmod(artifactPath, 0o755);
+    await symlink(artifactPath, executablePath);
+    const receipt = localDshInstallationReceipt({ sourceRoot, artifactPath, executablePath, nodePath });
+    let calls = 0;
+    try {
+      const executor = createDshCliExecutor({
+        cwd: workspace,
+        command: executablePath,
+        profile: "headless",
+        sandbox: "workspace-write",
+        filePolicy: frozenDshFilePolicy,
+        installationReceipt: receipt,
+        env: { DEEPSEEK_API_KEY: "host-owned-key" },
+        runCommand: async (input) => {
+          calls += 1;
+          if (input.cmd.at(-1) === "--version") return { exitCode: 0, stdout: "0.1.0-rc.5\n", stderr: "" };
+          if (input.cmd.at(-1) === "--help") {
+            await writeFile(artifactPath, "#!/usr/bin/env node\nconsole.log('drifted')\n");
+            return { exitCode: 0, stdout: "Usage: dsh\n", stderr: "" };
+          }
+          throw new Error("final DSH spawn must not run after binding drift");
+        },
+      });
+
+      const output = await executor(executorInput());
+      expect(calls).toBe(2);
+      expect(output.status).toBe("blocked");
+      expect(output.summary).toBe("DeepSeek Harness CLI could not start");
+      expect(output.problems?.join("\n")).toContain("executable hash drifted");
+    } finally {
+      await rm(sourceRoot, { recursive: true, force: true });
+    }
+  });
+
   test("accepts only bounded credential classifiers outside ordinary path globs", () => {
     const normalized = normalizeDshFilePolicy(frozenDshFilePolicy);
     expect(normalized.credentialPathPolicy).toEqual(frozenDshFilePolicy.credentialPathPolicy);
@@ -1024,18 +1181,27 @@ describe("DeepSeek Harness CLI executor", () => {
   test("fails a drifted installed artifact before profile, broker, or model startup", async () => {
     const root = await mkdtemp(join(homedir(), ".orbs-dsh-receipt-fixture-"));
     const command = join(root, "dsh");
+    const workspace = join(root, "worktree");
+    const nodePath = realpathSync(Bun.which("node")!);
+    await mkdir(workspace, { recursive: true });
     await writeFile(command, "#!/bin/sh\necho 0.1.0-rc.5\n");
     await chmod(command, 0o755);
     const calls: string[][] = [];
     try {
       const executor = createDshCliExecutor({
-        cwd: taskFixture.worktreePath,
+        cwd: workspace,
         command,
         installationReceipt: {
           kind: "local_dsh_installation_receipt",
           schemaVersion: 1,
+          sourceRepoPath: root,
+          executablePath: command,
           executableRealpath: command,
           artifactSha256: "0".repeat(64),
+          runtime: {
+            nodePath,
+            nodeSha256: createHash("sha256").update(readFileSync(nodePath)).digest("hex"),
+          },
         },
         resolveCommand: () => ({
           configuredCommand: command,
@@ -1057,13 +1223,42 @@ describe("DeepSeek Harness CLI executor", () => {
       const output = await executor({ ...executorInput(), attemptId: "attempt_dsh_receipt_drift" });
       expect(output).toMatchObject({
         status: "blocked",
-        summary: "DeepSeek Harness installation drifted from its host receipt",
-        artifacts: expect.arrayContaining([expect.objectContaining({ kind: "dsh_installation_receipt_drift" })]),
+        summary: "DeepSeek Harness runtime binding is unavailable",
+        artifacts: expect.arrayContaining([expect.objectContaining({
+          kind: "dsh_runtime_binding_receipt",
+          diagnosticCode: "runtime-binding-denied",
+        })]),
       });
-      expect(calls).toEqual([[command, "--version"], [command, "--help"]]);
+      expect(calls).toEqual([]);
       expect(JSON.stringify(output)).not.toContain("dsh_execution_profile_receipt");
     } finally {
       await rm(root, { recursive: true, force: true });
     }
   });
 });
+
+function localDshInstallationReceipt(input: {
+  sourceRoot: string;
+  artifactPath: string;
+  executablePath: string;
+  nodePath: string;
+}) {
+  return {
+    kind: "local_dsh_installation_receipt",
+    schemaVersion: 1,
+    sourceRepoPath: input.sourceRoot,
+    sourceHead: "4".repeat(40),
+    sourceTree: "5".repeat(40),
+    artifactPath: input.artifactPath,
+    artifactSha256: createHash("sha256").update(readFileSync(input.artifactPath)).digest("hex"),
+    executablePath: input.executablePath,
+    executableRealpath: input.artifactPath,
+    runtime: {
+      nodePath: input.nodePath,
+      nodeVersion: "v25.5.0",
+      nodeSha256: createHash("sha256").update(readFileSync(input.nodePath)).digest("hex"),
+    },
+    launchability: { version: "passed", help: "passed" },
+    receiptSha256: "6".repeat(64),
+  };
+}
