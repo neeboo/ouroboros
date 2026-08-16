@@ -612,12 +612,66 @@ describe("runtime integration task execution contracts", () => {
       role: "verifier",
       dependsOn: [migratedContinuationId],
     });
+    const stalledContinuationAttemptId = harness.recordAttempt({
+      taskId: migratedContinuationId,
+      input: { executor: "dsh-cli", cwd: repair.worktreePath },
+      output: {
+        status: "blocked",
+        summary: "DeepSeek Harness CLI failed",
+        changedFiles: [],
+        checks: [{ name: "DSH no-write progress", status: "failed" }],
+        artifacts: [{
+          kind: "dsh_progress_watchdog_receipt",
+          status: "stalled",
+          requestCount: 38,
+          baselineFingerprint: "a".repeat(64),
+          finalFingerprint: "a".repeat(64),
+        }],
+        problems: ["dsh-no-write-progress: 38 model requests with no allowed-surface change for 600041ms"],
+      },
+    });
+    const refined = applyHarnessAction(harness, {
+      type: "materializeVerifierRepairRecovery",
+      runId: fixture.runId,
+      verifierTaskId: semanticVerifierId,
+      reason: "refine the same-budget DSH continuation after its host watchdog stalled",
+    } as never);
+    const refinedArtifact = refined.artifacts.find((artifact) =>
+      artifact.kind === "runtime_semantic_repair_continuation"
+    )!;
+    const refinedContinuationId = refinedArtifact.continuationTaskId as string;
+    const refinedVerifierId = refinedArtifact.verifierTaskId as string;
+    const refinedOverview = harness.getRunOverview({ runId: fixture.runId, eventLimit: 0 });
+    const refinedContinuation = refinedOverview.tasks.find((task) => task.id === refinedContinuationId)!;
+    expect(refinedContinuationId).not.toBe(migratedContinuationId);
+    expect(refinedContinuation).toMatchObject({
+      status: "todo",
+      role: "worker",
+      dependsOn: [schedulingDependencyId],
+      config: {
+        dshNoWriteProgressPolicy: { maxStallMs: 300_000, minModelRequests: 12, probeIntervalMs: 30_000 },
+        runtimeIntegrationSemanticRepairContinuation: {
+          continuationOrdinal: 2,
+          maxContinuations: 2,
+          previousContinuationTaskId: migratedContinuationId,
+          previousContinuationAttemptId: stalledContinuationAttemptId,
+        },
+      },
+    });
+    expect(refinedContinuation.prompt).toContain("Before any additional search");
+    expect(refinedContinuation.prompt).toContain("host-receipt-matched-shadow-v6-runtime");
+    expect(refinedOverview.tasks.find((task) => task.id === migratedVerifierId)?.status).toBe("blocked");
+    expect(refinedOverview.tasks.find((task) => task.id === refinedVerifierId)).toMatchObject({
+      status: "todo",
+      role: "verifier",
+      dependsOn: [refinedContinuationId],
+    });
     expect(harness.leaseReadyTasks({
       runId: fixture.runId,
       limit: 1,
-      sessionForTask: (task) => `migrated-session-${task.id}`,
-    }).map((task) => task.id)).toEqual([migratedContinuationId]);
-    expect(migratedOverview.run!.context.repairReplanBudget).toEqual(budgetBefore);
+      sessionForTask: (task) => `refined-session-${task.id}`,
+    }).map((task) => task.id)).toEqual([refinedContinuationId]);
+    expect(refinedOverview.run!.context.repairReplanBudget).toEqual(budgetBefore);
   });
 
   test("failed host evidence remains terminal and prepareRunDrain never creates Goal Review", () => {

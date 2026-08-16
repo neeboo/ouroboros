@@ -405,7 +405,9 @@ function runtimeSemanticRepairContinuationExecutionProblem(input: {
     if (!validSchedulingAnchor) {
       throw new Error(`runtime semantic continuation scheduling anchor drifted for ${input.task.id}`);
     }
-    if (marker.sameBudget !== true || marker.maxContinuations !== 1 || sourceAttemptId.length === 0) {
+    const continuationOrdinal = marker.continuationOrdinal;
+    if (marker.sameBudget !== true || marker.maxContinuations !== 2
+      || (continuationOrdinal !== 1 && continuationOrdinal !== 2) || sourceAttemptId.length === 0) {
       throw new Error(`runtime semantic continuation budget contract drifted for ${input.task.id}`);
     }
     const exactFields: Array<[unknown, unknown, string]> = [

@@ -58,6 +58,7 @@ import {
   parseProductionEpisode,
 } from "./target-evolution";
 import type {
+  Attempt,
   AttemptOutput,
   ControlPlaneWatchdogState,
   EvolutionComparison,
@@ -4812,31 +4813,56 @@ function materializeTimedOutRuntimeSemanticRepairContinuationWithDb(input: {
     const marker = objectRecordOrNull(task.config?.runtimeIntegrationSemanticRepairContinuation);
     return task.role === "worker" && marker?.sourceAttemptId === repairAttempt.id;
   });
-  const existingContinuation = existingContinuations.find((task) =>
-    sameCanonicalValue(task.dependsOn, [schedulingDependency.id]) && task.status !== "blocked")
-    ?? existingContinuations.find((task) => task.status === "todo")
-    ?? existingContinuations[0];
+  for (const legacyContinuation of existingContinuations.filter((task) =>
+    !sameCanonicalValue(task.dependsOn, [schedulingDependency.id])
+  )) {
+    const legacyVerifier = overview.tasks.find((task) => task.role === "verifier"
+      && sameCanonicalValue(task.dependsOn, [legacyContinuation.id]));
+    if (!legacyVerifier) throw new Error(`semantic continuation ${legacyContinuation.id} lost its Verifier`);
+    const pairHasNoAttempt = !overview.sessions.some((session) =>
+      session.taskId === legacyContinuation.id || session.taskId === legacyVerifier.id
+    );
+    if (!pairHasNoAttempt
+      || !["todo", "blocked"].includes(legacyContinuation.status)
+      || !["todo", "blocked"].includes(legacyVerifier.status)) {
+      throw new Error(`semantic continuation ${legacyContinuation.id} has an unrecoverable dependency drift`);
+    }
+    db.query(
+      "update tasks set status = 'blocked', updated_at = current_timestamp where id in ($continuationTaskId, $verifierTaskId) and status = 'todo'",
+    ).run({ $continuationTaskId: legacyContinuation.id, $verifierTaskId: legacyVerifier.id });
+  }
+  const validContinuations = existingContinuations.filter((task) =>
+    sameCanonicalValue(task.dependsOn, [schedulingDependency.id])
+  );
+  const existingContinuation = validContinuations.at(-1);
+  let refinementSource: { task: Task; attempt: Attempt; verifier: Task } | null = null;
   if (existingContinuation) {
     const verifier = overview.tasks.find((task) => task.role === "verifier"
       && sameCanonicalValue(task.dependsOn, [existingContinuation.id]));
     if (!verifier) throw new Error(`semantic continuation ${existingContinuation.id} lost its Verifier`);
-    const pairHasNoAttempt = !overview.sessions.some((session) =>
-      session.taskId === existingContinuation.id || session.taskId === verifier.id
-    );
-    const isReplaceableLegacyPair = pairHasNoAttempt
-      && ["todo", "blocked"].includes(existingContinuation.status)
-      && ["todo", "blocked"].includes(verifier.status)
-      && !sameCanonicalValue(existingContinuation.dependsOn, [schedulingDependency.id]);
-    if (isReplaceableLegacyPair) {
-      db.query(
-        "update tasks set status = 'blocked', updated_at = current_timestamp where id in ($continuationTaskId, $verifierTaskId) and status = 'todo'",
-      ).run({ $continuationTaskId: existingContinuation.id, $verifierTaskId: verifier.id });
-    } else {
-      if (!sameCanonicalValue(existingContinuation.dependsOn, [schedulingDependency.id])) {
-        throw new Error(`semantic continuation ${existingContinuation.id} has an unrecoverable dependency drift`);
-      }
+    if (existingContinuation.status !== "blocked") {
       return semanticRepairContinuationResult(run.id, repair, repairAttempt.id, existingContinuation, verifier, true);
     }
+    const session = [...overview.sessions].reverse().find((candidate) => candidate.taskId === existingContinuation.id);
+    const attempt = session ? harness.getAttemptWithDb(db, session.attemptId) : null;
+    const marker = objectRecordOrNull(existingContinuation.config?.runtimeIntegrationSemanticRepairContinuation) ?? {};
+    const ordinal = typeof marker.continuationOrdinal === "number" ? marker.continuationOrdinal : 1;
+    if (!session || !attempt || !dshNoWriteProgressStalled(session.output)) {
+      throw new Error(`semantic continuation ${existingContinuation.id} is blocked without a no-write progress receipt`);
+    }
+    if (ordinal >= 2) {
+      return blockedResult(
+        "materializeVerifierRepairRecovery",
+        `Runtime semantic Repair continuation exhausted after ${ordinal} bounded attempts.`,
+        [`semantic continuation ${existingContinuation.id} made no allowed-surface progress`],
+      );
+    }
+    if (verifier.status !== "todo" || overview.sessions.some((candidate) => candidate.taskId === verifier.id)) {
+      throw new Error(`semantic continuation ${existingContinuation.id} cannot refine after its Verifier started`);
+    }
+    db.query("update tasks set status = 'blocked', updated_at = current_timestamp where id = $taskId and status = 'todo'")
+      .run({ $taskId: verifier.id });
+    refinementSource = { task: existingContinuation, attempt, verifier };
   }
   const replacedPendingVerifierId = existingContinuations
     .map((task) => objectRecordOrNull(task.config?.runtimeIntegrationSemanticRepairContinuation)?.replacedVerifierTaskId)
@@ -4844,25 +4870,30 @@ function materializeTimedOutRuntimeSemanticRepairContinuationWithDb(input: {
   const pendingVerifierWasSafelyReplaced = pendingVerifier.status === "blocked"
     && replacedPendingVerifierId === pendingVerifier.id
     && !overview.sessions.some((session) => session.taskId === pendingVerifier.id);
-  if (pendingVerifier.status !== "todo" && !pendingVerifierWasSafelyReplaced) {
+  if (!refinementSource && pendingVerifier.status !== "todo" && !pendingVerifierWasSafelyReplaced) {
     throw new Error(`pending semantic Verifier ${pendingVerifier.id} must be todo before replacement`);
   }
 
   const plannerTaskId = exactNonEmptyStringField(semanticMarker, "plannerTaskId");
   const continuationTaskId = makeId("task");
   const verifierTaskId = makeId("task");
+  const continuationOrdinal = refinementSource ? 2 : 1;
+  const verifierTemplate = refinementSource?.verifier ?? pendingVerifier;
   const continuationMarker = {
     schemaVersion: 1,
     recoveryKey: stableFingerprint({ recoveryKey, sourceRepairTaskId: repair.id, sourceAttemptId: repairAttempt.id }),
     sourceRepairTaskId: repair.id,
     sourceAttemptId: repairAttempt.id,
     sourceVerifierTaskId: sourceVerifier.id,
-    replacedVerifierTaskId: pendingVerifier.id,
+    replacedVerifierTaskId: verifierTemplate.id,
     continuationTaskId,
     verifierTaskId,
     schedulingDependencyTaskId: schedulingDependency.id,
+    continuationOrdinal,
+    previousContinuationTaskId: refinementSource?.task.id ?? null,
+    previousContinuationAttemptId: refinementSource?.attempt.id ?? null,
     sameBudget: true,
-    maxContinuations: 1,
+    maxContinuations: 2,
   };
   const identities = frozenRuntimeSemanticIdentities(run.context);
   const targetFiles = [
@@ -4878,10 +4909,28 @@ function materializeTimedOutRuntimeSemanticRepairContinuationWithDb(input: {
     "tests/runtime-integration/dsh-gateway.test.mjs",
     "tests/runtime-integration/readback-dsh-gateway.mjs",
   ];
+  const exactSubstitutions = [
+    `src/domain/evolution/frozen.ts: pack version 5 -> ${identities.packVersion}; pack contentSha256 9f38d61eaa0800a9b401d5dfc03e7a4b7aecd41f7472957216409029b77bac66 -> ${identities.packContentSha256}; preserve artifact:target-policy-v5 and artifact:target-policy-v4.`,
+    `src/domain/evolution/episodes.ts: host-receipt-episodes-v5 -> ${identities.episodeContractId}.`,
+    `src/domain/evolution/privacy.ts: host-receipt-privacy-v5 -> ${identities.privacyContractId}.`,
+    `src/domain/evolution/rollback.ts: change only ROLLBACK_CONTRACT_REF host-receipt-rollback-v5 -> ${identities.rollbackContractId}; preserve rollback:target-policy-v5 and both artifact policy refs.`,
+    "src/domain/evolution/comparison.ts: host-receipt-matched-shadow-v5 -> host-receipt-matched-shadow-v6-runtime; preserve matched-shadow:target-policy-v5.",
+    `src/application/evolution/evolutionRuntime.ts: change only emitted rollback contractRef to ${identities.rollbackContractId} and emitted matched-comparison contractRef to host-receipt-matched-shadow-v6-runtime; preserve format, AINovel, policy, request, and fixture identifiers.`,
+    "Update only the bounded runtime-integration expectations that assert those exact runtime identity fields.",
+  ];
   const prompt = [
-    "Continue the same already-charged semantic Repair in the existing worktree. The previous DSH attempt timed out after repeated model requests without any file change.",
+    refinementSource
+      ? "Final same-budget DSH convergence attempt. The prior continuation made repeated model requests and performed only read, search, and test operations; it made zero allowed-surface changes and was stopped by the host progress watchdog."
+      : "Continue the same already-charged semantic Repair in the existing worktree. The previous DSH attempt timed out after repeated model requests without any file change.",
     `Durable source attempt: ${repairAttempt.id}. Its terminal evidence is retained; do not rescan the full run history.`,
     "Apply only the frozen runtime identity correction below. Do not replan, rerun earlier Workers, touch the frozen comparison, or modify config/evolution/** or tests/evolution/**.",
+    ...(refinementSource ? [
+      `Previous stalled continuation attempt: ${refinementSource.attempt.id}. Do not repeat its repository discovery, Git history inspection, broad test run, or control-directory probes.`,
+      "Before any additional search, listing, history inspection, or test command, perform the exact bounded edits below using the available file mutation tool. If any exact old value is absent, fail closed and name that file; do not search outside the listed files.",
+      "## Exact file and field substitutions",
+      ...exactSubstitutions.map((rule) => `- ${rule}`),
+      "After the first allowed-surface fingerprint change, run only the directly named runtime-integration tests for the edited identity fields. Never read .ouroboros/**, .orbs/**, .git/orbs/**, db/**, config/evolution/** contents, or tests/evolution/** contents.",
+    ] : []),
     "## Exact frozen runtime identity",
     JSON.stringify(identities, null, 2),
     "## Maximum target diff list",
@@ -4934,7 +4983,7 @@ function materializeTimedOutRuntimeSemanticRepairContinuationWithDb(input: {
       runtimeIntegrationExecutionContract: continuationContract,
       runtimeIntegrationSemanticRepairContinuation: continuationMarker,
       dshNoWriteProgressPolicy: {
-        maxStallMs: 600_000,
+        maxStallMs: refinementSource ? 300_000 : 600_000,
         minModelRequests: 12,
         probeIntervalMs: 30_000,
       },
@@ -4946,8 +4995,8 @@ function materializeTimedOutRuntimeSemanticRepairContinuationWithDb(input: {
   if (!continuationTask) throw new Error(`semantic continuation ${continuationTaskId} was not persisted`);
   const completionContract = completionVerificationContract(continuationOverview, continuationTask);
 
-  const sourceVerifierContract = objectRecordOrNull(pendingVerifier.config?.runtimeIntegrationExecutionContract);
-  if (!sourceVerifierContract) throw new Error(`pending semantic Verifier ${pendingVerifier.id} lost its execution contract`);
+  const sourceVerifierContract = objectRecordOrNull(verifierTemplate.config?.runtimeIntegrationExecutionContract);
+  if (!sourceVerifierContract) throw new Error(`pending semantic Verifier ${verifierTemplate.id} lost its execution contract`);
   const { contractSha256: _verifierSha, taskId: _verifierTaskId, ...sourceVerifierContractBody } = sourceVerifierContract;
   const verifierContractBody = {
     ...sourceVerifierContractBody,
@@ -4970,17 +5019,17 @@ function materializeTimedOutRuntimeSemanticRepairContinuationWithDb(input: {
     sourceTaskId: _pendingSourceTaskId,
     completionContract: _pendingCompletionContract,
     ...pendingVerifierConfig
-  } = pendingVerifier.config ?? {};
+  } = verifierTemplate.config ?? {};
   harness.createTaskWithDb(db, {
     id: verifierTaskId,
     runId: run.id,
     parentId: plannerTaskId,
-    cycleId: pendingVerifier.cycleId,
+    cycleId: verifierTemplate.cycleId,
     role: "verifier",
-    goal: pendingVerifier.goal,
-    prompt: pendingVerifier.prompt,
+    goal: verifierTemplate.goal,
+    prompt: verifierTemplate.prompt,
     dependsOn: [continuationTaskId],
-    doneWhen: [...new Set([...pendingVerifier.doneWhen, ...completionContract.requiredEvidence])],
+    doneWhen: [...new Set([...verifierTemplate.doneWhen, ...completionContract.requiredEvidence])],
     worktreePath: repair.worktreePath,
     config: {
       ...pendingVerifierConfig,
@@ -5000,7 +5049,7 @@ function materializeTimedOutRuntimeSemanticRepairContinuationWithDb(input: {
   });
   db.query(
     "update tasks set status = 'blocked', updated_at = current_timestamp where id = $taskId and status = 'todo'",
-  ).run({ $taskId: pendingVerifier.id });
+  ).run({ $taskId: verifierTemplate.id });
   harness.updateRunWithDb(db, {
     runId: run.id,
     status: "todo",
@@ -5056,6 +5105,18 @@ function runtimeSemanticRepairNoWriteTimeout(output: AttemptOutput) {
     && (text.includes("timed out") || text.includes("timeout") || text.includes("exit code: 124"))
     && typeof requestCount === "number"
     && requestCount > 0;
+}
+
+function dshNoWriteProgressStalled(output: AttemptOutput) {
+  return output.status === "blocked"
+    && (output.changedFiles ?? []).length === 0
+    && (output.artifacts ?? []).map(objectRecordOrNull).some((artifact) =>
+      artifact?.kind === "dsh_progress_watchdog_receipt"
+      && artifact.status === "stalled"
+      && artifact.baselineFingerprint === artifact.finalFingerprint
+      && typeof artifact.requestCount === "number"
+      && artifact.requestCount > 0
+    );
 }
 
 function frozenRuntimeSemanticIdentities(context: Record<string, unknown>) {
