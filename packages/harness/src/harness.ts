@@ -1337,6 +1337,9 @@ export class Harness {
 
   nextReadyTask(runId: string) {
     return withDatabase(this.dbPath, (db) => {
+      const runRow = db.query("select * from runs where id = $runId").get({ $runId: runId }) as RunRow | null;
+      if (!runRow || runFromRow(runRow).context.retired === true) return null;
+      const run = runFromRow(runRow);
       const taskRows = db
         .query(
           `
@@ -1348,11 +1351,22 @@ export class Harness {
         )
         .all({ $runId: runId }) as TaskRow[];
       const allTaskRows = db.query("select * from tasks where run_id = $runId").all({ $runId: runId }) as TaskRow[];
-      const dependencyIsSatisfied = createDependencyReadiness(allTaskRows.map(taskFromRow));
+      const allTasks = allTaskRows.map(taskFromRow);
+      const dependencyIsSatisfied = createDependencyReadiness(allTasks);
 
       for (const row of taskRows) {
         const task = taskFromRow(row);
         if (task.dependsOn.every((dependencyId) => dependencyIsSatisfied(dependencyId, task))) {
+          const problem = runtimeIntegrationTaskExecutionProblem({
+            runId,
+            boundary: run.context.runtimeIntegrationBoundary,
+            evidenceBundle: run.context.targetSystemEvidenceBundle,
+            task,
+            tasks: allTasks,
+          });
+          if (problem) {
+            continue;
+          }
           return task;
         }
       }
@@ -1717,16 +1731,10 @@ export class Harness {
   leaseReadyTasks(input: LeaseReadyTasksInput) {
     return withDatabase(this.dbPath, (db) =>
       db.transaction(() => {
-        const runState = db
-          .query(
-            `
-            select json_extract(context_json, '$.retired') as retired
-            from runs
-            where id = $runId
-            `,
-          )
-          .get({ $runId: input.runId }) as { retired: number | null } | null;
-        if (runState?.retired === 1) {
+        const runRow = db.query("select * from runs where id = $runId").get({ $runId: input.runId }) as RunRow | null;
+        if (!runRow) return [];
+        const run = runFromRow(runRow);
+        if (run.context.retired === true) {
           return [];
         }
         const taskRows = db
@@ -1747,6 +1755,17 @@ export class Harness {
         for (const task of taskRows.map(taskFromRow)) {
           if (selected.length >= input.limit) break;
           if (!task.dependsOn.every((dependencyId) => dependencyIsSatisfied(dependencyId, task))) continue;
+          const problem = runtimeIntegrationTaskExecutionProblem({
+            runId: input.runId,
+            boundary: run.context.runtimeIntegrationBoundary,
+            evidenceBundle: run.context.targetSystemEvidenceBundle,
+            task,
+            tasks: allTasks,
+          });
+          if (problem) {
+            this.blockRuntimeIntegrationTaskBeforeLeaseWithDb(db, task, problem);
+            continue;
+          }
           if (!verifierLeaseIsAvailable(task, allTasks, selected)) continue;
           selected.push(task);
         }
@@ -1778,6 +1797,29 @@ export class Harness {
         return leased;
       }).immediate(),
     );
+  }
+
+  private blockRuntimeIntegrationTaskBeforeLeaseWithDb(db: HarnessDatabase, task: Task, problem: string) {
+    return this.recordAttemptWithDb(db, {
+      taskId: task.id,
+      input: {
+        runtimeIntegrationEvidenceValidation: "failed",
+        phase: "before-lease",
+      },
+      output: {
+        status: "blocked",
+        summary: "Runtime integration task was rejected before it could occupy an execution slot.",
+        changedFiles: [],
+        checks: [{ name: "frozen runtime integration task graph", status: "failed", evidence: problem }],
+        artifacts: [{
+          kind: "runtime_integration_task_rejected_before_lease",
+          taskId: task.id,
+          role: task.role,
+          goal: task.goal,
+        }],
+        problems: [problem],
+      },
+    });
   }
 
   recordAttempt(input: RecordAttemptInput) {
@@ -3586,10 +3628,13 @@ function assertTaskGovernanceBoundaryWithDb(db: HarnessDatabase, input: CreateTa
   const graph = Array.isArray(boundaryRecord?.taskGraph) ? boundaryRecord.taskGraph : [];
   const runtimeStage = graph.some((entry) => entry && typeof entry === "object" && !Array.isArray(entry)
     && (entry as Record<string, unknown>).id === input.goal);
-  if (runtimeStage || input.config?.runtimeIntegrationExecutionContract) {
-    const storedTasks = (db.query("select * from tasks where run_id = $runId").all({ $runId: run.id }) as TaskRow[])
-      .map(taskFromRow)
-      .filter((task) => task.id !== input.id);
+  const storedTasks = (db.query("select * from tasks where run_id = $runId").all({ $runId: run.id }) as TaskRow[])
+    .map(taskFromRow)
+    .filter((task) => task.id !== input.id);
+  const governedRuntimeRole = graph.length > 0
+    && (input.role === "worker" || input.role === "verifier")
+    && storedTasks.some((task) => task.config?.runtimeIntegrationExecutionContract);
+  if (runtimeStage || input.config?.runtimeIntegrationExecutionContract || governedRuntimeRole) {
     const candidate: Task = {
       id: input.id ?? "<pending-runtime-task>",
       runId: input.runId,

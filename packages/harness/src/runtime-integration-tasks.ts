@@ -252,6 +252,11 @@ export function runtimeIntegrationTaskExecutionProblem(input: {
 }): string | null {
   const graph = runtimeTaskGraphOrNull(input.boundary);
   const contract = objectOrNull(input.task.config?.runtimeIntegrationExecutionContract);
+  const frozenRuntimeGraphExists = Boolean(graph)
+    && input.tasks.some((candidate) => objectOrNull(candidate.config?.runtimeIntegrationExecutionContract));
+  if (!contract && frozenRuntimeGraphExists && (input.task.role === "worker" || input.task.role === "verifier")) {
+    return `runtime integration execution contract is missing for ${input.task.id}`;
+  }
   const stage = graph?.find((candidate) => candidate.id === input.task.goal)
     ?? (typeof contract?.stageId === "string" ? graph?.find((candidate) => candidate.id === contract.stageId) : undefined);
   if (!stage && !contract) return null;

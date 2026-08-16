@@ -1,6 +1,7 @@
 import {
   DEFAULT_VERIFIER_TASK_PROMPT_TEMPLATE,
   completionVerificationContract,
+  runtimeIntegrationTaskExecutionProblem,
   type AttemptOutput,
   type CompletionVerificationContractV1,
   type Harness,
@@ -33,6 +34,7 @@ export async function reconcileTerminalDoneWorkerVerifiers(options: {
   for (const worker of overview.tasks.filter((task) =>
     task.role === "worker"
     && task.status === "done"
+    && !task.config?.runtimeIntegrationExecutionContract
     && !overview.tasks.some((candidate) => candidate.role === "verifier" && candidate.dependsOn.includes(task.id))
   )) {
     const session = [...overview.sessions]
@@ -84,6 +86,70 @@ export function createVerifierTaskHook(options: { harness: Harness; sourceRoles?
     try {
       return options.harness.runInImmediateTransaction((db) => {
         const overview = options.harness.getRunOverviewWithDb(db, { runId: run.id, eventLimit: 0 });
+        const runtimeContract = objectOrNull(task.config?.runtimeIntegrationExecutionContract);
+        if (runtimeContract) {
+          const problem = runtimeIntegrationTaskExecutionProblem({
+            runId: run.id,
+            boundary: overview.run?.context.runtimeIntegrationBoundary,
+            evidenceBundle: overview.run?.context.targetSystemEvidenceBundle,
+            task,
+            tasks: overview.tasks,
+          });
+          if (problem) {
+            return {
+              decision: "exit" as const,
+              problems: [problem],
+              artifacts: [{ kind: "runtime_integration_graph_validation_failed", sourceTaskId: task.id }],
+            };
+          }
+          const runtimeTasks = overview.tasks.filter((candidate) =>
+            objectOrNull(candidate.config?.runtimeIntegrationExecutionContract));
+          const frozenChain: typeof runtimeTasks = [];
+          let source = task;
+          while (source.role !== "verifier") {
+            const successors = runtimeTasks.filter((candidate) => candidate.dependsOn.includes(source.id));
+            if (successors.length !== 1) {
+              return {
+                decision: "exit" as const,
+                problems: [`frozen runtime integration graph is incomplete after ${source.id}`],
+                artifacts: [{
+                  kind: "runtime_integration_graph_validation_failed",
+                  sourceTaskId: task.id,
+                  failedAfterTaskId: source.id,
+                  downstreamTaskIds: successors.map((candidate) => candidate.id),
+                }],
+              };
+            }
+            source = successors[0]!;
+            frozenChain.push(source);
+          }
+          const downstream = frozenChain[0];
+          const finalVerifier = frozenChain.at(-1);
+          if (!downstream || finalVerifier?.role !== "verifier") {
+            return {
+              decision: "exit" as const,
+              problems: [`frozen runtime integration graph is incomplete after ${task.id}`],
+              artifacts: [{
+                kind: "runtime_integration_graph_validation_failed",
+                sourceTaskId: task.id,
+                downstreamTaskIds: frozenChain.map((candidate) => candidate.id),
+              }],
+            };
+          }
+          return {
+            decision: downstream.status === "todo" || downstream.status === "running"
+              ? "continue" as const
+              : "exit" as const,
+            artifacts: [{
+              kind: "frozen_runtime_graph_verification",
+              sourceTaskId: task.id,
+              sourceStageId: runtimeContract.stageId,
+              nextTaskId: downstream.id,
+              finalVerifierTaskId: finalVerifier.id,
+              verifierCreation: "delegated-to-frozen-graph",
+            }],
+          };
+        }
         const completionContract = completionVerificationContract(overview, task);
         const existingVerifiers = overview.tasks
           .filter((candidate) => candidate.role === "verifier" && candidate.dependsOn.includes(task.id));
@@ -248,6 +314,12 @@ export function createVerifierTaskHook(options: { harness: Harness; sourceRoles?
       throw error;
     }
   };
+}
+
+function objectOrNull(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
 }
 
 function stableJson(value: unknown): string {

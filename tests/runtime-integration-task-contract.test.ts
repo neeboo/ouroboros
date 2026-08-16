@@ -13,6 +13,7 @@ import {
 import type { DshCredentialPathPolicyV1 } from "../packages/harness/src";
 import {
   createTasksFromOutputHook,
+  createVerifierTaskHook,
   resolveExecutionRoute,
   startCodexResumableAttempt,
 } from "../packages/runner/src";
@@ -129,6 +130,135 @@ describe("runtime integration task execution contracts", () => {
         });
       }
     }
+  });
+
+  test("runtime stage completion delegates verification to the frozen graph", async () => {
+    const fixture = governedRuntimeFixture(harness, dir, { legacyTasks: true });
+    const graph = applyHarnessAction(harness, {
+      type: "materializeRuntimeIntegrationTaskGraphRecovery",
+      runId: fixture.runId,
+      plannerTaskId: fixture.plannerTaskId,
+    } as never);
+    const taskIds = graph.artifacts.find((artifact) => artifact.kind === "runtime_integration_task_graph_recovery")!
+      .taskIds as string[];
+    const [backendId, ainovelId, frontendId, gatewayId, finalVerifierId] = taskIds;
+    const backend = harness.getTask(backendId!)!;
+    const backendOutput = completedStageOutput("backend-runtime");
+    harness.recordAttempt({ taskId: backend.id, input: {}, output: backendOutput });
+
+    const backendResult = await createVerifierTaskHook({ harness })({
+      run: harness.getRun(fixture.runId)!,
+      task: harness.getTask(backend.id)!,
+      sessionName: "backend-runtime",
+      prompt: backend.prompt,
+      output: backendOutput,
+    });
+
+    expect(backendResult).toMatchObject({
+      decision: "continue",
+      artifacts: [expect.objectContaining({
+        kind: "frozen_runtime_graph_verification",
+        sourceTaskId: backend.id,
+        nextTaskId: ainovelId,
+        finalVerifierTaskId: finalVerifierId,
+      })],
+    });
+    expect(harness.getRunOverview({ runId: fixture.runId, eventLimit: 0 }).tasks
+      .filter((task) => task.role === "verifier" && task.config?.runtimeIntegrationExecutionContract)).toHaveLength(1);
+    expect(harness.nextReadyTask(fixture.runId)?.id).toBe(ainovelId);
+
+    for (const stageId of [ainovelId, frontendId, gatewayId]) {
+      harness.recordAttempt({ taskId: stageId!, input: {}, output: completedStageOutput(harness.getTask(stageId!)!.goal) });
+    }
+    const gateway = harness.getTask(gatewayId!)!;
+    const gatewayOutput = completedStageOutput(gateway.goal);
+    const gatewayResult = await createVerifierTaskHook({ harness })({
+      run: harness.getRun(fixture.runId)!,
+      task: gateway,
+      sessionName: "dsh-gateway",
+      prompt: gateway.prompt,
+      output: gatewayOutput,
+    });
+    expect(gatewayResult).toMatchObject({
+      decision: "continue",
+      artifacts: [expect.objectContaining({
+        kind: "frozen_runtime_graph_verification",
+        sourceTaskId: gateway.id,
+        nextTaskId: finalVerifierId,
+        finalVerifierTaskId: finalVerifierId,
+      })],
+    });
+    expect(harness.getRunOverview({ runId: fixture.runId, eventLimit: 0 }).tasks
+      .filter((task) => task.role === "verifier" && task.config?.runtimeIntegrationExecutionContract)).toHaveLength(1);
+    expect(harness.nextReadyTask(fixture.runId)?.id).toBe(finalVerifierId);
+  });
+
+  test("runtime task creation rejects workers and verifiers outside the frozen graph", () => {
+    const fixture = governedRuntimeFixture(harness, dir, { legacyTasks: true });
+    const graph = applyHarnessAction(harness, {
+      type: "materializeRuntimeIntegrationTaskGraphRecovery",
+      runId: fixture.runId,
+      plannerTaskId: fixture.plannerTaskId,
+    } as never);
+    const taskIds = graph.artifacts.find((artifact) => artifact.kind === "runtime_integration_task_graph_recovery")!
+      .taskIds as string[];
+
+    expect(() => harness.createTask({
+      runId: fixture.runId,
+      role: "verifier",
+      goal: "Verify: backend-runtime",
+      prompt: "This verifier was not frozen by the Planner.",
+      dependsOn: [taskIds[0]!],
+    })).toThrow("runtime integration execution contract is missing");
+  });
+
+  test("leasing blocks a legacy out-of-graph verifier and selects the frozen next stage", () => {
+    const fixture = governedRuntimeFixture(harness, dir, { legacyTasks: true });
+    const graph = applyHarnessAction(harness, {
+      type: "materializeRuntimeIntegrationTaskGraphRecovery",
+      runId: fixture.runId,
+      plannerTaskId: fixture.plannerTaskId,
+    } as never);
+    const taskIds = graph.artifacts.find((artifact) => artifact.kind === "runtime_integration_task_graph_recovery")!
+      .taskIds as string[];
+    const [backendId, ainovelId] = taskIds;
+    harness.recordAttempt({ taskId: backendId!, input: {}, output: completedStageOutput("backend-runtime") });
+    const rogueVerifierId = "task_rogue_runtime_stage_verifier";
+    harness.runInImmediateTransaction((db) => {
+      db.query(
+        `insert into tasks (
+           id, run_id, parent_id, cycle_id, status, role, goal, prompt,
+           depends_on_json, done_when_json, worktree_path, config_json, created_at, updated_at
+         ) values (
+           $id, $runId, null, $cycleId, 'todo', 'verifier', $goal, $prompt,
+           $dependsOn, '[]', null, '{}', '2000-01-01 00:00:00', '2000-01-01 00:00:00'
+         )`,
+      ).run({
+        $id: rogueVerifierId,
+        $runId: fixture.runId,
+        $cycleId: harness.getTask(backendId!)!.cycleId,
+        $goal: "Verify: backend-runtime",
+        $prompt: "Legacy verifier without a frozen execution contract.",
+        $dependsOn: JSON.stringify([backendId]),
+      });
+    });
+
+    const leased = harness.leaseReadyTasks({
+      runId: fixture.runId,
+      limit: 1,
+      sessionForTask: (task) => `session-${task.id}`,
+    });
+
+    expect(leased.map((task) => task.id)).toEqual([ainovelId]);
+    expect(harness.getTask(rogueVerifierId)?.status).toBe("blocked");
+    const rogueAttempt = harness.getRunOverview({ runId: fixture.runId, eventLimit: 0 }).sessions
+      .find((session) => session.taskId === rogueVerifierId);
+    expect(rogueAttempt).toMatchObject({
+      status: "blocked",
+      output: {
+        problems: [expect.stringContaining("runtime integration execution contract is missing")],
+      },
+    });
   });
 
   test("a runtime Worker file policy may tighten reads and denials but never widen writes", () => {
@@ -764,6 +894,17 @@ function plannerOutput() {
       dependsOn: [...stage.dependsOn],
       doneWhen: [`${stage.id} done`],
     })),
+  };
+}
+
+function completedStageOutput(stageId: string) {
+  return {
+    status: "done" as const,
+    summary: `${stageId} completed within its frozen contract.`,
+    changedFiles: [],
+    checks: [{ name: `${stageId} deterministic checks`, status: "passed" as const }],
+    artifacts: [{ kind: "runtime_stage_receipt", stageId }],
+    problems: [],
   };
 }
 
