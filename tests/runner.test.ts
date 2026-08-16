@@ -571,6 +571,10 @@ describe("runner", () => {
           proposalProjection: {
             schemaVersion: 1,
             causalFailureClass: "evaluation-defect",
+            requiredDomainOutcomes: [
+              "短剧", "互动游戏剧", "电视剧", "电影", "ainovel",
+              "专业编剧", "审核", "评分", "互动第四墙", "共生",
+            ],
             signalSources: [
               { id: signal.id, kind: "external-ref" },
               { id: expect.stringMatching(/^action:action_/), kind: "external-ref" },

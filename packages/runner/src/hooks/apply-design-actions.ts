@@ -585,19 +585,51 @@ function adaptHostReceiptBoundProposal(
   }
   const rawTerms = adapter.requiredBusinessTerms;
   const requiredBusinessTerms = Array.isArray(rawTerms)
-    ? rawTerms.filter((term): term is string => typeof term === "string" && term.length > 0)
+    ? rawTerms.filter((term): term is string => typeof term === "string" && term.trim() === term && term.length > 0)
     : [];
-  if (!Array.isArray(rawTerms) || requiredBusinessTerms.length !== rawTerms.length || requiredBusinessTerms.length > 32) {
+  if (!Array.isArray(rawTerms)
+    || requiredBusinessTerms.length !== rawTerms.length
+    || requiredBusinessTerms.length === 0
+    || requiredBusinessTerms.length > 32
+    || new Set(requiredBusinessTerms).size !== requiredBusinessTerms.length) {
     throw new Error("host receipt design adapter business terms are malformed");
   }
-  const businessText = JSON.stringify({
-    problem: rawProposal.problem,
-    recommendation: rawProposal.recommendation,
-    objective: (rawProposal.evolutionPack as Record<string, unknown> | undefined)?.objective,
-  }).toLowerCase();
-  const missingBusinessTerms = requiredBusinessTerms.filter((term) => !businessText.includes(term.toLowerCase()));
-  if (missingBusinessTerms.length > 0) {
-    throw new Error(`versioned business design is missing frozen target requirements: ${missingBusinessTerms.join(", ")}`);
+  const projectedDomainOutcomes = projection.requiredDomainOutcomes;
+  if (!Array.isArray(projectedDomainOutcomes)
+    || projectedDomainOutcomes.length !== requiredBusinessTerms.length
+    || projectedDomainOutcomes.some((term, index) => term !== requiredBusinessTerms[index])) {
+    throw new Error("host receipt design adapter must project the exact frozen target requirements");
+  }
+  const problem = typeof rawProposal.problem === "string" ? rawProposal.problem.trim() : "";
+  const recommendation = typeof rawProposal.recommendation === "string" ? rawProposal.recommendation.trim() : "";
+  const additions = Array.isArray(rawProposal.additions)
+    ? rawProposal.additions.filter((item): item is string => typeof item === "string" && item.trim().length > 0)
+    : [];
+  const options = Array.isArray(rawProposal.options) ? rawProposal.options : [];
+  const hasConcreteOption = options.some((option) => {
+    if (!option || typeof option !== "object" || Array.isArray(option)) return false;
+    const record = option as Record<string, unknown>;
+    const hasTextItems = (value: unknown) => Array.isArray(value)
+      && value.some((item) => typeof item === "string" && item.trim().length > 0);
+    return typeof record.name === "string"
+      && record.name.trim().length >= 4
+      && hasTextItems(record.benefits)
+      && hasTextItems(record.costs)
+      && hasTextItems(record.risks);
+  });
+  const rawCausalForSubstance = rawProposal.causalHypothesis;
+  const mechanism = rawCausalForSubstance && typeof rawCausalForSubstance === "object" && !Array.isArray(rawCausalForSubstance)
+    && typeof (rawCausalForSubstance as Record<string, unknown>).mechanism === "string"
+    ? ((rawCausalForSubstance as Record<string, unknown>).mechanism as string).trim()
+    : "";
+  if (problem.length < 12
+    || recommendation.length < 12
+    || additions.length === 0
+    || !hasConcreteOption
+    || mechanism.length < 12) {
+    throw new Error(
+      "host receipt versioned business design must provide substantive problem, recommendation, options, additions, and causal mechanism",
+    );
   }
 
   const adapted = structuredClone(rawProposal);
@@ -606,13 +638,32 @@ function adaptHostReceiptBoundProposal(
     throw new Error("host receipt versioned design must include the business-owned evolutionPack");
   }
   const rawPack = adapted.evolutionPack as Record<string, unknown>;
+  const rawObjective = rawPack.objective;
+  if (!rawObjective || typeof rawObjective !== "object" || Array.isArray(rawObjective)) {
+    throw new Error("host receipt versioned design must include the business-owned evolutionPack objective");
+  }
+  const modelDomainOutcomes = (rawObjective as Record<string, unknown>).domainOutcomes;
+  if (!Array.isArray(modelDomainOutcomes)) {
+    throw new Error("host receipt versioned design must include business-owned domain outcomes");
+  }
+  const projectedOutcomes = [
+    ...modelDomainOutcomes,
+    ...requiredBusinessTerms.filter((term) => !modelDomainOutcomes.includes(term)),
+  ];
   const normalizedPack = parseEvolutionPackV1({
     ...rawPack,
     version: adapter.targetVersion,
+    objective: {
+      ...(rawObjective as Record<string, unknown>),
+      domainOutcomes: projectedOutcomes,
+    },
     observation: {
       signalSources: structuredClone(projectedSignalSources),
     },
   }, projectId, "host receipt adapted evolutionPack");
+  if (requiredBusinessTerms.some((term) => !normalizedPack.objective.domainOutcomes.includes(term))) {
+    throw new Error("host receipt versioned business design lost its frozen target requirements after projection");
+  }
   adapted.evolutionPack = normalizedPack;
   const rawCausal = adapted.causalHypothesis;
   if (!rawCausal || typeof rawCausal !== "object" || Array.isArray(rawCausal)) {

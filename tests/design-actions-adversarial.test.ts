@@ -2780,12 +2780,17 @@ describe("design-action transition coordinator (production authority path)", () 
       }],
       hostCorpusReceipts: [receipt],
     };
+    const requiredBusinessTerms = [
+      "短剧", "互动游戏剧", "电视剧", "电影", "ainovel",
+      "专业编剧", "审核", "评分", "互动第四墙", "共生",
+    ];
     const proposalProjection = buildHostReceiptProposalProjection({
       projectId,
       actionEvidenceRef: `action:${actionId}`,
       correctionSignalRef: defectSignalId,
       sourceDecisionId: "decision_frozen_v4",
       targetVersion: 5,
+      requiredBusinessTerms,
     });
     const governedMaturity = proposalProjection.deliveryContracts.maturityGateContract;
     const governedPrivacy = proposalProjection.deliveryContracts.productionEpisodePrivacyReceiptContract;
@@ -2815,18 +2820,18 @@ describe("design-action transition coordinator (production authority path)", () 
           comparisonSha256: canonicalEvolutionValueSha256(successorComparison),
           proposalProjection,
           proposalProjectionSha256: canonicalEvolutionValueSha256(proposalProjection),
-          requiredBusinessTerms: [
-            "短剧", "互动游戏剧", "电视剧", "电影", "ainovel",
-            "专业编剧", "审核", "评分", "互动第四墙", "共生",
-          ],
+          requiredBusinessTerms,
         },
       },
     });
-    const proposal = targetEvolutionEnvelope(projectId);
+    const proposal = {
+      ...targetEvolutionEnvelope(projectId),
+      additions: ["新增跨形式原创机制、编剧盲审评分和互动叙事验证链"],
+    };
     proposal.problem = "短剧、互动游戏剧、电视剧和电影缺少统一的原创演化合同。";
-    proposal.recommendation = "用 ainovel 原创能力，加入专业编剧审核与评分，并验证互动第四墙和共生机制。";
+    proposal.recommendation = "用 ainovel 原创能力，加入编剧盲审与量化打分机制，并验证互动第四墙和共生机制。";
     proposal.evolutionPack.objective.domainOutcomes = [
-      "短剧、互动游戏剧、电视剧和电影都能接受专业编剧审核与评分",
+      "短剧、互动游戏剧、电视剧和电影都能接受编剧盲审与量化打分",
       "ainovel 原创能力支持互动第四墙和共生机制",
     ];
     proposal.evolutionPack.observation.signalSources = [
@@ -2852,6 +2857,35 @@ describe("design-action transition coordinator (production authority path)", () 
       rollbackPlanRef: "plan:model-placeholder-v5",
     };
     proposal.evidenceRefs = [defectSignalId, `action:${actionId}`];
+    const hollowProposal = structuredClone(proposal);
+    hollowProposal.problem = "有问题";
+    hollowProposal.recommendation = "做改进";
+    hollowProposal.additions = [];
+    hollowProposal.options = [{
+      name: "改进",
+      benefits: [],
+      costs: [],
+      risks: [],
+      lockIn: [],
+    }];
+    hollowProposal.causalHypothesis.mechanism = "会变好";
+    const hollowResult = await runHook(parseAttemptOutput(JSON.stringify({
+      status: "done",
+      summary: "Hollow host-projected proposal",
+      actions: [{
+        type: "proposeDesign",
+        payload: { projectId, title: "Hollow version 5 proposal", proposal: hollowProposal },
+      }],
+    })), runId, taskId);
+    expect(hollowResult.problems).toEqual([expect.stringContaining(
+      "must provide substantive problem, recommendation, options, additions, and causal mechanism",
+    )]);
+    expect(harness.listDesignProposals({ projectId })).toHaveLength(0);
+    expect(JSON.stringify({
+      problem: proposal.problem,
+      recommendation: proposal.recommendation,
+      objective: proposal.evolutionPack.objective,
+    })).not.toContain("专业编剧");
     // This intentionally mirrors the failed production output: the model
     // repeats version 4 and the old comparison. The host-bound adapter must
     // replace only the receipt-owned fields before fixed validation.
@@ -2888,6 +2922,12 @@ describe("design-action transition coordinator (production authority path)", () 
       recommendation: expect.stringContaining("ainovel"),
       evolutionPack: {
         version: 5,
+        objective: {
+          domainOutcomes: expect.arrayContaining([
+            "短剧", "互动游戏剧", "电视剧", "电影", "ainovel",
+            "专业编剧", "审核", "评分", "互动第四墙", "共生",
+          ]),
+        },
       },
       causalHypothesis: { failureClass: "evaluation-defect" },
       evaluationContract: { comparison: successorComparison },
@@ -2927,7 +2967,7 @@ describe("design-action transition coordinator (production authority path)", () 
         source: "design",
         designProposal: {
           problem: expect.stringContaining("互动游戏剧"),
-          recommendation: expect.stringContaining("专业编剧"),
+          recommendation: expect.stringContaining("编剧盲审"),
           evolutionPack: { version: 5 },
           causalHypothesis: { failureClass: "evaluation-defect" },
           evaluationContract: { comparison: successorComparison },

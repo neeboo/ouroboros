@@ -342,6 +342,7 @@ export function buildHostReceiptProposalProjection(input: {
   correctionSignalRef: string;
   sourceDecisionId: string;
   targetVersion: number;
+  requiredBusinessTerms: readonly string[];
 }) {
   const version = input.targetVersion;
   const exactTargetRef = `artifact:target-policy-v${version}`;
@@ -379,6 +380,7 @@ export function buildHostReceiptProposalProjection(input: {
   return {
     schemaVersion: 1 as const,
     causalFailureClass: "evaluation-defect" as const,
+    requiredDomainOutcomes: [...input.requiredBusinessTerms],
     signalSources: [
       { id: input.correctionSignalRef, kind: "external-ref" as const },
       { id: input.actionEvidenceRef, kind: "external-ref" as const },
@@ -511,13 +513,6 @@ function ensureVersionedDesigner(
   const evidenceBundle = buildEvidenceBundle(harness, deliveryRun, marker, action);
   const receipt = evidenceBundle.hostCorpusReceipts[0]!;
   const actionEvidenceRef = `action:${action.eventId}`;
-  const proposalProjection = buildHostReceiptProposalProjection({
-    projectId: deliveryRun.projectId!,
-    actionEvidenceRef,
-    correctionSignalRef: marker.sourceSignalId,
-    sourceDecisionId: marker.sourceDecisionId,
-    targetVersion: marker.targetVersion,
-  });
   const requiredBusinessTerms = [
     "短剧",
     "互动游戏剧",
@@ -530,6 +525,14 @@ function ensureVersionedDesigner(
     "互动第四墙",
     "共生",
   ];
+  const proposalProjection = buildHostReceiptProposalProjection({
+    projectId: deliveryRun.projectId!,
+    actionEvidenceRef,
+    correctionSignalRef: marker.sourceSignalId,
+    sourceDecisionId: marker.sourceDecisionId,
+    targetVersion: marker.targetVersion,
+    requiredBusinessTerms,
+  });
   const retiredPredecessors = harness.listRuns({ limit: 1_000 }).filter((candidate) =>
     candidate.context.parentRunId === deliveryRun.id
     && candidate.context.source === "target-system-design"
