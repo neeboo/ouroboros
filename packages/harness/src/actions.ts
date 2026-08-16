@@ -124,6 +124,16 @@ export type HarnessAction =
       sourceAttemptId: string;
       reason?: string;
     }
+  | {
+      type: "buildVersionedCorpusManifest";
+      projectId: string;
+      sourceRunId: string;
+      proposalId: string;
+      decisionId: string;
+      targetVersion: number;
+      developmentFixtureRefs?: string[];
+      unrelatedFixtureRefs?: string[];
+    }
   | { type: "markRunTodo"; runId: string; reason?: string }
   | {
       type: "updateRunContext";
@@ -608,6 +618,28 @@ export function parseHarnessAction(value: unknown): HarnessAction {
       reason: optionalStringField(record, "reason"),
     };
   }
+  if (type === "buildVersionedCorpusManifest") {
+    assertOnlyFields(record, type, [
+      "type",
+      "projectId",
+      "sourceRunId",
+      "proposalId",
+      "decisionId",
+      "targetVersion",
+      "developmentFixtureRefs",
+      "unrelatedFixtureRefs",
+    ]);
+    return {
+      type,
+      projectId: exactSafeIdentifierField(record, "projectId"),
+      sourceRunId: exactSafeIdentifierField(record, "sourceRunId"),
+      proposalId: exactSafeIdentifierField(record, "proposalId"),
+      decisionId: exactSafeIdentifierField(record, "decisionId"),
+      targetVersion: positiveIntegerField(record, "targetVersion"),
+      developmentFixtureRefs: optionalStringArrayField(record, "developmentFixtureRefs"),
+      unrelatedFixtureRefs: optionalStringArrayField(record, "unrelatedFixtureRefs"),
+    };
+  }
   if (type === "markRunTodo") {
     return { type, runId: stringField(record, "runId"), reason: optionalStringField(record, "reason") };
   }
@@ -958,7 +990,7 @@ export function parseHarnessAction(value: unknown): HarnessAction {
     };
   }
   throw new Error(
-    "harness action type must be reclaimRunningTasks, retryTask, reconcileRunEvidence, recordSignal, linkResearchEvidence, materializeDesignerActionRecovery, markRunTodo, updateRunContext, amendRunContract, retireRun, retireTask, prepareRunDrain, completeSystemTask, integrateVerifiedRun, pushExactGitRef, createExactGitRef, commitExactGitIndex, stageExactWorkerFilesForVerification, materializeAttemptArtifactsForVerification, verifySealedCorpusForVerification, registerEvolutionProfile, recordProductionEpisode, registerHarnessVariant, activateHarnessRevision, freezeMatchedExperiment, interruptAttemptAndCreateTask, interruptRunningAttemptsAndCreateTask, acceptGuardrailProposal, startSubsession, collectSubsessions, cancelSubsessions, or runWatchdogPass",
+    "harness action type must be reclaimRunningTasks, retryTask, reconcileRunEvidence, recordSignal, linkResearchEvidence, materializeDesignerActionRecovery, buildVersionedCorpusManifest, markRunTodo, updateRunContext, amendRunContract, retireRun, retireTask, prepareRunDrain, completeSystemTask, integrateVerifiedRun, pushExactGitRef, createExactGitRef, commitExactGitIndex, stageExactWorkerFilesForVerification, materializeAttemptArtifactsForVerification, verifySealedCorpusForVerification, registerEvolutionProfile, recordProductionEpisode, registerHarnessVariant, activateHarnessRevision, freezeMatchedExperiment, interruptAttemptAndCreateTask, interruptRunningAttemptsAndCreateTask, acceptGuardrailProposal, startSubsession, collectSubsessions, cancelSubsessions, or runWatchdogPass",
   );
 }
 
@@ -1009,6 +1041,10 @@ export function applyHarnessAction(
 
   if (action.type === "linkResearchEvidence") {
     return applyResearchEvidenceLinkAtomically(harness, action);
+  }
+
+  if (action.type === "buildVersionedCorpusManifest") {
+    return applyVersionedCorpusManifestAction(harness, action, options);
   }
 
   if (action.type === "integrateVerifiedRun") {
@@ -1566,6 +1602,181 @@ function applyResearchEvidenceLinkAtomically(
     });
     return { ...result, eventId };
   }
+}
+
+type VersionedCorpusManifestAction = Extract<HarnessAction, { type: "buildVersionedCorpusManifest" }>;
+
+function fixtureEntry(projectRoot: string, ref: string, label: string) {
+  if (!ref.startsWith("fixture:")) {
+    throw new Error(`${label} must use a fixture: reference`);
+  }
+  const relativePath = ref.slice("fixture:".length);
+  if (!relativePath || isAbsolute(relativePath) || relativePath.split(/[\\/]+/).includes("..")) {
+    throw new Error(`${label} must resolve inside the target project`);
+  }
+  const candidate = resolve(projectRoot, relativePath);
+  const root = realpathSync(projectRoot);
+  const stat = lstatSync(candidate);
+  if (!stat.isFile() || stat.isSymbolicLink()) {
+    throw new Error(`${label} must reference a regular non-symlink fixture`);
+  }
+  const canonical = realpathSync(candidate);
+  if (canonical !== root && !canonical.startsWith(`${root}${sep}`)) {
+    throw new Error(`${label} escapes the target project`);
+  }
+  if (stat.size > 16 * 1024 * 1024) {
+    throw new Error(`${label} exceeds the 16 MiB host manifest limit`);
+  }
+  const bytes = readFileSync(canonical);
+  return {
+    ref,
+    sha256: createHash("sha256").update(bytes).digest("hex"),
+    byteLength: bytes.byteLength,
+  };
+}
+
+function applyVersionedCorpusManifestAction(
+  harness: Harness,
+  action: VersionedCorpusManifestAction,
+  options: HarnessActionOptions,
+): HarnessActionResult & { eventId: string } {
+  let result: HarnessActionResult;
+  try {
+    const run = harness.getRun(action.sourceRunId);
+    if (!run || run.projectId !== action.projectId) {
+      throw new Error("versioned corpus source run must belong to the explicit target project");
+    }
+    if (run.status !== "blocked") {
+      throw new Error(`versioned corpus source run must be blocked: ${run.status}`);
+    }
+    const project = harness.getProject(action.projectId);
+    if (!project) throw new Error(`target project not found: ${action.projectId}`);
+    const proposal = harness.getDesignProposal({ id: action.proposalId });
+    if (!proposal || proposal.projectId !== action.projectId || proposal.status !== "accepted") {
+      throw new Error("versioned corpus proposal must be accepted and project-bound");
+    }
+    const decision = harness.listDesignDecisions({ proposalId: proposal.id, limit: 100 })
+      .find((candidate) => candidate.id === action.decisionId);
+    if (!decision || decision.decision !== "approved") {
+      throw new Error("versioned corpus manifest requires the named approved decision");
+    }
+    if (run.context.designProposalId !== proposal.id || run.context.designDecisionId !== decision.id) {
+      throw new Error("versioned corpus source run must freeze the named proposal and decision");
+    }
+    const pack = proposal.proposal.evolutionPack as Record<string, unknown> | undefined;
+    const sourceVersion = pack?.version;
+    if (!Number.isInteger(sourceVersion) || Number(sourceVersion) < 1) {
+      throw new Error("accepted proposal must record a positive evolutionPack version");
+    }
+    if (action.targetVersion !== Number(sourceVersion) + 1) {
+      throw new Error("targetVersion must be exactly one greater than the accepted proposal version");
+    }
+    const comparison = parseEvolutionComparison(proposal.proposal.evaluationContract.comparison);
+    const developmentRefs = action.developmentFixtureRefs ?? comparison.developmentEvidenceRefs;
+    const unrelatedRefs = action.unrelatedFixtureRefs ?? comparison.unrelatedEvidenceRefs;
+    const developmentEntries = developmentRefs.map((ref, index) =>
+      fixtureEntry(project.rootPath, ref, `developmentEvidenceRefs[${index}]`));
+    const unrelatedEntries = unrelatedRefs.map((ref, index) =>
+      fixtureEntry(project.rootPath, ref, `unrelatedEvidenceRefs[${index}]`));
+    let holdoutEntries: Array<{ sha256: string; byteLength: number }>;
+    let descriptorSha256: string | null = null;
+    if (options.sealedDescriptorJson) {
+      if (options.sealedDescriptorJson.length > 64 * 1024) throw new Error("private holdout descriptor exceeds 64 KiB");
+      const descriptor = JSON.parse(options.sealedDescriptorJson) as Record<string, unknown>;
+      if (Object.keys(descriptor).join("\0") !== "entries" || !Array.isArray(descriptor.entries) || descriptor.entries.length === 0) {
+        throw new Error("private holdout descriptor must contain one non-empty entries array");
+      }
+      holdoutEntries = descriptor.entries.map((raw, index) => {
+        if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error(`private holdout entry ${index} is malformed`);
+        const entry = raw as Record<string, unknown>;
+        if (Object.keys(entry).sort().join("\0") !== "path\0ref" || typeof entry.path !== "string" || typeof entry.ref !== "string") {
+          throw new Error(`private holdout entry ${index} must contain only path and ref`);
+        }
+        if (!isAbsolute(entry.path)) throw new Error(`private holdout entry ${index} path must be absolute`);
+        const stat = lstatSync(entry.path);
+        if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 16 * 1024 * 1024) {
+          throw new Error(`private holdout entry ${index} must be a bounded regular non-symlink file`);
+        }
+        const bytes = readFileSync(realpathSync(entry.path));
+        return { sha256: createHash("sha256").update(bytes).digest("hex"), byteLength: bytes.byteLength };
+      });
+      descriptorSha256 = createHash("sha256").update(options.sealedDescriptorJson).digest("hex");
+    } else {
+      holdoutEntries = comparison.holdoutEvidenceRefs.map((ref, index) => {
+        const entry = fixtureEntry(project.rootPath, ref, `holdoutEvidenceRefs[${index}]`);
+        return { sha256: entry.sha256, byteLength: entry.byteLength };
+      });
+    }
+    const holdoutCommitmentSha256 = canonicalEvolutionValueSha256(holdoutEntries);
+    const manifestBody = {
+      schemaVersion: 1,
+      projectId: action.projectId,
+      sourceVersion: Number(sourceVersion),
+      targetVersion: action.targetVersion,
+      developmentEntries,
+      unrelatedEntries,
+      holdout: { count: holdoutEntries.length, commitmentSha256: holdoutCommitmentSha256 },
+    };
+    const corpusSnapshotSha256 = canonicalEvolutionValueSha256(manifestBody);
+    const successorComparison: EvolutionComparison = {
+      ...comparison,
+      developmentEvidenceRefs: developmentEntries.map((entry) => entry.ref),
+      holdoutEvidenceRefs: [`commitment:holdout-v${action.targetVersion}:${holdoutCommitmentSha256}`],
+      unrelatedEvidenceRefs: unrelatedEntries.map((entry) => entry.ref),
+      corpusSnapshotSha256,
+    };
+    const artifact = {
+      kind: "versioned_corpus_manifest_receipt",
+      projectId: action.projectId,
+      sourceRunId: action.sourceRunId,
+      proposalId: proposal.id,
+      decisionId: decision.id,
+      sourceVersion: Number(sourceVersion),
+      targetVersion: action.targetVersion,
+      sourceComparisonSha256: canonicalEvolutionValueSha256(comparison),
+      manifestSha256: corpusSnapshotSha256,
+      developmentEntries,
+      unrelatedEntries,
+      holdout: manifestBody.holdout,
+      descriptorSource: options.sealedDescriptorJson ? "ephemeral-host-input" : "approved-proposal-comparison",
+      descriptorSha256,
+      comparison: successorComparison,
+      comparisonSha256: canonicalEvolutionValueSha256(successorComparison),
+      noHoldoutDisclosure: true,
+      sideEffectCounters: zeroSideEffectCounters(),
+    };
+    result = doneResult(action.type, `Host-owned version ${action.targetVersion} corpus manifest receipt created.`, [
+      { name: "approved source comparison", status: "passed", evidence: artifact.sourceComparisonSha256 },
+      { name: "public fixture manifest", status: "passed", evidence: artifact.manifestSha256 },
+      { name: "private holdout disclosure", status: "passed", evidence: "count-and-commitment-only" },
+      { name: "side effects", status: "passed", evidence: "all zero" },
+    ], [artifact]);
+  } catch (error) {
+    result = blockedResult(action.type, `Versioned corpus manifest blocked: ${errorMessage(error)}`, [errorMessage(error)]);
+  }
+  if (result.status === "done") {
+    const request = safeRequest(action);
+    const prior = harness.listHarnessActionEvents({ limit: 1_000 })
+      .find((event) => event.status === "done" && event.actionType === action.type
+        && stableFingerprint(event.request) === stableFingerprint(request));
+    if (prior) {
+      if (stableFingerprint(prior.result) === stableFingerprint(resultToRecord(result))) {
+        return { ...result, eventId: prior.id };
+      }
+      result = blockedResult(
+        action.type,
+        "Versioned corpus manifest blocked because the same frozen request now resolves to different bytes.",
+        ["versioned corpus manifest replay drift"],
+      );
+    }
+  }
+  const eventId = harness.recordHarnessActionEvent({
+    actionType: action.type,
+    status: result.status,
+    request: safeRequest(action),
+    result: resultToRecord(result),
+  });
+  return { ...result, eventId };
 }
 
 function hasPassedResearchCheck(checks: unknown[] | undefined, name: string) {
@@ -2715,7 +2926,7 @@ function applyParsedHarnessAction(
   harness: Harness,
   action: Exclude<
     HarnessAction,
-    SubsessionAction | EvolutionAction | HarnessRevisionActivationAction | DesignerActionRecoveryAction | RunEvidenceReconciliationAction | ResearchEvidenceLinkAction | BlockedRunSignalAction
+    SubsessionAction | EvolutionAction | HarnessRevisionActivationAction | DesignerActionRecoveryAction | RunEvidenceReconciliationAction | ResearchEvidenceLinkAction | BlockedRunSignalAction | VersionedCorpusManifestAction
   >,
   options: HarnessActionOptions,
 ): HarnessActionResult {
@@ -7436,6 +7647,11 @@ function prepareRunDrain(harness: Harness, action: Extract<HarnessAction, { type
     );
   }
 
+  const exhaustedDesignCorrection = closeExhaustedTargetSystemDesignCorrection(harness, action.runId);
+  if (exhaustedDesignCorrection) {
+    return exhaustedDesignCorrection;
+  }
+
   const quiescence = closeTargetSystemDesignQuiescence(harness, action.runId);
   if (quiescence) {
     return quiescence;
@@ -10916,6 +11132,82 @@ function exactSafeIdentifierField(record: Record<string, unknown>, key: string) 
     throw new Error(`${key} must be a safe identifier of at most 200 characters`);
   }
   return value;
+}
+
+function closeExhaustedTargetSystemDesignCorrection(
+  harness: Harness,
+  runId: string,
+): HarnessActionResult | null {
+  const overview = harness.getRunOverview({ runId, eventLimit: 0 });
+  const run = overview.run;
+  if (!run || run.context.source !== "target-system-design" || !run.projectId) return null;
+  if (overview.tasks.some((task) => task.status === "todo" || task.status === "running")) return null;
+  const blockedDesigners = overview.tasks
+    .filter((task) => task.role === "designer" && task.status === "blocked")
+    .map((task) => ({
+      task,
+      session: overview.sessions
+        .filter((session) => session.taskId === task.id && session.status === "blocked")
+        .sort((left, right) => left.attemptId.localeCompare(right.attemptId))
+        .at(-1),
+    }))
+    .filter((entry): entry is typeof entry & { session: NonNullable<typeof entry.session> } => Boolean(entry.session));
+  if (blockedDesigners.length < 2) return null;
+  const reviews = overview.tasks.filter((task) => task.role === "goal-review");
+  const completedReviews = reviews.filter((task) => task.status === "done");
+  if (completedReviews.length === 0) return null;
+  const correction = blockedDesigners[blockedDesigners.length - 1]!;
+  const initial = blockedDesigners[blockedDesigners.length - 2]!;
+  const lineageReview = completedReviews.find((task) =>
+    task.dependsOn.includes(initial.task.id) && correction.task.dependsOn.includes(task.id));
+  if (!lineageReview) return null;
+  const validationProblem = [...(correction.session.output.problems ?? [])].reverse().find((problem) => problem.trim())
+    ?? correction.session.output.summary;
+  const observationTime = normalizedEvidenceTimestamp(correction.session.finishedAt);
+  if (run.status !== "blocked") harness.updateRunStatus({ runId, status: "blocked" });
+  const signal = applyHarnessAction(harness, {
+    type: "recordSignal",
+    projectId: run.projectId,
+    sourceRunId: runId,
+    signalClass: "system",
+    source: `blocked-run-outcome:${runId}`,
+    title: "Versioned target design validation exhausted its bounded correction",
+    summary: "The initial target-system Designer and its single governed correction both failed fixed-action validation. The root was closed without another Goal Review.",
+    observationTime,
+    confidence: 1,
+    evidence: [
+      `run:${runId}`,
+      `task:${initial.task.id}`,
+      `attempt:${initial.session.attemptId}`,
+      `task:${correction.task.id}`,
+      `attempt:${correction.session.attemptId}`,
+      `task:${lineageReview.id}`,
+    ],
+    payload: {
+      outcome: "evidence-defect",
+      defectKind: "target-system-versioned-design-validation-exhausted",
+      correctionLimit: 1,
+      validationFingerprint: stableFingerprint(validationProblem),
+      validationProblem: limitUtf8Output(validationProblem, 1_024),
+      initialDesignerTaskId: initial.task.id,
+      correctionDesignerTaskId: correction.task.id,
+      goalReviewTaskIds: [lineageReview.id],
+      nextStep: "new-independent-designer-trigger-or-quiescence",
+      sideEffectCounters: zeroSideEffectCounters(),
+    },
+  });
+  return {
+    status: "blocked",
+    actionType: "prepareRunDrain",
+    summary: `Run ${runId} stopped after its single bounded Designer correction failed validation.`,
+    checks: [
+      { name: "bounded Designer correction", status: "failed", evidence: "1/1" },
+      { name: "recursive Goal Review", status: "passed", evidence: "stopped" },
+      { name: "strategy signal", status: signal.status === "done" ? "passed" : "failed", evidence: signal.eventId },
+    ],
+    artifacts: signal.artifacts,
+    problems: [validationProblem],
+  };
 }
 
 function exactBoundedTextField(record: Record<string, unknown>, key: string, maxBytes: number) {

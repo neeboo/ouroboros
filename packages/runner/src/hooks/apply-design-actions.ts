@@ -397,7 +397,7 @@ function applyProposeDesignWithDb(
   }
   requireContractEvidence(contract);
   assertProductionComparisonHasNoPlaceholders(contract.comparison);
-  assertTargetSystemAuthoritativeComparison(sourceRun.context, contract.comparison);
+  assertTargetSystemAuthoritativeComparison(sourceRun.context, proposalData, evidenceRefs);
   const investment = proposalData.investment as Record<string, unknown> | undefined;
   if (!investment) {
     throw new Error("proposeDesign payload.proposal.investment must be present");
@@ -495,7 +495,8 @@ function assertProductionComparisonHasNoPlaceholders(value: unknown) {
 
 function assertTargetSystemAuthoritativeComparison(
   runContext: Record<string, unknown>,
-  comparison: unknown,
+  proposal: Record<string, unknown>,
+  evidenceRefs: string[],
 ) {
   const rawBundle = runContext.targetSystemEvidenceBundle;
   if (!rawBundle || typeof rawBundle !== "object" || Array.isArray(rawBundle)) return;
@@ -510,6 +511,56 @@ function assertTargetSystemAuthoritativeComparison(
   }
   const acceptedProposals = bundle.acceptedProposals;
   if (!Array.isArray(acceptedProposals) || acceptedProposals.length === 0) return;
+  const blockedSignals = Array.isArray(bundle.blockedSignals) ? bundle.blockedSignals : [];
+  const unrealizableSignal = blockedSignals.find((entry) => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) return false;
+    const record = entry as Record<string, unknown>;
+    const payload = record.payload;
+    return payload && typeof payload === "object" && !Array.isArray(payload)
+      && (payload as Record<string, unknown>).defectKind === "frozen-corpus-unrealizable";
+  }) as Record<string, unknown> | undefined;
+  const hostReceipts = Array.isArray(bundle.hostCorpusReceipts) ? bundle.hostCorpusReceipts : [];
+  if (unrealizableSignal) {
+    if (typeof unrealizableSignal.id !== "string" || !evidenceRefs.includes(unrealizableSignal.id)) {
+      throw new Error("versioned design correction must cite the frozen-corpus-unrealizable signal");
+    }
+    if (hostReceipts.length === 0) {
+      if (proposal.evolutionPack !== undefined
+        || proposal.causalHypothesis !== undefined
+        || (proposal.evaluationContract as Record<string, unknown> | undefined)?.comparison !== undefined) {
+        throw new Error("versioned design requires a host corpus manifest receipt before freezing evolutionPack or comparison");
+      }
+      return;
+    }
+    if (hostReceipts.length !== 1) {
+      throw new Error("versioned design requires exactly one host corpus manifest receipt");
+    }
+    const receipt = hostReceipts[0] as Record<string, unknown>;
+    if (typeof receipt.actionId !== "string" || !evidenceRefs.includes(receipt.actionId)) {
+      throw new Error("versioned design correction must cite the host corpus manifest action");
+    }
+    const sourceMatches = acceptedProposals.some((entry) => {
+      if (!entry || typeof entry !== "object" || Array.isArray(entry)) return false;
+      const record = entry as Record<string, unknown>;
+      return record.comparisonSha256 === receipt.sourceComparisonSha256
+        && canonicalEvolutionValueSha256(record.comparison) === receipt.sourceComparisonSha256;
+    });
+    if (!sourceMatches) {
+      throw new Error("versioned corpus receipt is not bound to the immutable accepted comparison");
+    }
+    const pack = proposal.evolutionPack as Record<string, unknown> | undefined;
+    if (!pack || pack.version !== receipt.targetVersion || receipt.targetVersion !== 5) {
+      throw new Error("versioned design correction must set evolutionPack.version to the host receipt targetVersion 5");
+    }
+    const proposedComparison = (proposal.evaluationContract as Record<string, unknown> | undefined)?.comparison;
+    if (typeof receipt.comparisonSha256 !== "string"
+      || canonicalEvolutionValueSha256(receipt.comparison) !== receipt.comparisonSha256
+      || canonicalEvolutionValueSha256(proposedComparison) !== receipt.comparisonSha256) {
+      throw new Error("versioned design comparison must copy the host corpus manifest receipt exactly");
+    }
+    return;
+  }
+  const comparison = (proposal.evaluationContract as Record<string, unknown> | undefined)?.comparison;
   const comparisonSha256 = canonicalEvolutionValueSha256(comparison);
   const matches = acceptedProposals.some((entry) => {
     if (!entry || typeof entry !== "object" || Array.isArray(entry)) return false;

@@ -851,6 +851,94 @@ describe("Harness actions", () => {
     expect(overview.tasks.filter((task) => task.role === "planner" || task.role === "worker")).toHaveLength(0);
   });
 
+  test("prepareRunDrain stops after one bounded target-system Designer correction fails validation", () => {
+    const projectId = harness.createProject({ name: "versioned-design-loop", rootPath: dir });
+    const runId = harness.createRun({
+      projectId,
+      goal: "Correct one unrealizable frozen corpus without recursive Goal Review",
+      context: {
+        source: "target-system-design",
+        repairReplanBudget: { limit: 3, used: 0, entries: [] },
+      },
+    });
+    const initialDesignerId = harness.createTask({
+      runId,
+      role: "designer",
+      goal: "Propose version 5",
+      prompt: "Use one fixed proposeDesign action.",
+      config: { readOnly: true, forbidImplementation: true, forbidBrowser: true },
+    });
+    harness.recordAttempt({
+      taskId: initialDesignerId,
+      input: { executor: "codex-resumable", sandbox: "read-only" },
+      output: {
+        status: "blocked",
+        summary: "Fixed action rejected an invalid signal source kind.",
+        changedFiles: [], checks: [], artifacts: [],
+        problems: ["signalSources[1].kind must be one of run-evidence, repository, external-ref, domain-metric"],
+      },
+    });
+    const reviewId = harness.createTask({
+      runId,
+      role: "goal-review",
+      goal: "Allow one bounded Designer correction",
+      prompt: "Correct schema only.",
+      dependsOn: [initialDesignerId],
+    });
+    harness.recordAttempt({
+      taskId: reviewId,
+      input: { executor: "codex-resumable", sandbox: "read-only" },
+      output: {
+        status: "done",
+        runDecision: "continue",
+        summary: "Request one schema correction.",
+        changedFiles: [], checks: [], artifacts: [], problems: [],
+        nextTasks: [{ role: "designer", goal: "Correct schema", prompt: "Use external-ref." }],
+      },
+    });
+    const correctionId = harness.createTask({
+      runId,
+      role: "designer",
+      goal: "Correct the rejected version 5 proposal",
+      prompt: "Use external-ref and the governed comparison path.",
+      dependsOn: [reviewId],
+      config: { readOnly: true, forbidImplementation: true, forbidBrowser: true },
+    });
+    harness.recordAttempt({
+      taskId: correctionId,
+      input: { executor: "codex-resumable", sandbox: "read-only" },
+      output: {
+        status: "blocked",
+        summary: "Fixed action rejected the correction.",
+        changedFiles: [], checks: [], artifacts: [],
+        problems: ["target-system authoritative evidence bundle comparison must be copied exactly into proposeDesign"],
+      },
+    });
+
+    const result = applyHarnessAction(harness, { type: "prepareRunDrain", runId, maxTries: 4 });
+    const replay = applyHarnessAction(harness, { type: "prepareRunDrain", runId, maxTries: 4 });
+    const overview = harness.getRunOverview({ runId, eventLimit: 20 });
+    const signals = harness.listStrategySignals({ projectId });
+
+    expect(result).toMatchObject({ status: "blocked", actionType: "prepareRunDrain" });
+    expect(replay).toMatchObject({ status: "blocked", actionType: "prepareRunDrain" });
+    expect(overview.run).toMatchObject({
+      status: "blocked",
+      context: { repairReplanBudget: { limit: 3, used: 0, entries: [] } },
+    });
+    expect(overview.tasks.filter((task) => task.role === "goal-review")).toHaveLength(1);
+    expect(overview.tasks.filter((task) => task.role === "planner" || task.role === "worker")).toHaveLength(0);
+    expect(signals).toHaveLength(1);
+    expect(signals[0]).toMatchObject({
+      source: `blocked-run-outcome:${runId}`,
+      status: "active",
+      payload: expect.objectContaining({
+        defectKind: "target-system-versioned-design-validation-exhausted",
+        correctionLimit: 1,
+      }),
+    });
+  });
+
   test("repair exhaustion stops after the final verifier without creating goal review work", () => {
     const runId = harness.createRun({
       goal: "Stop at the final verifier verdict",
@@ -4256,6 +4344,134 @@ describe("Harness actions", () => {
       const missing = applyHarnessAction(harness, { ...action, contractId: "sealedCorpusMissing" });
       expect(missing).toMatchObject({ status: "blocked", actionType: "verifySealedCorpusForVerification" });
       expect(missing.problems.join(" ")).toContain("descriptor");
+    });
+
+    test("builds one sanitized versioned corpus manifest receipt from an approved comparison", async () => {
+      const repoPath = join(dir, "versioned-corpus-host-receipt");
+      await mkdir(join(repoPath, "fixtures"), { recursive: true });
+      await writeFile(join(repoPath, "fixtures/development.json"), '{"kind":"development"}\n');
+      await writeFile(join(repoPath, "fixtures/holdout.json"), '{"kind":"private-holdout"}\n');
+      await writeFile(join(repoPath, "fixtures/unrelated.json"), '{"kind":"unrelated"}\n');
+      const projectId = harness.createProject({ name: "versioned-corpus", rootPath: repoPath });
+      const runId = harness.createRun({ projectId, goal: "Record one host-owned version 5 corpus receipt" });
+      const comparison = {
+        controlRef: "artifact:target-control-policy-v1",
+        developmentEvidenceRefs: ["episode:unrealizable-v4-development"],
+        holdoutEvidenceRefs: ["episode:unrealizable-v4-holdout"],
+        unrelatedEvidenceRefs: ["episode:unrealizable-v4-unrelated"],
+        corpusSnapshotSha256: "6".repeat(64),
+        equalBudget: {
+          model: "gpt-5.6-luna",
+          reasoningEffort: "high" as const,
+          wallClockMs: 300_000,
+          maxAttempts: 2,
+          maxTokens: 20_000,
+          toolPolicySha256: "5".repeat(64),
+          concurrency: 1,
+        },
+        primaryMetric: "matched offline replay pass rate",
+        minimumUplift: 0,
+        maximumGuardRegression: 0,
+      };
+      const proposal = harness.createDesignProposal({
+        id: "design_versioned_corpus_v4",
+        projectId,
+        runId,
+        title: "Immutable version 4 comparison",
+        problem: "The version 4 corpus cannot be realized.",
+        recommendation: "Build a host-owned version 5 receipt.",
+        status: "accepted",
+        proposal: {
+          problem: "The version 4 corpus cannot be realized.",
+          recommendation: "Build a host-owned version 5 receipt.",
+          evidenceRefs: ["signal:frozen-corpus-unrealizable"],
+          evaluationContract: {
+            baseline: ["frozen v4 corpus is unrealizable"],
+            successMetrics: ["host v5 manifest receipt exists"],
+            guardMetrics: ["v4 comparison remains immutable"],
+            requiredEvidence: ["host receipt"],
+            comparison,
+          },
+          investment: { reversibility: "easy", portfolio: "core", oneTimeCost: 0, recurringCost: 0 },
+          evolutionPack: { version: 4 } as never,
+        },
+      });
+      const decision = harness.recordDesignDecision({
+        id: "decision_versioned_corpus_v4",
+        proposalId: proposal.id,
+        decision: "approved",
+        actorKind: "auto",
+        reasons: ["Zero-cost host evidence construction."],
+      });
+      harness.updateRun({ runId, status: "blocked", contextPatch: {
+        designProposalId: proposal.id,
+        designDecisionId: decision.id,
+      } });
+
+      const result = applyHarnessAction(harness, {
+        type: "buildVersionedCorpusManifest",
+        projectId,
+        sourceRunId: runId,
+        proposalId: proposal.id,
+        decisionId: decision.id,
+        targetVersion: 5,
+        developmentFixtureRefs: ["fixture:fixtures/development.json"],
+        unrelatedFixtureRefs: ["fixture:fixtures/unrelated.json"],
+      } as never, {
+        sealedDescriptorJson: JSON.stringify({ entries: [{
+          ref: "fixture:private-holdout-v5",
+          path: join(repoPath, "fixtures/holdout.json"),
+        }] }),
+      });
+      const receipt = result.artifacts.find((artifact) => artifact.kind === "versioned_corpus_manifest_receipt");
+      const replay = applyHarnessAction(harness, {
+        type: "buildVersionedCorpusManifest",
+        projectId,
+        sourceRunId: runId,
+        proposalId: proposal.id,
+        decisionId: decision.id,
+        targetVersion: 5,
+        developmentFixtureRefs: ["fixture:fixtures/development.json"],
+        unrelatedFixtureRefs: ["fixture:fixtures/unrelated.json"],
+      } as never, {
+        sealedDescriptorJson: JSON.stringify({ entries: [{
+          ref: "fixture:private-holdout-v5",
+          path: join(repoPath, "fixtures/holdout.json"),
+        }] }),
+      });
+
+      expect(result).toMatchObject({ status: "done", actionType: "buildVersionedCorpusManifest" });
+      expect(receipt).toMatchObject({
+        projectId,
+        sourceRunId: runId,
+        sourceVersion: 4,
+        targetVersion: 5,
+        developmentEntries: [{ ref: "fixture:fixtures/development.json", sha256: expect.stringMatching(/^[a-f0-9]{64}$/), byteLength: expect.any(Number) }],
+        unrelatedEntries: [{ ref: "fixture:fixtures/unrelated.json", sha256: expect.stringMatching(/^[a-f0-9]{64}$/), byteLength: expect.any(Number) }],
+        holdout: { count: 1, commitmentSha256: expect.stringMatching(/^[a-f0-9]{64}$/) },
+        comparison: {
+          corpusSnapshotSha256: expect.stringMatching(/^[a-f0-9]{64}$/),
+          holdoutEvidenceRefs: [expect.stringMatching(/^commitment:holdout-v5:/)],
+        },
+        comparisonSha256: expect.stringMatching(/^[a-f0-9]{64}$/),
+        noHoldoutDisclosure: true,
+        sideEffectCounters: {
+          paidUsd: 0,
+          realProviderCalls: 0,
+          pancatWrites: 0,
+          productionPublishes: 0,
+          realAssetDeletes: 0,
+          crossProjectMemoryReads: 0,
+          crossProjectMemoryWrites: 0,
+        },
+      });
+      expect(JSON.stringify(result)).not.toContain("holdout.json");
+      expect(JSON.stringify(harness.listHarnessActionEvents({ limit: 1 })[0])).not.toContain("holdout.json");
+      expect(harness.getDesignProposal({ id: proposal.id })?.proposal.evaluationContract.comparison).toEqual(comparison);
+      expect(harness.getRun(runId)?.status).toBe("blocked");
+      expect(replay).toMatchObject({ status: "done", eventId: result.eventId });
+      expect(harness.listHarnessActionEvents()
+        .filter((event) => event.status === "done" && event.actionType === "buildVersionedCorpusManifest")).toHaveLength(1);
     });
 
     test("derives a sealed descriptor only inside the host action from an approved frozen comparison", async () => {

@@ -1609,6 +1609,7 @@ function targetSystemDesignerPrompt(input: {
   const hasUnrealizableFrozenCorpus = input.evidenceBundle.blockedSignals.some(
     (signal) => signal.payload.defectKind === "frozen-corpus-unrealizable",
   );
+  const hostCorpusReceipt = input.evidenceBundle.hostCorpusReceipts[0];
   const researchEvidence = input.researchEvidenceLinks.length === 0
     ? ["- no project-owned research evidence links are currently registered"]
     : input.researchEvidenceLinks.flatMap((link) => [
@@ -1637,17 +1638,24 @@ function targetSystemDesignerPrompt(input: {
     "Read the original evaluation-contract artifact before constructing comparison. If it lacks a precise corpus snapshot and hash, propose the smallest zero-cost evidence-building step; do not claim the research is absent.",
     ...(hasUnrealizableFrozenCorpus ? [
       "The accepted version 4 comparison named by the frozen-corpus-unrealizable signal is immutable failed evidence and must remain unchanged. Do not copy or amend it for a successor proposal.",
-      "A version 5 proposal must first build a canonical manifest, commitment, and corpus hash from verifiable real fixture bytes, and only then freeze a new comparison. Never substitute a research-output hash, placeholder hash, example reference, or newly invented metric.",
+      ...(hostCorpusReceipt ? [
+        `The host has produced action ${hostCorpusReceipt.actionId}, a sanitized version ${hostCorpusReceipt.targetVersion} corpus-manifest receipt. A full successor proposal must set evolutionPack.version=${hostCorpusReceipt.targetVersion}, cite the corrected evidence-defect signal and this action, and copy receipt.comparison exactly. Do not read or hash fixture bytes yourself.`,
+      ] : [
+        "No host corpus-manifest receipt is available. The only allowed proposal is a zero-cost host-receipt construction proposal for version 5 so the host can build a canonical manifest from verifiable real fixture bytes; omit evolutionPack, causalHypothesis, and evaluationContract.comparison. Do not read fixture bytes or self-report a corpus hash.",
+      ]),
       "Keep the holdout inside the host private descriptor channel. Ordinary Designer, Planner, Worker, and Verifier roles may receive count and commitment only, with no holdout reference, path, or content.",
       "Do not submit or commit the existing staged exact-seven tree. This Designer may propose one zero-cost evidence-contract correction or stay quiescent; it must not create a Repair, Worker, Verifier, or delivery run.",
     ] : [
       "When acceptedProposals is non-empty, copy its comparison exactly. Never substitute an output hash, placeholder hash, example reference, or newly invented metric.",
     ]),
     "When exactFileBoundary is present, preserve exactPaths byte-for-byte as the only candidate file list. The host must remove every unexpectedPaths entry before delivery; do not replace the list with newly invented paths.",
+    "When an evolutionPack cites a frozen research evidence strategy signal, encode its observation.signalSources kind as external-ref. research-evidence is not a valid enum value.",
     "",
     "Return either a justified quiescent result with no actions, or one fixed proposeDesign action.",
-    `For proposeDesign, payload.projectId must equal ${input.targetProject.id}. The proposal must include the complete target-evolution group: evolutionPack, causalHypothesis, and evaluationContract.comparison.`,
-    "The evolutionPack must keep knowledge, mutation surfaces, evidence, and evaluation scoped to the target project and must name maintenance cost and removals.",
+    `For proposeDesign, payload.projectId must equal ${input.targetProject.id}. ${hasUnrealizableFrozenCorpus && !hostCorpusReceipt ? "A host-receipt construction proposal must omit the target-evolution group until the host receipt exists." : "The proposal must include the complete target-evolution group: evolutionPack, causalHypothesis, and evaluationContract.comparison."}`,
+    ...(!hasUnrealizableFrozenCorpus || hostCorpusReceipt ? [
+      "The evolutionPack must keep knowledge, mutation surfaces, evidence, and evaluation scoped to the target project and must name maintenance cost and removals.",
+    ] : []),
     "Do not create delivery tasks or runs from this design step. Do not use createTasks, createRuns, or generic nextRuns to bypass authority.",
     "Only an accepted stored proposal with an approved authority decision may later create delivery runs through the fixed createRunsFromDesign action.",
   ].join("\n");
@@ -1687,6 +1695,18 @@ interface TargetSystemEvidenceBundleV1 {
     comparison: unknown;
     comparisonSha256: string;
   }>;
+  hostCorpusReceipts: Array<{
+    actionId: string;
+    projectId: string;
+    sourceRunId: string;
+    sourceVersion: number;
+    targetVersion: number;
+    sourceComparisonSha256: string;
+    manifestSha256: string;
+    comparison: unknown;
+    comparisonSha256: string;
+    noHoldoutDisclosure: true;
+  }>;
   exactFileBoundary?: {
     sourceRunId: string;
     sourceWorkerTaskId: string;
@@ -1712,7 +1732,7 @@ function authoritativeEvidenceCommand(
   return ["orbs", "--db", bundle.authoritativeDatabase.path, command, ...args].map(shellQuote).join(" ");
 }
 
-function referencedIds(text: string, prefix: "signal" | "design") {
+function referencedIds(text: string, prefix: "signal" | "design" | "action") {
   return [...new Set(text.match(new RegExp(`\\b${prefix}_[A-Za-z0-9_]+\\b`, "g")) ?? [])];
 }
 
@@ -1786,6 +1806,41 @@ function buildTargetSystemEvidenceBundle(input: {
       comparisonSha256: canonicalEvolutionValueSha256(comparison),
     };
   });
+  const hostCorpusReceipts = referencedIds(input.goal, "action").flatMap((actionId) => {
+    const event = harness.getHarnessActionEvent({ id: actionId });
+    if (!event || event.actionType !== "buildVersionedCorpusManifest" || event.status !== "done") return [];
+    const result = recordValue(event.result);
+    const artifacts = Array.isArray(result.artifacts) ? result.artifacts : [];
+    const artifact = artifacts.find((candidate) =>
+      candidate && typeof candidate === "object" && !Array.isArray(candidate)
+      && (candidate as Record<string, unknown>).kind === "versioned_corpus_manifest_receipt");
+    if (!artifact) fail(`versioned corpus manifest action has no receipt artifact: ${actionId}`);
+    const receipt = artifact as Record<string, unknown>;
+    if (receipt.projectId !== input.targetProjectId || receipt.noHoldoutDisclosure !== true) {
+      fail(`versioned corpus manifest receipt is outside the target project or discloses holdout data: ${actionId}`);
+    }
+    if (typeof receipt.comparisonSha256 !== "string"
+      || canonicalEvolutionValueSha256(receipt.comparison) !== receipt.comparisonSha256) {
+      fail(`versioned corpus manifest receipt comparison hash mismatch: ${actionId}`);
+    }
+    return [{
+      actionId,
+      projectId: String(receipt.projectId),
+      sourceRunId: String(receipt.sourceRunId),
+      sourceVersion: Number(receipt.sourceVersion),
+      targetVersion: Number(receipt.targetVersion),
+      sourceComparisonSha256: String(receipt.sourceComparisonSha256),
+      manifestSha256: String(receipt.manifestSha256),
+      comparison: receipt.comparison,
+      comparisonSha256: receipt.comparisonSha256,
+      noHoldoutDisclosure: true as const,
+    }];
+  });
+  for (const receipt of hostCorpusReceipts) {
+    if (!acceptedProposals.some((proposal) => proposal.comparisonSha256 === receipt.sourceComparisonSha256)) {
+      fail(`versioned corpus manifest receipt is not bound to a referenced accepted proposal: ${receipt.actionId}`);
+    }
+  }
   const exactFileBoundary = deriveExactTargetFileBoundary(blockedSignals);
   const authoritativeDatabase = {
     path: authoritativePath,
@@ -1802,6 +1857,7 @@ function buildTargetSystemEvidenceBundle(input: {
     referencedSignals,
     blockedSignals,
     acceptedProposals,
+    hostCorpusReceipts,
     ...(exactFileBoundary ? { exactFileBoundary } : {}),
   };
   return {

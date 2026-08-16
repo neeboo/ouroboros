@@ -2520,6 +2520,161 @@ describe("design-action transition coordinator (production authority path)", () 
     expect(harness.listDesignProposals({ projectId })).toHaveLength(0);
   });
 
+  test("accepts a version 5 comparison only when it copies the host corpus receipt", async () => {
+    const projectId = harness.createProject({ name: "target-versioned-comparison", rootPath: join(dir, "target-versioned-comparison") });
+    seedActiveCharter(projectId);
+    const defectSignalId = seedActiveSignal(projectId, {
+      title: "Frozen version 4 corpus is unrealizable",
+      summary: "Host evidence requires a versioned correction.",
+      payload: { outcome: "evidence-defect", defectKind: "frozen-corpus-unrealizable" },
+    });
+    const frozenProposal = targetEvolutionEnvelope(projectId);
+    const frozenComparison = frozenProposal.evaluationContract.comparison;
+    const successorComparison = {
+      ...frozenComparison,
+      holdoutEvidenceRefs: [`commitment:holdout-v5:${"d".repeat(64)}`],
+      corpusSnapshotSha256: "e".repeat(64),
+    };
+    const actionId = "action_versioned_manifest_receipt_v5";
+    const receipt = {
+      actionId,
+      projectId,
+      sourceRunId: "run_frozen_v4",
+      sourceVersion: 4,
+      targetVersion: 5,
+      sourceComparisonSha256: canonicalEvolutionValueSha256(frozenComparison),
+      manifestSha256: "e".repeat(64),
+      comparison: successorComparison,
+      comparisonSha256: canonicalEvolutionValueSha256(successorComparison),
+      noHoldoutDisclosure: true as const,
+    };
+    const bundleBody = {
+      schemaVersion: 1,
+      targetProjectId: projectId,
+      authoritativeDatabase: { path: join(dir, "authoritative.db"), bindingSha256: "c".repeat(64) },
+      referencedSignals: [],
+      blockedSignals: [{
+        id: defectSignalId,
+        projectId,
+        status: "active",
+        source: "blocked-run-outcome:run_frozen_v4",
+        summary: "Frozen corpus is unrealizable.",
+        evidence: [],
+        payload: { outcome: "evidence-defect", defectKind: "frozen-corpus-unrealizable" },
+        payloadSha256: "f".repeat(64),
+      }],
+      acceptedProposals: [{
+        id: "design_frozen_v4",
+        projectId,
+        status: "accepted",
+        approvedDecisionIds: ["decision_frozen_v4"],
+        comparison: frozenComparison,
+        comparisonSha256: canonicalEvolutionValueSha256(frozenComparison),
+      }],
+      hostCorpusReceipts: [receipt],
+    };
+    const runId = harness.createRun({
+      goal: `Use ${defectSignalId} and ${actionId} for version 5`,
+      projectId,
+      context: {
+        source: "target-system-design",
+        targetSystemEvidenceBundle: { ...bundleBody, bundleSha256: canonicalEvolutionValueSha256(bundleBody) },
+      },
+    });
+    const taskId = harness.createTask({ runId, role: "designer", goal: "Propose version 5", prompt: "Copy the host receipt." });
+    const proposal = targetEvolutionEnvelope(projectId);
+    proposal.evidenceRefs = [defectSignalId, actionId];
+    proposal.evolutionPack = { ...proposal.evolutionPack, version: 5 };
+    proposal.maturityGateContract = {
+      ...proposal.maturityGateContract,
+      packRef: {
+        id: proposal.evolutionPack.id,
+        version: 5,
+        contentSha256: canonicalEvolutionValueSha256(proposal.evolutionPack),
+      },
+    };
+    proposal.evaluationContract.comparison = successorComparison;
+    const output = parseAttemptOutput(JSON.stringify({
+      status: "done",
+      summary: "Host-receipt-bound version 5 proposal",
+      actions: [{ type: "proposeDesign", payload: { projectId, title: "Version 5 evidence contract", proposal } }],
+    }));
+
+    const result = await runHook(output, runId, taskId);
+
+    expect(result.problems ?? []).toEqual([]);
+    expect(harness.listDesignProposals({ projectId })).toHaveLength(1);
+    expect(harness.listDesignProposals({ projectId })[0]?.proposal.evaluationContract.comparison).toEqual(successorComparison);
+  });
+
+  test("without a host corpus receipt allows only a proposal to build the receipt", async () => {
+    const projectId = harness.createProject({ name: "target-pending-versioned-comparison", rootPath: join(dir, "target-pending-versioned-comparison") });
+    seedActiveCharter(projectId);
+    const defectSignalId = seedActiveSignal(projectId, {
+      title: "Frozen version 4 corpus is unrealizable",
+      summary: "A host receipt is still missing.",
+      payload: { outcome: "evidence-defect", defectKind: "frozen-corpus-unrealizable" },
+    });
+    const frozenProposal = targetEvolutionEnvelope(projectId);
+    const frozenComparison = frozenProposal.evaluationContract.comparison;
+    const bundleBody = {
+      schemaVersion: 1,
+      targetProjectId: projectId,
+      authoritativeDatabase: { path: join(dir, "authoritative.db"), bindingSha256: "c".repeat(64) },
+      referencedSignals: [],
+      blockedSignals: [{
+        id: defectSignalId,
+        projectId,
+        status: "active",
+        source: "blocked-run-outcome:run_frozen_v4",
+        summary: "Frozen corpus is unrealizable.",
+        evidence: [],
+        payload: { outcome: "evidence-defect", defectKind: "frozen-corpus-unrealizable" },
+        payloadSha256: "f".repeat(64),
+      }],
+      acceptedProposals: [{
+        id: "design_frozen_v4",
+        projectId,
+        status: "accepted",
+        approvedDecisionIds: ["decision_frozen_v4"],
+        comparison: frozenComparison,
+        comparisonSha256: canonicalEvolutionValueSha256(frozenComparison),
+      }],
+      hostCorpusReceipts: [],
+    };
+    const runId = harness.createRun({
+      goal: `Use ${defectSignalId} to request host receipt construction`,
+      projectId,
+      context: {
+        source: "target-system-design",
+        targetSystemEvidenceBundle: { ...bundleBody, bundleSha256: canonicalEvolutionValueSha256(bundleBody) },
+      },
+    });
+    const taskId = harness.createTask({ runId, role: "designer", goal: "Request host receipt", prompt: "Do not freeze a comparison yet." });
+    const proposal = {
+      ...validProposal,
+      problem: "The immutable version 4 corpus has no realizable source.",
+      recommendation: "Build one zero-cost host-owned corpus manifest receipt.",
+      evidenceRefs: [defectSignalId],
+      evaluationContract: {
+        ...validProposal.evaluationContract,
+        requiredEvidence: ["host versioned corpus manifest receipt"],
+      },
+    };
+    const output = parseAttemptOutput(JSON.stringify({
+      status: "done",
+      summary: "Request the missing host receipt without freezing a comparison.",
+      actions: [{ type: "proposeDesign", payload: { projectId, title: "Build host corpus receipt", proposal } }],
+    }));
+
+    const result = await runHook(output, runId, taskId);
+
+    expect(result.problems ?? []).toEqual([]);
+    expect(harness.listDesignProposals({ projectId })).toHaveLength(1);
+    expect(harness.listDesignProposals({ projectId })[0]?.proposal.evolutionPack).toBeUndefined();
+    expect(harness.listDesignProposals({ projectId })[0]?.proposal.evaluationContract.comparison).toBeUndefined();
+  });
+
   test("direct conflict: cited signal that names a conflicting peer routes to human-required checkpoint with no delivery run", async () => {
     const { runId, taskId } = setupRunAndTask();
     const projectId = harness.createProject({ name: "ouroboros", rootPath: dir });

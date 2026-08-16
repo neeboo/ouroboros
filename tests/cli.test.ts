@@ -942,13 +942,14 @@ describe("CLI", () => {
       },
     });
     const signal = signalResult.artifacts.find((artifact) => artifact.kind === "strategy_signal")!;
+    const blockedSignalId = String(signal.signalId);
     const proposalBefore = setupHarness.getDesignProposal({ id: design.designSource.designProposalId })!;
 
     const trigger = await runCliJson(
       "design-target-system",
       "--kernel-project-id", kernelProjectId,
       "--target-project-id", targetProjectId,
-      "--goal", `Review ${signal.signalId} and immutable proposal ${design.designSource.designProposalId}; propose version 5 or stay quiescent`,
+      "--goal", `Review ${blockedSignalId} and immutable proposal ${design.designSource.designProposalId}; propose version 5 or stay quiescent`,
     );
     const overview = setupHarness.getRunOverview({ runId: trigger.runId });
     const proposalAfter = setupHarness.getDesignProposal({ id: design.designSource.designProposalId })!;
@@ -981,6 +982,58 @@ describe("CLI", () => {
     expect(setupHarness.getRun(oldRunId)).toMatchObject({ status: "blocked", context: { repairReplanBudget: { used: 3, limit: 3 } } });
     expect(setupHarness.getRunOverview({ runId: currentRunId }).tasks).toHaveLength(0);
     expect(setupHarness.getRunOverview({ runId: oldRunId }).tasks).toHaveLength(0);
+
+    const manifestActionId = "action_versioned_corpus_manifest_v5";
+    const successorComparison = {
+      ...design.comparison,
+      holdoutEvidenceRefs: [`commitment:holdout-v5:${"d".repeat(64)}`],
+      corpusSnapshotSha256: "e".repeat(64),
+    };
+    const manifestReceipt = {
+      kind: "versioned_corpus_manifest_receipt",
+      actionId: manifestActionId,
+      projectId: targetProjectId,
+      sourceRunId: currentRunId,
+      sourceVersion: 4,
+      targetVersion: 5,
+      sourceComparisonSha256: canonicalEvolutionValueSha256(design.comparison),
+      manifestSha256: "e".repeat(64),
+      comparison: successorComparison,
+      comparisonSha256: canonicalEvolutionValueSha256(successorComparison),
+      noHoldoutDisclosure: true,
+    };
+    setupHarness.recordHarnessActionEvent({
+      id: manifestActionId,
+      actionType: "buildVersionedCorpusManifest",
+      status: "done",
+      request: { sourceRunId: currentRunId, proposalId: design.designSource.designProposalId, targetVersion: 5 },
+      result: {
+        status: "done",
+        actionType: "buildVersionedCorpusManifest",
+        summary: "Host receipt created.",
+        checks: [],
+        artifacts: [manifestReceipt],
+        problems: [],
+      },
+    });
+    const receiptTrigger = await runCliJson(
+      "design-target-system",
+      "--kernel-project-id", kernelProjectId,
+      "--target-project-id", targetProjectId,
+      "--goal", `Review ${blockedSignalId} and immutable proposal ${design.designSource.designProposalId} and host receipt ${manifestActionId}`,
+    );
+    const receiptOverview = setupHarness.getRunOverview({ runId: receiptTrigger.runId });
+    expect(receiptOverview.run?.context.targetSystemEvidenceBundle).toMatchObject({
+      hostCorpusReceipts: [{
+        actionId: manifestActionId,
+        sourceVersion: 4,
+        targetVersion: 5,
+        comparisonSha256: manifestReceipt.comparisonSha256,
+      }],
+    });
+    expect(receiptOverview.tasks[0]?.prompt).toContain(`evolutionPack.version=5`);
+    expect(receiptOverview.tasks[0]?.prompt).toContain(manifestActionId);
+    expect(receiptOverview.tasks[0]?.prompt).toContain("copy receipt.comparison exactly");
   });
 
   test("target-system Designer discovers linked research refs and can read each original artifact", async () => {
