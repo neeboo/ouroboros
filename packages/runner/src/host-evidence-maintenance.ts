@@ -336,6 +336,166 @@ function buildEvidenceBundle(
   return { ...body, bundleSha256: canonicalEvolutionValueSha256(body) };
 }
 
+export function buildHostReceiptProposalProjection(input: {
+  projectId: string;
+  actionEvidenceRef: string;
+  correctionSignalRef: string;
+  sourceDecisionId: string;
+  targetVersion: number;
+}) {
+  const version = input.targetVersion;
+  const exactTargetRef = `artifact:target-policy-v${version}`;
+  const lastKnownGoodRef = `artifact:target-policy-v${version - 1}`;
+  const rollbackPlanRef = `plan:target-policy-rollback-v${version}`;
+  const privacyContractId = `host-receipt-privacy-v${version}`;
+  const policySha256 = canonicalEvolutionValueSha256({
+    schemaVersion: 1,
+    kind: "host-receipt-privacy-requirements",
+    projectId: input.projectId,
+    actionEvidenceRef: input.actionEvidenceRef,
+    rawPayloadPolicy: "reject",
+    noHoldoutDisclosure: true,
+  });
+  const fromVariantId = `variant_${canonicalEvolutionValueSha256({
+    kind: "host-receipt-control-variant",
+    projectId: input.projectId,
+    version: version - 1,
+  })}`;
+  const toVariantId = `variant_${canonicalEvolutionValueSha256({
+    kind: "host-receipt-candidate-variant",
+    projectId: input.projectId,
+    version,
+    actionEvidenceRef: input.actionEvidenceRef,
+  })}`;
+  const sideEffectBudget = {
+    paidUsd: 0,
+    realProviderCalls: 0,
+    pancatWrites: 0,
+    productionPublishes: 0,
+    realAssetDeletes: 0,
+    crossProjectMemoryReads: 0,
+    crossProjectMemoryWrites: 0,
+  };
+  return {
+    schemaVersion: 1 as const,
+    causalFailureClass: "evaluation-defect" as const,
+    signalSources: [
+      { id: input.correctionSignalRef, kind: "external-ref" as const },
+      { id: input.actionEvidenceRef, kind: "external-ref" as const },
+    ],
+    deliveryContracts: {
+      episodeCollectionContract: {
+        schemaVersion: 1 as const,
+        id: `host-receipt-episodes-v${version}`,
+        projectId: input.projectId,
+        mode: "commitment-only" as const,
+        allowedSources: ["host-owned-fixture-replay" as const],
+        requiredEpisodeFields: [
+          "profileId", "sourceRef", "leakageGroupId", "observedAt",
+          "inputSnapshotSha256", "outcomeSnapshotSha256", "policyRef",
+          "metrics", "sideEffectCounters", "evidenceRefs", "privacyReview",
+        ],
+        privacyReceiptContractRef: privacyContractId,
+        appendOnly: true as const,
+        rawPayloadPolicy: "reject" as const,
+        sideEffectBudget,
+      },
+      maturityGateContract: {
+        schemaVersion: 1 as const,
+        id: `host-receipt-maturity-v${version}`,
+        projectId: input.projectId,
+        currentMaturity: "designed" as const,
+        allowedTransitions: ["designed->instrumented" as const, "instrumented->shadowing" as const],
+        forbiddenTransitions: [
+          "designed->shadowing" as const,
+          "designed->autonomous" as const,
+          "instrumented->autonomous" as const,
+          "shadowing->autonomous" as const,
+        ],
+        requireIndependentReceiptForEveryTransition: true as const,
+        stages: [
+          {
+            id: "designed" as const,
+            requiredEvidenceRefs: [input.actionEvidenceRef],
+            guardMetrics: ["frozen contracts are complete"],
+            allowedOperations: ["freeze delivery contracts"],
+            failureMaturity: "designed" as const,
+          },
+          {
+            id: "instrumented" as const,
+            requiredEvidenceRefs: [input.actionEvidenceRef],
+            guardMetrics: ["episodes are commitment-only"],
+            allowedOperations: ["collect episode commitments"],
+            failureMaturity: "designed" as const,
+          },
+          {
+            id: "shadowing" as const,
+            requiredEvidenceRefs: [input.actionEvidenceRef],
+            guardMetrics: ["side effect counters remain zero"],
+            allowedOperations: ["compare frozen variants"],
+            failureMaturity: "instrumented" as const,
+          },
+        ],
+      },
+      productionEpisodePrivacyReceiptContract: {
+        schemaVersion: 1 as const,
+        id: privacyContractId,
+        projectId: input.projectId,
+        mode: "requirements-only" as const,
+        privacyReview: {
+          requiredStatus: "approved" as const,
+          policySha256,
+          reviewerRef: "reviewer:independent-host-verifier",
+          dataClassification: "confidential" as const,
+          retentionPolicyRef: `policy:host-receipt-retention-v${version}`,
+          evidenceRefs: [input.actionEvidenceRef],
+        },
+        snapshotBinding: {
+          inputSnapshotSha256Required: true as const,
+          outcomeSnapshotSha256Required: true as const,
+          mustMatchEpisode: true as const,
+        },
+        rawPayloadPolicy: "reject" as const,
+        appendOnly: true as const,
+        rejectionConditions: ["privacy receipt is absent or mismatched"],
+      },
+      promotionReceiptContract: {
+        schemaVersion: 1 as const,
+        id: `host-receipt-promotion-v${version}`,
+        mode: "draft-only" as const,
+        projectId: input.projectId,
+        authorizedDecisionRef: `decision:${input.sourceDecisionId}`,
+        fromVariantId,
+        toVariantId,
+        exactTargetRef,
+        readbackEvidenceRefs: [input.actionEvidenceRef],
+        canaryEvidenceRefs: [input.actionEvidenceRef],
+        observationWindow: { matchedRuns: 3, startsAfterMaturity: "instrumented" as const },
+        rollbackPlanRef,
+        rollbackReceiptId: null,
+        issuerRef: "issuer:ouroboros-authority",
+        issuedAtRequired: true as const,
+      },
+      rollbackContract: {
+        schemaVersion: 1 as const,
+        id: `host-receipt-rollback-v${version}`,
+        projectId: input.projectId,
+        exactTargetRef,
+        lastKnownGoodRef,
+        idempotencyKey: `rollback:target-policy-v${version}`,
+        rollbackPlanRef,
+        rollbackReceiptId: null,
+        triggers: [{ id: "guard-regression", condition: "any frozen guard metric regresses" }],
+        readbackEvidenceRefs: [input.actionEvidenceRef],
+        canaryEvidenceRefs: [input.actionEvidenceRef],
+        appendOnly: true as const,
+        deleteOrRewriteHistory: false as const,
+        forbiddenScopes: ["HEAD", "latest", "wildcard target"],
+      },
+    },
+  };
+}
+
 function ensureVersionedDesigner(
   harness: Harness,
   deliveryRun: Run,
@@ -351,6 +511,13 @@ function ensureVersionedDesigner(
   const evidenceBundle = buildEvidenceBundle(harness, deliveryRun, marker, action);
   const receipt = evidenceBundle.hostCorpusReceipts[0]!;
   const actionEvidenceRef = `action:${action.eventId}`;
+  const proposalProjection = buildHostReceiptProposalProjection({
+    projectId: deliveryRun.projectId!,
+    actionEvidenceRef,
+    correctionSignalRef: marker.sourceSignalId,
+    sourceDecisionId: marker.sourceDecisionId,
+    targetVersion: marker.targetVersion,
+  });
   const requiredBusinessTerms = [
     "短剧",
     "互动游戏剧",
@@ -380,6 +547,8 @@ function ensureVersionedDesigner(
     targetVersion: marker.targetVersion,
     manifestSha256: receipt.manifestSha256,
     comparisonSha256: receipt.comparisonSha256,
+    proposalProjection,
+    proposalProjectionSha256: canonicalEvolutionValueSha256(proposalProjection),
     requiredBusinessTerms,
   };
   if (!harness.getRun(runId)) {

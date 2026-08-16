@@ -506,7 +506,7 @@ function adaptHostReceiptBoundProposal(
     })) {
       throw new Error("host receipt managed signal source requires a fixed host receipt design adapter");
     }
-    return rawProposal;
+    return normalizeTargetEvolutionProposalStrict(rawProposal, projectId);
   }
   const adapter = rawAdapter as Record<string, unknown>;
   if (adapter.schemaVersion !== 1
@@ -517,8 +517,47 @@ function adaptHostReceiptBoundProposal(
     || !adapter.correctionSignalRef.startsWith("signal_")
     || adapter.targetVersion !== 5
     || typeof adapter.manifestSha256 !== "string"
-    || typeof adapter.comparisonSha256 !== "string") {
+    || typeof adapter.comparisonSha256 !== "string"
+    || !adapter.proposalProjection
+    || typeof adapter.proposalProjection !== "object"
+    || Array.isArray(adapter.proposalProjection)
+    || typeof adapter.proposalProjectionSha256 !== "string"
+    || canonicalEvolutionValueSha256(adapter.proposalProjection) !== adapter.proposalProjectionSha256) {
     throw new Error("host receipt design adapter is malformed");
+  }
+  const projection = adapter.proposalProjection as Record<string, unknown>;
+  if (projection.schemaVersion !== 1 || projection.causalFailureClass !== "evaluation-defect") {
+    throw new Error("host receipt design adapter proposal projection is malformed");
+  }
+  const projectedSignalSources = projection.signalSources;
+  if (!Array.isArray(projectedSignalSources)) {
+    throw new Error("host receipt design adapter signal source projection is malformed");
+  }
+  const exactCorrectionSource = { id: adapter.correctionSignalRef, kind: "external-ref" };
+  const exactActionSource = { id: adapter.actionEvidenceRef, kind: "external-ref" };
+  const projectedSourceRecords = projectedSignalSources.map((source) => {
+    if (!source || typeof source !== "object" || Array.isArray(source)) {
+      throw new Error("host receipt design adapter signal source projection is malformed");
+    }
+    return source as Record<string, unknown>;
+  });
+  const isExactSource = (source: Record<string, unknown>, expected: Record<string, unknown>) =>
+    source.id === expected.id && source.kind === expected.kind && Object.keys(source).length === 2;
+  if (projectedSourceRecords.filter((source) => isExactSource(source, exactCorrectionSource)).length !== 1
+    || projectedSourceRecords.filter((source) => isExactSource(source, exactActionSource)).length !== 1
+    || projectedSourceRecords.some((source) => {
+      if (isExactSource(source, exactCorrectionSource) || isExactSource(source, exactActionSource)) return false;
+      return source.kind !== "run-evidence"
+        || typeof source.id !== "string"
+        || source.id === adapter.correctionSignalRef
+        || source.id === adapter.actionEvidenceRef
+        || Object.keys(source).some((key) => !["id", "kind", "freshnessMs"].includes(key));
+    })) {
+    throw new Error("host receipt design adapter must project the exact correction, action, and configured run evidence sources");
+  }
+  const projectedContracts = projection.deliveryContracts;
+  if (!projectedContracts || typeof projectedContracts !== "object" || Array.isArray(projectedContracts)) {
+    throw new Error("host receipt design adapter delivery contract projection is malformed");
   }
   const rawBundle = runContext.targetSystemEvidenceBundle;
   if (!rawBundle || typeof rawBundle !== "object" || Array.isArray(rawBundle)) {
@@ -562,44 +601,27 @@ function adaptHostReceiptBoundProposal(
   }
 
   const adapted = structuredClone(rawProposal);
-  const evidenceRefs = optionalStringArray(adapted.evidenceRefs, "proposeDesign payload.proposal.evidenceRefs") ?? [];
-  if (!evidenceRefs.includes(adapter.correctionSignalRef)) evidenceRefs.push(adapter.correctionSignalRef);
-  if (!evidenceRefs.includes(adapter.actionEvidenceRef)) evidenceRefs.push(adapter.actionEvidenceRef);
-  adapted.evidenceRefs = evidenceRefs;
+  adapted.evidenceRefs = [adapter.correctionSignalRef, adapter.actionEvidenceRef];
   if (!adapted.evolutionPack || typeof adapted.evolutionPack !== "object" || Array.isArray(adapted.evolutionPack)) {
     throw new Error("host receipt versioned design must include the business-owned evolutionPack");
   }
   const rawPack = adapted.evolutionPack as Record<string, unknown>;
-  const rawObservation = rawPack.observation;
-  if (!rawObservation || typeof rawObservation !== "object" || Array.isArray(rawObservation)) {
-    throw new Error("host receipt versioned design must include evolutionPack.observation");
-  }
-  const rawSignalSources = (rawObservation as Record<string, unknown>).signalSources;
-  if (!Array.isArray(rawSignalSources)) {
-    throw new Error("host receipt versioned design must include evolutionPack.observation.signalSources");
-  }
-  const signalSources = rawSignalSources.filter((source) => {
-    if (!source || typeof source !== "object" || Array.isArray(source)) return true;
-    const record = source as Record<string, unknown>;
-    const id = record.id;
-    return record.kind !== "host-receipt"
-      && record.kind !== "blocked-run-outcome"
-      && record.kind !== "host-corpus-receipt"
-      && id !== adapter.correctionSignalRef
-      && id !== adapter.actionId
-      && id !== adapter.actionEvidenceRef;
-  });
-  signalSources.push({ id: adapter.correctionSignalRef, kind: "external-ref" });
-  signalSources.push({ id: adapter.actionEvidenceRef, kind: "external-ref" });
   const normalizedPack = parseEvolutionPackV1({
     ...rawPack,
     version: adapter.targetVersion,
     observation: {
-      ...(rawObservation as Record<string, unknown>),
-      signalSources,
+      signalSources: structuredClone(projectedSignalSources),
     },
   }, projectId, "host receipt adapted evolutionPack");
   adapted.evolutionPack = normalizedPack;
+  const rawCausal = adapted.causalHypothesis;
+  if (!rawCausal || typeof rawCausal !== "object" || Array.isArray(rawCausal)) {
+    throw new Error("host receipt versioned design must include causalHypothesis");
+  }
+  adapted.causalHypothesis = parseEvolutionCausalHypothesis({
+    ...(rawCausal as Record<string, unknown>),
+    failureClass: projection.causalFailureClass,
+  }, "host receipt adapted causalHypothesis");
   const evaluationContract = adapted.evaluationContract;
   if (!evaluationContract || typeof evaluationContract !== "object" || Array.isArray(evaluationContract)) {
     throw new Error("host receipt versioned design must include evaluationContract");
@@ -608,12 +630,19 @@ function adaptHostReceiptBoundProposal(
     ...(evaluationContract as Record<string, unknown>),
     comparison: structuredClone(receipt.comparison),
   };
-  const maturityGate = adapted.maturityGateContract;
+  const deliveryContracts = projectedContracts as Record<string, unknown>;
+  adapted.episodeCollectionContract = structuredClone(deliveryContracts.episodeCollectionContract);
+  adapted.productionEpisodePrivacyReceiptContract = structuredClone(
+    deliveryContracts.productionEpisodePrivacyReceiptContract,
+  );
+  adapted.promotionReceiptContract = structuredClone(deliveryContracts.promotionReceiptContract);
+  adapted.rollbackContract = structuredClone(deliveryContracts.rollbackContract);
+  const maturityGate = deliveryContracts.maturityGateContract;
   if (!maturityGate || typeof maturityGate !== "object" || Array.isArray(maturityGate)) {
-    throw new Error("host receipt versioned design must include maturityGateContract");
+    throw new Error("host receipt design adapter maturity contract projection is malformed");
   }
   adapted.maturityGateContract = {
-    ...(maturityGate as Record<string, unknown>),
+    ...structuredClone(maturityGate as Record<string, unknown>),
     packRef: {
       id: normalizedPack.id,
       version: normalizedPack.version,
@@ -624,8 +653,47 @@ function adaptHostReceiptBoundProposal(
     (adapted.evaluationContract as Record<string, unknown>).comparison,
     "host receipt adapted comparison",
   );
-  parseEvolutionDeliveryContracts(adapted, projectId, normalizedPack, "host receipt adapted proposal");
+  const normalizedContracts = parseEvolutionDeliveryContracts(
+    adapted,
+    projectId,
+    normalizedPack,
+    "host receipt adapted proposal",
+  );
+  if (!normalizedContracts) {
+    throw new Error("host receipt adapted proposal lost its governed delivery contracts");
+  }
+  Object.assign(adapted, normalizedContracts);
   return adapted;
+}
+
+function normalizeTargetEvolutionProposalStrict(
+  rawProposal: Record<string, unknown>,
+  projectId: string,
+): Record<string, unknown> {
+  const normalized = structuredClone(rawProposal);
+  if (normalized.evolutionPack === undefined) return normalized;
+  const pack = parseEvolutionPackV1(normalized.evolutionPack, projectId, "proposeDesign payload.proposal.evolutionPack");
+  normalized.evolutionPack = pack;
+  normalized.causalHypothesis = parseEvolutionCausalHypothesis(
+    normalized.causalHypothesis,
+    "proposeDesign payload.proposal.causalHypothesis",
+  );
+  const evaluation = normalized.evaluationContract;
+  if (!evaluation || typeof evaluation !== "object" || Array.isArray(evaluation)) {
+    throw new Error("proposeDesign payload.proposal.evaluationContract must be present");
+  }
+  (evaluation as Record<string, unknown>).comparison = parseEvolutionComparison(
+    (evaluation as Record<string, unknown>).comparison,
+    "proposeDesign payload.proposal.evaluationContract.comparison",
+  );
+  const deliveryContracts = parseEvolutionDeliveryContracts(
+    normalized,
+    projectId,
+    pack,
+    "proposeDesign payload.proposal",
+  );
+  if (deliveryContracts) Object.assign(normalized, deliveryContracts);
+  return normalized;
 }
 
 function assertProductionComparisonHasNoPlaceholders(value: unknown) {

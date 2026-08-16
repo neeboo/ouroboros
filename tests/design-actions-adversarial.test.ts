@@ -16,6 +16,7 @@ import {
   requireStrictIsoTimestamp,
 } from "../packages/harness/src";
 import { createApplyDesignActionsHook } from "../packages/runner/src/hooks/apply-design-actions";
+import { buildHostReceiptProposalProjection } from "../packages/runner/src/host-evidence-maintenance";
 import { parseAttemptOutput } from "../packages/runner/src";
 
 // Fault-injection harness that overrides the audit-write primitive so the
@@ -2779,6 +2780,17 @@ describe("design-action transition coordinator (production authority path)", () 
       }],
       hostCorpusReceipts: [receipt],
     };
+    const proposalProjection = buildHostReceiptProposalProjection({
+      projectId,
+      actionEvidenceRef: `action:${actionId}`,
+      correctionSignalRef: defectSignalId,
+      sourceDecisionId: "decision_frozen_v4",
+      targetVersion: 5,
+    });
+    const governedMaturity = proposalProjection.deliveryContracts.maturityGateContract;
+    const governedPrivacy = proposalProjection.deliveryContracts.productionEpisodePrivacyReceiptContract;
+    const governedPromotion = proposalProjection.deliveryContracts.promotionReceiptContract;
+    const governedRollback = proposalProjection.deliveryContracts.rollbackContract;
     const runId = harness.createRun({
       goal: `Use ${defectSignalId} and ${actionId} for version 5`,
       projectId,
@@ -2801,6 +2813,8 @@ describe("design-action transition coordinator (production authority path)", () 
           targetVersion: 5,
           manifestSha256: successorComparison.corpusSnapshotSha256,
           comparisonSha256: canonicalEvolutionValueSha256(successorComparison),
+          proposalProjection,
+          proposalProjectionSha256: canonicalEvolutionValueSha256(proposalProjection),
           requiredBusinessTerms: [
             "短剧", "互动游戏剧", "电视剧", "电影", "ainovel",
             "专业编剧", "审核", "评分", "互动第四墙", "共生",
@@ -2816,12 +2830,28 @@ describe("design-action transition coordinator (production authority path)", () 
       "ainovel 原创能力支持互动第四墙和共生机制",
     ];
     proposal.evolutionPack.observation.signalSources = [
-      ...proposal.evolutionPack.observation.signalSources,
-      { id: defectSignalId, kind: "blocked-run-outcome" as never },
+      { id: defectSignalId, kind: "run-evidence" as never },
+      { id: "signal_model_blocked_alias", kind: "blocked-run-outcome" as never },
       { id: actionId, kind: "host-corpus-receipt" as never },
       { id: "host-receipt", kind: "host-receipt" as never },
     ];
-    proposal.evidenceRefs = [defectSignalId];
+    proposal.causalHypothesis.failureClass = "evidence-defect" as never;
+    proposal.productionEpisodePrivacyReceiptContract.privacyReview.policySha256 = "2".repeat(64);
+    proposal.productionEpisodePrivacyReceiptContract.privacyReview.evidenceRefs = ["evidence:model-placeholder"];
+    proposal.promotionReceiptContract = {
+      ...proposal.promotionReceiptContract,
+      authorizedDecisionRef: "decision:model-placeholder",
+      exactTargetRef: "artifact:model-placeholder-v5",
+      rollbackPlanRef: "plan:model-placeholder-v5",
+    };
+    proposal.rollbackContract = {
+      ...proposal.rollbackContract,
+      exactTargetRef: "artifact:model-placeholder-v5",
+      lastKnownGoodRef: "artifact:model-placeholder-v4",
+      idempotencyKey: "rollback:model-placeholder-v5",
+      rollbackPlanRef: "plan:model-placeholder-v5",
+    };
+    proposal.evidenceRefs = [defectSignalId, `action:${actionId}`];
     // This intentionally mirrors the failed production output: the model
     // repeats version 4 and the old comparison. The host-bound adapter must
     // replace only the receipt-owned fields before fixed validation.
@@ -2848,11 +2878,7 @@ describe("design-action transition coordinator (production authority path)", () 
     expect(harness.listDesignProposals({ projectId })).toHaveLength(1);
     expect(storedProposal).toMatchObject({ status: "accepted" });
     const storedSources = storedProposal.proposal.evolutionPack?.observation.signalSources ?? [];
-    expect(storedSources).toEqual([
-      { id: "run-evidence", kind: "run-evidence" },
-      { id: defectSignalId, kind: "external-ref" },
-      { id: `action:${actionId}`, kind: "external-ref" },
-    ]);
+    expect(storedSources).toEqual(proposalProjection.signalSources);
     expect(storedProposal.proposal.maturityGateContract?.packRef.contentSha256).toBe(
       canonicalEvolutionValueSha256(storedProposal.proposal.evolutionPack),
     );
@@ -2863,8 +2889,14 @@ describe("design-action transition coordinator (production authority path)", () 
       evolutionPack: {
         version: 5,
       },
+      causalHypothesis: { failureClass: "evaluation-defect" },
       evaluationContract: { comparison: successorComparison },
+      episodeCollectionContract: proposalProjection.deliveryContracts.episodeCollectionContract,
+      productionEpisodePrivacyReceiptContract: governedPrivacy,
+      promotionReceiptContract: governedPromotion,
+      rollbackContract: governedRollback,
       maturityGateContract: {
+        ...governedMaturity,
         packRef: {
           version: 5,
           contentSha256: expect.stringMatching(/^[0-9a-f]{64}$/),
@@ -2897,7 +2929,11 @@ describe("design-action transition coordinator (production authority path)", () 
           problem: expect.stringContaining("互动游戏剧"),
           recommendation: expect.stringContaining("专业编剧"),
           evolutionPack: { version: 5 },
+          causalHypothesis: { failureClass: "evaluation-defect" },
           evaluationContract: { comparison: successorComparison },
+          productionEpisodePrivacyReceiptContract: governedPrivacy,
+          promotionReceiptContract: governedPromotion,
+          rollbackContract: governedRollback,
         },
       },
     });

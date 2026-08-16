@@ -9,6 +9,7 @@ import { spawnSync } from "node:child_process";
 import {
   acceptGuardrailProposal,
   applyHarnessAction,
+  canonicalEvolutionValueSha256,
   Harness,
   type AttemptOutput,
   type HarnessRevisionComponentKind,
@@ -545,6 +546,13 @@ describe("runner", () => {
     })]);
     expect(harness.getRun(runId)?.status).toBe("done");
     expect(designerRun).toMatchObject({ status: "todo", context: { source: "target-system-design" } });
+    const adapter = designerTask!.config!.hostReceiptDesignAdapter as Record<string, unknown>;
+    expect(adapter.proposalProjectionSha256).toBe(canonicalEvolutionValueSha256(adapter.proposalProjection));
+    const privacyPolicySha256 = (((adapter.proposalProjection as Record<string, unknown>).deliveryContracts as Record<string, unknown>)
+      .productionEpisodePrivacyReceiptContract as { privacyReview: { policySha256: string } })
+      .privacyReview.policySha256;
+    expect(privacyPolicySha256).toMatch(/^[0-9a-f]{64}$/);
+    expect(privacyPolicySha256).not.toMatch(/^([0-9a-f])\1{63}$/);
     expect(designerTask).toMatchObject({
       role: "designer",
       status: "todo",
@@ -559,6 +567,22 @@ describe("runner", () => {
           targetVersion: 5,
           manifestSha256: expect.stringMatching(/^[0-9a-f]{64}$/),
           comparisonSha256: expect.stringMatching(/^[0-9a-f]{64}$/),
+          proposalProjectionSha256: expect.stringMatching(/^[0-9a-f]{64}$/),
+          proposalProjection: {
+            schemaVersion: 1,
+            causalFailureClass: "evaluation-defect",
+            signalSources: [
+              { id: signal.id, kind: "external-ref" },
+              { id: expect.stringMatching(/^action:action_/), kind: "external-ref" },
+            ],
+            deliveryContracts: expect.objectContaining({
+              episodeCollectionContract: expect.any(Object),
+              maturityGateContract: expect.any(Object),
+              productionEpisodePrivacyReceiptContract: expect.any(Object),
+              promotionReceiptContract: expect.any(Object),
+              rollbackContract: expect.any(Object),
+            }),
+          },
         },
       },
     });

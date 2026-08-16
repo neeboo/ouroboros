@@ -400,7 +400,13 @@ function parseDesignProposalData(
   if (options.length === 0) {
     throw new Error(`${label}.options must include at least one alternative`);
   }
-  const evaluationContract = parseDesignEvaluationContract(record.evaluationContract, `${label}.evaluationContract`);
+  const hostReceiptCandidate = evidenceRefs.some((ref) => /^action:action_[A-Za-z0-9._-]+$/.test(ref))
+    || evidenceRefs.some((ref) => /^signal_blocked_correction_[A-Za-z0-9._-]+$/.test(ref));
+  const evaluationContract = parseDesignEvaluationContract(
+    record.evaluationContract,
+    `${label}.evaluationContract`,
+    { preserveComparisonForHostReceiptAdapter: hostReceiptCandidate },
+  );
   const hasEvolutionPack = record.evolutionPack !== undefined;
   const hasCausalHypothesis = record.causalHypothesis !== undefined;
   const hasComparison = evaluationContract.comparison !== undefined;
@@ -429,19 +435,25 @@ function parseDesignProposalData(
     );
   }
   const evolutionPack = hasEvolutionPack
-    ? parseEvolutionPackV1(
-      record.evolutionPack,
-      expectedProjectId,
-      `${label}.evolutionPack`,
-      { allowHostReceiptAdapterAliases: true },
-    )
+    ? hostReceiptCandidate
+      ? structuredClone(requireObject(record.evolutionPack, `${label}.evolutionPack`)) as never
+      : parseEvolutionPackV1(
+        record.evolutionPack,
+        expectedProjectId,
+        `${label}.evolutionPack`,
+        { allowHostReceiptAdapterAliases: true },
+      )
     : undefined;
   const causalHypothesis = hasCausalHypothesis
-    ? parseEvolutionCausalHypothesis(record.causalHypothesis, `${label}.causalHypothesis`)
+    ? hostReceiptCandidate
+      ? structuredClone(requireObject(record.causalHypothesis, `${label}.causalHypothesis`)) as never
+      : parseEvolutionCausalHypothesis(record.causalHypothesis, `${label}.causalHypothesis`)
     : undefined;
   const deliveryContracts = evolutionPack === undefined
     ? null
-    : parseEvolutionDeliveryContracts(record, expectedProjectId, evolutionPack, label);
+    : hostReceiptCandidate
+      ? preserveHostReceiptDeliveryContracts(record, deliveryContractKeys, label)
+      : parseEvolutionDeliveryContracts(record, expectedProjectId, evolutionPack, label);
   const investment = parseDesignInvestment(record.investment, `${label}.investment`);
   const resourceRequest = record.resourceRequest === undefined
     ? undefined
@@ -492,7 +504,11 @@ function parseDesignOptions(value: unknown, label: string) {
   });
 }
 
-function parseDesignEvaluationContract(value: unknown, label: string) {
+function parseDesignEvaluationContract(
+  value: unknown,
+  label: string,
+  options: { preserveComparisonForHostReceiptAdapter?: boolean } = {},
+) {
   const record = requireObject(value, label);
   const baseline = optionalStringArray(record.baseline, `${label}.baseline`);
   const successMetrics = optionalStringArray(record.successMetrics, `${label}.successMetrics`);
@@ -501,7 +517,9 @@ function parseDesignEvaluationContract(value: unknown, label: string) {
   const reviewAtRaw = optionalIsoTimestamp(record.reviewAt, `${label}.reviewAt`);
   const comparison = record.comparison === undefined
     ? undefined
-    : parseEvolutionComparison(record.comparison, `${label}.comparison`);
+    : options.preserveComparisonForHostReceiptAdapter === true
+      ? structuredClone(requireObject(record.comparison, `${label}.comparison`)) as never
+      : parseEvolutionComparison(record.comparison, `${label}.comparison`);
   if ((!successMetrics || successMetrics.length === 0) && (!requiredEvidence || requiredEvidence.length === 0)) {
     throw new Error(`${label} must define successMetrics or requiredEvidence`);
   }
@@ -518,6 +536,21 @@ function parseDesignEvaluationContract(value: unknown, label: string) {
     contract.comparison = comparison;
   }
   return contract;
+}
+
+function preserveHostReceiptDeliveryContracts(
+  record: Record<string, unknown>,
+  keys: readonly string[],
+  label: string,
+) {
+  const present = keys.filter((key) => record[key] !== undefined);
+  if (present.length !== keys.length) {
+    throw new Error(`${label} host receipt candidate must include the complete delivery contract group`);
+  }
+  return Object.fromEntries(keys.map((key) => [
+    key,
+    structuredClone(requireObject(record[key], `${label}.${key}`)),
+  ])) as never;
 }
 
 function parseDesignInvestment(value: unknown, label: string) {
