@@ -490,6 +490,17 @@ function adaptHostReceiptBoundProposal(
 ): Record<string, unknown> {
   const rawAdapter = task.config?.hostReceiptDesignAdapter;
   if (!rawAdapter || typeof rawAdapter !== "object" || Array.isArray(rawAdapter)) {
+    const rawPack = rawProposal.evolutionPack;
+    const rawObservation = rawPack && typeof rawPack === "object" && !Array.isArray(rawPack)
+      ? (rawPack as Record<string, unknown>).observation
+      : undefined;
+    const rawSources = rawObservation && typeof rawObservation === "object" && !Array.isArray(rawObservation)
+      ? (rawObservation as Record<string, unknown>).signalSources
+      : undefined;
+    if (Array.isArray(rawSources) && rawSources.some((source) => source && typeof source === "object"
+      && !Array.isArray(source) && (source as Record<string, unknown>).id === "host-receipt")) {
+      throw new Error("host-receipt signal source requires a fixed host receipt design adapter");
+    }
     return rawProposal;
   }
   const adapter = rawAdapter as Record<string, unknown>;
@@ -542,9 +553,28 @@ function adaptHostReceiptBoundProposal(
   if (!adapted.evolutionPack || typeof adapted.evolutionPack !== "object" || Array.isArray(adapted.evolutionPack)) {
     throw new Error("host receipt versioned design must include the business-owned evolutionPack");
   }
+  const rawPack = adapted.evolutionPack as Record<string, unknown>;
+  const rawObservation = rawPack.observation;
+  if (!rawObservation || typeof rawObservation !== "object" || Array.isArray(rawObservation)) {
+    throw new Error("host receipt versioned design must include evolutionPack.observation");
+  }
+  const rawSignalSources = (rawObservation as Record<string, unknown>).signalSources;
+  if (!Array.isArray(rawSignalSources)) {
+    throw new Error("host receipt versioned design must include evolutionPack.observation.signalSources");
+  }
+  const signalSources = rawSignalSources.filter((source) => {
+    if (!source || typeof source !== "object" || Array.isArray(source)) return true;
+    const id = (source as Record<string, unknown>).id;
+    return id !== "host-receipt" && id !== adapter.actionEvidenceRef;
+  });
+  signalSources.push({ id: adapter.actionEvidenceRef, kind: "external-ref" });
   const normalizedPack = parseEvolutionPackV1({
-    ...(adapted.evolutionPack as Record<string, unknown>),
+    ...rawPack,
     version: adapter.targetVersion,
+    observation: {
+      ...(rawObservation as Record<string, unknown>),
+      signalSources,
+    },
   }, projectId, "host receipt adapted evolutionPack");
   adapted.evolutionPack = normalizedPack;
   const evaluationContract = adapted.evaluationContract;

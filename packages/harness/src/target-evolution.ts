@@ -187,6 +187,7 @@ export function parseEvolutionPackV1(
   value: unknown,
   expectedProjectId: string,
   label = "evolutionPack",
+  options: { allowHostReceiptAdapterAlias?: boolean } = {},
 ): EvolutionPackV1 {
   requireString(
     expectedProjectId,
@@ -235,7 +236,11 @@ export function parseEvolutionPackV1(
     `${label}.observation.signalSources`,
     TARGET_EVOLUTION_LIMITS.maxSignalSources,
   ).map((source, index) =>
-    parseSignalSource(source, `${label}.observation.signalSources[${index}]`),
+    parseSignalSource(
+      source,
+      `${label}.observation.signalSources[${index}]`,
+      options.allowHostReceiptAdapterAlias === true,
+    ),
   );
   requireNonEmpty(signalSources, `${label}.observation.signalSources`);
   requireUniqueIds(signalSources, `${label}.observation.signalSources`);
@@ -1297,14 +1302,27 @@ function parseEvolutionInstancePack(value: unknown, label: string): NonNullable<
   };
 }
 
-function parseSignalSource(value: unknown, label: string): EvolutionPackV1["observation"]["signalSources"][number] {
+function parseSignalSource(
+  value: unknown,
+  label: string,
+  allowHostReceiptAdapterAlias: boolean,
+): EvolutionPackV1["observation"]["signalSources"][number] {
   const record = strictObject(value, ["id", "kind", "freshnessMs"], label);
+  const id = requireOpaqueRef(record.id, `${label}.id`);
+  // A host-receipt-bound Designer may emit this one legacy spelling before
+  // the fixed action has access to the task adapter. Preserve it only as a
+  // transient marker so the model-computed pack hash still verifies; the
+  // fixed action must replace the whole source with the exact action ref
+  // before persistence. Every other unknown kind still fails here.
+  const kind = allowHostReceiptAdapterAlias && id === "host-receipt" && record.kind === "host-receipt"
+    ? record.kind as never
+    : requireEnum(record.kind, SIGNAL_SOURCE_KINDS, `${label}.kind`);
   const freshnessMs = record.freshnessMs === undefined
     ? undefined
     : requirePositiveInteger(record.freshnessMs, `${label}.freshnessMs`);
   return {
-    id: requireOpaqueRef(record.id, `${label}.id`),
-    kind: requireEnum(record.kind, SIGNAL_SOURCE_KINDS, `${label}.kind`),
+    id,
+    kind,
     ...(freshnessMs === undefined ? {} : { freshnessMs }),
   };
 }

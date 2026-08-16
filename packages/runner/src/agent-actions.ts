@@ -429,7 +429,12 @@ function parseDesignProposalData(
     );
   }
   const evolutionPack = hasEvolutionPack
-    ? parseEvolutionPackV1(record.evolutionPack, expectedProjectId, `${label}.evolutionPack`)
+    ? parseEvolutionPackV1(
+      record.evolutionPack,
+      expectedProjectId,
+      `${label}.evolutionPack`,
+      { allowHostReceiptAdapterAlias: true },
+    )
     : undefined;
   const causalHypothesis = hasCausalHypothesis
     ? parseEvolutionCausalHypothesis(record.causalHypothesis, `${label}.causalHypothesis`)

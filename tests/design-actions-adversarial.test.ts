@@ -2814,6 +2814,10 @@ describe("design-action transition coordinator (production authority path)", () 
       "短剧、互动游戏剧、电视剧和电影都能接受专业编剧审核与评分",
       "ainovel 原创能力支持互动第四墙和共生机制",
     ];
+    proposal.evolutionPack.observation.signalSources = [
+      ...proposal.evolutionPack.observation.signalSources,
+      { id: "host-receipt", kind: "host-receipt" as never },
+    ];
     proposal.evidenceRefs = [defectSignalId];
     // This intentionally mirrors the failed production output: the model
     // repeats version 4 and the old comparison. The host-bound adapter must
@@ -2840,11 +2844,18 @@ describe("design-action transition coordinator (production authority path)", () 
     const storedProposal = harness.listDesignProposals({ projectId })[0]!;
     expect(harness.listDesignProposals({ projectId })).toHaveLength(1);
     expect(storedProposal).toMatchObject({ status: "accepted" });
+    const storedSources = storedProposal.proposal.evolutionPack?.observation.signalSources ?? [];
+    expect(storedSources).toEqual([
+      { id: "run-evidence", kind: "run-evidence" },
+      { id: `action:${actionId}`, kind: "external-ref" },
+    ]);
     expect(storedProposal.proposal).toMatchObject({
       evidenceRefs: [defectSignalId, `action:${actionId}`],
       problem: expect.stringContaining("短剧"),
       recommendation: expect.stringContaining("ainovel"),
-      evolutionPack: { version: 5 },
+      evolutionPack: {
+        version: 5,
+      },
       evaluationContract: { comparison: successorComparison },
       maturityGateContract: {
         packRef: {
@@ -2883,6 +2894,59 @@ describe("design-action transition coordinator (production authority path)", () 
         },
       },
     });
+  });
+
+  test("host receipt adapter still rejects unrelated unknown signal source kinds", () => {
+    const projectId = "project_host_receipt_unknown_kind";
+    const proposal = targetEvolutionEnvelope(projectId);
+    proposal.evolutionPack.observation.signalSources.push({
+      id: "other-managed-source",
+      kind: "other-managed-kind" as never,
+    });
+
+    expect(() => parseAttemptOutput(JSON.stringify({
+      status: "done",
+      summary: "Unknown non-adapter signal source",
+      actions: [{
+        type: "proposeDesign",
+        payload: { projectId, title: "Unknown signal source", proposal },
+      }],
+    }))).toThrow(/signalSources\[1\]\.kind must be one of/);
+  });
+
+  test("host receipt signal source alias cannot persist without the fixed adapter", async () => {
+    const projectId = harness.createProject({ name: "unbound-host-receipt-alias", rootPath: dir });
+    seedActiveCharter(projectId);
+    const signalId = seedActiveSignal(projectId);
+    const runId = harness.createRun({ projectId, goal: "Reject an unbound host receipt alias" });
+    const taskId = harness.createTask({ runId, role: "designer", goal: "Propose", prompt: "Propose." });
+    const proposal = targetEvolutionEnvelope(projectId);
+    proposal.evidenceRefs = [signalId];
+    proposal.evolutionPack.observation.signalSources.push({
+      id: "host-receipt",
+      kind: "host-receipt" as never,
+    });
+    proposal.maturityGateContract = {
+      ...proposal.maturityGateContract,
+      packRef: {
+        id: proposal.evolutionPack.id,
+        version: proposal.evolutionPack.version,
+        contentSha256: canonicalEvolutionValueSha256(proposal.evolutionPack),
+      },
+    };
+    const output = parseAttemptOutput(JSON.stringify({
+      status: "done",
+      summary: "Unbound host receipt alias",
+      actions: [{
+        type: "proposeDesign",
+        payload: { projectId, title: "Unbound host receipt alias", proposal },
+      }],
+    }));
+
+    const result = await runHook(output, runId, taskId);
+
+    expect(result.problems).toContainEqual(expect.stringMatching(/requires a fixed host receipt design adapter/));
+    expect(harness.listDesignProposals({ projectId })).toHaveLength(0);
   });
 
   test("without a host corpus receipt allows only a proposal to build the receipt", async () => {

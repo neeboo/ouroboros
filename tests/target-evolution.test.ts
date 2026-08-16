@@ -1091,6 +1091,13 @@ describe("target-system evolution contracts", () => {
     ).toThrow();
   });
 
+  test("strict evolution pack parsing rejects the transient host receipt adapter alias", () => {
+    expect(() => targetEvolutionModule.parseEvolutionPackV1({
+      ...validEvolutionPack(),
+      observation: { signalSources: [{ id: "host-receipt", kind: "host-receipt" }] },
+    }, PROJECT_ID)).toThrow(/kind must be one of/);
+  });
+
   test.each([
     ["invalid failure class", { ...validCausalHypothesis(), failureClass: "test-failure" }, validComparison()],
     ["empty mechanism", { ...validCausalHypothesis(), mechanism: "" }, validComparison()],
