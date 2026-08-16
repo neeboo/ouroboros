@@ -218,6 +218,9 @@ export type HarnessAction =
       expectedRefsSha256: string;
       expectedCorpusSnapshotSha256: string;
       expectedCount: number;
+      descriptorSource?: "approved-proposal-comparison";
+      proposalId?: string;
+      decisionId?: string;
     }
   | { type: "registerEvolutionProfile"; runId: string; profile: EvolutionProfile }
   | { type: "recordProductionEpisode"; runId: string; episode: ProductionEpisode }
@@ -795,10 +798,27 @@ export function parseHarnessAction(value: unknown): HarnessAction {
       "expectedRefsSha256",
       "expectedCorpusSnapshotSha256",
       "expectedCount",
+      "descriptorSource",
+      "proposalId",
+      "decisionId",
     ]);
     const expectedCount = record.expectedCount;
     if (!Number.isSafeInteger(expectedCount) || (expectedCount as number) <= 0 || (expectedCount as number) > 1_000) {
       throw new Error("expectedCount must be an integer between 1 and 1000");
+    }
+    const descriptorSource = record.descriptorSource;
+    const proposalId = record.proposalId;
+    const decisionId = record.decisionId;
+    const hasGovernedDescriptor = descriptorSource !== undefined || proposalId !== undefined || decisionId !== undefined;
+    if (
+      hasGovernedDescriptor
+      && (
+        descriptorSource !== "approved-proposal-comparison"
+        || typeof proposalId !== "string" || proposalId.length === 0
+        || typeof decisionId !== "string" || decisionId.length === 0
+      )
+    ) {
+      throw new Error("approved proposal descriptor source requires descriptorSource, proposalId, and decisionId");
     }
     return {
       type,
@@ -810,6 +830,11 @@ export function parseHarnessAction(value: unknown): HarnessAction {
       expectedRefsSha256: exactSha256Field(record, "expectedRefsSha256"),
       expectedCorpusSnapshotSha256: exactSha256Field(record, "expectedCorpusSnapshotSha256"),
       expectedCount: expectedCount as number,
+      ...(hasGovernedDescriptor ? {
+        descriptorSource: "approved-proposal-comparison" as const,
+        proposalId: proposalId as string,
+        decisionId: decisionId as string,
+      } : {}),
     };
   }
   if (type === "registerEvolutionProfile") {
@@ -5326,7 +5351,30 @@ function verifySealedCorpusForVerification(
   const checks: HarnessActionResult["checks"] = [];
   const evidence = completedWorkerFileReceipts(harness, action, checks);
   if ("problem" in evidence) return failedHostEvidenceAction(action, evidence.problem, checks);
-  const descriptorText = options.sealedDescriptorJson;
+  let descriptorText = options.sealedDescriptorJson;
+  let descriptorSource = "ephemeral-host-input";
+  let opaqueAuthorizationRef: string | null = null;
+  let authorizationDecision: string | null = null;
+  if (action.descriptorSource === "approved-proposal-comparison") {
+    if (!action.proposalId || !action.decisionId) {
+      return failedHostEvidenceAction(action, "Approved proposal descriptor derivation requires proposal and decision IDs.", checks);
+    }
+    if (descriptorText) {
+      return failedHostEvidenceAction(action, "Approved proposal descriptor derivation cannot be combined with an external descriptor.", checks);
+    }
+    const governed = governedSealedDescriptor(harness, {
+      ...action,
+      descriptorSource: action.descriptorSource,
+      proposalId: action.proposalId,
+      decisionId: action.decisionId,
+    });
+    if ("problem" in governed) return failedHostEvidenceAction(action, governed.problem, checks);
+    descriptorText = governed.descriptorText;
+    descriptorSource = action.descriptorSource;
+    opaqueAuthorizationRef = governed.opaqueAuthorizationRef;
+    authorizationDecision = "approved";
+    checks.push({ name: "sealed descriptor governance", status: "passed", evidence: governed.opaqueAuthorizationRef });
+  }
   if (typeof descriptorText !== "string" || descriptorText.length === 0 || descriptorText.length > 64 * 1024) {
     return failedHostEvidenceAction(action, "A bounded ephemeral sealed descriptor is required from the host.", checks);
   }
@@ -5423,6 +5471,7 @@ function verifySealedCorpusForVerification(
     crossProjectMemoryReads: 0,
     crossProjectMemoryWrites: 0,
   };
+  const descriptorSha256 = createHash("sha256").update(descriptorText).digest("hex");
   return {
     status: "done",
     actionType: action.type,
@@ -5437,15 +5486,113 @@ function verifySealedCorpusForVerification(
       scriptPath: action.scriptPath,
       scriptSha256: evidence.files.find((file) => file.path === action.scriptPath)!.sha256,
       descriptorCount: action.expectedCount,
+      descriptorSource,
+      opaqueAuthorizationRef,
+      authorizationDecision,
+      descriptorSha256,
       refsSha256: action.expectedRefsSha256,
       corpusSnapshotSha256: action.expectedCorpusSnapshotSha256,
       networkPolicy: "sandbox-exec:deny-network",
       fileWritePolicy: "sandbox-exec:deny-file-write",
       command: `node ${action.scriptPath} --sealed-stdin`,
       exitCode: 0,
+      noHoldoutDisclosure: true,
       sideEffectCounters,
     }],
     problems: [],
+  };
+}
+
+function governedSealedDescriptor(
+  harness: Harness,
+  action: VerifySealedCorpusAction & {
+    descriptorSource: "approved-proposal-comparison";
+    proposalId: string;
+    decisionId: string;
+  },
+): { descriptorText: string; opaqueAuthorizationRef: string } | { problem: string } {
+  const run = harness.getRun(action.runId);
+  if (!run || !run.projectId || !run.projectRoot) {
+    return { problem: "The target run is not bound to one project root for governed sealed verification." };
+  }
+  if (
+    run.context.designProposalId !== action.proposalId
+    || run.context.designDecisionId !== action.decisionId
+  ) {
+    return { problem: "The target run does not freeze the requested proposal and authority decision." };
+  }
+  const proposal = harness.getDesignProposal({ id: action.proposalId });
+  if (!proposal || proposal.projectId !== run.projectId || proposal.status !== "accepted") {
+    return { problem: "The sealed descriptor proposal is not one accepted target-project proposal." };
+  }
+  const approvedDecisions = harness.listDesignDecisions({ proposalId: proposal.id, limit: 100 })
+    .filter((decision) => decision.decision === "approved");
+  const decision = approvedDecisions.find((candidate) => candidate.id === action.decisionId);
+  if (!decision || approvedDecisions.at(-1)?.id !== decision.id) {
+    return { problem: "The sealed descriptor decision is not the latest approved authority decision." };
+  }
+  const evaluationContract = objectRecordOrNull(proposal.proposal.evaluationContract);
+  const comparison = objectRecordOrNull(evaluationContract?.comparison);
+  const refs = Array.isArray(comparison?.holdoutEvidenceRefs) ? comparison.holdoutEvidenceRefs : [];
+  if (
+    refs.length !== action.expectedCount
+    || !refs.every((ref): ref is string => typeof ref === "string" && ref.startsWith("fixture:"))
+  ) {
+    return { problem: "The accepted comparison does not contain the frozen fixture holdout count." };
+  }
+  const refsSha256 = createHash("sha256").update(JSON.stringify([...refs].sort())).digest("hex");
+  if (refsSha256 !== action.expectedRefsSha256) {
+    return { problem: "The accepted comparison holdout commitment does not match the fixed action." };
+  }
+  if (comparison?.corpusSnapshotSha256 !== action.expectedCorpusSnapshotSha256) {
+    return { problem: "The accepted comparison corpus snapshot does not match the fixed action." };
+  }
+  let projectRoot: string;
+  try {
+    projectRoot = realpathSync(run.projectRoot);
+  } catch {
+    return { problem: "The target project root is unavailable for governed sealed verification." };
+  }
+  const projectCommon = safeGitStep(defaultGitRunner, projectRoot, ["rev-parse", "--path-format=absolute", "--git-common-dir"]);
+  const verifierCommon = safeGitStep(defaultGitRunner, action.repoPath, ["rev-parse", "--path-format=absolute", "--git-common-dir"]);
+  if (
+    !projectCommon.ok || !verifierCommon.ok
+    || realpathSync(projectCommon.stdout.trim()) !== realpathSync(verifierCommon.stdout.trim())
+  ) {
+    return { problem: "The sealed verification worktree does not share the target project Git identity." };
+  }
+  const entries: Array<{ ref: string; path: string }> = [];
+  for (const ref of refs) {
+    let relativePath: string;
+    try {
+      relativePath = exactRelativeGitPathField({ value: ref.slice("fixture:".length) }, "value", "holdoutEvidenceRefs[]");
+      if (!relativePath.startsWith("tests/fixtures/") || isOuroborosRuntimePath(relativePath)) {
+        return { problem: "The accepted comparison holdout reference is outside the project fixture boundary." };
+      }
+    } catch {
+      return { problem: "The accepted comparison contains an invalid fixture holdout reference." };
+    }
+    const candidate = join(projectRoot, relativePath);
+    try {
+      const canonical = realpathSync(candidate);
+      const stat = lstatSync(canonical);
+      if (!stat.isFile() || stat.isSymbolicLink() || !canonical.startsWith(`${projectRoot}${sep}`)) {
+        return { problem: "The governed holdout source is not one project-owned regular file." };
+      }
+      entries.push({ ref, path: canonical });
+    } catch {
+      return { problem: "The governed holdout source is unavailable on the host." };
+    }
+  }
+  const descriptorText = JSON.stringify({ entries });
+  return {
+    descriptorText,
+    opaqueAuthorizationRef: `authorization_sha256:${createHash("sha256").update(JSON.stringify({
+      projectId: run.projectId,
+      proposalId: proposal.id,
+      decisionId: decision.id,
+      expectedRefsSha256: action.expectedRefsSha256,
+    })).digest("hex")}`,
   };
 }
 

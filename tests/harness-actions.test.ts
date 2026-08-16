@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, setDefaultTimeout, test } from
 import { createHash } from "node:crypto";
 import { realpathSync, writeFileSync } from "node:fs";
 import { chmod, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import {
   applyHarnessAction,
@@ -4066,7 +4066,8 @@ describe("Harness actions", () => {
       const content = '{"appendOnly":true}\n';
       await writeFile(join(repoPath, path), content);
       if (extraPath) await writeFile(join(repoPath, extraPath), "unexpected\n");
-      const runId = harness.createRun({ goal: "Prepare sealed offline evidence" });
+      const projectId = harness.createProject({ name: `host evidence ${scenarioIndex}`, rootPath: repoPath });
+      const runId = harness.createRun({ projectId, goal: "Prepare sealed offline evidence" });
       const taskId = harness.createTask({
         runId,
         role: "worker",
@@ -4086,7 +4087,7 @@ describe("Harness actions", () => {
           problems: [],
         },
       });
-      return { repoPath, runId, taskId, path, expectedParentSha };
+      return { repoPath, projectId, runId, taskId, path, expectedParentSha };
     }
 
     test("stages only the exact worker file receipt and rejects an additional untracked file", async () => {
@@ -4191,6 +4192,142 @@ describe("Harness actions", () => {
       const missing = applyHarnessAction(harness, { ...action, contractId: "sealedCorpusMissing" });
       expect(missing).toMatchObject({ status: "blocked", actionType: "verifySealedCorpusForVerification" });
       expect(missing.problems.join(" ")).toContain("descriptor");
+    });
+
+    test("derives a sealed descriptor only inside the host action from an approved frozen comparison", async () => {
+      const scenario = await createOfflineWorkerScenario();
+      const holdoutRef = "fixture:tests/fixtures/private-holdout.json";
+      const holdoutPath = join(scenario.repoPath, "tests/fixtures/private-holdout.json");
+      await mkdir(dirname(holdoutPath), { recursive: true });
+      await writeFile(holdoutPath, '{"sealed":true}\n');
+      const expectedRefsSha256 = createHash("sha256").update(JSON.stringify([holdoutRef])).digest("hex");
+      const proposal = harness.createDesignProposal({
+        id: "design_host_sealed_descriptor",
+        projectId: scenario.projectId,
+        runId: scenario.runId,
+        title: "Authorize host-owned sealed verification",
+        problem: "The verifier needs one private holdout descriptor.",
+        recommendation: "Derive it only inside the host fixed action.",
+        status: "accepted",
+        proposal: {
+          problem: "The verifier needs one private holdout descriptor.",
+          recommendation: "Derive it only inside the host fixed action.",
+          evaluationContract: {
+            baseline: ["sealed control"],
+            successMetrics: ["sealed replay passes"],
+            guardMetrics: ["no disclosure"],
+            requiredEvidence: ["host sealed receipt"],
+            reviewAt: "2026-09-01T00:00:00.000Z",
+            comparison: {
+              controlRef: "artifact:sealed-control-v1",
+              developmentEvidenceRefs: ["fixture:tests/fixtures/development.json"],
+              holdoutEvidenceRefs: [holdoutRef],
+              unrelatedEvidenceRefs: ["fixture:tests/fixtures/unrelated.json"],
+              corpusSnapshotSha256: "c".repeat(64),
+              equalBudget: {
+                model: "fixture-replay-no-provider",
+                reasoningEffort: "high",
+                wallClockMs: 30_000,
+                maxAttempts: 1,
+                maxTokens: 1_000,
+                toolPolicySha256: "d".repeat(64),
+                concurrency: 1,
+              },
+              primaryMetric: "sealed replay pass rate",
+              minimumUplift: 0,
+              maximumGuardRegression: 0,
+            },
+          },
+          investment: {
+            reversibility: "easy",
+            portfolio: "core",
+            oneTimeCost: 0,
+            recurringCost: 0,
+          },
+        },
+      });
+      const decision = harness.recordDesignDecision({
+        id: "decision_host_sealed_descriptor",
+        proposalId: proposal.id,
+        decision: "approved",
+        actorKind: "auto",
+        actorRef: "authority-evaluator",
+        reasons: ["Zero-spend host-only verification."],
+        authority: { disposition: "automatic" },
+      });
+      harness.updateRun({
+        runId: scenario.runId,
+        contextPatch: { designProposalId: proposal.id, designDecisionId: decision.id },
+      });
+      let observedStdin = "";
+      const result = applyHarnessAction(harness, {
+        type: "verifySealedCorpusForVerification",
+        contractId: "sealedCorpusApprovedComparisonV1",
+        runId: scenario.runId,
+        taskId: scenario.taskId,
+        repoPath: scenario.repoPath,
+        scriptPath: scenario.path,
+        expectedRefsSha256,
+        expectedCorpusSnapshotSha256: "c".repeat(64),
+        expectedCount: 1,
+        descriptorSource: "approved-proposal-comparison",
+        proposalId: proposal.id,
+        decisionId: decision.id,
+      } as never, {
+        runCommand: (input) => {
+          observedStdin = input.stdin ?? "";
+          return {
+            exitCode: 0,
+            stdout: `${JSON.stringify({ status: "pass", refsSha256: expectedRefsSha256, corpusSnapshotSha256: "c".repeat(64) })}\n`,
+            stderr: "",
+          };
+        },
+      });
+
+      expect(result).toMatchObject({ status: "done", actionType: "verifySealedCorpusForVerification" });
+      expect(JSON.parse(observedStdin)).toEqual({ entries: [{ ref: holdoutRef, path: realpathSync(holdoutPath) }] });
+      expect(result.artifacts).toContainEqual(expect.objectContaining({
+        kind: "sealed_corpus_verification_receipt",
+        descriptorSource: "approved-proposal-comparison",
+        authorizationDecision: "approved",
+        descriptorSha256: expect.stringMatching(/^[a-f0-9]{64}$/),
+        noHoldoutDisclosure: true,
+      }));
+      const event = harness.listHarnessActionEvents({ limit: 1 })[0]!;
+      expect(JSON.stringify(event)).not.toContain(holdoutRef);
+      expect(JSON.stringify(event)).not.toContain(holdoutPath);
+
+      const rejectedDecision = harness.recordDesignDecision({
+        id: "decision_host_sealed_descriptor_rejected",
+        proposalId: proposal.id,
+        decision: "rejected",
+        actorKind: "auto",
+        actorRef: "authority-evaluator",
+        reasons: ["Fixture authorization withdrawn."],
+      });
+      harness.updateRun({ runId: scenario.runId, contextPatch: { designDecisionId: rejectedDecision.id } });
+      let rejectedCommandCalls = 0;
+      const rejected = applyHarnessAction(harness, {
+        type: "verifySealedCorpusForVerification",
+        contractId: "sealedCorpusRejectedComparisonV1",
+        runId: scenario.runId,
+        taskId: scenario.taskId,
+        repoPath: scenario.repoPath,
+        scriptPath: scenario.path,
+        expectedRefsSha256,
+        expectedCorpusSnapshotSha256: "c".repeat(64),
+        expectedCount: 1,
+        descriptorSource: "approved-proposal-comparison",
+        proposalId: proposal.id,
+        decisionId: rejectedDecision.id,
+      } as never, {
+        runCommand: () => {
+          rejectedCommandCalls += 1;
+          throw new Error("sealed verifier must not start without approval");
+        },
+      });
+      expect(rejected).toMatchObject({ status: "blocked", actionType: "verifySealedCorpusForVerification" });
+      expect(rejectedCommandCalls).toBe(0);
     });
 
     test("materializes an exact historical attempt artifact set into a fresh host worktree without consuming repair budget", async () => {
