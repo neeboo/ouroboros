@@ -2736,7 +2736,12 @@ describe("design-action transition coordinator (production authority path)", () 
       holdoutEvidenceRefs: [`commitment:holdout-v5:${"d".repeat(64)}`],
       corpusSnapshotSha256: "e".repeat(64),
     };
-    const actionId = "action_versioned_manifest_receipt_v5";
+    const actionId = harness.recordHarnessActionEvent({
+      actionType: "buildVersionedCorpusManifest",
+      status: "done",
+      request: { type: "buildVersionedCorpusManifest", projectId, targetVersion: 5 },
+      result: { status: "done" },
+    });
     const receipt = {
       actionId,
       projectId,
@@ -2782,19 +2787,47 @@ describe("design-action transition coordinator (production authority path)", () 
         targetSystemEvidenceBundle: { ...bundleBody, bundleSha256: canonicalEvolutionValueSha256(bundleBody) },
       },
     });
-    const taskId = harness.createTask({ runId, role: "designer", goal: "Propose version 5", prompt: "Copy the host receipt." });
+    const taskId = harness.createTask({
+      runId,
+      role: "designer",
+      goal: "Propose version 5",
+      prompt: "Use the host receipt for the comparison contract and design the target business change.",
+      config: {
+        hostReceiptDesignAdapter: {
+          schemaVersion: 1,
+          actionId,
+          actionEvidenceRef: `action:${actionId}`,
+          targetVersion: 5,
+          manifestSha256: successorComparison.corpusSnapshotSha256,
+          comparisonSha256: canonicalEvolutionValueSha256(successorComparison),
+          requiredBusinessTerms: [
+            "短剧", "互动游戏剧", "电视剧", "电影", "ainovel",
+            "专业编剧", "审核", "评分", "互动第四墙", "共生",
+          ],
+        },
+      },
+    });
     const proposal = targetEvolutionEnvelope(projectId);
-    proposal.evidenceRefs = [defectSignalId, actionId];
-    proposal.evolutionPack = { ...proposal.evolutionPack, version: 5 };
+    proposal.problem = "短剧、互动游戏剧、电视剧和电影缺少统一的原创演化合同。";
+    proposal.recommendation = "用 ainovel 原创能力，加入专业编剧审核与评分，并验证互动第四墙和共生机制。";
+    proposal.evolutionPack.objective.domainOutcomes = [
+      "短剧、互动游戏剧、电视剧和电影都能接受专业编剧审核与评分",
+      "ainovel 原创能力支持互动第四墙和共生机制",
+    ];
+    proposal.evidenceRefs = [defectSignalId];
+    // This intentionally mirrors the failed production output: the model
+    // repeats version 4 and the old comparison. The host-bound adapter must
+    // replace only the receipt-owned fields before fixed validation.
+    proposal.evolutionPack = { ...proposal.evolutionPack, version: 4 };
     proposal.maturityGateContract = {
       ...proposal.maturityGateContract,
       packRef: {
         id: proposal.evolutionPack.id,
-        version: 5,
+        version: 4,
         contentSha256: canonicalEvolutionValueSha256(proposal.evolutionPack),
       },
     };
-    proposal.evaluationContract.comparison = successorComparison;
+    proposal.evaluationContract.comparison = frozenComparison;
     const output = parseAttemptOutput(JSON.stringify({
       status: "done",
       summary: "Host-receipt-bound version 5 proposal",
@@ -2804,8 +2837,52 @@ describe("design-action transition coordinator (production authority path)", () 
     const result = await runHook(output, runId, taskId);
 
     expect(result.problems ?? []).toEqual([]);
+    const storedProposal = harness.listDesignProposals({ projectId })[0]!;
     expect(harness.listDesignProposals({ projectId })).toHaveLength(1);
-    expect(harness.listDesignProposals({ projectId })[0]?.proposal.evaluationContract.comparison).toEqual(successorComparison);
+    expect(storedProposal).toMatchObject({ status: "accepted" });
+    expect(storedProposal.proposal).toMatchObject({
+      evidenceRefs: [defectSignalId, `action:${actionId}`],
+      problem: expect.stringContaining("短剧"),
+      recommendation: expect.stringContaining("ainovel"),
+      evolutionPack: { version: 5 },
+      evaluationContract: { comparison: successorComparison },
+      maturityGateContract: {
+        packRef: {
+          version: 5,
+          contentSha256: expect.stringMatching(/^[0-9a-f]{64}$/),
+        },
+      },
+    });
+    const continuation = harness.getRunOverview({ runId, eventLimit: 0 }).tasks.find((task) =>
+      task.role === "designer"
+      && (task.config?.designContinuation as Record<string, unknown> | undefined)?.kind === "after-approveDesign");
+    expect(continuation).toBeDefined();
+    const delivery = await runHook(parseAttemptOutput(JSON.stringify({
+      status: "done",
+      summary: "Create the governed business delivery.",
+      actions: [{
+        type: "createRunsFromDesign",
+        payload: {
+          proposalId: storedProposal.id,
+          runs: [{
+            goal: "Deliver the professional multi-format story evolution contract",
+            prompt: "Plan the accepted short-drama, interactive game drama, television, and film capability.",
+          }],
+        },
+      }],
+    })), runId, continuation!.id);
+    const child = createdRunArtifacts(delivery)[0] as { runId: string };
+    expect(harness.getRun(child.runId)).toMatchObject({
+      context: {
+        source: "design",
+        designProposal: {
+          problem: expect.stringContaining("互动游戏剧"),
+          recommendation: expect.stringContaining("专业编剧"),
+          evolutionPack: { version: 5 },
+          evaluationContract: { comparison: successorComparison },
+        },
+      },
+    });
   });
 
   test("without a host corpus receipt allows only a proposal to build the receipt", async () => {

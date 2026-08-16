@@ -939,6 +939,121 @@ describe("Harness actions", () => {
     });
   });
 
+  test("prepareRunDrain closes the first host-receipt Designer validation failure without Goal Review", () => {
+    const projectId = harness.createProject({ name: "host-receipt-designer-stop", rootPath: dir });
+    const runId = harness.createRun({
+      projectId,
+      goal: "Design version 5 from one verified host receipt",
+      context: {
+        source: "target-system-design",
+        repairReplanBudget: { limit: 3, used: 0, entries: [] },
+      },
+    });
+    const designerId = harness.createTask({
+      runId,
+      role: "designer",
+      goal: "Propose version 5",
+      prompt: "Use the frozen host receipt.",
+      config: {
+        readOnly: true,
+        forbidImplementation: true,
+        forbidBrowser: true,
+        hostReceiptDesignAdapter: {
+          schemaVersion: 1,
+          actionId: "action_host_manifest_v5",
+          actionEvidenceRef: "action:action_host_manifest_v5",
+          targetVersion: 5,
+          manifestSha256: "a".repeat(64),
+          comparisonSha256: "b".repeat(64),
+        },
+      },
+    });
+    harness.recordAttempt({
+      taskId: designerId,
+      input: { executor: "codex-resumable", sandbox: "read-only" },
+      output: {
+        status: "blocked",
+        summary: "The fixed proposal action rejected the missing receipt citation.",
+        changedFiles: [], checks: [], artifacts: [],
+        problems: ["versioned design correction must cite the host corpus manifest action"],
+      },
+    });
+
+    const first = applyHarnessAction(harness, { type: "prepareRunDrain", runId });
+    const replay = applyHarnessAction(harness, { type: "prepareRunDrain", runId });
+    const overview = harness.getRunOverview({ runId, eventLimit: 0 });
+    const signals = harness.listStrategySignals({ projectId });
+
+    expect(first).toMatchObject({ status: "blocked", actionType: "prepareRunDrain" });
+    expect(replay).toMatchObject({ status: "blocked", actionType: "prepareRunDrain" });
+    expect(overview.run).toMatchObject({
+      status: "blocked",
+      context: {
+        hostReceiptDesignFailure: expect.objectContaining({
+          sourceTaskId: designerId,
+          actionEvidenceRef: "action:action_host_manifest_v5",
+        }),
+        repairReplanBudget: { limit: 3, used: 0, entries: [] },
+      },
+    });
+    expect(overview.tasks.filter((task) => task.role === "goal-review")).toHaveLength(0);
+    expect(signals).toHaveLength(1);
+    expect(signals[0]?.payload).toMatchObject({
+      defectKind: "host-receipt-versioned-design-validation-failed",
+      validationFingerprint: expect.stringMatching(/^[0-9a-f]{64}$/),
+    });
+  });
+
+  test("prepareRunDrain fails closed an empty continue Goal Review without retrying it", () => {
+    const runId = harness.createRun({
+      goal: "Stop an empty Goal Review continuation",
+      context: { repairReplanBudget: { limit: 3, used: 0, entries: [] } },
+    });
+    const sourceId = harness.createTask({ runId, role: "planner", goal: "Plan", prompt: "Plan." });
+    harness.recordAttempt({
+      taskId: sourceId,
+      input: { executor: "test" },
+      output: { status: "done", summary: "Planning drained.", changedFiles: [], checks: [], artifacts: [], problems: [] },
+    });
+    const reviewId = harness.createTask({
+      runId,
+      role: "goal-review",
+      goal: "Review",
+      prompt: "Return a valid terminal decision or concrete work.",
+      dependsOn: [sourceId],
+    });
+    harness.recordAttempt({
+      taskId: reviewId,
+      input: { executor: "codex-resumable" },
+      output: {
+        status: "blocked",
+        runDecision: "continue",
+        summary: "Continue, but no task was supplied.",
+        changedFiles: [], checks: [], artifacts: [],
+        problems: ["continue goal-review must include one to 8 nextTasks items"],
+        nextTasks: [],
+      },
+    });
+
+    const first = applyHarnessAction(harness, { type: "prepareRunDrain", runId });
+    const replay = applyHarnessAction(harness, { type: "prepareRunDrain", runId });
+    const overview = harness.getRunOverview({ runId, eventLimit: 0 });
+
+    expect(first).toMatchObject({ status: "blocked", actionType: "prepareRunDrain" });
+    expect(replay).toMatchObject({ status: "blocked", actionType: "prepareRunDrain" });
+    expect(overview.run).toMatchObject({
+      status: "blocked",
+      context: {
+        invalidGoalReviewContinuation: expect.objectContaining({
+          taskId: reviewId,
+          decision: "continue",
+        }),
+      },
+    });
+    expect(overview.tasks).toHaveLength(2);
+    expect(overview.sessions.filter((session) => session.taskId === reviewId)).toHaveLength(1);
+  });
+
   test("repair exhaustion stops after the final verifier without creating goal review work", () => {
     const runId = harness.createRun({
       goal: "Stop at the final verifier verdict",

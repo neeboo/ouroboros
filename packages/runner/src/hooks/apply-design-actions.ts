@@ -399,10 +399,16 @@ function applyProposeDesignWithDb(
   const sourceRun = assertActionSourceProject(harness, db, context, projectId, "proposeDesign");
   assertProposalCharterProjects(harness, db, sourceRun.context, payload.charterId, projectId);
   const title = requiredString(payload.title, "proposeDesign payload.title");
-  const proposalData = payload.proposal as Record<string, unknown> | undefined;
-  if (!proposalData) {
+  const rawProposalData = payload.proposal as Record<string, unknown> | undefined;
+  if (!rawProposalData) {
     throw new Error("proposeDesign payload.proposal must be present");
   }
+  const proposalData = adaptHostReceiptBoundProposal(
+    sourceRun.context,
+    context.task,
+    rawProposalData,
+    projectId,
+  );
   const problem = requiredString(proposalData.problem, "proposeDesign payload.proposal.problem");
   const recommendation = requiredString(proposalData.recommendation, "proposeDesign payload.proposal.recommendation");
   const evidenceRefs = optionalStringArray(proposalData.evidenceRefs, "proposeDesign payload.proposal.evidenceRefs");
@@ -474,6 +480,99 @@ function applyProposeDesignWithDb(
       checkpointDecisionId: transition.checkpointDecisionId ?? null,
     },
   };
+}
+
+function adaptHostReceiptBoundProposal(
+  runContext: Record<string, unknown>,
+  task: Task,
+  rawProposal: Record<string, unknown>,
+  projectId: string,
+): Record<string, unknown> {
+  const rawAdapter = task.config?.hostReceiptDesignAdapter;
+  if (!rawAdapter || typeof rawAdapter !== "object" || Array.isArray(rawAdapter)) {
+    return rawProposal;
+  }
+  const adapter = rawAdapter as Record<string, unknown>;
+  if (adapter.schemaVersion !== 1
+    || typeof adapter.actionId !== "string"
+    || typeof adapter.actionEvidenceRef !== "string"
+    || adapter.actionEvidenceRef !== `action:${adapter.actionId}`
+    || adapter.targetVersion !== 5
+    || typeof adapter.manifestSha256 !== "string"
+    || typeof adapter.comparisonSha256 !== "string") {
+    throw new Error("host receipt design adapter is malformed");
+  }
+  const rawBundle = runContext.targetSystemEvidenceBundle;
+  if (!rawBundle || typeof rawBundle !== "object" || Array.isArray(rawBundle)) {
+    throw new Error("host receipt design adapter requires the authoritative evidence bundle");
+  }
+  const bundle = rawBundle as Record<string, unknown>;
+  const receipts = Array.isArray(bundle.hostCorpusReceipts) ? bundle.hostCorpusReceipts : [];
+  const receipt = receipts.find((entry) => entry && typeof entry === "object" && !Array.isArray(entry)
+    && (entry as Record<string, unknown>).actionId === adapter.actionId) as Record<string, unknown> | undefined;
+  if (!receipt
+    || receipt.targetVersion !== adapter.targetVersion
+    || receipt.manifestSha256 !== adapter.manifestSha256
+    || receipt.comparisonSha256 !== adapter.comparisonSha256
+    || receipt.projectId !== projectId
+    || canonicalEvolutionValueSha256(receipt.comparison) !== adapter.comparisonSha256) {
+    throw new Error("host receipt design adapter does not match its authoritative receipt");
+  }
+  const rawTerms = adapter.requiredBusinessTerms;
+  const requiredBusinessTerms = Array.isArray(rawTerms)
+    ? rawTerms.filter((term): term is string => typeof term === "string" && term.length > 0)
+    : [];
+  if (!Array.isArray(rawTerms) || requiredBusinessTerms.length !== rawTerms.length || requiredBusinessTerms.length > 32) {
+    throw new Error("host receipt design adapter business terms are malformed");
+  }
+  const businessText = JSON.stringify({
+    problem: rawProposal.problem,
+    recommendation: rawProposal.recommendation,
+    objective: (rawProposal.evolutionPack as Record<string, unknown> | undefined)?.objective,
+  }).toLowerCase();
+  const missingBusinessTerms = requiredBusinessTerms.filter((term) => !businessText.includes(term.toLowerCase()));
+  if (missingBusinessTerms.length > 0) {
+    throw new Error(`versioned business design is missing frozen target requirements: ${missingBusinessTerms.join(", ")}`);
+  }
+
+  const adapted = structuredClone(rawProposal);
+  const evidenceRefs = optionalStringArray(adapted.evidenceRefs, "proposeDesign payload.proposal.evidenceRefs") ?? [];
+  if (!evidenceRefs.includes(adapter.actionEvidenceRef)) evidenceRefs.push(adapter.actionEvidenceRef);
+  adapted.evidenceRefs = evidenceRefs;
+  if (!adapted.evolutionPack || typeof adapted.evolutionPack !== "object" || Array.isArray(adapted.evolutionPack)) {
+    throw new Error("host receipt versioned design must include the business-owned evolutionPack");
+  }
+  const normalizedPack = parseEvolutionPackV1({
+    ...(adapted.evolutionPack as Record<string, unknown>),
+    version: adapter.targetVersion,
+  }, projectId, "host receipt adapted evolutionPack");
+  adapted.evolutionPack = normalizedPack;
+  const evaluationContract = adapted.evaluationContract;
+  if (!evaluationContract || typeof evaluationContract !== "object" || Array.isArray(evaluationContract)) {
+    throw new Error("host receipt versioned design must include evaluationContract");
+  }
+  adapted.evaluationContract = {
+    ...(evaluationContract as Record<string, unknown>),
+    comparison: structuredClone(receipt.comparison),
+  };
+  const maturityGate = adapted.maturityGateContract;
+  if (!maturityGate || typeof maturityGate !== "object" || Array.isArray(maturityGate)) {
+    throw new Error("host receipt versioned design must include maturityGateContract");
+  }
+  adapted.maturityGateContract = {
+    ...(maturityGate as Record<string, unknown>),
+    packRef: {
+      id: normalizedPack.id,
+      version: normalizedPack.version,
+      contentSha256: canonicalEvolutionValueSha256(normalizedPack),
+    },
+  };
+  parseEvolutionComparison(
+    (adapted.evaluationContract as Record<string, unknown>).comparison,
+    "host receipt adapted comparison",
+  );
+  parseEvolutionDeliveryContracts(adapted, projectId, normalizedPack, "host receipt adapted proposal");
+  return adapted;
 }
 
 function assertProductionComparisonHasNoPlaceholders(value: unknown) {
@@ -555,7 +654,7 @@ function assertTargetSystemAuthoritativeComparison(
       throw new Error("versioned design requires exactly one host corpus manifest receipt");
     }
     const receipt = hostReceipts[0] as Record<string, unknown>;
-    if (typeof receipt.actionId !== "string" || !evidenceRefs.includes(receipt.actionId)) {
+    if (typeof receipt.actionId !== "string" || !evidenceRefs.includes(`action:${receipt.actionId}`)) {
       throw new Error("versioned design correction must cite the host corpus manifest action");
     }
     const sourceMatches = acceptedProposals.some((entry) => {
@@ -2961,6 +3060,19 @@ function resolveProposalEvidence(
     : [];
 
   for (const ref of evidenceRefs) {
+    const actionMatch = /^action:(action_[A-Za-z0-9._-]+)$/.exec(ref);
+    if (actionMatch) {
+      const event = harness.getHarnessActionEventWithDb(db, { id: actionMatch[1]! });
+      const requestProjectId = event?.request && typeof event.request === "object"
+        ? (event.request as Record<string, unknown>).projectId
+        : undefined;
+      if (event?.status === "done"
+        && event.actionType === "buildVersionedCorpusManifest"
+        && requestProjectId === projectId) {
+        references.push({ ref, kind: "evidence-ref", expiresAt: null, hasConflict: false });
+      }
+      continue;
+    }
     const signal = harness.getStrategySignalWithDb(db, { id: ref });
     if (!signal) {
       // Missing evidence: omit. The evaluator treats any cited ref absent from

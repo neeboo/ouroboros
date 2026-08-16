@@ -348,9 +348,39 @@ function ensureVersionedDesigner(
   if (!parent || parent.context.source !== "target-system-design" || parent.projectId !== deliveryRun.projectId) {
     throw new Error("host evidence maintenance delivery is not bound to a target-system-design root");
   }
-  const runId = stableId("run", `host-evidence-successor|${action.eventId}`);
-  const taskId = stableId("task", `host-evidence-successor-designer|${action.eventId}`);
   const evidenceBundle = buildEvidenceBundle(harness, deliveryRun, marker, action);
+  const receipt = evidenceBundle.hostCorpusReceipts[0]!;
+  const actionEvidenceRef = `action:${action.eventId}`;
+  const requiredBusinessTerms = [
+    "短剧",
+    "互动游戏剧",
+    "电视剧",
+    "电影",
+    "ainovel",
+    "专业编剧",
+    "审核",
+    "评分",
+    "互动第四墙",
+    "共生",
+  ];
+  const retiredPredecessors = harness.listRuns({ limit: 1_000 }).filter((candidate) =>
+    candidate.context.parentRunId === deliveryRun.id
+    && candidate.context.source === "target-system-design"
+    && candidate.context.sourceTaskId === verifierTask.id
+    && candidate.context.retired === true,
+  );
+  const generation = retiredPredecessors.length;
+  const runId = stableId("run", `host-evidence-successor|${action.eventId}|generation:${generation}`);
+  const taskId = stableId("task", `host-evidence-successor-designer|${action.eventId}|generation:${generation}`);
+  const hostReceiptDesignAdapter = {
+    schemaVersion: 1 as const,
+    actionId: action.eventId,
+    actionEvidenceRef,
+    targetVersion: marker.targetVersion,
+    manifestSha256: receipt.manifestSha256,
+    comparisonSha256: receipt.comparisonSha256,
+    requiredBusinessTerms,
+  };
   if (!harness.getRun(runId)) {
     harness.createRun({
       id: runId,
@@ -362,6 +392,7 @@ function ensureVersionedDesigner(
         parentRunId: deliveryRun.id,
         sourceTaskId: verifierTask.id,
         targetSystemEvidenceBundle: evidenceBundle,
+        hostReceiptDesignAdapter,
       },
     });
   }
@@ -373,8 +404,10 @@ function ensureVersionedDesigner(
       goal: `Propose the version ${marker.targetVersion} comparison or stay quiescent`,
       prompt: [
         `Use the verified host receipt ${action.eventId} to decide version ${marker.targetVersion}.`,
-        `Cite signal ${marker.sourceSignalId} and action ${action.eventId}.`,
-        `Set evolutionPack.version=${marker.targetVersion} and copy receipt.comparison exactly when proposing.`,
+        `The fixed adapter supplies actionEvidenceRef=${actionEvidenceRef}; proposal.evidenceRefs must retain this exact reference.`,
+        `Cite signal ${marker.sourceSignalId}. Receipt-owned fields are injected by the control plane: evolutionPack.version=${marker.targetVersion}, evaluationContract.comparison, holdout commitment, manifest hash, comparison hash, and maturityGateContract.packRef.`,
+        "Do not rewrite, downgrade, or replace those receipt-owned fields. Design only the target business problem, mechanism, professional creative approach, and delivery path.",
+        "The business design must cover 短剧、互动游戏剧、电视剧和电影, ainovel 原创能力, 专业编剧审核与评分, and 互动第四墙和共生.",
         "Keep the immutable prior proposal unchanged. The holdout remains count-and-commitment only.",
         "Return one fixed proposeDesign action or a mutation-free quiescent result. Do not implement or create tasks directly.",
         JSON.stringify(evidenceBundle, null, 2),
@@ -390,6 +423,7 @@ function ensureVersionedDesigner(
         forbidBrowser: true,
         browserProcessPolicy: "deny",
         targetSystemEvidenceBundle: evidenceBundle,
+        hostReceiptDesignAdapter,
       },
     });
   }

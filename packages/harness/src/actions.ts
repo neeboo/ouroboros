@@ -7983,6 +7983,16 @@ function prepareRunDrain(harness: Harness, action: Extract<HarnessAction, { type
     );
   }
 
+  const hostReceiptDesignFailure = closeHostReceiptDesignFailure(harness, action.runId);
+  if (hostReceiptDesignFailure) {
+    return hostReceiptDesignFailure;
+  }
+
+  const invalidEmptyGoalReview = closeInvalidEmptyGoalReview(harness, action.runId);
+  if (invalidEmptyGoalReview) {
+    return invalidEmptyGoalReview;
+  }
+
   const exhaustedDesignCorrection = closeExhaustedTargetSystemDesignCorrection(harness, action.runId);
   if (exhaustedDesignCorrection) {
     return exhaustedDesignCorrection;
@@ -11468,6 +11478,146 @@ function exactSafeIdentifierField(record: Record<string, unknown>, key: string) 
     throw new Error(`${key} must be a safe identifier of at most 200 characters`);
   }
   return value;
+}
+
+function closeHostReceiptDesignFailure(
+  harness: Harness,
+  runId: string,
+): HarnessActionResult | null {
+  const overview = harness.getRunOverview({ runId, eventLimit: 0 });
+  const run = overview.run;
+  if (!run || run.context.source !== "target-system-design" || !run.projectId) return null;
+  if (overview.tasks.some((task) => task.status === "todo" || task.status === "running")) return null;
+  const designer = [...overview.tasks].reverse().find((task) =>
+    task.role === "designer"
+    && task.status === "blocked"
+    && task.config?.hostReceiptDesignAdapter
+    && typeof task.config.hostReceiptDesignAdapter === "object"
+    && !Array.isArray(task.config.hostReceiptDesignAdapter));
+  if (!designer) return null;
+  const session = [...overview.sessions].reverse().find((candidate) =>
+    candidate.taskId === designer.id && candidate.status === "blocked");
+  if (!session) return null;
+  const problem = [...(session.output.problems ?? [])].reverse().find((entry) => entry.trim().length > 0)
+    ?? session.output.summary;
+  if (!/(?:host corpus manifest action|host receipt|versioned business design|evolutionPack\.version)/i.test(problem)) {
+    return null;
+  }
+  const adapter = designer.config!.hostReceiptDesignAdapter as Record<string, unknown>;
+  const actionEvidenceRef = typeof adapter.actionEvidenceRef === "string" ? adapter.actionEvidenceRef : null;
+  if (!actionEvidenceRef || !/^action:action_[A-Za-z0-9._-]+$/.test(actionEvidenceRef)) return null;
+  const fingerprint = stableFingerprint(JSON.stringify({
+    runId,
+    taskId: designer.id,
+    attemptId: session.attemptId,
+    actionEvidenceRef,
+    problem,
+  }));
+  const existing = run.context.hostReceiptDesignFailure;
+  const existingRecord = existing && typeof existing === "object" && !Array.isArray(existing)
+    ? existing as Record<string, unknown>
+    : null;
+  if (existingRecord?.fingerprint === fingerprint) {
+    if (run.status !== "blocked") harness.updateRunStatus({ runId, status: "blocked" });
+    return {
+      status: "blocked",
+      actionType: "prepareRunDrain",
+      summary: `Run ${runId} already stopped at host receipt Designer failure ${session.attemptId}.`,
+      checks: [{ name: "host receipt Designer failure", status: "failed", evidence: fingerprint }],
+      artifacts: [{ kind: "host_receipt_design_failure", ...existingRecord, reused: true }],
+      problems: [problem],
+    };
+  }
+  const record = {
+    schemaVersion: 1,
+    fingerprint,
+    sourceTaskId: designer.id,
+    sourceAttemptId: session.attemptId,
+    actionEvidenceRef,
+    validationProblem: limitUtf8Output(problem, 1_024),
+    recordedAt: normalizedEvidenceTimestamp(session.finishedAt),
+  };
+  harness.updateRun({ runId, status: "blocked", contextPatch: { hostReceiptDesignFailure: record } });
+  const signal = applyHarnessAction(harness, {
+    type: "recordSignal",
+    projectId: run.projectId,
+    sourceRunId: runId,
+    signalClass: "system",
+    source: `blocked-run-outcome:${runId}`,
+    title: "Host-receipt versioned Designer failed fixed validation",
+    summary: "The first host-receipt-bound Designer failed fixed validation. The root stopped without Goal Review or another Designer continuation.",
+    observationTime: record.recordedAt,
+    confidence: 1,
+    evidence: [`run:${runId}`, `task:${designer.id}`, `attempt:${session.attemptId}`, actionEvidenceRef],
+    payload: {
+      outcome: "evidence-defect",
+      defectKind: "host-receipt-versioned-design-validation-failed",
+      validationFingerprint: fingerprint,
+      validationProblem: record.validationProblem,
+      actionEvidenceRef,
+      nextStep: "new-independent-versioned-designer-trigger-or-quiescence",
+      sideEffectCounters: zeroSideEffectCounters(),
+    },
+  });
+  return {
+    status: "blocked",
+    actionType: "prepareRunDrain",
+    summary: `Run ${runId} stopped after its first host-receipt Designer validation failure.`,
+    checks: [
+      { name: "host receipt Designer failure", status: "failed", evidence: fingerprint },
+      { name: "recursive Goal Review", status: "passed", evidence: "stopped before creation" },
+    ],
+    artifacts: signal.artifacts,
+    problems: [problem],
+  };
+}
+
+function closeInvalidEmptyGoalReview(
+  harness: Harness,
+  runId: string,
+): HarnessActionResult | null {
+  const overview = harness.getRunOverview({ runId, eventLimit: 0 });
+  const run = overview.run;
+  if (!run || overview.tasks.some((task) => task.status === "todo" || task.status === "running")) return null;
+  const session = [...overview.sessions].reverse().find((candidate) => {
+    if (candidate.role !== "goal-review" || candidate.status !== "blocked") return false;
+    const decision = resolveRunDecision(candidate.output);
+    return (decision === "continue" || decision === "verify")
+      && (candidate.output.nextTasks ?? []).length === 0
+      && (candidate.output.problems ?? []).some((problem) => /must include one to \d+ nextTasks items/i.test(problem));
+  });
+  if (!session) return null;
+  const decision = resolveRunDecision(session.output) as "continue" | "verify";
+  const fingerprint = stableFingerprint(JSON.stringify({
+    runId,
+    taskId: session.taskId,
+    attemptId: session.attemptId,
+    decision,
+    nextTasks: [],
+  }));
+  const existing = run.context.invalidGoalReviewContinuation;
+  const record = existing && typeof existing === "object" && !Array.isArray(existing)
+    && (existing as Record<string, unknown>).fingerprint === fingerprint
+    ? existing as Record<string, unknown>
+    : {
+        schemaVersion: 1,
+        fingerprint,
+        taskId: session.taskId,
+        attemptId: session.attemptId,
+        decision,
+        recordedAt: normalizedEvidenceTimestamp(session.finishedAt),
+      };
+  if (existing !== record || run.status !== "blocked") {
+    harness.updateRun({ runId, status: "blocked", contextPatch: { invalidGoalReviewContinuation: record } });
+  }
+  return {
+    status: "blocked",
+    actionType: "prepareRunDrain",
+    summary: `Run ${runId} stopped at an invalid empty ${decision} Goal Review.`,
+    checks: [{ name: "goal review concrete continuation", status: "failed", evidence: session.attemptId }],
+    artifacts: [{ kind: "invalid_goal_review_continuation", ...record }],
+    problems: [`${decision} goal-review ${session.taskId} supplied no next task`],
+  };
 }
 
 function closeExhaustedTargetSystemDesignCorrection(

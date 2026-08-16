@@ -548,9 +548,24 @@ describe("runner", () => {
     expect(designerTask).toMatchObject({
       role: "designer",
       status: "todo",
-      config: { readOnly: true, forbidImplementation: true, forbidBrowser: true },
+      config: {
+        readOnly: true,
+        forbidImplementation: true,
+        forbidBrowser: true,
+        hostReceiptDesignAdapter: {
+          schemaVersion: 1,
+          actionEvidenceRef: expect.stringMatching(/^action:action_/),
+          targetVersion: 5,
+          manifestSha256: expect.stringMatching(/^[0-9a-f]{64}$/),
+          comparisonSha256: expect.stringMatching(/^[0-9a-f]{64}$/),
+        },
+      },
     });
-    expect(designerTask!.prompt).toContain("copy receipt.comparison exactly");
+    expect(designerTask!.prompt).toContain("actionEvidenceRef=");
+    expect(designerTask!.prompt).toContain("短剧、互动游戏剧、电视剧和电影");
+    expect(designerTask!.prompt).toContain("ainovel");
+    expect(designerTask!.prompt).toContain("专业编剧审核与评分");
+    expect(designerTask!.prompt).toContain("互动第四墙和共生");
   });
 
   test("blocks a missing authoritative host boundary once without Goal Review recursion", async () => {
