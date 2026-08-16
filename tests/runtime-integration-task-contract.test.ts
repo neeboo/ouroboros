@@ -666,6 +666,51 @@ describe("runtime integration task execution contracts", () => {
       role: "verifier",
       dependsOn: [refinedContinuationId],
     });
+    const progressedAttemptId = harness.recordAttempt({
+      taskId: refinedContinuationId,
+      input: { executor: "dsh-cli", cwd: repair.worktreePath },
+      output: {
+        status: "blocked",
+        summary: "DeepSeek Harness CLI stopped after producing a bounded candidate diff",
+        changedFiles: [],
+        checks: [{ name: "DSH no-write progress", status: "failed" }],
+        artifacts: [{
+          kind: "dsh_progress_watchdog_receipt",
+          status: "stalled",
+          requestCount: 24,
+          baselineFingerprint: "b".repeat(64),
+          finalFingerprint: "c".repeat(64),
+        }],
+        problems: ["watchdog stopped test cleanup after the authorized candidate changed"],
+      },
+    });
+    const resumedCandidate = applyHarnessAction(harness, {
+      type: "materializeVerifierRepairRecovery",
+      runId: fixture.runId,
+      verifierTaskId: semanticVerifierId,
+      reason: "resume the same final candidate after its first authorized write",
+    } as never);
+    const resumedOverview = harness.getRunOverview({ runId: fixture.runId, eventLimit: 0 });
+    expect(resumedCandidate.status).toBe("done");
+    expect(resumedCandidate.artifacts).toEqual(expect.arrayContaining([expect.objectContaining({
+      kind: "runtime_semantic_repair_continuation",
+      continuationTaskId: refinedContinuationId,
+      verifierTaskId: refinedVerifierId,
+      reused: true,
+    })]));
+    expect(resumedOverview.tasks.find((task) => task.id === refinedContinuationId)).toMatchObject({
+      status: "todo",
+      config: {
+        dshNoWriteProgressPolicy: {
+          baselineFingerprint: "b".repeat(64),
+        },
+        runtimeIntegrationSemanticRepairContinuation: {
+          progressRetryUsed: true,
+          progressAttemptId: progressedAttemptId,
+        },
+      },
+    });
+    expect(resumedOverview.tasks.find((task) => task.id === refinedVerifierId)?.status).toBe("todo");
     expect(harness.leaseReadyTasks({
       runId: fixture.runId,
       limit: 1,

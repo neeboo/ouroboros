@@ -4847,8 +4847,50 @@ function materializeTimedOutRuntimeSemanticRepairContinuationWithDb(input: {
     const attempt = session ? harness.getAttemptWithDb(db, session.attemptId) : null;
     const marker = objectRecordOrNull(existingContinuation.config?.runtimeIntegrationSemanticRepairContinuation) ?? {};
     const ordinal = typeof marker.continuationOrdinal === "number" ? marker.continuationOrdinal : 1;
-    if (!session || !attempt || !dshNoWriteProgressStalled(session.output)) {
+    const progressReceipt = session ? dshProgressWatchdogReceipt(session.output) : null;
+    if (!session || !attempt || !progressReceipt) {
       throw new Error(`semantic continuation ${existingContinuation.id} is blocked without a no-write progress receipt`);
+    }
+    if (progressReceipt.baselineFingerprint !== progressReceipt.finalFingerprint) {
+      if (marker.progressRetryUsed === true) {
+        return blockedResult(
+          "materializeVerifierRepairRecovery",
+          `Runtime semantic Repair continuation ${existingContinuation.id} already used its bounded post-progress retry.`,
+          [`semantic continuation ${existingContinuation.id} did not reach a terminal DSH output after candidate progress`],
+        );
+      }
+      if (verifier.status !== "todo" || overview.sessions.some((candidate) => candidate.taskId === verifier.id)) {
+        throw new Error(`semantic continuation ${existingContinuation.id} cannot resume after its Verifier started`);
+      }
+      const resumedConfig = {
+        ...(existingContinuation.config ?? {}),
+        dshNoWriteProgressPolicy: {
+          ...objectRecordOrNull(existingContinuation.config?.dshNoWriteProgressPolicy),
+          baselineFingerprint: progressReceipt.baselineFingerprint,
+        },
+        runtimeIntegrationSemanticRepairContinuation: {
+          ...marker,
+          progressRetryUsed: true,
+          progressAttemptId: attempt.id,
+        },
+      };
+      const resumed = db.query(
+        `update tasks
+         set status = 'todo', config_json = $configJson, updated_at = current_timestamp
+         where id = $taskId and status = 'blocked'`,
+      ).run({
+        $taskId: existingContinuation.id,
+        $configJson: JSON.stringify(resumedConfig),
+      });
+      if (resumed.changes !== 1) {
+        throw new Error(`semantic continuation ${existingContinuation.id} changed while resuming its candidate`);
+      }
+      harness.updateRunWithDb(db, { runId: run.id, status: "todo" });
+      return semanticRepairContinuationResult(run.id, repair, repairAttempt.id, {
+        ...existingContinuation,
+        status: "todo",
+        config: resumedConfig,
+      }, verifier, true);
     }
     if (ordinal >= 2) {
       return blockedResult(
@@ -5107,16 +5149,19 @@ function runtimeSemanticRepairNoWriteTimeout(output: AttemptOutput) {
     && requestCount > 0;
 }
 
-function dshNoWriteProgressStalled(output: AttemptOutput) {
-  return output.status === "blocked"
-    && (output.changedFiles ?? []).length === 0
-    && (output.artifacts ?? []).map(objectRecordOrNull).some((artifact) =>
-      artifact?.kind === "dsh_progress_watchdog_receipt"
-      && artifact.status === "stalled"
-      && artifact.baselineFingerprint === artifact.finalFingerprint
-      && typeof artifact.requestCount === "number"
-      && artifact.requestCount > 0
-    );
+function dshProgressWatchdogReceipt(output: AttemptOutput) {
+  if (output.status !== "blocked" || (output.changedFiles ?? []).length !== 0) return null;
+  const receipt = (output.artifacts ?? []).map(objectRecordOrNull).find((artifact) =>
+    artifact?.kind === "dsh_progress_watchdog_receipt"
+    && artifact.status === "stalled"
+    && typeof artifact.baselineFingerprint === "string"
+    && /^[a-f0-9]{64}$/.test(artifact.baselineFingerprint)
+    && typeof artifact.finalFingerprint === "string"
+    && /^[a-f0-9]{64}$/.test(artifact.finalFingerprint)
+    && typeof artifact.requestCount === "number"
+    && artifact.requestCount > 0
+  );
+  return receipt as ({ baselineFingerprint: string; finalFingerprint: string } & Record<string, unknown>) | null;
 }
 
 function frozenRuntimeSemanticIdentities(context: Record<string, unknown>) {

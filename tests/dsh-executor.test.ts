@@ -133,10 +133,10 @@ describe("DeepSeek Harness CLI executor", () => {
     }
   });
 
-  test("an allowed file change resets the DSH progress watchdog", async () => {
+  test("the DSH no-write watchdog stops enforcing after the first allowed file change", async () => {
     const workspace = await mkdtemp(join(homedir(), ".orbs-dsh-progress-write-"));
     await mkdir(join(workspace, "config", "evolution"), { recursive: true });
-    let monitorResult: unknown = null;
+    const monitorResults: unknown[] = [];
     try {
       const executor = createDshCliExecutor({
         cwd: workspace,
@@ -148,7 +148,9 @@ describe("DeepSeek Harness CLI executor", () => {
         runCommand: async (input) => {
           await Bun.sleep(3);
           await writeFile(join(workspace, "config", "evolution", "changed.ts"), "export const version = 6;\n");
-          monitorResult = await input.progressMonitor?.evaluate();
+          monitorResults.push(await input.progressMonitor?.evaluate());
+          await Bun.sleep(3);
+          monitorResults.push(await input.progressMonitor?.evaluate());
           return {
             exitCode: 0,
             stdout: '{"status":"done","summary":"changed","changedFiles":["config/evolution/changed.ts"],"checks":[],"artifacts":[],"problems":[]}',
@@ -159,7 +161,10 @@ describe("DeepSeek Harness CLI executor", () => {
 
       const output = await executor({ ...executorInput(), attemptId: "attempt_dsh_progress_write" });
 
-      expect(monitorResult).toMatchObject({ stalled: false, changed: true });
+      expect(monitorResults).toEqual([
+        expect.objectContaining({ stalled: false, changed: true, progressSatisfied: true }),
+        expect.objectContaining({ stalled: false, changed: false, progressSatisfied: true }),
+      ]);
       expect(output).toMatchObject({
         status: "done",
         artifacts: expect.arrayContaining([expect.objectContaining({
@@ -167,6 +172,44 @@ describe("DeepSeek Harness CLI executor", () => {
           status: "completed",
         })]),
       });
+    } finally {
+      await rm(workspace, { recursive: true, force: true });
+    }
+  });
+
+  test("a persisted pre-edit fingerprint satisfies the no-write gate when a retried task already has the authorized diff", async () => {
+    const workspace = await mkdtemp(join(homedir(), ".orbs-dsh-progress-retry-"));
+    await mkdir(join(workspace, "config", "evolution"), { recursive: true });
+    await writeFile(join(workspace, "config", "evolution", "changed.ts"), "export const version = 6;\n");
+    let monitorResult: unknown = null;
+    try {
+      const executor = createDshCliExecutor({
+        cwd: workspace,
+        sandbox: "workspace-write",
+        filePolicy: frozenDshFilePolicy,
+        env: { DEEPSEEK_API_KEY: "host-owned-key" },
+        resolveCommand: availableDshResolution,
+        noWriteProgressPolicy: {
+          maxStallMs: 1,
+          minModelRequests: 0,
+          probeIntervalMs: 1,
+          baselineFingerprint: "a".repeat(64),
+        } as never,
+        runCommand: async (input) => {
+          await Bun.sleep(3);
+          monitorResult = await input.progressMonitor?.evaluate();
+          return {
+            exitCode: 0,
+            stdout: '{"status":"done","summary":"verified existing candidate","changedFiles":["config/evolution/changed.ts"],"checks":[],"artifacts":[],"problems":[]}',
+            stderr: "",
+          };
+        },
+      });
+
+      const output = await executor({ ...executorInput(), attemptId: "attempt_dsh_progress_retry" });
+
+      expect(monitorResult).toMatchObject({ stalled: false, changed: false, progressSatisfied: true });
+      expect(output.status).toBe("done");
     } finally {
       await rm(workspace, { recursive: true, force: true });
     }

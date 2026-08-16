@@ -83,6 +83,7 @@ interface DshProgressWatchdogReceipt {
   status: "progressing" | "stalled" | "completed";
   baselineFingerprint: string;
   finalFingerprint: string;
+  progressSatisfied: boolean;
   lastProgressAt: string;
   requestCount: number;
   maxStallMs: number;
@@ -456,14 +457,17 @@ function createDshNoWriteProgressWatchdog(input: {
   recorder?: { event(payload: Record<string, unknown>): void };
 }) {
   const { maxStallMs, minModelRequests, probeIntervalMs } = input.policy;
+  const configuredBaselineFingerprint = input.policy.baselineFingerprint;
   if (!Number.isInteger(maxStallMs) || maxStallMs < 1
     || !Number.isInteger(minModelRequests) || minModelRequests < 0
     || !Number.isInteger(probeIntervalMs) || probeIntervalMs < 1
-    || probeIntervalMs > maxStallMs) {
+    || probeIntervalMs > maxStallMs
+    || (configuredBaselineFingerprint !== undefined && !/^[a-f0-9]{64}$/.test(configuredBaselineFingerprint))) {
     throw new Error("DSH no-write progress policy is invalid");
   }
   let fingerprint = dshAllowedSurfaceFingerprint(input.cwd, input.filePolicy.allowedPaths);
-  const baselineFingerprint = fingerprint;
+  const baselineFingerprint = configuredBaselineFingerprint ?? fingerprint;
+  let progressSatisfied = fingerprint !== baselineFingerprint;
   let lastProgressAtMs = Date.now();
   let lastProgressAt = new Date(lastProgressAtMs).toISOString();
   let lastEvaluation: Record<string, unknown> = {};
@@ -472,12 +476,13 @@ function createDshNoWriteProgressWatchdog(input: {
     const changed = nextFingerprint !== fingerprint;
     if (changed) {
       fingerprint = nextFingerprint;
+      progressSatisfied = true;
       lastProgressAtMs = Date.now();
       lastProgressAt = new Date(lastProgressAtMs).toISOString();
     }
     const requestCount = input.requestCount();
     const stalledForMs = Math.max(0, Date.now() - lastProgressAtMs);
-    const stalled = !changed && requestCount >= minModelRequests && stalledForMs >= maxStallMs;
+    const stalled = !progressSatisfied && requestCount >= minModelRequests && stalledForMs >= maxStallMs;
     lastEvaluation = {
       stalled,
       code: stalled ? "dsh-no-write-progress" : "dsh-progress-observed",
@@ -486,6 +491,7 @@ function createDshNoWriteProgressWatchdog(input: {
         : undefined,
       requestCount,
       changed,
+      progressSatisfied,
       currentFingerprint: fingerprint,
       baselineFingerprint,
       stalledForMs,
@@ -509,6 +515,7 @@ function createDshNoWriteProgressWatchdog(input: {
         status,
         baselineFingerprint,
         finalFingerprint,
+        progressSatisfied,
         lastProgressAt,
         requestCount: input.requestCount(),
         maxStallMs,

@@ -33,6 +33,7 @@ export interface RouteExecutorOptions {
     maxStallMs: number;
     minModelRequests: number;
     probeIntervalMs: number;
+    baselineFingerprint?: string;
   };
 }
 
