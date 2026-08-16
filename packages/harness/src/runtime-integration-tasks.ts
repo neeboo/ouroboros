@@ -31,6 +31,81 @@ export interface RuntimeIntegrationTaskProjection {
   config: TaskConfig;
 }
 
+export interface FrozenRuntimeDshFilePolicy {
+  schemaVersion: 1;
+  source: "frozen-design-mutation-surfaces";
+  allowedPaths: string[];
+  readOnlyPaths: string[];
+  forbiddenPaths: string[];
+}
+
+export function validateDshFilePolicyAgainstFrozenRuntime(input: {
+  policy: unknown;
+  repositoryId: unknown;
+  boundary: unknown;
+  mutationSurfaces: unknown;
+}): FrozenRuntimeDshFilePolicy {
+  const policy = requireObject(input.policy, "dshFilePolicy");
+  if (policy.schemaVersion !== 1) throw new Error("DSH file policy schema is invalid");
+  const allowedPaths = normalizedPolicyPatterns(policy.allowedPaths, "dshFilePolicy.allowedPaths");
+  const readOnlyPaths = normalizedPolicyPatterns(policy.readOnlyPaths ?? [], "dshFilePolicy.readOnlyPaths");
+  const forbiddenPaths = normalizedPolicyPatterns(policy.forbiddenPaths, "dshFilePolicy.forbiddenPaths");
+  if (allowedPaths.length === 0) throw new Error("DSH file policy must retain a frozen allowed write path");
+
+  const boundary = requireObject(input.boundary, "runtimeIntegrationBoundary");
+  const repositoryId = stringValue(input.repositoryId);
+  const repositories = Array.isArray(boundary.repositories) ? boundary.repositories : [];
+  const repository = repositories
+    .map((value, index) => requireObject(value, `runtimeIntegrationBoundary.repositories[${index}]`))
+    .find((candidate) => candidate.id === repositoryId);
+  if (!repository) throw new Error(`runtime integration repository is missing: ${repositoryId}`);
+  const repositoryAllowed = normalizedPolicyPatterns(repository.allowedPaths, `${repositoryId}.allowedPaths`);
+  for (const candidate of allowedPaths) {
+    if (!repositoryAllowed.some((frozen) => policyPatternContains(frozen, candidate))) {
+      throw new Error(`DSH allowed write path exceeds the frozen repository boundary: ${candidate}`);
+    }
+  }
+
+  const surfaceValues = Array.isArray(input.mutationSurfaces) ? input.mutationSurfaces : [];
+  const surfaces = surfaceValues.map((value, index) => {
+    const surface = requireObject(value, `mutationSurfaces[${index}]`);
+    return {
+      allowedPaths: normalizedPolicyPatterns(surface.allowedPaths, `mutationSurfaces[${index}].allowedPaths`),
+      forbiddenPaths: normalizedPolicyPatterns(surface.forbiddenPaths, `mutationSurfaces[${index}].forbiddenPaths`),
+    };
+  });
+  const matchingSurface = surfaces.find((surface) => allowedPaths.every((candidate) =>
+    surface.allowedPaths.some((frozen) => policyPatternContains(frozen, candidate))));
+  if (!matchingSurface) throw new Error("DSH allowed write path exceeds the frozen design mutation surfaces");
+
+  const requiredForbidden = [
+    ...normalizedPolicyPatterns(repository.forbiddenPaths, `${repositoryId}.forbiddenPaths`),
+    ...normalizedPolicyPatterns(
+      objectOrNull(boundary.credentialIsolation)?.forbiddenPaths ?? [],
+      "runtimeIntegrationBoundary.credentialIsolation.forbiddenPaths",
+    ),
+  ];
+  for (const required of requiredForbidden) {
+    if (!forbiddenPaths.includes(required)) {
+      throw new Error(`DSH file policy is missing frozen forbidden path: ${required}`);
+    }
+  }
+  const deniedWritePaths = new Set([...readOnlyPaths, ...forbiddenPaths]);
+  const requiredReadOnly = normalizedPolicyPatterns(repository.readOnlyPaths ?? [], `${repositoryId}.readOnlyPaths`);
+  for (const required of [...matchingSurface.forbiddenPaths, ...requiredReadOnly]) {
+    if (!deniedWritePaths.has(required)) {
+      throw new Error(`DSH file policy is missing frozen read-only path: ${required}`);
+    }
+  }
+  return {
+    schemaVersion: 1,
+    source: "frozen-design-mutation-surfaces",
+    allowedPaths,
+    readOnlyPaths,
+    forbiddenPaths,
+  };
+}
+
 export function projectRuntimeIntegrationTaskGraph(input: {
   runId: string;
   plannerTaskId: string;
@@ -347,6 +422,17 @@ function stringValue(value: unknown) {
 function stringArray(value: unknown, label: string) {
   if (!Array.isArray(value) || value.some((entry) => typeof entry !== "string")) throw new Error(`${label} must be a string array`);
   return value as string[];
+}
+
+function normalizedPolicyPatterns(value: unknown, label: string) {
+  return [...new Set(stringArray(value, label).map((entry) => entry.trim()))].sort();
+}
+
+function policyPatternContains(frozen: string, candidate: string) {
+  if (frozen === candidate) return true;
+  if (!frozen.endsWith("/**")) return false;
+  const prefix = frozen.slice(0, -3);
+  return candidate === prefix || candidate.startsWith(`${prefix}/`);
 }
 
 function exactSha(value: unknown, label: string) {

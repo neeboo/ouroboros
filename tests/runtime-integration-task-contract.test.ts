@@ -6,6 +6,7 @@ import {
   applyHarnessAction,
   canonicalEvolutionValueSha256,
   Harness,
+  validateDshFilePolicyAgainstFrozenRuntime,
 } from "../packages/harness/src";
 import {
   createTasksFromOutputHook,
@@ -112,6 +113,66 @@ describe("runtime integration task execution contracts", () => {
     }
   });
 
+  test("a runtime Worker file policy may tighten reads and denials but never widen writes", () => {
+    const fixture = governedRuntimeFixture(harness, dir);
+    const backend = fixture.boundary.repositories.find((candidate) => candidate.id === "target-backend")!;
+    const policy = {
+      schemaVersion: 1 as const,
+      source: "frozen-runtime-integration-boundary",
+      allowedPaths: [...backend.allowedPaths],
+      readOnlyPaths: [...backend.readOnlyPaths],
+      forbiddenPaths: [
+        ...backend.forbiddenPaths,
+        ...fixture.boundary.credentialIsolation.forbiddenPaths,
+      ],
+    };
+    const mutationSurfaces = [
+      {
+        id: "target-backend",
+        allowedPaths: [...backend.allowedPaths],
+        forbiddenPaths: [...backend.readOnlyPaths, ...backend.forbiddenPaths],
+      },
+      {
+        id: "target-frontend",
+        allowedPaths: ["src-react/features/studio-os/**"],
+        forbiddenPaths: [".git/orbs/**", ".orbs/**", ".ouroboros/**", "db/**"],
+      },
+    ];
+
+    expect(validateDshFilePolicyAgainstFrozenRuntime({
+      policy,
+      repositoryId: "target-backend",
+      boundary: fixture.boundary,
+      mutationSurfaces,
+    })).toEqual({
+      schemaVersion: 1,
+      source: "frozen-design-mutation-surfaces",
+      allowedPaths: [...backend.allowedPaths].sort(),
+      readOnlyPaths: [...backend.readOnlyPaths].sort(),
+      forbiddenPaths: [...new Set([
+        ...backend.forbiddenPaths,
+        ...fixture.boundary.credentialIsolation.forbiddenPaths,
+      ])].sort(),
+    });
+
+    expect(() => validateDshFilePolicyAgainstFrozenRuntime({
+      policy: {
+        ...policy,
+        forbiddenPaths: policy.forbiddenPaths.filter((entry) => entry !== ".git/orbs/**"),
+      },
+      repositoryId: "target-backend",
+      boundary: fixture.boundary,
+      mutationSurfaces,
+    })).toThrow("missing frozen forbidden path");
+
+    expect(() => validateDshFilePolicyAgainstFrozenRuntime({
+      policy: { ...policy, allowedPaths: [...policy.allowedPaths, "src/unauthorized/**"] },
+      repositoryId: "target-backend",
+      boundary: fixture.boundary,
+      mutationSurfaces,
+    })).toThrow("allowed write path exceeds");
+  });
+
   test("an incomplete stored runtime Worker is blocked before hooks or a Codex client", async () => {
     const fixture = governedRuntimeFixture(harness, dir, { legacyTasks: true });
     let startHookCalls = 0;
@@ -178,6 +239,71 @@ describe("runtime integration task execution contracts", () => {
       .filter((task) => task.config?.runtimeIntegrationExecutionContract)).toHaveLength(5);
     expect(harness.getRunOverview({ runId: fixture.runId, eventLimit: 0 }).tasks
       .filter((task) => task.role === "goal-review")).toHaveLength(0);
+  });
+
+  test("a fixed recovery closes a dead preparation attempt and replaces its frozen task graph once", () => {
+    const fixture = governedRuntimeFixture(harness, dir, { legacyTasks: true });
+    const first = applyHarnessAction(harness, {
+      type: "materializeRuntimeIntegrationTaskGraphRecovery",
+      runId: fixture.runId,
+      plannerTaskId: fixture.plannerTaskId,
+    } as never);
+    const firstTaskIds = first.artifacts.find((artifact) => artifact.kind === "runtime_integration_task_graph_recovery")!
+      .taskIds as string[];
+    const backendTaskId = firstTaskIds[0]!;
+    const attemptId = harness.startAttempt({ taskId: backendTaskId, input: { preparation: "dsh-file-policy" } });
+    harness.upsertExecutionThread({
+      id: `thread_${attemptId}`,
+      runId: fixture.runId,
+      taskId: backendTaskId,
+      attemptId,
+      ownerType: "runner",
+      ownerId: "dead-owner",
+      role: "worker",
+      status: "running",
+      pid: 999_999,
+    });
+    const beforeBudget = harness.getRun(fixture.runId)!.context.repairReplanBudget;
+
+    const recovered = applyHarnessAction(harness, {
+      type: "recoverRuntimeIntegrationTaskGraphPreparationFailure",
+      runId: fixture.runId,
+      taskId: backendTaskId,
+      attemptId,
+      reason: "DSH file policy semantic validation failed before model startup",
+    } as never);
+
+    expect(recovered.status).toBe("done");
+    const artifact = recovered.artifacts.find((candidate) =>
+      candidate.kind === "runtime_integration_task_graph_preparation_recovery")!;
+    const replacementTaskIds = artifact.taskIds as string[];
+    expect(replacementTaskIds).toHaveLength(5);
+    expect(replacementTaskIds).not.toEqual(firstTaskIds);
+    expect(firstTaskIds.map((id) => harness.getTask(id)?.status)).toEqual(Array(5).fill("blocked"));
+    expect(replacementTaskIds.map((id) => harness.getTask(id)?.status)).toEqual(Array(5).fill("todo"));
+    expect(harness.getAttempt(attemptId)).toMatchObject({ status: "blocked", error: expect.stringContaining("DSH file policy") });
+    expect(harness.getRunOverview({ runId: fixture.runId, eventLimit: 0 }).sessions
+      .find((session) => session.attemptId === attemptId)?.finishedAt).toEqual(expect.any(String));
+    expect(harness.listExecutionThreads({ runId: fixture.runId }).find((thread) => thread.attemptId === attemptId)).toMatchObject({
+      status: "interrupted",
+      interruptReason: expect.stringContaining("DSH file policy"),
+      interruptedAt: expect.any(String),
+    });
+    expect(harness.listExecutionThreads({ runId: fixture.runId }).filter((thread) => thread.status === "running")).toHaveLength(0);
+    expect(harness.getRun(fixture.runId)!.context.repairReplanBudget).toEqual(beforeBudget);
+    expect(harness.getRunOverview({ runId: fixture.runId, eventLimit: 0 }).tasks.filter((task) => task.role === "goal-review")).toHaveLength(0);
+
+    const replay = applyHarnessAction(harness, {
+      type: "recoverRuntimeIntegrationTaskGraphPreparationFailure",
+      runId: fixture.runId,
+      taskId: backendTaskId,
+      attemptId,
+      reason: "DSH file policy semantic validation failed before model startup",
+    } as never);
+    expect(replay).toMatchObject({
+      status: "done",
+      artifacts: [expect.objectContaining({ taskIds: replacementTaskIds, reused: true })],
+    });
   });
 });
 

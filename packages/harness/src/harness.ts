@@ -1906,6 +1906,32 @@ export class Harness {
     );
   }
 
+  finishAttemptAndExecutionThread(input: FinishAttemptInput & {
+    threadStatus: "blocked" | "interrupted" | "orphaned";
+    interruptReason: string;
+  }) {
+    return withDatabase(this.dbPath, (db) => db.transaction(() => {
+      this.finishAttemptWithDb(db, input);
+      ensureExecutionThreads(db);
+      db.query(
+        `
+        update execution_threads
+        set status = $status,
+            pid = null,
+            heartbeat_at = current_timestamp,
+            interrupted_at = current_timestamp,
+            interrupt_reason = $interruptReason,
+            updated_at = current_timestamp
+        where attempt_id = $attemptId and status = 'running'
+        `,
+      ).run({
+        $attemptId: input.attemptId,
+        $status: input.threadStatus,
+        $interruptReason: input.interruptReason,
+      });
+    })());
+  }
+
   finishAttemptWithDb(db: HarnessDatabase, input: FinishAttemptInput) {
     const output = normalizeAttemptOutput(input.output);
     if (output.status !== "done" && output.status !== "blocked") {

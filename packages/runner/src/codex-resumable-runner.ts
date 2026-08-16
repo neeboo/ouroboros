@@ -1038,19 +1038,30 @@ class CodexResumableOrchestrator {
       agentSessionId: genericAgentSessionId(input.route, input.sessionName),
     });
     const recorder = this.createAttemptEventRecorder(attemptId);
-    const result = await this.client({
-      model: input.route.model?.model,
-      reasoningEffort: input.route.model?.reasoning_effort,
-      cwd: input.cwd,
-      task: input.task,
-      route: input.route,
-    }).start({
-      prompt: input.prompt,
-      sessionName: input.sessionName,
-      onStdout: recorder.stdout,
-      onStderr: recorder.stderr,
-      onEvent: recorder.event,
-    });
+    let result: CodexResumableResult;
+    try {
+      result = await this.client({
+        model: input.route.model?.model,
+        reasoningEffort: input.route.model?.reasoning_effort,
+        cwd: input.cwd,
+        task: input.task,
+        route: input.route,
+      }).start({
+        prompt: input.prompt,
+        sessionName: input.sessionName,
+        onStdout: recorder.stdout,
+        onStderr: recorder.stderr,
+        onEvent: recorder.event,
+      });
+    } catch (error) {
+      return this.blockStartedAttemptLifecycleFailure({
+        attemptId,
+        task: input.task,
+        sessionName: input.sessionName,
+        phase: "codex client preparation",
+        error,
+      });
+    }
     this.harness.updateAttemptInput({
       attemptId,
       input: {
@@ -1211,37 +1222,51 @@ class CodexResumableOrchestrator {
         dshRequiredPlugins: stringArrayConfig(factoryInput.task.config?.dshRequiredPlugins),
         dshFilePolicy: factoryInput.task.config?.dshFilePolicy as import("./executors/types").DshFilePolicy | undefined,
       }));
-    const executor = executorFactory({
-      run: input.run,
-      task: input.task,
-      sessionName: input.sessionName,
-      cwd: input.cwd,
-      route: input.route,
-    });
     let rawOutput: AttemptOutput;
     try {
-      rawOutput = await executor({
-        prompt: input.prompt,
+      const executor = executorFactory({
         run: input.run,
         task: input.task,
         sessionName: input.sessionName,
+        cwd: input.cwd,
         route: input.route,
-        attemptId,
-        recorder,
       });
+      try {
+        rawOutput = await executor({
+          prompt: input.prompt,
+          run: input.run,
+          task: input.task,
+          sessionName: input.sessionName,
+          route: input.route,
+          attemptId,
+          recorder,
+        });
+      } catch (error) {
+        recorder.event({
+          type: "generic.attempt.executor_threw",
+          error: error instanceof Error ? error.message : String(error),
+        });
+        rawOutput = {
+          status: "blocked",
+          summary: "generic executor threw before producing output",
+          changedFiles: [],
+          checks: [{ name: "generic executor", status: "failed" }],
+          artifacts: [],
+          problems: [error instanceof Error ? error.message : String(error)],
+        };
+      }
     } catch (error) {
       recorder.event({
-        type: "generic.attempt.executor_threw",
+        type: "generic.attempt.preparation_threw",
         error: error instanceof Error ? error.message : String(error),
       });
-      rawOutput = {
-        status: "blocked",
-        summary: "generic executor threw before producing output",
-        changedFiles: [],
-        checks: [{ name: "generic executor", status: "failed" }],
-        artifacts: [],
-        problems: [error instanceof Error ? error.message : String(error)],
-      };
+      return this.blockStartedAttemptLifecycleFailure({
+        attemptId,
+        task: input.task,
+        sessionName: input.sessionName,
+        phase: "generic executor preparation",
+        error,
+      });
     } finally {
       clearInterval(heartbeat);
     }
@@ -1629,6 +1654,42 @@ class CodexResumableOrchestrator {
       status: "blocked",
       agentSessionId: null,
       heartbeat: true,
+    });
+    return {
+      taskId: input.task.id,
+      attemptId: input.attemptId,
+      sessionName: input.sessionName,
+      status: "blocked" as const,
+      codexSessionId: null,
+    };
+  }
+
+  private blockStartedAttemptLifecycleFailure(input: {
+    attemptId: string;
+    task: Task;
+    sessionName: string;
+    phase: string;
+    error: unknown;
+  }) {
+    const problem = redactSensitiveText(errorMessage(input.error));
+    const output: AttemptOutput = {
+      status: "blocked",
+      summary: `${input.phase} failed after the attempt and execution thread started`,
+      changedFiles: [],
+      checks: [{ name: input.phase, status: "failed", evidence: problem }],
+      artifacts: [{
+        kind: "started_attempt_lifecycle_failure",
+        taskId: input.task.id,
+        attemptId: input.attemptId,
+        phase: input.phase,
+      }],
+      problems: [problem],
+    };
+    this.harness.finishAttemptAndExecutionThread({
+      attemptId: input.attemptId,
+      output,
+      threadStatus: "blocked",
+      interruptReason: problem,
     });
     return {
       taskId: input.task.id,

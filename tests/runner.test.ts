@@ -4375,6 +4375,94 @@ describe("runner", () => {
     expect(harness.getAttempt(attemptId)?.status).toBe("done");
   });
 
+  test("a generic executor preparation throw atomically blocks its attempt task and execution thread", async () => {
+    const runId = harness.createRun({
+      goal: "Close generic preparation failures",
+      context: {
+        agentDefaults: { roles: { worker: "dsh" } },
+        agentBackends: { dsh: { kind: "dsh-cli" } },
+      },
+    });
+    const taskId = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Prepare the bounded DSH worker",
+      prompt: "Do not reach the model.",
+    });
+
+    const result = await runCodexResumableLoop({
+      harness,
+      runId,
+      limit: 1,
+      maxRounds: 1,
+      maxTries: 1,
+      cwd: dir,
+      genericExecutorFactory: () => {
+        throw new Error("synthetic DSH preflight failure");
+      },
+      clientFactory: () => ({
+        start: async () => { throw new Error("Codex must not start"); },
+        resume: async () => { throw new Error("Codex must not resume"); },
+      }),
+    });
+
+    expect(result.rounds[0]?.tasks[0]).toMatchObject({ taskId, status: "blocked" });
+    const attempt = harness.getRunOverview({ runId, eventLimit: 0 }).sessions[0]!;
+    expect(attempt).toMatchObject({
+      status: "blocked",
+      finishedAt: expect.any(String),
+      output: expect.objectContaining({ problems: [expect.stringContaining("synthetic DSH preflight failure")] }),
+    });
+    expect(harness.getAttempt(attempt.attemptId)?.error).toContain("synthetic DSH preflight failure");
+    expect(harness.getTask(taskId)?.status).toBe("blocked");
+    expect(harness.listExecutionThreads({ runId })).toEqual([
+      expect.objectContaining({
+        taskId,
+        attemptId: attempt.attemptId,
+        status: "blocked",
+        interruptReason: expect.stringContaining("synthetic DSH preflight failure"),
+      }),
+    ]);
+    expect(harness.listRunningAttempts({ runId })).toHaveLength(0);
+  });
+
+  test("a Codex client preparation throw atomically blocks its attempt task and execution thread", async () => {
+    const runId = harness.createRun({ goal: "Close Codex preparation failures" });
+    const taskId = harness.createTask({
+      runId,
+      role: "planner",
+      goal: "Prepare the bounded Codex client",
+      prompt: "Do not reach the model.",
+    });
+
+    const result = await runCodexResumableLoop({
+      harness,
+      runId,
+      limit: 1,
+      maxRounds: 1,
+      maxTries: 1,
+      cwd: dir,
+      clientFactory: () => {
+        throw new Error("synthetic Codex client preparation failure");
+      },
+    });
+
+    expect(result.rounds[0]?.tasks[0]).toMatchObject({ taskId, status: "blocked" });
+    const attempt = harness.getRunOverview({ runId, eventLimit: 0 }).sessions[0]!;
+    expect(attempt).toMatchObject({ status: "blocked", finishedAt: expect.any(String) });
+    expect(harness.getAttempt(attempt.attemptId)?.error).toContain("synthetic Codex client preparation failure");
+    expect(harness.getTask(taskId)?.status).toBe("blocked");
+    expect(harness.listExecutionThreads({ runId })).toEqual([
+      expect.objectContaining({
+        taskId,
+        attemptId: attempt.attemptId,
+        status: "blocked",
+        interruptReason: expect.stringContaining("synthetic Codex client preparation failure"),
+      }),
+    ]);
+    expect(harness.listRunningAttempts({ runId })).toHaveLength(0);
+  });
+
   test("generic acpx attempt records heartbeat events while a quiet executor is still running", async () => {
     const runId = harness.createRun({
       goal: "Observe quiet generic acpx attempt",

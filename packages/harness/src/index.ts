@@ -11,8 +11,10 @@ export {
   projectRuntimeIntegrationTaskGraph,
   RUNTIME_INTEGRATION_TASK_GRAPH,
   runtimeIntegrationTaskExecutionProblem,
+  validateDshFilePolicyAgainstFrozenRuntime,
 } from "./runtime-integration-tasks";
 export type {
+  FrozenRuntimeDshFilePolicy,
   RuntimeIntegrationPlannedTask,
   RuntimeIntegrationTaskProjection,
 } from "./runtime-integration-tasks";

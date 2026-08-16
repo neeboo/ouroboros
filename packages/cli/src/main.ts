@@ -17,6 +17,7 @@ import {
   readResearchEvidenceArtifact,
   parseHarnessRevisionV1,
   requireStrictIsoTimestamp,
+  validateDshFilePolicyAgainstFrozenRuntime,
 } from "@ouroboros/harness";
 import type {
   AttemptOutput,
@@ -2181,28 +2182,16 @@ function dshFilePolicyConfig(
   if (run.context.source !== "design") return value as DshFilePolicy;
   const proposal = recordValue(run.context.designProposal);
   const pack = recordValue(proposal.evolutionPack);
-  const surfaces = Array.isArray(pack.mutationSurfaces) ? pack.mutationSurfaces.map(recordValue) : [];
-  const allowedPaths = [...new Set(surfaces.flatMap((surface) =>
-    Array.isArray(surface.allowedPaths) ? surface.allowedPaths.filter((entry): entry is string => typeof entry === "string") : []
-  ))].sort();
-  const forbiddenPaths = [...new Set([
-    ...surfaces.flatMap((surface) =>
-      Array.isArray(surface.forbiddenPaths) ? surface.forbiddenPaths.filter((entry): entry is string => typeof entry === "string") : []
-    ),
-    ".git/orbs/**",
-    ".ouroboros/**",
-    ".orbs/**",
-  ])].sort();
-  const expected: DshFilePolicy = {
-    schemaVersion: 1,
-    source: "frozen-design-mutation-surfaces",
-    allowedPaths,
-    forbiddenPaths,
-  };
-  if (JSON.stringify(value) !== JSON.stringify(expected)) {
+  try {
+    return validateDshFilePolicyAgainstFrozenRuntime({
+      policy: value,
+      repositoryId: task.config?.repositoryId,
+      boundary: task.config?.runtimeIntegrationBoundary ?? run.context.runtimeIntegrationBoundary,
+      mutationSurfaces: pack.mutationSurfaces,
+    });
+  } catch {
     fail(`task ${task.id} DSH file policy exceeds or drifts from the frozen design mutation surfaces`);
   }
-  return expected;
 }
 
 function resolveCliExecutionRoute(input: {

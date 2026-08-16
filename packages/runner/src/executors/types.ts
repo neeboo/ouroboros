@@ -114,7 +114,8 @@ export interface DshCliExecutorOptions {
 
 export interface DshFilePolicy {
   schemaVersion: 1;
-  source: "frozen-design-mutation-surfaces";
+  source: "frozen-design-mutation-surfaces" | "frozen-runtime-integration-boundary";
   allowedPaths: string[];
+  readOnlyPaths?: string[];
   forbiddenPaths: string[];
 }

@@ -62,6 +62,7 @@ export interface NormalizedDshFilePolicy {
   schemaVersion: 1;
   source: "frozen-design-mutation-surfaces";
   allowedPaths: string[];
+  readOnlyPaths: string[];
   forbiddenPaths: string[];
   sha256: string;
 }
@@ -169,7 +170,7 @@ export async function prepareDshProcessPolicy(input: {
     workspaceRoot: input.workspaceRoot,
     permissionMode: input.permissionMode,
     allowedPaths: input.filePolicy?.allowedPaths,
-    forbiddenPaths: input.filePolicy?.forbiddenPaths,
+    forbiddenPaths: [...(input.filePolicy?.readOnlyPaths ?? []), ...(input.filePolicy?.forbiddenPaths ?? [])],
     temporaryWritePaths: [toolHome],
   });
   const runnerSource = darwinDshPolicyRunnerSource(toolProfile.profile, toolHome);
@@ -263,16 +264,27 @@ export function normalizeDshFilePolicy(input: unknown): NormalizedDshFilePolicy 
     throw new Error("DSH workspace-write requires a frozen file policy");
   }
   const record = input as Record<string, unknown>;
-  if (JSON.stringify(Object.keys(record).sort()) !== JSON.stringify(["allowedPaths", "forbiddenPaths", "schemaVersion", "source"])) {
+  const keys = Object.keys(record).sort();
+  const oldKeys = ["allowedPaths", "forbiddenPaths", "schemaVersion", "source"];
+  const currentKeys = ["allowedPaths", "forbiddenPaths", "readOnlyPaths", "schemaVersion", "source"];
+  if (JSON.stringify(keys) !== JSON.stringify(oldKeys) && JSON.stringify(keys) !== JSON.stringify(currentKeys)) {
     throw new Error("DSH file policy contains unknown or missing fields");
   }
-  if (record.schemaVersion !== 1 || record.source !== "frozen-design-mutation-surfaces") {
+  if (record.schemaVersion !== 1
+    || (record.source !== "frozen-design-mutation-surfaces" && record.source !== "frozen-runtime-integration-boundary")) {
     throw new Error("DSH file policy schema or source is invalid");
   }
   const allowedPaths = normalizePolicyPatterns(record.allowedPaths, "allowedPaths");
+  const readOnlyPaths = normalizePolicyPatterns(record.readOnlyPaths ?? [], "readOnlyPaths");
   const forbiddenPaths = normalizePolicyPatterns(record.forbiddenPaths, "forbiddenPaths");
   if (allowedPaths.length === 0) throw new Error("DSH file policy must allow at least one frozen path");
-  const normalized = { schemaVersion: 1 as const, source: "frozen-design-mutation-surfaces" as const, allowedPaths, forbiddenPaths };
+  const normalized = {
+    schemaVersion: 1 as const,
+    source: "frozen-design-mutation-surfaces" as const,
+    allowedPaths,
+    readOnlyPaths,
+    forbiddenPaths,
+  };
   return { ...normalized, sha256: createHash("sha256").update(JSON.stringify(normalized)).digest("hex") };
 }
 
