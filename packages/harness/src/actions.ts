@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, realpathSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import { accessSync, chmodSync, constants, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { tmpdir } from "node:os";
 import { acceptGuardrailProposal, proposeGuardrailsFromLessons } from "./guardrails";
@@ -217,6 +217,20 @@ export type HarnessAction =
     }
   | {
       type: "recoverRuntimeIntegrationTaskGraphPreparationFailure";
+      runId: string;
+      taskId: string;
+      attemptId: string;
+      reason: string;
+    }
+  | {
+      type: "installLocalDshCli";
+      runId: string;
+      sourceRepoPath: string;
+      expectedHead: string;
+      executablePath: string;
+    }
+  | {
+      type: "recoverRuntimeIntegrationDshInstallationFailure";
       runId: string;
       taskId: string;
       attemptId: string;
@@ -639,6 +653,8 @@ const FROZEN_DESIGN_CONTEXT_KEYS = new Set([
   "runtimeIntegrationTaskGraphRecovery",
   "runtimeIntegrationTaskGraphPreparationRecovery",
   "runtimeIntegrationTaskGraphPreparationRecoveries",
+  "dshInstallationReceipt",
+  "runtimeIntegrationDshInstallationRecovery",
 ]);
 
 function frozenDesignContextKeys(keys: Iterable<string>): string[] {
@@ -858,6 +874,26 @@ export function parseHarnessAction(value: unknown): HarnessAction {
     };
   }
   if (type === "recoverRuntimeIntegrationTaskGraphPreparationFailure") {
+    assertOnlyFields(record, type, ["type", "runId", "taskId", "attemptId", "reason"]);
+    return {
+      type,
+      runId: exactSafeIdentifierField(record, "runId"),
+      taskId: exactSafeIdentifierField(record, "taskId"),
+      attemptId: exactSafeIdentifierField(record, "attemptId"),
+      reason: exactNonEmptyStringField(record, "reason"),
+    };
+  }
+  if (type === "installLocalDshCli") {
+    assertOnlyFields(record, type, ["type", "runId", "sourceRepoPath", "expectedHead", "executablePath"]);
+    return {
+      type,
+      runId: exactSafeIdentifierField(record, "runId"),
+      sourceRepoPath: exactAbsolutePathField(record, "sourceRepoPath"),
+      expectedHead: exactGitCommitShaField(record, "expectedHead"),
+      executablePath: exactAbsolutePathField(record, "executablePath"),
+    };
+  }
+  if (type === "recoverRuntimeIntegrationDshInstallationFailure") {
     assertOnlyFields(record, type, ["type", "runId", "taskId", "attemptId", "reason"]);
     return {
       type,
@@ -1284,7 +1320,7 @@ export function parseHarnessAction(value: unknown): HarnessAction {
     };
   }
   throw new Error(
-    "harness action type must be reclaimRunningTasks, retryTask, reconcileRunEvidence, recordSignal, linkResearchEvidence, materializeDesignerActionRecovery, materializeDesignDeliveryRecovery, materializeDesignWorkerRuntimeRecovery, materializeDesignWorkerTransportRecovery, materializeVerifierRepairRecovery, reconcileVerifierRepairHandoff, buildVersionedCorpusManifest, bindHostEvidenceMaintenanceReceipt, materializeHostEvidenceMaintenanceDelivery, materializeRuntimeIntegrationDesignRecovery, materializeRuntimeIntegrationTaskGraphRecovery, recoverRuntimeIntegrationTaskGraphPreparationFailure, markRunTodo, updateRunContext, amendRunContract, retireRun, retireTask, prepareRunDrain, completeSystemTask, integrateVerifiedRun, pushExactGitRef, createExactGitRef, commitExactGitIndex, stageExactWorkerFilesForVerification, materializeAttemptArtifactsForVerification, verifySealedCorpusForVerification, registerEvolutionProfile, recordProductionEpisode, registerHarnessVariant, activateHarnessRevision, freezeMatchedExperiment, interruptAttemptAndCreateTask, interruptRunningAttemptsAndCreateTask, acceptGuardrailProposal, startSubsession, collectSubsessions, cancelSubsessions, or runWatchdogPass",
+    "harness action type must be reclaimRunningTasks, retryTask, reconcileRunEvidence, recordSignal, linkResearchEvidence, materializeDesignerActionRecovery, materializeDesignDeliveryRecovery, materializeDesignWorkerRuntimeRecovery, materializeDesignWorkerTransportRecovery, materializeVerifierRepairRecovery, reconcileVerifierRepairHandoff, buildVersionedCorpusManifest, bindHostEvidenceMaintenanceReceipt, materializeHostEvidenceMaintenanceDelivery, materializeRuntimeIntegrationDesignRecovery, materializeRuntimeIntegrationTaskGraphRecovery, recoverRuntimeIntegrationTaskGraphPreparationFailure, installLocalDshCli, recoverRuntimeIntegrationDshInstallationFailure, markRunTodo, updateRunContext, amendRunContract, retireRun, retireTask, prepareRunDrain, completeSystemTask, integrateVerifiedRun, pushExactGitRef, createExactGitRef, commitExactGitIndex, stageExactWorkerFilesForVerification, materializeAttemptArtifactsForVerification, verifySealedCorpusForVerification, registerEvolutionProfile, recordProductionEpisode, registerHarnessVariant, activateHarnessRevision, freezeMatchedExperiment, interruptAttemptAndCreateTask, interruptRunningAttemptsAndCreateTask, acceptGuardrailProposal, startSubsession, collectSubsessions, cancelSubsessions, or runWatchdogPass",
   );
 }
 
@@ -1374,6 +1410,19 @@ export function applyHarnessAction(
   if (action.type === "recoverRuntimeIntegrationTaskGraphPreparationFailure") {
     return applyRuntimeIntegrationTaskGraphPreparationRecoveryAtomically(harness, action);
   }
+  if (action.type === "recoverRuntimeIntegrationDshInstallationFailure") {
+    return applyRuntimeIntegrationDshInstallationRecoveryAtomically(harness, action);
+  }
+  if (action.type === "installLocalDshCli") {
+    const result = installLocalDshCli(harness, action, options);
+    const eventId = harness.recordHarnessActionEvent({
+      actionType: action.type,
+      status: result.status,
+      request: safeRequest(action),
+      result: resultToRecord(result),
+    });
+    return { ...result, eventId };
+  }
 
   if (action.type === "integrateVerifiedRun") {
     const replay = findIntegrationReplay(harness, action, options);
@@ -1423,6 +1472,7 @@ type BlockedRunSignalAction = Extract<HarnessAction, { type: "recordSignal" }>;
 type RuntimeIntegrationDesignRecoveryAction = Extract<HarnessAction, { type: "materializeRuntimeIntegrationDesignRecovery" }>;
 type RuntimeIntegrationTaskGraphRecoveryAction = Extract<HarnessAction, { type: "materializeRuntimeIntegrationTaskGraphRecovery" }>;
 type RuntimeIntegrationTaskGraphPreparationRecoveryAction = Extract<HarnessAction, { type: "recoverRuntimeIntegrationTaskGraphPreparationFailure" }>;
+type RuntimeIntegrationDshInstallationRecoveryAction = Extract<HarnessAction, { type: "recoverRuntimeIntegrationDshInstallationFailure" }>;
 
 function isEvolutionAction(action: HarnessAction): action is EvolutionAction {
   return action.type === "registerEvolutionProfile"
@@ -6096,6 +6146,383 @@ function applyParsedHarnessAction(
     return prepareRunDrain(harness, action);
   }
   throw new Error(`unhandled harness action type: ${(action as { type: string }).type}`);
+}
+
+function applyRuntimeIntegrationDshInstallationRecoveryAtomically(
+  harness: Harness,
+  action: RuntimeIntegrationDshInstallationRecoveryAction,
+): HarnessActionResult & { eventId: string } {
+  try {
+    return harness.runInImmediateTransaction((db) => {
+      const result = recoverRuntimeIntegrationDshInstallationFailureWithDb(harness, db, action);
+      const eventId = harness.recordHarnessActionEventWithDb(db, {
+        actionType: action.type,
+        status: result.status,
+        request: safeRequest(action),
+        result: resultToRecord(result),
+      });
+      return { ...result, eventId };
+    });
+  } catch (error) {
+    const problem = limitUtf8Output(sanitizeEvolutionErrorText(errorMessage(error)), 4_096);
+    const result = blockedResult(action.type, `${action.type} blocked: ${problem}`, [problem]);
+    const eventId = harness.recordHarnessActionEvent({
+      actionType: action.type,
+      status: result.status,
+      request: safeRequest(action),
+      result: resultToRecord(result),
+    });
+    return { ...result, eventId };
+  }
+}
+
+function recoverRuntimeIntegrationDshInstallationFailureWithDb(
+  harness: Harness,
+  db: HarnessDatabase,
+  action: RuntimeIntegrationDshInstallationRecoveryAction,
+): HarnessActionResult {
+  const overview = harness.getRunOverviewWithDb(db, { runId: action.runId, eventLimit: 0 });
+  const run = overview.run;
+  if (!run || run.context.source !== "design" || run.context.retired === true) {
+    throw new Error(`DSH installation recovery requires an active design delivery: ${action.runId}`);
+  }
+  const existingReceipt = objectRecordOrNull(run.context.runtimeIntegrationDshInstallationRecovery);
+  if (existingReceipt) {
+    if (existingReceipt.sourceTaskId !== action.taskId || existingReceipt.sourceAttemptId !== action.attemptId) {
+      throw new Error("DSH installation recovery is already consumed by another failure");
+    }
+    const taskIds = exactStringArray(existingReceipt.taskIds, "DSH installation recovery taskIds");
+    if (taskIds.some((taskId) => !overview.tasks.some((task) => task.id === taskId))) {
+      throw new Error("DSH installation recovery receipt points to missing tasks");
+    }
+    return doneResult(action.type, "DSH installation recovery reused.", [
+      { name: "source attempt", status: "passed", evidence: action.attemptId },
+      { name: "replacement graph", status: "passed", evidence: taskIds.join(",") },
+      { name: "repair budget", status: "passed", evidence: "unchanged" },
+    ], [{ kind: "runtime_integration_dsh_installation_recovery", taskIds, reused: true }]);
+  }
+
+  const graphReceipt = objectRecordOrNull(run.context.runtimeIntegrationTaskGraphPreparationRecovery)
+    ?? objectRecord(run.context.runtimeIntegrationTaskGraphRecovery, "runtime integration graph receipt");
+  const currentTaskIds = exactStringArray(graphReceipt.taskIds, "runtime integration current taskIds");
+  if (currentTaskIds.length !== RUNTIME_INTEGRATION_TASK_GRAPH.length || currentTaskIds[0] !== action.taskId) {
+    throw new Error("DSH installation recovery only accepts the current frozen backend stage");
+  }
+  const sourceTask = overview.tasks.find((task) => task.id === action.taskId);
+  const sourceSession = overview.sessions.find((session) => session.attemptId === action.attemptId);
+  const persistedAttempt = sourceSession ? harness.getAttemptWithDb(db, sourceSession.attemptId) : null;
+  const evidence = [persistedAttempt?.error, ...(sourceSession?.output.problems ?? [])]
+    .filter((value): value is string => typeof value === "string" && value.length > 0)
+    .join("\n");
+  if (!sourceTask || sourceTask.status !== "blocked" || sourceSession?.taskId !== sourceTask.id || sourceSession.status !== "blocked"
+    || !/(?:ENOENT[^\n]*posix_spawn[^\n]*dsh|dsh[^\n]*(?:dangling|not callable|launchability|readiness))/i.test(evidence)) {
+    throw new Error("DSH installation recovery source is not a closed executable-readiness failure");
+  }
+  const downstreamIds = currentTaskIds.slice(1);
+  if (downstreamIds.some((taskId) => overview.tasks.find((task) => task.id === taskId)?.status !== "todo")
+    || overview.sessions.some((session) => downstreamIds.includes(session.taskId))) {
+    throw new Error("DSH installation recovery requires four unstarted downstream tasks");
+  }
+
+  const installationReceipt = validateLocalDshInstallationReceipt(run.context.dshInstallationReceipt);
+  const plannerTaskId = exactNonEmptyStringField(graphReceipt, "plannerTaskId");
+  const plannerAttemptId = exactNonEmptyStringField(graphReceipt, "plannerAttemptId");
+  const planner = overview.tasks.find((task) => task.id === plannerTaskId);
+  const plannerSession = overview.sessions.find((session) => session.attemptId === plannerAttemptId);
+  if (!planner || planner.role !== "planner" || planner.status !== "done"
+    || plannerSession?.taskId !== planner.id || plannerSession.status !== "done") {
+    throw new Error("DSH installation recovery lost the frozen Planner evidence");
+  }
+  const plannedTasks = Array.isArray(plannerSession.output.nextTasks)
+    ? plannerSession.output.nextTasks.map((entry, index) => {
+        const planned = objectRecord(entry, `Planner nextTasks[${index}]`);
+        return {
+          role: exactNonEmptyStringField(planned, "role"),
+          goal: exactNonEmptyStringField(planned, "goal"),
+          prompt: exactNonEmptyStringField(planned, "prompt"),
+          dependsOn: planned.dependsOn === undefined ? [] : exactStringArray(planned.dependsOn, `Planner nextTasks[${index}].dependsOn`),
+          doneWhen: planned.doneWhen === undefined ? [] : exactStringArray(planned.doneWhen, `Planner nextTasks[${index}].doneWhen`),
+        };
+      })
+    : [];
+  const boundary = objectRecord(planner.config?.runtimeIntegrationBoundary ?? run.context.runtimeIntegrationBoundary, "runtimeIntegrationBoundary");
+  const bundle = objectRecord(run.context.targetSystemEvidenceBundle ?? planner.config?.targetSystemEvidenceBundle, "targetSystemEvidenceBundle");
+  const verifierContract = objectRecord(planner.config?.verifierContract, "verifierContract");
+  const frozenPlanner = objectRecord(planner.config?.frozenDesignPlanner, "frozenDesignPlanner");
+  const recoveryKey = stableFingerprint({
+    runId: run.id,
+    sourceTaskId: action.taskId,
+    sourceAttemptId: action.attemptId,
+    installationReceiptSha256: installationReceipt.receiptSha256,
+  });
+  const replacementTaskIds = plannedTasks.map((planned) =>
+    `task_${createHash("sha1").update(`runtime-integration-dsh-installation-recovery|${recoveryKey}|${planned.goal}`).digest("hex")}`);
+  const projected = projectRuntimeIntegrationTaskGraph({
+    runId: run.id,
+    plannerTaskId: planner.id,
+    boundary,
+    evidenceBundle: bundle,
+    plannedTasks,
+    taskIds: replacementTaskIds,
+    verifierContract,
+    frozenDesignPlanner: frozenPlanner,
+    dshInstallationReceipt: installationReceipt,
+  });
+  for (const taskId of downstreamIds) {
+    const retired = db.query("update tasks set status = 'blocked', updated_at = current_timestamp where id = $taskId and status = 'todo'")
+      .run({ $taskId: taskId });
+    if (retired.changes !== 1) throw new Error(`DSH installation downstream task changed before recovery: ${taskId}`);
+  }
+  for (const entry of projected) {
+    harness.createTaskWithDb(db, {
+      id: entry.id,
+      runId: run.id,
+      parentId: entry.parentId,
+      cycleId: planner.cycleId,
+      role: entry.role,
+      goal: entry.goal,
+      prompt: entry.prompt,
+      dependsOn: entry.dependsOn,
+      doneWhen: entry.doneWhen,
+      worktreePath: entry.worktreePath,
+      config: entry.config,
+    });
+  }
+  const recoveryReceipt = {
+    schemaVersion: 1,
+    recoveryKey,
+    sourceTaskId: action.taskId,
+    sourceAttemptId: action.attemptId,
+    plannerTaskId,
+    plannerAttemptId,
+    retiredTaskIds: currentTaskIds,
+    taskIds: replacementTaskIds,
+    installationReceiptSha256: installationReceipt.receiptSha256,
+    reason: limitUtf8Output(sanitizeEvolutionErrorText(action.reason), 2_048),
+  };
+  harness.updateRunWithDb(db, {
+    runId: run.id,
+    status: "todo",
+    contextPatch: { runtimeIntegrationDshInstallationRecovery: recoveryReceipt },
+  });
+  return doneResult(action.type, `DSH installation recovery ${recoveryKey} materialized.`, [
+    { name: "readiness failure", status: "passed", evidence: action.attemptId },
+    { name: "installation receipt", status: "passed", evidence: installationReceipt.receiptSha256 },
+    { name: "old graph retired", status: "passed", evidence: currentTaskIds.join(",") },
+    { name: "replacement graph", status: "passed", evidence: replacementTaskIds.join(",") },
+    { name: "repair budget", status: "passed", evidence: "unchanged" },
+    { name: "Goal Review", status: "passed", evidence: "not created" },
+  ], [{
+    kind: "runtime_integration_dsh_installation_recovery",
+    ...recoveryReceipt,
+    reused: false,
+  }]);
+}
+
+function validateLocalDshInstallationReceipt(value: unknown): Record<string, unknown> & { receiptSha256: string } {
+  const receipt = objectRecord(value, "dshInstallationReceipt");
+  const receiptSha256 = exactSha256Field(receipt, "receiptSha256");
+  const { receiptSha256: _receiptSha256, ...body } = receipt;
+  if (stableFingerprint(body) !== receiptSha256) throw new Error("DSH installation receipt hash is invalid");
+  if (receipt.kind !== "local_dsh_installation_receipt" || receipt.schemaVersion !== 1) {
+    throw new Error("DSH installation receipt schema is invalid");
+  }
+  const sourceRepoPath = exactAbsolutePathField(receipt, "sourceRepoPath");
+  const sourceHead = exactGitCommitShaField(receipt, "sourceHead");
+  const artifactSha256 = exactSha256Field(receipt, "artifactSha256");
+  const executablePath = exactAbsolutePathField(receipt, "executablePath");
+  const executableRealpath = exactAbsolutePathField(receipt, "executableRealpath");
+  if (realpathSync(executablePath) !== executableRealpath || sha256File(executableRealpath) !== artifactSha256) {
+    throw new Error("DSH installed executable drifted from its receipt");
+  }
+  accessSync(executablePath, constants.X_OK);
+  const head = defaultGitRunner({ cwd: sourceRepoPath, args: ["rev-parse", "HEAD"] });
+  if (head.exitCode !== 0 || head.stdout.trim() !== sourceHead) throw new Error("DSH source HEAD drifted from its installation receipt");
+  return receipt as Record<string, unknown> & { receiptSha256: string };
+}
+
+function installLocalDshCli(
+  harness: Harness,
+  action: Extract<HarnessAction, { type: "installLocalDshCli" }>,
+  options: HarnessActionOptions,
+): HarnessActionResult {
+  const run = harness.getRun(action.runId);
+  if (!run || run.context.retired === true || (run.status !== "todo" && run.status !== "blocked")) {
+    return blockedResult(action.type, `Local DSH installation requires an active audited run: ${action.runId}`, [
+      `run is missing, retired, or not recoverable: ${action.runId}`,
+    ]);
+  }
+  const existingReceipt = objectRecordOrNull(run.context.dshInstallationReceipt);
+  if (existingReceipt
+    && existingReceipt.sourceHead === action.expectedHead
+    && existingReceipt.sourceRepoPath === safeRealpath(action.sourceRepoPath)
+    && existingReceipt.executablePath === action.executablePath) {
+    try {
+      const receipt = validateLocalDshInstallationReceipt(existingReceipt);
+      return doneResult(action.type, `Pinned DSH installation ${receipt.receiptSha256} reused.`, [
+        { name: "installation receipt", status: "passed", evidence: receipt.receiptSha256 },
+        { name: "executable readback", status: "passed", evidence: String(receipt.executableRealpath) },
+      ], [{ ...receipt, reused: true }]);
+    } catch {
+      // A stale durable receipt is repaired only by rebuilding the same frozen source HEAD below.
+    }
+  }
+  const runGit = options.runGit ?? defaultGitRunner;
+  const runCommand = options.runCommand ?? defaultCommandRunner;
+  try {
+    const sourceRepoPath = realpathSync(action.sourceRepoPath);
+    const boundary = objectRecord(run.context.runtimeIntegrationBoundary, "runtimeIntegrationBoundary");
+    const repositories = Array.isArray(boundary.repositories) ? boundary.repositories : [];
+    const dshRepository = repositories
+      .map((entry, index) => objectRecord(entry, `runtimeIntegrationBoundary.repositories[${index}]`))
+      .find((entry) => entry.id === "dsh-source");
+    if (!dshRepository
+      || safeRealpath(exactAbsolutePathField(dshRepository, "repoPath")) !== sourceRepoPath
+      || exactGitCommitShaField(dshRepository, "expectedHead") !== action.expectedHead
+      || dshRepository.access !== "read-only") {
+      throw new Error("DSH installation source is not the frozen read-only dsh-source repository");
+    }
+    if (!statSync(sourceRepoPath).isDirectory()) throw new Error("DSH source repository is not a directory");
+    const topLevel = runGit({ cwd: sourceRepoPath, args: ["rev-parse", "--show-toplevel"] });
+    if (topLevel.exitCode !== 0 || realpathSync(topLevel.stdout.trim()) !== sourceRepoPath) {
+      throw new Error("DSH source path is not the repository root");
+    }
+    const headResult = runGit({ cwd: sourceRepoPath, args: ["rev-parse", "HEAD"] });
+    const sourceHead = headResult.stdout.trim();
+    if (headResult.exitCode !== 0 || sourceHead !== action.expectedHead) {
+      throw new Error(`DSH source HEAD drifted: expected ${action.expectedHead}, observed ${sourceHead || "unresolved"}`);
+    }
+    const treeResult = runGit({ cwd: sourceRepoPath, args: ["rev-parse", "HEAD^{tree}"] });
+    const sourceTree = treeResult.stdout.trim();
+    if (treeResult.exitCode !== 0 || !/^[a-f0-9]{40}$/i.test(sourceTree)) throw new Error("DSH source tree is unresolved");
+    const statusBefore = runGit({ cwd: sourceRepoPath, args: ["status", "--short", "--untracked-files=no"] });
+    if (statusBefore.exitCode !== 0 || statusBefore.stdout.trim().length > 0) {
+      throw new Error("DSH source repository has tracked changes and cannot be built by the host action");
+    }
+
+    const rootPackage = parseJsonFile(join(sourceRepoPath, "package.json"), "DSH root package.json");
+    const cliPackage = parseJsonFile(join(sourceRepoPath, "apps", "cli", "package.json"), "DSH CLI package.json");
+    if (rootPackage.name !== "@deepseek-ai/dsh-root"
+      || objectRecord(rootPackage.scripts, "DSH root scripts")["build:lib:host"] === undefined
+      || cliPackage.name !== "@deepseek-ai/dsh"
+      || objectRecord(cliPackage.bin, "DSH CLI bin").dsh !== "lib/bin.js") {
+      throw new Error("DSH source repository does not expose the frozen host CLI build contract");
+    }
+    const packageVersion = exactNonEmptyStringField(cliPackage, "version");
+    const sourceEntry = join(sourceRepoPath, "apps", "cli", "src", "bin.ts");
+    const sourceEntryStat = lstatSync(sourceEntry);
+    if (!sourceEntryStat.isFile() || sourceEntryStat.isSymbolicLink()) throw new Error("DSH source entry is not a regular file");
+
+    const buildCommand = "npm run build:lib:host";
+    const build = runCommand({ cwd: sourceRepoPath, command: buildCommand, timeoutMs: 600_000, maxOutputBytes: 64 * 1024 });
+    if (build.exitCode !== 0) throw new Error(`DSH host build failed (${build.exitCode}): ${limitUtf8Output(build.stderr || build.stdout, 2_048)}`);
+    const statusAfter = runGit({ cwd: sourceRepoPath, args: ["status", "--short", "--untracked-files=no"] });
+    if (statusAfter.exitCode !== 0 || statusAfter.stdout !== statusBefore.stdout) {
+      throw new Error("DSH host build changed tracked source files");
+    }
+
+    const artifactPath = join(sourceRepoPath, "apps", "cli", "lib", "bin.js");
+    const artifactStat = lstatSync(artifactPath);
+    if (!artifactStat.isFile() || artifactStat.isSymbolicLink()) throw new Error("DSH host build artifact is not a regular file");
+    chmodSync(artifactPath, artifactStat.mode | 0o100);
+    accessSync(artifactPath, constants.X_OK);
+    const artifactRealpath = realpathSync(artifactPath);
+    if (relative(sourceRepoPath, artifactRealpath).startsWith(`..${sep}`)) throw new Error("DSH build artifact escaped the pinned source repository");
+    const artifactSha256 = sha256File(artifactRealpath);
+    if (!artifactSha256) throw new Error("DSH build artifact hash is unavailable");
+    const versionProbe = runCommand({ cwd: sourceRepoPath, command: `${shellQuote(artifactRealpath)} --version`, timeoutMs: 10_000, maxOutputBytes: 8_192 });
+    const helpProbe = runCommand({ cwd: sourceRepoPath, command: `${shellQuote(artifactRealpath)} --help`, timeoutMs: 10_000, maxOutputBytes: 16_384 });
+    if (versionProbe.exitCode !== 0 || !versionProbe.stdout.includes(packageVersion)) throw new Error("DSH version launchability probe failed");
+    if (helpProbe.exitCode !== 0 || !/^\s*(?:usage|options?|commands?)\s*:/im.test(helpProbe.stdout)) throw new Error("DSH help launchability probe failed");
+
+    const executableDirectory = dirname(action.executablePath);
+    mkdirSync(executableDirectory, { recursive: true, mode: 0o755 });
+    const directoryStat = lstatSync(executableDirectory);
+    if (!directoryStat.isDirectory() || directoryStat.isSymbolicLink()) throw new Error("DSH executable directory must be a real directory");
+    if (existsSync(action.executablePath) || isPathEntry(action.executablePath)) {
+      const existing = lstatSync(action.executablePath);
+      if (!existing.isSymbolicLink()) throw new Error("DSH executable path exists and is not a symbolic link");
+    }
+    const temporaryLink = join(executableDirectory, `.dsh-${process.pid}-${Date.now()}.tmp`);
+    try {
+      symlinkSync(artifactRealpath, temporaryLink);
+      renameSync(temporaryLink, action.executablePath);
+    } finally {
+      if (existsSync(temporaryLink)) unlinkSync(temporaryLink);
+    }
+    if (realpathSync(action.executablePath) !== artifactRealpath) throw new Error("DSH executable atomic readback did not resolve to the built artifact");
+    accessSync(action.executablePath, constants.X_OK);
+
+    const discoveredNodePath = Bun.which("node");
+    if (!discoveredNodePath) throw new Error("DSH runtime node executable is unavailable");
+    const nodePath = realpathSync(discoveredNodePath);
+    const nodeProbe = runCommand({ cwd: sourceRepoPath, command: `${shellQuote(nodePath)} --version`, timeoutMs: 10_000, maxOutputBytes: 8_192 });
+    if (nodeProbe.exitCode !== 0 || !/^v\d+\.\d+\.\d+/.test(nodeProbe.stdout.trim())) {
+      throw new Error("DSH runtime node launchability probe failed");
+    }
+    const receiptBody = {
+      kind: "local_dsh_installation_receipt",
+      schemaVersion: 1,
+      sourceRepoPath,
+      sourceHead,
+      sourceTree,
+      buildCommand,
+      packageManager: typeof rootPackage.packageManager === "string" ? rootPackage.packageManager : null,
+      packageVersion,
+      sourceEntry,
+      artifactPath,
+      artifactSha256,
+      executablePath: action.executablePath,
+      executableRealpath: artifactRealpath,
+      runtime: {
+        nodePath,
+        nodeVersion: nodeProbe.stdout.trim(),
+        nodeSha256: sha256File(nodePath),
+      },
+      launchability: { version: "passed", help: "passed" },
+    } as const;
+    const receipt = { ...receiptBody, receiptSha256: stableFingerprint(receiptBody) };
+    harness.updateRun({ runId: run.id, contextPatch: { dshInstallationReceipt: receipt } });
+    return doneResult(action.type, `Pinned DSH ${packageVersion} installed from ${sourceHead}.`, [
+      { name: "source HEAD", status: "passed", evidence: sourceHead },
+      { name: "tracked source boundary", status: "passed", evidence: "clean before and after build" },
+      { name: "artifact hash", status: "passed", evidence: artifactSha256 },
+      { name: "launchability", status: "passed", evidence: "--version and --help" },
+      { name: "atomic executable readback", status: "passed", evidence: artifactRealpath },
+    ], [receipt]);
+  } catch (error) {
+    const problem = limitUtf8Output(sanitizeEvolutionErrorText(errorMessage(error)), 4_096);
+    return blockedResult(action.type, `Local DSH installation blocked: ${problem}`, [problem]);
+  }
+}
+
+function parseJsonFile(path: string, label: string): Record<string, unknown> {
+  try {
+    return objectRecord(JSON.parse(readFileSync(path, "utf8")), label);
+  } catch (error) {
+    throw new Error(`${label} is invalid: ${errorMessage(error)}`);
+  }
+}
+
+function shellQuote(value: string) {
+  return `'${value.replaceAll("'", `'"'"'`)}'`;
+}
+
+function isPathEntry(path: string) {
+  try {
+    lstatSync(path);
+    return true;
+  } catch (error) {
+    return error instanceof Error && "code" in error && error.code === "ENOENT" ? false : true;
+  }
+}
+
+function safeRealpath(path: string) {
+  try {
+    return realpathSync(path);
+  } catch {
+    return null;
+  }
 }
 
 const SUBSESSION_DEFAULT_TIMEOUT_MS = 30 * 60 * 1000;

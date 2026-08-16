@@ -111,6 +111,7 @@ export function projectRuntimeIntegrationTaskGraph(input: {
   taskIds: string[];
   verifierContract: Record<string, unknown>;
   frozenDesignPlanner: Record<string, unknown>;
+  dshInstallationReceipt?: Record<string, unknown>;
 }): RuntimeIntegrationTaskProjection[] {
   const frozen = parseFrozenRuntimeIntegration(input.boundary, input.evidenceBundle);
   if (input.taskIds.length !== RUNTIME_INTEGRATION_TASK_GRAPH.length) {
@@ -165,6 +166,9 @@ export function projectRuntimeIntegrationTaskGraph(input: {
       readBindings: readBindingsForStage(stage.id),
       browser: "deny",
       identitySeparated: stage.role === "verifier",
+      dshInstallationReceiptSha256: stage.role === "worker" && input.dshInstallationReceipt
+        ? stringValue(input.dshInstallationReceipt.receiptSha256)
+        : null,
     };
     const runtimeIntegrationExecutionContract = {
       ...stageBody,
@@ -192,6 +196,7 @@ export function projectRuntimeIntegrationTaskGraph(input: {
       worktreeStrategy,
       runtimeIntegrationBoundarySha256: frozen.boundarySha256,
       targetSystemEvidenceBundleSha256: frozen.bundleSha256,
+      dshInstallationReceiptSha256: stageBody.dshInstallationReceiptSha256,
       runtimeIntegrationExecutionContract,
       verifierContract: input.verifierContract,
       frozenDesignPlanner: input.frozenDesignPlanner,
@@ -207,6 +212,7 @@ export function projectRuntimeIntegrationTaskGraph(input: {
           dshRequiredPlugins: [],
           dshModelTransport: "host-brokered-deepseek",
           dshToolNetwork: "deny",
+          ...(input.dshInstallationReceipt ? { dshInstallationReceipt: input.dshInstallationReceipt } : {}),
           dshFilePolicy: normalizeDshFilePolicyContract({
             schemaVersion: 1,
             source: "frozen-runtime-integration-boundary",
@@ -282,6 +288,7 @@ export function runtimeIntegrationTaskExecutionProblem(input: {
       [input.task.config?.expectedHead, repository.expectedHead, "task expectedHead"],
       [input.task.config?.runtimeIntegrationBoundarySha256, frozen.boundarySha256, "task boundarySha256"],
       [input.task.config?.targetSystemEvidenceBundleSha256, frozen.bundleSha256, "task bundleSha256"],
+      [input.task.config?.dshInstallationReceiptSha256, contract.dshInstallationReceiptSha256, "task DSH installation receiptSha256"],
     ];
     const mismatch = exactFields.find(([actual, expected]) => actual !== expected);
     if (mismatch) throw new Error(`runtime integration execution contract ${mismatch[2]} drifted for ${input.task.id}`);

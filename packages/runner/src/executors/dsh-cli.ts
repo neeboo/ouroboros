@@ -1,10 +1,12 @@
 import type { AttemptOutput } from "@ouroboros/harness";
+import { createHash } from "node:crypto";
+import { readFileSync, realpathSync } from "node:fs";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { boundedDiagnosticText, sha256Text } from "../bounded-diagnostic";
 import { promptBudgetBlockedOutput, promptBudgetEvidence } from "../prompt-budget";
-import { resolveDshCommand } from "../dsh-readiness";
+import { inspectDshReadiness, resolveDshCommand } from "../dsh-readiness";
 import type { TaskExecutor } from "../types";
 import { commandProblem, runLocalCommand } from "./command";
 import {
@@ -107,22 +109,48 @@ export function createDshCliExecutor(options: DshCliExecutorOptions): TaskExecut
         [{ kind: "dsh_project_plugins_unconfigured", requiredPlugins }],
       );
     }
-    const resolution = resolveCommand({ command, cwd: options.cwd, env: options.env });
-    if (!resolution.callable || !resolution.selectedPath) {
+    const injectedResolution = options.resolveCommand && options.launchabilityPreflight !== true && !options.installationReceipt
+      ? resolveCommand({ command, cwd: options.cwd, env: options.env })
+      : null;
+    const readiness = injectedResolution ? null : await inspectDshReadiness({
+      backendId: "dsh-cli",
+      command,
+      cwd: options.cwd,
+      env: options.env,
+      profile,
+      runCommand,
+      resolveCommand,
+    });
+    if (readiness && (!readiness.readiness || !readiness.selectedPath)) {
+      return blockedOutput(
+        readiness.callable
+          ? "DeepSeek Harness executable failed launchability preflight"
+          : "DeepSeek Harness executable is not callable",
+        "dsh command readiness",
+        readiness.diagnostics.join("\n") || `DSH command is unavailable: ${readiness.configuredCommand}`,
+        [readiness],
+      );
+    }
+    if (injectedResolution && (!injectedResolution.callable || !injectedResolution.selectedPath)) {
       return blockedOutput(
         "DeepSeek Harness executable is not callable",
         "dsh command readiness",
-        resolution.diagnostic ?? `DSH command is unavailable: ${resolution.configuredCommand}`,
-        [{
-          kind: "dsh_command_resolution",
-          configuredCommand: resolution.configuredCommand,
-          resolutionMode: resolution.resolutionMode,
-          selectedPath: resolution.selectedPath,
-          canonicalPath: resolution.canonicalPath,
-          installationState: resolution.installationState,
-          callable: resolution.callable,
-        }],
+        injectedResolution.diagnostic ?? `DSH command is unavailable: ${injectedResolution.configuredCommand}`,
       );
+    }
+    const selectedCommand = readiness?.selectedPath ?? injectedResolution?.selectedPath;
+    const canonicalCommand = readiness?.canonicalPath ?? injectedResolution?.canonicalPath ?? null;
+    if (!selectedCommand) return blockedOutput("DeepSeek Harness executable is not callable", "dsh command readiness", "DSH command resolution returned no path");
+    if (options.installationReceipt) {
+      const installationProblem = installedDshDriftProblem(options.installationReceipt, canonicalCommand);
+      if (installationProblem) {
+        return blockedOutput(
+          "DeepSeek Harness installation drifted from its host receipt",
+          "dsh installation receipt",
+          installationProblem,
+          [...(readiness ? [readiness] : []), { kind: "dsh_installation_receipt_drift", problem: installationProblem }],
+        );
+      }
     }
     const oversizedPrompt = promptBudgetEvidence(prompt, "DeepSeek Harness CLI start");
     if (oversizedPrompt) {
@@ -242,7 +270,7 @@ export function createDshCliExecutor(options: DshCliExecutorOptions): TaskExecut
       });
       result = await runCommand({
         cmd: [
-          resolution.selectedPath,
+          selectedCommand,
           "--profile",
           profile,
           ...(processPolicy ? ["--patch", processPolicy.patchPath] : []),
@@ -316,6 +344,36 @@ export function createDshCliExecutor(options: DshCliExecutorOptions): TaskExecut
       ? { ...output, artifacts: [...(output.artifacts ?? []), profileReceipt] }
       : output;
   };
+}
+
+function installedDshDriftProblem(receipt: Record<string, unknown>, canonicalPath: string | null) {
+  if (receipt.kind !== "local_dsh_installation_receipt" || receipt.schemaVersion !== 1) {
+    return "DSH installation receipt schema is invalid";
+  }
+  const expectedPath = typeof receipt.executableRealpath === "string" ? receipt.executableRealpath : null;
+  const expectedSha256 = typeof receipt.artifactSha256 === "string" && /^[a-f0-9]{64}$/.test(receipt.artifactSha256)
+    ? receipt.artifactSha256
+    : null;
+  if (!expectedPath || !expectedSha256 || canonicalPath !== expectedPath) {
+    return "DSH command does not resolve to the frozen installation artifact";
+  }
+  try {
+    if (realpathSync(expectedPath) !== expectedPath) return "DSH installation artifact realpath drifted";
+    const actualSha256 = createHash("sha256").update(readFileSync(expectedPath)).digest("hex");
+    if (actualSha256 !== expectedSha256) return "DSH installation artifact hash drifted";
+    const runtime = receipt.runtime && typeof receipt.runtime === "object" && !Array.isArray(receipt.runtime)
+      ? receipt.runtime as Record<string, unknown>
+      : null;
+    const expectedNodePath = typeof runtime?.nodePath === "string" ? runtime.nodePath : null;
+    const expectedNodeSha256 = typeof runtime?.nodeSha256 === "string" ? runtime.nodeSha256 : null;
+    if (!expectedNodePath || !expectedNodeSha256) return "DSH installation runtime receipt is missing";
+    const observedNode = Bun.which("node");
+    if (!observedNode || realpathSync(observedNode) !== expectedNodePath) return "DSH runtime node path drifted";
+    const observedNodeSha256 = createHash("sha256").update(readFileSync(expectedNodePath)).digest("hex");
+    return observedNodeSha256 === expectedNodeSha256 ? null : "DSH runtime node hash drifted";
+  } catch (error) {
+    return `DSH installation artifact readback failed: ${error instanceof Error ? error.message : String(error)}`;
+  }
 }
 
 function dshProcessEnvironment(

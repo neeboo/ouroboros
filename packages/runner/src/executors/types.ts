@@ -110,6 +110,9 @@ export interface DshCliExecutorOptions {
   isolatedProfile?: "base-headless";
   requiredPlugins?: string[];
   filePolicy?: DshFilePolicy;
+  installationReceipt?: Record<string, unknown>;
+  /** Test seam for an injected resolver. Production resolution always probes. */
+  launchabilityPreflight?: boolean;
 }
 
 export type DshFilePolicy = DshFilePolicyContractV1 | (Omit<DshFilePolicyContractV1, "source" | "readOnlyPaths"> & {

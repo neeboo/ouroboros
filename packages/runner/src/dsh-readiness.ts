@@ -1,4 +1,4 @@
-import { accessSync, constants, existsSync, realpathSync, statSync } from "node:fs";
+import { accessSync, constants, existsSync, lstatSync, realpathSync, statSync } from "node:fs";
 import { delimiter, isAbsolute, join, resolve } from "node:path";
 import { boundedDiagnosticText } from "./bounded-diagnostic";
 import { runLocalCommand } from "./executors/command";
@@ -42,6 +42,8 @@ export interface DshProbeReceipt {
 }
 
 export interface DshReadinessReceipt {
+  kind: "dsh_readiness_receipt";
+  schemaVersion: 1;
   backendId: string;
   configuredCommand: string;
   resolutionMode: DshResolutionMode;
@@ -87,7 +89,7 @@ export const resolveDshCommand: DshCommandResolver = (input) => {
   for (const entry of pathEntries) {
     const directory = entry.length > 0 ? (isAbsolute(entry) ? entry : resolve(input.cwd, entry)) : input.cwd;
     const candidate = join(directory, configuredCommand);
-    if (existsSync(candidate) && firstExisting === null) {
+    if (pathEntryExists(candidate) && firstExisting === null) {
       firstExisting = candidate;
     }
     if (isCallable(candidate)) {
@@ -96,12 +98,7 @@ export const resolveDshCommand: DshCommandResolver = (input) => {
   }
 
   if (firstExisting) {
-    return {
-      ...resolutionForPath(firstExisting, resolutionMode, configuredCommand, input.cwd),
-      installationState: "non-callable",
-      callable: false,
-      diagnostic: boundedDiagnosticText(`DSH command is not executable: ${firstExisting}`, MAX_READINESS_DIAGNOSTIC_CHARS).text,
-    };
+    return resolutionForPath(firstExisting, resolutionMode, configuredCommand, input.cwd);
   }
   return {
     configuredCommand,
@@ -122,6 +119,8 @@ export async function inspectDshReadiness(input: InspectDshReadinessInput): Prom
     env: input.env,
   });
   const base = {
+    kind: "dsh_readiness_receipt" as const,
+    schemaVersion: 1 as const,
     backendId: input.backendId,
     configuredCommand,
     resolutionMode: resolution.resolutionMode,
@@ -204,14 +203,21 @@ function effectiveEnvironment(overrides: Record<string, string | undefined> | un
 function resolutionForPath(path: string, resolutionMode: DshResolutionMode, configuredCommand: string, cwd: string): DshCommandResolution {
   const inspectionPath = isAbsolute(path) ? path : resolve(cwd, path);
   const callable = isCallable(inspectionPath);
+  const canonical = canonicalPath(inspectionPath);
+  const danglingSymlink = isSymbolicLink(inspectionPath) && canonical === null;
   return {
     configuredCommand,
     resolutionMode,
     selectedPath: path,
-    canonicalPath: canonicalPath(inspectionPath),
-    installationState: callable ? "available" : existsSync(inspectionPath) ? "non-callable" : "missing",
+    canonicalPath: canonical,
+    installationState: callable ? "available" : pathEntryExists(inspectionPath) ? "non-callable" : "missing",
     callable,
-    diagnostic: callable ? null : boundedDiagnosticText(`DSH command is not callable: ${path}`, MAX_READINESS_DIAGNOSTIC_CHARS).text,
+    diagnostic: callable ? null : boundedDiagnosticText(
+      danglingSymlink
+        ? `DSH command is a dangling symbolic link: ${path}`
+        : `DSH command is not callable: ${path}`,
+      MAX_READINESS_DIAGNOSTIC_CHARS,
+    ).text,
   };
 }
 
@@ -223,6 +229,23 @@ function isCallable(path: string) {
   try {
     accessSync(path, constants.X_OK);
     return statSync(path).isFile();
+  } catch {
+    return false;
+  }
+}
+
+function pathEntryExists(path: string) {
+  try {
+    lstatSync(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function isSymbolicLink(path: string) {
+  try {
+    return lstatSync(path).isSymbolicLink();
   } catch {
     return false;
   }

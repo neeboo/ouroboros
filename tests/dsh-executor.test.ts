@@ -982,4 +982,88 @@ describe("DeepSeek Harness CLI executor", () => {
     expect(output).toMatchObject({ status: "blocked", summary: "DeepSeek Harness CLI could not start" });
     expect(JSON.stringify(output)).not.toContain("missing-binary-secret");
   });
+
+  test("fails launchability probes before profile, broker, or model startup", async () => {
+    const command = join(homedir(), ".orbs-dsh-unlaunchable-fixture", "dsh");
+    const calls: string[][] = [];
+    const executor = createDshCliExecutor({
+      cwd: taskFixture.worktreePath,
+      command,
+      profile: "headless",
+      sandbox: "workspace-write",
+      filePolicy: frozenDshFilePolicy,
+      resolveCommand: () => ({
+        configuredCommand: command,
+        resolutionMode: "explicit",
+        selectedPath: command,
+        canonicalPath: command,
+        installationState: "available",
+        callable: true,
+        diagnostic: null,
+      }),
+      launchabilityPreflight: true,
+      runCommand: async (input) => {
+        calls.push(input.cmd);
+        throw new Error(`ENOENT posix_spawn ${input.cmd[0]}`);
+      },
+    });
+
+    const output = await executor({ ...executorInput(), attemptId: "attempt_dsh_launch_probe" });
+
+    expect(output.status).toBe("blocked");
+    expect(output.summary).toBe("DeepSeek Harness executable failed launchability preflight");
+    expect(output.artifacts).toContainEqual(expect.objectContaining({
+      kind: "dsh_readiness_receipt",
+      readiness: false,
+      evidence: expect.objectContaining({ modelInferenceCalls: 0, taskExecutionStarted: false }),
+    }));
+    expect(calls).toEqual([[command, "--version"], [command, "--help"]]);
+    expect(JSON.stringify(output)).not.toContain("dsh_execution_profile_receipt");
+  });
+
+  test("fails a drifted installed artifact before profile, broker, or model startup", async () => {
+    const root = await mkdtemp(join(homedir(), ".orbs-dsh-receipt-fixture-"));
+    const command = join(root, "dsh");
+    await writeFile(command, "#!/bin/sh\necho 0.1.0-rc.5\n");
+    await chmod(command, 0o755);
+    const calls: string[][] = [];
+    try {
+      const executor = createDshCliExecutor({
+        cwd: taskFixture.worktreePath,
+        command,
+        installationReceipt: {
+          kind: "local_dsh_installation_receipt",
+          schemaVersion: 1,
+          executableRealpath: command,
+          artifactSha256: "0".repeat(64),
+        },
+        resolveCommand: () => ({
+          configuredCommand: command,
+          resolutionMode: "explicit",
+          selectedPath: command,
+          canonicalPath: command,
+          installationState: "available",
+          callable: true,
+          diagnostic: null,
+        }),
+        runCommand: async (input) => {
+          calls.push(input.cmd);
+          return input.cmd.includes("--version")
+            ? { exitCode: 0, stdout: "0.1.0-rc.5\n", stderr: "" }
+            : { exitCode: 0, stdout: "Usage: dsh\n", stderr: "" };
+        },
+      });
+
+      const output = await executor({ ...executorInput(), attemptId: "attempt_dsh_receipt_drift" });
+      expect(output).toMatchObject({
+        status: "blocked",
+        summary: "DeepSeek Harness installation drifted from its host receipt",
+        artifacts: expect.arrayContaining([expect.objectContaining({ kind: "dsh_installation_receipt_drift" })]),
+      });
+      expect(calls).toEqual([[command, "--version"], [command, "--help"]]);
+      expect(JSON.stringify(output)).not.toContain("dsh_execution_profile_receipt");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
 });

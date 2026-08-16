@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { join } from "node:path";
 import { mkdtemp, rm } from "node:fs/promises";
+import { chmodSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import {
   applyHarnessAction,
@@ -401,6 +402,91 @@ describe("runtime integration task execution contracts", () => {
       .filter((task) => task.config?.runtimeIntegrationExecutionContract)).toHaveLength(15);
   });
 
+  test("an installed DSH receipt unlocks one separate recovery after executable readiness failure", () => {
+    const sourceRepoPath = join(dir, "dsh");
+    const artifactPath = join(sourceRepoPath, "apps", "cli", "lib", "bin.js");
+    const executablePath = join(dir, "bin", "dsh");
+    mkdirSync(join(sourceRepoPath, "apps", "cli", "src"), { recursive: true });
+    writeFileSync(join(sourceRepoPath, "package.json"), JSON.stringify({
+      name: "@deepseek-ai/dsh-root", scripts: { "build:lib:host": "fixture" }, packageManager: "pnpm@11.7.0",
+    }));
+    writeFileSync(join(sourceRepoPath, "apps", "cli", "package.json"), JSON.stringify({
+      name: "@deepseek-ai/dsh", version: "0.1.0-rc.5", bin: { dsh: "lib/bin.js" },
+    }));
+    writeFileSync(join(sourceRepoPath, "apps", "cli", "src", "bin.ts"), "console.log('source')\n");
+    gitFixture(sourceRepoPath, ["init"]);
+    gitFixture(sourceRepoPath, ["config", "user.email", "fixture@example.test"]);
+    gitFixture(sourceRepoPath, ["config", "user.name", "Fixture"]);
+    gitFixture(sourceRepoPath, ["add", "."]);
+    gitFixture(sourceRepoPath, ["commit", "-m", "fixture"]);
+    const expectedHead = gitFixture(sourceRepoPath, ["rev-parse", "HEAD"]);
+    const fixture = governedRuntimeFixture(harness, dir, { legacyTasks: true, dshExpectedHead: expectedHead });
+    const graph = applyHarnessAction(harness, {
+      type: "materializeRuntimeIntegrationTaskGraphRecovery",
+      runId: fixture.runId,
+      plannerTaskId: fixture.plannerTaskId,
+    } as never);
+    const taskIds = graph.artifacts.find((artifact) => artifact.kind === "runtime_integration_task_graph_recovery")!.taskIds as string[];
+    const sourceTaskId = taskIds[0]!;
+    const attemptId = harness.startAttempt({ taskId: sourceTaskId, input: { readiness: "dsh" } });
+    harness.finishAttempt({
+      attemptId,
+      output: {
+        status: "blocked",
+        summary: "DSH executable could not start",
+        changedFiles: [], checks: [], artifacts: [],
+        problems: ["ENOENT: no such file or directory, posix_spawn '/fixture/bin/dsh'"],
+      },
+    });
+    const installation = applyHarnessAction(harness, {
+      type: "installLocalDshCli",
+      runId: fixture.runId,
+      sourceRepoPath,
+      expectedHead,
+      executablePath,
+    } as never, {
+      runCommand: (input) => {
+        if (input.command === "npm run build:lib:host") {
+          mkdirSync(join(sourceRepoPath, "apps", "cli", "lib"), { recursive: true });
+          writeFileSync(artifactPath, "#!/usr/bin/env node\nconsole.log('0.1.0-rc.5')\n");
+          chmodSync(artifactPath, 0o755);
+          return { exitCode: 0, stdout: "built", stderr: "" };
+        }
+        if (input.command.endsWith(" --version") && input.command.includes("node")) return { exitCode: 0, stdout: "v25.5.0\n", stderr: "" };
+        if (input.command.endsWith(" --version")) return { exitCode: 0, stdout: "0.1.0-rc.5\n", stderr: "" };
+        if (input.command.endsWith(" --help")) return { exitCode: 0, stdout: "Usage: dsh\n", stderr: "" };
+        throw new Error(`unexpected command: ${input.command}`);
+      },
+    });
+    expect(installation.status).toBe("done");
+    const beforeBudget = harness.getRun(fixture.runId)!.context.repairReplanBudget;
+
+    const recovered = applyHarnessAction(harness, {
+      type: "recoverRuntimeIntegrationDshInstallationFailure",
+      runId: fixture.runId,
+      taskId: sourceTaskId,
+      attemptId,
+      reason: "install the pinned DSH host CLI after a dangling launcher",
+    } as never);
+
+    expect(recovered.status).toBe("done");
+    const artifact = recovered.artifacts.find((candidate) => candidate.kind === "runtime_integration_dsh_installation_recovery")!;
+    const replacementIds = artifact.taskIds as string[];
+    expect(replacementIds).toHaveLength(5);
+    expect(taskIds.map((id) => harness.getTask(id)?.status)).toEqual(Array(5).fill("blocked"));
+    expect(replacementIds.map((id) => harness.getTask(id)?.status)).toEqual(Array(5).fill("todo"));
+    expect(harness.getTask(replacementIds[0]!)?.config).toMatchObject({
+      executor: "dsh-cli",
+      dshInstallationReceipt: expect.objectContaining({ sourceHead: expectedHead }),
+      dshInstallationReceiptSha256: expect.stringMatching(/^[a-f0-9]{64}$/),
+    });
+    expect(harness.getRun(fixture.runId)!.context.repairReplanBudget).toEqual(beforeBudget);
+    expect(harness.getRunOverview({ runId: fixture.runId, eventLimit: 0 }).sessions
+      .filter((session) => replacementIds.includes(session.taskId))).toHaveLength(0);
+    expect(harness.getRunOverview({ runId: fixture.runId, eventLimit: 0 }).tasks
+      .filter((task) => task.role === "goal-review")).toHaveLength(0);
+  });
+
   test("maps only the frozen credential classifier vocabulary", () => {
     expect(credentialPathPolicyFromFrozenPatterns([
       "story-mesh/.ainovel/**",
@@ -420,7 +506,7 @@ describe("runtime integration task execution contracts", () => {
   });
 });
 
-function governedRuntimeFixture(harness: Harness, root: string, options: { legacyTasks?: boolean } = {}) {
+function governedRuntimeFixture(harness: Harness, root: string, options: { legacyTasks?: boolean; dshExpectedHead?: string } = {}) {
   const projectId = harness.createProject({ name: "runtime target", rootPath: join(root, "backend") });
   const parentRunId = harness.createRun({
     projectId,
@@ -474,7 +560,7 @@ function governedRuntimeFixture(harness: Harness, root: string, options: { legac
     },
     {
       id: "dsh-source", role: "dsh", projectId: null, repoPath: join(root, "dsh"),
-      expectedHead: "7".repeat(40), access: "read-only",
+      expectedHead: options.dshExpectedHead ?? "7".repeat(40), access: "read-only",
       allowedPaths: ["apps/cli/src/**"], readOnlyPaths: ["apps/cli/src/**"],
       forbiddenPaths: [".git/orbs/**", ".orbs/**", ".ouroboros/**", "db/**"],
     },
@@ -611,4 +697,10 @@ function plannerOutput() {
       doneWhen: [`${stage.id} done`],
     })),
   };
+}
+
+function gitFixture(cwd: string, args: string[]) {
+  const result = Bun.spawnSync({ cmd: ["git", ...args], cwd, stdout: "pipe", stderr: "pipe" });
+  if (result.exitCode !== 0) throw new Error(result.stderr.toString());
+  return result.stdout.toString().trim();
 }

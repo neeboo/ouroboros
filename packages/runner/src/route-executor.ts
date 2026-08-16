@@ -28,6 +28,7 @@ export interface RouteExecutorOptions {
   dshProfileIsolation?: "base-headless";
   dshRequiredPlugins?: string[];
   dshFilePolicy?: DshFilePolicy;
+  dshInstallationReceipt?: Record<string, unknown>;
 }
 
 export function createRouteExecutor(options: RouteExecutorOptions): TaskExecutor {
@@ -98,6 +99,7 @@ export function createRouteExecutor(options: RouteExecutorOptions): TaskExecutor
       isolatedProfile: options.dshProfileIsolation ?? "base-headless",
       requiredPlugins: options.dshRequiredPlugins,
       filePolicy: options.dshFilePolicy,
+      installationReceipt: options.dshInstallationReceipt,
     });
   }
   return createCodexCliExecutor({

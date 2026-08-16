@@ -1221,6 +1221,7 @@ class CodexResumableOrchestrator {
           : undefined,
         dshRequiredPlugins: stringArrayConfig(factoryInput.task.config?.dshRequiredPlugins),
         dshFilePolicy: factoryInput.task.config?.dshFilePolicy as import("./executors/types").DshFilePolicy | undefined,
+        dshInstallationReceipt: factoryInput.task.config?.dshInstallationReceipt as Record<string, unknown> | undefined,
       }));
     let rawOutput: AttemptOutput;
     try {

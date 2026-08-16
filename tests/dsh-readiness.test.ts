@@ -69,6 +69,24 @@ describe("DSH readiness", () => {
     expect(JSON.stringify(result)).not.toContain("underlying");
   });
 
+  test("rejects a dangling PATH symlink before any launch probe", async () => {
+    const bin = join(dir, "bin");
+    const wrapper = join(bin, "dsh");
+    await mkdir(bin, { recursive: true });
+    await symlink(join(dir, "missing", "dsh.js"), wrapper);
+
+    const result = resolveDshCommand({ command: "dsh", cwd: dir, env: { PATH: bin } });
+
+    expect(result).toMatchObject({
+      configuredCommand: "dsh",
+      selectedPath: wrapper,
+      canonicalPath: null,
+      installationState: "non-callable",
+      callable: false,
+      diagnostic: expect.stringContaining("dangling symbolic link"),
+    });
+  });
+
   test("uses the supplied cwd for a relative explicit executable", async () => {
     await writeExecutable(join(dir, "relative-dsh"));
 
