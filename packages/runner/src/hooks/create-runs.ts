@@ -9,6 +9,23 @@ export function createRunsFromOutputHook(options: { harness: Harness }): StopHoo
     }
 
     const plannedRuns = validatePlannedRuns(output.nextRuns);
+    if (task.config?.forbidNextRuns === true && plannedRuns.length > 0) {
+      return {
+        decision: "exit",
+        checks: [{
+          name: "frozen Designer run boundary",
+          status: "failed",
+          evidence: `task ${task.id} forbids nextRuns`,
+        }],
+        artifacts: [{
+          kind: "forbidden_next_runs",
+          runId: run.id,
+          taskId: task.id,
+          requestedCount: plannedRuns.length,
+        }],
+        problems: [`task ${task.id} forbids nextRuns; use the governed design action path or return quiescent`],
+      };
+    }
     const created = plannedRuns.map((plannedRun) => {
       const childRunId = options.harness.createRun({
         goal: plannedRun.goal,

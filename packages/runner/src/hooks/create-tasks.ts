@@ -22,6 +22,23 @@ export function createTasksFromOutputHook(options: { harness: Harness }): StopHo
     }
 
     const plannedTasks = validatePlannedTasks(output.nextTasks);
+    if (task.config?.forbidNextTasks === true && plannedTasks.length > 0) {
+      return {
+        decision: "exit",
+        checks: [{
+          name: "frozen Designer task boundary",
+          status: "failed",
+          evidence: `task ${task.id} forbids nextTasks`,
+        }],
+        artifacts: [{
+          kind: "forbidden_next_tasks",
+          runId: run.id,
+          taskId: task.id,
+          requestedCount: plannedTasks.length,
+        }],
+        problems: [`task ${task.id} forbids nextTasks; record a governed design action or return quiescent`],
+      };
+    }
     const activeDesignChildren = options.harness.listRuns({ limit: 1000 }).filter((candidate) =>
       candidate.context.parentRunId === run.id
       && candidate.context.source === "design"

@@ -13,6 +13,7 @@ import {
 import type { DshCredentialPathPolicyV1 } from "../packages/harness/src";
 import {
   buildTaskPrompt,
+  createRunsFromOutputHook,
   createTasksFromOutputHook,
   createRepairTaskHook,
   createVerifierTaskHook,
@@ -505,6 +506,172 @@ describe("runtime integration task execution contracts", () => {
       }),
     }));
     expect(signals).toHaveLength(1);
+
+    const conflictSignal = signals[0]!;
+    const researchRunId = harness.createRun({
+      projectId: overview.run!.projectId!,
+      projectRoot: overview.run!.projectRoot,
+      goal: "Frozen read-only professional creation research",
+      context: { source: "research-only", sideEffects: "none" },
+    });
+    const researchTaskId = harness.createTask({
+      runId: researchRunId,
+      role: "researcher",
+      goal: "Produce immutable research artifacts",
+      prompt: "Read only.",
+    });
+    const researchAttemptId = harness.recordAttempt({
+      taskId: researchTaskId,
+      input: { readOnly: true },
+      output: {
+        status: "done",
+        summary: "Research artifacts are complete.",
+        changedFiles: [],
+        checks: [{ name: "side effects", status: "passed", evidence: "none" }],
+        artifacts: [{ kind: "evaluation-contract", artifactId: "evaluation-contract", sha256: "c".repeat(64) }],
+        problems: [],
+      },
+    });
+    harness.updateRunStatus({ runId: researchRunId, status: "done" });
+    const researchSignalId = `signal_research_${"d".repeat(32)}`;
+    harness.createStrategySignal({
+      id: researchSignalId,
+      projectId: overview.run!.projectId!,
+      signalClass: "system",
+      source: `research-evidence-link:${researchAttemptId}`,
+      title: "Completed frozen research artifacts",
+      summary: "The target Designer can read the immutable research artifacts by reference.",
+      observationTime: "2026-08-17T00:00:00.000Z",
+      confidence: 1,
+      evidence: [`run:${researchRunId}`, `task:${researchTaskId}`, `attempt:${researchAttemptId}`, `sha256:${"c".repeat(64)}`],
+      runId: researchRunId,
+      taskId: researchTaskId,
+      attemptId: researchAttemptId,
+      payload: { artifactRefs: [{ artifactId: "evaluation-contract", sha256: "c".repeat(64) }] },
+    });
+    const oldBudget = harness.getRun(fixture.runId)!.context.repairReplanBudget;
+    const invalidTrigger = applyHarnessAction(harness, {
+      type: "materializeFrozenEvidenceConflictDesigner",
+      sourceRunId: fixture.runId,
+      conflictSignalId: conflictSignal.id,
+      researchSignalId: conflictSignal.id,
+    } as never);
+    expect(invalidTrigger).toMatchObject({
+      status: "blocked",
+      problems: [expect.stringContaining("research evidence link")],
+    });
+    const trigger = applyHarnessAction(harness, {
+      type: "materializeFrozenEvidenceConflictDesigner",
+      sourceRunId: fixture.runId,
+      conflictSignalId: conflictSignal.id,
+      researchSignalId,
+    } as never);
+    expect(trigger.status).toBe("done");
+    const triggerArtifact = trigger.artifacts.find((artifact) =>
+      artifact.kind === "frozen_evidence_conflict_designer_trigger")!;
+    const designerRun = harness.getRun(String(triggerArtifact.runId))!;
+    const triggerReplay = applyHarnessAction(harness, {
+      type: "materializeFrozenEvidenceConflictDesigner",
+      sourceRunId: fixture.runId,
+      conflictSignalId: conflictSignal.id,
+      researchSignalId,
+    } as never);
+    const designerTask = harness.getRunOverview({ runId: designerRun.id, eventLimit: 0 }).tasks
+      .find((task) => task.id === String(triggerArtifact.taskId))!;
+
+    expect(trigger).toMatchObject({
+      status: "done",
+      artifacts: [expect.objectContaining({
+        kind: "frozen_evidence_conflict_designer_trigger",
+        sourceRunId: fixture.runId,
+        conflictSignalId: conflictSignal.id,
+        researchSignalId,
+        reused: false,
+      })],
+    });
+    expect(triggerReplay).toMatchObject({
+      status: "done",
+      artifacts: [expect.objectContaining({ runId: designerRun.id, taskId: designerTask.id, reused: true })],
+    });
+    expect(designerRun).toMatchObject({
+      status: "todo",
+      projectId: overview.run!.projectId!,
+      context: expect.objectContaining({
+        source: "target-system-design",
+        supersedesRunId: fixture.runId,
+        repairReplanBudget: { limit: 3, used: 0, entries: [] },
+        frozenEvidenceConflictDesigner: expect.objectContaining({
+          conflictSignalId: conflictSignal.id,
+          researchSignalId,
+        }),
+      }),
+    });
+    expect(harness.getRun(designerRun.id)!.context.parentRunId).toBeUndefined();
+    expect(designerTask).toMatchObject({
+      role: "designer",
+      status: "todo",
+      config: expect.objectContaining({
+        readOnly: true,
+        forbidImplementation: true,
+        forbidBrowser: true,
+        forbidNextTasks: true,
+        forbidNextRuns: true,
+        allowedOutcomes: ["minimal-evidence-contract-correction", "quiescent"],
+      }),
+    });
+    expect(designerTask.prompt).toContain(conflictSignal.id);
+    expect(designerTask.prompt).toContain(researchSignalId);
+    expect(designerTask.prompt).toContain("Do not restore or reopen");
+    expect(harness.getRunOverview({ runId: designerRun.id, eventLimit: 0 }).sessions).toHaveLength(0);
+    expect(harness.getRun(fixture.runId)).toMatchObject({ status: "blocked", context: { repairReplanBudget: oldBudget } });
+    expect(harness.getRunOverview({ runId: fixture.runId, eventLimit: 0 }).tasks.filter((task) =>
+      task.status === "todo" || task.status === "running"
+    )).toHaveLength(0);
+
+    const designerOverviewBefore = harness.getRunOverview({ runId: designerRun.id, eventLimit: 0 });
+    const guardedDesignerTask = designerOverviewBefore.tasks.find((task) => task.id === designerTask.id)!;
+    expect(guardedDesignerTask.config?.forbidNextTasks).toBe(true);
+    const forbiddenTaskResult = await createTasksFromOutputHook({ harness })({
+      run: designerRun,
+      task: guardedDesignerTask,
+      sessionName: "frozen-conflict-designer",
+      prompt: guardedDesignerTask.prompt,
+      output: {
+        status: "done",
+        summary: "Create a business implementation task.",
+        changedFiles: [],
+        checks: [],
+        artifacts: [],
+        problems: [],
+        nextTasks: [{ role: "worker", goal: "Implement business changes", prompt: "Write target code." }],
+      },
+    });
+    const forbiddenRunResult = await createRunsFromOutputHook({ harness })({
+      run: designerRun,
+      task: guardedDesignerTask,
+      sessionName: "frozen-conflict-designer",
+      prompt: guardedDesignerTask.prompt,
+      output: {
+        status: "done",
+        summary: "Create a delivery run.",
+        changedFiles: [],
+        checks: [],
+        artifacts: [],
+        problems: [],
+        nextRuns: [{ goal: "Deliver business changes", prompt: "Plan target implementation." }],
+      },
+    });
+    expect(forbiddenTaskResult).toMatchObject({
+      decision: "exit",
+      problems: [expect.stringContaining("forbids nextTasks")],
+    });
+    expect(forbiddenRunResult).toMatchObject({
+      decision: "exit",
+      problems: [expect.stringContaining("forbids nextRuns")],
+    });
+    const designerOverviewAfter = harness.getRunOverview({ runId: designerRun.id, eventLimit: 0 });
+    expect(designerOverviewAfter.tasks).toHaveLength(designerOverviewBefore.tasks.length);
+    expect(harness.listRuns({ limit: 1000 }).filter((candidate) => candidate.context.parentRunId === designerRun.id)).toHaveLength(0);
   });
 
   test("a no-write semantic DSH timeout continues the same charged recovery and replaces its pending Verifier", async () => {

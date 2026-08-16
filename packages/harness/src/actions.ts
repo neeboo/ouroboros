@@ -222,6 +222,12 @@ export type HarnessAction =
       boundary: RuntimeIntegrationBoundaryInput;
     }
   | {
+      type: "materializeFrozenEvidenceConflictDesigner";
+      sourceRunId: string;
+      conflictSignalId: string;
+      researchSignalId: string;
+    }
+  | {
       type: "materializeRuntimeIntegrationTaskGraphRecovery";
       runId: string;
       plannerTaskId: string;
@@ -894,6 +900,15 @@ export function parseHarnessAction(value: unknown): HarnessAction {
       boundary: parseRuntimeIntegrationBoundaryInput(record.boundary),
     };
   }
+  if (type === "materializeFrozenEvidenceConflictDesigner") {
+    assertOnlyFields(record, type, ["type", "sourceRunId", "conflictSignalId", "researchSignalId"]);
+    return {
+      type,
+      sourceRunId: exactSafeIdentifierField(record, "sourceRunId"),
+      conflictSignalId: exactSafeIdentifierField(record, "conflictSignalId"),
+      researchSignalId: exactSafeIdentifierField(record, "researchSignalId"),
+    };
+  }
   if (type === "materializeRuntimeIntegrationTaskGraphRecovery") {
     assertOnlyFields(record, type, ["type", "runId", "plannerTaskId", "reason"]);
     return {
@@ -1360,7 +1375,7 @@ export function parseHarnessAction(value: unknown): HarnessAction {
     };
   }
   throw new Error(
-    "harness action type must be reclaimRunningTasks, retryTask, reconcileRunEvidence, recordSignal, linkResearchEvidence, materializeDesignerActionRecovery, materializeDesignDeliveryRecovery, materializeDesignWorkerRuntimeRecovery, materializeDesignWorkerTransportRecovery, materializeVerifierRepairRecovery, recoverRuntimeIntegrationHostEvidenceFailure, reconcileVerifierRepairHandoff, buildVersionedCorpusManifest, bindHostEvidenceMaintenanceReceipt, materializeHostEvidenceMaintenanceDelivery, materializeRuntimeIntegrationDesignRecovery, materializeRuntimeIntegrationTaskGraphRecovery, recoverRuntimeIntegrationTaskGraphPreparationFailure, installLocalDshCli, recoverRuntimeIntegrationDshInstallationFailure, recoverRuntimeIntegrationDshRuntimeBindingFailure, markRunTodo, updateRunContext, amendRunContract, retireRun, retireTask, prepareRunDrain, completeSystemTask, integrateVerifiedRun, pushExactGitRef, createExactGitRef, commitExactGitIndex, stageExactWorkerFilesForVerification, materializeAttemptArtifactsForVerification, verifySealedCorpusForVerification, registerEvolutionProfile, recordProductionEpisode, registerHarnessVariant, activateHarnessRevision, freezeMatchedExperiment, interruptAttemptAndCreateTask, interruptRunningAttemptsAndCreateTask, acceptGuardrailProposal, startSubsession, collectSubsessions, cancelSubsessions, or runWatchdogPass",
+    "harness action type must be reclaimRunningTasks, retryTask, reconcileRunEvidence, recordSignal, linkResearchEvidence, materializeDesignerActionRecovery, materializeDesignDeliveryRecovery, materializeDesignWorkerRuntimeRecovery, materializeDesignWorkerTransportRecovery, materializeVerifierRepairRecovery, recoverRuntimeIntegrationHostEvidenceFailure, reconcileVerifierRepairHandoff, buildVersionedCorpusManifest, bindHostEvidenceMaintenanceReceipt, materializeHostEvidenceMaintenanceDelivery, materializeRuntimeIntegrationDesignRecovery, materializeFrozenEvidenceConflictDesigner, materializeRuntimeIntegrationTaskGraphRecovery, recoverRuntimeIntegrationTaskGraphPreparationFailure, installLocalDshCli, recoverRuntimeIntegrationDshInstallationFailure, recoverRuntimeIntegrationDshRuntimeBindingFailure, markRunTodo, updateRunContext, amendRunContract, retireRun, retireTask, prepareRunDrain, completeSystemTask, integrateVerifiedRun, pushExactGitRef, createExactGitRef, commitExactGitIndex, stageExactWorkerFilesForVerification, materializeAttemptArtifactsForVerification, verifySealedCorpusForVerification, registerEvolutionProfile, recordProductionEpisode, registerHarnessVariant, activateHarnessRevision, freezeMatchedExperiment, interruptAttemptAndCreateTask, interruptRunningAttemptsAndCreateTask, acceptGuardrailProposal, startSubsession, collectSubsessions, cancelSubsessions, or runWatchdogPass",
   );
 }
 
@@ -1444,6 +1459,10 @@ export function applyHarnessAction(
   if (action.type === "materializeRuntimeIntegrationDesignRecovery") {
     return applyRuntimeIntegrationDesignRecoveryAtomically(harness, action);
   }
+
+  if (action.type === "materializeFrozenEvidenceConflictDesigner") {
+    return applyFrozenEvidenceConflictDesignerAtomically(harness, action);
+  }
   if (action.type === "materializeRuntimeIntegrationTaskGraphRecovery") {
     return applyRuntimeIntegrationTaskGraphRecoveryAtomically(harness, action);
   }
@@ -1513,6 +1532,7 @@ type RunEvidenceReconciliationAction = Extract<HarnessAction, { type: "reconcile
 type ResearchEvidenceLinkAction = Extract<HarnessAction, { type: "linkResearchEvidence" }>;
 type BlockedRunSignalAction = Extract<HarnessAction, { type: "recordSignal" }>;
 type RuntimeIntegrationDesignRecoveryAction = Extract<HarnessAction, { type: "materializeRuntimeIntegrationDesignRecovery" }>;
+type FrozenEvidenceConflictDesignerAction = Extract<HarnessAction, { type: "materializeFrozenEvidenceConflictDesigner" }>;
 type RuntimeIntegrationTaskGraphRecoveryAction = Extract<HarnessAction, { type: "materializeRuntimeIntegrationTaskGraphRecovery" }>;
 type RuntimeIntegrationTaskGraphPreparationRecoveryAction = Extract<HarnessAction, { type: "recoverRuntimeIntegrationTaskGraphPreparationFailure" }>;
 type RuntimeIntegrationDshInstallationRecoveryAction = Extract<HarnessAction, { type: "recoverRuntimeIntegrationDshInstallationFailure" }>;
@@ -2764,6 +2784,317 @@ function applyRuntimeIntegrationDesignRecoveryAtomically(
           expectedHead: repository.expectedHead,
         })),
         credentialIsolation: true,
+        reused: false,
+      }]);
+      const eventId = harness.recordHarnessActionEventWithDb(db, {
+        actionType: action.type,
+        status: result.status,
+        request: safeRequest(action),
+        result: resultToRecord(result),
+      });
+      return { ...result, eventId };
+    });
+  } catch (error) {
+    const problem = limitUtf8Output(sanitizeEvolutionErrorText(errorMessage(error)), 4_096);
+    const result = blockedResult(action.type, `${action.type} blocked: ${problem}`, [problem]);
+    const eventId = harness.recordHarnessActionEvent({
+      actionType: action.type,
+      status: result.status,
+      request: safeRequest(action),
+      result: resultToRecord(result),
+    });
+    return { ...result, eventId };
+  }
+}
+
+function applyFrozenEvidenceConflictDesignerAtomically(
+  harness: Harness,
+  action: FrozenEvidenceConflictDesignerAction,
+): HarnessActionResult & { eventId: string } {
+  try {
+    return harness.runInImmediateTransaction((db) => {
+      const overview = harness.getRunOverviewWithDb(db, { runId: action.sourceRunId, eventLimit: 0 });
+      const sourceRun = overview.run;
+      if (!sourceRun || !sourceRun.projectId || sourceRun.status !== "blocked"
+        || sourceRun.context.source !== "design" || sourceRun.context.retired === true) {
+        throw new Error("frozen evidence conflict Designer requires one active project-bound blocked delivery run");
+      }
+      if (overview.tasks.some((task) => task.status === "todo" || task.status === "running")
+        || overview.sessions.some((session) => session.status === "running")) {
+        throw new Error("frozen evidence conflict Designer source still has active work");
+      }
+      const conflict = objectRecord(sourceRun.context.runtimeIntegrationFrozenEvidenceConflict, "runtimeIntegrationFrozenEvidenceConflict");
+      const verifierTaskId = exactContextId(conflict.verifierTaskId, "frozen evidence conflict verifier task");
+      const verifierAttemptId = exactContextId(conflict.verifierAttemptId, "frozen evidence conflict verifier attempt");
+      const observedManifestSha256 = exactSha256Field(conflict, "observedManifestSha256");
+      const frozenManifestSha256 = exactSha256Field(conflict, "frozenManifestSha256");
+      const conflictFingerprint = exactSha256Field(conflict, "fingerprint");
+      const conflictSignal = harness.getStrategySignalWithDb(db, { id: action.conflictSignalId });
+      const conflictPayload = objectRecordOrNull(conflictSignal?.payload);
+      if (!conflictSignal || conflictSignal.status !== "active"
+        || conflictSignal.projectId !== sourceRun.projectId || conflictSignal.runId !== sourceRun.id
+        || conflictPayload?.defectKind !== "runtime-integration-frozen-evidence-conflict"
+        || conflictPayload.verifierTaskId !== verifierTaskId
+        || conflictPayload.verifierAttemptId !== verifierAttemptId
+        || conflictPayload.observedManifestSha256 !== observedManifestSha256
+        || conflictPayload.frozenManifestSha256 !== frozenManifestSha256) {
+        throw new Error("frozen evidence conflict signal is missing, stale, or detached from the source run");
+      }
+      const verifier = overview.tasks.find((task) => task.id === verifierTaskId);
+      const verifierSession = overview.sessions.find((session) =>
+        session.taskId === verifierTaskId && session.attemptId === verifierAttemptId);
+      if (!verifier || verifier.role !== "verifier" || !["done", "blocked"].includes(verifier.status)
+        || !verifierSession || !["done", "blocked"].includes(verifierSession.status)
+        || verifierSession.output.verdict !== "fail" || (verifierSession.output.changedFiles ?? []).length !== 0
+        || !(verifierSession.output.problems ?? []).some((problem) => problem.includes("FROZEN_OFFLINE_CONTRACT_CHECKS_FAILED"))) {
+        throw new Error("frozen evidence conflict lacks its identity-separated terminal Verifier failure");
+      }
+      const researchSignal = harness.getStrategySignalWithDb(db, { id: action.researchSignalId });
+      if (!researchSignal || researchSignal.status !== "active" || researchSignal.projectId !== sourceRun.projectId
+        || !researchSignal.source.startsWith("research-evidence-link:")
+        || !researchSignal.runId || !researchSignal.taskId || !researchSignal.attemptId) {
+        throw new Error("frozen evidence conflict Designer requires one active project-bound research evidence link");
+      }
+      if (researchSignal.expiresAt && Date.parse(researchSignal.expiresAt) <= Date.now()) {
+        throw new Error("frozen evidence conflict research evidence has expired");
+      }
+      const researchRun = harness.getRunWithDb(db, researchSignal.runId);
+      const researchOverview = researchRun
+        ? harness.getRunOverviewWithDb(db, { runId: researchRun.id, eventLimit: 0 })
+        : null;
+      const researchTask = researchOverview?.tasks.find((task) => task.id === researchSignal.taskId);
+      const researchAttempt = harness.getAttemptWithDb(db, researchSignal.attemptId);
+      if (!researchRun || researchRun.status !== "done" || researchRun.projectId !== sourceRun.projectId
+        || !researchTask || researchTask.runId !== researchRun.id || !researchAttempt
+        || researchAttempt.taskId !== researchTask.id || researchAttempt.output.status !== "done"
+        || (researchAttempt.output.changedFiles ?? []).length !== 0
+        || (researchAttempt.output.problems ?? []).length !== 0) {
+        throw new Error("research evidence link does not resolve to one done read-only attempt");
+      }
+      const originalBundle = objectRecord(sourceRun.context.targetSystemEvidenceBundle, "targetSystemEvidenceBundle");
+      const originalBundleSha256 = exactSha256Field(originalBundle, "bundleSha256");
+      const { bundleSha256: _originalBundleSha256, ...originalBundleBody } = originalBundle;
+      if (canonicalEvolutionValueSha256(originalBundleBody) !== originalBundleSha256) {
+        throw new Error("source runtime evidence bundle hash does not match its canonical body");
+      }
+      const runtimeReceipts = overview.tasks.flatMap((task) => {
+        if (task.role !== "worker" || task.status !== "done") return [];
+        const executionContract = objectRecordOrNull(task.config?.runtimeIntegrationExecutionContract);
+        const session = [...overview.sessions].reverse().find((candidate) =>
+          candidate.taskId === task.id && candidate.status === "done");
+        const profileReceipt = session?.output.artifacts?.map(objectRecordOrNull).find((artifact) =>
+          artifact?.kind === "dsh_execution_profile_receipt");
+        if (!executionContract || !session || !profileReceipt) return [];
+        return [{
+          taskId: task.id,
+          attemptId: session.attemptId,
+          stageId: executionContract.stageId,
+          changedFiles: [...(session.output.changedFiles ?? [])].sort(),
+          outputSha256: canonicalEvolutionValueSha256(session.output),
+          profileReceiptSha256: canonicalEvolutionValueSha256(profileReceipt),
+        }];
+      }).sort((left, right) => left.taskId.localeCompare(right.taskId));
+      if (runtimeReceipts.length === 0) {
+        throw new Error("frozen evidence conflict has no verified DSH runtime accomplishment receipts");
+      }
+      const existingReceipt = objectRecordOrNull(sourceRun.context.frozenEvidenceConflictDesignerTrigger);
+      if (existingReceipt) {
+        if (existingReceipt.conflictSignalId !== action.conflictSignalId
+          || existingReceipt.researchSignalId !== action.researchSignalId
+          || typeof existingReceipt.runId !== "string" || typeof existingReceipt.taskId !== "string") {
+          throw new Error("frozen evidence conflict Designer trigger conflicts with the existing receipt");
+        }
+        const existingRun = harness.getRunWithDb(db, existingReceipt.runId);
+        const existingTask = existingRun
+          ? harness.getRunOverviewWithDb(db, { runId: existingRun.id, eventLimit: 0 }).tasks
+            .find((task) => task.id === existingReceipt.taskId)
+          : null;
+        if (!existingRun || !existingTask || existingTask.runId !== existingRun.id) {
+          throw new Error("frozen evidence conflict Designer trigger points to missing state");
+        }
+        const reused = doneResult(action.type, `Frozen evidence conflict Designer ${existingTask.id} trigger reused.`, [
+          { name: "source run", status: "passed", evidence: sourceRun.id },
+          { name: "old Repair budget", status: "passed", evidence: "unchanged" },
+          { name: "Designer attempts", status: "passed", evidence: "0" },
+        ], [{
+          kind: "frozen_evidence_conflict_designer_trigger",
+          runId: existingRun.id,
+          taskId: existingTask.id,
+          sourceRunId: sourceRun.id,
+          conflictSignalId: conflictSignal.id,
+          researchSignalId: researchSignal.id,
+          bundleSha256: existingReceipt.bundleSha256,
+          reused: true,
+        }]);
+        const eventId = harness.recordHarnessActionEventWithDb(db, {
+          actionType: action.type,
+          status: reused.status,
+          request: safeRequest(action),
+          result: resultToRecord(reused),
+        });
+        return { ...reused, eventId };
+      }
+      const evidenceBundleBody = {
+        schemaVersion: 1,
+        purpose: "runtime-integration-frozen-evidence-conflict-correction",
+        targetProjectId: sourceRun.projectId,
+        authoritativeDatabase: {
+          path: harness.dbPath,
+          bindingSha256: canonicalEvolutionValueSha256({ path: harness.dbPath, projectId: sourceRun.projectId }),
+        },
+        sourceRun: {
+          id: sourceRun.id,
+          status: sourceRun.status,
+          originalEvidenceBundleSha256: originalBundleSha256,
+          repairBudgetSha256: canonicalEvolutionValueSha256(sourceRun.context.repairReplanBudget ?? null),
+        },
+        conflict: {
+          signalId: conflictSignal.id,
+          signalSha256: canonicalEvolutionValueSha256({
+            source: conflictSignal.source,
+            summary: conflictSignal.summary,
+            evidence: conflictSignal.evidence,
+            payload: conflictSignal.payload,
+          }),
+          verifierTaskId,
+          verifierAttemptId,
+          verifierOutputSha256: canonicalEvolutionValueSha256(verifierSession.output),
+          observedManifestSha256,
+          frozenManifestSha256,
+          fingerprint: conflictFingerprint,
+        },
+        research: {
+          signalId: researchSignal.id,
+          sourceRunId: researchRun.id,
+          sourceTaskId: researchTask.id,
+          sourceAttemptId: researchAttempt.id,
+          evidence: researchSignal.evidence,
+          payloadSha256: canonicalEvolutionValueSha256(researchSignal.payload),
+          outputSha256: canonicalEvolutionValueSha256(researchAttempt.output),
+        },
+        verifiedRuntime: runtimeReceipts,
+        immutableContracts: {
+          evolutionInstanceSha256: canonicalEvolutionValueSha256(sourceRun.context.evolutionInstance ?? null),
+          designProposalSha256: canonicalEvolutionValueSha256(sourceRun.context.designProposal ?? null),
+          observedManifestSha256,
+          frozenManifestSha256,
+          mayModifyFrozenPackage: false,
+          mayRecoverSourceRun: false,
+        },
+      };
+      const evidenceBundle = {
+        ...evidenceBundleBody,
+        bundleSha256: canonicalEvolutionValueSha256(evidenceBundleBody),
+      };
+      const recoveryKey = canonicalEvolutionValueSha256({
+        sourceRunId: sourceRun.id,
+        conflictSignalId: conflictSignal.id,
+        researchSignalId: researchSignal.id,
+        bundleSha256: evidenceBundle.bundleSha256,
+      });
+      const runId = `run_${createHash("sha1").update(`frozen-evidence-conflict-designer|${recoveryKey}`).digest("hex")}`;
+      const taskId = `task_${createHash("sha1").update(`frozen-evidence-conflict-designer-task|${recoveryKey}`).digest("hex")}`;
+      if (harness.getRunWithDb(db, runId)) {
+        throw new Error("frozen evidence conflict Designer stable run already exists without a source receipt");
+      }
+      harness.createRunWithDb(db, {
+        id: runId,
+        goal: "Resolve the immutable v5/v6 runtime evidence-contract conflict or record quiescence",
+        projectId: sourceRun.projectId,
+        projectRoot: sourceRun.projectRoot,
+        context: {
+          source: "target-system-design",
+          supersedesRunId: sourceRun.id,
+          founderCharterId: sourceRun.context.founderCharterId,
+          designCharterId: sourceRun.context.designCharterId ?? sourceRun.context.founderCharterId,
+          projectId: sourceRun.projectId,
+          repairReplanBudget: { limit: 3, used: 0, entries: [] },
+          targetSystemEvidenceBundle: evidenceBundle,
+          frozenEvidenceConflictDesigner: {
+            schemaVersion: 1,
+            recoveryKey,
+            sourceRunId: sourceRun.id,
+            conflictSignalId: conflictSignal.id,
+            researchSignalId: researchSignal.id,
+            bundleSha256: evidenceBundle.bundleSha256,
+            allowedOutcomes: ["minimal-evidence-contract-correction", "quiescent"],
+          },
+        },
+      });
+      const prompt = [
+        "Review one immutable runtime evidence-contract conflict using only the host-bound evidence bundle in task config.",
+        `Conflict signal: ${conflictSignal.id}`,
+        `Frozen research signal: ${researchSignal.id}`,
+        `Authoritative evidence bundle SHA-256: ${evidenceBundle.bundleSha256}`,
+        "Read original research artifacts only through the authoritative research-evidence interface and their stored references. Do not search target worktrees for control databases.",
+        "Choose exactly one outcome: propose the smallest evidence-contract correction that preserves verified runtime work, or return a mutation-free quiescent decision.",
+        "Do not restore or reopen the blocked source run. Do not modify the frozen package, v5/v6 hashes, comparison, manifests, or prior evidence.",
+        "Do not create Planner, Worker, Repair, Verifier, delivery tasks, or implementation artifacts in this Designer task.",
+        "Any future implementation requires a new accepted proposal, authority decision, independent delivery run, and independent budget.",
+      ].join("\n\n");
+      const taskConfig = {
+        readOnly: true,
+        permissionMode: "read-only",
+        forbidImplementation: true,
+        forbidBrowser: true,
+        browserProcessPolicy: "deny",
+        targetSystemEvidenceBundle: evidenceBundle,
+        authoritativeEvidenceBundleSha256: evidenceBundle.bundleSha256,
+        conflictSignalId: conflictSignal.id,
+        researchSignalId: researchSignal.id,
+        allowedOutcomes: ["minimal-evidence-contract-correction", "quiescent"],
+        forbidNextTasks: true,
+        forbidNextRuns: true,
+      };
+      harness.createTaskWithDb(db, {
+        id: taskId,
+        runId,
+        role: "designer",
+        goal: "Design the minimum evidence-contract correction or quiesce",
+        prompt,
+        doneWhen: [
+          "the conflict, research, verified runtime receipts, and immutable hashes are cited by exact stored reference",
+          "the result is one minimal evidence-contract correction proposal or a mutation-free quiescent decision",
+          "the blocked source run and its Repair budget remain unchanged",
+          "no frozen package, comparison, manifest, business file, task graph, or implementation is changed",
+        ],
+        config: taskConfig,
+      });
+      const createdTask = harness.getRunOverviewWithDb(db, { runId, eventLimit: 0 }).tasks
+        .find((task) => task.id === taskId);
+      if (!createdTask || createdTask.config?.forbidNextTasks !== true
+        || createdTask.config?.forbidNextRuns !== true) {
+        throw new Error("frozen evidence conflict Designer task boundary failed atomic readback");
+      }
+      const receipt = {
+        schemaVersion: 1,
+        recoveryKey,
+        sourceRunId: sourceRun.id,
+        conflictSignalId: conflictSignal.id,
+        researchSignalId: researchSignal.id,
+        bundleSha256: evidenceBundle.bundleSha256,
+        runId,
+        taskId,
+      };
+      harness.updateRunWithDb(db, {
+        runId: sourceRun.id,
+        contextPatch: { frozenEvidenceConflictDesignerTrigger: receipt },
+      });
+      const result = doneResult(action.type, `Frozen evidence conflict Designer ${taskId} materialized without execution.`, [
+        { name: "conflict signal", status: "passed", evidence: conflictSignal.id },
+        { name: "frozen research", status: "passed", evidence: researchSignal.id },
+        { name: "verified runtime receipts", status: "passed", evidence: String(runtimeReceipts.length) },
+        { name: "source Repair budget", status: "passed", evidence: "unchanged" },
+        { name: "Designer attempts", status: "passed", evidence: "0" },
+      ], [{
+        kind: "frozen_evidence_conflict_designer_trigger",
+        runId,
+        taskId,
+        sourceRunId: sourceRun.id,
+        conflictSignalId: conflictSignal.id,
+        researchSignalId: researchSignal.id,
+        bundleSha256: evidenceBundle.bundleSha256,
+        runtimeReceiptCount: runtimeReceipts.length,
         reused: false,
       }]);
       const eventId = harness.recordHarnessActionEventWithDb(db, {
