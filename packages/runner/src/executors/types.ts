@@ -129,6 +129,7 @@ export interface DshCliExecutorOptions {
     minModelRequests: number;
     probeIntervalMs: number;
     baselineFingerprint?: string;
+    completionGraceMs?: number;
   };
 }
 

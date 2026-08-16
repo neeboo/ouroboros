@@ -215,6 +215,44 @@ describe("DeepSeek Harness CLI executor", () => {
     }
   });
 
+  test("a completed candidate still has a bounded convergence grace below the command hard timeout", async () => {
+    const workspace = await mkdtemp(join(homedir(), ".orbs-dsh-convergence-"));
+    await mkdir(join(workspace, "config", "evolution"), { recursive: true });
+    await writeFile(join(workspace, "config", "evolution", "changed.ts"), "export const version = 6;\n");
+    let monitorResult: unknown = null;
+    try {
+      const executor = createDshCliExecutor({
+        cwd: workspace,
+        sandbox: "workspace-write",
+        filePolicy: frozenDshFilePolicy,
+        env: { DEEPSEEK_API_KEY: "host-owned-key" },
+        resolveCommand: availableDshResolution,
+        noWriteProgressPolicy: {
+          maxStallMs: 10,
+          minModelRequests: 0,
+          probeIntervalMs: 1,
+          baselineFingerprint: "a".repeat(64),
+          completionGraceMs: 1,
+        } as never,
+        runCommand: async (input) => {
+          await Bun.sleep(3);
+          monitorResult = await input.progressMonitor?.evaluate();
+          return { exitCode: 124, stdout: "", stderr: "bounded convergence grace expired", terminationReason: "progress-stall" };
+        },
+      });
+
+      await executor({ ...executorInput(), attemptId: "attempt_dsh_convergence" });
+
+      expect(monitorResult).toMatchObject({
+        stalled: true,
+        code: "dsh-convergence-timeout",
+        progressSatisfied: true,
+      });
+    } finally {
+      await rm(workspace, { recursive: true, force: true });
+    }
+  });
+
   test("classifies a missing frozen worktree as a runtime binding failure before spawn", async () => {
     const sourceRoot = await mkdtemp(join(homedir(), ".orbs-dsh-runtime-source-"));
     const missingWorktree = join(sourceRoot, "missing-worktree");

@@ -4853,6 +4853,75 @@ function materializeTimedOutRuntimeSemanticRepairContinuationWithDb(input: {
     }
     if (progressReceipt.baselineFingerprint !== progressReceipt.finalFingerprint) {
       if (marker.progressRetryUsed === true) {
+        const canRefineContract = marker.contractRefinementUsed !== true
+          && progressReceipt.status === "completed"
+          && (session.output.problems ?? []).some((problem) => /command timed out after 1800000ms/i.test(problem));
+        if (canRefineContract) {
+          const identities = frozenRuntimeSemanticIdentities(run.context);
+          const refinementPrompt = [
+            "Final same-budget DSH contract-separation refinement. This is the last permitted execution of this semantic Repair.",
+            `The prior attempt ${attempt.id} produced the v6 candidate but timed out while proving it. Its durable trace established two exact failures: the immutable v5 source-package manifest drifted when its identity constant was overwritten, and replay episodes still emitted the v5 runtime contract ref.`,
+            "Separate the immutable v5 source package identity from the frozen v6 runtime delivery identity. This section supersedes the earlier instruction to overwrite the package identity used by the v5 manifest.",
+            "## Required bounded changes",
+            "- Keep the source package manifest, comparison, config/evolution/**, tests/evolution/**, source-byte commitments, v5 policy refs, fixture refs, rollback targets, and stored hashes byte-identical.",
+            "- In src/domain/evolution/frozen.ts, retain or restore a distinct immutable v5 package identity (version 5 and content hash 9f38d61eaa0800a9b401d5dfc03e7a4b7aecd41f7472957216409029b77bac66) for manifest regeneration, and add a separately named v6 runtime identity for the frozen delivery values below.",
+            "- Keep src/domain/evolution/manifest.ts bound only to the immutable v5 package identity; do not edit stored manifest or comparison artifacts.",
+            `- Emit ${identities.episodeContractId} from runtime replay episodes and ${identities.privacyContractId} from runtime AINovel privacy evidence while preserving all source fixture, provider, and policy v5 identifiers.`,
+            `- Emit runtime pack version ${identities.packVersion} with content hash ${identities.packContentSha256}, rollback ${identities.rollbackContractId}, and matched comparison host-receipt-matched-shadow-v6-runtime through the runtime/readback receipts only.`,
+            "- Update only directly affected tests/runtime-integration expectations. Do not change config/evolution/** or tests/evolution/**.",
+            "## Maximum files",
+            ...[
+              "src/domain/evolution/frozen.ts",
+              "src/domain/evolution/manifest.ts",
+              "src/domain/evolution/replay.ts",
+              "src/domain/evolution/ainovelAdapter.ts",
+              "src/domain/evolution/episodes.ts",
+              "src/domain/evolution/privacy.ts",
+              "src/domain/evolution/rollback.ts",
+              "src/domain/evolution/comparison.ts",
+              "src/application/evolution/evolutionRuntime.ts",
+              "tests/runtime-integration/evolution-runtime.test.mjs",
+              "tests/runtime-integration/ainovel-adapter.test.mjs",
+              "tests/runtime-integration/readback-backend-runtime.mjs",
+              "tests/runtime-integration/evolution-postgres.test.mjs",
+              "tests/runtime-integration/dsh-gateway.test.mjs",
+              "tests/runtime-integration/readback-dsh-gateway.mjs",
+            ].map((path) => `- ${path}`),
+            "Make the separating code changes before any repository-wide search. Run only the named runtime-integration checks. Return exact changedFiles and check evidence. If the two identities cannot be separated without modifying the frozen package, fail closed immediately.",
+          ].join("\n\n");
+          const refinedConfig = {
+            ...(existingContinuation.config ?? {}),
+            dshNoWriteProgressPolicy: {
+              ...objectRecordOrNull(existingContinuation.config?.dshNoWriteProgressPolicy),
+              baselineFingerprint: progressReceipt.finalFingerprint,
+              completionGraceMs: 600_000,
+            },
+            runtimeIntegrationSemanticRepairContinuation: {
+              ...marker,
+              contractRefinementUsed: true,
+              contractRefinementAttemptId: attempt.id,
+            },
+          };
+          const refined = db.query(
+            `update tasks
+             set status = 'todo', prompt = $prompt, config_json = $configJson, updated_at = current_timestamp
+             where id = $taskId and status = 'blocked'`,
+          ).run({
+            $taskId: existingContinuation.id,
+            $prompt: refinementPrompt,
+            $configJson: JSON.stringify(refinedConfig),
+          });
+          if (refined.changes !== 1) {
+            throw new Error(`semantic continuation ${existingContinuation.id} changed while refining its contract separation`);
+          }
+          harness.updateRunWithDb(db, { runId: run.id, status: "todo" });
+          return semanticRepairContinuationResult(run.id, repair, repairAttempt.id, {
+            ...existingContinuation,
+            status: "todo",
+            prompt: refinementPrompt,
+            config: refinedConfig,
+          }, verifier, true);
+        }
         return blockedResult(
           "materializeVerifierRepairRecovery",
           `Runtime semantic Repair continuation ${existingContinuation.id} already used its bounded post-progress retry.`,
@@ -5153,7 +5222,7 @@ function dshProgressWatchdogReceipt(output: AttemptOutput) {
   if (output.status !== "blocked" || (output.changedFiles ?? []).length !== 0) return null;
   const receipt = (output.artifacts ?? []).map(objectRecordOrNull).find((artifact) =>
     artifact?.kind === "dsh_progress_watchdog_receipt"
-    && artifact.status === "stalled"
+    && (artifact.status === "stalled" || artifact.status === "completed")
     && typeof artifact.baselineFingerprint === "string"
     && /^[a-f0-9]{64}$/.test(artifact.baselineFingerprint)
     && typeof artifact.finalFingerprint === "string"
@@ -5161,7 +5230,7 @@ function dshProgressWatchdogReceipt(output: AttemptOutput) {
     && typeof artifact.requestCount === "number"
     && artifact.requestCount > 0
   );
-  return receipt as ({ baselineFingerprint: string; finalFingerprint: string } & Record<string, unknown>) | null;
+  return receipt as ({ baselineFingerprint: string; finalFingerprint: string; status: "stalled" | "completed" } & Record<string, unknown>) | null;
 }
 
 function frozenRuntimeSemanticIdentities(context: Record<string, unknown>) {

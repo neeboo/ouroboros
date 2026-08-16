@@ -34,6 +34,7 @@ export interface RouteExecutorOptions {
     minModelRequests: number;
     probeIntervalMs: number;
     baselineFingerprint?: string;
+    completionGraceMs?: number;
   };
 }
 

@@ -711,6 +711,48 @@ describe("runtime integration task execution contracts", () => {
       },
     });
     expect(resumedOverview.tasks.find((task) => task.id === refinedVerifierId)?.status).toBe("todo");
+    const timedOutProgressAttemptId = harness.recordAttempt({
+      taskId: refinedContinuationId,
+      input: { executor: "dsh-cli", cwd: repair.worktreePath },
+      output: {
+        status: "blocked",
+        summary: "DeepSeek Harness CLI reached the hard timeout after preserving its candidate",
+        changedFiles: [],
+        checks: [{ name: "DSH bounded convergence", status: "failed" }],
+        artifacts: [{
+          kind: "dsh_progress_watchdog_receipt",
+          status: "completed",
+          requestCount: 23,
+          baselineFingerprint: "b".repeat(64),
+          finalFingerprint: "c".repeat(64),
+          progressSatisfied: true,
+        }],
+        problems: ["exit code: 124 stderr: command timed out after 1800000ms"],
+      },
+    });
+    const contractRefinement = applyHarnessAction(harness, {
+      type: "materializeVerifierRepairRecovery",
+      runId: fixture.runId,
+      verifierTaskId: semanticVerifierId,
+      reason: "separate immutable v5 package identity from frozen v6 runtime identity",
+    } as never);
+    const contractRefinementOverview = harness.getRunOverview({ runId: fixture.runId, eventLimit: 0 });
+    expect(contractRefinement.status).toBe("done");
+    expect(contractRefinementOverview.tasks.find((task) => task.id === refinedContinuationId)).toMatchObject({
+      status: "todo",
+      config: {
+        dshNoWriteProgressPolicy: {
+          baselineFingerprint: "c".repeat(64),
+          completionGraceMs: 600_000,
+        },
+        runtimeIntegrationSemanticRepairContinuation: {
+          contractRefinementUsed: true,
+          contractRefinementAttemptId: timedOutProgressAttemptId,
+        },
+      },
+    });
+    expect(contractRefinementOverview.tasks.find((task) => task.id === refinedContinuationId)?.prompt)
+      .toContain("immutable v5 source package identity from the frozen v6 runtime delivery identity");
     expect(harness.leaseReadyTasks({
       runId: fixture.runId,
       limit: 1,
