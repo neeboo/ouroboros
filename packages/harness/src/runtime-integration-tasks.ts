@@ -418,7 +418,7 @@ function runtimeSemanticRepairContinuationExecutionProblem(input: {
       if (input.task.id !== continuationTaskId
         || contract.stageId !== "runtime-semantic-repair" || contract.role !== "worker" || contract.executor !== "dsh-cli"
         || input.task.config?.executor !== "dsh-cli" || input.task.config?.permissionMode !== "workspace-write"
-        || !sameValue(input.task.dependsOn, [sourceRepairTaskId])) {
+        || !sameValue(input.task.dependsOn, [sourceVerifierTaskId])) {
         throw new Error(`runtime semantic Repair continuation execution contract drifted for ${input.task.id}`);
       }
       for (const key of [

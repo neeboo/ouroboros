@@ -420,7 +420,7 @@ describe("runtime integration task execution contracts", () => {
     expect(verifier).toMatchObject({
       status: "todo",
       parentId: fixture.plannerTaskId,
-      dependsOn: [repair.id],
+      dependsOn: [semanticVerifierId],
       config: {
         executor: "codex-resumable",
         permissionMode: "read-only",
@@ -537,7 +537,7 @@ describe("runtime integration task execution contracts", () => {
     expect(continuation).toMatchObject({
       status: "todo",
       parentId: fixture.plannerTaskId,
-      dependsOn: [repair.id],
+      dependsOn: [semanticVerifierId],
       worktreePath: repair.worktreePath,
       config: {
         executor: "dsh-cli",
@@ -566,6 +566,12 @@ describe("runtime integration task execution contracts", () => {
     });
     expect(after.run!.context.repairReplanBudget).toEqual(budgetBefore);
     expect(after.tasks.filter((task) => task.role === "goal-review")).toHaveLength(0);
+    const leased = harness.leaseReadyTasks({
+      runId: fixture.runId,
+      limit: 1,
+      sessionForTask: (task) => `session-${task.id}`,
+    });
+    expect(leased.map((task) => task.id)).toEqual([continuation.id]);
   });
 
   test("failed host evidence remains terminal and prepareRunDrain never creates Goal Review", () => {

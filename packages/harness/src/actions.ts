@@ -4800,15 +4800,31 @@ function materializeTimedOutRuntimeSemanticRepairContinuationWithDb(input: {
   if (overview.sessions.some((session) => session.taskId === pendingVerifier.id)) {
     throw new Error(`pending semantic Verifier ${pendingVerifier.id} already has an attempt`);
   }
-  const existingContinuation = overview.tasks.find((task) => {
+  const existingContinuations = overview.tasks.filter((task) => {
     const marker = objectRecordOrNull(task.config?.runtimeIntegrationSemanticRepairContinuation);
     return marker?.sourceAttemptId === repairAttempt.id;
   });
+  const existingContinuation = existingContinuations.find((task) =>
+    sameCanonicalValue(task.dependsOn, [sourceVerifier.id]) && task.status !== "blocked")
+    ?? existingContinuations.find((task) => task.status === "todo")
+    ?? existingContinuations[0];
   if (existingContinuation) {
     const verifier = overview.tasks.find((task) => task.role === "verifier"
       && sameCanonicalValue(task.dependsOn, [existingContinuation.id]));
     if (!verifier) throw new Error(`semantic continuation ${existingContinuation.id} lost its Verifier`);
-    return semanticRepairContinuationResult(run.id, repair, repairAttempt.id, existingContinuation, verifier, true);
+    if (existingContinuation.status === "todo"
+      && verifier.status === "todo"
+      && !overview.sessions.some((session) => session.taskId === existingContinuation.id || session.taskId === verifier.id)
+      && !sameCanonicalValue(existingContinuation.dependsOn, [sourceVerifier.id])) {
+      db.query(
+        "update tasks set status = 'blocked', updated_at = current_timestamp where id in ($continuationTaskId, $verifierTaskId) and status = 'todo'",
+      ).run({ $continuationTaskId: existingContinuation.id, $verifierTaskId: verifier.id });
+    } else {
+      if (!sameCanonicalValue(existingContinuation.dependsOn, [sourceVerifier.id])) {
+        throw new Error(`semantic continuation ${existingContinuation.id} has an unrecoverable dependency drift`);
+      }
+      return semanticRepairContinuationResult(run.id, repair, repairAttempt.id, existingContinuation, verifier, true);
+    }
   }
   if (pendingVerifier.status !== "todo") {
     throw new Error(`pending semantic Verifier ${pendingVerifier.id} must be todo before replacement`);
@@ -4883,7 +4899,7 @@ function materializeTimedOutRuntimeSemanticRepairContinuationWithDb(input: {
     role: "worker",
     goal: `Continue timed out semantic Repair: ${repair.goal}`,
     prompt,
-    dependsOn: [repair.id],
+    dependsOn: [sourceVerifier.id],
     doneWhen: [
       `Only the frozen runtime identity is corrected to ${identities.packContentSha256}.`,
       "config/evolution/** and tests/evolution/** remain byte-identical.",
