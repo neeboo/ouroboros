@@ -3088,6 +3088,18 @@ export class Harness {
     return row ? strategySignalFromRow(row) : null;
   }
 
+  supersedeStrategySignalWithDb(db: HarnessDatabase, input: GetStrategySignalInput) {
+    ensureStrategyTables(db);
+    db.query(
+      `
+      update strategy_signals
+      set status = 'superseded', updated_at = current_timestamp
+      where id = $id and status = 'active'
+      `,
+    ).run({ $id: input.id });
+    return this.getStrategySignalWithDb(db, input);
+  }
+
   listStrategySignals(input: ListStrategySignalsInput = {}) {
     return withReadOnlyDatabase(this.dbPath, (db) => this.listStrategySignalsWithDb(db, input));
   }

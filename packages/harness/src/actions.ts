@@ -102,6 +102,7 @@ export type HarnessAction =
       evidence: string[];
       expiresAt?: string;
       payload: Record<string, unknown>;
+      supersedesSignalId?: string;
     }
   | {
       type: "linkResearchEvidence";
@@ -537,6 +538,7 @@ export function parseHarnessAction(value: unknown): HarnessAction {
       "evidence",
       "expiresAt",
       "payload",
+      "supersedesSignalId",
     ]);
     const projectId = exactSafeIdentifierField(record, "projectId");
     const sourceRunId = exactSafeIdentifierField(record, "sourceRunId");
@@ -571,6 +573,9 @@ export function parseHarnessAction(value: unknown): HarnessAction {
       evidence: blockedRunSignalEvidence(record.evidence),
       expiresAt,
       payload: blockedRunSignalPayload(record.payload),
+      supersedesSignalId: record.supersedesSignalId === undefined
+        ? undefined
+        : exactSafeIdentifierField(record, "supersedesSignalId"),
     };
   }
   if (type === "linkResearchEvidence") {
@@ -1286,10 +1291,6 @@ function applyBlockedRunSignalAtomically(
       if (run.status !== "blocked") {
         throw new Error(`recordSignal source run must be blocked: ${run.status}`);
       }
-      const signalId = `signal_blocked_${stableFingerprint({
-        projectId: action.projectId,
-        sourceRunId: action.sourceRunId,
-      }).slice(0, 32)}`;
       const signalRecord = {
         projectId: action.projectId,
         signalClass: action.signalClass,
@@ -1303,11 +1304,37 @@ function applyBlockedRunSignalAtomically(
         runId: action.sourceRunId,
         payload: action.payload,
       };
-      const signalSha256 = stableFingerprint(signalRecord);
+      const supersededSignal = action.supersedesSignalId
+        ? harness.getStrategySignalWithDb(db, { id: action.supersedesSignalId })
+        : null;
+      if (action.supersedesSignalId) {
+        if (!supersededSignal) {
+          throw new Error(`recordSignal superseded signal not found: ${action.supersedesSignalId}`);
+        }
+        if (supersededSignal.projectId !== action.projectId || supersededSignal.runId !== action.sourceRunId) {
+          throw new Error(`recordSignal superseded signal is not bound to source run: ${action.supersedesSignalId}`);
+        }
+        if (supersededSignal.status !== "active" && supersededSignal.status !== "superseded") {
+          throw new Error(`recordSignal cannot supersede signal in status ${supersededSignal.status}: ${action.supersedesSignalId}`);
+        }
+      }
+      const conflictingSignalIds = action.supersedesSignalId ? [action.supersedesSignalId] : [];
+      const signalSha256 = stableFingerprint(action.supersedesSignalId
+        ? { ...signalRecord, conflictingSignalIds }
+        : signalRecord);
+      const signalId = action.supersedesSignalId
+        ? `signal_blocked_correction_${stableFingerprint({
+            supersedesSignalId: action.supersedesSignalId,
+            signalSha256,
+          }).slice(0, 32)}`
+        : `signal_blocked_${stableFingerprint({
+            projectId: action.projectId,
+            sourceRunId: action.sourceRunId,
+          }).slice(0, 32)}`;
       const existing = harness.getStrategySignalWithDb(db, { id: signalId });
       const reused = existing !== null;
       if (existing) {
-        const existingSha256 = stableFingerprint({
+        const existingRecord = {
           projectId: existing.projectId,
           signalClass: existing.signalClass,
           source: existing.source,
@@ -1319,7 +1346,10 @@ function applyBlockedRunSignalAtomically(
           expiresAt: existing.expiresAt,
           runId: existing.runId,
           payload: existing.payload,
-        });
+        };
+        const existingSha256 = stableFingerprint(action.supersedesSignalId
+          ? { ...existingRecord, conflictingSignalIds: existing.conflictingSignalIds }
+          : existingRecord);
         if (existingSha256 !== signalSha256) {
           throw new Error(`recordSignal conflicts with existing blocked-run signal: ${signalId}`);
         }
@@ -1327,7 +1357,14 @@ function applyBlockedRunSignalAtomically(
         harness.createStrategySignalWithDb(db, {
           id: signalId,
           ...signalRecord,
+          conflictingSignalIds,
         });
+      }
+      if (action.supersedesSignalId) {
+        if (supersededSignal?.status === "superseded" && !existing) {
+          throw new Error(`recordSignal superseded signal has no matching correction: ${action.supersedesSignalId}`);
+        }
+        harness.supersedeStrategySignalWithDb(db, { id: action.supersedesSignalId });
       }
       const readback = harness.getStrategySignalWithDb(db, { id: signalId });
       if (!readback || readback.projectId !== action.projectId || readback.runId !== action.sourceRunId) {
@@ -1348,6 +1385,7 @@ function applyBlockedRunSignalAtomically(
           signalSha256,
           projectId: action.projectId,
           sourceRunId: action.sourceRunId,
+          supersededSignalId: action.supersedesSignalId ?? null,
           reused,
         }],
       );

@@ -216,6 +216,70 @@ describe("Harness actions", () => {
     });
   });
 
+  test("supersedes one incorrect blocked-run signal with an immutable corrected signal", () => {
+    const projectId = harness.createProject({ name: "corrected-blocked-signal", rootPath: dir });
+    const sourceRunId = harness.createRun({ projectId, goal: "Preserve a corrected blocked outcome" });
+    harness.updateRunStatus({ runId: sourceRunId, status: "blocked" });
+    const baseRequest = {
+      type: "recordSignal",
+      projectId,
+      sourceRunId,
+      signalClass: "system",
+      source: `blocked-run-outcome:${sourceRunId}`,
+      title: "Frozen corpus cannot be realized",
+      summary: "The frozen corpus commitment has no matching source and the delivery remains blocked.",
+      observationTime: "2026-08-16T02:00:00.000Z",
+      confidence: 1,
+      evidence: [`run:${sourceRunId}`, `commit:${"1".repeat(40)}`],
+      payload: { defectKind: "frozen-corpus-unrealizable" },
+    } as const;
+    const original = applyHarnessAction(harness, baseRequest);
+    const originalId = original.artifacts.find((artifact) => artifact.kind === "strategy_signal")?.signalId as string;
+    const correctedRequest = {
+      ...baseRequest,
+      supersedesSignalId: originalId,
+      evidence: [`run:${sourceRunId}`, `commit:${"2".repeat(40)}`],
+    } as const;
+
+    const corrected = applyHarnessAction(harness, correctedRequest);
+    const replay = applyHarnessAction(harness, correctedRequest);
+    const correctedArtifact = corrected.artifacts.find((artifact) => artifact.kind === "strategy_signal");
+    const correctedId = correctedArtifact?.signalId as string;
+
+    expect(corrected).toMatchObject({ status: "done", actionType: "recordSignal" });
+    expect(correctedArtifact).toMatchObject({
+      signalId: expect.stringMatching(/^signal_blocked_correction_/),
+      supersededSignalId: originalId,
+      reused: false,
+    });
+    expect(replay.artifacts).toContainEqual(expect.objectContaining({
+      kind: "strategy_signal",
+      signalId: correctedId,
+      supersededSignalId: originalId,
+      reused: true,
+    }));
+    expect(harness.getStrategySignal({ id: originalId })?.status).toBe("superseded");
+    expect(harness.getStrategySignal({ id: correctedId })).toMatchObject({
+      status: "active",
+      runId: sourceRunId,
+      evidence: correctedRequest.evidence,
+      conflictingSignalIds: [originalId],
+    });
+    expect(harness.getRun(sourceRunId)?.status).toBe("blocked");
+    expect(harness.listStrategySignals({ projectId, statuses: ["active"] }).map((signal) => signal.id)).toEqual([
+      correctedId,
+    ]);
+
+    expect(applyHarnessAction(harness, {
+      ...correctedRequest,
+      evidence: [`run:${sourceRunId}`, `commit:${"3".repeat(40)}`],
+    })).toMatchObject({
+      status: "blocked",
+      actionType: "recordSignal",
+      problems: [expect.stringMatching(/superseded|conflict/i)],
+    });
+  });
+
   test("links completed research artifacts by immutable reference and keeps them project scoped", () => {
     const projectId = harness.createProject({ name: "target", rootPath: dir });
     const otherProjectId = harness.createProject({ name: "other", rootPath: join(dir, "other") });
