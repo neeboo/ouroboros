@@ -561,8 +561,12 @@ function assertTargetSystemAuthoritativeComparison(
     const sourceMatches = acceptedProposals.some((entry) => {
       if (!entry || typeof entry !== "object" || Array.isArray(entry)) return false;
       const record = entry as Record<string, unknown>;
-      return record.comparisonSha256 === receipt.sourceComparisonSha256
-        && canonicalEvolutionValueSha256(record.comparison) === receipt.sourceComparisonSha256;
+      const proposalBindingMatches = receipt.proposalId === undefined || record.id === receipt.proposalId;
+      const comparisonBindingMatches = record.comparison === undefined
+        || canonicalEvolutionValueSha256(record.comparison) === receipt.sourceComparisonSha256;
+      return proposalBindingMatches
+        && record.comparisonSha256 === receipt.sourceComparisonSha256
+        && comparisonBindingMatches;
     });
     if (!sourceMatches) {
       throw new Error("versioned corpus receipt is not bound to the immutable accepted comparison");
@@ -1557,6 +1561,12 @@ function applyCreateRunsFromDesignWithDb(
     authority: approval.authority,
     charterId: resolvedCharterId,
   };
+  const hostEvidenceMaintenance = deriveHostEvidenceMaintenanceDelivery({
+    harness,
+    db,
+    proposal,
+    projectId: proposalProjectId,
+  });
 
   // Linear intake provenance for this run was read and validated above. The
   // single-run contract for Linear intake proposals is enforced here, after
@@ -1576,7 +1586,9 @@ function applyCreateRunsFromDesignWithDb(
       : existingProposalDelivery?.id ?? stableChildRunId(proposalId);
     let plannerTaskId = linearIntake && canonicalPlannerTaskId
       ? canonicalPlannerTaskId
-      : stablePlannerTaskId(proposalId);
+      : hostEvidenceMaintenance
+        ? stableHostEvidenceTaskId(proposalId)
+        : stablePlannerTaskId(proposalId);
     const existingRun = harness.getRunWithDb(db, childRunId);
     // Preserve the project-identity failure boundary before inspecting any
     // legacy planner state. A polluted child must never be interpreted as a
@@ -1600,7 +1612,10 @@ function applyCreateRunsFromDesignWithDb(
       const existingTasks = harness
         .getRunOverviewWithDb(db, { runId: existingProposalDelivery.id, eventLimit: 0 })
         .tasks;
-      const plannerCandidates = existingTasks.filter((task) => task.role === "planner");
+      const plannerCandidates = existingTasks.filter((task) =>
+        hostEvidenceMaintenance
+          ? task.role === "system" && Boolean(task.config?.hostEvidenceMaintenance)
+          : task.role === "planner");
       const existingPlanner = plannerCandidates.length === 1
         ? plannerCandidates[0]
         : (plannerCandidates.length === 0 && existingTasks.length === 1 ? existingTasks[0] : null);
@@ -1612,17 +1627,38 @@ function applyCreateRunsFromDesignWithDb(
       plannerTaskId = existingPlanner.id;
     }
     const existingTask = harness.getTask(plannerTaskId);
-    const requestedDeliveryPlan = designDeliveryPlan({
-      runGoal: plannedRun.goal,
-      plannerGoal: `Plan run: ${plannedRun.goal}`,
-      plannerPrompt: plannedRun.prompt,
-      plannerDoneWhen: plannedRun.doneWhen ?? [
-        "Planner returns a small nextTasks graph for this run",
-        "Every generated task honors the frozen design evaluation contract",
-        "The run can be drained by the supervisor without manual task injection",
-      ],
-      plannerConfig: plannedRun.modelPreference ? { modelPreference: plannedRun.modelPreference } : {},
-    });
+    const requestedDeliveryPlan = hostEvidenceMaintenance
+      ? designDeliveryPlan({
+          runGoal: plannedRun.goal,
+          plannerGoal: `Build the host-owned version ${hostEvidenceMaintenance.targetVersion} corpus receipt`,
+          plannerPrompt: [
+            "Execute the frozen host evidence-maintenance action through audited harness actions.",
+            `Source signal: ${hostEvidenceMaintenance.sourceSignalId}`,
+            `Immutable source proposal: ${hostEvidenceMaintenance.sourceProposalId}`,
+            `Blocked source delivery: ${hostEvidenceMaintenance.sourceRunId}`,
+            "Do not start a model executor. Do not expose holdout references, paths, or bytes.",
+          ].join("\n"),
+          plannerDoneWhen: [
+            "one audited versioned corpus manifest receipt exists or the host boundary fails closed",
+            "an independent read-only verifier is created only after the host receipt succeeds",
+            "the immutable source proposal and blocked source delivery remain unchanged",
+          ],
+          plannerConfig: {
+            systemTask: true,
+            hostEvidenceMaintenance,
+          },
+        })
+      : designDeliveryPlan({
+          runGoal: plannedRun.goal,
+          plannerGoal: `Plan run: ${plannedRun.goal}`,
+          plannerPrompt: plannedRun.prompt,
+          plannerDoneWhen: plannedRun.doneWhen ?? [
+            "Planner returns a small nextTasks graph for this run",
+            "Every generated task honors the frozen design evaluation contract",
+            "The run can be drained by the supervisor without manual task injection",
+          ],
+          plannerConfig: plannedRun.modelPreference ? { modelPreference: plannedRun.modelPreference } : {},
+        });
     const storedDeliveryPlan = existingRun?.context.designDeliveryPlan === undefined
       ? null
       : parseDesignDeliveryPlan(existingRun.context.designDeliveryPlan, childRunId);
@@ -1710,7 +1746,7 @@ function applyCreateRunsFromDesignWithDb(
       harness.createTaskWithDb(db, {
         id: plannerTaskId,
         runId: childRunId,
-        role: "planner",
+        role: hostEvidenceMaintenance ? "system" : "planner",
         goal: canonicalDeliveryPlan.planner.goal,
         prompt: canonicalDeliveryPlan.planner.prompt,
         doneWhen: canonicalDeliveryPlan.planner.doneWhen,
@@ -1719,7 +1755,7 @@ function applyCreateRunsFromDesignWithDb(
     } else {
       verifyExistingPlannerTask(existingTask, {
         runId: childRunId,
-        role: "planner",
+        role: hostEvidenceMaintenance ? "system" : "planner",
         goal: canonicalDeliveryPlan.planner.goal,
         prompt: canonicalDeliveryPlan.planner.prompt,
         doneWhen: canonicalDeliveryPlan.planner.doneWhen,
@@ -2979,6 +3015,93 @@ function resolveProposalEvidence(
   return { references, signals, crossProjectRefs, malformedConflictMetadataRefs };
 }
 
+interface HostEvidenceMaintenanceDelivery {
+  kind: "versioned-corpus-manifest";
+  sourceSignalId: string;
+  sourceRunId: string;
+  sourceProposalId: string;
+  sourceDecisionId: string;
+  targetVersion: number;
+}
+
+function deriveHostEvidenceMaintenanceDelivery(input: {
+  harness: Harness;
+  db: HarnessDatabase;
+  proposal: DesignProposal;
+  projectId: string;
+}): HostEvidenceMaintenanceDelivery | null {
+  const investment = input.proposal.proposal.investment as Record<string, unknown> | undefined;
+  const comparison = input.proposal.proposal.evaluationContract?.comparison;
+  if (investment?.classification !== "evidence-maintenance") return null;
+  if (investment.oneTimeCost !== 0 || investment.recurringCost !== 0) {
+    throw new Error("evidence-maintenance delivery must remain zero-cost");
+  }
+  if (comparison !== undefined
+    || input.proposal.proposal.evolutionPack !== undefined
+    || input.proposal.proposal.causalHypothesis !== undefined) {
+    throw new Error("evidence-maintenance delivery must build the host receipt before freezing a successor comparison");
+  }
+  const evidenceRefs = input.proposal.proposal.evidenceRefs ?? [];
+  const candidates = evidenceRefs.flatMap((signalId) => {
+    const signal = input.harness.getStrategySignalWithDb(input.db, { id: signalId });
+    if (!signal || signal.projectId !== input.projectId) return [];
+    const payload = signal.payload;
+    if (payload.outcome !== "evidence-defect" || payload.defectKind !== "frozen-corpus-unrealizable") return [];
+    const frozen = payload.frozenContract;
+    const nextDesign = payload.nextDesign;
+    if (!frozen || typeof frozen !== "object" || Array.isArray(frozen)
+      || !nextDesign || typeof nextDesign !== "object" || Array.isArray(nextDesign)) {
+      throw new Error("evidence-maintenance signal is missing frozenContract or nextDesign");
+    }
+    return [{ signal, frozen: frozen as Record<string, unknown>, nextDesign: nextDesign as Record<string, unknown> }];
+  });
+  if (candidates.length !== 1) {
+    throw new Error("evidence-maintenance delivery requires exactly one project-owned frozen-corpus-unrealizable signal");
+  }
+  const candidate = candidates[0]!;
+  const sourceProposalId = requiredString(
+    candidate.frozen.proposalId,
+    "evidence-maintenance frozenContract.proposalId",
+  );
+  const sourceProposal = input.harness.getDesignProposalWithDb(input.db, { id: sourceProposalId });
+  if (!sourceProposal || sourceProposal.projectId !== input.projectId || sourceProposal.status !== "accepted") {
+    throw new Error("evidence-maintenance source proposal must be accepted and target-project bound");
+  }
+  const sourcePack = sourceProposal.proposal.evolutionPack as Record<string, unknown> | undefined;
+  const sourceVersion = sourcePack?.version;
+  const targetVersion = candidate.nextDesign.targetVersion;
+  if (!Number.isInteger(sourceVersion) || !Number.isInteger(targetVersion)
+    || Number(targetVersion) !== Number(sourceVersion) + 1) {
+    throw new Error("evidence-maintenance targetVersion must be exactly one greater than the immutable source version");
+  }
+  const sourceDecision = input.harness.listDesignDecisionsWithDb(input.db, { proposalId: sourceProposal.id })
+    .find((decision) => decision.decision === "approved");
+  if (!sourceDecision) {
+    throw new Error("evidence-maintenance source proposal requires an approved decision");
+  }
+  const sourceRuns = input.harness.listRunsWithDb(input.db, { limit: 1_000 })
+    .filter((run) => run.projectId === input.projectId
+      && run.context.source === "design"
+      && run.context.designProposalId === sourceProposal.id
+      && run.context.designDecisionId === sourceDecision.id
+      && run.context.retired !== true);
+  if (sourceRuns.length !== 1 || sourceRuns[0]!.status !== "blocked") {
+    throw new Error("evidence-maintenance requires exactly one blocked immutable source delivery");
+  }
+  const sourceRun = sourceRuns[0]!;
+  if (candidate.signal.source !== `blocked-run-outcome:${sourceRun.id}`) {
+    throw new Error("evidence-maintenance signal is not bound to the immutable blocked source delivery");
+  }
+  return {
+    kind: "versioned-corpus-manifest",
+    sourceSignalId: candidate.signal.id,
+    sourceRunId: sourceRun.id,
+    sourceProposalId: sourceProposal.id,
+    sourceDecisionId: sourceDecision.id,
+    targetVersion: Number(targetVersion),
+  };
+}
+
 function hasSignalSupersessionReceipt(db: HarnessDatabase, signalId: string, supersededSignalId: string) {
   const row = db.query(`
     select event.id
@@ -3426,6 +3549,10 @@ function stableChildRunId(proposalId: string): string {
 
 function stablePlannerTaskId(proposalId: string): string {
   return `task_${sha1Hex(`design-planner|${proposalId}`)}`;
+}
+
+function stableHostEvidenceTaskId(proposalId: string): string {
+  return `task_${sha1Hex(`design-host-evidence|${proposalId}`)}`;
 }
 
 function sha1Hex(input: string): string {

@@ -133,6 +133,25 @@ export type HarnessAction =
       targetVersion: number;
       developmentFixtureRefs?: string[];
       unrelatedFixtureRefs?: string[];
+      publicFixtureBindings?: Array<{
+        ref: string;
+        sourceTaskId: string;
+        sourceAttemptId: string;
+        relativePath: string;
+        sha256: string;
+      }>;
+    }
+  | {
+      type: "bindHostEvidenceMaintenanceReceipt";
+      runId: string;
+      taskId: string;
+      actionEventId: string;
+      evidenceBundle: Record<string, unknown>;
+    }
+  | {
+      type: "materializeHostEvidenceMaintenanceDelivery";
+      proposalId: string;
+      decisionId: string;
     }
   | { type: "markRunTodo"; runId: string; reason?: string }
   | {
@@ -628,7 +647,9 @@ export function parseHarnessAction(value: unknown): HarnessAction {
       "targetVersion",
       "developmentFixtureRefs",
       "unrelatedFixtureRefs",
+      "publicFixtureBindings",
     ]);
+    const publicFixtureBindings = publicFixtureBindingsField(record.publicFixtureBindings);
     return {
       type,
       projectId: exactSafeIdentifierField(record, "projectId"),
@@ -638,6 +659,25 @@ export function parseHarnessAction(value: unknown): HarnessAction {
       targetVersion: positiveIntegerField(record, "targetVersion"),
       developmentFixtureRefs: optionalStringArrayField(record, "developmentFixtureRefs"),
       unrelatedFixtureRefs: optionalStringArrayField(record, "unrelatedFixtureRefs"),
+      ...(publicFixtureBindings === undefined ? {} : { publicFixtureBindings }),
+    };
+  }
+  if (type === "bindHostEvidenceMaintenanceReceipt") {
+    assertOnlyFields(record, type, ["type", "runId", "taskId", "actionEventId", "evidenceBundle"]);
+    return {
+      type,
+      runId: exactSafeIdentifierField(record, "runId"),
+      taskId: exactSafeIdentifierField(record, "taskId"),
+      actionEventId: exactSafeIdentifierField(record, "actionEventId"),
+      evidenceBundle: objectRecord(record.evidenceBundle, "evidenceBundle"),
+    };
+  }
+  if (type === "materializeHostEvidenceMaintenanceDelivery") {
+    assertOnlyFields(record, type, ["type", "proposalId", "decisionId"]);
+    return {
+      type,
+      proposalId: exactSafeIdentifierField(record, "proposalId"),
+      decisionId: exactSafeIdentifierField(record, "decisionId"),
     };
   }
   if (type === "markRunTodo") {
@@ -990,7 +1030,7 @@ export function parseHarnessAction(value: unknown): HarnessAction {
     };
   }
   throw new Error(
-    "harness action type must be reclaimRunningTasks, retryTask, reconcileRunEvidence, recordSignal, linkResearchEvidence, materializeDesignerActionRecovery, buildVersionedCorpusManifest, markRunTodo, updateRunContext, amendRunContract, retireRun, retireTask, prepareRunDrain, completeSystemTask, integrateVerifiedRun, pushExactGitRef, createExactGitRef, commitExactGitIndex, stageExactWorkerFilesForVerification, materializeAttemptArtifactsForVerification, verifySealedCorpusForVerification, registerEvolutionProfile, recordProductionEpisode, registerHarnessVariant, activateHarnessRevision, freezeMatchedExperiment, interruptAttemptAndCreateTask, interruptRunningAttemptsAndCreateTask, acceptGuardrailProposal, startSubsession, collectSubsessions, cancelSubsessions, or runWatchdogPass",
+    "harness action type must be reclaimRunningTasks, retryTask, reconcileRunEvidence, recordSignal, linkResearchEvidence, materializeDesignerActionRecovery, buildVersionedCorpusManifest, bindHostEvidenceMaintenanceReceipt, materializeHostEvidenceMaintenanceDelivery, markRunTodo, updateRunContext, amendRunContract, retireRun, retireTask, prepareRunDrain, completeSystemTask, integrateVerifiedRun, pushExactGitRef, createExactGitRef, commitExactGitIndex, stageExactWorkerFilesForVerification, materializeAttemptArtifactsForVerification, verifySealedCorpusForVerification, registerEvolutionProfile, recordProductionEpisode, registerHarnessVariant, activateHarnessRevision, freezeMatchedExperiment, interruptAttemptAndCreateTask, interruptRunningAttemptsAndCreateTask, acceptGuardrailProposal, startSubsession, collectSubsessions, cancelSubsessions, or runWatchdogPass",
   );
 }
 
@@ -1045,6 +1085,10 @@ export function applyHarnessAction(
 
   if (action.type === "buildVersionedCorpusManifest") {
     return applyVersionedCorpusManifestAction(harness, action, options);
+  }
+
+  if (action.type === "materializeHostEvidenceMaintenanceDelivery") {
+    return applyHostEvidenceMaintenanceDeliveryAtomically(harness, action);
   }
 
   if (action.type === "integrateVerifiedRun") {
@@ -1605,8 +1649,193 @@ function applyResearchEvidenceLinkAtomically(
 }
 
 type VersionedCorpusManifestAction = Extract<HarnessAction, { type: "buildVersionedCorpusManifest" }>;
+type HostEvidenceMaintenanceDeliveryAction = Extract<HarnessAction, { type: "materializeHostEvidenceMaintenanceDelivery" }>;
 
-function fixtureEntry(projectRoot: string, ref: string, label: string) {
+function applyHostEvidenceMaintenanceDeliveryAtomically(
+  harness: Harness,
+  action: HostEvidenceMaintenanceDeliveryAction,
+): HarnessActionResult & { eventId: string } {
+  return harness.runInImmediateTransaction((db) => {
+    const request = safeRequest(action);
+    const prior = harness.listHarnessActionEventsWithDb(db, {
+      actionType: action.type,
+      statuses: ["done"],
+      limit: 1_000,
+    }).find((event) => stableFingerprint(event.request) === stableFingerprint(request));
+    if (prior) {
+      return { ...(prior.result as unknown as HarnessActionResult), eventId: prior.id };
+    }
+
+    let result: HarnessActionResult;
+    try {
+      const proposal = harness.getDesignProposalWithDb(db, { id: action.proposalId });
+      if (!proposal || proposal.status !== "accepted" || !proposal.projectId) {
+        throw new Error("host evidence maintenance proposal must be accepted and project-bound");
+      }
+      const investment = proposal.proposal.investment as Record<string, unknown> | undefined;
+      if (investment?.classification !== "evidence-maintenance"
+        || investment.oneTimeCost !== 0
+        || investment.recurringCost !== 0
+        || proposal.proposal.evolutionPack !== undefined
+        || proposal.proposal.causalHypothesis !== undefined
+        || proposal.proposal.evaluationContract.comparison !== undefined) {
+        throw new Error("host evidence maintenance delivery requires a zero-cost receipt-only proposal");
+      }
+      const decision = harness.listDesignDecisionsWithDb(db, { proposalId: proposal.id })
+        .find((candidate) => candidate.id === action.decisionId);
+      if (!decision || decision.decision !== "approved") {
+        throw new Error("host evidence maintenance delivery requires the named approved decision");
+      }
+      const sourceRoot = proposal.runId ? harness.getRunWithDb(db, proposal.runId) : null;
+      if (!sourceRoot || sourceRoot.projectId !== proposal.projectId || sourceRoot.context.source !== "target-system-design") {
+        throw new Error("host evidence maintenance proposal must originate from a target-system-design root");
+      }
+      const evidenceCandidates = (proposal.proposal.evidenceRefs ?? []).flatMap((signalId) => {
+        const signal = harness.getStrategySignalWithDb(db, { id: signalId });
+        if (!signal || signal.projectId !== proposal.projectId
+          || signal.payload.outcome !== "evidence-defect"
+          || signal.payload.defectKind !== "frozen-corpus-unrealizable") return [];
+        return [signal];
+      });
+      if (evidenceCandidates.length !== 1) {
+        throw new Error("host evidence maintenance delivery requires exactly one frozen-corpus-unrealizable signal");
+      }
+      const signal = evidenceCandidates[0]!;
+      const frozen = objectRecord(signal.payload.frozenContract, "frozenContract");
+      const nextDesign = objectRecord(signal.payload.nextDesign, "nextDesign");
+      const sourceProposalId = stringField(frozen, "proposalId");
+      const sourceProposal = harness.getDesignProposalWithDb(db, { id: sourceProposalId });
+      if (!sourceProposal || sourceProposal.projectId !== proposal.projectId || sourceProposal.status !== "accepted") {
+        throw new Error("host evidence maintenance immutable source proposal is invalid");
+      }
+      const sourceDecision = harness.listDesignDecisionsWithDb(db, { proposalId: sourceProposal.id })
+        .find((candidate) => candidate.decision === "approved");
+      if (!sourceDecision) throw new Error("host evidence maintenance immutable source decision is missing");
+      const sourceVersion = (sourceProposal.proposal.evolutionPack as Record<string, unknown> | undefined)?.version;
+      const targetVersion = nextDesign.targetVersion;
+      if (!Number.isInteger(sourceVersion) || !Number.isInteger(targetVersion)
+        || Number(targetVersion) !== Number(sourceVersion) + 1) {
+        throw new Error("host evidence maintenance target version is not the next immutable version");
+      }
+      const allRuns = harness.listRunsWithDb(db, { limit: 10_000 });
+      const immutableSourceRuns = allRuns.filter((candidate) => candidate.projectId === proposal.projectId
+        && candidate.context.source === "design"
+        && candidate.context.designProposalId === sourceProposal.id
+        && candidate.context.designDecisionId === sourceDecision.id
+        && candidate.context.retired !== true);
+      if (immutableSourceRuns.length !== 1 || immutableSourceRuns[0]!.status !== "blocked") {
+        throw new Error("host evidence maintenance requires one blocked immutable source delivery");
+      }
+      const immutableSourceRun = immutableSourceRuns[0]!;
+      if (signal.source !== `blocked-run-outcome:${immutableSourceRun.id}`) {
+        throw new Error("host evidence maintenance signal is not bound to the blocked immutable source delivery");
+      }
+      const activeDeliveries = allRuns.filter((candidate) => candidate.projectId === proposal.projectId
+        && candidate.context.source === "design"
+        && candidate.context.designProposalId === proposal.id
+        && candidate.context.retired !== true);
+      const runId = `run_${createHash("sha1").update(`host-evidence-delivery|${proposal.id}`).digest("hex")}`;
+      const taskId = `task_${createHash("sha1").update(`host-evidence-task|${proposal.id}`).digest("hex")}`;
+      if (activeDeliveries.length > 0 && !activeDeliveries.every((candidate) => candidate.id === runId)) {
+        throw new Error("retire the prior evidence-maintenance delivery before materializing its host-action successor");
+      }
+      const existingRun = harness.getRunWithDb(db, runId);
+      const existingTask = existingRun
+        ? harness.getRunOverviewWithDb(db, { runId, eventLimit: 0 }).tasks.find((candidate) => candidate.id === taskId) ?? null
+        : null;
+      const marker = {
+        kind: "versioned-corpus-manifest",
+        sourceSignalId: signal.id,
+        sourceRunId: immutableSourceRun.id,
+        sourceProposalId: sourceProposal.id,
+        sourceDecisionId: sourceDecision.id,
+        targetVersion: Number(targetVersion),
+      };
+      const inheritedKeys = [
+        "modelDefaults",
+        "agentDefaults",
+        "agentBackends",
+        "founderCharterId",
+        "designCharterId",
+        "controlPlaneRuntime",
+        "harnessRevision",
+      ] as const;
+      const inherited = Object.fromEntries(inheritedKeys.flatMap((key) =>
+        sourceRoot.context[key] === undefined ? [] : [[key, sourceRoot.context[key]]]));
+      if (!existingRun) {
+        harness.createRunWithDb(db, {
+          id: runId,
+          goal: proposal.recommendation,
+          projectId: proposal.projectId,
+          context: {
+            ...inherited,
+            projectId: proposal.projectId,
+            parentRunId: sourceRoot.id,
+            sourceTaskId: proposal.taskId,
+            source: "design",
+            designProposalId: proposal.id,
+            designDecisionId: decision.id,
+            designEvaluationContract: proposal.proposal.evaluationContract,
+            designProposal: proposal.proposal,
+            designInvestment: proposal.proposal.investment,
+            hostEvidenceMaintenance: { state: "pending", marker },
+          },
+        });
+      }
+      if (!existingTask) {
+        harness.createTaskWithDb(db, {
+          id: taskId,
+          runId,
+          role: "system",
+          goal: `Build the host-owned version ${targetVersion} corpus receipt`,
+          prompt: [
+            "Execute the frozen host evidence-maintenance action through audited harness actions.",
+            `Source signal: ${signal.id}`,
+            `Immutable source proposal: ${sourceProposal.id}`,
+            "Do not start a model executor or disclose holdout references, paths, or bytes.",
+          ].join("\n"),
+          doneWhen: [
+            "one audited versioned corpus manifest receipt exists or the host boundary fails closed",
+            "an independent read-only verifier is created only after a successful host receipt",
+          ],
+          config: { systemTask: true, hostEvidenceMaintenance: marker },
+        });
+      }
+      result = doneResult(action.type, `Host evidence maintenance delivery ${runId} materialized.`, [
+        { name: "accepted proposal", status: "passed", evidence: proposal.id },
+        { name: "approved decision", status: "passed", evidence: decision.id },
+        { name: "blocked immutable source", status: "passed", evidence: immutableSourceRun.id },
+        { name: "entry task role", status: "passed", evidence: "system" },
+      ], [{
+        kind: "host_evidence_maintenance_delivery",
+        runId,
+        taskId,
+        proposalId: proposal.id,
+        decisionId: decision.id,
+        sourceRunId: immutableSourceRun.id,
+        reused: Boolean(existingRun && existingTask),
+      }]);
+    } catch (error) {
+      result = blockedResult(action.type, `Host evidence maintenance delivery blocked: ${errorMessage(error)}`, [errorMessage(error)]);
+    }
+    const eventId = harness.recordHarnessActionEventWithDb(db, {
+      actionType: action.type,
+      status: result.status,
+      request,
+      result: resultToRecord(result),
+    });
+    return { ...result, eventId };
+  });
+}
+
+function fixtureEntry(
+  harness: Harness,
+  projectId: string,
+  projectRoot: string,
+  ref: string,
+  label: string,
+  bindings: VersionedCorpusManifestAction["publicFixtureBindings"],
+) {
   if (!ref.startsWith("fixture:")) {
     throw new Error(`${label} must use a fixture: reference`);
   }
@@ -1616,6 +1845,52 @@ function fixtureEntry(projectRoot: string, ref: string, label: string) {
   }
   const candidate = resolve(projectRoot, relativePath);
   const root = realpathSync(projectRoot);
+  if (!existsSync(candidate)) {
+    const binding = bindings?.find((entry) => entry.ref === ref);
+    if (!binding) {
+      throw new Error(`${label} is absent from the target project and has no authoritative attempt binding`);
+    }
+    const sourceTask = harness.getTask(binding.sourceTaskId);
+    const sourceAttempt = harness.getAttempt(binding.sourceAttemptId);
+    const sourceRun = sourceTask ? harness.getRun(sourceTask.runId) : null;
+    if (!sourceTask || !sourceAttempt || sourceAttempt.taskId !== sourceTask.id
+      || sourceAttempt.output.status !== "done" || sourceRun?.projectId !== projectId
+      || !sourceTask.worktreePath) {
+      throw new Error(`${label} authoritative attempt binding is not a completed target-project task`);
+    }
+    const artifact = (sourceAttempt.output.artifacts ?? []).find((entry) => {
+      if (!entry || typeof entry !== "object" || Array.isArray(entry)) return false;
+      const record = entry as Record<string, unknown>;
+      return record.kind === "file"
+        && record.path === binding.relativePath
+        && record.sha256 === binding.sha256;
+    });
+    if (!artifact) {
+      throw new Error(`${label} authoritative attempt has no matching file artifact receipt`);
+    }
+    const worktreeRoot = realpathSync(sourceTask.worktreePath);
+    const boundCandidate = resolve(worktreeRoot, binding.relativePath);
+    const boundStat = lstatSync(boundCandidate);
+    if (!boundStat.isFile() || boundStat.isSymbolicLink() || boundStat.size > 16 * 1024 * 1024) {
+      throw new Error(`${label} authoritative attempt binding must be a bounded regular non-symlink file`);
+    }
+    const boundCanonical = realpathSync(boundCandidate);
+    if (boundCanonical !== worktreeRoot && !boundCanonical.startsWith(`${worktreeRoot}${sep}`)) {
+      throw new Error(`${label} authoritative attempt binding escapes its source worktree`);
+    }
+    const bytes = readFileSync(boundCanonical);
+    const sha256 = createHash("sha256").update(bytes).digest("hex");
+    if (sha256 !== binding.sha256) {
+      throw new Error(`${label} authoritative attempt binding hash mismatch`);
+    }
+    return {
+      ref,
+      sha256,
+      byteLength: bytes.byteLength,
+      source: "authoritative-attempt-artifact",
+      sourceAttemptId: sourceAttempt.id,
+    };
+  }
   const stat = lstatSync(candidate);
   if (!stat.isFile() || stat.isSymbolicLink()) {
     throw new Error(`${label} must reference a regular non-symlink fixture`);
@@ -1675,9 +1950,9 @@ function applyVersionedCorpusManifestAction(
     const developmentRefs = action.developmentFixtureRefs ?? comparison.developmentEvidenceRefs;
     const unrelatedRefs = action.unrelatedFixtureRefs ?? comparison.unrelatedEvidenceRefs;
     const developmentEntries = developmentRefs.map((ref, index) =>
-      fixtureEntry(project.rootPath, ref, `developmentEvidenceRefs[${index}]`));
+      fixtureEntry(harness, action.projectId, project.rootPath, ref, `developmentEvidenceRefs[${index}]`, action.publicFixtureBindings));
     const unrelatedEntries = unrelatedRefs.map((ref, index) =>
-      fixtureEntry(project.rootPath, ref, `unrelatedEvidenceRefs[${index}]`));
+      fixtureEntry(harness, action.projectId, project.rootPath, ref, `unrelatedEvidenceRefs[${index}]`, action.publicFixtureBindings));
     let holdoutEntries: Array<{ sha256: string; byteLength: number }>;
     let descriptorSha256: string | null = null;
     if (options.sealedDescriptorJson) {
@@ -1703,7 +1978,7 @@ function applyVersionedCorpusManifestAction(
       descriptorSha256 = createHash("sha256").update(options.sealedDescriptorJson).digest("hex");
     } else {
       holdoutEntries = comparison.holdoutEvidenceRefs.map((ref, index) => {
-        const entry = fixtureEntry(project.rootPath, ref, `holdoutEvidenceRefs[${index}]`);
+        const entry = fixtureEntry(harness, action.projectId, project.rootPath, ref, `holdoutEvidenceRefs[${index}]`, undefined);
         return { sha256: entry.sha256, byteLength: entry.byteLength };
       });
     }
@@ -2926,7 +3201,7 @@ function applyParsedHarnessAction(
   harness: Harness,
   action: Exclude<
     HarnessAction,
-    SubsessionAction | EvolutionAction | HarnessRevisionActivationAction | DesignerActionRecoveryAction | RunEvidenceReconciliationAction | ResearchEvidenceLinkAction | BlockedRunSignalAction | VersionedCorpusManifestAction
+    SubsessionAction | EvolutionAction | HarnessRevisionActivationAction | DesignerActionRecoveryAction | RunEvidenceReconciliationAction | ResearchEvidenceLinkAction | BlockedRunSignalAction | VersionedCorpusManifestAction | HostEvidenceMaintenanceDeliveryAction
   >,
   options: HarnessActionOptions,
 ): HarnessActionResult {
@@ -2965,6 +3240,67 @@ function applyParsedHarnessAction(
       { name: "run exists", status: "passed", evidence: action.runId },
       { name: "run status", status: "passed", evidence: "todo" },
     ], [{ kind: "run", runId: action.runId, previousStatus: run.status, status: "todo", reason: action.reason ?? null }]);
+  }
+
+  if (action.type === "bindHostEvidenceMaintenanceReceipt") {
+    const run = harness.getRun(action.runId);
+    const task = harness.getTask(action.taskId);
+    const event = harness.getHarnessActionEvent({ id: action.actionEventId });
+    if (!run || !task || task.runId !== run.id || task.role !== "system") {
+      return blockedResult(action.type, "Host evidence receipt binding requires its project-bound system task.", [
+        `run=${action.runId}`,
+        `task=${action.taskId}`,
+      ]);
+    }
+    const marker = task.config?.hostEvidenceMaintenance;
+    if (!marker || typeof marker !== "object" || Array.isArray(marker)) {
+      return blockedResult(action.type, "Host evidence receipt binding task has no frozen marker.", [action.taskId]);
+    }
+    if (!event || event.status !== "done" || event.actionType !== "buildVersionedCorpusManifest") {
+      return blockedResult(action.type, "Host evidence receipt binding requires a completed manifest action.", [action.actionEventId]);
+    }
+    const bundleSha256 = action.evidenceBundle.bundleSha256;
+    const { bundleSha256: _ignoredBundleSha256, ...bundleBody } = action.evidenceBundle;
+    if (typeof bundleSha256 !== "string" || canonicalEvolutionValueSha256(bundleBody) !== bundleSha256) {
+      return blockedResult(action.type, "Host evidence receipt bundle hash mismatch.", [action.actionEventId]);
+    }
+    const receipts = action.evidenceBundle.hostCorpusReceipts;
+    if (!Array.isArray(receipts) || receipts.length !== 1) {
+      return blockedResult(action.type, "Host evidence receipt bundle must contain exactly one sanitized receipt.", [action.actionEventId]);
+    }
+    const receipt = receipts[0];
+    if (!receipt || typeof receipt !== "object" || Array.isArray(receipt)
+      || (receipt as Record<string, unknown>).actionId !== action.actionEventId
+      || (receipt as Record<string, unknown>).noHoldoutDisclosure !== true) {
+      return blockedResult(action.type, "Host evidence receipt bundle is not bound to the audited action.", [action.actionEventId]);
+    }
+    const updated = harness.updateRun({
+      runId: run.id,
+      contextPatch: {
+        targetSystemEvidenceBundle: action.evidenceBundle,
+        hostEvidenceMaintenance: {
+          state: "awaiting-verification",
+          taskId: task.id,
+          actionEventId: event.id,
+        },
+      },
+    });
+    if (!updated) {
+      return blockedResult(action.type, `Run not found: ${run.id}`, [`run not found: ${run.id}`]);
+    }
+    return doneResult(action.type, `Host evidence receipt ${event.id} bound for independent verification.`, [
+      { name: "system task binding", status: "passed", evidence: task.id },
+      { name: "manifest action", status: "passed", evidence: event.id },
+      { name: "evidence bundle hash", status: "passed", evidence: bundleSha256 },
+      { name: "holdout disclosure", status: "passed", evidence: "count-and-commitment-only" },
+    ], [{
+      kind: "host_evidence_maintenance_binding",
+      runId: run.id,
+      taskId: task.id,
+      actionEventId: event.id,
+      bundleSha256,
+      noHoldoutDisclosure: true,
+    }]);
   }
 
   if (action.type === "updateRunContext") {
@@ -11594,6 +11930,35 @@ function researchEvidenceArtifactRequests(value: unknown): ResearchEvidenceLinkA
 
 function optionalFollowUpTaskField(record: Record<string, unknown>, key: string) {
   return record[key] === undefined ? undefined : followUpTaskField(record, key);
+}
+
+function publicFixtureBindingsField(value: unknown) {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value) || value.length === 0 || value.length > 100) {
+    throw new Error("publicFixtureBindings must be a non-empty array of at most 100 bindings");
+  }
+  const seen = new Set<string>();
+  return value.map((entry, index) => {
+    const record = objectRecord(entry, `publicFixtureBindings[${index}]`);
+    assertOnlyFields(record, `publicFixtureBindings[${index}]`, [
+      "ref",
+      "sourceTaskId",
+      "sourceAttemptId",
+      "relativePath",
+      "sha256",
+    ]);
+    const ref = exactNonEmptyStringField(record, "ref");
+    const sourceTaskId = exactSafeIdentifierField(record, "sourceTaskId");
+    const sourceAttemptId = exactSafeIdentifierField(record, "sourceAttemptId");
+    const relativePath = exactRelativeGitPathField(record, "relativePath", `publicFixtureBindings[${index}].relativePath`);
+    const sha256 = exactNonEmptyStringField(record, "sha256");
+    if (!/^[0-9a-f]{64}$/.test(sha256)) {
+      throw new Error(`publicFixtureBindings[${index}].sha256 must be a lowercase SHA-256`);
+    }
+    if (seen.has(ref)) throw new Error(`publicFixtureBindings contains duplicate ref ${ref}`);
+    seen.add(ref);
+    return { ref, sourceTaskId, sourceAttemptId, relativePath, sha256 };
+  });
 }
 
 function optionalStringArrayField(record: Record<string, unknown>, key: string) {

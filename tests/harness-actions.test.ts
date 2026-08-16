@@ -4474,6 +4474,129 @@ describe("Harness actions", () => {
         .filter((event) => event.status === "done" && event.actionType === "buildVersionedCorpusManifest")).toHaveLength(1);
     });
 
+    test("reads a missing public fixture only through a hash-bound completed attempt worktree", async () => {
+      const repoPath = join(dir, "versioned-corpus-authoritative-binding");
+      const sourceWorktree = join(dir, "versioned-corpus-authoritative-source");
+      await mkdir(join(repoPath, "fixtures"), { recursive: true });
+      await mkdir(join(sourceWorktree, "artifacts"), { recursive: true });
+      await writeFile(join(repoPath, "fixtures/holdout.json"), '{"kind":"holdout"}\n');
+      await writeFile(join(repoPath, "fixtures/unrelated.json"), '{"kind":"unrelated"}\n');
+      const publicBytes = '{"kind":"development-from-authoritative-attempt"}\n';
+      const publicPath = "artifacts/development.json";
+      await writeFile(join(sourceWorktree, publicPath), publicBytes);
+      const publicSha256 = createHash("sha256").update(publicBytes).digest("hex");
+      const projectId = harness.createProject({ name: "versioned-corpus-binding", rootPath: repoPath });
+      const sourceRunId = harness.createRun({ projectId, goal: "Produce authoritative public fixture bytes" });
+      const sourceTaskId = harness.createTask({
+        runId: sourceRunId,
+        role: "worker",
+        goal: "Produce one public fixture",
+        prompt: "Produce the fixture.",
+        worktreePath: sourceWorktree,
+      });
+      const sourceAttemptId = harness.recordAttempt({
+        taskId: sourceTaskId,
+        input: {},
+        output: {
+          status: "done",
+          summary: "Public fixture produced with a per-file hash.",
+          changedFiles: [publicPath],
+          checks: [{ name: "fixture hash", status: "passed" }],
+          artifacts: [{ kind: "file", path: publicPath, sha256: publicSha256 }],
+          problems: [],
+        },
+      });
+      const runId = harness.createRun({ projectId, goal: "Build receipt from authoritative binding" });
+      const comparison = {
+        controlRef: "artifact:target-control-policy-v1",
+        developmentEvidenceRefs: ["fixture:fixtures/missing-development.json"],
+        holdoutEvidenceRefs: ["fixture:fixtures/holdout.json"],
+        unrelatedEvidenceRefs: ["fixture:fixtures/unrelated.json"],
+        corpusSnapshotSha256: "6".repeat(64),
+        equalBudget: {
+          model: "gpt-5.6-luna",
+          reasoningEffort: "high" as const,
+          wallClockMs: 300_000,
+          maxAttempts: 2,
+          maxTokens: 20_000,
+          toolPolicySha256: "5".repeat(64),
+          concurrency: 1,
+        },
+        primaryMetric: "matched offline replay pass rate",
+        minimumUplift: 0,
+        maximumGuardRegression: 0,
+      };
+      const proposal = harness.createDesignProposal({
+        id: "design_versioned_corpus_authoritative_binding_v4",
+        projectId,
+        runId,
+        title: "Immutable version 4 comparison",
+        problem: "One public fixture exists only in an authoritative attempt worktree.",
+        recommendation: "Bind it by attempt and per-file hash.",
+        status: "accepted",
+        proposal: {
+          problem: "One public fixture exists only in an authoritative attempt worktree.",
+          recommendation: "Bind it by attempt and per-file hash.",
+          evidenceRefs: ["signal:frozen-corpus-unrealizable"],
+          evaluationContract: {
+            baseline: ["public fixture missing from target root"],
+            successMetrics: ["host receipt binds authoritative bytes"],
+            guardMetrics: ["holdout remains private"],
+            requiredEvidence: ["attempt file receipt"],
+            comparison,
+          },
+          investment: { reversibility: "easy", portfolio: "core", oneTimeCost: 0, recurringCost: 0 },
+          evolutionPack: { version: 4 } as never,
+        },
+      });
+      const decision = harness.recordDesignDecision({
+        proposalId: proposal.id,
+        decision: "approved",
+        actorKind: "auto",
+        reasons: ["Public fixture binding is zero cost."],
+      });
+      harness.updateRun({
+        runId,
+        status: "blocked",
+        contextPatch: { designProposalId: proposal.id, designDecisionId: decision.id },
+      });
+      const action = {
+        type: "buildVersionedCorpusManifest",
+        projectId,
+        sourceRunId: runId,
+        proposalId: proposal.id,
+        decisionId: decision.id,
+        targetVersion: 5,
+        publicFixtureBindings: [{
+          ref: "fixture:fixtures/missing-development.json",
+          sourceTaskId,
+          sourceAttemptId,
+          relativePath: publicPath,
+          sha256: publicSha256,
+        }],
+      } as const;
+
+      const result = applyHarnessAction(harness, action);
+      const receipt = result.artifacts.find((artifact) => artifact.kind === "versioned_corpus_manifest_receipt");
+      const mismatched = applyHarnessAction(harness, {
+        ...action,
+        publicFixtureBindings: [{ ...action.publicFixtureBindings[0], sha256: "f".repeat(64) }],
+      });
+
+      expect(result).toMatchObject({ status: "done", actionType: "buildVersionedCorpusManifest" });
+      expect(receipt).toMatchObject({
+        developmentEntries: [{
+          ref: "fixture:fixtures/missing-development.json",
+          sha256: publicSha256,
+          source: "authoritative-attempt-artifact",
+          sourceAttemptId,
+        }],
+      });
+      expect(JSON.stringify(result)).not.toContain(sourceWorktree);
+      expect(mismatched).toMatchObject({ status: "blocked", actionType: "buildVersionedCorpusManifest" });
+      expect(mismatched.problems.join(" ")).toContain("matching file artifact receipt");
+    });
+
     test("derives a sealed descriptor only inside the host action from an approved frozen comparison", async () => {
       const scenario = await createOfflineWorkerScenario();
       const holdoutRef = "fixture:tests/fixtures/private-holdout.json";

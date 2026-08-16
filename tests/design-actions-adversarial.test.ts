@@ -2419,6 +2419,206 @@ describe("design-action transition coordinator (production authority path)", () 
     }
   });
 
+  test("accepted evidence-maintenance creates a host action entry instead of a contradictory Planner", async () => {
+    const projectId = harness.createProject({ name: "target", rootPath: dir });
+    const charterId = seedActiveCharter(projectId);
+    const sourceRunId = harness.createRun({ goal: "Freeze version 4", projectId });
+    const sourceTaskId = harness.createTask({
+      runId: sourceRunId,
+      role: "designer",
+      goal: "Freeze the version 4 comparison",
+      prompt: "Freeze version 4.",
+    });
+    const sourceProposal = harness.createDesignProposal({
+      id: "design_evidence_maintenance_source_v4",
+      projectId,
+      runId: sourceRunId,
+      taskId: sourceTaskId,
+      charterId,
+      title: "Immutable version 4 comparison",
+      problem: "The frozen version 4 corpus is unrealizable.",
+      recommendation: "Keep version 4 immutable and build a host-owned version 5 receipt.",
+      status: "accepted",
+      proposal: targetEvolutionEnvelope(projectId) as never,
+    });
+    const sourceDecision = harness.recordDesignDecision({
+      id: "decision_evidence_maintenance_source_v4",
+      proposalId: sourceProposal.id,
+      charterId,
+      decision: "approved",
+      actorKind: "auto",
+      reasons: ["Frozen version 4 evidence."],
+    });
+    const sourceDeliveryRunId = harness.createRun({
+      goal: "Preserve the blocked version 4 delivery",
+      projectId,
+      context: {
+        source: "design",
+        designProposalId: sourceProposal.id,
+        designDecisionId: sourceDecision.id,
+        repairReplanBudget: { used: 2, limit: 3 },
+      },
+    });
+    harness.updateRunStatus({ runId: sourceDeliveryRunId, status: "blocked" });
+
+    const correctionSignal = harness.createStrategySignal({
+      id: "signal_evidence_maintenance_v5",
+      projectId,
+      signalClass: "system",
+      source: `blocked-run-outcome:${sourceDeliveryRunId}`,
+      title: "Frozen corpus requires a host receipt",
+      summary: "The immutable version 4 corpus has no realizable source.",
+      observationTime: "2026-08-16T00:00:00.000Z",
+      confidence: 1,
+      evidence: [`run:${sourceDeliveryRunId}`, `design:${sourceProposal.id}`],
+      payload: {
+        outcome: "evidence-defect",
+        defectKind: "frozen-corpus-unrealizable",
+        frozenContract: {
+          version: 4,
+          proposalId: sourceProposal.id,
+          corpusSnapshotSha256: (sourceProposal.proposal.evaluationContract.comparison as { corpusSnapshotSha256: string }).corpusSnapshotSha256,
+          immutable: true,
+        },
+        nextDesign: {
+          targetVersion: 5,
+          zeroCost: true,
+          readOnly: true,
+          canonicalManifestMustPrecedeComparisonFreeze: true,
+          holdoutVisibility: "count-and-commitment-only",
+        },
+      },
+    });
+    const designRunId = harness.createRun({
+      goal: "Authorize the host receipt",
+      projectId,
+      context: { source: "target-system-design" },
+    });
+    const designTaskId = harness.createTask({
+      runId: designRunId,
+      role: "designer",
+      goal: "Propose the host receipt",
+      prompt: "Propose one host-only evidence-maintenance action.",
+    });
+    const receiptProposal = harness.createDesignProposal({
+      id: "design_evidence_maintenance_receipt_v5",
+      projectId,
+      runId: designRunId,
+      taskId: designTaskId,
+      charterId,
+      title: "Build the version 5 host corpus receipt",
+      problem: "The host receipt is missing.",
+      recommendation: "Build it from authoritative fixture bytes.",
+      status: "accepted",
+      proposal: {
+        ...lowRiskEnvelope(correctionSignal.id),
+        evaluationContract: {
+          baseline: ["host receipt missing"],
+          successMetrics: ["host receipt exists"],
+          guardMetrics: ["version 4 stays immutable"],
+          requiredEvidence: ["host receipt", "independent verifier"],
+        },
+        investment: {
+          reversibility: "easy",
+          portfolio: "core",
+          classification: "evidence-maintenance",
+          oneTimeCost: 0,
+          recurringCost: 0,
+          timeBudget: "one host action",
+        },
+      } as never,
+    });
+    harness.recordDesignDecision({
+      id: "decision_evidence_maintenance_receipt_v5",
+      proposalId: receiptProposal.id,
+      charterId,
+      decision: "approved",
+      actorKind: "auto",
+      reasons: ["Zero-cost host evidence maintenance."],
+    });
+
+    const result = await runHook({
+      status: "done",
+      summary: "Create the receipt delivery.",
+      designActions: [{
+        type: "createRunsFromDesign",
+        payload: {
+          proposalId: receiptProposal.id,
+          runs: [{
+            goal: "Build the host corpus receipt",
+            prompt: "Do not create Worker, Repair, Verifier, or delivery tasks.",
+          }],
+        },
+      }],
+    } as AttemptOutput, designRunId, designTaskId);
+
+    const created = createdRunArtifacts(result) as Array<{ runId: string; plannerTaskId: string }>;
+    expect(created).toHaveLength(1);
+    const overview = harness.getRunOverview({ runId: created[0]!.runId, eventLimit: 0 });
+    expect(overview.tasks).toHaveLength(1);
+    expect(overview.tasks[0]).toMatchObject({
+      id: created[0]!.plannerTaskId,
+      role: "system",
+      status: "todo",
+      config: {
+        hostEvidenceMaintenance: {
+          kind: "versioned-corpus-manifest",
+          sourceSignalId: correctionSignal.id,
+          sourceRunId: sourceDeliveryRunId,
+          sourceProposalId: sourceProposal.id,
+          sourceDecisionId: sourceDecision.id,
+          targetVersion: 5,
+        },
+      },
+    });
+    expect(overview.tasks.some((task) => task.role === "planner")).toBe(false);
+    expect(overview.tasks[0]!.prompt).not.toContain("Do not create Worker, Repair, Verifier");
+    expect(harness.getRun(sourceDeliveryRunId)).toMatchObject({
+      status: "blocked",
+      context: { repairReplanBudget: { used: 2, limit: 3 } },
+    });
+
+    const retired = applyHarnessAction(harness, {
+      type: "retireRun",
+      runId: created[0]!.runId,
+      reason: "replace the contradictory Planner delivery with the fixed host-action route",
+    });
+    const replacement = applyHarnessAction(harness, {
+      type: "materializeHostEvidenceMaintenanceDelivery",
+      proposalId: receiptProposal.id,
+      decisionId: "decision_evidence_maintenance_receipt_v5",
+    } as never);
+    const replay = applyHarnessAction(harness, {
+      type: "materializeHostEvidenceMaintenanceDelivery",
+      proposalId: receiptProposal.id,
+      decisionId: "decision_evidence_maintenance_receipt_v5",
+    } as never);
+    const replacementArtifact = replacement.artifacts.find((artifact) =>
+      artifact.kind === "host_evidence_maintenance_delivery");
+    const replacementRunId = String(replacementArtifact?.runId);
+    const replacementTaskId = String(replacementArtifact?.taskId);
+    expect(retired).toMatchObject({ status: "done", actionType: "retireRun" });
+    expect(replacement).toMatchObject({ status: "done", actionType: "materializeHostEvidenceMaintenanceDelivery" });
+    expect(replay).toMatchObject({ status: "done", eventId: replacement.eventId });
+    expect(replacementArtifact).toMatchObject({
+      proposalId: receiptProposal.id,
+      reused: false,
+    });
+    expect(replacementRunId).toMatch(/^run_/);
+    expect(replacementTaskId).toMatch(/^task_/);
+    expect(replacementRunId).not.toBe(created[0]!.runId);
+    expect(harness.getRun(created[0]!.runId)).toMatchObject({ status: "blocked", context: { retired: true } });
+    const replacementOverview = harness.getRunOverview({ runId: replacementRunId, eventLimit: 0 });
+    expect(replacementOverview.tasks).toEqual([expect.objectContaining({
+      id: replacementTaskId,
+      role: "system",
+      status: "todo",
+      config: expect.objectContaining({
+        hostEvidenceMaintenance: expect.objectContaining({ sourceRunId: sourceDeliveryRunId }),
+      }),
+    })]);
+  });
+
   test("rejects target-evolution comparison placeholders before persistence or authority approval", async () => {
     const projectId = harness.createProject({ name: "target-placeholder", rootPath: join(dir, "target-placeholder") });
     const runId = harness.createRun({ goal: "reject placeholder comparison", projectId });

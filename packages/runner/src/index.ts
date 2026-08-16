@@ -204,6 +204,8 @@ export type {
   SuperviseCodexDaemonInput,
   SuperviseCodexRunsInput,
 } from "./codex-resumable-runner";
+export { reconcileHostEvidenceMaintenance } from "./host-evidence-maintenance";
+export type { HostEvidenceMaintenanceReconciliation } from "./host-evidence-maintenance";
 export type {
   ContextSubagent,
   ContextSubagentEntry,

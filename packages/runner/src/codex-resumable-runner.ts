@@ -41,6 +41,7 @@ import type { CodexResumableClientOptions, CodexResumableResult } from "./execut
 import { childToolchainEnvEvidence } from "./executors/proxy-env";
 import { reconcileTerminalBlockedVerifierRepair } from "./hooks/create-repair";
 import { reconcileTerminalDoneWorkerVerifiers } from "./hooks/create-verifier";
+import { reconcileHostEvidenceMaintenance } from "./host-evidence-maintenance";
 import { createRouteExecutor } from "./route-executor";
 import {
   assertPersistedHostExecutionCapabilityAttestation,
@@ -144,6 +145,14 @@ export async function runCodexResumableLoop(input: RunCodexResumableLoopInput) {
     for (let index = 0; index < input.maxRounds; index += 1) {
       if (interruptedSignal || input.shouldStop?.()) {
         break;
+      }
+      const hostEvidenceMaintenance = reconcileHostEvidenceMaintenance({
+        harness: input.harness,
+        runId: input.runId,
+      });
+      if (hostEvidenceMaintenance.length > 0) {
+        rounds.push({ index, tasks: [], hostEvidenceMaintenance });
+        continue;
       }
       const reconciledVerifiers = input.reconcileTerminalDoneWorkerVerifiers
         ? await reconcileTerminalDoneWorkerVerifiers({ harness: input.harness, runId: input.runId })

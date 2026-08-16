@@ -41,6 +41,7 @@ import {
   recordDesignOutcomeAction,
   recordSignalAction,
   reconcileDeferredDesignAuthority,
+  reconcileHostEvidenceMaintenance,
   reconcileTerminalBlockedVerifierRepair,
   readHostCapabilityReadback,
   resolveAgentBackend,
@@ -361,6 +362,290 @@ describe("runner", () => {
 
     expect(result.rounds).toHaveLength(0);
     expect(harness.getRunOverview({ runId, eventLimit: 0 }).tasks[0]?.status).toBe("todo");
+  });
+
+  test("reconciles host evidence maintenance before leasing a model and freezes verifier then versioned Designer", async () => {
+    const projectRoot = join(dir, "host-evidence-target");
+    await mkdir(join(projectRoot, "fixtures"), { recursive: true });
+    await writeFile(join(projectRoot, "fixtures/development.json"), '{"kind":"development"}\n');
+    await writeFile(join(projectRoot, "fixtures/unrelated.json"), '{"kind":"unrelated"}\n');
+    await writeFile(join(projectRoot, "fixtures/holdout.json"), '{"kind":"holdout"}\n');
+    const projectId = harness.createProject({ name: "Host evidence target", rootPath: projectRoot });
+    const sourceRunId = harness.createRun({ goal: "Immutable version 4", projectId });
+    const comparison = {
+      controlRef: "artifact:control-v4",
+      developmentEvidenceRefs: ["fixture:fixtures/development.json"],
+      holdoutEvidenceRefs: ["fixture:fixtures/holdout.json"],
+      unrelatedEvidenceRefs: ["fixture:fixtures/unrelated.json"],
+      corpusSnapshotSha256: "a".repeat(64),
+      equalBudget: {
+        model: "gpt-5.6-luna",
+        reasoningEffort: "high",
+        wallClockMs: 300_000,
+        maxAttempts: 1,
+        maxTokens: 10_000,
+        toolPolicySha256: "b".repeat(64),
+        concurrency: 1,
+      },
+      primaryMetric: "matched replay pass rate",
+      minimumUplift: 0,
+      maximumGuardRegression: 0,
+    };
+    const sourceProposal = harness.createDesignProposal({
+      id: "design_host_evidence_runner_v4",
+      projectId,
+      runId: sourceRunId,
+      title: "Immutable version 4",
+      problem: "Version 4 is unrealizable.",
+      recommendation: "Build a host receipt.",
+      status: "accepted",
+      proposal: {
+        problem: "Version 4 is unrealizable.",
+        recommendation: "Build a host receipt.",
+        evidenceRefs: ["signal_host_evidence_runner"],
+        evaluationContract: {
+          baseline: ["missing receipt"],
+          successMetrics: ["receipt exists"],
+          guardMetrics: ["holdout private"],
+          requiredEvidence: ["host receipt"],
+          comparison,
+        },
+        investment: { reversibility: "easy", portfolio: "core", oneTimeCost: 0, recurringCost: 0 },
+        evolutionPack: { version: 4 } as never,
+      } as never,
+    });
+    const sourceDecision = harness.recordDesignDecision({
+      id: "decision_host_evidence_runner_v4",
+      proposalId: sourceProposal.id,
+      decision: "approved",
+      actorKind: "auto",
+      reasons: ["Approved immutable comparison."],
+    });
+    harness.updateRun({
+      runId: sourceRunId,
+      status: "blocked",
+      contextPatch: { designProposalId: sourceProposal.id, designDecisionId: sourceDecision.id },
+    });
+    const signal = harness.createStrategySignal({
+      id: "signal_host_evidence_runner",
+      projectId,
+      signalClass: "system",
+      source: `blocked-run-outcome:${sourceRunId}`,
+      title: "Build version 5 receipt",
+      summary: "The immutable comparison needs a host receipt.",
+      observationTime: "2026-08-16T00:00:00.000Z",
+      confidence: 1,
+      evidence: [`run:${sourceRunId}`],
+      payload: { outcome: "evidence-defect", defectKind: "frozen-corpus-unrealizable" },
+    });
+    const designRootId = harness.createRun({
+      goal: "Target-system design root",
+      projectId,
+      context: {
+        source: "target-system-design",
+        founderCharterId: "charter_host_evidence",
+        evolutionInstance: {
+          schemaVersion: 1,
+          mode: "design-target",
+          kernelProjectId: "project_kernel",
+          targetProjectId: projectId,
+          cycle: { kind: "design", index: 0 },
+        },
+      },
+    });
+    const runId = harness.createRun({
+      goal: "Build the version 5 host receipt",
+      projectId,
+      context: {
+        source: "design",
+        parentRunId: designRootId,
+        designProposalId: "design_receipt_delivery",
+      },
+    });
+    const systemTaskId = harness.createTask({
+      runId,
+      role: "system",
+      goal: "Build host receipt",
+      prompt: "Execute the fixed host action.",
+      config: {
+        systemTask: true,
+        hostEvidenceMaintenance: {
+          kind: "versioned-corpus-manifest",
+          sourceSignalId: signal.id,
+          sourceRunId,
+          sourceProposalId: sourceProposal.id,
+          sourceDecisionId: sourceDecision.id,
+          targetVersion: 5,
+        },
+      },
+    });
+    let clientCalls = 0;
+
+    const result = await runCodexResumableLoop({
+      harness,
+      runId,
+      maxRounds: 1,
+      limit: 1,
+      maxTries: 3,
+      clientFactory: () => {
+        clientCalls += 1;
+        throw new Error("host evidence system task must not start a model");
+      },
+    });
+
+    const overview = harness.getRunOverview({ runId, eventLimit: 0 });
+    const verifier = overview.tasks.find((task) => task.role === "verifier");
+    expect(clientCalls).toBe(0);
+    expect(result.rounds).toHaveLength(1);
+    expect(harness.getTask(systemTaskId)?.status).toBe("done");
+    expect(verifier).toMatchObject({
+      status: "todo",
+      config: {
+        readOnly: true,
+        forbidImplementation: true,
+        forbidBrowser: true,
+        hostEvidenceMaintenanceVerifier: expect.objectContaining({ actionEventId: expect.stringMatching(/^action_/) }),
+      },
+    });
+    expect(overview.tasks.some((task) => task.role === "designer")).toBe(false);
+    expect(overview.run?.context.targetSystemEvidenceBundle).toMatchObject({
+      blockedSignals: [{ id: signal.id }],
+      acceptedProposals: [{ id: sourceProposal.id }],
+      hostCorpusReceipts: [{ targetVersion: 5, noHoldoutDisclosure: true }],
+    });
+    expect(harness.getRun(sourceRunId)?.status).toBe("blocked");
+    expect(overview.tasks.some((task) => task.role === "planner" || task.role === "worker" || task.role === "goal-review")).toBe(false);
+
+    const verifierAttemptId = harness.startAttempt({
+      taskId: verifier!.id,
+      input: { executor: "codex-resumable", evidence: "independent receipt readback" },
+    });
+    harness.finishAttempt({
+      attemptId: verifierAttemptId,
+      output: {
+        status: "done",
+        summary: "The host receipt and public fixture hashes match.",
+        changedFiles: [],
+        checks: [{ name: "host receipt", status: "passed" }],
+        artifacts: [{
+          kind: "receipt_readback",
+          actionEventId: (verifier!.config?.hostEvidenceMaintenanceVerifier as { actionEventId: string }).actionEventId,
+        }],
+        problems: [],
+      },
+    });
+    const successor = reconcileHostEvidenceMaintenance({ harness, runId });
+    const designerRun = harness.getRun(successor[0]!.designerRunId!);
+    const designerTask = harness.getTask(successor[0]!.designerTaskId!);
+    expect(successor).toEqual([expect.objectContaining({
+      status: "done",
+      verifierTaskId: verifier!.id,
+      designerRunId: expect.stringMatching(/^run_/),
+      designerTaskId: expect.stringMatching(/^task_/),
+    })]);
+    expect(harness.getRun(runId)?.status).toBe("done");
+    expect(designerRun).toMatchObject({ status: "todo", context: { source: "target-system-design" } });
+    expect(designerTask).toMatchObject({
+      role: "designer",
+      status: "todo",
+      config: { readOnly: true, forbidImplementation: true, forbidBrowser: true },
+    });
+    expect(designerTask!.prompt).toContain("copy receipt.comparison exactly");
+  });
+
+  test("blocks a missing authoritative host boundary once without Goal Review recursion", async () => {
+    const projectRoot = join(dir, "host-evidence-missing-boundary");
+    await mkdir(projectRoot, { recursive: true });
+    const projectId = harness.createProject({ name: "Missing host boundary", rootPath: projectRoot });
+    const sourceRunId = harness.createRun({ goal: "Immutable version 4", projectId });
+    const sourceProposal = harness.createDesignProposal({
+      id: "design_missing_host_boundary_v4",
+      projectId,
+      runId: sourceRunId,
+      title: "Immutable version 4",
+      problem: "The public fixture boundary is absent.",
+      recommendation: "Fail closed with one evidence signal.",
+      status: "accepted",
+      proposal: {
+        problem: "The public fixture boundary is absent.",
+        recommendation: "Fail closed with one evidence signal.",
+        evidenceRefs: ["signal_missing_host_boundary"],
+        evaluationContract: {
+          baseline: ["missing fixture"], successMetrics: ["host receipt"],
+          guardMetrics: ["no model fallback"], requiredEvidence: ["host receipt"],
+          comparison: {
+            controlRef: "artifact:control-v4",
+            developmentEvidenceRefs: ["fixture:fixtures/missing-development.json"],
+            holdoutEvidenceRefs: ["fixture:fixtures/missing-holdout.json"],
+            unrelatedEvidenceRefs: ["fixture:fixtures/missing-unrelated.json"],
+            corpusSnapshotSha256: "a".repeat(64),
+            equalBudget: {
+              model: "gpt-5.6-luna", reasoningEffort: "high", wallClockMs: 300_000,
+              maxAttempts: 1, maxTokens: 10_000, toolPolicySha256: "b".repeat(64), concurrency: 1,
+            },
+            primaryMetric: "matched replay pass rate", minimumUplift: 0, maximumGuardRegression: 0,
+          },
+        },
+        investment: { reversibility: "easy", portfolio: "core", oneTimeCost: 0, recurringCost: 0 },
+        evolutionPack: { version: 4 } as never,
+      } as never,
+    });
+    const sourceDecision = harness.recordDesignDecision({
+      id: "decision_missing_host_boundary_v4",
+      proposalId: sourceProposal.id,
+      decision: "approved",
+      actorKind: "auto",
+      reasons: ["Freeze the immutable comparison."],
+    });
+    harness.updateRun({
+      runId: sourceRunId,
+      status: "blocked",
+      contextPatch: { designProposalId: sourceProposal.id, designDecisionId: sourceDecision.id },
+    });
+    const signal = harness.createStrategySignal({
+      id: "signal_missing_host_boundary",
+      projectId,
+      signalClass: "system",
+      source: `blocked-run-outcome:${sourceRunId}`,
+      title: "Missing authoritative fixture boundary",
+      summary: "The host cannot resolve the frozen fixture bytes.",
+      observationTime: "2026-08-16T00:00:00.000Z",
+      confidence: 1,
+      evidence: [`run:${sourceRunId}`],
+      payload: { outcome: "evidence-defect", defectKind: "frozen-corpus-unrealizable" },
+    });
+    const runId = harness.createRun({ goal: "Build a bounded host receipt", projectId, context: { source: "design" } });
+    harness.createTask({
+      runId,
+      role: "system",
+      goal: "Build host receipt",
+      prompt: "Execute the host action only.",
+      config: {
+        systemTask: true,
+        hostEvidenceMaintenance: {
+          kind: "versioned-corpus-manifest", sourceSignalId: signal.id, sourceRunId,
+          sourceProposalId: sourceProposal.id, sourceDecisionId: sourceDecision.id, targetVersion: 5,
+        },
+      },
+    });
+    let clientCalls = 0;
+
+    await runCodexResumableLoop({
+      harness, runId, maxRounds: 2, limit: 1, maxTries: 3,
+      clientFactory: () => {
+        clientCalls += 1;
+        throw new Error("a missing host boundary must not start a model");
+      },
+    });
+    reconcileHostEvidenceMaintenance({ harness, runId });
+
+    const overview = harness.getRunOverview({ runId, eventLimit: 0 });
+    expect(clientCalls).toBe(0);
+    expect(overview.run?.status).toBe("blocked");
+    expect(overview.tasks).toHaveLength(1);
+    expect(overview.tasks[0]).toMatchObject({ role: "system", status: "blocked" });
+    expect(harness.listStrategySignals({ projectId }).filter((candidate) =>
+      candidate.payload.defectKind === "missing-authoritative-boundary")).toHaveLength(1);
   });
 
   test("records a blocked attempt when preparation throws after leasing a verifier", async () => {
@@ -1906,7 +2191,7 @@ describe("runner", () => {
       const runId = harness.createRun({
         goal: "Use the accepted ordinary design proposal",
         context: {
-          source: "design",
+          source: "prompt-redaction-fixture",
           designProposalId: "proposal_ordinary_sensitive",
           designEvaluationContract: {
             baseline: ["baseline remains visible"],
