@@ -1415,6 +1415,154 @@ describe("runner", () => {
     expect(harness.getAttempt(result.attemptId)?.input.hostExecutionCapability).toMatchObject({ status: "invalid" });
   });
 
+  test("runtime integration Designer with an incomplete authoritative bundle blocks before hooks or model startup", async () => {
+    const projectId = harness.createProject({ name: "runtime-bundle-preflight", rootPath: dir });
+    const runId = harness.createRun({
+      projectId,
+      goal: "Reject incomplete runtime integration evidence",
+      context: {
+        source: "target-system-design",
+        runtimeIntegrationBoundary: { schemaVersion: 1 },
+        targetSystemEvidenceBundle: {
+          schemaVersion: 1,
+          purpose: "runtime-integration-after-verified-package",
+        },
+      },
+    });
+    const taskId = harness.createTask({
+      runId,
+      role: "designer",
+      goal: "Must not reach the model",
+      prompt: "Do not execute.",
+      config: {
+        readOnly: true,
+        forbidImplementation: true,
+        runtimeIntegrationBoundary: { schemaVersion: 1 },
+        targetSystemEvidenceBundle: {
+          schemaVersion: 1,
+          purpose: "runtime-integration-after-verified-package",
+        },
+        runtimeIntegrationDesignAdapter: { schemaVersion: 1 },
+      },
+    });
+    let startHookCalls = 0;
+    let clientFactoryCalls = 0;
+
+    const result = await startCodexResumableAttempt({
+      harness,
+      taskId,
+      cwd: dir,
+      startHooks: [() => {
+        startHookCalls += 1;
+        return {};
+      }],
+      clientFactory: () => {
+        clientFactoryCalls += 1;
+        throw new Error("client must not be constructed");
+      },
+    });
+
+    expect(result.status).toBe("blocked");
+    expect(startHookCalls).toBe(0);
+    expect(clientFactoryCalls).toBe(0);
+    expect(harness.getTask(taskId)?.status).toBe("blocked");
+    expect(harness.getRun(runId)?.status).toBe("blocked");
+    expect(harness.getAttempt(result.attemptId)?.output.problems).toContainEqual(
+      expect.stringContaining("bundleSha256"),
+    );
+    expect(harness.getRunOverview({ runId, eventLimit: 0 }).tasks.filter((task) => task.status === "todo")).toHaveLength(0);
+    expect(harness.listStrategySignals({ projectId }).filter((signal) =>
+      signal.source === `blocked-run-outcome:${runId}`)).toHaveLength(1);
+
+    const repositories = ["backend", "frontend", "ainovel", "dsh"].map((id, index) => ({
+      id,
+      expectedHead: String(index + 1).repeat(40),
+    }));
+    const boundaryBody = { schemaVersion: 1, repositories, gateway: { host: "127.0.0.1", port: 10588 } };
+    const boundary = { ...boundaryBody, boundarySha256: canonicalEvolutionValueSha256(boundaryBody), credentialIsolation: {} };
+    const verifiedPackageEvidence = {
+      signalId: "signal_verified_package_drift",
+      commitSha: "a".repeat(40),
+      tree: "b".repeat(40),
+      remoteRef: "refs/heads/codex/package",
+      commitActionEventId: "action_commit",
+      pushActionEventId: "action_push",
+      verifierTaskId: "task_verifier",
+    };
+    const driftedBundleBody = {
+      schemaVersion: 1,
+      purpose: "runtime-integration-after-verified-package",
+      targetProjectId: projectId,
+      verifiedPackage: {
+        ...verifiedPackageEvidence,
+        verifierReceipt: {
+          taskId: "task_verifier",
+          attemptId: "attempt_verifier",
+          status: "done",
+          outputSha256: "c".repeat(64),
+        },
+      },
+      runtimeIntegrationBoundary: boundary,
+      boundarySha256: boundary.boundarySha256,
+      repositoryHeads: repositories.map((repository, index) => ({
+        ...repository,
+        expectedHead: index === 0 ? "f".repeat(40) : repository.expectedHead,
+      })),
+      credentialIsolation: {},
+      sourceFailure: {
+        sourceRunId: "run_source",
+        sourceTaskId: "task_source",
+        sourceAttemptId: "attempt_source",
+        problemSha256: "d".repeat(64),
+      },
+    };
+    const driftedBundle = {
+      ...driftedBundleBody,
+      bundleSha256: canonicalEvolutionValueSha256(driftedBundleBody),
+    };
+    const driftRunId = harness.createRun({
+      projectId,
+      goal: "Reject repository head drift",
+      context: {
+        source: "target-system-design",
+        runtimeIntegrationBoundary: boundary,
+        targetSystemEvidenceBundle: driftedBundle,
+        verifiedPackageEvidence,
+      },
+    });
+    const adapterBody = {
+      schemaVersion: 1,
+      evidenceBundleSha256: driftedBundle.bundleSha256,
+      runtimeIntegrationBoundary: boundary,
+    };
+    const driftTaskId = harness.createTask({
+      runId: driftRunId,
+      role: "designer",
+      goal: "Must reject drift",
+      prompt: "Do not execute.",
+      config: {
+        runtimeIntegrationBoundary: boundary,
+        targetSystemEvidenceBundle: driftedBundle,
+        runtimeIntegrationDesignAdapter: {
+          ...adapterBody,
+          adapterSha256: canonicalEvolutionValueSha256(adapterBody),
+        },
+      },
+    });
+    const driftResult = await startCodexResumableAttempt({
+      harness,
+      taskId: driftTaskId,
+      cwd: dir,
+      clientFactory: () => {
+        throw new Error("client must not be constructed for drift");
+      },
+    });
+    expect(driftResult.status).toBe("blocked");
+    expect(harness.getAttempt(driftResult.attemptId)?.output.problems).toContainEqual(
+      expect.stringContaining("repository HEADs drifted"),
+    );
+  });
+
   test("generic task execution rejects invalid host capabilities before start hooks", async () => {
     const runId = harness.createRun({ goal: "reject invalid generic host capability" });
     harness.createTask({

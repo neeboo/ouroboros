@@ -12364,7 +12364,7 @@ describe("verified package delivery closeout", () => {
       corpusSnapshotSha256: "a".repeat(64),
       equalBudget: {
         model: "deepseek",
-        reasoningEffort: "high",
+        reasoningEffort: "high" as const,
         wallClockMs: 60_000,
         maxAttempts: 1,
         toolPolicySha256: "b".repeat(64),
@@ -12383,6 +12383,68 @@ describe("verified package delivery closeout", () => {
         founderCharterId: "charter_runtime",
         designEvaluationContract: { comparison },
         verifiedPackageCloseout: { packageOnly: true, overallGoalComplete: false },
+      },
+    });
+    const packageProposal = harness.createDesignProposal({
+      id: "design_runtime_package",
+      projectId: backendProjectId,
+      runId: packageRunId,
+      title: "Verified runtime package",
+      problem: "Runtime package evidence must remain immutable.",
+      recommendation: "Integrate the verified package through a bounded runtime adapter.",
+      status: "accepted",
+      proposal: {
+        problem: "Runtime package evidence must remain immutable.",
+        recommendation: "Integrate the verified package through a bounded runtime adapter.",
+        evidenceRefs: ["artifact:runtime-package"],
+        evaluationContract: {
+          baseline: [comparison.controlRef],
+          successMetrics: [comparison.primaryMetric],
+          guardMetrics: ["zero boundary drift"],
+          requiredEvidence: ["independent verifier receipt"],
+          comparison,
+        },
+        investment: { reversibility: "easy", portfolio: "core", oneTimeCost: 0, recurringCost: 0 },
+      },
+    });
+    const packageDecision = harness.recordDesignDecision({
+      id: "decision_runtime_package",
+      proposalId: packageProposal.id,
+      decision: "approved",
+      actorKind: "auto",
+      reasons: ["Zero-cost bounded integration."],
+    });
+    const packageVerifierTaskId = harness.createTask({
+      runId: packageRunId,
+      role: "verifier",
+      goal: "Verify the package",
+      prompt: "Verify the immutable package.",
+    });
+    const packageVerifierAttemptId = harness.recordAttempt({
+      taskId: packageVerifierTaskId,
+      input: { readOnly: true },
+      output: {
+        status: "done",
+        summary: "Package verification passed.",
+        changedFiles: [],
+        checks: [{ name: "package", status: "passed", evidence: "immutable" }],
+        artifacts: [{ kind: "verifier_verdict", verdict: "pass" }],
+        problems: [],
+      },
+    });
+    harness.updateRun({
+      runId: packageRunId,
+      contextPatch: {
+        designProposalId: packageProposal.id,
+        designDecisionId: packageDecision.id,
+        verifiedPackageCloseout: {
+          schemaVersion: 1,
+          commitActionEventId: "action_runtime_commit",
+          pushActionEventId: "action_runtime_push",
+          verifierTaskId: packageVerifierTaskId,
+          packageOnly: true,
+          overallGoalComplete: false,
+        },
       },
     });
     harness.updateRunStatus({ runId: packageRunId, status: "done" });
@@ -12413,6 +12475,9 @@ describe("verified package delivery closeout", () => {
           commitSha: backend.head,
           tree: "d".repeat(40),
           remoteRef: "refs/heads/codex/runtime-package",
+          commitActionEventId: "action_runtime_commit",
+          pushActionEventId: "action_runtime_push",
+          verifierTaskId: packageVerifierTaskId,
           packageOnly: true,
           overallGoalComplete: false,
         },
@@ -12525,8 +12590,30 @@ describe("verified package delivery closeout", () => {
     expect(harness.getRun(sourceRunId)).toMatchObject({ status: "blocked" });
     expect(harness.getRun(nextRunId)).toMatchObject({
       status: "todo",
-      context: expect.objectContaining({ runtimeIntegrationBoundary: expect.objectContaining({ schemaVersion: 1 }) }),
+      context: expect.objectContaining({
+        runtimeIntegrationBoundary: expect.objectContaining({ schemaVersion: 1 }),
+        targetSystemEvidenceBundle: expect.objectContaining({
+          bundleSha256: expect.stringMatching(/^[0-9a-f]{64}$/),
+          boundarySha256: expect.stringMatching(/^[0-9a-f]{64}$/),
+          verifiedPackage: expect.objectContaining({
+            signalId,
+            commitSha: backend.head,
+            verifierReceipt: expect.objectContaining({
+              taskId: packageVerifierTaskId,
+              attemptId: packageVerifierAttemptId,
+            }),
+          }),
+          sourceFailure: expect.objectContaining({ sourceAttemptId: expect.any(String) }),
+        }),
+      }),
     });
+    const nextRun = harness.getRun(nextRunId)!;
+    const bundle = nextRun.context.targetSystemEvidenceBundle as Record<string, unknown>;
+    const { bundleSha256, ...bundleBody } = bundle;
+    expect(bundleSha256).toBe(canonicalEvolutionValueSha256(bundleBody));
+    expect(bundle.runtimeIntegrationBoundary).toEqual(nextRun.context.runtimeIntegrationBoundary);
+    expect(JSON.stringify(bundle)).not.toContain("private-holdout");
+    expect(JSON.stringify(bundle)).not.toContain("/Users/example/.ainovel");
     expect(harness.getTask(nextTaskId)).toMatchObject({
       role: "designer",
       status: "todo",
@@ -12534,6 +12621,7 @@ describe("verified package delivery closeout", () => {
         readOnly: true,
         forbidImplementation: true,
         forbidBrowser: true,
+        targetSystemEvidenceBundle: bundle,
         runtimeIntegrationDesignAdapter: expect.objectContaining({ normalizedFailureClass: "contract-mismatch" }),
       }),
     });

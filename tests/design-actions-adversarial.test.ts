@@ -3065,7 +3065,7 @@ describe("design-action transition coordinator (production authority path)", () 
     });
     const proposal = targetEvolutionEnvelope(projectId);
     const frozenComparison = structuredClone(proposal.evaluationContract.comparison);
-    const runtimeIntegrationBoundary = {
+    const runtimeIntegrationBoundary: Record<string, unknown> = {
       schemaVersion: 1,
       package: {
         commitSha: "a".repeat(40),
@@ -3133,6 +3133,12 @@ describe("design-action transition coordinator (production authority path)", () 
         hostInjectionOnly: true,
       },
     };
+    const boundarySha256 = canonicalEvolutionValueSha256({
+      schemaVersion: runtimeIntegrationBoundary.schemaVersion,
+      repositories: runtimeIntegrationBoundary.repositories,
+      gateway: runtimeIntegrationBoundary.gateway,
+    });
+    runtimeIntegrationBoundary.boundarySha256 = boundarySha256;
     const requiredMutationSurfaces = [
       {
         id: "target-backend-runtime",
@@ -3153,7 +3159,7 @@ describe("design-action transition coordinator (production authority path)", () 
         owner: "target" as const,
       },
     ];
-    const adapter = {
+    const adapterBase = {
       schemaVersion: 1,
       signalId,
       normalizedFailureClass: "contract-mismatch",
@@ -3162,25 +3168,59 @@ describe("design-action transition coordinator (production authority path)", () 
       frozenComparison,
       runtimeIntegrationBoundary,
     };
+    const verifiedPackageEvidence = {
+      signalId,
+      commitSha: "a".repeat(40),
+      tree: "b".repeat(40),
+      remoteRef: "refs/heads/codex/runtime-package",
+      commitActionEventId: "action_commit",
+      pushActionEventId: "action_push",
+      verifierTaskId: "task_package_verifier",
+    };
+    const evidenceBundleBody = {
+      schemaVersion: 1,
+      purpose: "runtime-integration-after-verified-package",
+      targetProjectId: projectId,
+      verifiedPackage: {
+        ...verifiedPackageEvidence,
+        verifierReceipt: {
+          taskId: verifiedPackageEvidence.verifierTaskId,
+          attemptId: "attempt_package_verifier",
+          status: "done",
+          outputSha256: "f".repeat(64),
+        },
+      },
+      runtimeIntegrationBoundary,
+      boundarySha256,
+      repositoryHeads: (runtimeIntegrationBoundary.repositories as Array<Record<string, unknown>>).map((repository) => ({
+        id: repository.id,
+        expectedHead: repository.expectedHead,
+      })),
+      credentialIsolation: runtimeIntegrationBoundary.credentialIsolation,
+      sourceFailure: {
+        sourceRunId: "run_source",
+        sourceTaskId: "task_source",
+        sourceAttemptId: "attempt_source",
+        problemSha256: "1".repeat(64),
+      },
+    };
+    const evidenceBundle = {
+      ...evidenceBundleBody,
+      bundleSha256: canonicalEvolutionValueSha256(evidenceBundleBody),
+    };
+    const adapter = { ...adapterBase, evidenceBundleSha256: evidenceBundle.bundleSha256 };
     const runtimeIntegrationDesignAdapter = {
       ...adapter,
       adapterSha256: canonicalEvolutionValueSha256(adapter),
-    };
-    const evidenceBundle = {
-      purpose: "runtime-integration-after-verified-package",
-      signalId,
-      acceptedProposals: [],
     };
     const runId = harness.createRun({
       projectId,
       goal: "Integrate the verified package into multiple target repositories",
       context: {
         source: "target-system-design",
+        verifiedPackageEvidence,
         runtimeIntegrationBoundary,
-        targetSystemEvidenceBundle: {
-          ...evidenceBundle,
-          bundleSha256: canonicalEvolutionValueSha256(evidenceBundle),
-        },
+        targetSystemEvidenceBundle: evidenceBundle,
       },
     });
     const taskId = harness.createTask({
@@ -3188,7 +3228,7 @@ describe("design-action transition coordinator (production authority path)", () 
       role: "designer",
       goal: "Design runtime integration",
       prompt: "Use the fixed runtime integration boundary.",
-      config: { runtimeIntegrationDesignAdapter },
+      config: { runtimeIntegrationDesignAdapter, runtimeIntegrationBoundary, targetSystemEvidenceBundle: evidenceBundle },
     });
     proposal.evidenceRefs = [signalId];
     proposal.causalHypothesis.failureClass = "runtime-integration-gap" as never;
@@ -3237,11 +3277,9 @@ describe("design-action transition coordinator (production authority path)", () 
       goal: "Reject an uncontrolled runtime failure class",
       context: {
         source: "target-system-design",
+        verifiedPackageEvidence,
         runtimeIntegrationBoundary,
-        targetSystemEvidenceBundle: {
-          ...evidenceBundle,
-          bundleSha256: canonicalEvolutionValueSha256(evidenceBundle),
-        },
+        targetSystemEvidenceBundle: evidenceBundle,
       },
     });
     const unknownTaskId = harness.createTask({
@@ -3249,7 +3287,7 @@ describe("design-action transition coordinator (production authority path)", () 
       role: "designer",
       goal: "Reject unknown alias",
       prompt: "Use only the frozen adapter aliases.",
-      config: { runtimeIntegrationDesignAdapter },
+      config: { runtimeIntegrationDesignAdapter, runtimeIntegrationBoundary, targetSystemEvidenceBundle: evidenceBundle },
     });
     const unknownProposal = targetEvolutionEnvelope(projectId);
     unknownProposal.evidenceRefs = [signalId];

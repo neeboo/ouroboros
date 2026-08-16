@@ -30,6 +30,10 @@ import {
   parseEvolutionPackV1,
   parseHarnessRevisionV1,
 } from "@ouroboros/harness";
+import {
+  closeRuntimeIntegrationEvidenceFailure,
+  runtimeIntegrationEvidenceProblem,
+} from "../runtime-integration-evidence";
 import { optionalStrictIsoTimestamp } from "@ouroboros/harness";
 import { createHash } from "node:crypto";
 import { codexOnlyAgentDefaults } from "../agent-backends";
@@ -102,6 +106,21 @@ export function createApplyDesignActionsHook(options: ApplyDesignActionsHookOpti
       return { decision: "exit" };
     }
     const actions = output.designActions ?? [];
+    if (task.config?.runtimeIntegrationDesignAdapter) {
+      const evidenceProblem = runtimeIntegrationEvidenceProblem(run, task);
+      const actionProblem = actions.length === 1 && actions[0]?.type === "proposeDesign"
+        ? null
+        : "runtime integration Designer must emit exactly one proposeDesign action";
+      const problem = evidenceProblem ?? actionProblem;
+      if (problem) {
+        closeRuntimeIntegrationEvidenceFailure({ harness: options.harness, run, task, problem });
+        return {
+          decision: "exit",
+          problems: [problem],
+          checks: [{ name: "runtime integration authoritative evidence", status: "failed", evidence: problem }],
+        };
+      }
+    }
     if (actions.length === 0) {
       // No-action Designer result: stay mutation-free and quiescent for
       // non-intake runs. For an issue-scoped Linear intake run, a quiescent
@@ -174,6 +193,14 @@ export function createApplyDesignActionsHook(options: ApplyDesignActionsHookOpti
     });
 
     if (problems.length > 0) {
+      if (task.config?.runtimeIntegrationDesignAdapter) {
+        closeRuntimeIntegrationEvidenceFailure({
+          harness: options.harness,
+          run,
+          task,
+          problem: problems[problems.length - 1]!,
+        });
+      }
       return {
         decision: "exit",
         problems,

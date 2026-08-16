@@ -42,6 +42,11 @@ import { childToolchainEnvEvidence } from "./executors/proxy-env";
 import { reconcileTerminalBlockedVerifierRepair } from "./hooks/create-repair";
 import { reconcileTerminalDoneWorkerVerifiers } from "./hooks/create-verifier";
 import { reconcileHostEvidenceMaintenance } from "./host-evidence-maintenance";
+import {
+  closeRuntimeIntegrationEvidenceFailure,
+  runtimeIntegrationEvidenceBlockedOutput,
+  runtimeIntegrationEvidenceProblem,
+} from "./runtime-integration-evidence";
 import { createRouteExecutor } from "./route-executor";
 import {
   assertPersistedHostExecutionCapabilityAttestation,
@@ -449,6 +454,23 @@ class CodexResumableOrchestrator {
     const sessionName = task.sessionRef ?? `task-${task.id}`;
     const route = this.resolveRoute(run, task);
     const cwd = task.worktreePath ?? this.worktreeFor(task) ?? this.cwd;
+    const runtimeEvidenceProblem = runtimeIntegrationEvidenceProblem(run, task);
+    if (runtimeEvidenceProblem) {
+      const attemptId = this.harness.recordAttempt({
+        taskId,
+        input: { runtimeIntegrationEvidenceValidation: "failed", sessionName, cwd },
+        output: runtimeIntegrationEvidenceBlockedOutput(runtimeEvidenceProblem),
+      });
+      closeRuntimeIntegrationEvidenceFailure({
+        harness: this.harness,
+        run,
+        task,
+        problem: runtimeEvidenceProblem,
+        attemptId,
+      });
+      this.upsertAttemptThread({ runId: run.id, task, attemptId, sessionName, cwd, status: "blocked" });
+      return { attemptId, taskId, status: "blocked" as const, codexSessionId: null };
+    }
     const hostCapabilityInput = hostExecutionCapabilityAttemptInput(task.config?.hostExecutionCapabilities, {
       role: task.role,
       verifierContract: task.config?.verifierContract,
@@ -893,6 +915,23 @@ class CodexResumableOrchestrator {
       const cwd = task.worktreePath ?? this.cwd;
       try {
         const route = this.resolveRoute(run, task);
+        const runtimeEvidenceProblem = runtimeIntegrationEvidenceProblem(run, task);
+        if (runtimeEvidenceProblem) {
+          const attemptId = this.harness.recordAttempt({
+            taskId: task.id,
+            input: { runtimeIntegrationEvidenceValidation: "failed", sessionName, cwd },
+            output: runtimeIntegrationEvidenceBlockedOutput(runtimeEvidenceProblem),
+          });
+          closeRuntimeIntegrationEvidenceFailure({
+            harness: this.harness,
+            run,
+            task,
+            problem: runtimeEvidenceProblem,
+            attemptId,
+          });
+          this.upsertAttemptThread({ runId: run.id, task, attemptId, sessionName, cwd, status: "blocked" });
+          return { taskId: task.id, attemptId, sessionName, status: "blocked" as const, codexSessionId: null };
+        }
         let loadedHarnessRevision: LoadedHarnessRevision | null;
         try {
           loadedHarnessRevision = loadFrozenHarnessRevision({ harness: this.harness, run, cwd });

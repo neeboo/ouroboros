@@ -2353,8 +2353,8 @@ function applyRuntimeIntegrationDesignRecoveryAtomically(
         ? [...(sourceSession.output.problems ?? [])].reverse().find((problem) => problem.trim().length > 0)
           ?? sourceSession.output.summary
         : "";
-      if (!/runtime-integration-gap|failureClass/i.test(sourceProblem)) {
-        throw new Error("runtime integration recovery source has no bounded failureClass evidence");
+      if (!/runtime-integration-gap|failureClass|authoritative evidence bundle|bundleSha256/i.test(sourceProblem)) {
+        throw new Error("runtime integration recovery source has no bounded runtime-integration evidence failure");
       }
       const purpose = objectRecordOrNull(sourceRun.context.targetSystemEvidenceBundle)?.purpose;
       if (purpose !== "runtime-integration-after-verified-package") {
@@ -2381,6 +2381,26 @@ function applyRuntimeIntegrationDesignRecoveryAtomically(
       const signal = harness.getStrategySignalWithDb(db, { id: verifiedPackage.signalId });
       if (!signal || signal.projectId !== sourceRun.projectId || signal.status !== "active") {
         throw new Error("runtime integration verified-package strategy signal is missing or inactive");
+      }
+      const packageProposalId = exactContextId(packageRun.context.designProposalId, "runtime integration package proposal");
+      const packageDecisionId = exactContextId(packageRun.context.designDecisionId, "runtime integration package decision");
+      const packageProposal = harness.getDesignProposalWithDb(db, { id: packageProposalId });
+      const packageDecision = packageProposal
+        ? harness.listDesignDecisionsWithDb(db, { proposalId: packageProposal.id })
+          .find((candidate) => candidate.id === packageDecisionId)
+        : null;
+      if (!packageProposal || packageProposal.projectId !== sourceRun.projectId
+        || packageProposal.status !== "accepted"
+        || !packageDecision || packageDecision.decision !== "approved") {
+        throw new Error("runtime integration package proposal or authority decision is not approved");
+      }
+      const packageVerifierTaskId = exactContextId(verifiedPackage.verifierTaskId, "runtime integration package verifier task");
+      const packageOverview = harness.getRunOverviewWithDb(db, { runId: packageRun.id, eventLimit: 0 });
+      const packageVerifierTask = packageOverview.tasks.find((task) => task.id === packageVerifierTaskId);
+      const packageVerifierSession = [...packageOverview.sessions].reverse().find((session) =>
+        session.taskId === packageVerifierTaskId && session.status === "done" && (session.output.problems ?? []).length === 0);
+      if (!packageVerifierTask || packageVerifierTask.role !== "verifier" || !packageVerifierSession) {
+        throw new Error("runtime integration package verifier receipt is missing or not passing");
       }
       const backend = normalizedBoundary.repositories.find((repository) => repository.role === "backend")!;
       if (backend.projectId !== sourceRun.projectId || backend.repoPath !== realpathSync(packageRun.projectRoot ?? "")) {
@@ -2427,6 +2447,67 @@ function applyRuntimeIntegrationDesignRecoveryAtomically(
           hostInjectionOnly: true,
         },
       };
+      const evidenceBundleBody = {
+        schemaVersion: 1,
+        purpose: "runtime-integration-after-verified-package",
+        targetProjectId: sourceRun.projectId,
+        authoritativeDatabase: {
+          path: harness.dbPath,
+          bindingSha256: canonicalEvolutionValueSha256({ path: harness.dbPath, projectId: sourceRun.projectId }),
+        },
+        referencedSignals: [{
+          id: signal.id,
+          projectId: signal.projectId,
+          status: signal.status,
+          source: signal.source,
+          summary: signal.summary,
+          evidence: signal.evidence,
+          payloadSha256: canonicalEvolutionValueSha256(signal.payload),
+        }],
+        blockedSignals: [],
+        acceptedProposals: [{
+          id: packageProposal.id,
+          projectId: packageProposal.projectId,
+          status: packageProposal.status,
+          approvedDecisionIds: [packageDecision.id],
+          comparison: frozenComparison,
+          comparisonSha256: canonicalEvolutionValueSha256(frozenComparison),
+        }],
+        hostCorpusReceipts: [],
+        verifiedPackage: {
+          signalId: signal.id,
+          sourceRunId: packageRun.id,
+          commitSha: verifiedPackage.commitSha,
+          tree: verifiedPackage.tree,
+          remoteRef: verifiedPackage.remoteRef,
+          commitActionEventId: verifiedPackage.commitActionEventId,
+          pushActionEventId: verifiedPackage.pushActionEventId,
+          verifierTaskId: packageVerifierTaskId,
+          verifierReceipt: {
+            taskId: packageVerifierTaskId,
+            attemptId: packageVerifierSession.attemptId,
+            status: "done",
+            outputSha256: canonicalEvolutionValueSha256(packageVerifierSession.output),
+          },
+        },
+        runtimeIntegrationBoundary,
+        boundarySha256,
+        repositoryHeads: normalizedBoundary.repositories.map((repository) => ({
+          id: repository.id,
+          expectedHead: repository.expectedHead,
+        })),
+        credentialIsolation: runtimeIntegrationBoundary.credentialIsolation,
+        sourceFailure: {
+          sourceRunId: sourceRun.id,
+          sourceTaskId: sourceTask.id,
+          sourceAttemptId: sourceSession!.attemptId,
+          problemSha256: canonicalEvolutionValueSha256(sourceProblem),
+        },
+      };
+      const targetSystemEvidenceBundle = {
+        ...evidenceBundleBody,
+        bundleSha256: canonicalEvolutionValueSha256(evidenceBundleBody),
+      };
       const adapterBody = {
         schemaVersion: 1,
         signalId: verifiedPackage.signalId,
@@ -2435,6 +2516,7 @@ function applyRuntimeIntegrationDesignRecoveryAtomically(
         requiredMutationSurfaces,
         frozenComparison,
         runtimeIntegrationBoundary,
+        evidenceBundleSha256: targetSystemEvidenceBundle.bundleSha256,
       };
       const runtimeIntegrationDesignAdapter = {
         ...adapterBody,
@@ -2467,10 +2549,7 @@ function applyRuntimeIntegrationDesignRecoveryAtomically(
           designCharterId: sourceRun.context.designCharterId ?? sourceRun.context.founderCharterId,
           evolutionInstance: sourceRun.context.evolutionInstance,
           verifiedPackageEvidence: sourceRun.context.verifiedPackageEvidence,
-          targetSystemEvidenceBundle: {
-            ...(objectRecordOrNull(sourceRun.context.targetSystemEvidenceBundle) ?? {}),
-            runtimeIntegrationBoundarySha256: boundarySha256,
-          },
+          targetSystemEvidenceBundle,
           runtimeIntegrationBoundary,
         },
       });
@@ -2503,6 +2582,7 @@ function applyRuntimeIntegrationDesignRecoveryAtomically(
           browserProcessPolicy: "deny",
           runtimeIntegrationBoundary,
           runtimeIntegrationDesignAdapter,
+          targetSystemEvidenceBundle,
         },
       });
       const receipt = {
@@ -2528,6 +2608,7 @@ function applyRuntimeIntegrationDesignRecoveryAtomically(
       }
       const result = doneResult(action.type, `Runtime integration Designer ${taskId} materialized with a frozen multi-repository boundary.`, [
         { name: "source Designer failure", status: "passed", evidence: sourceTask.id },
+        { name: "authoritative evidence bundle", status: "passed", evidence: targetSystemEvidenceBundle.bundleSha256 },
         { name: "repository HEAD readback", status: "passed", evidence: boundarySha256 },
         { name: "credential isolation", status: "passed", evidence: "modelReceivesCredentials=false" },
         { name: "single read-only Designer", status: "passed", evidence: taskId },
@@ -2538,6 +2619,7 @@ function applyRuntimeIntegrationDesignRecoveryAtomically(
         sourceRunId: sourceRun.id,
         sourceTaskId: sourceTask.id,
         boundarySha256,
+        bundleSha256: targetSystemEvidenceBundle.bundleSha256,
         repositoryHeads: normalizedBoundary.repositories.map((repository) => ({
           id: repository.id,
           expectedHead: repository.expectedHead,

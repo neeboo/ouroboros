@@ -27,6 +27,11 @@ import type {
   StartHookResult,
   StopHook,
 } from "./types";
+import {
+  closeRuntimeIntegrationEvidenceFailure,
+  runtimeIntegrationEvidenceBlockedOutput,
+  runtimeIntegrationEvidenceProblem,
+} from "./runtime-integration-evidence";
 
 export async function runNextReadyTask(input: RunNextReadyTaskInput) {
   const task = input.harness.nextReadyTask(input.runId);
@@ -42,6 +47,22 @@ export async function runNextReadyTask(input: RunNextReadyTaskInput) {
   const cwd = task.worktreePath
     ?? (run.projectId ? input.harness.getProject(run.projectId)?.rootPath ?? process.cwd() : process.cwd());
   const route = resolveExecutionRoute({ run, task });
+  const runtimeEvidenceProblem = runtimeIntegrationEvidenceProblem(run, task);
+  if (runtimeEvidenceProblem) {
+    const attemptId = input.harness.recordAttempt({
+      taskId: task.id,
+      input: { runtimeIntegrationEvidenceValidation: "failed", route, model: route.model },
+      output: runtimeIntegrationEvidenceBlockedOutput(runtimeEvidenceProblem),
+    });
+    closeRuntimeIntegrationEvidenceFailure({
+      harness: input.harness,
+      run,
+      task,
+      problem: runtimeEvidenceProblem,
+      attemptId,
+    });
+    return { taskId: task.id, attemptId, stopDecision: "exit" as const };
+  }
   let verifierExecutionEnvironment;
   try {
     verifierExecutionEnvironment = prepareVerifierExecutionEnvironment({
@@ -173,6 +194,22 @@ export async function runReadyTasks(input: RunReadyTasksInput) {
         cliExecutor: input.cliExecutor,
         globalModel: input.model,
       });
+      const runtimeEvidenceProblem = runtimeIntegrationEvidenceProblem(run, task);
+      if (runtimeEvidenceProblem) {
+        const attemptId = input.harness.recordAttempt({
+          taskId: task.id,
+          input: { sessionName, cwd, runtimeIntegrationEvidenceValidation: "failed", route, model: route.model },
+          output: runtimeIntegrationEvidenceBlockedOutput(runtimeEvidenceProblem),
+        });
+        closeRuntimeIntegrationEvidenceFailure({
+          harness: input.harness,
+          run,
+          task,
+          problem: runtimeEvidenceProblem,
+          attemptId,
+        });
+        return { taskId: task.id, attemptId, sessionName, stopDecision: "exit" as const };
+      }
       let verifierExecutionEnvironment;
       try {
         verifierExecutionEnvironment = prepareVerifierExecutionEnvironment({
