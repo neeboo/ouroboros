@@ -9215,7 +9215,17 @@ if (args.includes("self-improve-daemon")) {
         forbiddenPaths: [".git/orbs/**", ".orbs/**", ".ouroboros/**", "db/**"],
         sha256: expect.stringMatching(/^[a-f0-9]{64}$/),
       }),
-      network: { mode: "deny", enforcement: "darwin-host-seatbelt" },
+      modelTransport: expect.objectContaining({
+        provider: "deepseek",
+        enforcement: "loopback-http-broker",
+        credentialIsolation: true,
+      }),
+      toolSandbox: expect.objectContaining({
+        network: "deny",
+        enforcement: "darwin-host-seatbelt",
+        credentialsInherited: false,
+      }),
+      noTargetNetworkBypass: true,
       preflight: expect.objectContaining({
         passed: true,
         projectPluginsLoaded: false,

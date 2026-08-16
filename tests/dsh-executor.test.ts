@@ -5,6 +5,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { createDshCliExecutor } from "../packages/runner/src";
 import type { ResolvedExecutionRoute, RunCommandInput } from "../packages/runner/src";
+import { prepareDshModelTransportBroker } from "../packages/runner/src/executors/dsh-model-transport";
 import { darwinDshHostReadProfile, darwinDshProcessProfile } from "../packages/runner/src/executors/dsh-process-policy";
 
 const runFixture = {
@@ -76,7 +77,69 @@ function availableDshResolution() {
 }
 
 describe("DeepSeek Harness CLI executor", () => {
-  test("defaults every DSH task to a hashed base-only offline profile receipt", async () => {
+  test("brokers only authenticated DeepSeek chat completions without exposing the host key", async () => {
+    const upstream: Array<{ url: string; authorization: string | null; body: string }> = [];
+    const broker = await prepareDshModelTransportBroker({
+      apiKey: "host-owned-secret",
+      fetchImpl: async (url, init) => {
+        upstream.push({
+          url: String(url),
+          authorization: new Headers(init?.headers).get("authorization"),
+          body: String(init?.body),
+        });
+        return new Response("data: {\"ok\":true}\n\n", {
+          status: 200,
+          headers: { "content-type": "text/event-stream" },
+        });
+      },
+    });
+    try {
+      const rejectedPath = await fetch(`${broker.baseUrl}/models`, {
+        headers: { authorization: `Bearer ${broker.clientApiKey}` },
+      });
+      const rejectedCredential = await fetch(`${broker.baseUrl}/chat/completions`, {
+        method: "POST",
+        headers: { authorization: "Bearer wrong" },
+        body: "{}",
+      });
+      const accepted = await fetch(`${broker.baseUrl}/chat/completions`, {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${broker.clientApiKey}`,
+          "content-type": "application/json",
+        },
+        body: '{"model":"deepseek-v4-flash","messages":[]}',
+      });
+
+      expect(rejectedPath.status).toBe(404);
+      expect(rejectedCredential.status).toBe(401);
+      expect(await accepted.text()).toContain("data:");
+      expect(upstream).toEqual([{
+        url: "https://api.deepseek.com/chat/completions",
+        authorization: "Bearer host-owned-secret",
+        body: '{"model":"deepseek-v4-flash","messages":[]}',
+      }]);
+      expect(JSON.stringify(broker.receipt())).not.toContain("host-owned-secret");
+      expect(broker.receipt()).toMatchObject({
+        provider: "deepseek",
+        enforcement: "loopback-http-broker",
+        credentialIsolation: true,
+        requestCount: 1,
+        rejectedRequestCount: 2,
+      });
+    } finally {
+      await broker.cleanup();
+    }
+  });
+
+  test("fails closed for an unfrozen DeepSeek model endpoint", async () => {
+    await expect(prepareDshModelTransportBroker({
+      apiKey: "host-owned-secret",
+      endpoint: "https://example.com",
+    })).rejects.toThrow("frozen DeepSeek API origin");
+  });
+
+  test("splits DeepSeek model transport from the offline tool sandbox", async () => {
     const events: Array<Record<string, unknown>> = [];
     let processPolicy = "";
     const executor = createDshCliExecutor({
@@ -99,10 +162,11 @@ describe("DeepSeek Harness CLI executor", () => {
         expect(input.env?.HODOR_APPLICATION_BASE_URL).toBeUndefined();
         expect(input.env?.HODOR_APPLICATION_TOKEN).toBeUndefined();
         expect(input.env?.LINEAR_API_KEY).toBeUndefined();
-        expect(input.env?.DEEPSEEK_API_KEY).toBe("approved-model-key");
+        expect(input.env?.DEEPSEEK_API_KEY).not.toBe("approved-model-key");
+        expect(input.env?.DEEPSEEK_API_KEY).toMatch(/^orbs-dsh-broker-/);
+        expect(input.env?.DEEPSEEK_BASE_URL).toMatch(/^http:\/\/127\.0\.0\.1:\d+$/);
         expect(input.inheritEnv).toBe(false);
-        expect(input.cmd.slice(0, 4)).toEqual(["/usr/bin/sandbox-exec", "-p", expect.any(String), "--"]);
-        expect(input.cmd[4]).toBe("/opt/deepseek/bin/dsh");
+        expect(input.cmd[0]).toBe("/opt/deepseek/bin/dsh");
         const patchIndex = input.cmd.indexOf("--patch");
         processPolicy = readFileSync(input.cmd[patchIndex + 1]!, "utf8");
         return {
@@ -138,13 +202,25 @@ describe("DeepSeek Harness CLI executor", () => {
       processPolicyPatchSha256: expect.stringMatching(/^[a-f0-9]{64}$/),
       controlPathReadPolicy: "deny",
       deniedControlPathRootsSha256: expect.stringMatching(/^[a-f0-9]{64}$/),
-      network: { mode: "deny", enforcement: "darwin-host-seatbelt" },
+      modelTransport: expect.objectContaining({
+        provider: "deepseek",
+        endpointHostSha256: expect.stringMatching(/^[a-f0-9]{64}$/),
+        enforcement: "loopback-http-broker",
+        credentialIsolation: true,
+      }),
+      toolSandbox: expect.objectContaining({
+        network: "deny",
+        enforcement: "darwin-host-seatbelt",
+        credentialsInherited: false,
+        filePolicySha256: expect.stringMatching(/^[a-f0-9]{64}$/),
+      }),
+      noTargetNetworkBypass: true,
       preflight: {
         passed: true,
         projectPluginsLoaded: false,
         ambientCredentialsInherited: false,
         targetCredentialsInherited: false,
-        modelCredentialNames: ["DEEPSEEK_API_KEY"],
+        modelCredentialNames: [],
       },
     }));
     expect(events).toContainEqual(expect.objectContaining({
@@ -153,8 +229,73 @@ describe("DeepSeek Harness CLI executor", () => {
       enabledPlugins: ["@deepseek-ai/dsh-base", "@deepseek-ai/dsh-headless"],
       controlPathReadPolicy: "deny",
       deniedControlPathRootsSha256: expect.stringMatching(/^[a-f0-9]{64}$/),
-      networkMode: "deny",
+      modelTransportProvider: "deepseek",
+      modelTransportEndpointHostSha256: expect.stringMatching(/^[a-f0-9]{64}$/),
+      modelTransportEnforcement: "loopback-http-broker",
+      modelTransportCredentialIsolation: true,
+      toolNetworkMode: "deny",
+      toolSandboxEnforcement: "darwin-host-seatbelt",
+      noTargetNetworkBypass: true,
     }));
+  });
+
+  test.skipIf(process.platform !== "darwin")("keeps DSH tool commands offline with exact write and credential boundaries", async () => {
+    const workspace = await mkdtemp(join(homedir(), ".orbs-dsh-split-boundary-"));
+    const allowed = join(workspace, "config", "evolution", "allowed.json");
+    const denied = join(workspace, "src", "denied.ts");
+    const control = join(workspace, ".orbs", "harness.db");
+    await mkdir(join(workspace, "config", "evolution"), { recursive: true });
+    await mkdir(join(workspace, "src"), { recursive: true });
+    await mkdir(join(workspace, ".orbs"), { recursive: true });
+    await writeFile(control, "control-secret\n");
+    const server = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response("must-stay-offline") });
+    let runnerPath = "";
+    try {
+      const executor = createDshCliExecutor({
+        cwd: workspace,
+        command: "/opt/deepseek/bin/dsh",
+        profile: "headless",
+        sandbox: "workspace-write",
+        filePolicy: frozenDshFilePolicy,
+        env: { DEEPSEEK_API_KEY: "host-owned-model-key" },
+        resolveCommand: availableDshResolution,
+        runCommand: async (input) => {
+          const patchIndex = input.cmd.indexOf("--patch");
+          const patch = readFileSync(input.cmd[patchIndex + 1]!, "utf8");
+          const runnerMatch = patch.match(/ORBS_DSH_POLICY_RUNNER=([^\n]+)/);
+          runnerPath = runnerMatch?.[1] ?? "";
+          expect(runnerPath).not.toBe("");
+          const runTool = (script: string) => Bun.spawnSync({
+            cmd: [process.execPath, runnerPath, "sandbox-local-profile", "--", "/bin/sh", "-c", script],
+            env: {
+              ...Object.fromEntries(Object.entries(input.env ?? {}).filter((entry): entry is [string, string] => entry[1] !== undefined)),
+              DEEPSEEK_API_KEY: "must-not-reach-tool",
+            },
+            stdout: "pipe",
+            stderr: "pipe",
+          });
+          expect(runTool(`printf ok > ${JSON.stringify(allowed)}`).exitCode).toBe(0);
+          expect(runTool(`printf denied > ${JSON.stringify(denied)}`).exitCode).not.toBe(0);
+          expect(runTool(`cat ${JSON.stringify(control)}`).stdout.toString()).not.toContain("control-secret");
+          expect(runTool("test -z \"${DEEPSEEK_API_KEY:-}\"").exitCode).toBe(0);
+          expect(runTool(`/usr/bin/curl --max-time 2 http://127.0.0.1:${server.port}`).exitCode).not.toBe(0);
+          expect(runTool("/usr/bin/curl --max-time 2 https://api.deepseek.com").exitCode).not.toBe(0);
+          return {
+            exitCode: 0,
+            stdout: '{"status":"done","summary":"split boundary active","changedFiles":[],"checks":[],"artifacts":[],"problems":[]}',
+            stderr: "",
+          };
+        },
+      });
+
+      const output = await executor(executorInput());
+      expect(output.status).toBe("done");
+      expect(readFileSync(allowed, "utf8")).toBe("ok");
+      expect(existsSync(denied)).toBe(false);
+    } finally {
+      server.stop(true);
+      await rm(workspace, { recursive: true, force: true });
+    }
   });
 
   test("fails before DSH boot when a task requires project plugins without an explicit host configuration", async () => {
@@ -268,8 +409,7 @@ describe("DeepSeek Harness CLI executor", () => {
     });
     expect(calls[0]?.env?.DSH_HOME).toContain("ouroboros-dsh-");
     expect(calls[0]?.env?.HODOR_APPLICATION_TOKEN).toBeUndefined();
-    expect(calls[0]?.cmd.slice(0, 4)).toEqual(["/usr/bin/sandbox-exec", "-p", expect.any(String), "--"]);
-    expect(calls[0]?.cmd.slice(4, 7)).toEqual(["/opt/deepseek/bin/dsh", "--profile", "headless"]);
+    expect(calls[0]?.cmd.slice(0, 3)).toEqual(["/opt/deepseek/bin/dsh", "--profile", "headless"]);
     expect(calls[0]?.cmd.at(-1)).toBe(executorInput().prompt);
     expect(calls[0]?.cmd).toContain("--patch");
     expect(events.map((event) => event.type)).toEqual([
@@ -285,7 +425,7 @@ describe("DeepSeek Harness CLI executor", () => {
     let policyRunner = "";
     let policyPatchPath = "";
     let policyRunnerPath = "";
-    let hostProfile = "";
+    let commandPrefix: string[] = [];
     const executor = createDshCliExecutor({
       cwd: taskFixture.worktreePath,
       command: "/opt/deepseek/bin/dsh",
@@ -294,7 +434,7 @@ describe("DeepSeek Harness CLI executor", () => {
       filePolicy: frozenDshFilePolicy,
       resolveCommand: availableDshResolution,
       runCommand: async (input) => {
-        hostProfile = input.cmd[2] ?? "";
+        commandPrefix = input.cmd.slice(0, 3);
         const patchIndex = input.cmd.indexOf("--patch");
         expect(patchIndex).toBeGreaterThan(0);
         const patchPath = input.cmd[patchIndex + 1];
@@ -317,14 +457,14 @@ describe("DeepSeek Harness CLI executor", () => {
 
     expect(output.status).toBe("done");
     expect(policyPatch).toContain("@deepseek-ai/dsh-sandbox-local");
-    expect(hostProfile).toContain("/Applications/ChatGPT.app/Contents/Resources/codex");
-    expect(hostProfile).toContain("/Applications/Codex.app/Contents/Resources/codex");
-    expect(hostProfile).toContain("deny process-exec");
-    expect(hostProfile).toContain("deny file-read");
-    expect(hostProfile).toContain("deny network*");
+    expect(commandPrefix).toEqual(["/opt/deepseek/bin/dsh", "--profile", "headless"]);
     expect(policyRunner).toContain("allowedEnvironment");
-    expect(policyRunner).not.toContain('spawn("/usr/bin/sandbox-exec"');
+    expect(policyRunner).toContain('spawn("/usr/bin/sandbox-exec"');
     expect(policyRunner).not.toContain("env: process.env");
+    expect(policyPatch).toContain("- id: tool-web\n  disabled: true");
+    expect(policyPatch).toContain("- id: code-runtime\n  disabled: true");
+    expect(policyPatch).toContain("- id: tool-subagent\n  disabled: true");
+    expect(policyPatch).toContain("- id: tool-fs\n  disabled: true");
     expect(existsSync(policyPatchPath)).toBe(false);
     expect(existsSync(policyRunnerPath)).toBe(false);
   });
@@ -629,8 +769,7 @@ describe("DeepSeek Harness CLI executor", () => {
 
     await executor(executorInput());
 
-    expect(calls[0]?.cmd.slice(0, 4)).toEqual(["/usr/bin/sandbox-exec", "-p", expect.any(String), "--"]);
-    expect(calls[0]?.cmd.slice(4, 7)).toEqual([selectedPath, "--profile", "headless"]);
+    expect(calls[0]?.cmd.slice(0, 3)).toEqual([selectedPath, "--profile", "headless"]);
     expect(calls[0]?.cmd).toContain("--patch");
     expect(calls[0]?.cmd.at(-1)).toBe(executorInput().prompt);
   });

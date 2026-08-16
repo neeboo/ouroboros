@@ -14,11 +14,41 @@ const DARWIN_DSH_DENIED_EXECUTABLES = [
 
 const POLICY_FAILURE_MARKER = "orbs-dsh-agent-policy:";
 const NESTED_CODEX_PATH_PATTERN = "(^|/)codex$";
+const DISABLED_DSH_IN_PROCESS_ROWS = [
+  "credentials",
+  "llm-pi-ai",
+  "session-title-llm",
+  "tool-jobs",
+  "tool-fs",
+  "tool-fs-search",
+  "agent-instructions",
+  "skill-filesystem",
+  "tool-skill",
+  "subagent-spawn-in-process",
+  "subagent-fork-in-process",
+  "tool-subagent-control",
+  "tool-subagent-list-agents",
+  "tool-subagent",
+  "tool-subagent-fork",
+  "workflow-worker-thread",
+  "tool-workflow",
+  "tool-ralph",
+  "tool-str-replace-editor",
+  "web",
+  "web-search-deepseek",
+  "tool-web",
+  "code-runtime",
+] as const;
 
 export interface DshProcessPolicyBundle {
   patchPath: string;
   patchSha256: string;
   networkMode: "deny";
+  sandboxProfileSha256: string;
+  filePolicySha256: string | null;
+  deniedControlPathRootsSha256: string;
+  disabledInProcessRows: string[];
+  disabledInProcessRowsSha256: string;
   cleanup(): Promise<void>;
 }
 
@@ -117,7 +147,11 @@ function canonicalExistingDirectory(path: string) {
   return canonical;
 }
 
-export async function prepareDshProcessPolicy(): Promise<DshProcessPolicyBundle | null> {
+export async function prepareDshProcessPolicy(input: {
+  workspaceRoot: string;
+  permissionMode: "read-only" | "workspace-write";
+  filePolicy: NormalizedDshFilePolicy | null;
+}): Promise<DshProcessPolicyBundle | null> {
   if (process.platform !== "darwin") return null;
 
   const base = join(homedir(), ".ouroboros", "runtime", "dsh-process-policies");
@@ -126,13 +160,28 @@ export async function prepareDshProcessPolicy(): Promise<DshProcessPolicyBundle 
   await ensurePrivateDirectory(directory);
   const runnerPath = join(directory, "runner.mjs");
   const patchPath = join(directory, "cordis.patch.yml");
-  await writeFile(runnerPath, darwinDshPolicyRunnerSource(), { mode: 0o600, flag: "wx" });
+  const toolHome = join(directory, "tool-home");
+  await ensurePrivateDirectory(toolHome);
+  const toolProfile = darwinDshHostReadProfile({
+    workspaceRoot: input.workspaceRoot,
+    permissionMode: input.permissionMode,
+    allowedPaths: input.filePolicy?.allowedPaths,
+    forbiddenPaths: input.filePolicy?.forbiddenPaths,
+    temporaryWritePaths: [toolHome],
+  });
+  const runnerSource = darwinDshPolicyRunnerSource(toolProfile.profile, toolHome);
+  await writeFile(runnerPath, runnerSource, { mode: 0o600, flag: "wx" });
   const patch = dshPolicyPatch(process.execPath, runnerPath);
   await writeFile(patchPath, patch, { mode: 0o600, flag: "wx" });
   return {
     patchPath,
     patchSha256: createHash("sha256").update(patch).digest("hex"),
     networkMode: "deny",
+    sandboxProfileSha256: createHash("sha256").update(toolProfile.profile).digest("hex"),
+    filePolicySha256: input.filePolicy?.sha256 ?? null,
+    deniedControlPathRootsSha256: toolProfile.deniedReadPathsSha256,
+    disabledInProcessRows: [...DISABLED_DSH_IN_PROCESS_ROWS],
+    disabledInProcessRowsSha256: createHash("sha256").update(JSON.stringify(DISABLED_DSH_IN_PROCESS_ROWS)).digest("hex"),
     cleanup: () => rm(directory, { recursive: true, force: true }),
   };
 }
@@ -227,15 +276,22 @@ function dshPolicyPatch(runtimeExecutable: string, runnerPath: string) {
     `      - ${JSON.stringify(runnerPath)}`,
     "    runnerFailureSignatures:",
     `      - ${JSON.stringify(POLICY_FAILURE_MARKER)}`,
+    ...DISABLED_DSH_IN_PROCESS_ROWS.flatMap((id) => [
+      "",
+      `- id: ${id}`,
+      "  disabled: true",
+    ]),
     "",
   ].join("\n");
 }
 
-function darwinDshPolicyRunnerSource() {
+function darwinDshPolicyRunnerSource(profile: string, toolHome: string) {
   return `#!/usr/bin/env node
 import { spawn } from "node:child_process";
 
 const FAILURE = ${JSON.stringify(POLICY_FAILURE_MARKER)};
+const PROFILE = ${JSON.stringify(profile)};
+const TOOL_HOME = ${JSON.stringify(toolHome)};
 const args = process.argv.slice(2);
 const separator = args.indexOf("--");
 if (separator < 0 || separator === args.length - 1) {
@@ -251,7 +307,9 @@ const childEnvironment = {};
 for (const [key, value] of Object.entries(process.env)) {
   if (allowedEnvironment.has(key) && value !== undefined) childEnvironment[key] = value;
 }
-const child = spawn(command[0], command.slice(1), {
+childEnvironment.HOME = TOOL_HOME;
+childEnvironment.TMPDIR = TOOL_HOME;
+const child = spawn("/usr/bin/sandbox-exec", ["-p", PROFILE, "--", ...command], {
   stdio: "inherit",
   env: childEnvironment,
 });

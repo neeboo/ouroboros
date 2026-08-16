@@ -7239,6 +7239,92 @@ describe("Harness actions", () => {
     });
     expect(runtimeTasks).toHaveLength(2);
     expect(harness.getRun(runId)?.context.repairReplanBudget).toEqual({ limit: 3, used: 1, entries: [] });
+
+    harness.recordAttempt({
+      taskId: recoveredWorker.id,
+      input: { executor: "dsh-cli", permissionMode: "workspace-write", cwd: "/tmp/frozen-dsh-worktree" },
+      output: {
+        status: "blocked",
+        summary: "The whole-process network denial blocked the model transport.",
+        changedFiles: [],
+        checks: [{ name: "dsh headless execution", status: "failed" }],
+        artifacts: [{
+          kind: "dsh_execution_profile_receipt",
+          permissionMode: "workspace-write",
+          network: { mode: "deny", enforcement: "darwin-host-seatbelt" },
+        }],
+        problems: ["dsh: TRANSPORT: DeepSeek API request to https://api.deepseek.com failed"],
+      },
+    });
+    harness.recordAttempt({
+      taskId: recoveredVerifier.id,
+      input: { executor: "codex-resumable", permissionMode: "read-only", cwd: "/tmp/frozen-dsh-worktree" },
+      output: {
+        status: "blocked",
+        summary: "Verifier dependency was blocked by the DSH transport failure.",
+        changedFiles: [],
+        checks: [],
+        artifacts: [],
+        problems: ["task dependencies are blocked"],
+      },
+    });
+    const transportRecovery = applyHarnessAction(harness, {
+      type: "materializeDesignWorkerTransportRecovery",
+      runId,
+      sourceWorkerTaskId: recoveredWorker.id,
+      reason: "split the trusted model transport from the denied tool network once",
+    });
+    const transportReplay = applyHarnessAction(harness, {
+      type: "materializeDesignWorkerTransportRecovery",
+      runId,
+      sourceWorkerTaskId: recoveredWorker.id,
+      reason: "split the trusted model transport from the denied tool network once",
+    });
+    const transportOverview = harness.getRunOverview({ runId, eventLimit: 0 });
+    const transportTasks = transportOverview.tasks.filter((task) => task.config?.designWorkerTransportRecovery);
+    const transportWorker = transportTasks.find((task) => task.role === "worker")!;
+    const transportVerifier = transportTasks.find((task) => task.role === "verifier")!;
+    expect(transportRecovery).toMatchObject({
+      status: "done",
+      actionType: "materializeDesignWorkerTransportRecovery",
+      artifacts: [expect.objectContaining({
+        kind: "design_worker_transport_recovery",
+        sourceWorkerTaskId: recoveredWorker.id,
+        workerTaskId: transportWorker.id,
+        verifierTaskId: transportVerifier.id,
+        reused: false,
+      })],
+    });
+    expect(transportWorker).toMatchObject({
+      status: "todo",
+      dependsOn: [planner.id],
+      config: {
+        agentBackend: "deepseek-harness",
+        permissionMode: "workspace-write",
+        sourceWorktreePath: "/tmp/frozen-dsh-worktree",
+        dshModelTransport: "host-brokered-deepseek",
+        dshToolNetwork: "deny",
+        dshFilePolicy: recoveredWorker.config?.dshFilePolicy,
+      },
+    });
+    expect(transportVerifier).toMatchObject({
+      status: "todo",
+      dependsOn: [transportWorker.id],
+      config: {
+        permissionMode: "read-only",
+        sourceTaskId: transportWorker.id,
+      },
+    });
+    expect(transportReplay).toMatchObject({
+      status: "done",
+      artifacts: [expect.objectContaining({
+        workerTaskId: transportWorker.id,
+        verifierTaskId: transportVerifier.id,
+        reused: true,
+      })],
+    });
+    expect(transportTasks).toHaveLength(2);
+    expect(harness.getRun(runId)?.context.repairReplanBudget).toEqual({ limit: 3, used: 1, entries: [] });
   });
 
   test("materializes one audited read-only Designer recovery from a blocked fixed-action attempt", () => {

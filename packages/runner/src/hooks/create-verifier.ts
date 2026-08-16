@@ -313,10 +313,14 @@ function uniqueStrings(values: string[]) {
 }
 
 function sourceEvidenceAssessment(output: AttemptOutput) {
+  const sourceArtifacts = (output.artifacts ?? []).filter((artifact) => {
+    if (!artifact || typeof artifact !== "object" || Array.isArray(artifact)) return true;
+    return (artifact as Record<string, unknown>).kind !== "dsh_execution_profile_receipt";
+  });
   const missing = [
     ...((output.changedFiles?.length ?? 0) === 0 ? ["changedFiles"] : []),
     ...((output.checks?.length ?? 0) === 0 ? ["checks"] : []),
-    ...((output.artifacts?.length ?? 0) === 0 ? ["artifacts"] : []),
+    ...(sourceArtifacts.length === 0 ? ["artifacts"] : []),
   ];
   return missing.length > 0
     ? {

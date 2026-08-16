@@ -8,7 +8,11 @@ import { resolveDshCommand } from "../dsh-readiness";
 import type { TaskExecutor } from "../types";
 import { commandProblem, runLocalCommand } from "./command";
 import {
-  darwinDshHostReadProfile,
+  prepareDshModelTransportBroker,
+  type DshModelTransportBroker,
+  type DshModelTransportReceipt,
+} from "./dsh-model-transport";
+import {
   normalizeDshFilePolicy,
   prepareDshProcessPolicy,
   type NormalizedDshFilePolicy,
@@ -35,7 +39,17 @@ interface DshExecutionProfileReceipt {
   processPolicyPatchSha256: string;
   controlPathReadPolicy: "deny";
   deniedControlPathRootsSha256: string;
-  network: { mode: "deny"; enforcement: "darwin-host-seatbelt" };
+  modelTransport: DshModelTransportReceipt;
+  toolSandbox: {
+    network: "deny";
+    enforcement: "darwin-host-seatbelt";
+    credentialsInherited: false;
+    filePolicySha256: string | null;
+    sandboxProfileSha256: string;
+    disabledInProcessRows: string[];
+    disabledInProcessRowsSha256: string;
+  };
+  noTargetNetworkBypass: true;
   preflight: {
     passed: true;
     projectPluginsLoaded: false;
@@ -131,23 +145,31 @@ export function createDshCliExecutor(options: DshCliExecutorOptions): TaskExecut
 
     let isolatedProfile: Awaited<ReturnType<typeof createIsolatedHeadlessHome>> | null = null;
     let processPolicy: Awaited<ReturnType<typeof prepareDshProcessPolicy>> = null;
+    let modelTransport: DshModelTransportBroker | null = null;
     let profileReceipt: DshExecutionProfileReceipt | null = null;
     let result;
     try {
       isolatedProfile = await createIsolatedHeadlessHome();
-      processPolicy = await prepareDshProcessPolicy();
+      processPolicy = await prepareDshProcessPolicy({
+        workspaceRoot: options.cwd,
+        permissionMode: sandbox,
+        filePolicy,
+      });
       if (!processPolicy) {
         throw new Error("DSH offline network denial is unsupported on this host and must fail closed before model execution.");
       }
-      const processEnvironment = dshProcessEnvironment(options.env, isolatedProfile.home, sandbox);
-      const hostReadProfile = darwinDshHostReadProfile({
-        workspaceRoot: options.cwd,
-        permissionMode: sandbox,
-        allowedPaths: filePolicy?.allowedPaths,
-        forbiddenPaths: filePolicy?.forbiddenPaths,
-        temporaryWritePaths: [isolatedProfile.home, tmpdir()],
+      const sourceEnvironment = { ...process.env, ...(options.env ?? {}) };
+      modelTransport = await prepareDshModelTransportBroker({
+        apiKey: sourceEnvironment.DEEPSEEK_API_KEY,
+        endpoint: sourceEnvironment.DEEPSEEK_BASE_URL,
       });
-      const modelCredentialNames = processEnvironment.DEEPSEEK_API_KEY ? ["DEEPSEEK_API_KEY"] : [];
+      const processEnvironment = dshProcessEnvironment(
+        options.env,
+        isolatedProfile.home,
+        sandbox,
+        modelTransport,
+      );
+      const modelCredentialNames: string[] = [];
       profileReceipt = {
         kind: "dsh_execution_profile_receipt",
         schemaVersion: 1,
@@ -161,8 +183,18 @@ export function createDshCliExecutor(options: DshCliExecutorOptions): TaskExecut
         profilePatchSha256: isolatedProfile.profilePatchSha256,
         processPolicyPatchSha256: processPolicy.patchSha256,
         controlPathReadPolicy: "deny",
-        deniedControlPathRootsSha256: hostReadProfile.deniedReadPathsSha256,
-        network: { mode: "deny", enforcement: "darwin-host-seatbelt" },
+        deniedControlPathRootsSha256: processPolicy.deniedControlPathRootsSha256,
+        modelTransport: modelTransport.receipt(),
+        toolSandbox: {
+          network: "deny",
+          enforcement: "darwin-host-seatbelt",
+          credentialsInherited: false,
+          filePolicySha256: processPolicy.filePolicySha256,
+          sandboxProfileSha256: processPolicy.sandboxProfileSha256,
+          disabledInProcessRows: processPolicy.disabledInProcessRows,
+          disabledInProcessRowsSha256: processPolicy.disabledInProcessRowsSha256,
+        },
+        noTargetNetworkBypass: true,
         preflight: {
           passed: true,
           projectPluginsLoaded: false,
@@ -192,7 +224,17 @@ export function createDshCliExecutor(options: DshCliExecutorOptions): TaskExecut
         processPolicyPatchSha256: profileReceipt.processPolicyPatchSha256,
         controlPathReadPolicy: profileReceipt.controlPathReadPolicy,
         deniedControlPathRootsSha256: profileReceipt.deniedControlPathRootsSha256,
-        networkMode: "deny",
+        modelTransportProvider: profileReceipt.modelTransport.provider,
+        modelTransportEndpointHostSha256: profileReceipt.modelTransport.endpointHostSha256,
+        modelTransportEndpointPolicySha256: profileReceipt.modelTransport.endpointPolicySha256,
+        modelTransportEnforcement: profileReceipt.modelTransport.enforcement,
+        modelTransportCredentialIsolation: profileReceipt.modelTransport.credentialIsolation,
+        toolNetworkMode: profileReceipt.toolSandbox.network,
+        toolSandboxEnforcement: profileReceipt.toolSandbox.enforcement,
+        toolSandboxFilePolicySha256: profileReceipt.toolSandbox.filePolicySha256,
+        toolSandboxProfileSha256: profileReceipt.toolSandbox.sandboxProfileSha256,
+        disabledInProcessRowsSha256: profileReceipt.toolSandbox.disabledInProcessRowsSha256,
+        noTargetNetworkBypass: profileReceipt.noTargetNetworkBypass,
         projectPluginsLoaded: false,
         ambientCredentialsInherited: false,
         targetCredentialsInherited: false,
@@ -200,10 +242,6 @@ export function createDshCliExecutor(options: DshCliExecutorOptions): TaskExecut
       });
       result = await runCommand({
         cmd: [
-          "/usr/bin/sandbox-exec",
-          "-p",
-          hostReadProfile.profile,
-          "--",
           resolution.selectedPath,
           "--profile",
           profile,
@@ -233,6 +271,8 @@ export function createDshCliExecutor(options: DshCliExecutorOptions): TaskExecut
         profileReceipt ? [profileReceipt] : [],
       );
     } finally {
+      if (profileReceipt && modelTransport) profileReceipt.modelTransport = modelTransport.receipt();
+      await modelTransport?.cleanup();
       if (isolatedProfile) {
         await rm(isolatedProfile.home, { recursive: true, force: true });
       }
@@ -282,6 +322,7 @@ function dshProcessEnvironment(
   configured: Record<string, string | undefined> | undefined,
   isolatedHome: string,
   sandbox: string,
+  modelTransport: DshModelTransportBroker,
 ) {
   const source = { ...process.env, ...(configured ?? {}) };
   const environment: Record<string, string | undefined> = {
@@ -302,8 +343,9 @@ function dshProcessEnvironment(
     NVM_BIN: source.NVM_BIN,
     NVM_DIR: source.NVM_DIR,
     PNPM_HOME: source.PNPM_HOME,
-    DEEPSEEK_API_KEY: source.DEEPSEEK_API_KEY,
-    DEEPSEEK_BASE_URL: source.DEEPSEEK_BASE_URL,
+    DEEPSEEK_API_KEY: modelTransport.clientApiKey,
+    DEEPSEEK_BASE_URL: modelTransport.baseUrl,
+    DSH_TELEMETRY_DISABLED: "1",
     DSH_HOME: isolatedHome,
     DSH_AGENTS_HOME: join(isolatedHome, "agents"),
     DSH_PERMISSION_MODE: sandbox,
@@ -315,7 +357,7 @@ function dshProcessEnvironment(
 }
 
 function isExplicitDshEnvironmentNameAllowed(key: string) {
-  if (key === "DEEPSEEK_API_KEY" || key === "DEEPSEEK_BASE_URL") return true;
+  if (key === "DEEPSEEK_API_KEY" || key === "DEEPSEEK_BASE_URL") return false;
   if (key.startsWith("DSH_") || key.startsWith("HODOR_")) return false;
   if (/proxy/i.test(key)) return false;
   return !/(?:key|token|secret|credential|password|authorization|cookie|session)/i.test(key);

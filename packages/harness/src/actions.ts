@@ -137,6 +137,12 @@ export type HarnessAction =
       reason?: string;
     }
   | {
+      type: "materializeDesignWorkerTransportRecovery";
+      runId: string;
+      sourceWorkerTaskId: string;
+      reason?: string;
+    }
+  | {
       type: "buildVersionedCorpusManifest";
       projectId: string;
       sourceRunId: string;
@@ -667,6 +673,15 @@ export function parseHarnessAction(value: unknown): HarnessAction {
       reason: optionalStringField(record, "reason"),
     };
   }
+  if (type === "materializeDesignWorkerTransportRecovery") {
+    assertOnlyFields(record, type, ["type", "runId", "sourceWorkerTaskId", "reason"]);
+    return {
+      type,
+      runId: stringField(record, "runId"),
+      sourceWorkerTaskId: stringField(record, "sourceWorkerTaskId"),
+      reason: optionalStringField(record, "reason"),
+    };
+  }
   if (type === "buildVersionedCorpusManifest") {
     assertOnlyFields(record, type, [
       "type",
@@ -1060,7 +1075,7 @@ export function parseHarnessAction(value: unknown): HarnessAction {
     };
   }
   throw new Error(
-    "harness action type must be reclaimRunningTasks, retryTask, reconcileRunEvidence, recordSignal, linkResearchEvidence, materializeDesignerActionRecovery, materializeDesignDeliveryRecovery, materializeDesignWorkerRuntimeRecovery, buildVersionedCorpusManifest, bindHostEvidenceMaintenanceReceipt, materializeHostEvidenceMaintenanceDelivery, markRunTodo, updateRunContext, amendRunContract, retireRun, retireTask, prepareRunDrain, completeSystemTask, integrateVerifiedRun, pushExactGitRef, createExactGitRef, commitExactGitIndex, stageExactWorkerFilesForVerification, materializeAttemptArtifactsForVerification, verifySealedCorpusForVerification, registerEvolutionProfile, recordProductionEpisode, registerHarnessVariant, activateHarnessRevision, freezeMatchedExperiment, interruptAttemptAndCreateTask, interruptRunningAttemptsAndCreateTask, acceptGuardrailProposal, startSubsession, collectSubsessions, cancelSubsessions, or runWatchdogPass",
+    "harness action type must be reclaimRunningTasks, retryTask, reconcileRunEvidence, recordSignal, linkResearchEvidence, materializeDesignerActionRecovery, materializeDesignDeliveryRecovery, materializeDesignWorkerRuntimeRecovery, materializeDesignWorkerTransportRecovery, buildVersionedCorpusManifest, bindHostEvidenceMaintenanceReceipt, materializeHostEvidenceMaintenanceDelivery, markRunTodo, updateRunContext, amendRunContract, retireRun, retireTask, prepareRunDrain, completeSystemTask, integrateVerifiedRun, pushExactGitRef, createExactGitRef, commitExactGitIndex, stageExactWorkerFilesForVerification, materializeAttemptArtifactsForVerification, verifySealedCorpusForVerification, registerEvolutionProfile, recordProductionEpisode, registerHarnessVariant, activateHarnessRevision, freezeMatchedExperiment, interruptAttemptAndCreateTask, interruptRunningAttemptsAndCreateTask, acceptGuardrailProposal, startSubsession, collectSubsessions, cancelSubsessions, or runWatchdogPass",
   );
 }
 
@@ -1107,6 +1122,10 @@ export function applyHarnessAction(
 
   if (action.type === "materializeDesignWorkerRuntimeRecovery") {
     return applyDesignWorkerRuntimeRecoveryAtomically(harness, action);
+  }
+
+  if (action.type === "materializeDesignWorkerTransportRecovery") {
+    return applyDesignWorkerTransportRecoveryAtomically(harness, action);
   }
 
   if (action.type === "reconcileRunEvidence") {
@@ -1168,6 +1187,7 @@ type HarnessRevisionActivationAction = Extract<HarnessAction, { type: "activateH
 type DesignerActionRecoveryAction = Extract<HarnessAction, { type: "materializeDesignerActionRecovery" }>;
 type DesignDeliveryRecoveryAction = Extract<HarnessAction, { type: "materializeDesignDeliveryRecovery" }>;
 type DesignWorkerRuntimeRecoveryAction = Extract<HarnessAction, { type: "materializeDesignWorkerRuntimeRecovery" }>;
+type DesignWorkerTransportRecoveryAction = Extract<HarnessAction, { type: "materializeDesignWorkerTransportRecovery" }>;
 type RunEvidenceReconciliationAction = Extract<HarnessAction, { type: "reconcileRunEvidence" }>;
 type ResearchEvidenceLinkAction = Extract<HarnessAction, { type: "linkResearchEvidence" }>;
 type BlockedRunSignalAction = Extract<HarnessAction, { type: "recordSignal" }>;
@@ -1349,6 +1369,34 @@ function applyDesignWorkerRuntimeRecoveryAtomically(
   try {
     return harness.runInImmediateTransaction((db) => {
       const result = materializeDesignWorkerRuntimeRecoveryWithDb(harness, db, action);
+      const eventId = harness.recordHarnessActionEventWithDb(db, {
+        actionType: action.type,
+        status: result.status,
+        request: safeRequest(action),
+        result: resultToRecord(result),
+      });
+      return { ...result, eventId };
+    });
+  } catch (error) {
+    const problem = limitUtf8Output(sanitizeEvolutionErrorText(errorMessage(error)), 4_096);
+    const result = blockedResult(action.type, `${action.type} blocked: ${problem}`, [problem]);
+    const eventId = harness.recordHarnessActionEvent({
+      actionType: action.type,
+      status: result.status,
+      request: safeRequest(action),
+      result: resultToRecord(result),
+    });
+    return { ...result, eventId };
+  }
+}
+
+function applyDesignWorkerTransportRecoveryAtomically(
+  harness: Harness,
+  action: DesignWorkerTransportRecoveryAction,
+): HarnessActionResult & { eventId: string } {
+  try {
+    return harness.runInImmediateTransaction((db) => {
+      const result = materializeDesignWorkerTransportRecoveryWithDb(harness, db, action);
       const eventId = harness.recordHarnessActionEventWithDb(db, {
         actionType: action.type,
         status: result.status,
@@ -2816,6 +2864,194 @@ function materializeDesignWorkerRuntimeRecoveryWithDb(
     { name: "repair budget", status: "passed", evidence: "not charged" },
   ], [{
     kind: "design_worker_runtime_recovery",
+    runId: run.id,
+    sourceWorkerTaskId: sourceWorker.id,
+    sourceWorkerAttemptId: sourceAttempt.attemptId,
+    workerTaskId,
+    verifierTaskId,
+    recoveryKey,
+    reused: false,
+  }]);
+}
+
+function materializeDesignWorkerTransportRecoveryWithDb(
+  harness: Harness,
+  db: HarnessDatabase,
+  action: DesignWorkerTransportRecoveryAction,
+): HarnessActionResult {
+  const overview = harness.getRunOverviewWithDb(db, { runId: action.runId, eventLimit: 0 });
+  const run = overview.run;
+  if (!run || run.context.source !== "design" || run.context.retired === true) {
+    throw new Error(`design Worker transport recovery requires an active design child: ${action.runId}`);
+  }
+  const sourceWorker = overview.tasks.find((task) => task.id === action.sourceWorkerTaskId);
+  if (!sourceWorker || sourceWorker.role !== "worker" || sourceWorker.status !== "blocked") {
+    throw new Error(`source DSH Worker must be blocked in ${run.id}: ${action.sourceWorkerTaskId}`);
+  }
+  if (sourceWorker.config?.agentBackend !== "deepseek-harness" || sourceWorker.config?.permissionMode !== "workspace-write") {
+    throw new Error(`source Worker ${sourceWorker.id} is not a frozen workspace-write DSH task`);
+  }
+  const sourceAttempt = overview.sessions.filter((session) => session.taskId === sourceWorker.id).at(-1);
+  if (!sourceAttempt || sourceAttempt.status !== "blocked") {
+    throw new Error(`source Worker ${sourceWorker.id} has no blocked terminal attempt`);
+  }
+  const permissionReceipt = sourceAttempt.output.artifacts?.find((artifact) =>
+    objectRecordOrNull(artifact)?.kind === "dsh_execution_profile_receipt"
+  );
+  const receipt = objectRecordOrNull(permissionReceipt);
+  const legacyNetwork = objectRecordOrNull(receipt?.network);
+  if (receipt?.permissionMode !== "workspace-write"
+    || legacyNetwork?.mode !== "deny"
+    || legacyNetwork.enforcement !== "darwin-host-seatbelt") {
+    throw new Error(`source Worker ${sourceWorker.id} lacks the whole-process DSH network denial receipt`);
+  }
+  const diagnostic = [sourceAttempt.output.summary, ...(sourceAttempt.output.problems ?? [])].join("\n");
+  if (!/TRANSPORT|DeepSeek API request/i.test(diagnostic)) {
+    throw new Error(`source Worker ${sourceWorker.id} did not fail at the DeepSeek model transport boundary`);
+  }
+  if (sourceWorker.dependsOn.length !== 1) {
+    throw new Error(`source Worker ${sourceWorker.id} must depend on exactly one frozen Planner`);
+  }
+  const planner = overview.tasks.find((task) => task.id === sourceWorker.dependsOn[0]);
+  if (!planner || planner.role !== "planner" || planner.status !== "done" || !planner.config?.frozenDesignPlanner) {
+    throw new Error(`source Worker ${sourceWorker.id} is not downstream of one done frozen Planner`);
+  }
+  const sourceVerifier = overview.tasks.find((task) =>
+    task.role === "verifier" && sameCanonicalValue(task.dependsOn, [sourceWorker.id])
+  );
+  if (!sourceVerifier || sourceVerifier.status !== "blocked") {
+    throw new Error(`source Worker ${sourceWorker.id} has no blocked independent Verifier descendant`);
+  }
+  const filePolicy = objectRecordOrNull(sourceWorker.config?.dshFilePolicy);
+  const allowedPaths = Array.isArray(filePolicy?.allowedPaths)
+    ? filePolicy.allowedPaths.filter((path): path is string => typeof path === "string")
+    : [];
+  const forbiddenPaths = Array.isArray(filePolicy?.forbiddenPaths)
+    ? filePolicy.forbiddenPaths.filter((path): path is string => typeof path === "string")
+    : [];
+  if (filePolicy?.schemaVersion !== 1
+    || filePolicy.source !== "frozen-design-mutation-surfaces"
+    || !sameCanonicalValue(allowedPaths, ["config/evolution/**", "tests/evolution/**"])
+    || !sameCanonicalValue(forbiddenPaths, [".git/orbs/**", ".orbs/**", ".ouroboros/**", "db/**"])) {
+    throw new Error(`design Worker transport recovery requires the exact frozen DSH file policy`);
+  }
+  const worktreePath = sourceWorker.worktreePath
+    ?? (typeof sourceWorker.config?.sourceWorktreePath === "string" ? sourceWorker.config.sourceWorktreePath : null);
+  if (!worktreePath) throw new Error(`source Worker ${sourceWorker.id} has no frozen worktree path`);
+
+  const recoveryKey = stableFingerprint({
+    runId: run.id,
+    sourceWorkerTaskId: sourceWorker.id,
+    sourceWorkerAttemptId: sourceAttempt.attemptId,
+    plannerTaskId: planner.id,
+    verifierTaskId: sourceVerifier.id,
+    filePolicy,
+    failureClass: "dsh-model-transport-denied-by-tool-sandbox",
+  });
+  const existing = overview.tasks.filter((task) =>
+    objectRecordOrNull(task.config?.designWorkerTransportRecovery)?.recoveryKey === recoveryKey
+  );
+  if (existing.length > 0) {
+    const worker = existing.find((task) => task.role === "worker");
+    const verifier = existing.find((task) => task.role === "verifier");
+    if (existing.length !== 2 || !worker || !verifier || !sameCanonicalValue(verifier.dependsOn, [worker.id])) {
+      throw new Error(`existing design Worker transport recovery conflicts with ${recoveryKey}`);
+    }
+    return doneResult(action.type, `Design Worker transport recovery ${recoveryKey} reused.`, [
+      { name: "bounded transport recovery", status: "passed", evidence: "reused" },
+      { name: "repair budget", status: "passed", evidence: "not charged" },
+    ], [{
+      kind: "design_worker_transport_recovery",
+      runId: run.id,
+      sourceWorkerTaskId: sourceWorker.id,
+      sourceWorkerAttemptId: sourceAttempt.attemptId,
+      workerTaskId: worker.id,
+      verifierTaskId: verifier.id,
+      recoveryKey,
+      reused: true,
+    }]);
+  }
+  if (sourceWorker.config?.designWorkerTransportRecovery !== undefined
+    || overview.tasks.some((task) => task.config?.designWorkerTransportRecovery !== undefined)) {
+    throw new Error(`design child ${run.id} already used its one bounded DSH transport recovery`);
+  }
+  const activeTasks = overview.tasks.filter((task) => task.status === "todo" || task.status === "running");
+  if (activeTasks.length > 0) {
+    throw new Error(`design child ${run.id} still has active tasks: ${activeTasks.map((task) => task.id).join(", ")}`);
+  }
+
+  const marker = {
+    schemaVersion: 1,
+    recoveryKey,
+    sourceWorkerTaskId: sourceWorker.id,
+    sourceWorkerAttemptId: sourceAttempt.attemptId,
+    sourceVerifierTaskId: sourceVerifier.id,
+    plannerTaskId: planner.id,
+    maxRecoveries: 1,
+    reason: action.reason ?? "split one DSH model transport from its denied tool execution plane",
+  };
+  const workerTaskId = makeId("task");
+  const verifierTaskId = makeId("task");
+  harness.createTaskWithDb(db, {
+    id: workerTaskId,
+    runId: run.id,
+    parentId: sourceWorker.id,
+    cycleId: sourceWorker.cycleId,
+    role: "worker",
+    goal: sourceWorker.goal,
+    prompt: sourceWorker.prompt,
+    dependsOn: [planner.id],
+    doneWhen: sourceWorker.doneWhen,
+    worktreePath: null,
+    config: {
+      ...sourceWorker.config,
+      permissionMode: "workspace-write",
+      dshProfileIsolation: "base-headless",
+      dshRequiredPlugins: [],
+      dshModelTransport: "host-brokered-deepseek",
+      dshToolNetwork: "deny",
+      forbidBrowser: true,
+      browserProcessPolicy: "deny",
+      sourceWorktreePath: worktreePath,
+      dshFilePolicy: filePolicy,
+      designWorkerTransportRecovery: marker,
+    },
+  });
+  harness.createTaskWithDb(db, {
+    id: verifierTaskId,
+    runId: run.id,
+    parentId: workerTaskId,
+    cycleId: sourceWorker.cycleId,
+    role: "verifier",
+    goal: sourceVerifier.goal,
+    prompt: sourceVerifier.prompt,
+    dependsOn: [workerTaskId],
+    doneWhen: sourceVerifier.doneWhen,
+    worktreePath: null,
+    config: {
+      ...sourceVerifier.config,
+      permissionMode: "read-only",
+      readOnly: true,
+      forbidImplementation: true,
+      forbidBrowser: true,
+      browserProcessPolicy: "deny",
+      sourceTaskId: workerTaskId,
+      sourceWorktreePath: worktreePath,
+      designWorkerTransportRecovery: marker,
+    },
+  });
+  harness.updateRunWithDb(db, {
+    runId: run.id,
+    status: "todo",
+    contextPatch: { designWorkerTransportRecovery: { ...marker, workerTaskId, verifierTaskId } },
+  });
+  return doneResult(action.type, `Design Worker transport recovery ${recoveryKey} materialized.`, [
+    { name: "model transport", status: "passed", evidence: "host-brokered-deepseek" },
+    { name: "tool sandbox", status: "passed", evidence: "network deny; exact frozen paths; zero credentials" },
+    { name: "independent Verifier dependency", status: "passed", evidence: `${verifierTaskId}->${workerTaskId}` },
+    { name: "repair budget", status: "passed", evidence: "not charged" },
+  ], [{
+    kind: "design_worker_transport_recovery",
     runId: run.id,
     sourceWorkerTaskId: sourceWorker.id,
     sourceWorkerAttemptId: sourceAttempt.attemptId,
