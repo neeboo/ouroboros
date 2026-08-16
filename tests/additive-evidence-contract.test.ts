@@ -189,6 +189,132 @@ describe("additive evidence-contract delivery", () => {
     });
     expect(reconcileAdditiveEvidenceContract({ harness, runId: fixture.deliveryRunId })).toEqual([]);
   });
+
+  test("audited retired bare tasks do not displace the verified additive system lineage at closeout", () => {
+    const fixture = seedAdditiveDelivery(harness, dir, true);
+    applyHarnessAction(harness, {
+      type: "materializeAdditiveEvidenceContractRecovery",
+      runId: fixture.deliveryRunId,
+      plannerTaskId: fixture.plannerTaskId,
+    } as never);
+
+    const graph = harness.getRun(fixture.deliveryRunId)!.context.additiveEvidenceContractTaskGraph as Record<string, string>;
+    expect(reconcileAdditiveEvidenceContract({ harness, runId: fixture.deliveryRunId })).toEqual([
+      expect.objectContaining({ status: "done", systemTaskId: graph.systemTaskId }),
+    ]);
+    harness.recordAttempt({
+      taskId: graph.verifierTaskId,
+      input: { executor: "codex-resumable", permissionMode: "read-only" },
+      output: {
+        status: "done",
+        verdict: "pass",
+        summary: "The additive overlay and all immutable bindings passed independent verification.",
+        changedFiles: [],
+        checks: Array.from({ length: 16 }, (_, index) => ({
+          name: `frozen additive check ${index + 1}`,
+          status: "passed",
+          evidence: graph.graphSha256,
+        })),
+        artifacts: [{ kind: "additive_evidence_contract_verifier_receipt", graphSha256: graph.graphSha256 }],
+        problems: [],
+      },
+    });
+
+    const closed = applyHarnessAction(harness, {
+      type: "prepareRunDrain",
+      runId: fixture.deliveryRunId,
+      maxTries: 3,
+    });
+    const replay = applyHarnessAction(harness, {
+      type: "prepareRunDrain",
+      runId: fixture.deliveryRunId,
+      maxTries: 3,
+    });
+
+    expect(closed).toMatchObject({
+      status: "done",
+      artifacts: [expect.objectContaining({
+        kind: "additive_evidence_contract_verified",
+        systemTaskId: graph.systemTaskId,
+        verifierTaskId: graph.verifierTaskId,
+        packageOnly: true,
+        evidenceContractOnly: true,
+        targetFilesChanged: 0,
+      })],
+    });
+    expect(replay).toMatchObject({ status: "done" });
+    expect(harness.getRun(fixture.deliveryRunId)).toMatchObject({
+      status: "done",
+      context: {
+        additiveEvidenceContractCloseout: {
+          status: "verified",
+          packageOnly: true,
+          evidenceContractOnly: true,
+          targetFilesChanged: 0,
+          graphSha256: graph.graphSha256,
+        },
+      },
+    });
+    expect(harness.getTask(fixture.badWorkerId!)?.config).toMatchObject({
+      retired: true,
+      retiredByAction: "materializeAdditiveEvidenceContractRecovery",
+    });
+    expect(harness.getTask(fixture.badVerifierId!)?.config).toMatchObject({
+      retired: true,
+      retiredByAction: "materializeAdditiveEvidenceContractRecovery",
+    });
+    expect(harness.getRun("run_source_blocked")).toMatchObject({
+      status: "blocked",
+      context: { repairReplanBudget: { used: 1, limit: 3 } },
+    });
+    const finalOverview = harness.getRunOverview({ runId: fixture.deliveryRunId, eventLimit: 0 });
+    expect(finalOverview.tasks.some((task) => task.role === "goal-review")).toBe(false);
+    expect(finalOverview.tasks.some((task) => task.status === "todo" || task.status === "running")).toBe(false);
+    expect(finalOverview.threads.some((thread) => thread.status === "running")).toBe(false);
+  });
+
+  test("a real unverified worker still blocks additive closeout", () => {
+    const fixture = seedAdditiveDelivery(harness, dir, true);
+    harness.recordAttempt({
+      taskId: fixture.badWorkerId!,
+      input: { executor: "codex-resumable" },
+      output: {
+        status: "done",
+        summary: "A real worker changed the delivery.",
+        changedFiles: ["src/unverified.ts"],
+        checks: [],
+        artifacts: [],
+        problems: [],
+      },
+    });
+    applyHarnessAction(harness, {
+      type: "materializeAdditiveEvidenceContractRecovery",
+      runId: fixture.deliveryRunId,
+      plannerTaskId: fixture.plannerTaskId,
+    } as never);
+    const graph = harness.getRun(fixture.deliveryRunId)!.context.additiveEvidenceContractTaskGraph as Record<string, string>;
+    reconcileAdditiveEvidenceContract({ harness, runId: fixture.deliveryRunId });
+    harness.recordAttempt({
+      taskId: graph.verifierTaskId,
+      input: { executor: "codex-resumable", permissionMode: "read-only" },
+      output: {
+        status: "done",
+        verdict: "pass",
+        summary: "The overlay itself passed.",
+        changedFiles: [],
+        checks: [{ name: "overlay", status: "passed", evidence: graph.graphSha256 }],
+        artifacts: [],
+        problems: [],
+      },
+    });
+
+    expect(() => applyHarnessAction(harness, {
+      type: "prepareRunDrain",
+      runId: fixture.deliveryRunId,
+      maxTries: 3,
+    })).toThrow(/latest repair lineage.*has no passing verifier/i);
+    expect(harness.getRun(fixture.deliveryRunId)?.status).toBe("todo");
+  });
 });
 
 function seedAdditiveDelivery(harness: Harness, rootPath: string, includeLegacyBareTasks = false) {

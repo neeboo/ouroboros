@@ -13731,27 +13731,87 @@ function prepareRunDrain(harness: Harness, action: Extract<HarnessAction, { type
         verifierTaskId: verifierTask.id,
       }]);
     }
-    const latestVerifier = harness.listLatestAttemptsForTasks([verifierTask.id])[0] ?? null;
+    const systemSession = [...overview.sessions].reverse().find((session) => session.taskId === systemTask.id) ?? null;
+    const verifierSession = [...overview.sessions].reverse().find((session) => session.taskId === verifierTask.id) ?? null;
+    const overlayActionEventId = (systemSession?.output.artifacts ?? []).flatMap((artifact) => {
+      const receipt = objectRecordOrNull(artifact);
+      return receipt?.kind === "harness_action_event"
+        && receipt.actionType === "recordAdditiveEvidenceContractOverlay"
+        && typeof receipt.actionEventId === "string"
+        ? [receipt.actionEventId]
+        : [];
+    })[0] ?? null;
+    const overlayState = objectRecordOrNull(run.context.additiveEvidenceContractOverlayState);
+    const overlay = objectRecordOrNull(run.context.additiveEvidenceContractOverlay);
+    const bundle = objectRecordOrNull(run.context.targetSystemEvidenceBundle);
+    const sourceBinding = objectRecordOrNull(bundle?.sourceRun);
+    const sourceRun = typeof sourceBinding?.id === "string" ? harness.getRun(sourceBinding.id) : null;
+    const failedVerifierCheck = (verifierSession?.output.checks ?? []).some((check) => {
+      const value = objectRecordOrNull(check);
+      return value?.status === "failed";
+    });
     if (systemTask.status === "done" && verifierTask.status === "done"
-      && latestVerifier?.status === "done" && latestVerifier.problems.length === 0) {
+      && verifierTask.dependsOn.length === 1 && verifierTask.dependsOn[0] === systemTask.id
+      && systemSession?.status === "done" && systemSession.output.status === "done"
+      && overlayActionEventId
+      && verifierSession?.status === "done" && verifierSession.output.status === "done"
+      && verifierSession.output.verdict === "pass"
+      && (verifierSession.output.problems ?? []).length === 0
+      && !failedVerifierCheck
+      && (verifierSession.output.changedFiles ?? []).length === 0
+      && overlayState?.status === "recorded"
+      && overlayState.recordedBySystemTaskId === systemTask.id
+      && overlayState.overlaySha256 === additiveGraph.overlaySha256
+      && overlay?.overlaySha256 === additiveGraph.overlaySha256
+      && bundle?.bundleSha256 === additiveGraph.bundleSha256
+      && sourceRun?.status === "blocked"
+      && sourceRun.projectId === run.projectId
+      && (typeof sourceBinding?.repairBudgetSha256 !== "string"
+        || canonicalEvolutionValueSha256(sourceRun.context.repairReplanBudget) === sourceBinding.repairBudgetSha256)
+      && !overview.tasks.some((task) => task.status === "todo" || task.status === "running")
+      && !overview.threads.some((thread) => thread.status === "running")) {
       harness.updateRun({
         runId: run.id,
         status: "done",
         contextPatch: {
           additiveEvidenceContractCloseout: {
+            schemaVersion: 1,
             status: "verified",
+            packageOnly: true,
+            evidenceContractOnly: true,
+            targetFilesChanged: 0,
             systemTaskId: systemTask.id,
             verifierTaskId: verifierTask.id,
-            verifierAttemptId: latestVerifier.attemptId,
+            systemAttemptId: systemSession.attemptId,
+            overlayActionEventId,
+            overlaySha256: additiveGraph.overlaySha256,
+            bundleSha256: additiveGraph.bundleSha256,
+            verifierAttemptId: verifierSession.attemptId,
             graphSha256: additiveGraph.graphSha256,
+            sourceRunId: sourceRun.id,
+            sourceRepairBudgetSha256: canonicalEvolutionValueSha256(sourceRun.context.repairReplanBudget),
           },
         },
       });
       return doneResult(action.type, `Run ${run.id} additive evidence-contract overlay is independently verified.`, [
         { name: "host overlay task", status: "passed", evidence: systemTask.id },
-        { name: "independent verifier", status: "passed", evidence: `${verifierTask.id}:${latestVerifier.attemptId}` },
+        { name: "overlay action receipt", status: "passed", evidence: overlayActionEventId },
+        { name: "independent verifier", status: "passed", evidence: `${verifierTask.id}:${verifierSession.attemptId}` },
+        { name: "delivery semantics", status: "passed", evidence: "packageOnly=true;evidenceContractOnly=true;targetFilesChanged=0" },
         { name: "Goal Review", status: "passed", evidence: "not created" },
-      ], [{ kind: "additive_evidence_contract_verified", systemTaskId: systemTask.id, verifierTaskId: verifierTask.id }]);
+      ], [{
+        kind: "additive_evidence_contract_verified",
+        systemTaskId: systemTask.id,
+        verifierTaskId: verifierTask.id,
+        verifierAttemptId: verifierSession.attemptId,
+        overlayActionEventId,
+        graphSha256: additiveGraph.graphSha256,
+        overlaySha256: additiveGraph.overlaySha256,
+        bundleSha256: additiveGraph.bundleSha256,
+        packageOnly: true,
+        evidenceContractOnly: true,
+        targetFilesChanged: 0,
+      }]);
     }
     if (run.status !== "blocked") harness.updateRunStatus({ runId: run.id, status: "blocked" });
     return blockedResult(action.type, `Run ${run.id} additive evidence-contract verification failed closed.`, [

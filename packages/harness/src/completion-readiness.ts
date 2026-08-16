@@ -24,15 +24,19 @@ export interface RunCompletionReadiness {
 }
 
 export function describeRunCompletionReadiness(overview: RunOverview): RunCompletionReadiness {
-  const workers = overview.tasks.filter((task) => task.role === "worker");
+  const workers = overview.tasks.filter((task) => task.role === "worker" && !isAuditedRetiredAdditiveTask(overview, task));
   const targetDesignBlockers = describeTargetSystemDesignAuthorityBlockers(overview);
   if (targetDesignBlockers.length > 0) {
     return { required: true, verifiedWorkerTaskIds: [], blockers: targetDesignBlockers };
   }
+  const additiveBlockers = describeAdditiveEvidenceContractBlockers(overview);
+  const additiveGraphPresent = objectOrNull(overview.run?.context.additiveEvidenceContractTaskGraph)?.kind
+    === "additive-evidence-contract";
   const requiredEvidence = readRequiredEvidence(overview.run?.context.designEvaluationContract);
   const receiptGatedAssessment = overview.run?.context.source === "design"
     && requiredEvidence.some((item) => RECEIPT_EVIDENCE.test(item));
-  const required = overview.run?.context.source === "design" && (workers.length > 0 || receiptGatedAssessment);
+  const required = overview.run?.context.source === "design"
+    && (workers.length > 0 || receiptGatedAssessment || additiveGraphPresent);
   if (!required) {
     return { required: false, verifiedWorkerTaskIds: [], blockers: [] };
   }
@@ -41,7 +45,7 @@ export function describeRunCompletionReadiness(overview: RunOverview): RunComple
     ? describeAssessmentEvidenceBlockers(overview)
     : [];
   if (workers.length === 0) {
-    return { required, verifiedWorkerTaskIds: [], blockers: assessmentBlockers };
+    return { required, verifiedWorkerTaskIds: [], blockers: [...assessmentBlockers, ...additiveBlockers] };
   }
 
   const verifiedPackageWorker = verifiedPackageCloseoutWorker(overview, workers, requiredEvidence);
@@ -88,7 +92,7 @@ export function describeRunCompletionReadiness(overview: RunOverview): RunComple
 
   const heads = workers.filter((worker) => !supersededWorkerIds.has(worker.id));
   const verifiedWorkerTaskIds: string[] = [];
-  const blockers: CompletionVerificationBlocker[] = [...assessmentBlockers];
+  const blockers: CompletionVerificationBlocker[] = [...assessmentBlockers, ...additiveBlockers];
   for (const worker of heads) {
     const verifier = latestVerifierForWorker(overview, worker.id);
     if (worker.status !== "done" || !isPassingVerifier(overview, worker, verifier, requiredEvidence)) {
@@ -102,6 +106,75 @@ export function describeRunCompletionReadiness(overview: RunOverview): RunComple
     verifiedWorkerTaskIds.push(worker.id);
   }
   return { required, verifiedWorkerTaskIds, blockers };
+}
+
+function isAuditedRetiredAdditiveTask(overview: RunOverview, task: Task) {
+  const graph = objectOrNull(overview.run?.context.additiveEvidenceContractTaskGraph);
+  if (graph?.kind !== "additive-evidence-contract" || task.status !== "blocked") return false;
+  const config = task.config ?? {};
+  return config.retired === true
+    && config.retiredByAction === "materializeAdditiveEvidenceContractRecovery"
+    && config.retiredReason === "replaced by the frozen additive evidence-contract host graph"
+    && task.id !== graph.plannerTaskId
+    && task.id !== graph.systemTaskId
+    && task.id !== graph.verifierTaskId;
+}
+
+function describeAdditiveEvidenceContractBlockers(overview: RunOverview): CompletionVerificationBlocker[] {
+  const graph = objectOrNull(overview.run?.context.additiveEvidenceContractTaskGraph);
+  if (graph?.kind !== "additive-evidence-contract") return [];
+  const systemTaskId = typeof graph.systemTaskId === "string" ? graph.systemTaskId : null;
+  const verifierTaskId = typeof graph.verifierTaskId === "string" ? graph.verifierTaskId : null;
+  const graphSha256 = typeof graph.graphSha256 === "string" ? graph.graphSha256 : null;
+  const systemTask = systemTaskId
+    ? overview.tasks.find((task) => task.id === systemTaskId && task.role === "system") ?? null
+    : null;
+  const verifierTask = verifierTaskId
+    ? overview.tasks.find((task) => task.id === verifierTaskId && task.role === "verifier") ?? null
+    : null;
+  const systemContract = objectOrNull(systemTask?.config?.additiveEvidenceContractExecutionContract);
+  const verifierContract = objectOrNull(verifierTask?.config?.additiveEvidenceContractExecutionContract);
+  const systemSession = systemTask
+    ? [...overview.sessions].reverse().find((session) => session.taskId === systemTask.id) ?? null
+    : null;
+  const verifierSession = verifierTask
+    ? [...overview.sessions].reverse().find((session) => session.taskId === verifierTask.id) ?? null
+    : null;
+  const systemActionReceipt = (systemSession?.output.artifacts ?? []).some((artifact) => {
+    const record = objectOrNull(artifact);
+    return record?.kind === "harness_action_event"
+      && record.actionType === "recordAdditiveEvidenceContractOverlay"
+      && typeof record.actionEventId === "string";
+  });
+  const valid = Boolean(
+    systemTaskId
+      && verifierTaskId
+      && graphSha256
+      && SHA256.test(graphSha256)
+      && systemTask?.status === "done"
+      && verifierTask?.status === "done"
+      && verifierTask.dependsOn.length === 1
+      && verifierTask.dependsOn[0] === systemTask.id
+      && systemContract?.stage === "system-overlay"
+      && systemContract.graphSha256 === graphSha256
+      && verifierContract?.stage === "independent-verifier"
+      && verifierContract.graphSha256 === graphSha256
+      && systemSession?.status === "done"
+      && systemSession.output.status === "done"
+      && systemActionReceipt
+      && verifierSession?.status === "done"
+      && verifierSession.output.status === "done"
+      && verifierSession.output.verdict === "pass"
+      && (verifierSession.output.problems ?? []).length === 0
+      && !(verifierSession.output.checks ?? []).some((check) => isFailedCheck(check))
+      && (verifierSession.output.changedFiles ?? []).length === 0,
+  );
+  if (valid) return [];
+  return [{
+    taskId: systemTaskId ?? overview.run?.id ?? "additive-evidence-contract",
+    verifierTaskId,
+    reason: "additive evidence-contract completion requires the frozen host overlay receipt and an exact independent passing verifier",
+  }];
 }
 
 function verifiedPackageCloseoutWorker(overview: RunOverview, workers: Task[], requiredEvidence: string[]) {
