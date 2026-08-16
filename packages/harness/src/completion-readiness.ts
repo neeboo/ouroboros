@@ -44,6 +44,11 @@ export function describeRunCompletionReadiness(overview: RunOverview): RunComple
     return { required, verifiedWorkerTaskIds: [], blockers: assessmentBlockers };
   }
 
+  const verifiedPackageWorker = verifiedPackageCloseoutWorker(overview, workers, requiredEvidence);
+  if (verifiedPackageWorker) {
+    return { required, verifiedWorkerTaskIds: [verifiedPackageWorker.id], blockers: assessmentBlockers };
+  }
+
   const taskById = new Map(overview.tasks.map((task) => [task.id, task]));
   const taskIndexById = new Map(overview.tasks.map((task, index) => [task.id, index]));
   const supersededWorkerIds = new Set<string>();
@@ -97,6 +102,23 @@ export function describeRunCompletionReadiness(overview: RunOverview): RunComple
     verifiedWorkerTaskIds.push(worker.id);
   }
   return { required, verifiedWorkerTaskIds, blockers };
+}
+
+function verifiedPackageCloseoutWorker(overview: RunOverview, workers: Task[], requiredEvidence: string[]) {
+  const closeout = objectOrNull(overview.run?.context.verifiedPackageCloseout);
+  if (!closeout || closeout.schemaVersion !== 1 || closeout.packageOnly !== true || closeout.overallGoalComplete !== false
+    || typeof closeout.verifierTaskId !== "string" || typeof closeout.commitSha !== "string"
+    || !/^[0-9a-f]{40}$/.test(closeout.commitSha)) {
+    return null;
+  }
+  const verifier = overview.tasks.find((task) => task.id === closeout.verifierTaskId && task.role === "verifier") ?? null;
+  if (!verifier) return null;
+  const sourceWorkers = workers.filter((worker) => verifier.dependsOn.includes(worker.id));
+  if (sourceWorkers.length !== 1) return null;
+  const worker = sourceWorkers[0]!;
+  const session = [...overview.sessions].reverse().find((candidate) => candidate.taskId === verifier.id);
+  if (!session || session.output.verdict !== "pass") return null;
+  return worker.status === "done" && isPassingVerifier(overview, worker, verifier, requiredEvidence) ? worker : null;
 }
 
 function describeTargetSystemDesignAuthorityBlockers(overview: RunOverview): CompletionVerificationBlocker[] {

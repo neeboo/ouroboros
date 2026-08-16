@@ -12041,6 +12041,18 @@ describe("verified package delivery closeout", () => {
         designProposal: { recommendation: "Build the next runtime integration after this package." },
       },
     });
+    const supersededWorkerTaskId = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Historical package attempt",
+      prompt: "This historical attempt remains blocked for audit.",
+      worktreePath: repoPath,
+    });
+    harness.recordAttempt({
+      taskId: supersededWorkerTaskId,
+      input: { executor: "test" },
+      output: { status: "blocked", summary: "Historical attempt failed.", changedFiles: [], checks: [], artifacts: [], problems: ["historical blocker"] },
+    });
     const repairTaskId = harness.createTask({
       runId,
       role: "worker",

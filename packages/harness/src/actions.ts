@@ -595,6 +595,7 @@ const FROZEN_DESIGN_CONTEXT_KEYS = new Set([
   "targetSystemDesignQuiescence",
   "researchEvidenceLinks",
   "targetSystemEvidenceBundle",
+  "verifiedPackageCloseout",
 ]);
 
 function frozenDesignContextKeys(keys: Iterable<string>): string[] {
@@ -8205,7 +8206,8 @@ function completeVerifiedPackageDelivery(
           verifiedPackageEvidence: { signalId, ...closeout },
         },
       });
-      harness.updateRunWithDb(db, { runId: run.id, status: "done", contextPatch: { verifiedPackageCloseout: closeout } });
+      harness.updateRunWithDb(db, { runId: run.id, contextPatch: { verifiedPackageCloseout: closeout } });
+      harness.updateRunStatusWithDb(db, { runId: run.id, status: "done" });
       return doneResult(action.type, `Verified package ${commit.sha} closed and runtime integration Designer ${nextTaskId} created.`, [
         { name: "exact commit", status: "passed", evidence: commitEvent.id },
         { name: "independent remote readback", status: "passed", evidence: pushEvent.id },
