@@ -2059,6 +2059,7 @@ function applyCreateRunsFromDesignWithDb(
             ...(runtimeIntegrationBoundary ? {
               runtimeIntegrationBoundary,
               runtimeIntegrationTaskGraph: runtimeTaskGraph,
+              targetSystemEvidenceBundle: proposalSourceRun.context.targetSystemEvidenceBundle,
             } : {}),
             verifierContract: {
               schemaVersion: 1,
@@ -2270,6 +2271,7 @@ function inheritedControlContext(
       "goalContract",
       "founderCharterId",
       "runtimeIntegrationBoundary",
+      "targetSystemEvidenceBundle",
     ]
       .filter((key) => context[key] !== undefined)
       .map((key) => [key, context[key]]),

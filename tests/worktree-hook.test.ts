@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { createGitWorktreeHook } from "../packages/runner/src";
+import type { StartHookInput } from "../packages/runner/src";
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { mkdtemp, readFile, readlink, rm, symlink, writeFile } from "node:fs/promises";
@@ -115,6 +116,41 @@ describe("git worktree hook", () => {
       "-b",
       "ouroboros/task_hodor_web",
       "main",
+    ]);
+  });
+
+  test("uses the frozen task repository and exact head for a multi-repository runtime task", async () => {
+    const calls: string[][] = [];
+    const expectedHead = "d6b4b9af6b4b442891588b6ef06ca966e537a89e";
+    const hook = createGitWorktreeHook({
+      repoPath: "/repos/backend",
+      baseRef: "main",
+      runCommand: async ({ cmd }) => {
+        calls.push(cmd);
+        return { exitCode: 0, stdout: "", stderr: "" };
+      },
+    });
+    const input = hookInput("/repos/frontend/.ouroboros/worktrees/runtime-front");
+    input.run.projectRoot = "/repos/backend";
+    input.task.config = {
+      repositoryRoot: "/repos/frontend",
+      expectedHead,
+      repositoryId: "target-frontend",
+      worktreeStrategy: { mode: "new-isolated-worktree", isolated: true },
+    };
+
+    await hook(input);
+
+    expect(calls[0]).toEqual([
+      "git",
+      "-C",
+      "/repos/frontend",
+      "worktree",
+      "add",
+      "/repos/frontend/.ouroboros/worktrees/runtime-front",
+      "-b",
+      "ouroboros/task_1",
+      expectedHead,
     ]);
   });
 
@@ -689,7 +725,7 @@ function spawnCommand(cmd: string[]) {
   };
 }
 
-function hookInput(cwd: string) {
+function hookInput(cwd: string): StartHookInput {
   return {
     run: {
       id: "run_1",

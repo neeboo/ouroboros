@@ -454,7 +454,7 @@ class CodexResumableOrchestrator {
     const sessionName = task.sessionRef ?? `task-${task.id}`;
     const route = this.resolveRoute(run, task);
     const cwd = task.worktreePath ?? this.worktreeFor(task) ?? this.cwd;
-    const runtimeEvidenceProblem = runtimeIntegrationEvidenceProblem(run, task);
+    const runtimeEvidenceProblem = runtimeIntegrationEvidenceProblem(run, task, this.harness);
     if (runtimeEvidenceProblem) {
       const attemptId = this.harness.recordAttempt({
         taskId,
@@ -915,7 +915,7 @@ class CodexResumableOrchestrator {
       const cwd = task.worktreePath ?? this.cwd;
       try {
         const route = this.resolveRoute(run, task);
-        const runtimeEvidenceProblem = runtimeIntegrationEvidenceProblem(run, task);
+        const runtimeEvidenceProblem = runtimeIntegrationEvidenceProblem(run, task, this.harness);
         if (runtimeEvidenceProblem) {
           const attemptId = this.harness.recordAttempt({
             taskId: task.id,

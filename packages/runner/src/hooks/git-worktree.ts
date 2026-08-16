@@ -18,8 +18,8 @@ export function createGitWorktreeHook(options: {
   const setupByWorktree = new Map<string, ReturnType<StartHook>>();
 
   const runSetup: StartHook = async ({ run, task, cwd }) => {
-    const repoPath = run.projectRoot ?? options.repoPath;
-    const resolvedBaseRef = worktreeBaseRef(run.context, defaultBaseRef);
+    const repoPath = taskRepositoryRoot(task.config?.repositoryRoot, run.projectRoot ?? options.repoPath);
+    const resolvedBaseRef = worktreeBaseRef(run.context, defaultBaseRef, task.config?.expectedHead);
     if (!resolvedBaseRef.ok) {
       return {
         checks: [{ name: "git worktree base", status: "failed", summary: resolvedBaseRef.problem }],
@@ -174,8 +174,8 @@ export function createGitWorktreeHook(options: {
   };
 
   return async (input) => {
-    const repoPath = resolve(input.run.projectRoot ?? options.repoPath);
-    const baseRef = worktreeBaseRef(input.run.context, defaultBaseRef);
+    const repoPath = resolve(taskRepositoryRoot(input.task.config?.repositoryRoot, input.run.projectRoot ?? options.repoPath));
+    const baseRef = worktreeBaseRef(input.run.context, defaultBaseRef, input.task.config?.expectedHead);
     if (!baseRef.ok) {
       return {
         checks: [{ name: "git worktree base", status: "failed", summary: baseRef.problem }],
@@ -211,8 +211,8 @@ export function createGitWorktreeHook(options: {
   };
 }
 
-function worktreeBaseRef(context: Record<string, unknown>, fallback: string) {
-  const expectedRemoteSha = context.expectedRemoteSha;
+function worktreeBaseRef(context: Record<string, unknown>, fallback: string, taskExpectedHead?: unknown) {
+  const expectedRemoteSha = taskExpectedHead ?? context.expectedRemoteSha;
   if (expectedRemoteSha === undefined) {
     return { ok: true as const, baseRef: fallback };
   }
@@ -226,6 +226,14 @@ function worktreeBaseRef(context: Record<string, unknown>, fallback: string) {
     };
   }
   return { ok: true as const, baseRef: expectedRemoteSha };
+}
+
+function taskRepositoryRoot(value: unknown, fallback: string) {
+  if (value === undefined) return fallback;
+  if (typeof value !== "string" || value.trim() !== value || value.length === 0) {
+    throw new Error("task repositoryRoot must be a non-empty exact path");
+  }
+  return value;
 }
 
 function dependencyInstallCommand(cwd: string, hasTrackedBunLock: boolean) {

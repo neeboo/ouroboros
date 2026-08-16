@@ -7,6 +7,15 @@ export {
 export { checkpointDatabase, initDatabase, withDatabase, withReadOnlyDatabase } from "./database";
 export type { HarnessDatabase } from "./database";
 export { makeId } from "./ids";
+export {
+  projectRuntimeIntegrationTaskGraph,
+  RUNTIME_INTEGRATION_TASK_GRAPH,
+  runtimeIntegrationTaskExecutionProblem,
+} from "./runtime-integration-tasks";
+export type {
+  RuntimeIntegrationPlannedTask,
+  RuntimeIntegrationTaskProjection,
+} from "./runtime-integration-tasks";
 export { filterOuroborosRuntimePaths, isOuroborosRuntimePath, OUROBOROS_RUNTIME_PATHS } from "./runtime-paths";
 export {
   isStrictIsoTimestamp,

@@ -47,7 +47,7 @@ export async function runNextReadyTask(input: RunNextReadyTaskInput) {
   const cwd = task.worktreePath
     ?? (run.projectId ? input.harness.getProject(run.projectId)?.rootPath ?? process.cwd() : process.cwd());
   const route = resolveExecutionRoute({ run, task });
-  const runtimeEvidenceProblem = runtimeIntegrationEvidenceProblem(run, task);
+  const runtimeEvidenceProblem = runtimeIntegrationEvidenceProblem(run, task, input.harness);
   if (runtimeEvidenceProblem) {
     const attemptId = input.harness.recordAttempt({
       taskId: task.id,
@@ -194,7 +194,7 @@ export async function runReadyTasks(input: RunReadyTasksInput) {
         cliExecutor: input.cliExecutor,
         globalModel: input.model,
       });
-      const runtimeEvidenceProblem = runtimeIntegrationEvidenceProblem(run, task);
+      const runtimeEvidenceProblem = runtimeIntegrationEvidenceProblem(run, task, input.harness);
       if (runtimeEvidenceProblem) {
         const attemptId = input.harness.recordAttempt({
           taskId: task.id,

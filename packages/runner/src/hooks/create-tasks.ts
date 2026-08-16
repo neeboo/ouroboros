@@ -1,4 +1,10 @@
-import { makeId, type Harness, type PlannedTask, type Task } from "@ouroboros/harness";
+import {
+  makeId,
+  projectRuntimeIntegrationTaskGraph,
+  type Harness,
+  type PlannedTask,
+  type Task,
+} from "@ouroboros/harness";
 import { validatePlannedTasks } from "../executors/output";
 import type { StopHook } from "../types";
 import {
@@ -82,7 +88,37 @@ export function createTasksFromOutputHook(options: { harness: Harness }): StopHo
       };
     }
 
+    const runtimeBoundary = task.role === "planner" && Array.isArray(task.config?.runtimeIntegrationTaskGraph)
+      ? task.config.runtimeIntegrationBoundary
+      : null;
+    const runtimeBundle = runtimeBoundary
+      ? task.config?.targetSystemEvidenceBundle ?? run.context.targetSystemEvidenceBundle
+      : null;
+    const runtimeProjection = runtimeBoundary
+      ? projectRuntimeIntegrationTaskGraph({
+          runId: run.id,
+          plannerTaskId: task.id,
+          boundary: runtimeBoundary,
+          evidenceBundle: runtimeBundle,
+          plannedTasks,
+          taskIds: plannedEntries.map((entry) => entry.id),
+          verifierContract: objectConfig(task.config?.verifierContract, "runtime integration verifierContract"),
+          frozenDesignPlanner: objectConfig(task.config?.frozenDesignPlanner, "runtime integration frozenDesignPlanner"),
+        })
+      : null;
     const prepared = plannedEntries.map(({ id, plannedTask }, index) => {
+      const projected = runtimeProjection?.[index];
+      if (projected) {
+        return {
+          id,
+          plannedTask,
+          dependsOn: projected.dependsOn,
+          sourceWorktreePath: null,
+          parentId: projected.parentId,
+          worktreePath: projected.worktreePath,
+          config: projected.config,
+        };
+      }
       const governedPlanner = run.context.source === "design"
         && task.role === "planner"
         && task.config?.frozenDesignPlanner != null;
@@ -119,7 +155,7 @@ export function createTasksFromOutputHook(options: { harness: Harness }): StopHo
           goalReviewContinuation: { sourceTaskId: task.id, ordinal: index },
         } : {}),
       };
-      return { id, plannedTask, dependsOn, sourceWorktreePath, config };
+      return { id, plannedTask, dependsOn, sourceWorktreePath, parentId: null, worktreePath: null, config };
     });
     const createPrepared = (entry: typeof prepared[number], db?: Parameters<Harness["createTaskWithDb"]>[0]) => {
       const input = {
@@ -130,7 +166,8 @@ export function createTasksFromOutputHook(options: { harness: Harness }): StopHo
         prompt: entry.plannedTask.prompt,
         dependsOn: entry.dependsOn,
         doneWhen: entry.plannedTask.doneWhen ?? [],
-        worktreePath: null,
+        parentId: entry.parentId,
+        worktreePath: entry.worktreePath,
         config: entry.config,
       };
       const taskId = db ? options.harness.createTaskWithDb(db, input) : options.harness.createTask(input);
@@ -355,6 +392,13 @@ export function createTasksFromOutputHook(options: { harness: Harness }): StopHo
       artifacts: created,
     };
   };
+}
+
+function objectConfig(value: unknown, label: string): Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error(`${label} must be an object`);
+  }
+  return value as Record<string, unknown>;
 }
 
 function configuredRoleBackend(context: Record<string, unknown>, role: string) {

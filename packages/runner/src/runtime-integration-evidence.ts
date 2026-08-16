@@ -5,6 +5,7 @@ import {
   type Harness,
   type Run,
   type Task,
+  runtimeIntegrationTaskExecutionProblem,
 } from "@ouroboros/harness";
 
 function record(value: unknown, label: string): Record<string, unknown> {
@@ -25,8 +26,24 @@ function sameValue(left: unknown, right: unknown) {
   return canonicalEvolutionValueSha256(left) === canonicalEvolutionValueSha256(right);
 }
 
-export function runtimeIntegrationEvidenceProblem(run: Run, task: Task): string | null {
-  if (!task.config?.runtimeIntegrationDesignAdapter) return null;
+export function runtimeIntegrationEvidenceProblem(run: Run, task: Task, harness?: Harness): string | null {
+  if (!task.config?.runtimeIntegrationDesignAdapter) {
+    const boundary = run.context.runtimeIntegrationBoundary;
+    const graph = recordOrNull(boundary)?.taskGraph;
+    const runtimeStage = Array.isArray(graph) && graph.some((entry) => recordOrNull(entry)?.id === task.goal);
+    if (!runtimeStage && !task.config?.runtimeIntegrationExecutionContract) return null;
+    if (!task.config?.runtimeIntegrationExecutionContract) {
+      return `runtime integration execution contract is missing for ${task.id}`;
+    }
+    if (!harness) return `runtime integration execution contract cannot be validated without the authoritative harness for ${task.id}`;
+    return runtimeIntegrationTaskExecutionProblem({
+      runId: run.id,
+      boundary,
+      evidenceBundle: run.context.targetSystemEvidenceBundle,
+      task,
+      tasks: harness.getRunOverview({ runId: run.id, eventLimit: 0 }).tasks,
+    });
+  }
   try {
     const boundary = record(run.context.runtimeIntegrationBoundary, "runtimeIntegrationBoundary");
     const taskBoundary = record(task.config.runtimeIntegrationBoundary, "task runtimeIntegrationBoundary");
@@ -118,7 +135,29 @@ export function closeRuntimeIntegrationEvidenceFailure(input: {
   problem: string;
   attemptId?: string;
 }) {
-  if (!input.task.config?.runtimeIntegrationDesignAdapter || !input.run.projectId) return;
+  if (!input.run.projectId) return;
+  if (!input.task.config?.runtimeIntegrationDesignAdapter) {
+    applyHarnessAction(input.harness, {
+      type: "updateRunContext",
+      runId: input.run.id,
+      status: "blocked",
+      contextPatch: {
+        runtimeIntegrationTaskExecutionFailure: {
+          schemaVersion: 1,
+          taskId: input.task.id,
+          attemptId: input.attemptId ?? null,
+          problem: input.problem.slice(0, 1_024),
+          fingerprint: canonicalEvolutionValueSha256({
+            runId: input.run.id,
+            taskId: input.task.id,
+            problem: input.problem,
+          }),
+        },
+      },
+      reason: "runtime integration task failed its frozen execution-contract preflight",
+    });
+    return;
+  }
   const fingerprint = canonicalEvolutionValueSha256({
     runId: input.run.id,
     taskId: input.task.id,
@@ -170,4 +209,8 @@ export function closeRuntimeIntegrationEvidenceFailure(input: {
       nextStep: "new-independent-runtime-integration-designer-trigger",
     },
   });
+}
+
+function recordOrNull(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
 }

@@ -15,6 +15,7 @@ import {
 } from "./default-prompts";
 import { makeId } from "./ids";
 import { toJson } from "./json";
+import { runtimeIntegrationTaskExecutionProblem } from "./runtime-integration-tasks";
 import { assertRunCompletionReady } from "./completion-readiness";
 import {
   attemptEventFromRow,
@@ -3547,14 +3548,50 @@ function processIsAlive(pid: number) {
 }
 
 function assertTaskGovernanceBoundaryWithDb(db: HarnessDatabase, input: CreateTaskInput) {
-  if (input.role !== "worker") {
-    return;
-  }
   const runRow = db.query("select * from runs where id = $runId").get({ $runId: input.runId }) as RunRow | null;
   if (!runRow) {
     throw new Error(`run not found: ${input.runId}`);
   }
   const run = runFromRow(runRow);
+  const boundary = run.context.runtimeIntegrationBoundary;
+  const boundaryRecord = boundary && typeof boundary === "object" && !Array.isArray(boundary)
+    ? boundary as Record<string, unknown>
+    : null;
+  const graph = Array.isArray(boundaryRecord?.taskGraph) ? boundaryRecord.taskGraph : [];
+  const runtimeStage = graph.some((entry) => entry && typeof entry === "object" && !Array.isArray(entry)
+    && (entry as Record<string, unknown>).id === input.goal);
+  if (runtimeStage || input.config?.runtimeIntegrationExecutionContract) {
+    const storedTasks = (db.query("select * from tasks where run_id = $runId").all({ $runId: run.id }) as TaskRow[])
+      .map(taskFromRow)
+      .filter((task) => task.id !== input.id);
+    const candidate: Task = {
+      id: input.id ?? "<pending-runtime-task>",
+      runId: input.runId,
+      parentId: input.parentId ?? null,
+      cycleId: input.cycleId ?? "<pending-cycle>",
+      status: "todo",
+      role: input.role,
+      goal: input.goal,
+      prompt: input.prompt,
+      dependsOn: input.dependsOn ?? [],
+      doneWhen: input.doneWhen ?? [],
+      config: input.config,
+      worktreePath: input.worktreePath ?? null,
+      sessionRef: null,
+      contextVersion: 1,
+    };
+    const problem = runtimeIntegrationTaskExecutionProblem({
+      runId: run.id,
+      boundary,
+      evidenceBundle: run.context.targetSystemEvidenceBundle,
+      task: candidate,
+      tasks: [...storedTasks, candidate],
+    });
+    if (problem) throw new Error(problem);
+  }
+  if (input.role !== "worker") {
+    return;
+  }
   if (run.context.source === "target-system-design") {
     throw new Error(
       `target-system-design root ${run.id} cannot create or start a Worker; accepted design delivery must pass authority and createRunsFromDesign into a child run with a Planner`,
