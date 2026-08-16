@@ -4278,7 +4278,7 @@ describe("Harness actions", () => {
           artifacts: [
             {
               kind: "workerSha256Receipt",
-              sourceAttemptId,
+              projectId,
               itemCount: files.length,
               items: files.map(({ path, sha256, content }) => ({ path, sha256, byteLength: Buffer.byteLength(content) })),
             },

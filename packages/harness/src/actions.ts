@@ -4856,7 +4856,7 @@ function materializeAttemptArtifactsForVerification(
     const value = artifact && typeof artifact === "object" && !Array.isArray(artifact)
       ? artifact as Record<string, unknown>
       : null;
-    return value?.kind === "workerSha256Receipt" && value.sourceAttemptId === action.sourceAttemptId;
+    return value?.kind === "workerSha256Receipt" && value.projectId === run.projectId;
   }) as Array<Record<string, unknown>>;
   const retrievalReceipts = receiptArtifacts.filter((artifact) => {
     const value = artifact && typeof artifact === "object" && !Array.isArray(artifact)
@@ -4868,7 +4868,11 @@ function materializeAttemptArtifactsForVerification(
       && value.artifactWorktree === sourceTask.worktreePath;
   });
   if (shaReceipts.length !== 1 || retrievalReceipts.length !== 1) {
-    return failedHostEvidenceAction(action, "Receipt attempt does not bind one exact source attempt and artifact worktree.", checks);
+    return failedHostEvidenceAction(
+      action,
+      "Receipt attempt must contain one project-bound SHA-256 receipt and one exact source-attempt retrieval receipt.",
+      checks,
+    );
   }
   const receiptItems = Array.isArray(shaReceipts[0]!.items) ? shaReceipts[0]!.items : [];
   const normalizedReceiptFiles: WorkerFileReceipt[] = [];
