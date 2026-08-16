@@ -114,6 +114,7 @@ describe("CLI", () => {
     projectId: string;
     charterId: string;
     suffix: string;
+    version?: number;
   }) {
     const toolPolicySha256 = canonicalEvolutionValueSha256({
       fixture: "evolution-readback-tool-policy",
@@ -123,7 +124,7 @@ describe("CLI", () => {
       schemaVersion: 1 as const,
       id: `pack_evolution_readback_${input.suffix}`,
       targetSystemId: `target_evolution_readback_${input.suffix}`,
-      version: 1,
+      version: input.version ?? 1,
       knowledgeScope: `project:${input.projectId}` as const,
       objective: {
         charterId: input.charterId,
@@ -840,6 +841,146 @@ describe("CLI", () => {
     expect(overview.tasks[0].prompt).not.toContain("1".repeat(64));
     expect(overview.tasks[0].prompt).not.toContain("0679ef6f3d928221ef32f37f4666cf198ed10892078b53e34032af6eeda1034b");
     expect(await readFile(join(targetRoot, ".orbs", "harness.db"), "utf8")).toBe("stale-local-control-database");
+  });
+
+  test("turns an unrealizable frozen corpus into one independent read-only Designer trigger without changing old delivery state", async () => {
+    await runCli("init");
+    const setupHarness = new Harness(dbPath);
+    const kernelRoot = join(dir, "kernel-frozen-corpus-defect");
+    const targetRoot = join(dir, "target-frozen-corpus-defect");
+    await mkdir(kernelRoot, { recursive: true });
+    await mkdir(targetRoot, { recursive: true });
+    const kernelProjectId = setupHarness.createProject({ name: "Kernel", rootPath: kernelRoot });
+    const targetProjectId = setupHarness.createProject({ name: "Target", rootPath: targetRoot });
+    const charter = setupHarness.createFounderCharter({
+      projectId: targetProjectId,
+      mission: "Repair evidence contracts without weakening frozen history.",
+      activate: true,
+    });
+    const design = createAcceptedEvolutionDesignSource({
+      harness: setupHarness,
+      projectId: targetProjectId,
+      charterId: charter.id,
+      suffix: "unrealizable_v4",
+      version: 4,
+    });
+    const currentRunId = setupHarness.createRun({
+      projectId: targetProjectId,
+      goal: "Deliver the frozen v4 seven-file corpus",
+      context: {
+        ...design.runContext,
+        repairReplanBudget: { used: 2, limit: 3 },
+      },
+    });
+    const oldRunId = setupHarness.createRun({
+      projectId: targetProjectId,
+      goal: "Retain the exhausted predecessor as immutable evidence",
+      context: { repairReplanBudget: { used: 3, limit: 3 } },
+    });
+    setupHarness.updateRunStatus({ runId: currentRunId, status: "blocked" });
+    setupHarness.updateRunStatus({ runId: oldRunId, status: "blocked" });
+    const frozenCorpusSha256 = design.comparison.corpusSnapshotSha256;
+    const exactTreeSha = "f9db1410fc23c5681afa8d8746b7908e48e7fbe6";
+    const sealedFailureActionId = "action_sealed_failure_v4";
+    const signalResult = applyHarnessAction(setupHarness, {
+      type: "recordSignal",
+      projectId: targetProjectId,
+      sourceRunId: currentRunId,
+      signalClass: "system",
+      source: `blocked-run-outcome:${currentRunId}`,
+      title: "Frozen v4 corpus snapshot has no realizable host source",
+      summary: "Host verification found no matching fixture in isolated worktrees, candidate files, or Git history. The v4 comparison remains immutable and its staged seven files cannot be committed.",
+      observationTime: "2026-08-16T01:00:00.000Z",
+      confidence: 1,
+      evidence: [
+        `run:${currentRunId}`,
+        `action:${sealedFailureActionId}`,
+        `commit:${"9".repeat(40)}`,
+        `sha256:${frozenCorpusSha256}`,
+      ],
+      payload: {
+        outcome: "evidence-defect",
+        defectKind: "frozen-corpus-unrealizable",
+        frozenContract: {
+          version: 4,
+          proposalId: design.designSource.designProposalId,
+          corpusSnapshotSha256: frozenCorpusSha256,
+          immutable: true,
+          isolatedWorktreeCount: 166,
+          candidateFileCount: 124,
+          gitRevisionCount: 1044,
+          matchingSourceCount: 0,
+        },
+        sealedFailure: {
+          actionId: sealedFailureActionId,
+          executionStatus: "failed",
+          decisionStatus: "approved",
+          noHoldoutDisclosure: true,
+        },
+        exactSeven: {
+          materialized: true,
+          staged: true,
+          treeSha: exactTreeSha,
+          commitAllowed: false,
+        },
+        nextDesign: {
+          targetVersion: 5,
+          zeroCost: true,
+          readOnly: true,
+          canonicalManifestMustPrecedeComparisonFreeze: true,
+          holdoutVisibility: "count-and-commitment-only",
+        },
+        sideEffectCounters: {
+          paidUsd: 0,
+          realProviderCalls: 0,
+          pancatWrites: 0,
+          productionPublishes: 0,
+          realAssetDeletes: 0,
+          crossProjectMemoryReads: 0,
+          crossProjectMemoryWrites: 0,
+        },
+      },
+    });
+    const signal = signalResult.artifacts.find((artifact) => artifact.kind === "strategy_signal")!;
+    const proposalBefore = setupHarness.getDesignProposal({ id: design.designSource.designProposalId })!;
+
+    const trigger = await runCliJson(
+      "design-target-system",
+      "--kernel-project-id", kernelProjectId,
+      "--target-project-id", targetProjectId,
+      "--goal", `Review ${signal.signalId} and immutable proposal ${design.designSource.designProposalId}; propose version 5 or stay quiescent`,
+    );
+    const overview = setupHarness.getRunOverview({ runId: trigger.runId });
+    const proposalAfter = setupHarness.getDesignProposal({ id: design.designSource.designProposalId })!;
+    const readonlyDb = new Database(dbPath, { readonly: true });
+    const attempts = readonlyDb.query(
+      "select count(*) as count from attempts a join tasks t on t.id=a.task_id where t.run_id=?",
+    ).get(trigger.runId) as { count: number };
+    readonlyDb.close();
+
+    expect(signalResult).toMatchObject({ status: "done", actionType: "recordSignal" });
+    expect(signal).toMatchObject({
+      signalId: expect.stringMatching(/^signal_blocked_/),
+      signalSha256: expect.stringMatching(/^[a-f0-9]{64}$/),
+    });
+    expect(overview.run).toMatchObject({ id: trigger.runId, status: "todo", context: { source: "target-system-design" } });
+    expect(overview.tasks).toHaveLength(1);
+    expect(overview.tasks[0]).toMatchObject({
+      role: "designer",
+      status: "todo",
+      config: { readOnly: true, forbidImplementation: true, forbidBrowser: true },
+    });
+    expect(attempts.count).toBe(0);
+    expect(overview.tasks[0]!.prompt).toContain("version 5");
+    expect(overview.tasks[0]!.prompt).toContain("real fixture bytes");
+    expect(overview.tasks[0]!.prompt).toContain("count and commitment only");
+    expect(overview.tasks[0]!.prompt).toContain("must remain unchanged");
+    expect(overview.tasks[0]!.prompt).not.toContain("copy its comparison exactly");
+    expect(proposalAfter.proposal.evaluationContract.comparison).toEqual(proposalBefore.proposal.evaluationContract.comparison);
+    expect(setupHarness.getRun(currentRunId)).toMatchObject({ status: "blocked", context: { repairReplanBudget: { used: 2, limit: 3 } } });
+    expect(setupHarness.getRun(oldRunId)).toMatchObject({ status: "blocked", context: { repairReplanBudget: { used: 3, limit: 3 } } });
+    expect(setupHarness.getRunOverview({ runId: currentRunId }).tasks).toHaveLength(0);
+    expect(setupHarness.getRunOverview({ runId: oldRunId }).tasks).toHaveLength(0);
   });
 
   test("target-system Designer discovers linked research refs and can read each original artifact", async () => {

@@ -1606,6 +1606,9 @@ function targetSystemDesignerPrompt(input: {
   researchEvidenceLinks: ResearchEvidenceLinkV1[];
   evidenceBundle: TargetSystemEvidenceBundleV1;
 }) {
+  const hasUnrealizableFrozenCorpus = input.evidenceBundle.blockedSignals.some(
+    (signal) => signal.payload.defectKind === "frozen-corpus-unrealizable",
+  );
   const researchEvidence = input.researchEvidenceLinks.length === 0
     ? ["- no project-owned research evidence links are currently registered"]
     : input.researchEvidenceLinks.flatMap((link) => [
@@ -1632,7 +1635,14 @@ function targetSystemDesignerPrompt(input: {
     `Refresh the project index only with: ${authoritativeEvidenceCommand(input.evidenceBundle, "list-research-evidence", "--project-id", input.targetProject.id)}`,
     `Read any original artifact only with: ${authoritativeEvidenceCommand(input.evidenceBundle, "show-research-evidence", "--project-id", input.targetProject.id, "--signal-id", "<signal_id>", "--artifact-id", "<artifact_id>")}`,
     "Read the original evaluation-contract artifact before constructing comparison. If it lacks a precise corpus snapshot and hash, propose the smallest zero-cost evidence-building step; do not claim the research is absent.",
-    "When acceptedProposals is non-empty, copy its comparison exactly. Never substitute an output hash, placeholder hash, example reference, or newly invented metric.",
+    ...(hasUnrealizableFrozenCorpus ? [
+      "The accepted version 4 comparison named by the frozen-corpus-unrealizable signal is immutable failed evidence and must remain unchanged. Do not copy or amend it for a successor proposal.",
+      "A version 5 proposal must first build a canonical manifest, commitment, and corpus hash from verifiable real fixture bytes, and only then freeze a new comparison. Never substitute a research-output hash, placeholder hash, example reference, or newly invented metric.",
+      "Keep the holdout inside the host private descriptor channel. Ordinary Designer, Planner, Worker, and Verifier roles may receive count and commitment only, with no holdout reference, path, or content.",
+      "Do not submit or commit the existing staged exact-seven tree. This Designer may propose one zero-cost evidence-contract correction or stay quiescent; it must not create a Repair, Worker, Verifier, or delivery run.",
+    ] : [
+      "When acceptedProposals is non-empty, copy its comparison exactly. Never substitute an output hash, placeholder hash, example reference, or newly invented metric.",
+    ]),
     "When exactFileBoundary is present, preserve exactPaths byte-for-byte as the only candidate file list. The host must remove every unexpectedPaths entry before delivery; do not replace the list with newly invented paths.",
     "",
     "Return either a justified quiescent result with no actions, or one fixed proposeDesign action.",
