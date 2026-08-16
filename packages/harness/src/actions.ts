@@ -6414,7 +6414,7 @@ function installLocalDshCli(
     if (!sourceEntryStat.isFile() || sourceEntryStat.isSymbolicLink()) throw new Error("DSH source entry is not a regular file");
 
     const buildCommand = "npm run build:lib:host";
-    const build = runCommand({ cwd: sourceRepoPath, command: buildCommand, timeoutMs: 600_000, maxOutputBytes: 64 * 1024 });
+    const build = runCommand({ cwd: sourceRepoPath, command: buildCommand, timeoutMs: 600_000, maxOutputBytes: 64 * 1024 * 1024 });
     if (build.exitCode !== 0) throw new Error(`DSH host build failed (${build.exitCode}): ${limitUtf8Output(build.stderr || build.stdout, 2_048)}`);
     const statusAfter = runGit({ cwd: sourceRepoPath, args: ["status", "--short", "--untracked-files=no"] });
     if (statusAfter.exitCode !== 0 || statusAfter.stdout !== statusBefore.stdout) {

@@ -52,6 +52,7 @@ describe("local DSH installation action", () => {
       },
     });
     const commands: string[] = [];
+    let buildOutputLimit = 0;
 
     const result = applyHarnessAction(harness, {
       type: "installLocalDshCli",
@@ -63,6 +64,7 @@ describe("local DSH installation action", () => {
       runCommand: (input) => {
         commands.push(input.command);
         if (input.command === "npm run build:lib:host") {
+          buildOutputLimit = input.maxOutputBytes ?? 0;
           mkdirSync(join(sourceRepoPath, "apps", "cli", "lib"), { recursive: true });
           writeFileSync(artifactPath, "#!/usr/bin/env node\nconsole.log('0.1.0-rc.5')\n");
           chmodSync(artifactPath, 0o755);
@@ -92,6 +94,7 @@ describe("local DSH installation action", () => {
     expect(receipt.executableRealpath).toBe(realpathSync(artifactPath));
     expect(await readlink(executablePath)).toBe(realpathSync(artifactPath));
     expect(commands).toHaveLength(4);
+    expect(buildOutputLimit).toBe(64 * 1024 * 1024);
     expect(harness.getRun(runId)?.context.dshInstallationReceipt).toMatchObject({ sourceHead: expectedHead });
 
     const replay = applyHarnessAction(harness, {
