@@ -303,7 +303,8 @@ function targetEvolutionProposalExtension(projectId: string, charterId: string) 
 export function buildTaskPrompt(
   input: PromptInput & { loadedHarnessRevision?: HarnessRevisionV1 | null },
 ) {
-  const compactRecentLessons = compactLessons(input.lessons ?? []);
+  const boundedRuntimeSemanticRepair = input.task.config?.boundedPromptContext === "runtime-semantic-repair";
+  const compactRecentLessons = boundedRuntimeSemanticRepair ? [] : compactLessons(input.lessons ?? []);
   const template = input.template ?? DEFAULT_TASK_PROMPT_TEMPLATE;
   const sealedHoldoutRefs = frozenHoldoutEvidenceRefs(input.run.context);
   const sealText = (value: string) => redactSealedPromptText(value, sealedHoldoutRefs);
@@ -314,10 +315,9 @@ export function buildTaskPrompt(
       input.task.role,
     ),
   );
-  const frozenTargetEvolutionContract = renderFrozenTargetEvolutionContract(
-    input.run.context,
-    input.task.role,
-  );
+  const frozenTargetEvolutionContract = boundedRuntimeSemanticRepair
+    ? ""
+    : renderFrozenTargetEvolutionContract(input.run.context, input.task.role);
   const frozenHarnessRevision = input.loadedHarnessRevision ?? null;
   const protectedSections = [
     renderFrozenHarnessRevisionManifest(frozenHarnessRevision),
@@ -327,11 +327,18 @@ export function buildTaskPrompt(
   ].filter(Boolean);
   const prompt = renderPromptTemplate(template, {
     runGoal: sealText(input.run.goal),
-    runContextJson: prettyJson(promptSafeRunContext(input.run.context, sealedHoldoutRefs)),
+    runContextJson: prettyJson(boundedRuntimeSemanticRepair
+      ? boundedRuntimeSemanticRepairRunContext(input.run.context)
+      : promptSafeRunContext(input.run.context, sealedHoldoutRefs)),
     taskId: input.task.id,
     taskRole: input.task.role,
     taskGoal: sealText(input.task.goal),
-    taskConfigJson: prettyJson(redactSealedPromptValues(input.task.config ?? {}, sealedHoldoutRefs)),
+    taskConfigJson: prettyJson(redactSealedPromptValues(
+      boundedRuntimeSemanticRepair
+        ? boundedRuntimeSemanticRepairTaskConfig(input.task.config ?? {})
+        : input.task.config ?? {},
+      sealedHoldoutRefs,
+    )),
     taskPrompt: sealText(input.task.prompt),
     doneWhenMarkdown: input.task.doneWhen.map((item) => `- ${sealText(item)}`).join("\n"),
     dependencyAttemptsJson: prettyJson(
@@ -359,6 +366,47 @@ export function buildTaskPrompt(
     return `${prompt}\n\n${omittedProtectedSections.join("\n")}`;
   }
   return prompt;
+}
+
+function boundedRuntimeSemanticRepairRunContext(context: Record<string, unknown>) {
+  const proposal = asRecord(context.designProposal);
+  const evolutionInstance = asRecord(context.evolutionInstance);
+  return {
+    source: context.source,
+    projectId: context.projectId,
+    parentRunId: context.parentRunId,
+    designProposalId: context.designProposalId,
+    designDecisionId: context.designDecisionId,
+    runtimeIntegrationBoundarySha256: asRecord(context.runtimeIntegrationBoundary)?.boundarySha256,
+    targetSystemEvidenceBundleSha256: asRecord(context.targetSystemEvidenceBundle)?.bundleSha256,
+    frozenRuntimeIdentity: {
+      pack: asRecord(evolutionInstance?.pack),
+      episodeCollectionContract: asRecord(proposal?.episodeCollectionContract),
+      maturityGateContract: asRecord(proposal?.maturityGateContract),
+      productionEpisodePrivacyReceiptContract: asRecord(proposal?.productionEpisodePrivacyReceiptContract),
+      promotionReceiptContract: asRecord(proposal?.promotionReceiptContract),
+      rollbackContract: asRecord(proposal?.rollbackContract),
+    },
+  };
+}
+
+function boundedRuntimeSemanticRepairTaskConfig(config: Record<string, unknown>) {
+  return Object.fromEntries([
+    "executor",
+    "permissionMode",
+    "repositoryId",
+    "runtimeIntegrationBoundarySha256",
+    "targetSystemEvidenceBundleSha256",
+    "dshFilePolicy",
+    "dshProfileIsolation",
+    "dshModelTransport",
+    "dshToolNetwork",
+    "forbidBrowser",
+    "browserProcessPolicy",
+    "runtimeIntegrationExecutionContract",
+    "runtimeIntegrationSemanticRepairContinuation",
+    "dshNoWriteProgressPolicy",
+  ].flatMap((key) => config[key] === undefined ? [] : [[key, config[key]]]));
 }
 
 export function renderFrozenHarnessRevisionManifest(

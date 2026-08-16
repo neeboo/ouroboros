@@ -12,6 +12,7 @@ import {
 } from "../packages/harness/src";
 import type { DshCredentialPathPolicyV1 } from "../packages/harness/src";
 import {
+  buildTaskPrompt,
   createTasksFromOutputHook,
   createRepairTaskHook,
   createVerifierTaskHook,
@@ -433,6 +434,138 @@ describe("runtime integration task execution contracts", () => {
     expect(overview.run?.context.repairReplanBudget).toMatchObject({ limit: 3, used: 2 });
     expect(overview.tasks.filter((task) => task.role === "goal-review")).toHaveLength(0);
     expect(replay).toMatchObject({ status: "done", artifacts: [expect.objectContaining({ reused: true })] });
+  });
+
+  test("a no-write semantic DSH timeout continues the same charged recovery and replaces its pending Verifier", async () => {
+    const fixture = governedRuntimeFixture(harness, dir, { legacyTasks: true });
+    harness.updateRun({
+      runId: fixture.runId,
+      contextPatch: {
+        evolutionInstance: { pack: { version: 6, contentSha256: "d4b9cd4cbc567a72f691741cf636dea4b6912ea341ff467b6ff93fd2c53cdb4c" } },
+        designProposal: {
+          episodeCollectionContract: { id: "host-receipt-episodes-v6-runtime" },
+          maturityGateContract: { id: "host-receipt-maturity-v6-runtime", packRef: { version: 6, contentSha256: "d4b9cd4cbc567a72f691741cf636dea4b6912ea341ff467b6ff93fd2c53cdb4c" } },
+          productionEpisodePrivacyReceiptContract: { id: "host-receipt-privacy-v6-runtime" },
+          promotionReceiptContract: { id: "host-receipt-promotion-v6-runtime" },
+          rollbackContract: { id: "host-receipt-rollback-v6-runtime" },
+        },
+        irrelevantHistoricalContext: "OLD-HISTORY-MARKER-".repeat(4_000),
+      },
+    });
+    const graph = applyHarnessAction(harness, {
+      type: "materializeRuntimeIntegrationTaskGraphRecovery",
+      runId: fixture.runId,
+      plannerTaskId: fixture.plannerTaskId,
+    } as never);
+    const taskIds = graph.artifacts.find((artifact) => artifact.kind === "runtime_integration_task_graph_recovery")!
+      .taskIds as string[];
+    for (const taskId of taskIds.slice(0, 4)) {
+      harness.recordAttempt({ taskId, input: {}, output: completedStageOutput(harness.getTask(taskId)!.goal) });
+    }
+    const firstVerifierId = taskIds[4]!;
+    const firstVerifierAttemptId = harness.recordAttempt({
+      taskId: firstVerifierId,
+      input: { executor: "codex-resumable", sandbox: "read-only" },
+      output: capabilityOnlyVerifierFailure(),
+    });
+    const hostRecovery = applyHarnessAction(harness, {
+      type: "recoverRuntimeIntegrationHostEvidenceFailure",
+      runId: fixture.runId,
+      verifierTaskId: firstVerifierId,
+      verifierAttemptId: firstVerifierAttemptId,
+    } as never, { runCommand: (input) => successfulHostCommand(input.command) });
+    const semanticVerifierId = hostRecovery.artifacts.find((artifact) =>
+      artifact.kind === "runtime_integration_host_evidence_recovery")!.verifierTaskId as string;
+    harness.recordAttempt({
+      taskId: semanticVerifierId,
+      input: { executor: "codex-resumable", sandbox: "read-only" },
+      output: frozenRuntimeIdentityFailure(),
+    });
+    applyHarnessAction(harness, {
+      type: "materializeVerifierRepairRecovery",
+      runId: fixture.runId,
+      verifierTaskId: semanticVerifierId,
+    } as never);
+    const before = harness.getRunOverview({ runId: fixture.runId, eventLimit: 0 });
+    const repair = before.tasks.find((task) => task.role === "worker"
+      && task.config?.runtimeIntegrationSemanticRepairRecovery)!;
+    const pendingVerifier = before.tasks.find((task) => task.role === "verifier"
+      && task.id !== semanticVerifierId
+      && task.config?.runtimeIntegrationSemanticRepairRecovery)!;
+    const budgetBefore = before.run!.context.repairReplanBudget;
+    const timedOutAttemptId = harness.recordAttempt({
+      taskId: repair.id,
+      input: { executor: "dsh-cli", cwd: repair.worktreePath },
+      output: {
+        status: "blocked",
+        summary: "DeepSeek Harness CLI failed",
+        changedFiles: [],
+        checks: [{ name: "dsh headless execution", status: "failed" }],
+        artifacts: [{
+          kind: "dsh_execution_profile_receipt",
+          modelTransport: { requestCount: 62 },
+          noTargetNetworkBypass: true,
+        }],
+        problems: ["exit code: 124 stderr: command timed out after 1800000ms"],
+      },
+    });
+
+    const reconciliation = await reconcileTerminalBlockedVerifierRepair({ harness, runId: fixture.runId });
+    const after = harness.getRunOverview({ runId: fixture.runId, eventLimit: 0 });
+    const continuation = after.tasks.find((task) => {
+      const marker = task.config?.runtimeIntegrationSemanticRepairContinuation as Record<string, unknown> | undefined;
+      return marker?.sourceAttemptId === timedOutAttemptId;
+    })!;
+    expect(reconciliation).toEqual([expect.objectContaining({ decision: "continue" })]);
+    expect(continuation).toBeDefined();
+    const replacementVerifier = after.tasks.find((task) => task.role === "verifier"
+      && task.dependsOn.length === 1
+      && task.dependsOn[0] === continuation.id)!;
+
+    expect(reconciliation).toEqual([expect.objectContaining({
+      decision: "continue",
+      artifacts: [expect.objectContaining({
+        kind: "runtime_semantic_repair_continuation",
+        sourceRepairTaskId: repair.id,
+        sourceRepairAttemptId: timedOutAttemptId,
+        continuationTaskId: continuation.id,
+        verifierTaskId: replacementVerifier.id,
+        budgetCharged: false,
+      })],
+    })]);
+    expect(harness.getTask(pendingVerifier.id)?.status).toBe("blocked");
+    expect(continuation).toMatchObject({
+      status: "todo",
+      parentId: fixture.plannerTaskId,
+      dependsOn: [repair.id],
+      worktreePath: repair.worktreePath,
+      config: {
+        executor: "dsh-cli",
+        permissionMode: "workspace-write",
+        dshNoWriteProgressPolicy: {
+          maxStallMs: 600_000,
+          minModelRequests: 12,
+          probeIntervalMs: 30_000,
+        },
+      },
+    });
+    expect(continuation.prompt).toContain("host-receipt-episodes-v6-runtime");
+    expect(continuation.prompt).not.toContain("## Frozen Task Configuration");
+    const boundedPrompt = buildTaskPrompt({
+      run: after.run!,
+      task: continuation,
+      dependencyAttempts: [],
+      lessons: [],
+    });
+    expect(boundedPrompt.length).toBeLessThan(30_000);
+    expect(boundedPrompt).not.toContain("OLD-HISTORY-MARKER");
+    expect(replacementVerifier).toMatchObject({
+      status: "todo",
+      dependsOn: [continuation.id],
+      config: { executor: "codex-resumable", permissionMode: "read-only" },
+    });
+    expect(after.run!.context.repairReplanBudget).toEqual(budgetBefore);
+    expect(after.tasks.filter((task) => task.role === "goal-review")).toHaveLength(0);
   });
 
   test("failed host evidence remains terminal and prepareRunDrain never creates Goal Review", () => {

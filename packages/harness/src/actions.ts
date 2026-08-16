@@ -4519,6 +4519,17 @@ function materializeVerifierRepairRecoveryWithDb(
     if (existing.length !== 2 || !repair || !nextVerifier || !sameCanonicalValue(nextVerifier.dependsOn, [repair.id])) {
       throw new Error(`existing Verifier repair recovery conflicts with ${recoveryKey}`);
     }
+    const continuation = materializeTimedOutRuntimeSemanticRepairContinuationWithDb({
+      harness,
+      db,
+      overview,
+      run,
+      sourceVerifier: verifier,
+      repair,
+      pendingVerifier: nextVerifier,
+      recoveryKey,
+    });
+    if (continuation) return continuation;
     return doneResult(action.type, `Verifier repair recovery ${recoveryKey} reused.`, [
       { name: "bounded Verifier repair", status: "passed", evidence: "reused" },
     ], [{
@@ -4638,6 +4649,12 @@ function materializeVerifierRepairRecoveryWithDb(
       ...(repairContract ? {
         runtimeIntegrationExecutionContract: repairContract,
         runtimeIntegrationSemanticRepairRecovery: marker,
+        dshNoWriteProgressPolicy: {
+          maxStallMs: 600_000,
+          minModelRequests: 12,
+          probeIntervalMs: 30_000,
+        },
+        boundedPromptContext: "runtime-semantic-repair",
       } : {}),
     },
     });
@@ -4762,6 +4779,273 @@ function materializeVerifierRepairRecoveryWithDb(
     budgetLimit: limit,
     reused: false,
   }]);
+}
+
+function materializeTimedOutRuntimeSemanticRepairContinuationWithDb(input: {
+  harness: Harness;
+  db: HarnessDatabase;
+  overview: ReturnType<Harness["getRunOverviewWithDb"]>;
+  run: Run;
+  sourceVerifier: Task;
+  repair: Task;
+  pendingVerifier: Task;
+  recoveryKey: string;
+}): HarnessActionResult | null {
+  const { harness, db, overview, run, sourceVerifier, repair, pendingVerifier, recoveryKey } = input;
+  const semanticMarker = objectRecordOrNull(repair.config?.runtimeIntegrationSemanticRepairRecovery);
+  if (!semanticMarker || repair.status !== "blocked") return null;
+  const repairSession = [...overview.sessions].reverse().find((session) => session.taskId === repair.id);
+  const repairAttempt = repairSession ? harness.getAttemptWithDb(db, repairSession.attemptId) : null;
+  if (!repairSession || !repairAttempt || !runtimeSemanticRepairNoWriteTimeout(repairSession.output)) return null;
+  if (overview.sessions.some((session) => session.taskId === pendingVerifier.id)) {
+    throw new Error(`pending semantic Verifier ${pendingVerifier.id} already has an attempt`);
+  }
+  const existingContinuation = overview.tasks.find((task) => {
+    const marker = objectRecordOrNull(task.config?.runtimeIntegrationSemanticRepairContinuation);
+    return marker?.sourceAttemptId === repairAttempt.id;
+  });
+  if (existingContinuation) {
+    const verifier = overview.tasks.find((task) => task.role === "verifier"
+      && sameCanonicalValue(task.dependsOn, [existingContinuation.id]));
+    if (!verifier) throw new Error(`semantic continuation ${existingContinuation.id} lost its Verifier`);
+    return semanticRepairContinuationResult(run.id, repair, repairAttempt.id, existingContinuation, verifier, true);
+  }
+  if (pendingVerifier.status !== "todo") {
+    throw new Error(`pending semantic Verifier ${pendingVerifier.id} must be todo before replacement`);
+  }
+
+  const plannerTaskId = exactNonEmptyStringField(semanticMarker, "plannerTaskId");
+  const continuationTaskId = makeId("task");
+  const verifierTaskId = makeId("task");
+  const continuationMarker = {
+    schemaVersion: 1,
+    recoveryKey: stableFingerprint({ recoveryKey, sourceRepairTaskId: repair.id, sourceAttemptId: repairAttempt.id }),
+    sourceRepairTaskId: repair.id,
+    sourceAttemptId: repairAttempt.id,
+    sourceVerifierTaskId: sourceVerifier.id,
+    replacedVerifierTaskId: pendingVerifier.id,
+    continuationTaskId,
+    verifierTaskId,
+    sameBudget: true,
+    maxContinuations: 1,
+  };
+  const identities = frozenRuntimeSemanticIdentities(run.context);
+  const targetFiles = [
+    "src/domain/evolution/frozen.ts",
+    "src/domain/evolution/episodes.ts",
+    "src/domain/evolution/privacy.ts",
+    "src/domain/evolution/rollback.ts",
+    "src/domain/evolution/comparison.ts",
+    "src/application/evolution/evolutionRuntime.ts",
+    "tests/runtime-integration/evolution-runtime.test.mjs",
+    "tests/runtime-integration/readback-backend-runtime.mjs",
+    "tests/runtime-integration/evolution-postgres.test.mjs",
+    "tests/runtime-integration/dsh-gateway.test.mjs",
+    "tests/runtime-integration/readback-dsh-gateway.mjs",
+  ];
+  const prompt = [
+    "Continue the same already-charged semantic Repair in the existing worktree. The previous DSH attempt timed out after repeated model requests without any file change.",
+    `Durable source attempt: ${repairAttempt.id}. Its terminal evidence is retained; do not rescan the full run history.`,
+    "Apply only the frozen runtime identity correction below. Do not replan, rerun earlier Workers, touch the frozen comparison, or modify config/evolution/** or tests/evolution/**.",
+    "## Exact frozen runtime identity",
+    JSON.stringify(identities, null, 2),
+    "## Maximum target diff list",
+    ...targetFiles.map((path) => `- ${path}`),
+    "Update runtime-delivery identifiers and their bounded runtime-integration tests only. Do not blindly rename immutable v5 package paths or fixture labels that remain the read-only source package.",
+    "Run only the targeted runtime-integration checks that cover these identifiers. Return exact changedFiles, checks, and machine receipts. A separate read-only Verifier is already frozen.",
+  ].join("\n\n");
+  const sourceContract = objectRecordOrNull(repair.config?.runtimeIntegrationExecutionContract);
+  if (!sourceContract) throw new Error(`semantic Repair ${repair.id} lost its execution contract`);
+  const { contractSha256: _repairSha, taskId: _repairTaskId, ...sourceContractBody } = sourceContract;
+  const continuationContractBody = {
+    ...sourceContractBody,
+    taskId: continuationTaskId,
+    stageId: "runtime-semantic-repair",
+    role: "worker",
+    executor: "dsh-cli",
+    semanticRepairRecoveryKey: recoveryKey,
+    semanticRepairContinuationKey: continuationMarker.recoveryKey,
+  };
+  const continuationContract = {
+    ...continuationContractBody,
+    contractSha256: canonicalRuntimeRecoveryHash(continuationContractBody, "semantic Repair continuation contract"),
+  };
+  const {
+    runtimeIntegrationSemanticRepairRecovery: _semanticRecovery,
+    verifierRepairRecovery: _verifierRecovery,
+    ...repairConfig
+  } = repair.config ?? {};
+  harness.createTaskWithDb(db, {
+    id: continuationTaskId,
+    runId: run.id,
+    parentId: plannerTaskId,
+    cycleId: repair.cycleId,
+    role: "worker",
+    goal: `Continue timed out semantic Repair: ${repair.goal}`,
+    prompt,
+    dependsOn: [repair.id],
+    doneWhen: [
+      `Only the frozen runtime identity is corrected to ${identities.packContentSha256}.`,
+      "config/evolution/** and tests/evolution/** remain byte-identical.",
+      "Targeted runtime-integration identity checks pass with exact changed-file evidence.",
+    ],
+    worktreePath: repair.worktreePath,
+    config: {
+      ...repairConfig,
+      executor: "dsh-cli",
+      agentBackend: "dsh-cli",
+      permissionMode: "workspace-write",
+      runtimeIntegrationExecutionContract: continuationContract,
+      runtimeIntegrationSemanticRepairContinuation: continuationMarker,
+      dshNoWriteProgressPolicy: {
+        maxStallMs: 600_000,
+        minModelRequests: 12,
+        probeIntervalMs: 30_000,
+      },
+      boundedPromptContext: "runtime-semantic-repair",
+    },
+  });
+  const continuationOverview = harness.getRunOverviewWithDb(db, { runId: run.id, eventLimit: 0 });
+  const continuationTask = continuationOverview.tasks.find((task) => task.id === continuationTaskId);
+  if (!continuationTask) throw new Error(`semantic continuation ${continuationTaskId} was not persisted`);
+  const completionContract = completionVerificationContract(continuationOverview, continuationTask);
+
+  const sourceVerifierContract = objectRecordOrNull(pendingVerifier.config?.runtimeIntegrationExecutionContract);
+  if (!sourceVerifierContract) throw new Error(`pending semantic Verifier ${pendingVerifier.id} lost its execution contract`);
+  const { contractSha256: _verifierSha, taskId: _verifierTaskId, ...sourceVerifierContractBody } = sourceVerifierContract;
+  const verifierContractBody = {
+    ...sourceVerifierContractBody,
+    taskId: verifierTaskId,
+    stageId: "non-browser-e2e",
+    role: "verifier",
+    executor: "codex-resumable",
+    semanticRepairRecoveryKey: recoveryKey,
+    semanticRepairContinuationKey: continuationMarker.recoveryKey,
+  };
+  const verifierContract = {
+    ...verifierContractBody,
+    contractSha256: canonicalRuntimeRecoveryHash(verifierContractBody, "semantic continuation Verifier contract"),
+  };
+  const {
+    runtimeIntegrationSemanticRepairRecovery: _pendingSemanticRecovery,
+    verifierRepairRecovery: _pendingVerifierRecovery,
+    runtimeIntegrationExecutionContract: _pendingExecutionContract,
+    sourceTaskId: _pendingSourceTaskId,
+    completionContract: _pendingCompletionContract,
+    ...pendingVerifierConfig
+  } = pendingVerifier.config ?? {};
+  harness.createTaskWithDb(db, {
+    id: verifierTaskId,
+    runId: run.id,
+    parentId: plannerTaskId,
+    cycleId: pendingVerifier.cycleId,
+    role: "verifier",
+    goal: pendingVerifier.goal,
+    prompt: pendingVerifier.prompt,
+    dependsOn: [continuationTaskId],
+    doneWhen: [...new Set([...pendingVerifier.doneWhen, ...completionContract.requiredEvidence])],
+    worktreePath: repair.worktreePath,
+    config: {
+      ...pendingVerifierConfig,
+      executor: "codex-resumable",
+      agentBackend: "codex-resumable",
+      permissionMode: "read-only",
+      readOnly: true,
+      forbidImplementation: true,
+      forbidBrowser: true,
+      browserProcessPolicy: "deny",
+      sourceTaskId: continuationTaskId,
+      completionContract,
+      verdictRequired: true,
+      runtimeIntegrationExecutionContract: verifierContract,
+      runtimeIntegrationSemanticRepairContinuation: continuationMarker,
+    },
+  });
+  db.query(
+    "update tasks set status = 'blocked', updated_at = current_timestamp where id = $taskId and status = 'todo'",
+  ).run({ $taskId: pendingVerifier.id });
+  harness.updateRunWithDb(db, {
+    runId: run.id,
+    status: "todo",
+    contextPatch: {
+      runtimeIntegrationSemanticRepairContinuation: continuationMarker,
+      pendingVerificationTaskIds: [verifierTaskId],
+      pendingVerificationReason: `same-budget semantic Repair continuation ${continuationTaskId} awaits execution`,
+    },
+  });
+  const updated = harness.getRunOverviewWithDb(db, { runId: run.id, eventLimit: 0 });
+  return semanticRepairContinuationResult(
+    run.id,
+    repair,
+    repairAttempt.id,
+    updated.tasks.find((task) => task.id === continuationTaskId)!,
+    updated.tasks.find((task) => task.id === verifierTaskId)!,
+    false,
+  );
+}
+
+function semanticRepairContinuationResult(
+  runId: string,
+  repair: Task,
+  attemptId: string,
+  continuation: Task,
+  verifier: Task,
+  reused: boolean,
+): HarnessActionResult {
+  return doneResult("materializeVerifierRepairRecovery", `Runtime semantic Repair continuation ${continuation.id} ${reused ? "reused" : "materialized"}.`, [
+    { name: "same Repair budget", status: "passed", evidence: "not charged" },
+    { name: "same worktree", status: "passed", evidence: continuation.worktreePath ?? "missing" },
+    { name: "independent Verifier", status: "passed", evidence: `${verifier.id}->${continuation.id}` },
+    { name: "Goal Review", status: "passed", evidence: "not created" },
+  ], [{
+    kind: "runtime_semantic_repair_continuation",
+    runId,
+    sourceRepairTaskId: repair.id,
+    sourceRepairAttemptId: attemptId,
+    continuationTaskId: continuation.id,
+    verifierTaskId: verifier.id,
+    budgetCharged: false,
+    reused,
+  }]);
+}
+
+function runtimeSemanticRepairNoWriteTimeout(output: AttemptOutput) {
+  const text = [output.summary, ...(output.problems ?? [])].join("\n").toLowerCase();
+  const requestCount = output.artifacts?.map(objectRecordOrNull)
+    .map((artifact) => objectRecordOrNull(artifact?.modelTransport)?.requestCount)
+    .find((value) => typeof value === "number");
+  return output.status === "blocked"
+    && (output.changedFiles ?? []).length === 0
+    && (text.includes("timed out") || text.includes("timeout") || text.includes("exit code: 124"))
+    && typeof requestCount === "number"
+    && requestCount > 0;
+}
+
+function frozenRuntimeSemanticIdentities(context: Record<string, unknown>) {
+  const proposal = objectRecordOrNull(context.designProposal) ?? {};
+  const episode = objectRecordOrNull(proposal.episodeCollectionContract) ?? {};
+  const maturity = objectRecordOrNull(proposal.maturityGateContract) ?? {};
+  const packRef = objectRecordOrNull(maturity.packRef) ?? {};
+  const privacy = objectRecordOrNull(proposal.productionEpisodePrivacyReceiptContract) ?? {};
+  const promotion = objectRecordOrNull(proposal.promotionReceiptContract) ?? {};
+  const rollback = objectRecordOrNull(proposal.rollbackContract) ?? {};
+  const evolution = objectRecordOrNull(context.evolutionInstance) ?? {};
+  const evolutionPack = objectRecordOrNull(evolution.pack) ?? {};
+  const version = typeof evolutionPack.version === "number" ? evolutionPack.version : packRef.version;
+  const packContentSha256 = exactNonEmptyStringField(
+    { value: evolutionPack.contentSha256 ?? packRef.contentSha256 },
+    "value",
+  );
+  if (version !== 6) throw new Error("semantic Repair continuation requires frozen evolution pack version 6");
+  return {
+    packVersion: 6,
+    packContentSha256,
+    episodeContractId: exactNonEmptyStringField({ value: episode.id }, "value"),
+    privacyContractId: exactNonEmptyStringField({ value: privacy.id }, "value"),
+    maturityContractId: exactNonEmptyStringField({ value: maturity.id }, "value"),
+    promotionContractId: exactNonEmptyStringField({ value: promotion.id }, "value"),
+    rollbackContractId: exactNonEmptyStringField({ value: rollback.id }, "value"),
+  };
 }
 
 function verifierAttemptRequiresRepair(output: AttemptOutput) {

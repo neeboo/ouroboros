@@ -9,7 +9,14 @@ export interface CommandResult {
   exitCode: number;
   stdout: string;
   stderr: string;
-  terminationReason?: "hard-timeout" | "idle-timeout";
+  terminationReason?: "hard-timeout" | "idle-timeout" | "progress-stall";
+}
+
+export interface CommandProgressEvaluation {
+  stalled: boolean;
+  code?: string;
+  message?: string;
+  [key: string]: unknown;
 }
 
 export interface RunCommandInput {
@@ -24,6 +31,10 @@ export interface RunCommandInput {
   cleanupProcessTree?: (pid: number) => void | Promise<void>;
   onStdout?: (chunk: string) => void;
   onStderr?: (chunk: string) => void;
+  progressMonitor?: {
+    intervalMs: number;
+    evaluate(): CommandProgressEvaluation | Promise<CommandProgressEvaluation>;
+  };
 }
 
 export type RunCommand = (input: RunCommandInput) => Promise<CommandResult>;
@@ -113,6 +124,11 @@ export interface DshCliExecutorOptions {
   installationReceipt?: Record<string, unknown>;
   /** Test seam for an injected resolver. Production resolution always probes. */
   launchabilityPreflight?: boolean;
+  noWriteProgressPolicy?: {
+    maxStallMs: number;
+    minModelRequests: number;
+    probeIntervalMs: number;
+  };
 }
 
 export type DshFilePolicy = DshFilePolicyContractV1 | (Omit<DshFilePolicyContractV1, "source" | "readOnlyPaths"> & {

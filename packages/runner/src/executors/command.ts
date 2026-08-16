@@ -20,6 +20,7 @@ export const runLocalCommand: RunCommand = async (input) => {
   let stderr = "";
   let hardTimeout: Timer | undefined;
   let idleTimeout: Timer | undefined;
+  let progressTimer: Timer | undefined;
   const decoder = new TextDecoder();
 
   return await new Promise<CommandResult>((resolve) => {
@@ -44,6 +45,9 @@ export const runLocalCommand: RunCommand = async (input) => {
       }
       if (idleTimeout) {
         clearTimeout(idleTimeout);
+      }
+      if (progressTimer) {
+        clearInterval(progressTimer);
       }
       if (cleanupProcess) {
         await cleanup();
@@ -91,6 +95,36 @@ export const runLocalCommand: RunCommand = async (input) => {
     // the regular idle window. The grace is capped so a fully silent
     // command still trips idle before the hard timeout.
     resetIdleTimeout({ withStartupGrace: true });
+
+    if (input.progressMonitor) {
+      let evaluating = false;
+      progressTimer = setInterval(() => {
+        if (evaluating || settled) return;
+        evaluating = true;
+        void Promise.resolve(input.progressMonitor!.evaluate()).then((evaluation) => {
+          if (!evaluation.stalled || settled) return;
+          proc.kill();
+          const diagnostic = evaluation.message ?? evaluation.code ?? "command progress stalled";
+          return finish({
+            exitCode: 124,
+            stdout,
+            stderr: appendProblem(stderr, diagnostic),
+            terminationReason: "progress-stall",
+          }, true);
+        }).catch((error) => {
+          if (settled) return;
+          proc.kill();
+          return finish({
+            exitCode: 124,
+            stdout,
+            stderr: appendProblem(stderr, `progress monitor failed closed: ${error instanceof Error ? error.message : String(error)}`),
+            terminationReason: "progress-stall",
+          }, true);
+        }).finally(() => {
+          evaluating = false;
+        });
+      }, input.progressMonitor.intervalMs);
+    }
 
     drainStream(proc.stdout, (chunk) => {
       stdout += chunk;

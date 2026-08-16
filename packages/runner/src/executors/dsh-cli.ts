@@ -1,9 +1,9 @@
 import type { AttemptOutput } from "@ouroboros/harness";
 import { createHash } from "node:crypto";
-import { accessSync, constants, lstatSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { accessSync, constants, lstatSync, readFileSync, readdirSync, readlinkSync, realpathSync, statSync } from "node:fs";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, relative, resolve, sep } from "node:path";
 import { boundedDiagnosticText, sha256Text } from "../bounded-diagnostic";
 import { promptBudgetBlockedOutput, promptBudgetEvidence } from "../prompt-budget";
 import { inspectDshReadiness, resolveDshCommand } from "../dsh-readiness";
@@ -75,6 +75,19 @@ interface DshRuntimeBindingReceipt {
   worktreePath: string;
   readExecBindingSha256: string;
   finalSpawnSandboxSha256: string;
+}
+
+interface DshProgressWatchdogReceipt {
+  kind: "dsh_progress_watchdog_receipt";
+  schemaVersion: 1;
+  status: "progressing" | "stalled" | "completed";
+  baselineFingerprint: string;
+  finalFingerprint: string;
+  lastProgressAt: string;
+  requestCount: number;
+  maxStallMs: number;
+  minModelRequests: number;
+  probeIntervalMs: number;
 }
 
 interface FrozenDshRuntimeBinding {
@@ -199,6 +212,7 @@ export function createDshCliExecutor(options: DshCliExecutorOptions): TaskExecut
     let processPolicy: Awaited<ReturnType<typeof prepareDshProcessPolicy>> = null;
     let modelTransport: DshModelTransportBroker | null = null;
     let profileReceipt: DshExecutionProfileReceipt | null = null;
+    let progressWatchdog: ReturnType<typeof createDshNoWriteProgressWatchdog> | null = null;
     let result;
     try {
       isolatedProfile = await createIsolatedHeadlessHome();
@@ -295,6 +309,15 @@ export function createDshCliExecutor(options: DshCliExecutorOptions): TaskExecut
           modelCredentialNames,
         },
       };
+      progressWatchdog = options.noWriteProgressPolicy && filePolicy
+        ? createDshNoWriteProgressWatchdog({
+          cwd: options.cwd,
+          filePolicy,
+          policy: options.noWriteProgressPolicy,
+          requestCount: () => modelTransport?.receipt().requestCount ?? 0,
+          recorder,
+        })
+        : null;
       recorder?.event({
         type: "dsh.attempt.started",
         sessionName,
@@ -346,6 +369,7 @@ export function createDshCliExecutor(options: DshCliExecutorOptions): TaskExecut
         inheritEnv: false,
         timeoutMs: options.timeoutMs,
         idleTimeoutMs: options.idleTimeoutMs,
+        ...(progressWatchdog ? { progressMonitor: progressWatchdog.monitor } : {}),
       });
     } catch (error) {
       const diagnostic = boundedDiagnosticText(error instanceof Error ? error.message : String(error));
@@ -372,6 +396,7 @@ export function createDshCliExecutor(options: DshCliExecutorOptions): TaskExecut
     }
 
     if (result.exitCode !== 0) {
+      const progressReceipt = progressWatchdog?.receipt(result.terminationReason === "progress-stall" ? "stalled" : "completed");
       recorder?.event({
         type: "dsh.attempt.terminal",
         sessionName,
@@ -382,7 +407,11 @@ export function createDshCliExecutor(options: DshCliExecutorOptions): TaskExecut
         "DeepSeek Harness CLI failed",
         "dsh headless execution",
         commandProblem(result),
-        [...(profileReceipt ? [profileReceipt] : []), ...(runtimeBinding ? [runtimeBinding.receipt] : [])],
+        [
+          ...(profileReceipt ? [profileReceipt] : []),
+          ...(runtimeBinding ? [runtimeBinding.receipt] : []),
+          ...(progressReceipt ? [progressReceipt] : []),
+        ],
       );
     }
 
@@ -404,10 +433,133 @@ export function createDshCliExecutor(options: DshCliExecutorOptions): TaskExecut
       status: output.status,
       exitCode: result.exitCode,
     });
+    const progressReceipt = progressWatchdog?.receipt("completed");
     return profileReceipt
-      ? { ...output, artifacts: [...(output.artifacts ?? []), profileReceipt, ...(runtimeBinding ? [runtimeBinding.receipt] : [])] }
+      ? {
+        ...output,
+        artifacts: [
+          ...(output.artifacts ?? []),
+          profileReceipt,
+          ...(runtimeBinding ? [runtimeBinding.receipt] : []),
+          ...(progressReceipt ? [progressReceipt] : []),
+        ],
+      }
       : output;
   };
+}
+
+function createDshNoWriteProgressWatchdog(input: {
+  cwd: string;
+  filePolicy: NormalizedDshFilePolicy;
+  policy: NonNullable<DshCliExecutorOptions["noWriteProgressPolicy"]>;
+  requestCount(): number;
+  recorder?: { event(payload: Record<string, unknown>): void };
+}) {
+  const { maxStallMs, minModelRequests, probeIntervalMs } = input.policy;
+  if (!Number.isInteger(maxStallMs) || maxStallMs < 1
+    || !Number.isInteger(minModelRequests) || minModelRequests < 0
+    || !Number.isInteger(probeIntervalMs) || probeIntervalMs < 1
+    || probeIntervalMs > maxStallMs) {
+    throw new Error("DSH no-write progress policy is invalid");
+  }
+  let fingerprint = dshAllowedSurfaceFingerprint(input.cwd, input.filePolicy.allowedPaths);
+  const baselineFingerprint = fingerprint;
+  let lastProgressAtMs = Date.now();
+  let lastProgressAt = new Date(lastProgressAtMs).toISOString();
+  let lastEvaluation: Record<string, unknown> = {};
+  const evaluate = () => {
+    const nextFingerprint = dshAllowedSurfaceFingerprint(input.cwd, input.filePolicy.allowedPaths);
+    const changed = nextFingerprint !== fingerprint;
+    if (changed) {
+      fingerprint = nextFingerprint;
+      lastProgressAtMs = Date.now();
+      lastProgressAt = new Date(lastProgressAtMs).toISOString();
+    }
+    const requestCount = input.requestCount();
+    const stalledForMs = Math.max(0, Date.now() - lastProgressAtMs);
+    const stalled = !changed && requestCount >= minModelRequests && stalledForMs >= maxStallMs;
+    lastEvaluation = {
+      stalled,
+      code: stalled ? "dsh-no-write-progress" : "dsh-progress-observed",
+      message: stalled
+        ? `dsh-no-write-progress: ${requestCount} model requests with no allowed-surface change for ${stalledForMs}ms`
+        : undefined,
+      requestCount,
+      changed,
+      currentFingerprint: fingerprint,
+      baselineFingerprint,
+      stalledForMs,
+    };
+    input.recorder?.event({ type: "dsh.progress", ...lastEvaluation });
+    return lastEvaluation as {
+      stalled: boolean;
+      code: string;
+      message?: string;
+      requestCount: number;
+      changed: boolean;
+    };
+  };
+  return {
+    monitor: { intervalMs: probeIntervalMs, evaluate },
+    receipt(status: DshProgressWatchdogReceipt["status"]): DshProgressWatchdogReceipt {
+      const finalFingerprint = dshAllowedSurfaceFingerprint(input.cwd, input.filePolicy.allowedPaths);
+      return {
+        kind: "dsh_progress_watchdog_receipt",
+        schemaVersion: 1,
+        status,
+        baselineFingerprint,
+        finalFingerprint,
+        lastProgressAt,
+        requestCount: input.requestCount(),
+        maxStallMs,
+        minModelRequests,
+        probeIntervalMs,
+      };
+    },
+  };
+}
+
+function dshAllowedSurfaceFingerprint(cwd: string, allowedPaths: string[]) {
+  const entries: string[] = [];
+  const roots = [...new Set(allowedPaths.map((pattern) => {
+    const segments = pattern.split("/");
+    const wildcard = segments.findIndex((segment) => segment.includes("*"));
+    const prefix = (wildcard === -1 ? segments : segments.slice(0, wildcard)).join("/");
+    if (!prefix || prefix === ".") throw new Error(`DSH progress policy cannot fingerprint broad allowed path: ${pattern}`);
+    const root = resolve(cwd, prefix);
+    const rel = relative(cwd, root);
+    if (!rel || rel === ".." || rel.startsWith(`..${sep}`)) {
+      throw new Error(`DSH progress policy allowed path escapes the worktree: ${pattern}`);
+    }
+    return root;
+  }))].sort();
+  for (const root of roots) fingerprintDshPath(cwd, root, entries);
+  return createHash("sha256").update(entries.sort().join("\n")).digest("hex");
+}
+
+function fingerprintDshPath(cwd: string, path: string, entries: string[]) {
+  let stat;
+  try {
+    stat = lstatSync(path);
+  } catch {
+    entries.push(`${relative(cwd, path)}\0missing`);
+    return;
+  }
+  const rel = relative(cwd, path);
+  if (stat.isSymbolicLink()) {
+    entries.push(`${rel}\0symlink\0${readlinkSync(path)}`);
+    return;
+  }
+  if (stat.isDirectory()) {
+    entries.push(`${rel}\0directory`);
+    for (const name of readdirSync(path).sort()) fingerprintDshPath(cwd, join(path, name), entries);
+    return;
+  }
+  if (stat.isFile()) {
+    entries.push(`${rel}\0file\0${createHash("sha256").update(readFileSync(path)).digest("hex")}`);
+    return;
+  }
+  entries.push(`${rel}\0other`);
 }
 
 function freezeDshRuntimeBinding(receipt: Record<string, unknown>, worktreePath: string): FrozenDshRuntimeBinding {

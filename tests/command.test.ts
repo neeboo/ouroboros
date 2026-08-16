@@ -202,6 +202,28 @@ describe("command runner", () => {
     expect(result.terminationReason).toBe("hard-timeout");
   });
 
+  test("terminates a live child when its bounded progress monitor fails closed", async () => {
+    let evaluations = 0;
+    const result = await runLocalCommand({
+      cmd: ["bun", "-e", "await new Promise((resolve) => setTimeout(resolve, 1000));"],
+      stdin: "",
+      timeoutMs: 2_000,
+      progressMonitor: {
+        intervalMs: 5,
+        evaluate: () => ({
+          stalled: ++evaluations >= 2,
+          code: "fixture-no-progress",
+          message: "fixture progress stalled",
+        }),
+      },
+    });
+
+    expect(result.exitCode).toBe(124);
+    expect(result.terminationReason).toBe("progress-stall");
+    expect(result.stderr).toContain("fixture progress stalled");
+    expect(evaluations).toBeGreaterThanOrEqual(2);
+  });
+
   test("marks an idle-killed child as terminated instead of resumable", async () => {
     const result = await runLocalCommand({
       cmd: ["bun", "-e", "await new Promise((resolve) => setTimeout(resolve, 1000));"],

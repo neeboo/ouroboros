@@ -29,6 +29,11 @@ export interface RouteExecutorOptions {
   dshRequiredPlugins?: string[];
   dshFilePolicy?: DshFilePolicy;
   dshInstallationReceipt?: Record<string, unknown>;
+  dshNoWriteProgressPolicy?: {
+    maxStallMs: number;
+    minModelRequests: number;
+    probeIntervalMs: number;
+  };
 }
 
 export function createRouteExecutor(options: RouteExecutorOptions): TaskExecutor {
@@ -100,6 +105,7 @@ export function createRouteExecutor(options: RouteExecutorOptions): TaskExecutor
       requiredPlugins: options.dshRequiredPlugins,
       filePolicy: options.dshFilePolicy,
       installationReceipt: options.dshInstallationReceipt,
+      noWriteProgressPolicy: options.dshNoWriteProgressPolicy,
     });
   }
   return createCodexCliExecutor({

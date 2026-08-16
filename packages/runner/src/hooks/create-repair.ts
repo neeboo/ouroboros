@@ -27,6 +27,44 @@ export async function reconcileTerminalBlockedVerifierRepair(options: {
   budgetLimit?: number;
 }): Promise<TerminalBlockedVerifierRepairReconciliation[]> {
   const overview = options.harness.getRunOverview({ runId: options.runId, eventLimit: 0 });
+  const timedOutSemanticRepair = [...overview.tasks].reverse().find((task) => {
+    if (task.role !== "worker" || task.status !== "blocked"
+      || !task.config?.runtimeIntegrationSemanticRepairRecovery) return false;
+    const session = [...overview.sessions].reverse().find((candidate) => candidate.taskId === task.id);
+    return Boolean(session?.status === "blocked" && isBoundedRepairTimeout(session.output)
+      && (session.output.changedFiles ?? []).length === 0);
+  });
+  if (overview.run && timedOutSemanticRepair) {
+    const marker = timedOutSemanticRepair.config!.runtimeIntegrationSemanticRepairRecovery as Record<string, unknown>;
+    const sourceVerifierTaskId = typeof marker.sourceVerifierTaskId === "string" ? marker.sourceVerifierTaskId : null;
+    const session = [...overview.sessions].reverse().find((candidate) => candidate.taskId === timedOutSemanticRepair.id);
+    if (sourceVerifierTaskId && session) {
+      const result = applyHarnessAction(options.harness, {
+        type: "materializeVerifierRepairRecovery",
+        runId: overview.run.id,
+        verifierTaskId: sourceVerifierTaskId,
+        reason: "continue the same charged runtime semantic Repair after a no-write DSH timeout",
+      });
+      const artifact = result.artifacts.find((candidate) =>
+        candidate.kind === "runtime_semantic_repair_continuation");
+      if (result.status === "done" && artifact) {
+        return [{
+          verifierTaskId: sourceVerifierTaskId,
+          verifierAttemptId: session.attemptId,
+          decision: "continue",
+          artifacts: [artifact],
+          problems: [],
+        }];
+      }
+      return [{
+        verifierTaskId: sourceVerifierTaskId,
+        verifierAttemptId: session.attemptId,
+        decision: "exit",
+        artifacts: result.artifacts,
+        problems: result.problems,
+      }];
+    }
+  }
   if (
     !overview.run
     || !["todo", "done", "blocked"].includes(overview.run.status)
