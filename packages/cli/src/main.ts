@@ -2122,6 +2122,12 @@ function executorFactory(_executorName: CliExecutorName) {
       dshProfileIsolation: dshProfileIsolationForRoute(input.route),
       dshRequiredPlugins: stringArrayConfig(input.task.config?.dshRequiredPlugins),
       dshFilePolicy: dshFilePolicyConfig(input.run, input.task),
+      dshInstallationReceipt: input.task.config?.dshInstallationReceipt as Record<string, unknown> | undefined,
+      dshNoWriteProgressPolicy: input.task.config?.dshNoWriteProgressPolicy as {
+        maxStallMs: number;
+        minModelRequests: number;
+        probeIntervalMs: number;
+      } | undefined,
     });
   };
 }
@@ -2136,11 +2142,17 @@ function attemptInputFactory(_executorName: CliExecutorName) {
     const dshProfileIsolation = dshProfileIsolationForRoute(input.route);
     const dshRequiredPlugins = stringArrayConfig(input.task.config?.dshRequiredPlugins);
     const permissionMode = taskPermissionMode(input.task, parseSandbox(flag(parsed, "sandbox") ?? "read-only"));
+    const dshNoWriteProgressPolicy = input.task.config?.dshNoWriteProgressPolicy as {
+      maxStallMs: number;
+      minModelRequests: number;
+      probeIntervalMs: number;
+    } | undefined;
     return {
       ...attemptInputForRoute(input.route, input.cwd),
       permissionMode,
       ...(dshProfileIsolation ? { dshProfileIsolation } : {}),
       ...(dshRequiredPlugins?.length ? { dshRequiredPlugins } : {}),
+      ...(dshNoWriteProgressPolicy ? { dshNoWriteProgressPolicy } : {}),
       ...hostExecutionCapabilityAttemptInput(input.task.config?.hostExecutionCapabilities, {
         role: input.task.role,
         verifierContract: input.task.config?.verifierContract,

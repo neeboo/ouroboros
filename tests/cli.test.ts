@@ -9608,6 +9608,79 @@ if (args.includes("self-improve-daemon")) {
     });
   });
 
+  test("generic DSH run-loop forwards the frozen no-write progress watchdog", async () => {
+    await runCli("init");
+    const harness = new Harness(dbPath);
+    const worktree = join(dir, "dsh-progress-watchdog-worktree");
+    const dshCommand = join(dir, "fake-dsh-no-write-progress");
+    await mkdir(join(worktree, "src"), { recursive: true });
+    await writeFile(
+      dshCommand,
+      [
+        "#!/usr/bin/env bun",
+        "if (process.argv.includes('--version')) { console.log('0.1.0-test'); process.exit(0); }",
+        "if (process.argv.includes('--help')) { console.log('Usage: fake-dsh [prompt]'); process.exit(0); }",
+        "await Bun.sleep(2_000);",
+        "console.log(JSON.stringify({ status: 'done', summary: 'late completion', changedFiles: [], checks: [], artifacts: [], problems: [] }));",
+      ].join("\n"),
+    );
+    await chmod(dshCommand, 0o755);
+    const runId = harness.createRun({
+      goal: "Stop DSH model loops that make no allowed-surface progress",
+      context: {
+        agentDefaults: { global: "dsh", roles: { worker: "dsh" } },
+        agentBackends: { dsh: { kind: "dsh-cli", command: dshCommand, profile: "headless" } },
+      },
+    });
+    const workerId = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Make one bounded source change",
+      prompt: "Make one bounded source change.",
+      worktreePath: worktree,
+      config: {
+        permissionMode: "workspace-write",
+        dshFilePolicy: {
+          schemaVersion: 1,
+          source: "frozen-design-mutation-surfaces",
+          allowedPaths: ["src/**"],
+          readOnlyPaths: [],
+          forbiddenPaths: [".git/orbs/**", ".orbs/**", ".ouroboros/**", "db/**"],
+        },
+        dshNoWriteProgressPolicy: { maxStallMs: 100, minModelRequests: 0, probeIntervalMs: 25 },
+      },
+    });
+
+    const startedAt = Date.now();
+    await runCliJson(
+      "run-loop",
+      "--run-id", runId,
+      "--executor", "codex-resumable",
+      "--cwd", worktree,
+      "--start-hook", "none",
+      "--max-rounds", "1",
+      "--tasks", "1",
+    );
+
+    const session = harness.getRunOverview({ runId, eventLimit: 0 }).sessions
+      .find((candidate) => candidate.taskId === workerId)!;
+    const attempt = harness.getAttempt(session.attemptId)!;
+    expect(Date.now() - startedAt).toBeLessThan(1_500);
+    expect(attempt.status).toBe("blocked");
+    expect(attempt.input.dshNoWriteProgressPolicy).toEqual({
+      maxStallMs: 100,
+      minModelRequests: 0,
+      probeIntervalMs: 25,
+    });
+    expect(attempt.output.artifacts).toContainEqual(expect.objectContaining({
+      kind: "dsh_progress_watchdog_receipt",
+      status: "stalled",
+      maxStallMs: 100,
+      minModelRequests: 0,
+    }));
+    expect((attempt.output.problems ?? []).join("\n")).toContain("dsh-no-write-progress");
+  });
+
   test("run-loop reviews the goal when the queue is empty and can complete the run", async () => {
     await runCli("init");
     const run = await runCliJson("create-run", "--goal", "Bootstrap ouroboros");
