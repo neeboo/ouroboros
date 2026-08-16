@@ -4802,7 +4802,7 @@ function materializeTimedOutRuntimeSemanticRepairContinuationWithDb(input: {
   }
   const existingContinuations = overview.tasks.filter((task) => {
     const marker = objectRecordOrNull(task.config?.runtimeIntegrationSemanticRepairContinuation);
-    return marker?.sourceAttemptId === repairAttempt.id;
+    return task.role === "worker" && marker?.sourceAttemptId === repairAttempt.id;
   });
   const existingContinuation = existingContinuations.find((task) =>
     sameCanonicalValue(task.dependsOn, [sourceVerifier.id]) && task.status !== "blocked")
@@ -4812,10 +4812,14 @@ function materializeTimedOutRuntimeSemanticRepairContinuationWithDb(input: {
     const verifier = overview.tasks.find((task) => task.role === "verifier"
       && sameCanonicalValue(task.dependsOn, [existingContinuation.id]));
     if (!verifier) throw new Error(`semantic continuation ${existingContinuation.id} lost its Verifier`);
-    if (existingContinuation.status === "todo"
-      && verifier.status === "todo"
-      && !overview.sessions.some((session) => session.taskId === existingContinuation.id || session.taskId === verifier.id)
-      && !sameCanonicalValue(existingContinuation.dependsOn, [sourceVerifier.id])) {
+    const pairHasNoAttempt = !overview.sessions.some((session) =>
+      session.taskId === existingContinuation.id || session.taskId === verifier.id
+    );
+    const isReplaceableLegacyPair = pairHasNoAttempt
+      && ["todo", "blocked"].includes(existingContinuation.status)
+      && ["todo", "blocked"].includes(verifier.status)
+      && !sameCanonicalValue(existingContinuation.dependsOn, [sourceVerifier.id]);
+    if (isReplaceableLegacyPair) {
       db.query(
         "update tasks set status = 'blocked', updated_at = current_timestamp where id in ($continuationTaskId, $verifierTaskId) and status = 'todo'",
       ).run({ $continuationTaskId: existingContinuation.id, $verifierTaskId: verifier.id });
@@ -4826,7 +4830,13 @@ function materializeTimedOutRuntimeSemanticRepairContinuationWithDb(input: {
       return semanticRepairContinuationResult(run.id, repair, repairAttempt.id, existingContinuation, verifier, true);
     }
   }
-  if (pendingVerifier.status !== "todo") {
+  const replacedPendingVerifierId = existingContinuations
+    .map((task) => objectRecordOrNull(task.config?.runtimeIntegrationSemanticRepairContinuation)?.replacedVerifierTaskId)
+    .find((taskId) => taskId === pendingVerifier.id);
+  const pendingVerifierWasSafelyReplaced = pendingVerifier.status === "blocked"
+    && replacedPendingVerifierId === pendingVerifier.id
+    && !overview.sessions.some((session) => session.taskId === pendingVerifier.id);
+  if (pendingVerifier.status !== "todo" && !pendingVerifierWasSafelyReplaced) {
     throw new Error(`pending semantic Verifier ${pendingVerifier.id} must be todo before replacement`);
   }
 

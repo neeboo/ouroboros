@@ -420,7 +420,7 @@ describe("runtime integration task execution contracts", () => {
     expect(verifier).toMatchObject({
       status: "todo",
       parentId: fixture.plannerTaskId,
-      dependsOn: [semanticVerifierId],
+      dependsOn: [repair.id],
       config: {
         executor: "codex-resumable",
         permissionMode: "read-only",
@@ -572,6 +572,44 @@ describe("runtime integration task execution contracts", () => {
       sessionForTask: (task) => `session-${task.id}`,
     });
     expect(leased.map((task) => task.id)).toEqual([continuation.id]);
+
+    harness.runInImmediateTransaction((db) => {
+      db.query(
+        "update tasks set status = 'blocked', depends_on_json = $dependsOn where id = $taskId",
+      ).run({ $taskId: continuation.id, $dependsOn: JSON.stringify([repair.id]) });
+      db.query("update tasks set status = 'blocked' where id = $taskId")
+        .run({ $taskId: replacementVerifier.id });
+    });
+    const migrated = applyHarnessAction(harness, {
+      type: "materializeVerifierRepairRecovery",
+      runId: fixture.runId,
+      verifierTaskId: semanticVerifierId,
+      reason: "replace the unschedulable legacy same-budget continuation",
+    } as never);
+    const migratedOverview = harness.getRunOverview({ runId: fixture.runId, eventLimit: 0 });
+    const migratedArtifact = migrated.artifacts.find((artifact) =>
+      artifact.kind === "runtime_semantic_repair_continuation"
+    )!;
+    const migratedContinuationId = migratedArtifact.continuationTaskId as string;
+    const migratedVerifierId = migratedArtifact.verifierTaskId as string;
+    const migratedContinuation = migratedOverview.tasks.find((task) => task.id === migratedContinuationId)!;
+    expect(migratedContinuationId).not.toBe(continuation.id);
+    expect(migratedContinuation).toMatchObject({
+      status: "todo",
+      role: "worker",
+      dependsOn: [semanticVerifierId],
+    });
+    expect(migratedOverview.tasks.find((task) => task.id === migratedVerifierId)).toMatchObject({
+      status: "todo",
+      role: "verifier",
+      dependsOn: [migratedContinuationId],
+    });
+    expect(harness.leaseReadyTasks({
+      runId: fixture.runId,
+      limit: 1,
+      sessionForTask: (task) => `migrated-session-${task.id}`,
+    }).map((task) => task.id)).toEqual([migratedContinuationId]);
+    expect(migratedOverview.run!.context.repairReplanBudget).toEqual(budgetBefore);
   });
 
   test("failed host evidence remains terminal and prepareRunDrain never creates Goal Review", () => {
