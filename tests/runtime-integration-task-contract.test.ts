@@ -516,9 +516,10 @@ describe("runtime integration task execution contracts", () => {
     });
     const researchTaskId = harness.createTask({
       runId: researchRunId,
-      role: "researcher",
+      role: "designer",
       goal: "Produce immutable research artifacts",
       prompt: "Read only.",
+      config: { researchOnly: true, forbidWrites: true, forbidActions: true },
     });
     const researchAttemptId = harness.recordAttempt({
       taskId: researchTaskId,
@@ -527,9 +528,15 @@ describe("runtime integration task execution contracts", () => {
         status: "done",
         summary: "Research artifacts are complete.",
         changedFiles: [],
-        checks: [{ name: "side effects", status: "passed", evidence: "none" }],
+        checks: [
+          { name: "research-only", status: "passed", evidence: "no implementation" },
+          { name: "side effects", status: "passed", evidence: "none" },
+        ],
         artifacts: [{ kind: "evaluation-contract", artifactId: "evaluation-contract", sha256: "c".repeat(64) }],
-        problems: [],
+        problems: [
+          "summary: external expert review remains due; severity: known-limitation",
+          "summary: shared persistent worlds remain deferred; severity: design-risk",
+        ],
       },
     });
     harness.updateRunStatus({ runId: researchRunId, status: "done" });

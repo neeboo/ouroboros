@@ -2864,11 +2864,26 @@ function applyFrozenEvidenceConflictDesignerAtomically(
         : null;
       const researchTask = researchOverview?.tasks.find((task) => task.id === researchSignal.taskId);
       const researchAttempt = harness.getAttemptWithDb(db, researchSignal.attemptId);
+      const researchChecks = (researchAttempt?.output.checks ?? []).map(objectRecordOrNull).filter((check) => check !== null);
+      const passedResearchCheck = (name: string) => researchChecks.some((check) => {
+        const checkName = typeof check.name === "string"
+          ? check.name.toLowerCase().replace(/[_\s]+/g, "-")
+          : "";
+        const result = check.status ?? check.result;
+        return checkName === name && (result === "passed" || result === "pass");
+      });
+      const researchOutput = objectRecordOrNull(researchAttempt?.output);
       if (!researchRun || researchRun.status !== "done" || researchRun.projectId !== sourceRun.projectId
         || !researchTask || researchTask.runId !== researchRun.id || !researchAttempt
         || researchAttempt.taskId !== researchTask.id || researchAttempt.output.status !== "done"
         || (researchAttempt.output.changedFiles ?? []).length !== 0
-        || (researchAttempt.output.problems ?? []).length !== 0) {
+        || researchTask.config?.researchOnly !== true || researchTask.config?.forbidWrites !== true
+        || researchTask.config?.forbidActions !== true
+        || (researchAttempt.output.nextTasks ?? []).length !== 0
+        || (researchAttempt.output.nextRuns ?? []).length !== 0
+        || (researchAttempt.output.designActions ?? []).length !== 0
+        || (Array.isArray(researchOutput?.actions) && researchOutput.actions.length !== 0)
+        || !passedResearchCheck("research-only") || !passedResearchCheck("side-effects")) {
         throw new Error("research evidence link does not resolve to one done read-only attempt");
       }
       const originalBundle = objectRecord(sourceRun.context.targetSystemEvidenceBundle, "targetSystemEvidenceBundle");
