@@ -4328,6 +4328,15 @@ describe("Harness actions", () => {
         expectedCorpusSnapshotSha256: "c".repeat(64),
         executionStatus: "failed",
         noHoldoutDisclosure: true,
+        sideEffectCounters: {
+          paidUsd: 0,
+          realProviderCalls: 0,
+          pancatWrites: 0,
+          productionPublishes: 0,
+          realAssetDeletes: 0,
+          crossProjectMemoryReads: 0,
+          crossProjectMemoryWrites: 0,
+        },
       }));
       const mismatchEvent = harness.listHarnessActionEvents({ limit: 1 })[0]!;
       expect(JSON.stringify(mismatchEvent)).not.toContain(holdoutRef);
