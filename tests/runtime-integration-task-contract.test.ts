@@ -420,6 +420,10 @@ describe("runtime integration task execution contracts", () => {
     gitFixture(sourceRepoPath, ["add", "."]);
     gitFixture(sourceRepoPath, ["commit", "-m", "fixture"]);
     const expectedHead = gitFixture(sourceRepoPath, ["rev-parse", "HEAD"]);
+    mkdirSync(join(sourceRepoPath, "node_modules", "typescript", "bin"), { recursive: true });
+    mkdirSync(join(sourceRepoPath, "node_modules", "tsdown", "dist"), { recursive: true });
+    writeFileSync(join(sourceRepoPath, "node_modules", "typescript", "bin", "tsc"), "// fixture\n");
+    writeFileSync(join(sourceRepoPath, "node_modules", "tsdown", "dist", "run.mjs"), "// fixture\n");
     const fixture = governedRuntimeFixture(harness, dir, { legacyTasks: true, dshExpectedHead: expectedHead });
     const graph = applyHarnessAction(harness, {
       type: "materializeRuntimeIntegrationTaskGraphRecovery",
@@ -446,7 +450,7 @@ describe("runtime integration task execution contracts", () => {
       executablePath,
     } as never, {
       runCommand: (input) => {
-        if (input.command === "npm run build:lib:host") {
+        if (input.command.includes("typescript/bin/tsc") && input.command.includes("tsdown") && input.command.includes("DSH_BUILD_FACE")) {
           mkdirSync(join(sourceRepoPath, "apps", "cli", "lib"), { recursive: true });
           writeFileSync(artifactPath, "#!/usr/bin/env node\nconsole.log('0.1.0-rc.5')\n");
           chmodSync(artifactPath, 0o755);

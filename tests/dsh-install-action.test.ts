@@ -42,6 +42,10 @@ describe("local DSH installation action", () => {
     git(sourceRepoPath, ["add", "."]);
     git(sourceRepoPath, ["commit", "-m", "fixture"]);
     const expectedHead = git(sourceRepoPath, ["rev-parse", "HEAD"]);
+    await mkdir(join(sourceRepoPath, "node_modules", "typescript", "bin"), { recursive: true });
+    await mkdir(join(sourceRepoPath, "node_modules", "tsdown", "dist"), { recursive: true });
+    await writeFile(join(sourceRepoPath, "node_modules", "typescript", "bin", "tsc"), "// fixture\n");
+    await writeFile(join(sourceRepoPath, "node_modules", "tsdown", "dist", "run.mjs"), "// fixture\n");
     const runId = harness.createRun({
       goal: "Install pinned DSH",
       context: {
@@ -63,7 +67,7 @@ describe("local DSH installation action", () => {
     } as never, {
       runCommand: (input) => {
         commands.push(input.command);
-        if (input.command === "npm run build:lib:host") {
+        if (input.command.includes("typescript/bin/tsc") && input.command.includes("tsdown") && input.command.includes("DSH_BUILD_FACE")) {
           buildOutputLimit = input.maxOutputBytes ?? 0;
           mkdirSync(join(sourceRepoPath, "apps", "cli", "lib"), { recursive: true });
           writeFileSync(artifactPath, "#!/usr/bin/env node\nconsole.log('0.1.0-rc.5')\n");
@@ -87,7 +91,7 @@ describe("local DSH installation action", () => {
         artifactSha256: expect.stringMatching(/^[a-f0-9]{64}$/),
         executablePath,
         executableRealpath: expect.any(String),
-        buildCommand: "npm run build:lib:host",
+        buildCommand: expect.stringContaining("tsdown"),
         launchability: { version: "passed", help: "passed" },
       })],
     });

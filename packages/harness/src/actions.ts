@@ -6413,7 +6413,16 @@ function installLocalDshCli(
     const sourceEntryStat = lstatSync(sourceEntry);
     if (!sourceEntryStat.isFile() || sourceEntryStat.isSymbolicLink()) throw new Error("DSH source entry is not a regular file");
 
-    const buildCommand = "npm run build:lib:host";
+    const discoveredNodePath = Bun.which("node");
+    if (!discoveredNodePath) throw new Error("DSH runtime node executable is unavailable");
+    const nodePath = realpathSync(discoveredNodePath);
+    const nodeProbe = runCommand({ cwd: sourceRepoPath, command: `${shellQuote(nodePath)} --version`, timeoutMs: 10_000, maxOutputBytes: 8_192 });
+    if (nodeProbe.exitCode !== 0 || !/^v\d+\.\d+\.\d+/.test(nodeProbe.stdout.trim())) {
+      throw new Error("DSH runtime node launchability probe failed");
+    }
+    const typescriptEntry = realpathRegularFile(join(sourceRepoPath, "node_modules", "typescript", "bin", "tsc"), "DSH TypeScript entry");
+    const tsdownEntry = realpathRegularFile(join(sourceRepoPath, "node_modules", "tsdown", "dist", "run.mjs"), "DSH tsdown entry");
+    const buildCommand = `${shellQuote(nodePath)} ${shellQuote(typescriptEntry)} -b tsconfig.host.json && ${shellQuote(nodePath)} ${shellQuote(tsdownEntry)} --env.DSH_BUILD_FACE host`;
     const build = runCommand({ cwd: sourceRepoPath, command: buildCommand, timeoutMs: 600_000, maxOutputBytes: 64 * 1024 * 1024 });
     if (build.exitCode !== 0) throw new Error(`DSH host build failed (${build.exitCode}): ${limitUtf8Output(build.stderr || build.stdout, 2_048)}`);
     const statusAfter = runGit({ cwd: sourceRepoPath, args: ["status", "--short", "--untracked-files=no"] });
@@ -6453,13 +6462,6 @@ function installLocalDshCli(
     if (realpathSync(action.executablePath) !== artifactRealpath) throw new Error("DSH executable atomic readback did not resolve to the built artifact");
     accessSync(action.executablePath, constants.X_OK);
 
-    const discoveredNodePath = Bun.which("node");
-    if (!discoveredNodePath) throw new Error("DSH runtime node executable is unavailable");
-    const nodePath = realpathSync(discoveredNodePath);
-    const nodeProbe = runCommand({ cwd: sourceRepoPath, command: `${shellQuote(nodePath)} --version`, timeoutMs: 10_000, maxOutputBytes: 8_192 });
-    if (nodeProbe.exitCode !== 0 || !/^v\d+\.\d+\.\d+/.test(nodeProbe.stdout.trim())) {
-      throw new Error("DSH runtime node launchability probe failed");
-    }
     const receiptBody = {
       kind: "local_dsh_installation_receipt",
       schemaVersion: 1,
@@ -6523,6 +6525,13 @@ function safeRealpath(path: string) {
   } catch {
     return null;
   }
+}
+
+function realpathRegularFile(path: string, label: string) {
+  const real = realpathSync(path);
+  const stat = lstatSync(real);
+  if (!stat.isFile() || stat.isSymbolicLink()) throw new Error(`${label} is not a regular file`);
+  return real;
 }
 
 const SUBSESSION_DEFAULT_TIMEOUT_MS = 30 * 60 * 1000;
