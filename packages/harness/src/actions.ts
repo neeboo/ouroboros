@@ -243,6 +243,44 @@ export type HarnessAction =
       expectedParentSha: string;
       commitMessage: string;
       files: ExactGitIndexFile[];
+      verifierTaskId?: string;
+      verifiedAbsentPaths?: string[];
+      preservedUntrackedRoots?: string[];
+    }
+  | {
+      type: "freezeVerifiedPackageCommit";
+      contractId: string;
+      runId: string;
+      taskId: string;
+      verifierTaskId: string;
+      repoPath: string;
+      branch: string;
+      expectedParentSha: string;
+      commitMessage: string;
+      allowedRoots: string[];
+      preservedUntrackedRoots: string[];
+      comparisonPath: string;
+      expectedComparisonFileSha256: string;
+      expectedAbsentPaths: string[];
+      expectedTestPasses: number;
+    }
+  | {
+      type: "freezeExactGitPush";
+      runId: string;
+      contractId: string;
+      commitActionEventId: string;
+      repoPath: string;
+      remoteHost: string;
+      repository: string;
+      ref: string;
+      expectedOldSha: string;
+    }
+  | {
+      type: "completeVerifiedPackageDelivery";
+      runId: string;
+      commitActionEventId: string;
+      pushActionEventId: string;
+      nextGoal: string;
     }
   | {
       type: "stageExactWorkerFilesForVerification";
@@ -874,6 +912,9 @@ export function parseHarnessAction(value: unknown): HarnessAction {
       "expectedParentSha",
       "commitMessage",
       "files",
+      "verifierTaskId",
+      "verifiedAbsentPaths",
+      "preservedUntrackedRoots",
     ]);
     return {
       type,
@@ -885,6 +926,70 @@ export function parseHarnessAction(value: unknown): HarnessAction {
       expectedParentSha: exactGitCommitShaField(record, "expectedParentSha"),
       commitMessage: exactCommitMessageField(record, "commitMessage"),
       files: exactGitIndexFilesField(record, "files"),
+      verifierTaskId: optionalNonEmptyStringField(record, "verifierTaskId"),
+      verifiedAbsentPaths: exactRelativePathListField(record, "verifiedAbsentPaths"),
+      preservedUntrackedRoots: exactRelativeRootListField(record, "preservedUntrackedRoots"),
+    };
+  }
+  if (type === "freezeVerifiedPackageCommit") {
+    assertOnlyFields(record, type, [
+      "type", "contractId", "runId", "taskId", "verifierTaskId", "repoPath", "branch",
+      "expectedParentSha", "commitMessage", "allowedRoots", "preservedUntrackedRoots",
+      "comparisonPath", "expectedComparisonFileSha256", "expectedAbsentPaths", "expectedTestPasses",
+    ]);
+    const allowedRoots = exactRelativeRootListField(record, "allowedRoots", true) ?? [];
+    const preservedUntrackedRoots = exactRelativeRootListField(record, "preservedUntrackedRoots") ?? [];
+    if ([...allowedRoots].sort().join("\0") !== "config/evolution/\0tests/evolution/") {
+      throw new Error("allowedRoots must be exactly config/evolution/ and tests/evolution/");
+    }
+    if (preservedUntrackedRoots.join("\0") !== ".ouroboros/") {
+      throw new Error("preservedUntrackedRoots must be exactly .ouroboros/");
+    }
+    const expectedAbsentPaths = exactRelativePathListField(record, "expectedAbsentPaths");
+    if (!expectedAbsentPaths) throw new Error("expectedAbsentPaths is required");
+    return {
+      type,
+      contractId: exactSafeIdentifierField(record, "contractId"),
+      runId: exactNonEmptyStringField(record, "runId"),
+      taskId: exactNonEmptyStringField(record, "taskId"),
+      verifierTaskId: exactNonEmptyStringField(record, "verifierTaskId"),
+      repoPath: exactAbsolutePathField(record, "repoPath"),
+      branch: exactGitBranchField(record, "branch"),
+      expectedParentSha: exactGitCommitShaField(record, "expectedParentSha"),
+      commitMessage: exactCommitMessageField(record, "commitMessage"),
+      allowedRoots,
+      preservedUntrackedRoots,
+      comparisonPath: exactRelativeGitPathField(record, "comparisonPath", "comparisonPath"),
+      expectedComparisonFileSha256: exactSha256Field(record, "expectedComparisonFileSha256"),
+      expectedAbsentPaths,
+      expectedTestPasses: positiveIntegerField(record, "expectedTestPasses"),
+    };
+  }
+  if (type === "freezeExactGitPush") {
+    assertOnlyFields(record, type, [
+      "type", "runId", "contractId", "commitActionEventId", "repoPath", "remoteHost",
+      "repository", "ref", "expectedOldSha",
+    ]);
+    return {
+      type,
+      runId: exactNonEmptyStringField(record, "runId"),
+      contractId: exactSafeIdentifierField(record, "contractId"),
+      commitActionEventId: exactNonEmptyStringField(record, "commitActionEventId"),
+      repoPath: exactAbsolutePathField(record, "repoPath"),
+      remoteHost: exactGitRemoteHostField(record, "remoteHost"),
+      repository: exactGitRepositoryField(record, "repository"),
+      ref: gitBranchRefField(record, "ref"),
+      expectedOldSha: exactGitCommitShaField(record, "expectedOldSha"),
+    };
+  }
+  if (type === "completeVerifiedPackageDelivery") {
+    assertOnlyFields(record, type, ["type", "runId", "commitActionEventId", "pushActionEventId", "nextGoal"]);
+    return {
+      type,
+      runId: exactNonEmptyStringField(record, "runId"),
+      commitActionEventId: exactNonEmptyStringField(record, "commitActionEventId"),
+      pushActionEventId: exactNonEmptyStringField(record, "pushActionEventId"),
+      nextGoal: exactNonEmptyStringField(record, "nextGoal"),
     };
   }
   if (type === "stageExactWorkerFilesForVerification") {
@@ -4891,6 +4996,18 @@ function applyParsedHarnessAction(
     return commitExactGitIndex(harness, action, options);
   }
 
+  if (action.type === "freezeVerifiedPackageCommit") {
+    return freezeVerifiedPackageCommit(harness, action, options);
+  }
+
+  if (action.type === "freezeExactGitPush") {
+    return freezeExactGitPush(harness, action);
+  }
+
+  if (action.type === "completeVerifiedPackageDelivery") {
+    return completeVerifiedPackageDelivery(harness, action);
+  }
+
   if (action.type === "stageExactWorkerFilesForVerification") {
     return stageExactWorkerFilesForVerification(harness, action, options);
   }
@@ -6813,7 +6930,7 @@ interface WorkerFileReceipt {
 }
 
 function failedHostEvidenceAction(
-  action: StageExactWorkerFilesAction | MaterializeAttemptArtifactsAction | VerifySealedCorpusAction,
+  action: StageExactWorkerFilesAction | MaterializeAttemptArtifactsAction | VerifySealedCorpusAction | FreezeVerifiedPackageCommitAction,
   summary: string,
   checks: HarnessActionResult["checks"],
 ): HarnessActionResult {
@@ -7184,6 +7301,26 @@ function zeroSideEffectCounters() {
     crossProjectMemoryReads: 0,
     crossProjectMemoryWrites: 0,
   };
+}
+
+function exactZeroSideEffectCounters(value: unknown) {
+  const record = objectRecordOrNull(value);
+  const expected = zeroSideEffectCounters();
+  if (!record || Object.keys(record).sort().join("\0") !== Object.keys(expected).sort().join("\0")) {
+    return null;
+  }
+  for (const [key, expectedValue] of Object.entries(expected)) {
+    if (!Object.is(record[key], expectedValue)) return null;
+  }
+  return expected;
+}
+
+function sourceSideEffectReceipt(attempt: RunOverview["sessions"][number]) {
+  const artifacts = Array.isArray(attempt.output.artifacts) ? attempt.output.artifacts : [];
+  const matches = artifacts.map(objectRecordOrNull).filter((artifact) =>
+    artifact?.kind === "verifier_repair_handoff_receipt" && exactZeroSideEffectCounters(artifact.sideEffectCounters));
+  if (matches.length !== 1) return null;
+  return exactZeroSideEffectCounters(matches[0]!.sideEffectCounters);
 }
 
 function completedWorkerFileReceipts(
@@ -7646,6 +7783,439 @@ type ExactGitIndexCommitStatus =
   | "cas_failed"
   | "readback_mismatch";
 
+type FreezeVerifiedPackageCommitAction = Extract<HarnessAction, { type: "freezeVerifiedPackageCommit" }>;
+
+function pathUnderOneRoot(path: string, roots: string[]) {
+  return roots.some((root) => path.startsWith(root));
+}
+
+function latestDoneAttemptForTask(overview: RunOverview, taskId: string) {
+  return [...overview.sessions].reverse().find((session) => session.taskId === taskId && session.status === "done") ?? null;
+}
+
+function verifiedPackageComparisonMatches(
+  value: Record<string, unknown>,
+  frozenComparison: Record<string, unknown>,
+  projectId: string,
+) {
+  const fields = [
+    "canonicalManifestSha256", "corpusSnapshotSha256", "equalBudget", "freezeStage",
+    "holdoutEvidenceCommitment", "id", "kind", "maximumGuardRegression", "minimumUplift",
+    "primaryMetric", "projectId", "reviewAt", "schemaVersion", "sourceByteCommitments",
+  ].sort();
+  if (Object.keys(value).sort().join("\0") !== fields.join("\0")) return false;
+  const holdout = objectRecordOrNull(value.holdoutEvidenceCommitment);
+  const commitments = objectRecordOrNull(value.sourceByteCommitments);
+  if (!holdout || Object.keys(holdout).sort().join("\0") !== "algorithm\0count\0refsSha256"
+    || holdout.algorithm !== "sha256" || !Number.isInteger(holdout.count) || Number(holdout.count) <= 0
+    || typeof holdout.refsSha256 !== "string" || !/^[0-9a-f]{64}$/.test(holdout.refsSha256) || /^0+$/.test(holdout.refsSha256)
+    || !commitments || Object.keys(commitments).length === 0 || Object.keys(commitments).length > EXACT_GIT_INDEX_MAX_FILES
+    || Object.entries(commitments).some(([path, sha256]) =>
+      !path.startsWith("config/evolution/v5/") || isOuroborosRuntimePath(path)
+      || typeof sha256 !== "string" || !/^[0-9a-f]{64}$/.test(sha256) || /^0+$/.test(sha256))) {
+    return false;
+  }
+  const reviewAt = typeof value.reviewAt === "string" ? value.reviewAt : "";
+  return value.schemaVersion === 1
+    && value.kind === "comparison-freeze"
+    && value.id === "comparison-freeze:target-evolution-v5"
+    && value.freezeStage === "comparison-freeze-before-comparison"
+    && value.projectId === projectId
+    && typeof value.canonicalManifestSha256 === "string"
+    && /^[0-9a-f]{64}$/.test(value.canonicalManifestSha256) && !/^0+$/.test(value.canonicalManifestSha256)
+    && reviewAt.length > 0 && new Date(reviewAt).toISOString() === reviewAt
+    && value.corpusSnapshotSha256 === frozenComparison.corpusSnapshotSha256
+    && sameCanonicalValue(value.equalBudget, frozenComparison.equalBudget)
+    && value.primaryMetric === frozenComparison.primaryMetric
+    && value.minimumUplift === frozenComparison.minimumUplift
+    && value.maximumGuardRegression === frozenComparison.maximumGuardRegression;
+}
+
+function freezeVerifiedPackageCommit(
+  harness: Harness,
+  action: FreezeVerifiedPackageCommitAction,
+  options: HarnessActionOptions,
+): HarnessActionResult {
+  const checks: HarnessActionResult["checks"] = [];
+  const run = harness.getRun(action.runId);
+  const task = harness.getTask(action.taskId);
+  const verifier = harness.getTask(action.verifierTaskId);
+  if (!run || !task || !verifier || task.runId !== run.id || verifier.runId !== run.id) {
+    return failedHostEvidenceAction(action, "Run, execution task, and Verifier must belong to the same delivery.", checks);
+  }
+  if (task.status !== "done" || task.role !== "worker" || !task.worktreePath) {
+    return failedHostEvidenceAction(action, "The package source must be one completed Worker or Repair with a worktree.", checks);
+  }
+  if (verifier.status !== "done" || verifier.role !== "verifier" || !verifier.dependsOn.includes(task.id)) {
+    return failedHostEvidenceAction(action, "The named independent Verifier must be done and depend on the package source task.", checks);
+  }
+  const overview = harness.getRunOverview({ runId: run.id, eventLimit: 0 });
+  const sourceAttempt = latestDoneAttemptForTask(overview, task.id);
+  const verifierAttempt = latestDoneAttemptForTask(overview, verifier.id);
+  if (!sourceAttempt || sourceAttempt.output.status !== "done" || (sourceAttempt.output.problems ?? []).length > 0) {
+    return failedHostEvidenceAction(action, "The package source has no clean completed attempt evidence.", checks);
+  }
+  const verifierChecks = Array.isArray(verifierAttempt?.output.checks) ? verifierAttempt!.output.checks : [];
+  const requiredVerifierChecks = ["frozen-offline-suite", "authorized-artifact-surface", "canonical-manifest-binding", "side-effects"];
+  if (
+    !verifierAttempt || verifierAttempt.output.status !== "done" || verifierAttempt.output.verdict !== "pass" ||
+    (verifierAttempt.output.problems ?? []).length > 0 || verifierChecks.some(isFailedCheck) ||
+    requiredVerifierChecks.some((name) => !verifierChecks.some((check) => objectRecordOrNull(check)?.name === name && objectRecordOrNull(check)?.status === "passed"))
+  ) {
+    return failedHostEvidenceAction(action, "The independent Verifier does not contain the required machine-readable pass evidence.", checks);
+  }
+  const verifierEvidence = exactCommitVerifierEvidence(overview, task.id, verifier.id);
+  if (!verifierEvidence.ok) {
+    return failedHostEvidenceAction(action, `Verifier lineage is unresolved: ${verifierEvidence.reason}.`, checks);
+  }
+  const sourceChecks = Array.isArray(sourceAttempt.output.checks) ? sourceAttempt.output.checks : [];
+  for (const name of ["node-test-all-pass-no-skip", "zero-side-effect-counters", "authorized-paths-only-no-ouroboros-touches"]) {
+    if (!sourceChecks.some((check) => objectRecordOrNull(check)?.name === name && objectRecordOrNull(check)?.status === "passed")) {
+      return failedHostEvidenceAction(action, `The package source is missing passed check ${name}.`, checks);
+    }
+  }
+  if (!new RegExp(`\\b${action.expectedTestPasses}/${action.expectedTestPasses}\\b`).test(sourceAttempt.output.summary ?? "")) {
+    return failedHostEvidenceAction(action, `The package source does not attest ${action.expectedTestPasses}/${action.expectedTestPasses} offline tests.`, checks);
+  }
+  const sideEffectCounters = sourceSideEffectReceipt(sourceAttempt);
+  if (!sideEffectCounters) {
+    return failedHostEvidenceAction(action, "The package source lacks one machine-readable zero-side-effect receipt.", checks);
+  }
+  checks.push({ name: "verified package evidence", status: "passed", evidence: `${sourceAttempt.attemptId}:${verifierAttempt.attemptId}` });
+
+  if (!existsSync(action.repoPath)) return failedHostEvidenceAction(action, "Repository path does not exist.", checks);
+  const taskWorktreePath = task.worktreePath;
+  try {
+    if (!taskWorktreePath || realpathSync(taskWorktreePath) !== realpathSync(action.repoPath)) {
+      return failedHostEvidenceAction(action, "Package source worktree does not match repoPath.", checks);
+    }
+  } catch {
+    return failedHostEvidenceAction(action, "Package source worktree cannot be resolved.", checks);
+  }
+  const git = options.runGit ?? defaultGitRunner;
+  const top = safeGitStep(git, action.repoPath, ["rev-parse", "--show-toplevel"]);
+  const branch = safeGitStep(git, action.repoPath, ["branch", "--show-current"]);
+  const head = safeGitStep(git, action.repoPath, ["rev-parse", "HEAD"]);
+  if (!top.ok || !branch.ok || !head.ok || realpathSync(top.stdout.trim()) !== realpathSync(action.repoPath)
+    || branch.stdout.trim() !== action.branch || head.stdout.trim() !== action.expectedParentSha) {
+    return failedHostEvidenceAction(action, "Repository identity, branch, or parent SHA does not match the frozen request.", checks);
+  }
+  const changedFiles = Array.isArray(sourceAttempt.output.changedFiles) ? sourceAttempt.output.changedFiles : [];
+  if (changedFiles.length === 0 || changedFiles.length > EXACT_GIT_INDEX_MAX_FILES
+    || !changedFiles.every((path): path is string => typeof path === "string")
+    || new Set(changedFiles).size !== changedFiles.length
+    || changedFiles.some((path) => !pathUnderOneRoot(path, action.allowedRoots) || isOuroborosRuntimePath(path))) {
+    return failedHostEvidenceAction(action, "Source changedFiles must be a unique bounded list inside the frozen package roots.", checks);
+  }
+  const present: string[] = [];
+  const missing: string[] = [];
+  for (const path of changedFiles) {
+    const absolute = join(action.repoPath, path);
+    if (!existsSync(absolute)) {
+      const parentEntry = safeGitStep(git, action.repoPath, ["cat-file", "-e", `${action.expectedParentSha}:${path}`]);
+      if (parentEntry.ok) return failedHostEvidenceAction(action, `Missing source path would silently delete a tracked file: ${path}.`, checks);
+      missing.push(path);
+      continue;
+    }
+    try {
+      const stat = lstatSync(absolute);
+      if (!stat.isFile() || stat.isSymbolicLink() || !realpathSync(absolute).startsWith(`${realpathSync(action.repoPath)}${sep}`)) {
+        return failedHostEvidenceAction(action, `Package path is not one regular in-repository file: ${path}.`, checks);
+      }
+    } catch {
+      return failedHostEvidenceAction(action, `Package path cannot be read: ${path}.`, checks);
+    }
+    present.push(path);
+  }
+  if (!sameUniqueStrings(missing, action.expectedAbsentPaths)) {
+    return failedHostEvidenceAction(action, "Missing source paths do not exactly match expectedAbsentPaths.", checks);
+  }
+  if (present.length === 0) return failedHostEvidenceAction(action, "The verified package has no files to commit.", checks);
+
+  const unstaged = safeGitStep(git, action.repoPath, ["diff", "--name-only", "-z"]);
+  const stagedBefore = safeGitStep(git, action.repoPath, ["diff", "--cached", "--name-only", "-z", action.expectedParentSha, "--"]);
+  const untracked = safeGitStep(git, action.repoPath, ["ls-files", "--others", "--exclude-standard", "-z"]);
+  const conflicts = safeGitStep(git, action.repoPath, ["ls-files", "--unmerged", "-z"]);
+  if (!unstaged.ok || unstaged.stdout.length > 0 || !stagedBefore.ok
+    || !untracked.ok || !conflicts.ok || conflicts.stdout.length > 0) {
+    return failedHostEvidenceAction(action, "Repository must have only untracked package and explicitly preserved runtime files before staging.", checks);
+  }
+  const untrackedPaths = untracked.stdout.split("\0").filter(Boolean);
+  const presentSet = new Set(present);
+  const unauthorized = untrackedPaths.filter((path) => !presentSet.has(path) && !pathUnderOneRoot(path, action.preservedUntrackedRoots));
+  const preservedUntrackedPaths = untrackedPaths.filter((path) => pathUnderOneRoot(path, action.preservedUntrackedRoots));
+  const replay = sameNullSeparatedPaths(stagedBefore.stdout, present);
+  const missingUntracked = replay ? [] : present.filter((path) => !untrackedPaths.includes(path));
+  if (unauthorized.length > 0 || missingUntracked.length > 0 || (!replay && stagedBefore.stdout.length > 0)) {
+    return failedHostEvidenceAction(action, `Untracked scope differs from the frozen package: ${[...unauthorized, ...missingUntracked].join(",")}.`, checks);
+  }
+  const comparisonAbsolute = join(action.repoPath, action.comparisonPath);
+  if (!presentSet.has(action.comparisonPath)) {
+    return failedHostEvidenceAction(action, "The frozen comparison file must be part of the committed package.", checks);
+  }
+  let comparisonFile: Record<string, unknown>;
+  try {
+    comparisonFile = JSON.parse(readFileSync(comparisonAbsolute, "utf8")) as Record<string, unknown>;
+  } catch {
+    return failedHostEvidenceAction(action, "The frozen comparison file is not valid JSON.", checks);
+  }
+  const comparisonFileSha256 = sha256File(comparisonAbsolute);
+  if (comparisonFileSha256 !== action.expectedComparisonFileSha256) {
+    return failedHostEvidenceAction(action, "The package comparison file SHA-256 does not match the frozen whole-file receipt.", checks);
+  }
+  const frozenComparison = objectRecordOrNull(objectRecordOrNull(run.context.designEvaluationContract)?.comparison);
+  if (!frozenComparison || !run.projectId || !verifiedPackageComparisonMatches(comparisonFile, frozenComparison, run.projectId)) {
+    return failedHostEvidenceAction(action, "The package comparison file changed the frozen evaluation comparison.", checks);
+  }
+  if (!replay) {
+    const add = safeGitStep(git, action.repoPath, ["add", "--", ...present]);
+    if (!add.ok) return failedHostEvidenceAction(action, "Host could not stage the verified package files.", checks);
+  }
+
+  const files: Array<ExactGitIndexFile & { sha256: string }> = [];
+  for (const path of present.sort()) {
+    const blob = safeGitStep(git, action.repoPath, ["hash-object", "--", path]);
+    const entry = safeGitStep(git, action.repoPath, ["ls-files", "--stage", "-z", "--", path]);
+    const exact = { status: "A" as const, path, mode: "100644" as const, blobOid: blob.stdout.trim() };
+    if (!blob.ok || !/^[0-9a-f]{40}$/.test(exact.blobOid) || !entry.ok || !sameExactIndexEntry(entry.stdout, exact)) {
+      return failedHostEvidenceAction(action, `Staged package blob does not match ${path}.`, checks);
+    }
+    const sha256 = sha256File(join(action.repoPath, path));
+    if (!sha256) return failedHostEvidenceAction(action, `Could not hash package path ${path}.`, checks);
+    files.push({ ...exact, sha256 });
+  }
+  const contract = {
+    runId: action.runId,
+    taskId: action.taskId,
+    verifierTaskId: action.verifierTaskId,
+    repoPath: action.repoPath,
+    branch: action.branch,
+    expectedParentSha: action.expectedParentSha,
+    commitMessage: action.commitMessage,
+    files: files.map(({ sha256: _sha256, ...file }) => file),
+    verifiedAbsentPaths: missing.sort(),
+    preservedUntrackedRoots: [...action.preservedUntrackedRoots].sort(),
+  };
+  const existingContracts = objectRecordOrNull(run.context.gitIndexCommitContracts) ?? {};
+  const existing = objectRecordOrNull(existingContracts[action.contractId]);
+  if (existing && !sameCanonicalValue(existing, contract)) {
+    return failedHostEvidenceAction(action, `Frozen Git index contract ${action.contractId} conflicts with this package.`, checks);
+  }
+  harness.updateRun({
+    runId: run.id,
+    contextPatch: { gitIndexCommitContracts: { ...existingContracts, [action.contractId]: contract } },
+  });
+  checks.push({ name: "exact package paths and SHA-256", status: "passed", evidence: `${files.length}:${stableFingerprint(files)}` });
+  checks.push({ name: "frozen comparison unchanged", status: "passed", evidence: stableFingerprint(frozenComparison) });
+  checks.push({ name: "preserved untracked boundary", status: "passed", evidence: `${action.preservedUntrackedRoots.join(",")}:${preservedUntrackedPaths.length}` });
+  return doneResult(action.type, `Frozen and staged ${files.length} verified package files.`, checks, [{
+    kind: "verified_package_commit_freeze",
+    contractId: action.contractId,
+    runId: run.id,
+    taskId: task.id,
+    verifierTaskId: verifier.id,
+    sourceAttemptId: sourceAttempt.attemptId,
+    verifierAttemptId: verifierAttempt.attemptId,
+    fileCount: files.length,
+    files,
+    verifiedAbsentPaths: missing.sort(),
+    preservedUntrackedRoots: [...action.preservedUntrackedRoots].sort(),
+    preservedUntrackedCount: preservedUntrackedPaths.length,
+    comparisonPath: action.comparisonPath,
+    comparisonFileSha256,
+    comparisonContractSha256: stableFingerprint(frozenComparison),
+    sideEffectCounters,
+    reused: replay,
+  }]);
+}
+
+type FreezeExactGitPushAction = Extract<HarnessAction, { type: "freezeExactGitPush" }>;
+
+function freezeExactGitPush(harness: Harness, action: FreezeExactGitPushAction): HarnessActionResult {
+  const checks: HarnessActionResult["checks"] = [];
+  const run = harness.getRun(action.runId);
+  const event = harness.getHarnessActionEvent({ id: action.commitActionEventId });
+  if (!run || !event || event.status !== "done" || event.actionType !== "commitExactGitIndex" || event.request.runId !== run.id) {
+    return blockedResult(action.type, "The exact commit receipt is missing or does not belong to this run.", [action.commitActionEventId]);
+  }
+  const eventArtifacts = Array.isArray(event.result.artifacts) ? event.result.artifacts : [];
+  const commit = eventArtifacts.map(objectRecordOrNull).find((artifact) =>
+    artifact?.kind === "git_commit" && artifact.runId === run.id && artifact.repoPath === action.repoPath);
+  if (!commit || typeof commit.sha !== "string" || commit.parentSha !== action.expectedOldSha) {
+    return blockedResult(action.type, "The exact commit receipt does not match the frozen repository or old SHA.", [action.commitActionEventId]);
+  }
+  const contract = {
+    repoPath: action.repoPath,
+    remoteHost: action.remoteHost,
+    repository: action.repository,
+    ref: action.ref,
+    expectedOldSha: action.expectedOldSha,
+    newSha: commit.sha,
+  };
+  const contracts = objectRecordOrNull(run.context.gitRemoteWriteContracts) ?? {};
+  const existing = objectRecordOrNull(contracts[action.contractId]);
+  if (existing && !sameCanonicalValue(existing, contract)) {
+    return blockedResult(action.type, `Frozen Git push contract ${action.contractId} conflicts with the exact commit.`, [action.contractId]);
+  }
+  harness.updateRun({ runId: run.id, contextPatch: { gitRemoteWriteContracts: { ...contracts, [action.contractId]: contract } } });
+  checks.push({ name: "exact commit receipt", status: "passed", evidence: action.commitActionEventId });
+  checks.push({ name: "frozen remote ref", status: "passed", evidence: `${action.remoteHost}/${action.repository}:${action.ref}` });
+  return doneResult(action.type, `Frozen exact push ${action.contractId} for ${commit.sha}.`, checks, [{
+    kind: "git_push_contract",
+    contractId: action.contractId,
+    commitActionEventId: event.id,
+    ...contract,
+  }]);
+}
+
+type CompleteVerifiedPackageDeliveryAction = Extract<HarnessAction, { type: "completeVerifiedPackageDelivery" }>;
+
+function completeVerifiedPackageDelivery(
+  harness: Harness,
+  action: CompleteVerifiedPackageDeliveryAction,
+): HarnessActionResult {
+  try {
+    return harness.runInImmediateTransaction((db) => {
+      const run = harness.getRunWithDb(db, action.runId);
+      if (!run || !run.projectId || run.context.source !== "design") {
+        throw new Error("verified package closeout requires one project-bound design delivery run");
+      }
+      const commitEvent = harness.getHarnessActionEventWithDb(db, { id: action.commitActionEventId });
+      const pushEvent = harness.getHarnessActionEventWithDb(db, { id: action.pushActionEventId });
+      if (!commitEvent || commitEvent.status !== "done" || commitEvent.actionType !== "commitExactGitIndex"
+        || commitEvent.request.runId !== run.id) {
+        throw new Error("exact commit action is not a successful receipt for this run");
+      }
+      if (!pushEvent || pushEvent.status !== "done" || pushEvent.actionType !== "pushExactGitRef"
+        || pushEvent.request.runId !== run.id) {
+        throw new Error("exact push action is not a successful receipt for this run");
+      }
+      const commitArtifacts = Array.isArray(commitEvent.result.artifacts) ? commitEvent.result.artifacts : [];
+      const pushArtifacts = Array.isArray(pushEvent.result.artifacts) ? pushEvent.result.artifacts : [];
+      const commit = commitArtifacts.map(objectRecordOrNull).find((artifact) => artifact?.kind === "git_commit");
+      const push = pushArtifacts.map(objectRecordOrNull).find((artifact) =>
+        artifact?.kind === "git_remote_write" && artifact.outcome === "verified");
+      if (!commit || !push || typeof commit.sha !== "string" || push.newSha !== commit.sha) {
+        throw new Error("commit and independently read-back remote SHA do not match");
+      }
+      const overview = harness.getRunOverviewWithDb(db, { runId: run.id, eventLimit: 0 });
+      if (overview.tasks.some((task) => task.status === "todo" || task.status === "running")) {
+        throw new Error("delivery still has active tasks and cannot close");
+      }
+      const integration = commitArtifacts.map(objectRecordOrNull).find((artifact) =>
+        artifact?.kind === "integration" && artifact.mode === "exact_git_index_commit");
+      if (!integration || typeof integration.verifierTaskId !== "string"
+        || commit.verifierTaskId !== integration.verifierTaskId || typeof commit.taskId !== "string") {
+        throw new Error("exact commit lacks independent Verifier integration evidence");
+      }
+      const verifierEvidence = exactCommitVerifierEvidence(overview, commit.taskId, integration.verifierTaskId);
+      if (!verifierEvidence.ok) {
+        throw new Error(`exact commit Verifier receipt is no longer valid: ${verifierEvidence.reason}`);
+      }
+      const nextRunId = `run_${createHash("sha1").update(`verified-package-next|${run.id}|${commit.sha}`).digest("hex")}`;
+      const nextTaskId = `task_${createHash("sha1").update(`verified-package-next-task|${run.id}|${commit.sha}`).digest("hex")}`;
+      const signalId = `signal_verified_package_${createHash("sha256").update(`${run.id}|${commit.sha}`).digest("hex").slice(0, 32)}`;
+      const existingCloseout = objectRecordOrNull(run.context.verifiedPackageCloseout);
+      if (existingCloseout) {
+        if (existingCloseout.commitSha !== commit.sha || existingCloseout.nextDesignerRunId !== nextRunId) {
+          throw new Error("verified package closeout conflicts with the existing terminal receipt");
+        }
+        return doneResult(action.type, `Verified package closeout for ${run.id} reused.`, [
+          { name: "terminal receipt", status: "passed", evidence: String(commit.sha) },
+        ], [{ kind: "verified_package_closeout", ...existingCloseout, reused: true }]);
+      }
+      const now = new Date().toISOString();
+      const closeout = {
+        schemaVersion: 1,
+        commitActionEventId: commitEvent.id,
+        pushActionEventId: pushEvent.id,
+        commitSha: commit.sha,
+        tree: commit.tree,
+        remoteRef: push.ref,
+        verifierTaskId: integration.verifierTaskId,
+        packageOnly: true,
+        overallGoalComplete: false,
+        nextDesignerRunId: nextRunId,
+        nextDesignerTaskId: nextTaskId,
+        recordedAt: now,
+      };
+      harness.createStrategySignalWithDb(db, {
+        id: signalId,
+        projectId: run.projectId,
+        signalClass: "system",
+        source: `verified-package-integration:${run.id}`,
+        title: "Verified evaluation package is ready for runtime integration",
+        summary: "The versioned evaluation and contract package is committed and independently read back remotely. Runtime integration and real end-to-end evidence remain open.",
+        observationTime: now,
+        confidence: 1,
+        evidence: [`run:${run.id}`, `action:${commitEvent.id}`, `action:${pushEvent.id}`, `commit:${commit.sha}`],
+        runId: run.id,
+        taskId: String(commit.taskId),
+        payload: { kind: "verified-package-runtime-integration-needed", closeout, sideEffectCounters: zeroSideEffectCounters() },
+      });
+      harness.createRunWithDb(db, {
+        id: nextRunId,
+        goal: action.nextGoal,
+        projectId: run.projectId,
+        projectRoot: run.projectRoot,
+        context: {
+          source: "target-system-design",
+          parentRunId: run.id,
+          projectId: run.projectId,
+          founderCharterId: run.context.founderCharterId,
+          designCharterId: run.context.designCharterId ?? run.context.founderCharterId,
+          evolutionInstance: run.context.evolutionInstance,
+          verifiedPackageEvidence: { signalId, ...closeout },
+          targetSystemEvidenceBundle: {
+            schemaVersion: 1,
+            purpose: "runtime-integration-after-verified-package",
+            signalId,
+            sourceRunId: run.id,
+            commitSha: commit.sha,
+            remoteRef: push.ref,
+            packageOnly: true,
+            overallGoalComplete: false,
+          },
+        },
+      });
+      harness.createTaskWithDb(db, {
+        id: nextTaskId,
+        runId: nextRunId,
+        role: "designer",
+        goal: action.nextGoal,
+        prompt: [
+          "Design the smallest evidence-backed runtime integration after the verified package delivery.",
+          "The prior delivery established only the evaluation and contract package; it did not integrate the capability into the target runtime.",
+          `Use durable evidence ${signalId}, commit ${commit.sha}, and remote ref ${String(push.ref)}.`,
+          "Propose a governed delivery with real end-to-end evidence, or return a mutation-free quiescent decision. Do not implement in this task.",
+        ].join("\n"),
+        doneWhen: [
+          "the verified package receipt is read back",
+          "runtime integration scope and end-to-end evidence are explicit",
+          "one governed proposal is emitted or a justified mutation-free quiescent decision is recorded",
+          "no implementation or browser execution occurs",
+        ],
+        config: {
+          readOnly: true,
+          forbidImplementation: true,
+          forbidBrowser: true,
+          browserProcessPolicy: "deny",
+          verifiedPackageEvidence: { signalId, ...closeout },
+        },
+      });
+      harness.updateRunWithDb(db, { runId: run.id, status: "done", contextPatch: { verifiedPackageCloseout: closeout } });
+      return doneResult(action.type, `Verified package ${commit.sha} closed and runtime integration Designer ${nextTaskId} created.`, [
+        { name: "exact commit", status: "passed", evidence: commitEvent.id },
+        { name: "independent remote readback", status: "passed", evidence: pushEvent.id },
+        { name: "delivery terminal", status: "passed", evidence: "done" },
+        { name: "next governed Designer", status: "passed", evidence: nextTaskId },
+      ], [{ kind: "verified_package_closeout", ...closeout, signalId, reused: false }]);
+    });
+  } catch (error) {
+    return blockedResult(action.type, `Verified package closeout blocked: ${errorMessage(error)}`, [errorMessage(error)]);
+  }
+}
+
 function commitExactGitIndex(
   harness: Harness,
   action: ExactGitIndexCommitAction,
@@ -7690,7 +8260,8 @@ function commitExactGitIndex(
   const attempt = latestSessionForTask(overview, action.taskId);
   const contractPaths = action.files.map((file) => file.path);
   const changedFiles = Array.isArray(attempt?.output.changedFiles) ? attempt.output.changedFiles : [];
-  if (!attempt || !sameUniqueStrings(changedFiles, contractPaths)) {
+  const expectedReportedPaths = [...contractPaths, ...(action.verifiedAbsentPaths ?? [])];
+  if (!attempt || !sameUniqueStrings(changedFiles, expectedReportedPaths)) {
     return failedGitIndexCommit(
       action,
       "task_invalid",
@@ -7700,7 +8271,7 @@ function commitExactGitIndex(
   }
   checks.push({ name: "worker changedFiles", status: "passed", evidence: contractPaths.join(",") });
 
-  const verifierEvidence = exactCommitVerifierEvidence(overview, action.taskId);
+  const verifierEvidence = exactCommitVerifierEvidence(overview, action.taskId, action.verifierTaskId);
   if (!verifierEvidence.ok) {
     return failedGitIndexCommit(
       action,
@@ -7770,7 +8341,7 @@ function commitExactGitIndex(
   }
   checks.push({ name: "no MERGE_HEAD", status: "passed", evidence: "absent" });
 
-  const initialWorktreeState = exactGitWorktreeState(git, action.repoPath);
+  const initialWorktreeState = exactGitWorktreeState(git, action.repoPath, action.preservedUntrackedRoots ?? []);
   if (!initialWorktreeState.ok) {
     return failedGitIndexCommit(
       action,
@@ -7780,7 +8351,7 @@ function commitExactGitIndex(
       initialWorktreeState.result,
     );
   }
-  checks.push({ name: "worktree state", status: "passed", evidence: "no unstaged, untracked, or conflicted files" });
+  checks.push({ name: "worktree state", status: "passed", evidence: "no unstaged or conflicted files; only frozen preserved untracked roots" });
 
   const head = safeGitStep(git, action.repoPath, ["rev-parse", "HEAD"]);
   if (!head.ok || !/^[0-9a-f]{40}$/.test(head.stdout.trim())) {
@@ -7897,7 +8468,7 @@ function commitExactGitIndex(
       lateIndexTree,
     );
   }
-  const lateWorktreeState = exactGitWorktreeState(git, action.repoPath);
+  const lateWorktreeState = exactGitWorktreeState(git, action.repoPath, action.preservedUntrackedRoots ?? []);
   if (!lateWorktreeState.ok) {
     return failedGitIndexCommit(
       action,
@@ -7953,7 +8524,18 @@ function frozenGitIndexCommitContract(context: Record<string, unknown>, contract
 }
 
 function sameGitIndexCommitContract(frozen: Record<string, unknown>, action: ExactGitIndexCommitAction) {
-  const fields = ["branch", "commitMessage", "expectedParentSha", "files", "repoPath", "runId", "taskId"];
+  const fields = [
+    "branch",
+    "commitMessage",
+    ...(action.verifiedAbsentPaths === undefined ? [] : ["verifiedAbsentPaths"]),
+    "expectedParentSha",
+    "files",
+    ...(action.preservedUntrackedRoots === undefined ? [] : ["preservedUntrackedRoots"]),
+    "repoPath",
+    "runId",
+    "taskId",
+    ...(action.verifierTaskId === undefined ? [] : ["verifierTaskId"]),
+  ].sort();
   if (Object.keys(frozen).sort().join("\0") !== fields.join("\0")) {
     return false;
   }
@@ -7963,7 +8545,10 @@ function sameGitIndexCommitContract(frozen: Record<string, unknown>, action: Exa
     frozen.branch === action.branch &&
     frozen.expectedParentSha === action.expectedParentSha &&
     frozen.commitMessage === action.commitMessage &&
-    JSON.stringify(frozen.files) === JSON.stringify(action.files);
+    JSON.stringify(frozen.files) === JSON.stringify(action.files) &&
+    (action.verifierTaskId === undefined || frozen.verifierTaskId === action.verifierTaskId) &&
+    (action.verifiedAbsentPaths === undefined || JSON.stringify(frozen.verifiedAbsentPaths) === JSON.stringify(action.verifiedAbsentPaths)) &&
+    (action.preservedUntrackedRoots === undefined || JSON.stringify(frozen.preservedUntrackedRoots) === JSON.stringify(action.preservedUntrackedRoots));
 }
 
 function sameUniqueStrings(actual: unknown[], expected: string[]) {
@@ -7979,12 +8564,16 @@ function sameUniqueStrings(actual: unknown[], expected: string[]) {
 function exactCommitVerifierEvidence(
   overview: RunOverview,
   workerTaskId: string,
+  verifierTaskId?: string,
 ): { ok: true; verifiers: Task[] } | { ok: false; reason: string } {
   const verifiers = overview.tasks.filter((task) =>
     task.role === "verifier" && task.dependsOn.includes(workerTaskId)
   );
   if (verifiers.length === 0) {
     return { ok: false, reason: "no dependency verifier exists" };
+  }
+  if (verifierTaskId && !verifiers.some((verifier) => verifier.id === verifierTaskId)) {
+    return { ok: false, reason: `frozen verifier ${verifierTaskId} is not a dependency verifier` };
   }
   for (const verifier of verifiers) {
     if (verifier.status !== "done") {
@@ -7995,11 +8584,12 @@ function exactCommitVerifierEvidence(
       return { ok: false, reason: `verifier ${verifier.id} latest attempt is not done` };
     }
     const checks = Array.isArray(latestAttempt.output.checks) ? latestAttempt.output.checks : [];
-    if (checks.some(isFailedCheck)) {
-      return { ok: false, reason: `verifier ${verifier.id} has failed checks` };
+    const problems = Array.isArray(latestAttempt.output.problems) ? latestAttempt.output.problems : [];
+    if (checks.some(isFailedCheck) || (verifierTaskId !== undefined && (latestAttempt.output.verdict !== "pass" || problems.length > 0))) {
+      return { ok: false, reason: `verifier ${verifier.id} has no clean machine-readable pass verdict` };
     }
   }
-  return { ok: true, verifiers };
+  return { ok: true, verifiers: verifierTaskId ? verifiers.filter((verifier) => verifier.id === verifierTaskId) : verifiers };
 }
 
 function parseNameStatusZ(value: string) {
@@ -8037,6 +8627,7 @@ function sameExactIndexEntry(value: string, file: ExactGitIndexFile) {
 function exactGitWorktreeState(
   git: GitRunner,
   repoPath: string,
+  preservedUntrackedRoots: string[] = [],
 ):
   | { ok: true }
   | { ok: false; summary: string; result: ReturnType<typeof safeGitStep> } {
@@ -8045,7 +8636,8 @@ function exactGitWorktreeState(
     return { ok: false, summary: "Repository has unstaged changes.", result: unstaged };
   }
   const untracked = safeGitStep(git, repoPath, ["ls-files", "--others", "--exclude-standard", "-z"]);
-  if (!untracked.ok || untracked.stdout.length > 0) {
+  const untrackedPaths = untracked.stdout.split("\0").filter(Boolean);
+  if (!untracked.ok || untrackedPaths.some((path) => !pathUnderOneRoot(path, preservedUntrackedRoots))) {
     return { ok: false, summary: "Repository has untracked files.", result: untracked };
   }
   const conflicts = safeGitStep(git, repoPath, ["ls-files", "--unmerged", "-z"]);
@@ -8123,9 +8715,9 @@ function verifyExactGitIndexCommit(
   if (!exactTree.ok) {
     return exactTree;
   }
-  const clean = safeGitStep(git, action.repoPath, ["status", "--porcelain=v1", "-z"]);
-  if (!clean.ok || clean.stdout.length > 0) {
-    return { ok: false, result: clean };
+  const clean = exactGitWorktreeState(git, action.repoPath, action.preservedUntrackedRoots ?? []);
+  if (!clean.ok) {
+    return { ok: false, result: clean.result };
   }
   return {
     ok: true,
@@ -8133,7 +8725,7 @@ function verifyExactGitIndexCommit(
       { name: "independent commit readback", status: "passed", evidence: commitSha },
       { name: "parent tree message signature", status: "passed", evidence: "exact unsigned commit" },
       ...exactTree.checks,
-      { name: "worktree clean", status: "passed", evidence: "clean" },
+      { name: "worktree boundary", status: "passed", evidence: "clean except frozen preserved untracked roots" },
     ],
   };
 }
@@ -8160,6 +8752,9 @@ function verifiedGitIndexCommit(
       parentSha: action.expectedParentSha,
       tree,
       files: action.files,
+      verifierTaskId,
+      verifiedAbsentPaths: action.verifiedAbsentPaths ?? [],
+      preservedUntrackedRoots: action.preservedUntrackedRoots ?? [],
       signed: false,
       verifiedBy: "independent_readback",
     },
@@ -8174,6 +8769,8 @@ function verifiedGitIndexCommit(
       targetBranch: action.branch,
       mergeCommit: sha,
       changedFiles: action.files.map((file) => file.path),
+      verifiedAbsentPaths: action.verifiedAbsentPaths ?? [],
+      preservedDisjointFiles: action.preservedUntrackedRoots ?? [],
       alreadyMerged: true,
       pushed: false,
     },
@@ -13553,6 +14150,14 @@ function optionalStringField(record: Record<string, unknown>, key: string) {
   return value.trim();
 }
 
+function optionalNonEmptyStringField(record: Record<string, unknown>, key: string) {
+  const value = optionalStringField(record, key);
+  if (value !== undefined && value.length === 0) {
+    throw new Error(`${key} must be a non-empty string`);
+  }
+  return value;
+}
+
 function optionalStatusField(record: Record<string, unknown>, key: string) {
   const value = record[key];
   if (value === undefined) {
@@ -13583,6 +14188,34 @@ function followUpTaskField(record: Record<string, unknown>, key: string) {
     prompt: stringField(value, "prompt"),
     doneWhen: optionalStringArrayField(value, "doneWhen"),
   };
+}
+
+function exactRelativePathListField(record: Record<string, unknown>, key: string) {
+  const value = record[key];
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value) || value.length > EXACT_GIT_INDEX_MAX_FILES) {
+    throw new Error(`${key} must be a bounded array of relative Git paths`);
+  }
+  const paths = value.map((item, index) => exactRelativeGitPathField({ value: item }, "value", `${key}[${index}]`));
+  if (new Set(paths).size !== paths.length) throw new Error(`${key} must contain unique paths`);
+  return paths;
+}
+
+function exactRelativeRootListField(record: Record<string, unknown>, key: string, required = false) {
+  const value = record[key];
+  if (value === undefined && !required) return undefined;
+  if (!Array.isArray(value) || value.length === 0 || value.length > 16) {
+    throw new Error(`${key} must be a non-empty bounded array of relative directory roots`);
+  }
+  const roots = value.map((item, index) => {
+    if (typeof item !== "string" || !item.endsWith("/")) {
+      throw new Error(`${key}[${index}] must end with /`);
+    }
+    const path = exactRelativeGitPathField({ value: item.slice(0, -1) }, "value", `${key}[${index}]`);
+    return `${path}/`;
+  });
+  if (new Set(roots).size !== roots.length) throw new Error(`${key} must contain unique roots`);
+  return roots;
 }
 
 function exactWorkerFileReceiptsField(record: Record<string, unknown>, key: string): WorkerFileReceipt[] {

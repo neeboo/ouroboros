@@ -11974,6 +11974,481 @@ describe("Control-plane watchdog contract", () => {
   });
 });
 
+describe("verified package delivery closeout", () => {
+  let dir: string;
+  let harness: Harness;
+
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), "ouroboros-package-closeout-"));
+    harness = new Harness(join(dir, "ouroboros.db"));
+    harness.init();
+  });
+
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  test("freezes only verified package files while preserving Ouroboros runtime files", async () => {
+    const repoPath = join(dir, "target");
+    await mkdir(repoPath, { recursive: true });
+    await writeFile(join(repoPath, "README.md"), "base\n");
+    git(repoPath, ["init", "-b", "codex/package"]);
+    git(repoPath, ["config", "user.name", "Ouroboros Test"]);
+    git(repoPath, ["config", "user.email", "test@example.com"]);
+    git(repoPath, ["add", "README.md"]);
+    git(repoPath, ["commit", "-m", "base"]);
+    const parentSha = git(repoPath, ["rev-parse", "HEAD"]).stdout.trim();
+
+    await mkdir(join(repoPath, "config/evolution/v5/freeze"), { recursive: true });
+    await mkdir(join(repoPath, "tests/evolution/v5"), { recursive: true });
+    await mkdir(join(repoPath, ".ouroboros/runtime"), { recursive: true });
+    const frozenComparison = {
+      corpusSnapshotSha256: "b".repeat(64),
+      equalBudget: { model: "test", concurrency: 1 },
+      primaryMetric: "matched pass rate",
+      minimumUplift: 0,
+      maximumGuardRegression: 0,
+    };
+    const comparison = {
+      schemaVersion: 1,
+      kind: "comparison-freeze",
+      id: "comparison-freeze:target-evolution-v5",
+      projectId: "project_pending",
+      freezeStage: "comparison-freeze-before-comparison",
+      canonicalManifestSha256: "c".repeat(64),
+      ...frozenComparison,
+      reviewAt: "2026-09-01T00:00:00.000Z",
+      holdoutEvidenceCommitment: { algorithm: "sha256", count: 1, refsSha256: "d".repeat(64) },
+      sourceByteCommitments: { "config/evolution/v5/README.md": "e".repeat(64) },
+    };
+    await writeFile(join(repoPath, "tests/evolution/v5/package.test.mjs"), "// verified\n");
+    await writeFile(join(repoPath, ".ouroboros/runtime/state.json"), "{}\n");
+
+    const projectId = harness.createProject({ name: "target", rootPath: repoPath });
+    comparison.projectId = projectId;
+    const comparisonText = JSON.stringify(comparison);
+    const comparisonFileSha256 = createHash("sha256").update(comparisonText).digest("hex");
+    await writeFile(join(repoPath, "config/evolution/v5/freeze/comparison-freeze.json"), comparisonText);
+    const runId = harness.createRun({
+      goal: "Deliver a verified evaluation package",
+      projectId,
+      projectRoot: repoPath,
+      context: {
+        source: "design",
+        founderCharterId: "charter_target",
+        evolutionInstance: { kernelProjectId: "project_kernel", targetProjectId: projectId },
+        designEvaluationContract: { comparison: frozenComparison },
+        designProposal: { recommendation: "Build the next runtime integration after this package." },
+      },
+    });
+    const repairTaskId = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Repair the v5 package",
+      prompt: "Repair only the frozen package.",
+      worktreePath: repoPath,
+    });
+    harness.recordAttempt({
+      taskId: repairTaskId,
+      input: { executor: "test" },
+      output: {
+        status: "done",
+        summary: "98/98 pass with frozen comparison unchanged.",
+        changedFiles: [
+          "config/evolution/v5/freeze/comparison-freeze.json",
+          "tests/evolution/v5/package.test.mjs",
+          "tests/evolution/v5/transient-mirror.json",
+        ],
+        checks: [
+          { name: "node-test-all-pass-no-skip", status: "passed" },
+          { name: "zero-side-effect-counters", status: "passed" },
+          { name: "authorized-paths-only-no-ouroboros-touches", status: "passed" },
+        ],
+        artifacts: [{
+          kind: "verifier_repair_handoff_receipt",
+          sideEffectCounters: {
+            paidUsd: 0,
+            realProviderCalls: 0,
+            pancatWrites: 0,
+            productionPublishes: 0,
+            realAssetDeletes: 0,
+            crossProjectMemoryReads: 0,
+            crossProjectMemoryWrites: 0,
+          },
+        }],
+        problems: [],
+      },
+    });
+    const verifierTaskId = harness.createTask({
+      runId,
+      role: "verifier",
+      goal: "Verify the repaired package",
+      prompt: "Verify independently.",
+      dependsOn: [repairTaskId],
+      worktreePath: repoPath,
+    });
+    harness.recordAttempt({
+      taskId: verifierTaskId,
+      input: { executor: "test" },
+      output: {
+        status: "done",
+        verdict: "pass",
+        summary: "Independent package verification passed.",
+        changedFiles: [],
+        checks: [
+          { name: "frozen-offline-suite", status: "passed" },
+          { name: "authorized-artifact-surface", status: "passed" },
+          { name: "canonical-manifest-binding", status: "passed" },
+          { name: "side-effects", status: "passed" },
+        ],
+        artifacts: [],
+        problems: [],
+      },
+    });
+
+    const missingNotDeclared = applyHarnessAction(harness, {
+      type: "freezeVerifiedPackageCommit",
+      contractId: "verifiedPackageV5",
+      runId,
+      taskId: repairTaskId,
+      verifierTaskId,
+      repoPath,
+      branch: "codex/package",
+      expectedParentSha: parentSha,
+      commitMessage: "Add verified v5 evaluation package",
+      allowedRoots: ["config/evolution/", "tests/evolution/"],
+      preservedUntrackedRoots: [".ouroboros/"],
+      comparisonPath: "config/evolution/v5/freeze/comparison-freeze.json",
+      expectedComparisonFileSha256: comparisonFileSha256,
+      expectedAbsentPaths: [],
+      expectedTestPasses: 98,
+    });
+    expect(missingNotDeclared.status).toBe("blocked");
+    expect(git(repoPath, ["diff", "--cached", "--name-only"]).stdout).toBe("");
+
+    const driftedComparison = { ...comparison, extraUnfrozenField: "drift" };
+    const driftedText = JSON.stringify(driftedComparison);
+    await writeFile(join(repoPath, "config/evolution/v5/freeze/comparison-freeze.json"), driftedText);
+    const comparisonDrift = applyHarnessAction(harness, {
+      type: "freezeVerifiedPackageCommit",
+      contractId: "verifiedPackageV5",
+      runId,
+      taskId: repairTaskId,
+      verifierTaskId,
+      repoPath,
+      branch: "codex/package",
+      expectedParentSha: parentSha,
+      commitMessage: "Add verified v5 evaluation package",
+      allowedRoots: ["config/evolution/", "tests/evolution/"],
+      preservedUntrackedRoots: [".ouroboros/"],
+      comparisonPath: "config/evolution/v5/freeze/comparison-freeze.json",
+      expectedComparisonFileSha256: createHash("sha256").update(driftedText).digest("hex"),
+      expectedAbsentPaths: ["tests/evolution/v5/transient-mirror.json"],
+      expectedTestPasses: 98,
+    });
+    expect(comparisonDrift.status).toBe("blocked");
+    expect(git(repoPath, ["diff", "--cached", "--name-only"]).stdout).toBe("");
+    await writeFile(join(repoPath, "config/evolution/v5/freeze/comparison-freeze.json"), comparisonText);
+
+    const result = applyHarnessAction(harness, {
+      type: "freezeVerifiedPackageCommit",
+      contractId: "verifiedPackageV5",
+      runId,
+      taskId: repairTaskId,
+      verifierTaskId,
+      repoPath,
+      branch: "codex/package",
+      expectedParentSha: parentSha,
+      commitMessage: "Add verified v5 evaluation package",
+      allowedRoots: ["config/evolution/", "tests/evolution/"],
+      preservedUntrackedRoots: [".ouroboros/"],
+      comparisonPath: "config/evolution/v5/freeze/comparison-freeze.json",
+      expectedComparisonFileSha256: comparisonFileSha256,
+      expectedAbsentPaths: ["tests/evolution/v5/transient-mirror.json"],
+      expectedTestPasses: 98,
+    });
+
+    expect(result.status).toBe("done");
+    expect(result.artifacts).toContainEqual(expect.objectContaining({
+      kind: "verified_package_commit_freeze",
+      fileCount: 2,
+      verifiedAbsentPaths: ["tests/evolution/v5/transient-mirror.json"],
+      preservedUntrackedRoots: [".ouroboros/"],
+    }));
+    expect(git(repoPath, ["diff", "--cached", "--name-only"]).stdout.trim().split("\n").sort()).toEqual([
+      "config/evolution/v5/freeze/comparison-freeze.json",
+      "tests/evolution/v5/package.test.mjs",
+    ]);
+    expect(git(repoPath, ["status", "--short", "--untracked-files=all"]).stdout).toContain("?? .ouroboros/runtime/state.json");
+    expect(harness.getRun(runId)?.context.gitIndexCommitContracts).toBeTruthy();
+    const replay = applyHarnessAction(harness, {
+      type: "freezeVerifiedPackageCommit",
+      contractId: "verifiedPackageV5",
+      runId,
+      taskId: repairTaskId,
+      verifierTaskId,
+      repoPath,
+      branch: "codex/package",
+      expectedParentSha: parentSha,
+      commitMessage: "Add verified v5 evaluation package",
+      allowedRoots: ["config/evolution/", "tests/evolution/"],
+      preservedUntrackedRoots: [".ouroboros/"],
+      comparisonPath: "config/evolution/v5/freeze/comparison-freeze.json",
+      expectedComparisonFileSha256: comparisonFileSha256,
+      expectedAbsentPaths: ["tests/evolution/v5/transient-mirror.json"],
+      expectedTestPasses: 98,
+    });
+    expect(replay).toMatchObject({ status: "done", artifacts: [expect.objectContaining({ reused: true })] });
+
+    const freeze = result.artifacts.find((artifact) => artifact.kind === "verified_package_commit_freeze")!;
+    const commit = applyHarnessAction(harness, {
+      type: "commitExactGitIndex",
+      contractId: "verifiedPackageV5",
+      runId,
+      taskId: repairTaskId,
+      repoPath,
+      branch: "codex/package",
+      expectedParentSha: parentSha,
+      commitMessage: "Add verified v5 evaluation package",
+      files: (freeze.files as Array<Record<string, unknown>>).map(({ sha256: _sha256, ...file }) => file),
+      verifierTaskId,
+      verifiedAbsentPaths: freeze.verifiedAbsentPaths,
+      preservedUntrackedRoots: freeze.preservedUntrackedRoots,
+    });
+    expect(commit.status).toBe("done");
+    expect(git(repoPath, ["diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD"]).stdout.trim().split("\n").sort()).toEqual([
+      "config/evolution/v5/freeze/comparison-freeze.json",
+      "tests/evolution/v5/package.test.mjs",
+    ]);
+    expect(git(repoPath, ["status", "--short", "--untracked-files=all"]).stdout.trim()).toBe("?? .ouroboros/runtime/state.json");
+
+    const commitReceipt = commit.artifacts.find((artifact) => artifact.kind === "git_commit")!;
+    const pushContract = applyHarnessAction(harness, {
+      type: "freezeExactGitPush",
+      runId,
+      contractId: "verifiedPackageV5Push",
+      commitActionEventId: commit.eventId,
+      repoPath,
+      remoteHost: "github.com",
+      repository: "PanCatAI/hodor",
+      ref: "refs/heads/codex/package",
+      expectedOldSha: parentSha,
+    });
+    expect(pushContract.status).toBe("done");
+    let remoteSha = parentSha;
+    const push = applyHarnessAction(harness, {
+      type: "pushExactGitRef",
+      runId,
+      contractId: "verifiedPackageV5Push",
+      repoPath,
+      remoteHost: "github.com",
+      repository: "PanCatAI/hodor",
+      ref: "refs/heads/codex/package",
+      expectedOldSha: parentSha,
+      newSha: String(commitReceipt.sha),
+    }, {
+      runGit: (input) => {
+        if (input.args.join(" ") === "remote get-url --push origin") {
+          return { exitCode: 0, stdout: "git@github.com:PanCatAI/hodor.git\n", stderr: "" };
+        }
+        if (input.args[0] === "ls-remote") {
+          return { exitCode: 0, stdout: `${remoteSha}\trefs/heads/codex/package\n`, stderr: "" };
+        }
+        if (input.args[0] === "push") {
+          remoteSha = String(commitReceipt.sha);
+          return { exitCode: 0, stdout: "ok\n", stderr: "" };
+        }
+        return rawGit(input.cwd, input.args);
+      },
+    });
+    expect(push.status).toBe("done");
+
+    const closeout = applyHarnessAction(harness, {
+      type: "completeVerifiedPackageDelivery",
+      runId,
+      commitActionEventId: commit.eventId,
+      pushActionEventId: push.eventId,
+      nextGoal: "Integrate the verified v5 package into the target runtime with real end-to-end evidence",
+    });
+    expect(closeout.status).toBe("done");
+    expect(harness.getRun(runId)?.status).toBe("done");
+    const closeoutReceipt = closeout.artifacts.find((artifact) => artifact.kind === "verified_package_closeout")!;
+    expect(harness.getRun(String(closeoutReceipt.nextDesignerRunId))).toMatchObject({ status: "todo" });
+    expect(harness.getTask(String(closeoutReceipt.nextDesignerTaskId))).toMatchObject({
+      role: "designer",
+      status: "todo",
+      config: expect.objectContaining({ readOnly: true, forbidImplementation: true, forbidBrowser: true }),
+    });
+    expect(harness.getRunOverview({ runId, eventLimit: 0 }).tasks.filter((task) => task.role === "goal-review")).toHaveLength(0);
+  });
+
+  test("does not complete or create a Designer when exact push failed", () => {
+    const projectId = harness.createProject({ name: "push failure target", rootPath: dir });
+    const runId = harness.createRun({
+      goal: "Keep delivery open after failed push",
+      projectId,
+      projectRoot: dir,
+      context: { source: "design", founderCharterId: "charter_target" },
+    });
+    const commitEventId = harness.recordHarnessActionEvent({
+      actionType: "commitExactGitIndex",
+      status: "done",
+      request: { type: "commitExactGitIndex", runId },
+      result: {
+        status: "done",
+        actionType: "commitExactGitIndex",
+        artifacts: [
+          { kind: "git_commit", runId, taskId: "task_worker", sha: "a".repeat(40), tree: "b".repeat(40) },
+          { kind: "integration", mode: "exact_git_index_commit", runId, verifierTaskId: "task_verifier" },
+        ],
+      },
+    });
+    const pushEventId = harness.recordHarnessActionEvent({
+      actionType: "pushExactGitRef",
+      status: "blocked",
+      request: { type: "pushExactGitRef", runId },
+      result: {
+        status: "blocked",
+        actionType: "pushExactGitRef",
+        artifacts: [{ kind: "git_remote_write", outcome: "failed", runId, newSha: "a".repeat(40) }],
+      },
+    });
+
+    const result = applyHarnessAction(harness, {
+      type: "completeVerifiedPackageDelivery",
+      runId,
+      commitActionEventId: commitEventId,
+      pushActionEventId: pushEventId,
+      nextGoal: "Do not create this Designer",
+    });
+    expect(result.status).toBe("blocked");
+    expect(harness.getRun(runId)?.status).toBe("todo");
+    expect(harness.listRuns({ limit: 100 })).toHaveLength(1);
+  });
+
+  test("blocks an exact commit when any dependent Verifier has an unresolved fail verdict", () => {
+    const runId = harness.createRun({
+      goal: "Do not commit conflicting verification",
+      context: { source: "design" },
+    });
+    const workerTaskId = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Produce package",
+      prompt: "Produce package.",
+      worktreePath: dir,
+    });
+    harness.recordAttempt({
+      taskId: workerTaskId,
+      input: {},
+      output: { status: "done", summary: "done", changedFiles: ["config/evolution/v5/a.json"], checks: [], artifacts: [], problems: [] },
+    });
+    const passVerifierTaskId = harness.createTask({
+      runId,
+      role: "verifier",
+      goal: "Pass verifier",
+      prompt: "Verify.",
+      dependsOn: [workerTaskId],
+    });
+    harness.recordAttempt({
+      taskId: passVerifierTaskId,
+      input: {},
+      output: { status: "done", verdict: "pass", summary: "pass", changedFiles: [], checks: [], artifacts: [], problems: [] },
+    });
+    const failVerifierTaskId = harness.createTask({
+      runId,
+      role: "verifier",
+      goal: "Fail verifier",
+      prompt: "Verify independently.",
+      dependsOn: [workerTaskId],
+    });
+    harness.recordAttempt({
+      taskId: failVerifierTaskId,
+      input: {},
+      output: { status: "done", verdict: "fail", summary: "fail closed", changedFiles: [], checks: [], artifacts: [], problems: ["P1 unresolved"] },
+    });
+    const action = {
+      type: "commitExactGitIndex" as const,
+      contractId: "conflictingVerifier",
+      runId,
+      taskId: workerTaskId,
+      verifierTaskId: passVerifierTaskId,
+      repoPath: dir,
+      branch: "codex/package",
+      expectedParentSha: "b".repeat(40),
+      commitMessage: "Must not commit",
+      files: [{ status: "A" as const, path: "config/evolution/v5/a.json", mode: "100644" as const, blobOid: "a".repeat(40) }],
+      verifiedAbsentPaths: [],
+    };
+    harness.updateRun({
+      runId,
+      contextPatch: {
+        gitIndexCommitContracts: {
+          conflictingVerifier: {
+            runId,
+            taskId: workerTaskId,
+            verifierTaskId: passVerifierTaskId,
+            repoPath: dir,
+            branch: "codex/package",
+            expectedParentSha: "b".repeat(40),
+            commitMessage: "Must not commit",
+            files: action.files,
+            verifiedAbsentPaths: [],
+          },
+        },
+      },
+    });
+
+    const result = applyHarnessAction(harness, action);
+    expect(result).toMatchObject({ status: "blocked", artifacts: [expect.objectContaining({ status: "verification_invalid" })] });
+    expect(result.summary).toContain(failVerifierTaskId);
+  });
+
+  test("rejects closeout when commit artifacts disagree about the frozen Verifier identity", () => {
+    const projectId = harness.createProject({ name: "identity target", rootPath: dir });
+    const runId = harness.createRun({
+      goal: "Reject mismatched verifier receipt",
+      projectId,
+      projectRoot: dir,
+      context: { source: "design", founderCharterId: "charter_target" },
+    });
+    const commitEventId = harness.recordHarnessActionEvent({
+      actionType: "commitExactGitIndex",
+      status: "done",
+      request: { type: "commitExactGitIndex", runId },
+      result: {
+        status: "done",
+        actionType: "commitExactGitIndex",
+        artifacts: [
+          { kind: "git_commit", runId, taskId: "task_worker", verifierTaskId: "task_verifier_a", sha: "a".repeat(40), tree: "b".repeat(40) },
+          { kind: "integration", mode: "exact_git_index_commit", runId, verifierTaskId: "task_verifier_b" },
+        ],
+      },
+    });
+    const pushEventId = harness.recordHarnessActionEvent({
+      actionType: "pushExactGitRef",
+      status: "done",
+      request: { type: "pushExactGitRef", runId },
+      result: {
+        status: "done",
+        actionType: "pushExactGitRef",
+        artifacts: [{ kind: "git_remote_write", outcome: "verified", runId, newSha: "a".repeat(40) }],
+      },
+    });
+
+    const result = applyHarnessAction(harness, {
+      type: "completeVerifiedPackageDelivery",
+      runId,
+      commitActionEventId: commitEventId,
+      pushActionEventId: pushEventId,
+      nextGoal: "Must not be created",
+    });
+    expect(result.status).toBe("blocked");
+    expect(harness.getRun(runId)?.status).toBe("todo");
+    expect(harness.listRuns({ limit: 100 })).toHaveLength(1);
+  });
+});
+
 
 function rawGit(cwd: string, args: string[]) {
   const result = Bun.spawnSync({ cmd: ["git", ...args], cwd, stdout: "pipe", stderr: "pipe" });
