@@ -7416,6 +7416,12 @@ describe("Harness actions", () => {
         readOnly: true,
         forbidImplementation: true,
         verdictRequired: true,
+        completionContract: {
+          schemaVersion: 1,
+          sourceTaskId: repairWorker.id,
+          sourceDoneWhen: repairWorker.doneWhen,
+          requiredEvidence: expect.any(Array),
+        },
       },
     });
     expect(repairTasks).toHaveLength(2);
@@ -7429,6 +7435,238 @@ describe("Harness actions", () => {
       })],
     });
     expect(repairOverview.tasks.filter((task) => task.role === "goal-review")).toHaveLength(1);
+  });
+
+  test("reconciles one legacy blocked Repair handoff into its original frozen Verifier", () => {
+    const requiredEvidence = ["seven findings", "offline readback"];
+    const runId = harness.createRun({
+      goal: "Recover one completed Repair handoff",
+      context: {
+        source: "design",
+        designEvaluationContract: { requiredEvidence },
+        repairReplanBudget: { limit: 3, used: 2, entries: [] },
+      },
+    });
+    const sourceWorkerId = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Original Worker",
+      prompt: "Implement.",
+      worktreePath: "/tmp/frozen-repair-handoff",
+    });
+    const recovery = {
+      schemaVersion: 1,
+      recoveryKey: "legacy_repair_handoff",
+      verifierTaskId: "verifier_original",
+      verifierAttemptId: "attempt_original",
+      sourceWorkerTaskId: sourceWorkerId,
+      maxRecoveries: 1,
+      findingFingerprint: "seven_findings",
+      reason: "bounded Repair",
+    };
+    const verifierContract = { checks: ["seven frozen findings"], requiredEvidence };
+    const repairId = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Repair seven findings",
+      prompt: "Repair.",
+      dependsOn: [sourceWorkerId],
+      worktreePath: "/tmp/frozen-repair-handoff",
+      doneWhen: [
+        "all seven findings resolved",
+        ...Array.from({ length: 7 }, (_, index) => `Resolved with machine evidence: P1 finding ${index + 1}`),
+        ...requiredEvidence,
+      ],
+      config: {
+        agentBackend: "deepseek-harness",
+        permissionMode: "workspace-write",
+        dshModelTransport: "host-brokered-deepseek",
+        dshToolNetwork: "deny",
+        dshFilePolicy: {
+          mode: "allowlist",
+          allowedPaths: ["config/evolution/**", "tests/evolution/**"],
+          forbiddenPaths: [".git/orbs/**", ".orbs/**", ".ouroboros/**", "db/**"],
+        },
+        verifierContract,
+        verifierRepairRecovery: recovery,
+      },
+    });
+    const verifierId = harness.createTask({
+      runId,
+      role: "verifier",
+      goal: "Verify seven findings",
+      prompt: "Verify read-only.",
+      dependsOn: [repairId],
+      worktreePath: "/tmp/frozen-repair-handoff",
+      doneWhen: requiredEvidence,
+      config: {
+        permissionMode: "read-only",
+        readOnly: true,
+        sourceTaskId: repairId,
+        verifierContract,
+        verifierRepairRecovery: recovery,
+        completionContract: {
+          schemaVersion: 1,
+          sourceTaskId: sourceWorkerId,
+          sourceDoneWhen: [],
+          requiredEvidence,
+        },
+      },
+    });
+    const blockedAttemptId = harness.recordAttempt({
+      taskId: repairId,
+      input: { executor: "dsh-cli", cwd: "/tmp/frozen-repair-handoff" },
+      output: {
+        status: "blocked",
+        summary: "All seven repairs and 98 offline checks completed before the handoff metadata conflict.",
+        changedFiles: ["config/evolution/v5/contract.json", "tests/evolution/v5/contract.test.mjs"],
+        checks: [
+          ...Array.from({ length: 7 }, (_, index) => ({ name: `P1 finding ${index + 1}`, status: "passed" as const })),
+          { name: "tests/evolution/v5", status: "passed", evidence: "98/98" },
+        ],
+        artifacts: [{
+          kind: "dsh_execution_profile_receipt",
+          modelTransport: { enforcement: "loopback-http-broker", credentialIsolation: true },
+          toolSandbox: { network: "deny", credentialsInherited: false },
+          noTargetNetworkBypass: true,
+        }, { kind: "conflicting_completion_contract", taskId: verifierId, sourceTaskId: repairId }],
+        problems: [`existing verifier ${verifierId} has a different frozen completion contract`],
+      },
+    });
+    harness.blockTasksWithSharedRootCause({ runId, reason: "task dependencies are blocked" });
+    const goalReviewId = harness.createTask({
+      runId,
+      role: "goal-review",
+      goal: "Review stalled handoff",
+      prompt: "Review.",
+    });
+    harness.recordAttempt({
+      taskId: goalReviewId,
+      input: {},
+      output: { status: "blocked", summary: "blocked", changedFiles: [], checks: [], artifacts: [], problems: ["handoff pending"] },
+    });
+    harness.retryTask({ taskId: goalReviewId });
+    harness.recordAttempt({
+      taskId: goalReviewId,
+      input: {},
+      output: { status: "blocked", summary: "blocked again", changedFiles: [], checks: [], artifacts: [], problems: ["same handoff pending"] },
+    });
+
+    const request = {
+      type: "reconcileVerifierRepairHandoff" as const,
+      runId,
+      repairTaskId: repairId,
+      verifierTaskId: verifierId,
+      reason: "reconcile the legacy completion identity without changing business evidence",
+    };
+    const result = applyHarnessAction(harness, request as never);
+    const replay = applyHarnessAction(harness, request as never);
+    const overview = harness.getRunOverview({ runId, eventLimit: 0 });
+    const repairAttempts = overview.sessions.filter((session) => session.taskId === repairId);
+
+    expect(result).toMatchObject({
+      status: "done",
+      actionType: "reconcileVerifierRepairHandoff",
+      artifacts: [expect.objectContaining({
+        kind: "verifier_repair_handoff",
+        repairTaskId: repairId,
+        blockedAttemptId,
+        verifierTaskId: verifierId,
+        reused: false,
+      })],
+    });
+    expect(replay).toMatchObject({
+      status: "done",
+      artifacts: [expect.objectContaining({ kind: "verifier_repair_handoff", reused: true })],
+    });
+    expect(repairAttempts).toHaveLength(2);
+    expect(repairAttempts.map((attempt) => attempt.status)).toEqual(["blocked", "done"]);
+    expect(overview.tasks.find((task) => task.id === repairId)?.status).toBe("done");
+    expect(overview.tasks.find((task) => task.id === verifierId)).toMatchObject({
+      status: "todo",
+      dependsOn: [repairId],
+      config: {
+        completionContract: {
+          schemaVersion: 1,
+          sourceTaskId: repairId,
+          sourceDoneWhen: [
+            "all seven findings resolved",
+            ...Array.from({ length: 7 }, (_, index) => `Resolved with machine evidence: P1 finding ${index + 1}`),
+            ...requiredEvidence,
+          ],
+          requiredEvidence,
+        },
+      },
+    });
+    expect(overview.sessions.filter((session) => session.taskId === verifierId)).toHaveLength(0);
+    expect(overview.tasks.find((task) => task.id === goalReviewId)?.status).toBe("blocked");
+    expect(overview.run?.context.repairReplanBudget).toEqual({ limit: 3, used: 2, entries: [] });
+  });
+
+  test("prepareRunDrain blocks a pending fixed Repair handoff without creating Goal Review", () => {
+    const runId = harness.createRun({ goal: "Wait for the frozen Verifier", context: { source: "design" } });
+    const recovery = {
+      schemaVersion: 1,
+      recoveryKey: "pending_handoff",
+      verifierTaskId: "verifier_original",
+      verifierAttemptId: "attempt_original",
+      sourceWorkerTaskId: "worker_original",
+      maxRecoveries: 1,
+      findingFingerprint: "findings",
+      reason: "bounded Repair",
+    };
+    const repairId = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Repair",
+      prompt: "Repair.",
+      config: { verifierRepairRecovery: recovery },
+    });
+    const verifierId = harness.createTask({
+      runId,
+      role: "verifier",
+      goal: "Verify",
+      prompt: "Verify.",
+      dependsOn: [repairId],
+      config: { sourceTaskId: repairId, verifierRepairRecovery: recovery },
+    });
+    harness.recordAttempt({
+      taskId: repairId,
+      input: {},
+      output: {
+        status: "blocked",
+        summary: "repair evidence is ready but handoff failed",
+        changedFiles: ["config/evolution/v5/a.json"],
+        checks: [{ name: "offline", status: "passed" }],
+        artifacts: [{ kind: "conflicting_completion_contract", taskId: verifierId, sourceTaskId: repairId }],
+        problems: [`existing verifier ${verifierId} has a different frozen completion contract`],
+      },
+    });
+    harness.blockTasksWithSharedRootCause({ runId, reason: "task dependencies are blocked" });
+    const staleGoalReviewId = harness.createTask({
+      runId,
+      role: "goal-review",
+      goal: "Do not retry this stale review",
+      prompt: "Review.",
+    });
+
+    const first = applyHarnessAction(harness, { type: "prepareRunDrain", runId });
+    const replay = applyHarnessAction(harness, { type: "prepareRunDrain", runId });
+    const overview = harness.getRunOverview({ runId, eventLimit: 0 });
+
+    expect(first).toMatchObject({
+      status: "blocked",
+      artifacts: [expect.objectContaining({
+        kind: "pending_verifier_repair_handoff",
+        repairTaskId: repairId,
+        verifierTaskId: verifierId,
+      })],
+    });
+    expect(replay).toMatchObject({ status: "blocked" });
+    expect(overview.run?.status).toBe("blocked");
+    expect(overview.tasks.filter((task) => task.role === "goal-review")).toEqual([
+      expect.objectContaining({ id: staleGoalReviewId, status: "blocked" }),
+    ]);
   });
 
   test("materializes one audited read-only Designer recovery from a blocked fixed-action attempt", () => {

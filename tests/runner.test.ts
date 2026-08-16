@@ -9963,6 +9963,162 @@ describe("runner", () => {
     expect(() => harness.updateRunStatus({ runId, status: "done" })).not.toThrow();
   });
 
+  test("a fixed Repair recovery rebinds its pre-created Verifier to the same semantic completion contract", async () => {
+    const requiredEvidence = ["MATCHED_COMPARISON", "STATE_READBACK"];
+    const worktreePath = "/tmp/ouroboros-semantic-repair-verifier";
+    const runId = harness.createRun({
+      goal: "Reuse the frozen Verifier after one bounded Repair",
+      context: { source: "design", designEvaluationContract: { requiredEvidence } },
+    });
+    const sourceWorkerId = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Implement delivery",
+      prompt: "Implement.",
+      worktreePath,
+      doneWhen: ["SOURCE_DONE"],
+    });
+    const recovery = {
+      schemaVersion: 1,
+      recoveryKey: "recovery_semantic_contract",
+      verifierTaskId: "verifier_original",
+      verifierAttemptId: "attempt_original",
+      sourceWorkerTaskId: sourceWorkerId,
+      maxRecoveries: 1,
+      findingFingerprint: "finding_fingerprint",
+      reason: "bounded Repair",
+    };
+    const verifierContract = { checks: ["seven frozen findings", "offline readback"] };
+    const repairId = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Repair the frozen delivery",
+      prompt: "Repair.",
+      dependsOn: [sourceWorkerId],
+      worktreePath,
+      doneWhen: ["SOURCE_DONE", "SEVEN_FINDINGS_RESOLVED"],
+      config: { verifierContract, verifierRepairRecovery: recovery },
+    });
+    const verifierId = harness.createTask({
+      runId,
+      role: "verifier",
+      goal: "Verify the bounded Repair",
+      prompt: "Verify.",
+      dependsOn: [repairId],
+      worktreePath,
+      doneWhen: requiredEvidence,
+      config: {
+        verifierContract,
+        sourceTaskId: repairId,
+        verifierRepairRecovery: recovery,
+        completionContract: {
+          schemaVersion: 1,
+          sourceTaskId: sourceWorkerId,
+          sourceDoneWhen: ["SOURCE_DONE"],
+          requiredEvidence,
+        },
+      },
+    });
+    const output = {
+      status: "done" as const,
+      summary: "All seven findings repaired with machine evidence.",
+      changedFiles: ["config/evolution/v5/contract.json"],
+      checks: [{ name: "offline tests", status: "passed" as const }],
+      artifacts: [{ kind: "repair_receipt" }],
+      problems: [],
+    };
+
+    const result = await createVerifierTaskHook({ harness })({
+      run: harness.getRun(runId)!,
+      task: harness.getTask(repairId)!,
+      sessionName: "semantic-repair",
+      prompt: "repair prompt",
+      output,
+    });
+
+    expect(result).toMatchObject({
+      decision: "continue",
+      artifacts: [expect.objectContaining({ kind: "reused_verifier_task", taskId: verifierId })],
+    });
+    expect(harness.getTask(verifierId)).toMatchObject({
+      status: "todo",
+      config: {
+        completionContract: {
+          schemaVersion: 1,
+          sourceTaskId: repairId,
+          sourceDoneWhen: ["SOURCE_DONE", "SEVEN_FINDINGS_RESOLVED"],
+          requiredEvidence,
+        },
+      },
+    });
+  });
+
+  test("a fixed Repair recovery rejects a genuinely different frozen evidence contract", async () => {
+    const runId = harness.createRun({
+      goal: "Reject a drifted frozen Verifier",
+      context: { source: "design", designEvaluationContract: { requiredEvidence: ["CURRENT_EVIDENCE"] } },
+    });
+    const sourceWorkerId = harness.createTask({ runId, role: "worker", goal: "Source", prompt: "Source." });
+    const recovery = {
+      schemaVersion: 1,
+      recoveryKey: "recovery_real_mismatch",
+      verifierTaskId: "verifier_original",
+      verifierAttemptId: "attempt_original",
+      sourceWorkerTaskId: sourceWorkerId,
+      maxRecoveries: 1,
+      findingFingerprint: "finding_fingerprint",
+      reason: "bounded Repair",
+    };
+    const verifierContract = { checks: ["frozen"] };
+    const repairId = harness.createTask({
+      runId,
+      role: "worker",
+      goal: "Repair",
+      prompt: "Repair.",
+      dependsOn: [sourceWorkerId],
+      doneWhen: ["REPAIRED"],
+      config: { verifierContract, verifierRepairRecovery: recovery },
+    });
+    harness.createTask({
+      runId,
+      role: "verifier",
+      goal: "Verify",
+      prompt: "Verify.",
+      dependsOn: [repairId],
+      config: {
+        verifierContract,
+        sourceTaskId: repairId,
+        verifierRepairRecovery: recovery,
+        completionContract: {
+          schemaVersion: 1,
+          sourceTaskId: sourceWorkerId,
+          sourceDoneWhen: [],
+          requiredEvidence: ["DRIFTED_EVIDENCE"],
+        },
+      },
+    });
+
+    const result = await createVerifierTaskHook({ harness })({
+      run: harness.getRun(runId)!,
+      task: harness.getTask(repairId)!,
+      sessionName: "semantic-repair-mismatch",
+      prompt: "repair prompt",
+      output: {
+        status: "done",
+        summary: "done",
+        changedFiles: ["config/evolution/v5/contract.json"],
+        checks: [{ name: "offline", status: "passed" }],
+        artifacts: [{ kind: "repair_receipt" }],
+        problems: [],
+      },
+    });
+
+    expect(result).toMatchObject({
+      decision: "exit",
+      artifacts: [expect.objectContaining({ kind: "conflicting_completion_contract" })],
+    });
+  });
+
   test("run loop reconciles a terminal done worker with empty evidence into one real verifier attempt", async () => {
     const runId = harness.createRun({ goal: "Recover a missed worker verifier handoff" });
     const workerId = harness.createTask({

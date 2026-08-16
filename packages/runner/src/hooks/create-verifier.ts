@@ -115,8 +115,16 @@ export function createVerifierTaskHook(options: { harness: Harness; sourceRoles?
             };
           }
           const hasAttempt = overview.sessions.some((session) => session.taskId === existingVerifier.id);
+          const mayBindCompletionContract = existingCompletionContract === undefined
+            || mayRebindFixedRepairCompletionContract({
+              sourceTask: task,
+              existingVerifier,
+              existingCompletionContract,
+              completionContract,
+              hasAttempt,
+            });
           if (
-            existingCompletionContract === undefined
+            mayBindCompletionContract
             && existingVerifier.status === "todo"
             && !hasAttempt
           ) {
@@ -306,6 +314,39 @@ function buildVerifierPrompt(
     completionContractSection,
     sourceEvidenceSection,
   ]);
+}
+
+function mayRebindFixedRepairCompletionContract(input: {
+  sourceTask: {
+    id: string;
+    config?: Record<string, unknown>;
+  };
+  existingVerifier: {
+    status: string;
+    dependsOn: string[];
+    config?: Record<string, unknown>;
+  };
+  existingCompletionContract: unknown;
+  completionContract: CompletionVerificationContractV1;
+  hasAttempt: boolean;
+}) {
+  if (input.existingVerifier.status !== "todo" || input.hasAttempt) return false;
+  if (stableJson(input.existingVerifier.dependsOn) !== stableJson([input.sourceTask.id])) return false;
+  const sourceRecovery = objectRecord(input.sourceTask.config?.verifierRepairRecovery);
+  const verifierRecovery = objectRecord(input.existingVerifier.config?.verifierRepairRecovery);
+  const existingContract = objectRecord(input.existingCompletionContract);
+  if (!sourceRecovery || stableJson(sourceRecovery) !== stableJson(verifierRecovery) || !existingContract) return false;
+  if (typeof sourceRecovery.recoveryKey !== "string" || sourceRecovery.recoveryKey.length === 0) return false;
+  if (input.existingVerifier.config?.sourceTaskId !== input.sourceTask.id) return false;
+  return existingContract.schemaVersion === 1
+    && existingContract.sourceTaskId === sourceRecovery.sourceWorkerTaskId
+    && stableJson(existingContract.requiredEvidence) === stableJson(input.completionContract.requiredEvidence);
+}
+
+function objectRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
 }
 
 function uniqueStrings(values: string[]) {

@@ -3,7 +3,7 @@ import { chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync,
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { tmpdir } from "node:os";
 import { acceptGuardrailProposal, proposeGuardrailsFromLessons } from "./guardrails";
-import { describeRunCompletionReadiness } from "./completion-readiness";
+import { completionVerificationContract, describeRunCompletionReadiness } from "./completion-readiness";
 import type { HarnessDatabase } from "./database";
 import {
   GOAL_REVIEW_TASK_DONE_WHEN,
@@ -145,6 +145,13 @@ export type HarnessAction =
   | {
       type: "materializeVerifierRepairRecovery";
       runId: string;
+      verifierTaskId: string;
+      reason?: string;
+    }
+  | {
+      type: "reconcileVerifierRepairHandoff";
+      runId: string;
+      repairTaskId: string;
       verifierTaskId: string;
       reason?: string;
     }
@@ -697,6 +704,16 @@ export function parseHarnessAction(value: unknown): HarnessAction {
       reason: optionalStringField(record, "reason"),
     };
   }
+  if (type === "reconcileVerifierRepairHandoff") {
+    assertOnlyFields(record, type, ["type", "runId", "repairTaskId", "verifierTaskId", "reason"]);
+    return {
+      type,
+      runId: stringField(record, "runId"),
+      repairTaskId: stringField(record, "repairTaskId"),
+      verifierTaskId: stringField(record, "verifierTaskId"),
+      reason: optionalStringField(record, "reason"),
+    };
+  }
   if (type === "buildVersionedCorpusManifest") {
     assertOnlyFields(record, type, [
       "type",
@@ -1090,7 +1107,7 @@ export function parseHarnessAction(value: unknown): HarnessAction {
     };
   }
   throw new Error(
-    "harness action type must be reclaimRunningTasks, retryTask, reconcileRunEvidence, recordSignal, linkResearchEvidence, materializeDesignerActionRecovery, materializeDesignDeliveryRecovery, materializeDesignWorkerRuntimeRecovery, materializeDesignWorkerTransportRecovery, materializeVerifierRepairRecovery, buildVersionedCorpusManifest, bindHostEvidenceMaintenanceReceipt, materializeHostEvidenceMaintenanceDelivery, markRunTodo, updateRunContext, amendRunContract, retireRun, retireTask, prepareRunDrain, completeSystemTask, integrateVerifiedRun, pushExactGitRef, createExactGitRef, commitExactGitIndex, stageExactWorkerFilesForVerification, materializeAttemptArtifactsForVerification, verifySealedCorpusForVerification, registerEvolutionProfile, recordProductionEpisode, registerHarnessVariant, activateHarnessRevision, freezeMatchedExperiment, interruptAttemptAndCreateTask, interruptRunningAttemptsAndCreateTask, acceptGuardrailProposal, startSubsession, collectSubsessions, cancelSubsessions, or runWatchdogPass",
+    "harness action type must be reclaimRunningTasks, retryTask, reconcileRunEvidence, recordSignal, linkResearchEvidence, materializeDesignerActionRecovery, materializeDesignDeliveryRecovery, materializeDesignWorkerRuntimeRecovery, materializeDesignWorkerTransportRecovery, materializeVerifierRepairRecovery, reconcileVerifierRepairHandoff, buildVersionedCorpusManifest, bindHostEvidenceMaintenanceReceipt, materializeHostEvidenceMaintenanceDelivery, markRunTodo, updateRunContext, amendRunContract, retireRun, retireTask, prepareRunDrain, completeSystemTask, integrateVerifiedRun, pushExactGitRef, createExactGitRef, commitExactGitIndex, stageExactWorkerFilesForVerification, materializeAttemptArtifactsForVerification, verifySealedCorpusForVerification, registerEvolutionProfile, recordProductionEpisode, registerHarnessVariant, activateHarnessRevision, freezeMatchedExperiment, interruptAttemptAndCreateTask, interruptRunningAttemptsAndCreateTask, acceptGuardrailProposal, startSubsession, collectSubsessions, cancelSubsessions, or runWatchdogPass",
   );
 }
 
@@ -1145,6 +1162,10 @@ export function applyHarnessAction(
 
   if (action.type === "materializeVerifierRepairRecovery") {
     return applyVerifierRepairRecoveryAtomically(harness, action);
+  }
+
+  if (action.type === "reconcileVerifierRepairHandoff") {
+    return applyVerifierRepairHandoffReconciliationAtomically(harness, action);
   }
 
   if (action.type === "reconcileRunEvidence") {
@@ -1208,6 +1229,7 @@ type DesignDeliveryRecoveryAction = Extract<HarnessAction, { type: "materializeD
 type DesignWorkerRuntimeRecoveryAction = Extract<HarnessAction, { type: "materializeDesignWorkerRuntimeRecovery" }>;
 type DesignWorkerTransportRecoveryAction = Extract<HarnessAction, { type: "materializeDesignWorkerTransportRecovery" }>;
 type VerifierRepairRecoveryAction = Extract<HarnessAction, { type: "materializeVerifierRepairRecovery" }>;
+type VerifierRepairHandoffReconciliationAction = Extract<HarnessAction, { type: "reconcileVerifierRepairHandoff" }>;
 type RunEvidenceReconciliationAction = Extract<HarnessAction, { type: "reconcileRunEvidence" }>;
 type ResearchEvidenceLinkAction = Extract<HarnessAction, { type: "linkResearchEvidence" }>;
 type BlockedRunSignalAction = Extract<HarnessAction, { type: "recordSignal" }>;
@@ -1445,6 +1467,34 @@ function applyVerifierRepairRecoveryAtomically(
   try {
     return harness.runInImmediateTransaction((db) => {
       const result = materializeVerifierRepairRecoveryWithDb(harness, db, action);
+      const eventId = harness.recordHarnessActionEventWithDb(db, {
+        actionType: action.type,
+        status: result.status,
+        request: safeRequest(action),
+        result: resultToRecord(result),
+      });
+      return { ...result, eventId };
+    });
+  } catch (error) {
+    const problem = limitUtf8Output(sanitizeEvolutionErrorText(errorMessage(error)), 4_096);
+    const result = blockedResult(action.type, `${action.type} blocked: ${problem}`, [problem]);
+    const eventId = harness.recordHarnessActionEvent({
+      actionType: action.type,
+      status: result.status,
+      request: safeRequest(action),
+      result: resultToRecord(result),
+    });
+    return { ...result, eventId };
+  }
+}
+
+function applyVerifierRepairHandoffReconciliationAtomically(
+  harness: Harness,
+  action: VerifierRepairHandoffReconciliationAction,
+): HarnessActionResult & { eventId: string } {
+  try {
+    return harness.runInImmediateTransaction((db) => {
+      const result = reconcileVerifierRepairHandoffWithDb(harness, db, action);
       const eventId = harness.recordHarnessActionEventWithDb(db, {
         actionType: action.type,
         status: result.status,
@@ -3287,6 +3337,15 @@ function materializeVerifierRepairRecoveryWithDb(
       verifierRepairRecovery: marker,
     },
   });
+  const repairTask = harness.getRunOverviewWithDb(db, { runId: run.id, eventLimit: 0 })
+    .tasks.find((task) => task.id === repairTaskId);
+  if (!repairTask) {
+    throw new Error(`bounded Repair ${repairTaskId} was not persisted`);
+  }
+  const completionContract = completionVerificationContract(
+    harness.getRunOverviewWithDb(db, { runId: run.id, eventLimit: 0 }),
+    repairTask,
+  );
   harness.createTaskWithDb(db, {
     id: nextVerifierTaskId,
     runId: run.id,
@@ -3300,7 +3359,11 @@ function materializeVerifierRepairRecoveryWithDb(
       "Return verdict=fail for any remaining failed check or P1 finding. Run only the frozen offline tests/evolution/** checks.",
     ].join("\n\n"),
     dependsOn: [repairTaskId],
-    doneWhen: verifier.doneWhen,
+    doneWhen: [...new Set([
+      ...verifier.doneWhen,
+      ...repairTask.doneWhen,
+      ...completionContract.requiredEvidence,
+    ])],
     worktreePath: recoveryWorktreePath,
     config: {
       ...verifier.config,
@@ -3310,6 +3373,7 @@ function materializeVerifierRepairRecoveryWithDb(
       forbidBrowser: true,
       browserProcessPolicy: "deny",
       sourceTaskId: repairTaskId,
+      completionContract,
       verdictRequired: true,
       verifierRepairRecovery: marker,
     },
@@ -3366,6 +3430,230 @@ function verifierAttemptRequiresRepair(output: AttemptOutput) {
   const priorityProblem = (output.problems ?? []).some((problem) => /^P[0-3]\s*:/i.test(problem.trim()));
   if (failedCheck || priorityProblem || /fail-closed/i.test(output.summary)) return true;
   return output.verdict !== "pass";
+}
+
+function reconcileVerifierRepairHandoffWithDb(
+  harness: Harness,
+  db: HarnessDatabase,
+  action: VerifierRepairHandoffReconciliationAction,
+): HarnessActionResult {
+  const overview = harness.getRunOverviewWithDb(db, { runId: action.runId, eventLimit: 0 });
+  const run = overview.run;
+  if (!run || run.context.source !== "design" || run.context.retired === true) {
+    throw new Error(`Verifier Repair handoff requires an active design child: ${action.runId}`);
+  }
+  const repair = overview.tasks.find((task) => task.id === action.repairTaskId);
+  const verifier = overview.tasks.find((task) => task.id === action.verifierTaskId);
+  if (!repair || repair.role !== "worker" || !["blocked", "done"].includes(repair.status)) {
+    throw new Error(`Verifier Repair handoff requires one terminal Repair: ${action.repairTaskId}`);
+  }
+  if (!verifier || verifier.role !== "verifier" || !["todo", "blocked"].includes(verifier.status)) {
+    throw new Error(`Verifier Repair handoff requires one unattempted Verifier: ${action.verifierTaskId}`);
+  }
+  if (!sameCanonicalValue(verifier.dependsOn, [repair.id]) || verifier.config?.sourceTaskId !== repair.id) {
+    throw new Error(`Verifier ${verifier.id} is not bound only to Repair ${repair.id}`);
+  }
+  if (repair.worktreePath !== verifier.worktreePath) {
+    throw new Error(`Verifier ${verifier.id} is bound to a different Repair worktree`);
+  }
+  const repairRecovery = objectRecordOrNull(repair.config?.verifierRepairRecovery);
+  const verifierRecovery = objectRecordOrNull(verifier.config?.verifierRepairRecovery);
+  if (!repairRecovery || !sameCanonicalValue(repairRecovery, verifierRecovery)) {
+    throw new Error("Repair and Verifier do not share one frozen recovery identity");
+  }
+  if (!sameCanonicalValue(repair.config?.verifierContract, verifier.config?.verifierContract)) {
+    throw new Error("Repair and Verifier have different frozen verifier contracts");
+  }
+  const verifierSessions = overview.sessions.filter((session) => session.taskId === verifier.id);
+  if (verifierSessions.length > 0) {
+    throw new Error(`Verifier ${verifier.id} already has an attempt and cannot be rebound`);
+  }
+  const priorReceipt = overview.sessions.flatMap((session) => session.taskId === repair.id
+    ? (session.output.artifacts ?? []).map((artifact) => ({ session, artifact: objectRecordOrNull(artifact) }))
+    : [])
+    .find(({ artifact }) => artifact?.kind === "verifier_repair_handoff_receipt");
+  if (priorReceipt) {
+    return doneResult(action.type, `Verifier Repair handoff for ${repair.id} reused.`, [
+      { name: "handoff receipt", status: "passed", evidence: priorReceipt.session.attemptId },
+    ], [{
+      kind: "verifier_repair_handoff",
+      runId: run.id,
+      repairTaskId: repair.id,
+      blockedAttemptId: priorReceipt.artifact?.blockedAttemptId,
+      recoveryAttemptId: priorReceipt.session.attemptId,
+      verifierTaskId: verifier.id,
+      reused: true,
+    }]);
+  }
+  const blockedSession = [...overview.sessions].reverse().find((session) =>
+    session.taskId === repair.id && session.status === "blocked"
+  );
+  if (!blockedSession) {
+    throw new Error(`Repair ${repair.id} has no blocked completion-handoff attempt`);
+  }
+  const handoffProblem = `existing verifier ${verifier.id} has a different frozen completion contract`;
+  const problems = blockedSession.output.problems ?? [];
+  if (problems.length !== 1 || problems[0] !== handoffProblem) {
+    throw new Error(`Repair ${repair.id} has unresolved problems beyond the frozen completion handoff`);
+  }
+  const conflictArtifact = (blockedSession.output.artifacts ?? []).some((artifact) => {
+    const record = objectRecordOrNull(artifact);
+    return record?.kind === "conflicting_completion_contract"
+      && record.taskId === verifier.id
+      && record.sourceTaskId === repair.id;
+  });
+  if (!conflictArtifact) {
+    throw new Error(`Repair ${repair.id} lacks the matching completion-conflict artifact`);
+  }
+  const checks = blockedSession.output.checks ?? [];
+  if (checks.length === 0 || checks.some((check) => objectRecordOrNull(check)?.status !== "passed")) {
+    throw new Error(`Repair ${repair.id} lacks an all-passing structured check set`);
+  }
+  const frozenFindings = repair.doneWhen.filter((item) => item.startsWith("Resolved with machine evidence:"));
+  const namedChecks = new Set(checks.flatMap((check) => {
+    const name = objectRecordOrNull(check)?.name;
+    return typeof name === "string" && name.trim() ? [name.trim()] : [];
+  }));
+  if (frozenFindings.length === 0 || namedChecks.size < frozenFindings.length) {
+    throw new Error(`Repair ${repair.id} does not provide structured evidence for every frozen finding`);
+  }
+  const changedFiles = blockedSession.output.changedFiles ?? [];
+  const filePolicy = objectRecordOrNull(repair.config?.dshFilePolicy);
+  const allowedPaths = Array.isArray(filePolicy?.allowedPaths)
+    ? filePolicy.allowedPaths.filter((path): path is string => typeof path === "string")
+    : [];
+  const forbiddenPaths = Array.isArray(filePolicy?.forbiddenPaths)
+    ? filePolicy.forbiddenPaths.filter((path): path is string => typeof path === "string")
+    : [];
+  if (changedFiles.length === 0 || allowedPaths.length === 0 || changedFiles.some((path) =>
+    forbiddenPaths.some((pattern) => evolutionPathMatches(pattern, path))
+    || !allowedPaths.some((pattern) => evolutionPathMatches(pattern, path))
+  )) {
+    throw new Error(`Repair ${repair.id} changed files outside its frozen allowlist`);
+  }
+  const executionReceipt = (blockedSession.output.artifacts ?? []).map(objectRecordOrNull).find((artifact) =>
+    artifact?.kind === "dsh_execution_profile_receipt"
+  );
+  const modelTransport = objectRecordOrNull(executionReceipt?.modelTransport);
+  const toolSandbox = objectRecordOrNull(executionReceipt?.toolSandbox);
+  if (modelTransport?.enforcement !== "loopback-http-broker"
+    || modelTransport.credentialIsolation !== true
+    || toolSandbox?.network !== "deny"
+    || toolSandbox.credentialsInherited !== false
+    || executionReceipt?.noTargetNetworkBypass !== true) {
+    throw new Error(`Repair ${repair.id} lacks the frozen split execution receipt`);
+  }
+  const completionContract = completionVerificationContract(overview, repair);
+  const existingCompletion = objectRecordOrNull(verifier.config?.completionContract);
+  if (existingCompletion) {
+    const existingEvidence = existingCompletion.requiredEvidence;
+    if (!sameCanonicalValue(existingEvidence, completionContract.requiredEvidence)) {
+      throw new Error(`Verifier ${verifier.id} has a genuinely different frozen required-evidence contract`);
+    }
+    if (existingCompletion.sourceTaskId !== repair.id
+      && existingCompletion.sourceTaskId !== repairRecovery.sourceWorkerTaskId) {
+      throw new Error(`Verifier ${verifier.id} completion lineage is unrelated to the frozen Repair recovery`);
+    }
+  }
+  const receiptKey = stableFingerprint({
+    runId: run.id,
+    repairTaskId: repair.id,
+    blockedAttemptId: blockedSession.attemptId,
+    verifierTaskId: verifier.id,
+    recoveryKey: repairRecovery.recoveryKey,
+    completionContract,
+  });
+  const recoveryAttemptId = harness.recordAttemptWithDb(db, {
+    taskId: repair.id,
+    input: {
+      executor: "harness-action",
+      actionType: action.type,
+      blockedAttemptId: blockedSession.attemptId,
+      verifierTaskId: verifier.id,
+      receiptKey,
+    },
+    output: {
+      status: "done",
+      summary: `${blockedSession.output.summary} Host reconciliation preserved the blocked attempt and repaired only the frozen Verifier handoff metadata.`,
+      changedFiles,
+      checks,
+      artifacts: [
+        ...(blockedSession.output.artifacts ?? []),
+        {
+          kind: "verifier_repair_handoff_receipt",
+          schemaVersion: 1,
+          receiptKey,
+          blockedAttemptId: blockedSession.attemptId,
+          verifierTaskId: verifier.id,
+          completionContract,
+          changedFilesSha256: stableFingerprint(changedFiles),
+          checksSha256: stableFingerprint(checks),
+          sideEffectCounters: {
+            paidUsd: 0,
+            realProviderCalls: 0,
+            pancatWrites: 0,
+            productionPublishes: 0,
+            realAssetDeletes: 0,
+            crossProjectMemoryReads: 0,
+            crossProjectMemoryWrites: 0,
+          },
+        },
+      ],
+      problems: [],
+    },
+  });
+  const verifierUpdate = db.query(
+    `update tasks
+     set status = 'todo', config_json = $configJson, done_when_json = $doneWhenJson, updated_at = current_timestamp
+     where id = $taskId and status in ('todo', 'blocked')`,
+  ).run({
+    $taskId: verifier.id,
+    $configJson: JSON.stringify({ ...(verifier.config ?? {}), completionContract }),
+    $doneWhenJson: JSON.stringify([...new Set([
+      ...verifier.doneWhen,
+      ...repair.doneWhen,
+      ...completionContract.requiredEvidence,
+    ])]),
+  });
+  if (verifierUpdate.changes !== 1) {
+    throw new Error(`Verifier ${verifier.id} changed while reconciling the frozen handoff`);
+  }
+  db.query(
+    `update tasks set status = 'blocked', updated_at = current_timestamp
+     where run_id = $runId and role = 'goal-review' and status in ('todo', 'running', 'blocked')`,
+  ).run({ $runId: run.id });
+  harness.updateRunWithDb(db, {
+    runId: run.id,
+    status: "todo",
+    contextPatch: {
+      pendingVerificationTaskIds: [verifier.id],
+      pendingVerificationReason: `Repair ${repair.id} evidence reconciled; frozen Verifier ${verifier.id} is ready`,
+      verifierRepairHandoff: {
+        schemaVersion: 1,
+        receiptKey,
+        repairTaskId: repair.id,
+        blockedAttemptId: blockedSession.attemptId,
+        recoveryAttemptId,
+        verifierTaskId: verifier.id,
+      },
+    },
+  });
+  return doneResult(action.type, `Repair ${repair.id} reconciled; frozen Verifier ${verifier.id} is ready.`, [
+    { name: "Repair structured evidence", status: "passed", evidence: blockedSession.attemptId },
+    { name: "changed-file allowlist", status: "passed", evidence: `${changedFiles.length}:${stableFingerprint(changedFiles)}` },
+    { name: "frozen completion identity", status: "passed", evidence: receiptKey },
+    { name: "original Verifier", status: "passed", evidence: verifier.id },
+    { name: "Goal Review", status: "passed", evidence: "blocked; not retried" },
+  ], [{
+    kind: "verifier_repair_handoff",
+    runId: run.id,
+    repairTaskId: repair.id,
+    blockedAttemptId: blockedSession.attemptId,
+    recoveryAttemptId,
+    verifierTaskId: verifier.id,
+    receiptKey,
+    reused: false,
+  }]);
 }
 
 function activateHarnessRevisionWithDb(
@@ -9147,6 +9435,65 @@ function prepareRunDrain(harness: Harness, action: Extract<HarnessAction, { type
   }
 
   const initialOverview = harness.getRunOverview({ runId: action.runId, eventLimit: 0 });
+  const pendingRepairHandoff = pendingVerifierRepairHandoff(initialOverview);
+  if (pendingRepairHandoff) {
+    const retiredGoalReviewTaskIds = initialOverview.tasks.flatMap((task) => {
+      if (task.role !== "goal-review" || task.status !== "todo") return [];
+      const retired = harness.retireTask({
+        taskId: task.id,
+        reason: `pending fixed Repair handoff ${pendingRepairHandoff.repairTaskId}`,
+      });
+      return retired?.retired ? [task.id] : [];
+    });
+    const signalId = `signal_verifier_repair_handoff_${stableFingerprint({
+      runId: action.runId,
+      repairTaskId: pendingRepairHandoff.repairTaskId,
+      repairAttemptId: pendingRepairHandoff.repairAttemptId,
+      verifierTaskId: pendingRepairHandoff.verifierTaskId,
+    }).slice(0, 24)}`;
+    const existingSignals = Array.isArray(run.context.controlPlaneSignals)
+      ? run.context.controlPlaneSignals.filter((item) => item && typeof item === "object" && !Array.isArray(item))
+      : [];
+    const signal = {
+      id: signalId,
+      kind: "verifier-repair-handoff-blocked",
+      evidence: [
+        `run:${action.runId}`,
+        `task:${pendingRepairHandoff.repairTaskId}`,
+        `attempt:${pendingRepairHandoff.repairAttemptId}`,
+        `task:${pendingRepairHandoff.verifierTaskId}`,
+      ],
+      reason: "Repair evidence is terminal but its original frozen Verifier has not run",
+    };
+    harness.updateRun({
+      runId: action.runId,
+      status: "blocked",
+      contextPatch: {
+        pendingVerificationTaskIds: [pendingRepairHandoff.verifierTaskId],
+        pendingVerificationReason: `Repair ${pendingRepairHandoff.repairTaskId} requires fixed handoff reconciliation before Verifier ${pendingRepairHandoff.verifierTaskId}`,
+        controlPlaneSignals: existingSignals.some((item) => objectRecordOrNull(item)?.id === signalId)
+          ? existingSignals
+          : [...existingSignals, signal],
+      },
+    });
+    return {
+      status: "blocked",
+      actionType: action.type,
+      summary: `Run ${action.runId} is waiting for fixed reconciliation of Repair ${pendingRepairHandoff.repairTaskId}.`,
+      checks: [{
+        name: "pending frozen Verifier handoff",
+        status: "failed",
+        evidence: `${pendingRepairHandoff.repairTaskId}->${pendingRepairHandoff.verifierTaskId}`,
+      }],
+      artifacts: [{
+        kind: "pending_verifier_repair_handoff",
+        ...pendingRepairHandoff,
+        signalId,
+        retiredGoalReviewTaskIds,
+      }],
+      problems: [`Repair ${pendingRepairHandoff.repairTaskId} is blocked only on frozen Verifier handoff metadata`],
+    };
+  }
   const initialActive = initialOverview.tasks.some((task) => task.status === "todo" || task.status === "running");
   const initialGoalReviewInvalidated = initialOverview.run?.context.goalReviewInvalidatedByIntegration === true;
   const initialReviewSessions = currentGoalReviewSessions(initialOverview, initialGoalReviewInvalidated);
@@ -12639,6 +12986,44 @@ function exactSafeIdentifierField(record: Record<string, unknown>, key: string) 
     throw new Error(`${key} must be a safe identifier of at most 200 characters`);
   }
   return value;
+}
+
+function pendingVerifierRepairHandoff(overview: ReturnType<Harness["getRunOverview"]>) {
+  for (const repair of overview.tasks) {
+    if (repair.role !== "worker" || repair.status !== "blocked") continue;
+    const repairRecovery = objectRecordOrNull(repair.config?.verifierRepairRecovery);
+    if (!repairRecovery || typeof repairRecovery.recoveryKey !== "string") continue;
+    const verifier = overview.tasks.find((task) =>
+      task.role === "verifier"
+      && ["todo", "blocked"].includes(task.status)
+      && sameCanonicalValue(task.dependsOn, [repair.id])
+      && task.config?.sourceTaskId === repair.id
+      && sameCanonicalValue(task.config?.verifierRepairRecovery, repairRecovery)
+      && !overview.sessions.some((session) => session.taskId === task.id)
+    );
+    if (!verifier) continue;
+    const repairSession = [...overview.sessions].reverse().find((session) =>
+      session.taskId === repair.id
+      && session.status === "blocked"
+      && (session.output.problems ?? []).includes(
+        `existing verifier ${verifier.id} has a different frozen completion contract`,
+      )
+      && (session.output.artifacts ?? []).some((artifact) => {
+        const record = objectRecordOrNull(artifact);
+        return record?.kind === "conflicting_completion_contract"
+          && record.taskId === verifier.id
+          && record.sourceTaskId === repair.id;
+      })
+    );
+    if (!repairSession) continue;
+    return {
+      repairTaskId: repair.id,
+      repairAttemptId: repairSession.attemptId,
+      verifierTaskId: verifier.id,
+      recoveryKey: repairRecovery.recoveryKey,
+    };
+  }
+  return null;
 }
 
 function designDeliveryOfflineTestPolicy(context: Record<string, unknown>) {
