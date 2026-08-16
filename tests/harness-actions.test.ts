@@ -4297,6 +4297,43 @@ describe("Harness actions", () => {
       expect(JSON.stringify(event)).not.toContain(holdoutRef);
       expect(JSON.stringify(event)).not.toContain(holdoutPath);
 
+      const mismatch = applyHarnessAction(harness, {
+        type: "verifySealedCorpusForVerification",
+        contractId: "sealedCorpusApprovedComparisonMismatchV1",
+        runId: scenario.runId,
+        taskId: scenario.taskId,
+        repoPath: scenario.repoPath,
+        scriptPath: scenario.path,
+        expectedRefsSha256,
+        expectedCorpusSnapshotSha256: "c".repeat(64),
+        expectedCount: 1,
+        descriptorSource: "approved-proposal-comparison",
+        proposalId: proposal.id,
+        decisionId: decision.id,
+      } as never, {
+        runCommand: () => ({
+          exitCode: 1,
+          stdout: "",
+          stderr: `private mismatch at ${holdoutPath}`,
+        }),
+      });
+      expect(mismatch).toMatchObject({ status: "blocked", actionType: "verifySealedCorpusForVerification" });
+      expect(mismatch.artifacts).toContainEqual(expect.objectContaining({
+        kind: "sealed_corpus_verification_receipt",
+        descriptorSource: "approved-proposal-comparison",
+        authorizationDecision: "approved",
+        descriptorSha256: expect.stringMatching(/^[a-f0-9]{64}$/),
+        expectedCount: 1,
+        expectedRefsSha256,
+        expectedCorpusSnapshotSha256: "c".repeat(64),
+        executionStatus: "failed",
+        noHoldoutDisclosure: true,
+      }));
+      const mismatchEvent = harness.listHarnessActionEvents({ limit: 1 })[0]!;
+      expect(JSON.stringify(mismatchEvent)).not.toContain(holdoutRef);
+      expect(JSON.stringify(mismatchEvent)).not.toContain(holdoutPath);
+      expect(JSON.stringify(mismatchEvent)).not.toContain("private mismatch");
+
       const rejectedDecision = harness.recordDesignDecision({
         id: "decision_host_sealed_descriptor_rejected",
         proposalId: proposal.id,

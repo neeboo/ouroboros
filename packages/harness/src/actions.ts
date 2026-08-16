@@ -5415,6 +5415,23 @@ function verifySealedCorpusForVerification(
   if (refsSha256 !== action.expectedRefsSha256) {
     return failedHostEvidenceAction(action, "The sealed descriptor commitment does not match the frozen refs SHA-256.", checks);
   }
+  const descriptorSha256 = createHash("sha256").update(descriptorText).digest("hex");
+  const sealedAuditReceipt = (executionStatus: "passed" | "failed") => ({
+    kind: "sealed_corpus_verification_receipt",
+    descriptorSource,
+    opaqueAuthorizationRef,
+    authorizationDecision,
+    descriptorSha256,
+    expectedCount: action.expectedCount,
+    expectedRefsSha256: action.expectedRefsSha256,
+    expectedCorpusSnapshotSha256: action.expectedCorpusSnapshotSha256,
+    executionStatus,
+    noHoldoutDisclosure: true,
+  });
+  const failedWithSealedAudit = (problem: string) => {
+    const failed = failedHostEvidenceAction(action, problem, checks);
+    return { ...failed, artifacts: [sealedAuditReceipt("failed")] };
+  };
   if (!evidence.files.some((file) => file.path === action.scriptPath)) {
     return failedHostEvidenceAction(action, "The sealed verifier script is not bound to the Worker file receipt.", checks);
   }
@@ -5444,21 +5461,21 @@ function verifySealedCorpusForVerification(
     maxOutputBytes: 16 * 1024,
   });
   if (result.exitCode !== 0) {
-    return failedHostEvidenceAction(action, `Sealed verifier exited ${result.exitCode}; secret diagnostics were not persisted.`, checks);
+    return failedWithSealedAudit(`Sealed verifier exited ${result.exitCode}; secret diagnostics were not persisted.`);
   }
   const firstLine = result.stdout.split(/\r?\n/, 1)[0] ?? "";
   let output: Record<string, unknown>;
   try {
     output = JSON.parse(firstLine) as Record<string, unknown>;
   } catch {
-    return failedHostEvidenceAction(action, "Sealed verifier did not return the required structured result.", checks);
+    return failedWithSealedAudit("Sealed verifier did not return the required structured result.");
   }
   if (
     output.status !== "pass" ||
     output.refsSha256 !== action.expectedRefsSha256 ||
     output.corpusSnapshotSha256 !== action.expectedCorpusSnapshotSha256
   ) {
-    return failedHostEvidenceAction(action, "Sealed verifier result does not match the frozen commitment and corpus SHA-256.", checks);
+    return failedWithSealedAudit("Sealed verifier result does not match the frozen commitment and corpus SHA-256.");
   }
   checks.push({ name: "sealed descriptor commitment", status: "passed", evidence: `${action.expectedCount}:${action.expectedRefsSha256}` });
   checks.push({ name: "sealed verifier result", status: "passed", evidence: action.expectedCorpusSnapshotSha256 });
@@ -5471,7 +5488,6 @@ function verifySealedCorpusForVerification(
     crossProjectMemoryReads: 0,
     crossProjectMemoryWrites: 0,
   };
-  const descriptorSha256 = createHash("sha256").update(descriptorText).digest("hex");
   return {
     status: "done",
     actionType: action.type,
@@ -5490,6 +5506,10 @@ function verifySealedCorpusForVerification(
       opaqueAuthorizationRef,
       authorizationDecision,
       descriptorSha256,
+      expectedCount: action.expectedCount,
+      expectedRefsSha256: action.expectedRefsSha256,
+      expectedCorpusSnapshotSha256: action.expectedCorpusSnapshotSha256,
+      executionStatus: "passed",
       refsSha256: action.expectedRefsSha256,
       corpusSnapshotSha256: action.expectedCorpusSnapshotSha256,
       networkPolicy: "sandbox-exec:deny-network",
