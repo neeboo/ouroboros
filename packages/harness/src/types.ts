@@ -1212,6 +1212,7 @@ export interface DesignInvestment {
   timeBudget?: string;
   reversibility: "easy" | "moderate" | "hard";
   portfolio: "core" | "growth" | "exploration";
+  classification?: "investment" | "evidence-maintenance";
   [key: string]: unknown;
 }
 
@@ -1517,6 +1518,7 @@ export interface AuthorityActorContext {
 
 export interface AuthorityProposalRiskSurface {
   proposalId: string | null;
+  classification?: "investment" | "evidence-maintenance";
   reversibility: "easy" | "moderate" | "hard";
   portfolio: "core" | "growth" | "exploration";
   oneTimeCost: number;

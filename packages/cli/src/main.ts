@@ -1641,7 +1641,7 @@ function targetSystemDesignerPrompt(input: {
       ...(hostCorpusReceipt ? [
         `The host has produced action ${hostCorpusReceipt.actionId}, a sanitized version ${hostCorpusReceipt.targetVersion} corpus-manifest receipt. A full successor proposal must set evolutionPack.version=${hostCorpusReceipt.targetVersion}, cite the corrected evidence-defect signal and this action, and copy receipt.comparison exactly. Do not read or hash fixture bytes yourself.`,
       ] : [
-        "No host corpus-manifest receipt is available. The only allowed proposal is a zero-cost host-receipt construction proposal for version 5 so the host can build a canonical manifest from verifiable real fixture bytes; omit evolutionPack, causalHypothesis, and evaluationContract.comparison. Do not read fixture bytes or self-report a corpus hash.",
+        "No host corpus-manifest receipt is available. The only allowed proposal is a zero-cost host-receipt construction proposal for version 5 so the host can build a canonical manifest from verifiable real fixture bytes; set investment.classification=evidence-maintenance, omit evolutionPack, causalHypothesis, and evaluationContract.comparison. Do not read fixture bytes or self-report a corpus hash.",
       ]),
       "Keep the holdout inside the host private descriptor channel. Ordinary Designer, Planner, Worker, and Verifier roles may receive count and commitment only, with no holdout reference, path, or content.",
       "Do not submit or commit the existing staged exact-seven tree. This Designer may propose one zero-cost evidence-contract correction or stay quiescent; it must not create a Repair, Worker, Verifier, or delivery run.",

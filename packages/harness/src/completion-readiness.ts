@@ -25,6 +25,10 @@ export interface RunCompletionReadiness {
 
 export function describeRunCompletionReadiness(overview: RunOverview): RunCompletionReadiness {
   const workers = overview.tasks.filter((task) => task.role === "worker");
+  const targetDesignBlockers = describeTargetSystemDesignAuthorityBlockers(overview);
+  if (targetDesignBlockers.length > 0) {
+    return { required: true, verifiedWorkerTaskIds: [], blockers: targetDesignBlockers };
+  }
   const requiredEvidence = readRequiredEvidence(overview.run?.context.designEvaluationContract);
   const receiptGatedAssessment = overview.run?.context.source === "design"
     && requiredEvidence.some((item) => RECEIPT_EVIDENCE.test(item));
@@ -93,6 +97,39 @@ export function describeRunCompletionReadiness(overview: RunOverview): RunComple
     verifiedWorkerTaskIds.push(worker.id);
   }
   return { required, verifiedWorkerTaskIds, blockers };
+}
+
+function describeTargetSystemDesignAuthorityBlockers(overview: RunOverview): CompletionVerificationBlocker[] {
+  if (overview.run?.context.source !== "target-system-design") return [];
+  const designerSessions = overview.sessions.filter((session) => session.role === "designer");
+  const proposalIds = new Set<string>();
+  const acceptedProposalIds = new Set<string>();
+  for (const session of designerSessions) {
+    for (const artifact of session.output.artifacts ?? []) {
+      if (!artifact || typeof artifact !== "object" || Array.isArray(artifact)) continue;
+      const record = artifact as Record<string, unknown>;
+      if (record.kind === "design_proposal" && typeof record.proposalId === "string") {
+        proposalIds.add(record.proposalId);
+      }
+      if (record.kind === "design_decision"
+        && typeof record.proposalId === "string"
+        && record.disposition === "automatic") {
+        acceptedProposalIds.add(record.proposalId);
+      }
+      if (record.kind === "design_continuation" && typeof record.proposalId === "string") {
+        acceptedProposalIds.add(record.proposalId);
+      }
+    }
+  }
+  if (proposalIds.size === 0 || [...proposalIds].some((id) => acceptedProposalIds.has(id))) return [];
+  const taskId = [...overview.tasks].reverse().find((task) => task.role === "goal-review")?.id
+    ?? [...overview.tasks].reverse().find((task) => task.role === "designer")?.id
+    ?? overview.run.id;
+  return [{
+    taskId,
+    verifierTaskId: null,
+    reason: `target-system design has only rejected or deferred proposals (${[...proposalIds].sort().join(", ")}); authority has not accepted the run goal`,
+  }];
 }
 
 function describeAssessmentEvidenceBlockers(overview: RunOverview): CompletionVerificationBlocker[] {

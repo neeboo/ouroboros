@@ -33,6 +33,7 @@ import {
 import { optionalStrictIsoTimestamp } from "@ouroboros/harness";
 import { createHash } from "node:crypto";
 import { codexOnlyAgentDefaults } from "../agent-backends";
+import { boundedDiagnosticText } from "../bounded-diagnostic";
 import type { StopHook, StopHookResult } from "../types";
 
 export interface ApplyDesignActionsHookOptions {
@@ -181,10 +182,28 @@ export function createApplyDesignActionsHook(options: ApplyDesignActionsHookOpti
       };
     }
 
+    const nonBlockingDiagnostics = (output.problems ?? [])
+      .filter((problem) => problem.trim().length > 0)
+      .map((problem) => boundedDiagnosticText(problem, 1_200));
     return {
       decision: nextDecision,
-      artifacts: [...artifacts, ...createdRuns.map((created) => ({ kind: "created_run" as const, ...created }))],
+      artifacts: [
+        ...artifacts,
+        ...createdRuns.map((created) => ({ kind: "created_run" as const, ...created })),
+        ...(nonBlockingDiagnostics.length > 0 ? [{
+          kind: "non_blocking_designer_diagnostics" as const,
+          count: nonBlockingDiagnostics.length,
+          messages: nonBlockingDiagnostics.map((diagnostic) => diagnostic.text),
+          sourceEvidence: nonBlockingDiagnostics.map((diagnostic) => ({
+            sha256: diagnostic.sha256,
+            originalChars: diagnostic.originalChars,
+            utf8Bytes: diagnostic.utf8Bytes,
+            truncated: diagnostic.truncated,
+          })),
+        }] : []),
+      ],
       checks,
+      outputPatch: nonBlockingDiagnostics.length > 0 ? { problems: [] } : undefined,
     };
   };
 }
@@ -2833,6 +2852,11 @@ function validateInvestment(investment: Record<string, unknown>) {
   if (!["core", "growth", "exploration"].includes(portfolio as string)) {
     throw new Error("proposeDesign payload.proposal.investment.portfolio must be core, growth, or exploration");
   }
+  if (investment.classification !== undefined
+    && investment.classification !== "investment"
+    && investment.classification !== "evidence-maintenance") {
+    throw new Error("proposeDesign payload.proposal.investment.classification must be investment or evidence-maintenance");
+  }
   for (const key of ["oneTimeCost", "recurringCost"] as const) {
     const value = investment[key];
     if (value === undefined || value === null) {
@@ -2932,9 +2956,16 @@ function resolveProposalEvidence(
       continue;
     }
     // Reverse conflict: a same-project peer with clean metadata names this ref.
+    const unresolvedDirectConflict = signal.conflictingSignalIds.some((peerId) => {
+      const peer = sameProjectPeers.find((candidate) => candidate.id === peerId);
+      return !peer
+        || peer.status === "active"
+        || !hasSignalSupersessionReceipt(db, signal.id, peerId);
+    });
     const reverseConflict = sameProjectPeers.some(
       (peer) =>
         peer.id !== signal.id &&
+        peer.status === "active" &&
         isCleanStringArray(peer.conflictingSignalIds) &&
         (peer.conflictingSignalIds as string[]).includes(ref),
     );
@@ -2942,10 +2973,25 @@ function resolveProposalEvidence(
       ref,
       kind: "signal",
       expiresAt,
-      hasConflict: signal.conflictingSignalIds.length > 0 || reverseConflict,
+      hasConflict: unresolvedDirectConflict || reverseConflict,
     });
   }
   return { references, signals, crossProjectRefs, malformedConflictMetadataRefs };
+}
+
+function hasSignalSupersessionReceipt(db: HarnessDatabase, signalId: string, supersededSignalId: string) {
+  const row = db.query(`
+    select event.id
+    from harness_action_events event,
+         json_each(event.result_json, '$.artifacts') artifact
+    where event.action_type = 'recordSignal'
+      and event.status = 'done'
+      and json_extract(artifact.value, '$.kind') = 'strategy_signal'
+      and json_extract(artifact.value, '$.signalId') = $signalId
+      and json_extract(artifact.value, '$.supersededSignalId') = $supersededSignalId
+    limit 1
+  `).get({ $signalId: signalId, $supersededSignalId: supersededSignalId });
+  return row !== null;
 }
 
 function isCleanStringArray(value: unknown): value is string[] {
@@ -3059,6 +3105,7 @@ function deriveConservativeRiskSurface(
   const investment = (proposalEnvelope.investment ?? {}) as Record<string, unknown>;
   const reversibilityRaw = investment.reversibility;
   const portfolioRaw = investment.portfolio;
+  const classificationRaw = investment.classification;
   const oneTimeCostRaw = investment.oneTimeCost;
   const recurringCostRaw = investment.recurringCost;
   const evidenceRefs = readEvidenceRefs(proposal);
@@ -3088,6 +3135,25 @@ function deriveConservativeRiskSurface(
   }
   if (!Number.isFinite(recurringCost)) {
     derivationReasons.push(`investment.recurringCost ${JSON.stringify(recurringCostRaw)} is not a finite non-negative number; treating as invalid`);
+  }
+  const citesEvidenceDefect = evidenceRefs.some((ref) => {
+    const payload = signalsById.get(ref)?.payload;
+    return payload && typeof payload === "object" && !Array.isArray(payload)
+      && (payload as Record<string, unknown>).outcome === "evidence-defect";
+  });
+  const evaluationContract = proposalEnvelope.evaluationContract;
+  const comparison = evaluationContract && typeof evaluationContract === "object" && !Array.isArray(evaluationContract)
+    ? (evaluationContract as Record<string, unknown>).comparison
+    : undefined;
+  const evidenceMaintenance = classificationRaw === "evidence-maintenance"
+    && oneTimeCost === 0
+    && recurringCost === 0
+    && citesEvidenceDefect
+    && proposalEnvelope.evolutionPack === undefined
+    && proposalEnvelope.causalHypothesis === undefined
+    && comparison === undefined;
+  if (classificationRaw === "evidence-maintenance" && !evidenceMaintenance) {
+    derivationReasons.push("investment.classification evidence-maintenance lacks a zero-cost evidence-defect receipt-only shape; treating as investment");
   }
 
   // Compose text used for conservative keyword matching. Any keyword hit
@@ -3166,6 +3232,7 @@ function deriveConservativeRiskSurface(
 
   const riskSurface: AuthorityProposalRiskSurface = {
     proposalId: proposal.id,
+    classification: evidenceMaintenance ? "evidence-maintenance" : "investment",
     reversibility,
     portfolio,
     oneTimeCost: Number.isFinite(oneTimeCost) ? oneTimeCost : Number.NaN,

@@ -1241,6 +1241,7 @@ function proposeDesignActionExample(signalId = "signal_<id>"): Record<string, un
           reviewAt: "2026-09-01T00:00:00Z",
         },
         investment: {
+          classification: "investment",
           reversibility: "easy",
           portfolio: "core",
           oneTimeCost: 0,

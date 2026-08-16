@@ -165,6 +165,66 @@ describe("Harness", () => {
     expect(harness.getRunOverview({ runId, eventLimit: 0 }).tasks).toEqual([]);
   });
 
+  test("a target-system design root with only a rejected proposal cannot complete", () => {
+    const runId = harness.createRun({
+      goal: "Build one host evidence receipt",
+      context: { source: "target-system-design" },
+    });
+    const designerId = harness.createTask({
+      runId,
+      role: "designer",
+      goal: "Propose the evidence receipt",
+      prompt: "Propose only.",
+    });
+    harness.recordAttempt({
+      taskId: designerId,
+      input: {},
+      output: {
+        status: "done",
+        summary: "The proposal was rejected by authority.",
+        designActions: [{ type: "proposeDesign", payload: {} } as never],
+        checks: [],
+        artifacts: [
+          { kind: "design_proposal", proposalId: "design_rejected_only" },
+          {
+            kind: "design_decision",
+            proposalId: "design_rejected_only",
+            decisionId: "decision_rejected_only",
+            disposition: "rejected",
+          },
+        ],
+        problems: [],
+      },
+    });
+    const reviewId = harness.createTask({
+      runId,
+      role: "goal-review",
+      goal: "Review the rejected design",
+      prompt: "Do not claim completion.",
+      dependsOn: [designerId],
+    });
+    harness.recordAttempt({
+      taskId: reviewId,
+      input: {},
+      output: {
+        status: "done",
+        runDecision: "complete",
+        summary: "Incorrectly claims the run goal is complete.",
+        checks: [],
+        artifacts: [],
+        problems: [],
+      },
+    });
+
+    const result = applyHarnessAction(harness, { type: "prepareRunDrain", runId, maxTries: 3 });
+
+    expect(result.status).toBe("blocked");
+    expect(result.problems.join(" ")).toMatch(/rejected.*proposal|authority/i);
+    expect(harness.getRun(runId)?.status).toBe("blocked");
+    expect(harness.getRunOverview({ runId }).tasks.filter((task) => task.role === "goal-review")).toHaveLength(1);
+    expect(harness.getRunOverview({ runId }).tasks.some((task) => task.role === "planner" || task.role === "worker")).toBe(false);
+  });
+
   test("refuses to start a legacy Worker already stored on a target-system design root", () => {
     const runId = harness.createRun({
       goal: "Govern one legacy target-system design",

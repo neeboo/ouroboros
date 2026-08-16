@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
   type AttemptOutput,
+  applyHarnessAction,
   canonicalHarnessRevisionContentSha256,
   canonicalEvolutionValueSha256,
   type DesignActionInput,
@@ -2721,6 +2722,107 @@ describe("design-action transition coordinator (production authority path)", () 
     expect(
       harness.listRuns({ limit: 50 }).filter((run) => run.context?.parentRunId === runId),
     ).toHaveLength(0);
+  });
+
+  test("a correction that supersedes its historical signal is current evidence, not an unresolved conflict", async () => {
+    const { runId, taskId } = setupRunAndTask();
+    const projectId = harness.createProject({ name: "superseding-correction", rootPath: dir });
+    seedActiveCharter(projectId);
+    const sourceRunId = harness.createRun({ projectId, goal: "Preserve the failed corpus evidence" });
+    harness.updateRunStatus({ runId: sourceRunId, status: "blocked" });
+    const baseSignal = {
+      type: "recordSignal" as const,
+      projectId,
+      sourceRunId,
+      signalClass: "system" as const,
+      source: `blocked-run-outcome:${sourceRunId}`,
+      title: "Old frozen-corpus conclusion",
+      summary: "This historical conclusion was corrected by host readback.",
+      observationTime: "2026-08-01T00:00:00.000Z",
+      confidence: 1,
+      evidence: [`run:${sourceRunId}`, `sha256:${"a".repeat(64)}`],
+      payload: { outcome: "evidence-defect", sideEffectCounters: { paidUsd: 0 } },
+    };
+    const firstSignal = applyHarnessAction(harness, baseSignal);
+    const supersededSignalId = String(firstSignal.artifacts[0]?.signalId);
+    const correction = applyHarnessAction(harness, {
+      ...baseSignal,
+      observationTime: "2026-08-02T00:00:00.000Z",
+      summary: "Host readback supersedes the old conclusion while preserving it as history.",
+      supersedesSignalId: supersededSignalId,
+    });
+    const correctionSignalId = String(correction.artifacts[0]?.signalId);
+    const proposal = lowRiskEnvelope(correctionSignalId, {
+      recommendation: "Build one zero-cost host evidence receipt.",
+      investment: {
+        reversibility: "easy",
+        portfolio: "core",
+        classification: "evidence-maintenance",
+        oneTimeCost: 0,
+        recurringCost: 0,
+        timeBudget: "one bounded host pass",
+      },
+    });
+
+    const parsedOutput = parseAttemptOutput(JSON.stringify({
+      status: "done",
+      summary: "propose one host evidence receipt",
+      problems: ["optional local documentation was unavailable; Authorization: Bearer local-secret"],
+      actions: [{
+        type: "proposeDesign",
+        payload: { projectId, title: "Build host evidence receipt", proposal, status: "proposed" },
+      }],
+    }));
+    const result = await runHook(parsedOutput, runId, taskId);
+
+    const stored = harness.listDesignProposals({ projectId })[0]!;
+    const decision = harness.listDesignDecisions({ proposalId: stored.id }).at(-1)!;
+    expect(result.problems ?? []).toEqual([]);
+    expect(result.outputPatch).toMatchObject({ problems: [] });
+    expect(result.artifacts).toContainEqual(expect.objectContaining({
+      kind: "non_blocking_designer_diagnostics",
+      count: 1,
+      messages: [expect.not.stringContaining("local-secret")],
+      sourceEvidence: [expect.objectContaining({ originalChars: expect.any(Number), sha256: expect.any(String) })],
+    }));
+    expect(stored.status).toBe("accepted");
+    expect(stored.proposal.investment.classification).toBe("evidence-maintenance");
+    expect(decision.decision).toBe("approved");
+    expect((decision.authority as { evidence?: { conflicting?: string[] } }).evidence?.conflicting).toEqual([]);
+  });
+
+  test("a signal cannot clear conflict merely by naming a superseded peer without a host receipt", async () => {
+    const { runId, taskId } = setupRunAndTask();
+    const projectId = harness.createProject({ name: "forged-supersession", rootPath: dir });
+    seedActiveCharter(projectId);
+    const peerId = seedActiveSignal(projectId);
+    harness.runInTransaction((db) => harness.supersedeStrategySignalWithDb(db, { id: peerId }));
+    const forgedCorrectionId = seedActiveSignal(projectId, {
+      title: "Unreceipted correction",
+      conflictingSignalIds: [peerId],
+      payload: { outcome: "evidence-defect" },
+    });
+
+    const result = await runHook({
+      status: "done",
+      summary: "propose",
+      designActions: [{
+        type: "proposeDesign",
+        payload: {
+          projectId,
+          title: "Unreceipted correction proposal",
+          proposal: lowRiskEnvelope(forgedCorrectionId),
+          status: "proposed",
+        },
+      }],
+    } as AttemptOutput, runId, taskId);
+
+    const proposal = harness.listDesignProposals({ projectId })[0]!;
+    const decision = harness.listDesignDecisions({ proposalId: proposal.id }).at(-1)!;
+    expect(result.decision).toBe("exit");
+    expect(proposal.status).toBe("proposed");
+    expect((decision.authority as { evidence?: { conflicting?: string[] } }).evidence?.conflicting)
+      .toContain(forgedCorrectionId);
   });
 
   test("reverse conflict: a peer signal that names the cited signal as conflicting routes to human-required checkpoint", async () => {

@@ -353,9 +353,15 @@ function evaluatePortfolio(
   // === null` allowed a zero-allocation category to authorize silently; we
   // now compute proposedShare = currentShare + 1 so a null currentShare
   // (first investment) is compared against the configured allocation.
-  const proposedShare = currentShare === null ? 1 : currentShare + 1;
-  const withinShare =
-    configuredShare === null || usageMalformed ? false : proposedShare <= configuredShare;
+  const evidenceMaintenance = proposal.classification === "evidence-maintenance"
+    && proposal.oneTimeCost === 0
+    && proposal.recurringCost === 0;
+  const proposedShare = evidenceMaintenance
+    ? (currentShare ?? 0)
+    : currentShare === null ? 1 : currentShare + 1;
+  const withinShare = evidenceMaintenance
+    ? !usageMalformed && configuredShare !== null
+    : configuredShare === null || usageMalformed ? false : proposedShare <= configuredShare;
 
   if (!categoryKnown) {
     reasons.push({
@@ -376,7 +382,7 @@ function evaluatePortfolio(
       kind: "portfolio-allocation-missing",
       message: `Charter capital policy does not declare a valid allocation for the "${proposal.portfolio}" portfolio; auto-approval is unavailable.`,
     });
-  } else if (!usageMalformed && configuredShare !== null && proposedShare > configuredShare) {
+  } else if (!evidenceMaintenance && !usageMalformed && configuredShare !== null && proposedShare > configuredShare) {
     reasons.push({
       kind: "portfolio-allocation-exceeded",
       message: `Proposed ${proposal.portfolio} share ${proposedShare} exceeds configured allocation ${configuredShare}.`,

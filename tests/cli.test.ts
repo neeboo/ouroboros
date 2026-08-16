@@ -974,6 +974,7 @@ describe("CLI", () => {
     expect(attempts.count).toBe(0);
     expect(overview.tasks[0]!.prompt).toContain("version 5");
     expect(overview.tasks[0]!.prompt).toContain("real fixture bytes");
+    expect(overview.tasks[0]!.prompt).toContain("investment.classification=evidence-maintenance");
     expect(overview.tasks[0]!.prompt).toContain("count and commitment only");
     expect(overview.tasks[0]!.prompt).toContain("must remain unchanged");
     expect(overview.tasks[0]!.prompt).not.toContain("copy its comparison exactly");

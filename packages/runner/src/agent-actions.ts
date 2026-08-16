@@ -528,6 +528,13 @@ function parseDesignInvestment(value: unknown, label: string) {
     `${label}.portfolio`,
   );
   const investment: DesignProposalData["investment"] = { reversibility, portfolio };
+  if (record.classification !== undefined && record.classification !== null) {
+    investment.classification = requireEnumValue<"investment" | "evidence-maintenance">(
+      record.classification,
+      new Set(["investment", "evidence-maintenance"]),
+      `${label}.classification`,
+    );
+  }
   if (record.oneTimeCost !== undefined && record.oneTimeCost !== null) {
     if (typeof record.oneTimeCost !== "number" || !Number.isFinite(record.oneTimeCost) || record.oneTimeCost < 0) {
       throw new Error(`${label}.oneTimeCost must be a non-negative finite number`);

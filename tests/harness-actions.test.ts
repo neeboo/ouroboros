@@ -7771,6 +7771,65 @@ describe("Founder charter authority evaluator", () => {
     expect(result.reasons.some((reason) => reason.kind === "cost-requires-human-decision")).toBe(false);
   });
 
+  test("zero-cost evidence maintenance does not consume another portfolio share", () => {
+    const charter = makeCharter({
+      authority: {
+        autoResearch: true,
+        autoReversibleExperiments: true,
+        humanApprovalPolicy: "cost-only",
+        requireHumanFor: [],
+      },
+    });
+    const proposal = makeProposal({
+      classification: "evidence-maintenance",
+      oneTimeCost: 0,
+      recurringCost: 0,
+      portfolio: "core",
+    } as Partial<AuthorityProposalRiskSurface>);
+
+    const result = evaluate({
+      charter,
+      proposal,
+      portfolioUsage: { category: "core", currentShare: 26 },
+    });
+
+    expect(result.disposition).toBe("automatic");
+    expect(result.portfolio).toMatchObject({
+      category: "core",
+      configuredShare: 5,
+      currentShare: 26,
+      proposedShare: 26,
+      withinShare: true,
+    });
+    expect(result.reasons.some((reason) => reason.kind === "portfolio-allocation-exceeded")).toBe(false);
+  });
+
+  test("ordinary zero-cost investment still reports portfolio growth", () => {
+    const charter = makeCharter({
+      authority: {
+        autoResearch: true,
+        autoReversibleExperiments: true,
+        humanApprovalPolicy: "cost-only",
+        requireHumanFor: [],
+      },
+    });
+    const proposal = makeProposal({
+      classification: "investment",
+      oneTimeCost: 0,
+      recurringCost: 0,
+      portfolio: "core",
+    } as Partial<AuthorityProposalRiskSurface>);
+
+    const result = evaluate({
+      charter,
+      proposal,
+      portfolioUsage: { category: "core", currentShare: 26 },
+    });
+
+    expect(result.portfolio.proposedShare).toBe(27);
+    expect(result.portfolio.withinShare).toBe(false);
+  });
+
   test("cost-only policy defers any real spend to a human decision", () => {
     const charter = makeCharter({
       authority: {
