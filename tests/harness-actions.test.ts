@@ -12017,7 +12017,7 @@ describe("verified package delivery closeout", () => {
       freezeStage: "comparison-freeze-before-comparison",
       canonicalManifestSha256: "c".repeat(64),
       ...frozenComparison,
-      reviewAt: "2026-09-01T00:00:00.000Z",
+      reviewAt: "2026-09-01T00:00:00Z",
       holdoutEvidenceCommitment: { algorithm: "sha256", count: 1, refsSha256: "d".repeat(64) },
       sourceByteCommitments: { "config/evolution/v5/README.md": "e".repeat(64) },
     };

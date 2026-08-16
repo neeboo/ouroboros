@@ -7816,6 +7816,8 @@ function verifiedPackageComparisonMatches(
     return false;
   }
   const reviewAt = typeof value.reviewAt === "string" ? value.reviewAt : "";
+  const validReviewAt = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/.test(reviewAt)
+    && Number.isFinite(Date.parse(reviewAt));
   return value.schemaVersion === 1
     && value.kind === "comparison-freeze"
     && value.id === "comparison-freeze:target-evolution-v5"
@@ -7823,7 +7825,7 @@ function verifiedPackageComparisonMatches(
     && value.projectId === projectId
     && typeof value.canonicalManifestSha256 === "string"
     && /^[0-9a-f]{64}$/.test(value.canonicalManifestSha256) && !/^0+$/.test(value.canonicalManifestSha256)
-    && reviewAt.length > 0 && new Date(reviewAt).toISOString() === reviewAt
+    && validReviewAt
     && value.corpusSnapshotSha256 === frozenComparison.corpusSnapshotSha256
     && sameCanonicalValue(value.equalBudget, frozenComparison.equalBudget)
     && value.primaryMetric === frozenComparison.primaryMetric
