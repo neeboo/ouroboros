@@ -126,6 +126,7 @@ import type {
   BlockUnfinishedTasksForRunInput,
   ReclaimedRunningTask,
   ReclaimRunningTasksInput,
+  Run,
   RetryTaskInput,
   RetireTaskInput,
   SetPromptTemplateInput,
@@ -845,6 +846,10 @@ export class Harness {
       worktreePath: taskRow.worktree_path,
       config: JSON.parse(taskRow.config_json) as Record<string, unknown>,
     });
+    const taskConfig = JSON.parse(taskRow.config_json) as Record<string, unknown>;
+    if (taskConfig.executor === "host-fixed-action") {
+      throw new Error(`task ${taskId} is a host-fixed-action system task and cannot start a model executor`);
+    }
     return true;
   }
 
@@ -3621,6 +3626,7 @@ function assertTaskGovernanceBoundaryWithDb(db: HarnessDatabase, input: CreateTa
     throw new Error(`run not found: ${input.runId}`);
   }
   const run = runFromRow(runRow);
+  assertAdditiveEvidenceContractTaskWithDb(db, run, input);
   const boundary = run.context.runtimeIntegrationBoundary;
   const boundaryRecord = boundary && typeof boundary === "object" && !Array.isArray(boundary)
     ? boundary as Record<string, unknown>
@@ -3754,6 +3760,75 @@ function assertTaskGovernanceBoundaryWithDb(db: HarnessDatabase, input: CreateTa
   if (!plannerFound) {
     throw new Error(`design child ${run.id} Worker must be downstream of its frozen Planner task`);
   }
+}
+
+function assertAdditiveEvidenceContractTaskWithDb(db: HarnessDatabase, run: Run, input: CreateTaskInput) {
+  const bundle = run.context.targetSystemEvidenceBundle;
+  if (run.context.source !== "design"
+    || !bundle || typeof bundle !== "object" || Array.isArray(bundle)
+    || (bundle as Record<string, unknown>).purpose !== "runtime-integration-frozen-evidence-conflict-correction"
+    || input.role === "planner") {
+    return;
+  }
+  const config = input.config ?? {};
+  const contract = config.additiveEvidenceContractExecutionContract;
+  if (!contract || typeof contract !== "object" || Array.isArray(contract)) {
+    throw new Error(`task ${input.id ?? "<pending>"} additive evidence-contract execution contract is missing`);
+  }
+  const record = contract as Record<string, unknown>;
+  const bundleSha256 = (bundle as Record<string, unknown>).bundleSha256;
+  if (record.schemaVersion !== 1
+    || typeof bundleSha256 !== "string"
+    || record.bundleSha256 !== bundleSha256
+    || record.proposalId !== run.context.designProposalId
+    || record.decisionId !== run.context.designDecisionId
+    || typeof record.graphSha256 !== "string"
+    || typeof record.overlaySha256 !== "string"
+    || typeof record.plannerTaskId !== "string") {
+    throw new Error(`task ${input.id ?? "<pending>"} additive evidence-contract execution contract drifted`);
+  }
+  const planner = db.query("select * from tasks where id = $taskId and run_id = $runId")
+    .get({ $taskId: record.plannerTaskId, $runId: run.id }) as TaskRow | null;
+  if (!planner || planner.role !== "planner") {
+    throw new Error(`task ${input.id ?? "<pending>"} additive evidence-contract Planner lineage is invalid`);
+  }
+  if (record.stage === "system-overlay") {
+    if (input.role !== "system"
+      || config.systemTask !== true
+      || config.executor !== "host-fixed-action"
+      || config.permissionMode !== "host-control-plane"
+      || input.parentId !== planner.id
+      || JSON.stringify(input.dependsOn ?? []) !== JSON.stringify([planner.id])) {
+      throw new Error(`task ${input.id ?? "<pending>"} additive evidence-contract host overlay contract drifted`);
+    }
+    return;
+  }
+  if (record.stage === "independent-verifier") {
+    const dependencies = input.dependsOn ?? [];
+    if (input.role !== "verifier"
+      || config.executor !== "codex-resumable"
+      || config.permissionMode !== "read-only"
+      || config.readOnly !== true
+      || config.forbidImplementation !== true
+      || config.forbidBrowser !== true
+      || config.browserProcessPolicy !== "deny"
+      || input.parentId !== planner.id
+      || dependencies.length !== 1) {
+      throw new Error(`task ${input.id ?? "<pending>"} additive evidence-contract verifier contract drifted`);
+    }
+    const dependency = db.query("select * from tasks where id = $taskId and run_id = $runId")
+      .get({ $taskId: dependencies[0], $runId: run.id }) as TaskRow | null;
+    const dependencyConfig = dependency ? JSON.parse(dependency.config_json) as Record<string, unknown> : {};
+    const dependencyContract = dependencyConfig.additiveEvidenceContractExecutionContract;
+    if (!dependency || dependency.role !== "system"
+      || !dependencyContract || typeof dependencyContract !== "object" || Array.isArray(dependencyContract)
+      || (dependencyContract as Record<string, unknown>).stage !== "system-overlay"
+      || (dependencyContract as Record<string, unknown>).graphSha256 !== record.graphSha256) {
+      throw new Error(`task ${input.id ?? "<pending>"} additive evidence-contract verifier dependency is invalid`);
+    }
+    return;
+  }
+  throw new Error(`task ${input.id ?? "<pending>"} is outside the frozen additive evidence-contract task graph`);
 }
 
 function evolutionRecordProjectId(value: unknown, label: string): string {

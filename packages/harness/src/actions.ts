@@ -216,6 +216,16 @@ export type HarnessAction =
       decisionId: string;
     }
   | {
+      type: "materializeAdditiveEvidenceContractRecovery";
+      runId: string;
+      plannerTaskId: string;
+    }
+  | {
+      type: "recordAdditiveEvidenceContractOverlay";
+      runId: string;
+      systemTaskId: string;
+    }
+  | {
       type: "materializeRuntimeIntegrationDesignRecovery";
       sourceRunId: string;
       sourceTaskId: string;
@@ -681,6 +691,9 @@ const FROZEN_DESIGN_CONTEXT_KEYS = new Set([
   "dshInstallationReceipt",
   "runtimeIntegrationDshInstallationRecovery",
   "runtimeIntegrationDshRuntimeBindingRecovery",
+  "additiveEvidenceContractTaskGraph",
+  "additiveEvidenceContractOverlay",
+  "additiveEvidenceContractOverlayState",
 ]);
 
 function frozenDesignContextKeys(keys: Iterable<string>): string[] {
@@ -898,6 +911,22 @@ export function parseHarnessAction(value: unknown): HarnessAction {
       sourceRunId: exactSafeIdentifierField(record, "sourceRunId"),
       sourceTaskId: exactSafeIdentifierField(record, "sourceTaskId"),
       boundary: parseRuntimeIntegrationBoundaryInput(record.boundary),
+    };
+  }
+  if (type === "materializeAdditiveEvidenceContractRecovery") {
+    assertOnlyFields(record, type, ["type", "runId", "plannerTaskId"]);
+    return {
+      type,
+      runId: exactSafeIdentifierField(record, "runId"),
+      plannerTaskId: exactSafeIdentifierField(record, "plannerTaskId"),
+    };
+  }
+  if (type === "recordAdditiveEvidenceContractOverlay") {
+    assertOnlyFields(record, type, ["type", "runId", "systemTaskId"]);
+    return {
+      type,
+      runId: exactSafeIdentifierField(record, "runId"),
+      systemTaskId: exactSafeIdentifierField(record, "systemTaskId"),
     };
   }
   if (type === "materializeFrozenEvidenceConflictDesigner") {
@@ -1375,7 +1404,7 @@ export function parseHarnessAction(value: unknown): HarnessAction {
     };
   }
   throw new Error(
-    "harness action type must be reclaimRunningTasks, retryTask, reconcileRunEvidence, recordSignal, linkResearchEvidence, materializeDesignerActionRecovery, materializeDesignDeliveryRecovery, materializeDesignWorkerRuntimeRecovery, materializeDesignWorkerTransportRecovery, materializeVerifierRepairRecovery, recoverRuntimeIntegrationHostEvidenceFailure, reconcileVerifierRepairHandoff, buildVersionedCorpusManifest, bindHostEvidenceMaintenanceReceipt, materializeHostEvidenceMaintenanceDelivery, materializeRuntimeIntegrationDesignRecovery, materializeFrozenEvidenceConflictDesigner, materializeRuntimeIntegrationTaskGraphRecovery, recoverRuntimeIntegrationTaskGraphPreparationFailure, installLocalDshCli, recoverRuntimeIntegrationDshInstallationFailure, recoverRuntimeIntegrationDshRuntimeBindingFailure, markRunTodo, updateRunContext, amendRunContract, retireRun, retireTask, prepareRunDrain, completeSystemTask, integrateVerifiedRun, pushExactGitRef, createExactGitRef, commitExactGitIndex, stageExactWorkerFilesForVerification, materializeAttemptArtifactsForVerification, verifySealedCorpusForVerification, registerEvolutionProfile, recordProductionEpisode, registerHarnessVariant, activateHarnessRevision, freezeMatchedExperiment, interruptAttemptAndCreateTask, interruptRunningAttemptsAndCreateTask, acceptGuardrailProposal, startSubsession, collectSubsessions, cancelSubsessions, or runWatchdogPass",
+    "harness action type must be reclaimRunningTasks, retryTask, reconcileRunEvidence, recordSignal, linkResearchEvidence, materializeDesignerActionRecovery, materializeDesignDeliveryRecovery, materializeDesignWorkerRuntimeRecovery, materializeDesignWorkerTransportRecovery, materializeVerifierRepairRecovery, recoverRuntimeIntegrationHostEvidenceFailure, reconcileVerifierRepairHandoff, buildVersionedCorpusManifest, bindHostEvidenceMaintenanceReceipt, materializeHostEvidenceMaintenanceDelivery, materializeAdditiveEvidenceContractRecovery, recordAdditiveEvidenceContractOverlay, materializeRuntimeIntegrationDesignRecovery, materializeFrozenEvidenceConflictDesigner, materializeRuntimeIntegrationTaskGraphRecovery, recoverRuntimeIntegrationTaskGraphPreparationFailure, installLocalDshCli, recoverRuntimeIntegrationDshInstallationFailure, recoverRuntimeIntegrationDshRuntimeBindingFailure, markRunTodo, updateRunContext, amendRunContract, retireRun, retireTask, prepareRunDrain, completeSystemTask, integrateVerifiedRun, pushExactGitRef, createExactGitRef, commitExactGitIndex, stageExactWorkerFilesForVerification, materializeAttemptArtifactsForVerification, verifySealedCorpusForVerification, registerEvolutionProfile, recordProductionEpisode, registerHarnessVariant, activateHarnessRevision, freezeMatchedExperiment, interruptAttemptAndCreateTask, interruptRunningAttemptsAndCreateTask, acceptGuardrailProposal, startSubsession, collectSubsessions, cancelSubsessions, or runWatchdogPass",
   );
 }
 
@@ -1454,6 +1483,14 @@ export function applyHarnessAction(
 
   if (action.type === "materializeHostEvidenceMaintenanceDelivery") {
     return applyHostEvidenceMaintenanceDeliveryAtomically(harness, action);
+  }
+
+  if (action.type === "materializeAdditiveEvidenceContractRecovery") {
+    return applyAdditiveEvidenceContractRecoveryAtomically(harness, action);
+  }
+
+  if (action.type === "recordAdditiveEvidenceContractOverlay") {
+    return applyAdditiveEvidenceContractOverlayAtomically(harness, action);
   }
 
   if (action.type === "materializeRuntimeIntegrationDesignRecovery") {
@@ -2273,6 +2310,353 @@ function applyResearchEvidenceLinkAtomically(
 
 type VersionedCorpusManifestAction = Extract<HarnessAction, { type: "buildVersionedCorpusManifest" }>;
 type HostEvidenceMaintenanceDeliveryAction = Extract<HarnessAction, { type: "materializeHostEvidenceMaintenanceDelivery" }>;
+type AdditiveEvidenceContractRecoveryAction = Extract<HarnessAction, { type: "materializeAdditiveEvidenceContractRecovery" }>;
+type AdditiveEvidenceContractOverlayAction = Extract<HarnessAction, { type: "recordAdditiveEvidenceContractOverlay" }>;
+
+function applyAdditiveEvidenceContractRecoveryAtomically(
+  harness: Harness,
+  action: AdditiveEvidenceContractRecoveryAction,
+): HarnessActionResult & { eventId: string } {
+  return harness.runInImmediateTransaction((db) => {
+    const request = safeRequest(action);
+    const prior = harness.listHarnessActionEventsWithDb(db, {
+      actionType: action.type,
+      statuses: ["done"],
+      limit: 1_000,
+    }).find((event) => stableFingerprint(event.request) === stableFingerprint(request));
+    if (prior) return { ...(prior.result as unknown as HarnessActionResult), eventId: prior.id };
+
+    let result: HarnessActionResult;
+    try {
+      const overview = harness.getRunOverviewWithDb(db, { runId: action.runId, eventLimit: 0 });
+      const run = overview.run;
+      if (!run || !run.projectId || run.context.source !== "design") {
+        throw new Error("additive evidence-contract recovery requires one project-bound design delivery");
+      }
+      const planner = overview.tasks.find((task) => task.id === action.plannerTaskId);
+      if (!planner || planner.role !== "planner" || (planner.status !== "done" && planner.status !== "running")) {
+        throw new Error("additive evidence-contract recovery requires the terminal frozen Planner");
+      }
+      const frozenPlanner = objectRecord(planner.config?.frozenDesignPlanner, "frozenDesignPlanner");
+      const proposalId = exactNonEmptyStringField(frozenPlanner, "designProposalId");
+      const decisionId = exactNonEmptyStringField(frozenPlanner, "designDecisionId");
+      if (proposalId !== run.context.designProposalId || decisionId !== run.context.designDecisionId) {
+        throw new Error("additive evidence-contract Planner identity does not match the delivery authority binding");
+      }
+      const proposal = harness.getDesignProposalWithDb(db, { id: proposalId });
+      const decision = proposal
+        ? harness.listDesignDecisionsWithDb(db, { proposalId }).find((candidate) => candidate.id === decisionId)
+        : null;
+      if (!proposal || proposal.projectId !== run.projectId || proposal.status !== "accepted"
+        || !decision || decision.decision !== "approved") {
+        throw new Error("additive evidence-contract recovery requires an accepted proposal and approved decision");
+      }
+      const bundle = objectRecord(run.context.targetSystemEvidenceBundle, "targetSystemEvidenceBundle");
+      if (bundle.purpose !== "runtime-integration-frozen-evidence-conflict-correction"
+        || bundle.targetProjectId !== run.projectId) {
+        throw new Error("additive evidence-contract recovery requires the authoritative conflict-correction bundle");
+      }
+      const bundleSha256 = exactSha256Field(bundle, "bundleSha256");
+      const { bundleSha256: _bundleSha256, ...bundleBody } = bundle;
+      if (canonicalEvolutionValueSha256(bundleBody) !== bundleSha256) {
+        throw new Error("additive evidence-contract authoritative bundle hash mismatch");
+      }
+      const conflict = objectRecord(bundle.conflict, "targetSystemEvidenceBundle.conflict");
+      const sourceRun = objectRecord(bundle.sourceRun, "targetSystemEvidenceBundle.sourceRun");
+      const immutable = objectRecord(bundle.immutableContracts ?? run.context.immutableContracts, "immutableContracts");
+      if (immutable.mayModifyFrozenPackage !== false || immutable.mayRecoverSourceRun !== false) {
+        throw new Error("additive evidence-contract recovery cannot modify the frozen package or recover the source run");
+      }
+      const frozenManifestSha256 = exactSha256Field(conflict, "frozenManifestSha256");
+      const observedManifestSha256 = exactSha256Field(conflict, "observedManifestSha256");
+      const conflictFingerprint = exactSha256Field(conflict, "fingerprint");
+      if (frozenManifestSha256 === observedManifestSha256) {
+        throw new Error("additive evidence-contract recovery requires two distinct immutable manifest bindings");
+      }
+      const sourceRunId = exactNonEmptyStringField(sourceRun, "id");
+      const immutableSourceRun = harness.getRunWithDb(db, sourceRunId);
+      if (!immutableSourceRun || immutableSourceRun.projectId !== run.projectId || immutableSourceRun.status !== "blocked") {
+        throw new Error("additive evidence-contract source run must remain the blocked project-bound predecessor");
+      }
+      if (typeof sourceRun.repairBudgetSha256 === "string"
+        && canonicalEvolutionValueSha256(immutableSourceRun.context.repairReplanBudget) !== sourceRun.repairBudgetSha256) {
+        throw new Error("additive evidence-contract source Repair budget drifted");
+      }
+      const verifiedRuntime = Array.isArray(bundle.verifiedRuntime)
+        ? bundle.verifiedRuntime.map((value, index) => {
+            const receipt = objectRecord(value, `verifiedRuntime[${index}]`);
+            return {
+              taskId: exactNonEmptyStringField(receipt, "taskId"),
+              attemptId: exactNonEmptyStringField(receipt, "attemptId"),
+              stageId: exactNonEmptyStringField(receipt, "stageId"),
+              outputSha256: exactSha256Field(receipt, "outputSha256"),
+              profileReceiptSha256: exactSha256Field(receipt, "profileReceiptSha256"),
+            };
+          })
+        : [];
+      if (verifiedRuntime.length !== 5) {
+        throw new Error("additive evidence-contract recovery requires all five verified runtime receipts");
+      }
+      const conflictSignalId = exactNonEmptyStringField(conflict, "signalId");
+      if (!(proposal.proposal.evidenceRefs ?? []).includes(conflictSignalId)) {
+        throw new Error("additive evidence-contract proposal is not bound to the authoritative conflict signal");
+      }
+      const overlayBody = {
+        schemaVersion: 1,
+        kind: "dual-immutable-manifest-binding",
+        projectId: run.projectId,
+        deliveryRunId: run.id,
+        plannerTaskId: planner.id,
+        proposalId,
+        decisionId,
+        sourceRunId,
+        conflictSignalId,
+        bundleSha256,
+        frozenManifestSha256,
+        observedManifestSha256,
+        relation: "distinct-but-bound",
+        conflictFingerprint,
+        verifiedRuntime,
+        immutablePriorEvidence: true,
+      };
+      const overlay = { ...overlayBody, overlaySha256: canonicalEvolutionValueSha256(overlayBody) };
+      const systemTaskId = `task_${createHash("sha1").update(`additive-evidence-overlay|${run.id}|${planner.id}`).digest("hex")}`;
+      const verifierTaskId = `task_${createHash("sha1").update(`additive-evidence-verifier|${run.id}|${planner.id}`).digest("hex")}`;
+      const graphBody = {
+        schemaVersion: 1,
+        kind: "additive-evidence-contract",
+        plannerTaskId: planner.id,
+        systemTaskId,
+        verifierTaskId,
+        proposalId,
+        decisionId,
+        bundleSha256,
+        overlaySha256: overlay.overlaySha256,
+      };
+      const graph = { ...graphBody, graphSha256: canonicalEvolutionValueSha256(graphBody) };
+      const contractBase = {
+        schemaVersion: 1,
+        graphSha256: graph.graphSha256,
+        plannerTaskId: planner.id,
+        proposalId,
+        decisionId,
+        bundleSha256,
+        overlaySha256: overlay.overlaySha256,
+      };
+      const repairBudget = objectRecordOrNull(run.context.repairReplanBudget) ?? { used: 0, limit: 3, entries: [] };
+      if (repairBudget.used !== 0) {
+        throw new Error("additive evidence-contract recovery requires its independent unused Repair budget");
+      }
+      if (overview.tasks.some((task) => task.id === systemTaskId || task.id === verifierTaskId)) {
+        throw new Error("additive evidence-contract stable task IDs already exist without a completed recovery receipt");
+      }
+      const retiredTaskIds: string[] = [];
+      db.transaction(() => {
+        for (const task of overview.tasks) {
+          if (task.id === planner.id || task.status !== "todo") continue;
+          const nextConfig = {
+            ...(task.config ?? {}),
+            retired: true,
+            retiredReason: "replaced by the frozen additive evidence-contract host graph",
+            retiredByAction: action.type,
+          };
+          const updated = db.query(
+            "update tasks set status = 'blocked', config_json = $configJson, updated_at = current_timestamp where id = $taskId and status = 'todo'",
+          ).run({ $taskId: task.id, $configJson: JSON.stringify(nextConfig) });
+          if (updated.changes === 1) retiredTaskIds.push(task.id);
+        }
+        harness.createTaskWithDb(db, {
+          id: systemTaskId,
+          runId: run.id,
+          parentId: planner.id,
+          role: "system",
+          goal: "Record the additive evidence-contract overlay through one audited host action",
+          prompt: [
+            "Execute only recordAdditiveEvidenceContractOverlay through the trusted host control plane.",
+            `Delivery run: ${run.id}`,
+            `Bundle SHA-256: ${bundleSha256}`,
+            `Overlay SHA-256: ${overlay.overlaySha256}`,
+            "Do not start a model, write target repositories, change frozen evidence, or recover the source run.",
+          ].join("\n"),
+          dependsOn: [planner.id],
+          doneWhen: [
+            "the append-only overlay receipt is stored in the authoritative control plane",
+            "the source run, frozen package, comparison, runtime files, and Repair budget remain unchanged",
+          ],
+          config: {
+            systemTask: true,
+            executor: "host-fixed-action",
+            permissionMode: "host-control-plane",
+            repositoryId: "ouroboros-control-plane",
+            worktreeStrategy: "authoritative-db-only",
+            networkPolicy: { mode: "deny" },
+            credentialIsolation: { ambient: "deny", target: "deny" },
+            forbidBrowser: true,
+            browserProcessPolicy: "deny",
+            forbidNextTasks: true,
+            forbidNextRuns: true,
+            additiveEvidenceContractExecutionContract: { ...contractBase, stage: "system-overlay" },
+            additiveEvidenceContractOverlay: overlay,
+          },
+        });
+        harness.createTaskWithDb(db, {
+          id: verifierTaskId,
+          runId: run.id,
+          parentId: planner.id,
+          role: "verifier",
+          goal: "Independently verify the additive evidence-contract overlay",
+          prompt: [
+            "Read back the audited host overlay and its authoritative bundle from the control plane.",
+            "Verify both immutable manifest hashes, their declared non-equality, the conflict fingerprint, and all five runtime receipts.",
+            "Confirm that the frozen package, prior comparison and evidence, source run, target repositories, and old Repair budget are unchanged.",
+            "Do not implement, write files, run a browser, or create follow-up work.",
+          ].join("\n"),
+          dependsOn: [systemTaskId],
+          doneWhen: [
+            "the overlay action receipt and overlay hash match",
+            "the frozen and observed manifest bindings are exact and explicitly distinct",
+            "all five output/profile receipt pairs match the authoritative bundle",
+            "no frozen evidence, business file, source-run status, or prior Repair budget changed",
+          ],
+          config: {
+            executor: "codex-resumable",
+            permissionMode: "read-only",
+            repositoryId: "ouroboros-control-plane",
+            worktreeStrategy: "authoritative-db-read-only",
+            readOnly: true,
+            forbidImplementation: true,
+            networkPolicy: { mode: "deny" },
+            credentialIsolation: { ambient: "deny", target: "deny" },
+            forbidBrowser: true,
+            browserProcessPolicy: "deny",
+            forbidNextTasks: true,
+            forbidNextRuns: true,
+            additiveEvidenceContractExecutionContract: { ...contractBase, stage: "independent-verifier" },
+            additiveEvidenceContractVerifier: {
+              systemTaskId,
+              bundleSha256,
+              overlaySha256: overlay.overlaySha256,
+              verifiedRuntimeCount: verifiedRuntime.length,
+            },
+          },
+        });
+        harness.updateRunWithDb(db, {
+          runId: run.id,
+          status: "todo",
+          contextPatch: {
+            repairReplanBudget: repairBudget,
+            additiveEvidenceContractTaskGraph: graph,
+            additiveEvidenceContractOverlay: overlay,
+            additiveEvidenceContractOverlayState: { status: "pending", systemTaskId },
+          },
+        });
+      })();
+      result = doneResult(action.type, `Additive evidence-contract host graph ${graph.graphSha256} materialized.`, [
+        { name: "accepted proposal", status: "passed", evidence: proposalId },
+        { name: "approved decision", status: "passed", evidence: decisionId },
+        { name: "authoritative bundle", status: "passed", evidence: bundleSha256 },
+        { name: "single ready stage", status: "passed", evidence: systemTaskId },
+      ], [{
+        kind: "additive_evidence_contract_recovery",
+        runId: run.id,
+        plannerTaskId: planner.id,
+        systemTaskId,
+        verifierTaskId,
+        graphSha256: graph.graphSha256,
+        overlaySha256: overlay.overlaySha256,
+        retiredTaskIds,
+      }]);
+    } catch (error) {
+      result = blockedResult(action.type, `Additive evidence-contract recovery blocked: ${errorMessage(error)}`, [errorMessage(error)]);
+    }
+    const eventId = harness.recordHarnessActionEventWithDb(db, {
+      actionType: action.type,
+      status: result.status,
+      request,
+      result: resultToRecord(result),
+    });
+    return { ...result, eventId };
+  });
+}
+
+function applyAdditiveEvidenceContractOverlayAtomically(
+  harness: Harness,
+  action: AdditiveEvidenceContractOverlayAction,
+): HarnessActionResult & { eventId: string } {
+  return harness.runInImmediateTransaction((db) => {
+    const request = safeRequest(action);
+    const prior = harness.listHarnessActionEventsWithDb(db, {
+      actionType: action.type,
+      statuses: ["done"],
+      limit: 1_000,
+    }).find((event) => stableFingerprint(event.request) === stableFingerprint(request));
+    if (prior) return { ...(prior.result as unknown as HarnessActionResult), eventId: prior.id };
+    let result: HarnessActionResult;
+    try {
+      const overview = harness.getRunOverviewWithDb(db, { runId: action.runId, eventLimit: 0 });
+      const run = overview.run;
+      const task = overview.tasks.find((candidate) => candidate.id === action.systemTaskId);
+      const graph = objectRecord(run?.context.additiveEvidenceContractTaskGraph, "additiveEvidenceContractTaskGraph");
+      const overlay = objectRecord(run?.context.additiveEvidenceContractOverlay, "additiveEvidenceContractOverlay");
+      const { overlaySha256: _overlaySha256, ...overlayBody } = overlay;
+      if (!run || !task || task.role !== "system" || task.status !== "todo"
+        || graph.systemTaskId !== task.id
+        || overlay.overlaySha256 !== canonicalEvolutionValueSha256(overlayBody)) {
+        throw new Error("additive evidence-contract host overlay state is missing or drifted");
+      }
+      const bundle = objectRecord(run.context.targetSystemEvidenceBundle, "targetSystemEvidenceBundle");
+      const { bundleSha256: _bundleSha256, ...bundleBody } = bundle;
+      if (bundle.bundleSha256 !== graph.bundleSha256
+        || canonicalEvolutionValueSha256(bundleBody) !== bundle.bundleSha256
+        || overlay.bundleSha256 !== bundle.bundleSha256) {
+        throw new Error("additive evidence-contract host overlay no longer matches its authoritative bundle");
+      }
+      const sourceBinding = objectRecord(bundle.sourceRun, "targetSystemEvidenceBundle.sourceRun");
+      const sourceRun = harness.getRunWithDb(db, exactNonEmptyStringField(sourceBinding, "id"));
+      if (!sourceRun || sourceRun.status !== "blocked" || sourceRun.projectId !== run.projectId) {
+        throw new Error("additive evidence-contract source run no longer matches its blocked boundary");
+      }
+      if (typeof sourceBinding.repairBudgetSha256 === "string"
+        && canonicalEvolutionValueSha256(sourceRun.context.repairReplanBudget) !== sourceBinding.repairBudgetSha256) {
+        throw new Error("additive evidence-contract source Repair budget changed before overlay recording");
+      }
+      harness.updateRunWithDb(db, {
+        runId: run.id,
+        status: "todo",
+        contextPatch: {
+          additiveEvidenceContractOverlayState: {
+            status: "recorded",
+            recordedBySystemTaskId: task.id,
+            overlaySha256: overlay.overlaySha256,
+          },
+        },
+      });
+      result = doneResult(action.type, `Additive evidence-contract overlay ${String(overlay.overlaySha256)} recorded.`, [
+        { name: "overlay hash", status: "passed", evidence: String(overlay.overlaySha256) },
+        { name: "authoritative bundle", status: "passed", evidence: String(bundle.bundleSha256) },
+        { name: "target mutation", status: "passed", evidence: "none" },
+      ], [{
+        kind: "additive_evidence_contract_overlay_receipt",
+        runId: run.id,
+        systemTaskId: task.id,
+        verifierTaskId: graph.verifierTaskId,
+        overlaySha256: overlay.overlaySha256,
+        bundleSha256: bundle.bundleSha256,
+        targetFilesChanged: 0,
+        sourceRunChanged: false,
+      }]);
+    } catch (error) {
+      result = blockedResult(action.type, `Additive evidence-contract overlay blocked: ${errorMessage(error)}`, [errorMessage(error)]);
+    }
+    const eventId = harness.recordHarnessActionEventWithDb(db, {
+      actionType: action.type,
+      status: result.status,
+      request,
+      result: resultToRecord(result),
+    });
+    return { ...result, eventId };
+  });
+}
 
 function applyHostEvidenceMaintenanceDeliveryAtomically(
   harness: Harness,
@@ -13320,6 +13704,59 @@ function prepareRunDrain(harness: Harness, action: Extract<HarnessAction, { type
     return doneResult(action.type, `Run ${action.runId} is already done.`, [
       { name: "run status", status: "passed", evidence: "done" },
     ], [{ kind: "run", runId: action.runId, status: "done" }]);
+  }
+
+  const additiveGraph = objectRecordOrNull(run.context.additiveEvidenceContractTaskGraph);
+  if (additiveGraph?.kind === "additive-evidence-contract"
+    && typeof additiveGraph.systemTaskId === "string"
+    && typeof additiveGraph.verifierTaskId === "string") {
+    const overview = harness.getRunOverview({ runId: action.runId, eventLimit: 0 });
+    const systemTask = overview.tasks.find((task) => task.id === additiveGraph.systemTaskId);
+    const verifierTask = overview.tasks.find((task) => task.id === additiveGraph.verifierTaskId);
+    if (!systemTask || !verifierTask) {
+      if (run.status !== "blocked") harness.updateRunStatus({ runId: run.id, status: "blocked" });
+      return blockedResult(action.type, `Run ${run.id} additive evidence-contract graph is incomplete.`, [
+        "the frozen host overlay or independent Verifier task is missing; Goal Review is not permitted",
+      ]);
+    }
+    if (systemTask.status === "todo" || systemTask.status === "running"
+      || verifierTask.status === "todo" || verifierTask.status === "running") {
+      return doneResult(action.type, `Run ${run.id} is waiting for its frozen additive evidence-contract graph.`, [
+        { name: "host overlay task", status: "passed", evidence: `${systemTask.id}:${systemTask.status}` },
+        { name: "independent verifier task", status: "passed", evidence: `${verifierTask.id}:${verifierTask.status}` },
+        { name: "Goal Review", status: "passed", evidence: "forbidden" },
+      ], [{
+        kind: "additive_evidence_contract_pending",
+        systemTaskId: systemTask.id,
+        verifierTaskId: verifierTask.id,
+      }]);
+    }
+    const latestVerifier = harness.listLatestAttemptsForTasks([verifierTask.id])[0] ?? null;
+    if (systemTask.status === "done" && verifierTask.status === "done"
+      && latestVerifier?.status === "done" && latestVerifier.problems.length === 0) {
+      harness.updateRun({
+        runId: run.id,
+        status: "done",
+        contextPatch: {
+          additiveEvidenceContractCloseout: {
+            status: "verified",
+            systemTaskId: systemTask.id,
+            verifierTaskId: verifierTask.id,
+            verifierAttemptId: latestVerifier.attemptId,
+            graphSha256: additiveGraph.graphSha256,
+          },
+        },
+      });
+      return doneResult(action.type, `Run ${run.id} additive evidence-contract overlay is independently verified.`, [
+        { name: "host overlay task", status: "passed", evidence: systemTask.id },
+        { name: "independent verifier", status: "passed", evidence: `${verifierTask.id}:${latestVerifier.attemptId}` },
+        { name: "Goal Review", status: "passed", evidence: "not created" },
+      ], [{ kind: "additive_evidence_contract_verified", systemTaskId: systemTask.id, verifierTaskId: verifierTask.id }]);
+    }
+    if (run.status !== "blocked") harness.updateRunStatus({ runId: run.id, status: "blocked" });
+    return blockedResult(action.type, `Run ${run.id} additive evidence-contract verification failed closed.`, [
+      `system ${systemTask.id}:${systemTask.status}; verifier ${verifierTask.id}:${verifierTask.status}`,
+    ]);
   }
 
   const hostEvidenceRecovery = objectRecordOrNull(run.context.runtimeIntegrationHostEvidenceRecovery);

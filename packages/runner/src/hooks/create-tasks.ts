@@ -1,4 +1,5 @@
 import {
+  applyHarnessAction,
   makeId,
   projectRuntimeIntegrationTaskGraph,
   type Harness,
@@ -85,6 +86,25 @@ export function createTasksFromOutputHook(options: { harness: Harness }): StopHo
         problems: [
           "goal-review cannot materialize a mixed Planner, Worker, or Verifier recovery graph for a governed design delivery; use materializeDesignDeliveryRecovery",
         ],
+      };
+    }
+    const evidenceBundle = run.context.targetSystemEvidenceBundle;
+    const additiveEvidenceDelivery = task.role === "planner"
+      && evidenceBundle !== null
+      && typeof evidenceBundle === "object"
+      && !Array.isArray(evidenceBundle)
+      && (evidenceBundle as Record<string, unknown>).purpose === "runtime-integration-frozen-evidence-conflict-correction";
+    if (additiveEvidenceDelivery) {
+      const materialized = applyHarnessAction(options.harness, {
+        type: "materializeAdditiveEvidenceContractRecovery",
+        runId: run.id,
+        plannerTaskId: task.id,
+      });
+      return {
+        decision: "exit",
+        checks: materialized.checks,
+        artifacts: materialized.artifacts,
+        problems: materialized.status === "blocked" ? materialized.problems : [],
       };
     }
     const plannedEntries = plannedTasks.map((plannedTask) => ({

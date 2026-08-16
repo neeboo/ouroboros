@@ -42,6 +42,7 @@ import { childToolchainEnvEvidence } from "./executors/proxy-env";
 import { reconcileTerminalBlockedVerifierRepair } from "./hooks/create-repair";
 import { reconcileTerminalDoneWorkerVerifiers } from "./hooks/create-verifier";
 import { reconcileHostEvidenceMaintenance } from "./host-evidence-maintenance";
+import { reconcileAdditiveEvidenceContract } from "./additive-evidence-contract";
 import { reconcileRuntimeIntegrationHostEvidence } from "./runtime-integration-host-evidence";
 import {
   closeRuntimeIntegrationEvidenceFailure,
@@ -151,6 +152,14 @@ export async function runCodexResumableLoop(input: RunCodexResumableLoopInput) {
     for (let index = 0; index < input.maxRounds; index += 1) {
       if (interruptedSignal || input.shouldStop?.()) {
         break;
+      }
+      const additiveEvidenceContract = reconcileAdditiveEvidenceContract({
+        harness: input.harness,
+        runId: input.runId,
+      });
+      if (additiveEvidenceContract.length > 0) {
+        rounds.push({ index, tasks: [], additiveEvidenceContract });
+        continue;
       }
       const hostEvidenceMaintenance = reconcileHostEvidenceMaintenance({
         harness: input.harness,
