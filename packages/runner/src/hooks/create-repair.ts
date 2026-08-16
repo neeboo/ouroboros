@@ -1,4 +1,4 @@
-import { DEFAULT_REPAIR_TASK_PROMPT_TEMPLATE, makeId, readableValue, type AttemptOutput, type Harness, type Task } from "@ouroboros/harness";
+import { applyHarnessAction, DEFAULT_REPAIR_TASK_PROMPT_TEMPLATE, makeId, readableValue, type AttemptOutput, type Harness, type Task } from "@ouroboros/harness";
 import { boundedDiagnosticText, compactAttemptEvidence, latestRootCause } from "../bounded-diagnostic";
 import { fitPromptAroundFrozenSections, HandoffContractTooLargeError } from "../prompt-budget";
 import { prettyJson, renderPromptTemplate } from "../template";
@@ -66,6 +66,21 @@ export async function reconcileTerminalBlockedVerifierRepair(options: {
   const attempt = options.harness.getAttempt(session.attemptId);
   if (!attempt) {
     return [];
+  }
+  if (runtimeIntegrationSemanticRepairFailure(verifier, attempt.output)) {
+    const action = applyHarnessAction(options.harness, {
+      type: "materializeVerifierRepairRecovery",
+      runId: options.runId,
+      verifierTaskId: verifier.id,
+      reason: "materialize the bounded runtime identity Repair after host evidence passed",
+    });
+    return [{
+      verifierTaskId: verifier.id,
+      verifierAttemptId: attempt.id,
+      decision: action.status === "done" ? "continue" : "exit",
+      artifacts: action.artifacts,
+      problems: action.problems,
+    }];
   }
   const result = await createRepairTaskHook({
     harness: options.harness,
@@ -336,6 +351,16 @@ export function createRepairTaskHook(options: {
         }],
       };
     }
+    if (runtimeIntegrationSemanticRepairFailure(task, output)) {
+      return {
+        decision: "exit",
+        artifacts: [{
+          kind: "runtime_integration_semantic_repair_recovery_required",
+          verifierTaskId: task.id,
+          reason: "host evidence passed and one frozen runtime identity Repair must be materialized after this attempt is durable",
+        }],
+      };
+    }
     const hostMaterialization = hostArtifactMaterializationReason(options.harness, task);
     if (hostMaterialization) {
       return {
@@ -552,6 +577,17 @@ function runtimeIntegrationHostEvidenceFailure(task: Task, output: AttemptOutput
       "REAL_LOOPBACK_HTTP_EVIDENCE_UNAVAILABLE",
       "END_TO_END_BINDING_INCOMPLETE",
     ].every((code) => text.includes(code));
+}
+
+function runtimeIntegrationSemanticRepairFailure(task: Task, output: AttemptOutput) {
+  const hostRecovery = task.config?.runtimeIntegrationHostEvidenceRecovery;
+  if (!hostRecovery || typeof hostRecovery !== "object" || Array.isArray(hostRecovery)) return false;
+  const text = [output.summary, ...(output.problems ?? []), ...(output.checks ?? [])]
+    .map((value) => readableValue(value))
+    .join("\n");
+  return output.verdict === "fail"
+    && (output.changedFiles ?? []).length === 0
+    && text.includes("FROZEN_DELIVERY_CONTRACT_MISMATCH");
 }
 
 function inheritedDshRepairConfig(config: Record<string, unknown>) {

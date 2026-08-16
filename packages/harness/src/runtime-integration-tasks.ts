@@ -252,6 +252,10 @@ export function runtimeIntegrationTaskExecutionProblem(input: {
 }): string | null {
   const graph = runtimeTaskGraphOrNull(input.boundary);
   const contract = objectOrNull(input.task.config?.runtimeIntegrationExecutionContract);
+  const semanticRepair = objectOrNull(input.task.config?.runtimeIntegrationSemanticRepairRecovery);
+  if (semanticRepair) {
+    return runtimeSemanticRepairExecutionProblem({ ...input, contract, semanticRepair });
+  }
   const frozenRuntimeGraphExists = Boolean(graph)
     && input.tasks.some((candidate) => objectOrNull(candidate.config?.runtimeIntegrationExecutionContract));
   if (!contract && frozenRuntimeGraphExists && (input.task.role === "worker" || input.task.role === "verifier")) {
@@ -344,6 +348,111 @@ export function runtimeIntegrationTaskExecutionProblem(input: {
       || input.task.config?.forbidImplementation !== true
       || input.task.config?.identitySeparated !== true)) {
       throw new Error(`runtime integration execution contract Verifier isolation drifted for ${input.task.id}`);
+    }
+    return null;
+  } catch (error) {
+    return error instanceof Error ? error.message : String(error);
+  }
+}
+
+function runtimeSemanticRepairExecutionProblem(input: {
+  runId: string;
+  boundary: unknown;
+  evidenceBundle: unknown;
+  task: Task;
+  tasks: Task[];
+  contract: Record<string, unknown> | null;
+  semanticRepair: Record<string, unknown>;
+}): string | null {
+  try {
+    const frozen = parseFrozenRuntimeIntegration(input.boundary, input.evidenceBundle);
+    const repository = frozen.repositories.get("target-backend");
+    if (!repository) throw new Error("runtime semantic repair requires target-backend");
+    const contract = input.contract;
+    if (!contract) throw new Error(`runtime integration execution contract is missing for ${input.task.id}`);
+    const { contractSha256, ...contractBody } = contract;
+    if (typeof contractSha256 !== "string" || canonicalEvolutionValueSha256(contractBody) !== contractSha256) {
+      throw new Error(`runtime integration execution contract hash is invalid for ${input.task.id}`);
+    }
+    const recoveryKey = stringValue(input.semanticRepair.recoveryKey);
+    const plannerTaskId = stringValue(input.semanticRepair.plannerTaskId);
+    const sourceVerifierTaskId = stringValue(input.semanticRepair.sourceVerifierTaskId);
+    const sourceWorkerTaskId = stringValue(input.semanticRepair.sourceWorkerTaskId);
+    const hostTaskId = stringValue(input.semanticRepair.hostTaskId);
+    const sourceVerifier = input.tasks.find((task) => task.id === sourceVerifierTaskId);
+    const sourceWorker = input.tasks.find((task) => task.id === sourceWorkerTaskId);
+    const hostTask = input.tasks.find((task) => task.id === hostTaskId);
+    const hostTaskMarker = objectOrNull(hostTask?.config?.runtimeIntegrationHostEvidenceRecovery);
+    const sourceHostMarker = objectOrNull(sourceVerifier?.config?.runtimeIntegrationHostEvidenceRecovery);
+    const sourceWorkerContract = objectOrNull(sourceWorker?.config?.runtimeIntegrationExecutionContract);
+    const expectedWorktree = join(repository.repoPath, ".ouroboros", "worktrees", `${input.runId}-${repository.id}`);
+    if (!sourceVerifier || sourceVerifier.role !== "verifier" || !["done", "blocked"].includes(sourceVerifier.status)
+      || !sourceWorker || sourceWorker.role !== "worker" || sourceWorker.status !== "done"
+      || sourceWorkerContract?.stageId !== "backend-runtime"
+      || !hostTask || hostTask.role !== "system" || hostTask.status !== "done"
+      || !hostTaskMarker || !sourceHostMarker
+      || hostTaskMarker.recoveryKey !== input.semanticRepair.hostEvidenceRecoveryKey
+      || sourceHostMarker.recoveryKey !== input.semanticRepair.hostEvidenceRecoveryKey
+      || hostTaskMarker.hostReceiptSha256 !== input.semanticRepair.hostReceiptSha256
+      || sourceHostMarker.hostReceiptSha256 !== input.semanticRepair.hostReceiptSha256) {
+      throw new Error(`runtime semantic repair source lineage drifted for ${input.task.id}`);
+    }
+    const exactFields: Array<[unknown, unknown, string]> = [
+      [contract.runId, input.runId, "runId"],
+      [contract.taskId, input.task.id, "taskId"],
+      [contract.repositoryId, repository.id, "repositoryId"],
+      [contract.repositoryRoot, repository.repoPath, "repositoryRoot"],
+      [contract.expectedHead, repository.expectedHead, "expectedHead"],
+      [contract.worktreePath, expectedWorktree, "worktreePath"],
+      [contract.boundarySha256, frozen.boundarySha256, "boundarySha256"],
+      [contract.bundleSha256, frozen.bundleSha256, "bundleSha256"],
+      [contract.semanticRepairRecoveryKey, recoveryKey, "semanticRepairRecoveryKey"],
+      [input.task.parentId, plannerTaskId, "parentId"],
+      [input.task.worktreePath, expectedWorktree, "task worktreePath"],
+      [input.task.config?.repositoryId, repository.id, "task repositoryId"],
+      [input.task.config?.runtimeIntegrationBoundarySha256, frozen.boundarySha256, "task boundarySha256"],
+      [input.task.config?.targetSystemEvidenceBundleSha256, frozen.bundleSha256, "task bundleSha256"],
+    ];
+    const mismatch = exactFields.find(([actual, expected]) => actual !== expected);
+    if (mismatch) throw new Error(`runtime integration semantic repair ${mismatch[2]} drifted for ${input.task.id}`);
+
+    if (input.task.role === "worker") {
+      if (contract.stageId !== "runtime-semantic-repair" || contract.role !== "worker" || contract.executor !== "dsh-cli"
+        || input.task.config?.executor !== "dsh-cli" || input.task.config?.agentBackend !== "dsh-cli"
+        || input.task.config?.permissionMode !== "workspace-write"
+        || !sameValue(input.task.dependsOn, [sourceVerifierTaskId])) {
+        throw new Error(`runtime semantic Repair execution contract drifted for ${input.task.id}`);
+      }
+      for (const key of [
+        "dshFilePolicy", "dshCredentialPathPolicy", "dshProfileIsolation", "dshModelTransport", "dshToolNetwork",
+        "ambientCredentialsInherited", "targetCredentialsInherited", "forbidBrowser", "browserProcessPolicy",
+      ]) {
+        const actual = input.task.config?.[key];
+        const expected = sourceWorker.config?.[key];
+        if (actual === undefined && expected === undefined) continue;
+        if (!sameValue(actual, expected)) {
+          throw new Error(`runtime semantic Repair ${key} drifted from the frozen backend Worker`);
+        }
+      }
+    } else if (input.task.role === "verifier") {
+      const repairTaskId = stringValue(input.semanticRepair.repairTaskId);
+      const repair = input.tasks.find((task) => task.id === repairTaskId);
+      const repairMarker = objectOrNull(repair?.config?.runtimeIntegrationSemanticRepairRecovery);
+      if (contract.stageId !== "non-browser-e2e" || contract.role !== "verifier" || contract.executor !== "codex-resumable"
+        || !repair || repair.role !== "worker" || repairMarker?.recoveryKey !== recoveryKey
+        || !sameValue(input.task.dependsOn, [repairTaskId])
+        || input.task.config?.executor !== "codex-resumable"
+        || input.task.config?.permissionMode !== "read-only"
+        || input.task.config?.readOnly !== true
+        || input.task.config?.forbidImplementation !== true
+        || input.task.config?.identitySeparated !== true) {
+        throw new Error(`runtime semantic replacement Verifier execution contract drifted for ${input.task.id}`);
+      }
+    } else {
+      throw new Error(`runtime semantic recovery role is unsupported for ${input.task.id}`);
+    }
+    if (input.task.config?.forbidBrowser !== true || input.task.config?.browserProcessPolicy !== "deny") {
+      throw new Error(`runtime semantic recovery browser policy drifted for ${input.task.id}`);
     }
     return null;
   } catch (error) {

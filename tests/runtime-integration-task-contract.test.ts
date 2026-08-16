@@ -15,6 +15,7 @@ import {
   createTasksFromOutputHook,
   createRepairTaskHook,
   createVerifierTaskHook,
+  reconcileTerminalBlockedVerifierRepair,
   resolveExecutionRoute,
   startCodexResumableAttempt,
 } from "../packages/runner/src";
@@ -238,53 +239,7 @@ describe("runtime integration task execution contracts", () => {
     } as never, {
       runCommand: (input) => {
         commands.push(input.command);
-        if (input.command.endsWith(" --version")) return { exitCode: 0, stdout: "v25.8.1\n", stderr: "" };
-        if (input.command.includes("docker info")) return { exitCode: 0, stdout: "29.1.3\n", stderr: "" };
-        if (input.command.includes(" --test")) {
-          return { exitCode: 0, stdout: "1..54\n# tests 54\n# pass 54\n# fail 0\n# skipped 0\n", stderr: "" };
-        }
-        if (input.command.includes("docker run")) {
-          return {
-            exitCode: 0,
-            stdout: `IMAGE_ID=sha256:${"a".repeat(64)}\n${JSON.stringify({
-              schemaVersion: 1,
-              kind: "ainovel-adapter-worker-receipt",
-              http: { realServer: { available: true, host: "127.0.0.1", port: 10588, boundToGateway: true, browserExecuted: false } },
-            })}\n`,
-            stderr: "",
-          };
-        }
-        const payload = input.command.includes("readback-backend-runtime")
-          ? {
-              schemaVersion: 1,
-              kind: "backend-runtime-worker-receipt",
-              postgres: {
-                available: true,
-                schemaCreated: true,
-                evidenceReadbackMatches: true,
-                rollbackPersisted: true,
-                restartPersistence: { runSurvivesRestart: true, evidenceSurvivesRestart: true, rollbackReceiptsAfterRestart: 1 },
-              },
-            }
-          : input.command.includes("readback-ainovel-adapter")
-            ? {
-                schemaVersion: 1,
-                kind: "ainovel-adapter-worker-receipt",
-                postgres: { available: true, schemaCreated: true, readbackMatches: true, restartPersistence: { evidenceSurvivesRestart: true } },
-                http: { realServer: { available: true, host: "127.0.0.1", port: 10588, boundToGateway: true, browserExecuted: false } },
-              }
-            : {
-                schemaVersion: 1,
-                kind: "dsh-gateway-worker-receipt",
-                gatewayBinding: { host: "127.0.0.1", port: 10588 },
-                forwarding: { ok: true, allBound: true, requestToResponseBound: true, responseToDatabaseBound: true, responseToHttpPathBound: true },
-                addressEnforcement: { validBindingAccepted: true, nonLoopbackRejected: true, alternatePortRejected: true },
-              };
-        return {
-          exitCode: 0,
-          stdout: `${JSON.stringify(payload)}\n`,
-          stderr: "",
-        };
+        return successfulHostCommand(input.command, { directLoopbackAvailable: false });
       },
     });
     const replay = applyHarnessAction(harness, {
@@ -330,6 +285,9 @@ describe("runtime integration task execution contracts", () => {
         }),
       },
     });
+    expect(overview.sessions.find((session) => session.taskId === hostTask.id)?.output.checks).toContainEqual(
+      expect.objectContaining({ name: "runtime integration tests", status: "passed", evidence: "53/54" }),
+    );
     expect(replacement).toMatchObject({
       status: "todo",
       role: "verifier",
@@ -356,6 +314,125 @@ describe("runtime integration task execution contracts", () => {
       status: "done",
       artifacts: [expect.objectContaining({ hostTaskId: hostTask.id, verifierTaskId: replacement.id, reused: true })],
     });
+  });
+
+  test("a post-host semantic failure creates exactly one frozen DSH Repair and dependent Verifier", async () => {
+    const fixture = governedRuntimeFixture(harness, dir, { legacyTasks: true });
+    const graph = applyHarnessAction(harness, {
+      type: "materializeRuntimeIntegrationTaskGraphRecovery",
+      runId: fixture.runId,
+      plannerTaskId: fixture.plannerTaskId,
+    } as never);
+    const taskIds = graph.artifacts.find((artifact) => artifact.kind === "runtime_integration_task_graph_recovery")!
+      .taskIds as string[];
+    for (const taskId of taskIds.slice(0, 4)) {
+      harness.recordAttempt({ taskId, input: {}, output: completedStageOutput(harness.getTask(taskId)!.goal) });
+    }
+    const firstVerifierId = taskIds[4]!;
+    const firstVerifierAttemptId = harness.recordAttempt({
+      taskId: firstVerifierId,
+      input: { executor: "codex-resumable", sandbox: "read-only" },
+      output: capabilityOnlyVerifierFailure(),
+    });
+    const hostRecovery = applyHarnessAction(harness, {
+      type: "recoverRuntimeIntegrationHostEvidenceFailure",
+      runId: fixture.runId,
+      verifierTaskId: firstVerifierId,
+      verifierAttemptId: firstVerifierAttemptId,
+    } as never, { runCommand: (input) => successfulHostCommand(input.command) });
+    const hostArtifact = hostRecovery.artifacts.find((artifact) => artifact.kind === "runtime_integration_host_evidence_recovery")!;
+    const semanticVerifierId = hostArtifact.verifierTaskId as string;
+    const semanticAttemptId = harness.recordAttempt({
+      taskId: semanticVerifierId,
+      input: { executor: "codex-resumable", sandbox: "read-only" },
+      output: frozenRuntimeIdentityFailure(),
+    });
+    const stopHook = await createRepairTaskHook({ harness })({
+      run: harness.getRun(fixture.runId)!,
+      task: harness.getTask(semanticVerifierId)!,
+      sessionName: "semantic-verifier",
+      prompt: "verify the frozen runtime identity",
+      output: frozenRuntimeIdentityFailure(),
+    });
+    expect(stopHook).toMatchObject({
+      decision: "exit",
+      artifacts: [expect.objectContaining({
+        kind: "runtime_integration_semantic_repair_recovery_required",
+        verifierTaskId: semanticVerifierId,
+      })],
+    });
+
+    const reconciliation = await reconcileTerminalBlockedVerifierRepair({ harness, runId: fixture.runId });
+    const recovered = applyHarnessAction(harness, {
+      type: "materializeVerifierRepairRecovery",
+      runId: fixture.runId,
+      verifierTaskId: semanticVerifierId,
+      reason: "repair the one frozen v6 runtime identity mismatch",
+    } as never);
+    const replay = applyHarnessAction(harness, {
+      type: "materializeVerifierRepairRecovery",
+      runId: fixture.runId,
+      verifierTaskId: semanticVerifierId,
+    } as never);
+    const overview = harness.getRunOverview({ runId: fixture.runId, eventLimit: 0 });
+    expect(reconciliation).toEqual([expect.objectContaining({
+      verifierTaskId: semanticVerifierId,
+      verifierAttemptId: semanticAttemptId,
+      decision: "continue",
+      artifacts: [expect.objectContaining({ reused: false })],
+    })]);
+    expect(recovered).toMatchObject({ status: "done", problems: [], artifacts: [expect.objectContaining({ reused: true })] });
+    const repair = overview.tasks.find((task) => task.role === "worker"
+      && task.config?.runtimeIntegrationSemanticRepairRecovery)!;
+    const verifier = overview.tasks.find((task) => task.role === "verifier"
+      && task.id !== semanticVerifierId
+      && task.config?.runtimeIntegrationSemanticRepairRecovery)!;
+
+    expect(reconciliation[0]).toMatchObject({
+      artifacts: [expect.objectContaining({
+        verifierTaskId: semanticVerifierId,
+        verifierAttemptId: semanticAttemptId,
+        repairTaskId: repair.id,
+        nextVerifierTaskId: verifier.id,
+        reused: false,
+      })],
+    });
+    expect(repair).toMatchObject({
+      status: "todo",
+      parentId: fixture.plannerTaskId,
+      dependsOn: [semanticVerifierId],
+      worktreePath: expect.stringContaining(`${fixture.runId}-target-backend`),
+      config: {
+        executor: "dsh-cli",
+        permissionMode: "workspace-write",
+        dshModelTransport: "host-brokered-deepseek",
+        dshToolNetwork: "deny",
+        runtimeIntegrationExecutionContract: expect.objectContaining({
+          stageId: "runtime-semantic-repair",
+          taskId: repair.id,
+          contractSha256: expect.stringMatching(/^[a-f0-9]{64}$/),
+        }),
+      },
+    });
+    expect(repair.prompt).toContain("version 6");
+    expect(repair.prompt).toContain("Do not modify config/evolution/** or tests/evolution/**");
+    expect(verifier).toMatchObject({
+      status: "todo",
+      parentId: fixture.plannerTaskId,
+      dependsOn: [repair.id],
+      config: {
+        executor: "codex-resumable",
+        permissionMode: "read-only",
+        runtimeIntegrationExecutionContract: expect.objectContaining({
+          stageId: "non-browser-e2e",
+          taskId: verifier.id,
+          contractSha256: expect.stringMatching(/^[a-f0-9]{64}$/),
+        }),
+      },
+    });
+    expect(overview.run?.context.repairReplanBudget).toMatchObject({ limit: 3, used: 2 });
+    expect(overview.tasks.filter((task) => task.role === "goal-review")).toHaveLength(0);
+    expect(replay).toMatchObject({ status: "done", artifacts: [expect.objectContaining({ reused: true })] });
   });
 
   test("failed host evidence remains terminal and prepareRunDrain never creates Goal Review", () => {
@@ -1135,9 +1212,85 @@ function completedStageOutput(stageId: string) {
     summary: `${stageId} completed within its frozen contract.`,
     changedFiles: [],
     checks: [{ name: `${stageId} deterministic checks`, status: "passed" as const }],
-    artifacts: [{ kind: "runtime_stage_receipt", stageId }],
+    artifacts: [
+      { kind: "runtime_stage_receipt", stageId },
+      {
+        kind: "dsh_execution_profile_receipt",
+        modelTransport: { enforcement: "loopback-http-broker", credentialIsolation: true },
+        toolSandbox: { network: "deny", credentialsInherited: false },
+        noTargetNetworkBypass: true,
+      },
+    ],
     problems: [],
   };
+}
+
+function frozenRuntimeIdentityFailure() {
+  return {
+    status: "done" as const,
+    verdict: "fail" as const,
+    summary: "Host evidence passed, but runtime identifiers remain on v5 instead of the frozen v6 contract.",
+    changedFiles: [],
+    checks: [
+      { name: "host capability receipt", status: "passed" as const },
+      { name: "frozen v6 delivery-contract identity", status: "failed" as const },
+    ],
+    artifacts: [{ kind: "consumed-host-evidence-receipt" }],
+    problems: [
+      'message: Runtime uses v5 identifiers; frozen delivery requires version 6 and v6 runtime receipt identifiers.; extra: {"code":"FROZEN_DELIVERY_CONTRACT_MISMATCH"}',
+    ],
+  };
+}
+
+function successfulHostCommand(command: string, options: { directLoopbackAvailable?: boolean } = {}) {
+  const directLoopbackAvailable = options.directLoopbackAvailable ?? true;
+  if (command.endsWith(" --version")) return { exitCode: 0, stdout: "v25.8.1\n", stderr: "" };
+  if (command.includes("docker info")) return { exitCode: 0, stdout: "29.1.3\n", stderr: "" };
+  if (command.includes(" --test")) {
+    return directLoopbackAvailable
+      ? { exitCode: 0, stdout: "1..54\n# tests 54\n# pass 54\n# fail 0\n# skipped 0\n", stderr: "" }
+      : { exitCode: 0, stdout: "1..54\n# tests 54\n# pass 53\n# fail 0\n# skipped 1\n", stderr: "" };
+  }
+  if (command.includes("docker run")) {
+    return {
+      exitCode: 0,
+      stdout: `IMAGE_ID=sha256:${"a".repeat(64)}\n${JSON.stringify({
+        schemaVersion: 1,
+        kind: "ainovel-adapter-worker-receipt",
+        http: { realServer: { available: true, host: "127.0.0.1", port: 10588, boundToGateway: true, browserExecuted: false } },
+      })}\n`,
+      stderr: "",
+    };
+  }
+  const payload = command.includes("readback-backend-runtime")
+    ? {
+        schemaVersion: 1,
+        kind: "backend-runtime-worker-receipt",
+        postgres: {
+          available: true,
+          schemaCreated: true,
+          evidenceReadbackMatches: true,
+          rollbackPersisted: true,
+          restartPersistence: { runSurvivesRestart: true, evidenceSurvivesRestart: true, rollbackReceiptsAfterRestart: 1 },
+        },
+      }
+    : command.includes("readback-ainovel-adapter")
+      ? {
+          schemaVersion: 1,
+          kind: "ainovel-adapter-worker-receipt",
+          postgres: { available: true, schemaCreated: true, readbackMatches: true, restartPersistence: { evidenceSurvivesRestart: true } },
+          http: { realServer: directLoopbackAvailable
+            ? { available: true, host: "127.0.0.1", port: 10588, boundToGateway: true, browserExecuted: false }
+            : { available: false, reason: "listen EADDRINUSE: address already in use 127.0.0.1:10588", browserExecuted: false } },
+        }
+      : {
+          schemaVersion: 1,
+          kind: "dsh-gateway-worker-receipt",
+          gatewayBinding: { host: "127.0.0.1", port: 10588 },
+          forwarding: { ok: true, allBound: true, requestToResponseBound: true, responseToDatabaseBound: true, responseToHttpPathBound: true },
+          addressEnforcement: { validBindingAccepted: true, nonLoopbackRejected: true, alternatePortRejected: true },
+        };
+  return { exitCode: 0, stdout: `${JSON.stringify(payload)}\n`, stderr: "" };
 }
 
 function capabilityOnlyVerifierFailure() {

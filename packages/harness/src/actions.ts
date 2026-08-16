@@ -4428,14 +4428,37 @@ function materializeVerifierRepairRecoveryWithDb(
   if (!verifierSession || !verifierAttemptRequiresRepair(verifierSession.output)) {
     throw new Error(`Verifier ${verifier.id} does not contain a machine-readable or compatible failure verdict`);
   }
-  if (verifier.dependsOn.length !== 1) {
-    throw new Error(`Verifier ${verifier.id} must depend on exactly one source Worker`);
+  const hostRecovery = objectRecordOrNull(verifier.config?.runtimeIntegrationHostEvidenceRecovery);
+  let hostTask: Task | undefined;
+  let plannerTaskId: string | null = null;
+  let sourceWorker: Task | undefined;
+  if (hostRecovery) {
+    hostTask = overview.tasks.find((task) => task.id === exactNonEmptyStringField(hostRecovery, "hostTaskId"));
+    plannerTaskId = exactNonEmptyStringField(hostRecovery, "plannerTaskId");
+    sourceWorker = [...overview.tasks].reverse().find((task) =>
+      task.status === "done"
+      && objectRecordOrNull(task.config?.runtimeIntegrationExecutionContract)?.stageId === "backend-runtime"
+    );
+    if (!hostTask || hostTask.role !== "system" || hostTask.status !== "done"
+      || !sameCanonicalValue(verifier.dependsOn, [hostTask.id])) {
+      throw new Error(`Verifier ${verifier.id} lost its completed host evidence dependency`);
+    }
+  } else {
+    if (verifier.dependsOn.length !== 1) {
+      throw new Error(`Verifier ${verifier.id} must depend on exactly one source Worker`);
+    }
+    sourceWorker = overview.tasks.find((task) => task.id === verifier.dependsOn[0]);
   }
-  const sourceWorker = overview.tasks.find((task) => task.id === verifier.dependsOn[0]);
   if (!sourceWorker || sourceWorker.role !== "worker" || sourceWorker.status !== "done") {
     throw new Error(`Verifier ${verifier.id} has no done source Worker`);
   }
-  if (sourceWorker.config?.agentBackend !== "deepseek-harness"
+  const sourceExecutionContract = objectRecordOrNull(sourceWorker.config?.runtimeIntegrationExecutionContract);
+  if (hostRecovery && !sourceExecutionContract) {
+    throw new Error(`source Worker ${sourceWorker.id} lacks its runtime integration execution contract`);
+  }
+  if (hostRecovery) plannerTaskId ??= exactNonEmptyStringField(sourceExecutionContract ?? {}, "plannerTaskId");
+  if (!(["deepseek-harness", "dsh-cli"].includes(String(sourceWorker.config?.agentBackend)))
+    || (hostRecovery && sourceWorker.config?.executor !== "dsh-cli")
     || sourceWorker.config?.permissionMode !== "workspace-write"
     || sourceWorker.config?.dshModelTransport !== "host-brokered-deepseek"
     || sourceWorker.config?.dshToolNetwork !== "deny") {
@@ -4484,6 +4507,7 @@ function materializeVerifierRepairRecoveryWithDb(
     verifierTaskId: verifier.id,
     verifierAttemptId: verifierSession.attemptId,
     sourceWorkerTaskId: sourceWorker.id,
+    hostTaskId: hostTask?.id ?? null,
     findings,
   });
   const existing = overview.tasks.filter((task) =>
@@ -4536,22 +4560,34 @@ function materializeVerifierRepairRecoveryWithDb(
     ]);
   }
 
+  const repairTaskId = makeId("task");
+  const nextVerifierTaskId = makeId("task");
   const marker = {
     schemaVersion: 1,
     recoveryKey,
-    verifierTaskId: verifier.id,
-    verifierAttemptId: verifierSession.attemptId,
+    sourceVerifierTaskId: verifier.id,
+    sourceVerifierAttemptId: verifierSession.attemptId,
     sourceWorkerTaskId: sourceWorker.id,
+    hostTaskId: hostTask?.id ?? "none",
+    hostEvidenceRecoveryKey: hostRecovery?.recoveryKey ?? "none",
+    hostReceiptSha256: hostRecovery?.hostReceiptSha256 ?? "none",
+    plannerTaskId,
+    repairTaskId,
+    nextVerifierTaskId,
     maxRecoveries: 1,
     findingFingerprint: stableFingerprint(findings),
     reason: action.reason ?? "repair one terminal Verifier failure without Goal Review",
   };
-  const repairTaskId = makeId("task");
-  const nextVerifierTaskId = makeId("task");
   const frozenFindings = findings.map((finding) => `- ${finding}`).join("\n");
   const repairPrompt = [
     `Repair the existing implementation from Worker ${sourceWorker.id} in the same frozen worktree.`,
     "Preserve the existing files. Do not replan, modify the frozen comparison, broaden permissions, or create Goal Review tasks.",
+    ...(hostRecovery ? [
+      "This is the only bounded runtime identity Repair after the host Docker, PostgreSQL restart-persistence, and loopback HTTP evidence passed.",
+      "Replace stale version 5 runtime identifiers with the exact frozen version 6 runtime identity and bind real receipts to that frozen contract.",
+      "Do not modify config/evolution/** or tests/evolution/**. Write only paths already authorized by the frozen backend DSH file policy.",
+      "Keep the frontend unchanged unless a frozen finding proves a frontend change is necessary.",
+    ] : []),
     "Address every independent Verifier finding with real measured evidence, receipts, and state readback:",
     frozenFindings,
     "Keep the DeepSeek model transport host-brokered. All model-triggered tools remain network-denied and credential-free.",
@@ -4563,19 +4599,33 @@ function materializeVerifierRepairRecoveryWithDb(
     ...findings.map((finding) => `Resolved with machine evidence: ${finding}`),
     "The Repair output reports exact changed files, measured checks, receipts, and state restoration evidence.",
   ])];
-  harness.createTaskWithDb(db, {
+  const repairContract = hostRecovery && sourceExecutionContract ? (() => {
+    const { contractSha256: _sourceContractSha256, ...sourceContractBody } = sourceExecutionContract;
+    const body = {
+      ...sourceContractBody,
+      taskId: repairTaskId,
+      stageId: "runtime-semantic-repair",
+      role: "worker",
+      executor: "dsh-cli",
+      semanticRepairRecoveryKey: recoveryKey,
+    };
+    return { ...body, contractSha256: canonicalRuntimeRecoveryHash(body, "Repair execution contract") };
+  })() : null;
+  try {
+    harness.createTaskWithDb(db, {
     id: repairTaskId,
     runId: run.id,
-    parentId: verifier.id,
+    parentId: hostRecovery ? plannerTaskId : verifier.id,
     cycleId: sourceWorker.cycleId,
     role: "worker",
     goal: `Repair: ${verifier.goal}`,
     prompt: repairPrompt,
-    dependsOn: [sourceWorker.id],
+    dependsOn: hostRecovery ? [verifier.id] : [sourceWorker.id],
     doneWhen: repairDoneWhen,
     worktreePath: recoveryWorktreePath,
     config: {
       ...sourceWorker.config,
+      ...(hostRecovery ? { executor: "dsh-cli", agentBackend: "dsh-cli" } : {}),
       permissionMode: "workspace-write",
       dshProfileIsolation: "base-headless",
       dshRequiredPlugins: [],
@@ -4583,10 +4633,17 @@ function materializeVerifierRepairRecoveryWithDb(
       dshToolNetwork: "deny",
       forbidBrowser: true,
       browserProcessPolicy: "deny",
-      verifierContract: verifier.config?.verifierContract,
+      ...(verifier.config?.verifierContract === undefined ? {} : { verifierContract: verifier.config.verifierContract }),
       verifierRepairRecovery: marker,
+      ...(repairContract ? {
+        runtimeIntegrationExecutionContract: repairContract,
+        runtimeIntegrationSemanticRepairRecovery: marker,
+      } : {}),
     },
-  });
+    });
+  } catch (error) {
+    throw new Error(`runtime semantic Repair persistence failed: ${error instanceof Error ? error.message : String(error)}`);
+  }
   const repairTask = harness.getRunOverviewWithDb(db, { runId: run.id, eventLimit: 0 })
     .tasks.find((task) => task.id === repairTaskId);
   if (!repairTask) {
@@ -4596,10 +4653,35 @@ function materializeVerifierRepairRecoveryWithDb(
     harness.getRunOverviewWithDb(db, { runId: run.id, eventLimit: 0 }),
     repairTask,
   );
-  harness.createTaskWithDb(db, {
+  const sourceVerifierContract = objectRecordOrNull(verifier.config?.runtimeIntegrationExecutionContract);
+  if (hostRecovery && !sourceVerifierContract) {
+    throw new Error(`Verifier ${verifier.id} lacks its runtime integration execution contract`);
+  }
+  const nextVerifierContract = hostRecovery && sourceVerifierContract ? (() => {
+    const {
+      contractSha256: _verifierContractSha256,
+      hostEvidenceRecovery: _hostEvidenceRecovery,
+      ...sourceVerifierContractBody
+    } = sourceVerifierContract;
+    const body = {
+      ...sourceVerifierContractBody,
+      taskId: nextVerifierTaskId,
+      stageId: "non-browser-e2e",
+      role: "verifier",
+      executor: "codex-resumable",
+      semanticRepairRecoveryKey: recoveryKey,
+    };
+    return { ...body, contractSha256: canonicalRuntimeRecoveryHash(body, "replacement Verifier execution contract") };
+  })() : null;
+  const {
+    runtimeIntegrationHostEvidenceRecovery: _sourceHostRecoveryConfig,
+    ...sourceVerifierConfig
+  } = verifier.config ?? {};
+  try {
+    harness.createTaskWithDb(db, {
     id: nextVerifierTaskId,
     runId: run.id,
-    parentId: repairTaskId,
+    parentId: hostRecovery ? plannerTaskId : repairTaskId,
     cycleId: sourceWorker.cycleId,
     role: "verifier",
     goal: verifier.goal,
@@ -4616,7 +4698,8 @@ function materializeVerifierRepairRecoveryWithDb(
     ])],
     worktreePath: recoveryWorktreePath,
     config: {
-      ...verifier.config,
+      ...sourceVerifierConfig,
+      ...(hostRecovery ? { executor: "codex-resumable", agentBackend: "codex-resumable" } : {}),
       permissionMode: "read-only",
       readOnly: true,
       forbidImplementation: true,
@@ -4626,8 +4709,15 @@ function materializeVerifierRepairRecoveryWithDb(
       completionContract,
       verdictRequired: true,
       verifierRepairRecovery: marker,
+      ...(nextVerifierContract ? {
+        runtimeIntegrationExecutionContract: nextVerifierContract,
+        runtimeIntegrationSemanticRepairRecovery: marker,
+      } : {}),
     },
-  });
+    });
+  } catch (error) {
+    throw new Error(`runtime semantic replacement Verifier persistence failed: ${error instanceof Error ? error.message : String(error)}`);
+  }
   const nextBudget = {
     limit,
     used: used + 1,
@@ -4680,6 +4770,14 @@ function verifierAttemptRequiresRepair(output: AttemptOutput) {
   const priorityProblem = (output.problems ?? []).some((problem) => /^P[0-3]\s*:/i.test(problem.trim()));
   if (failedCheck || priorityProblem || /fail-closed/i.test(output.summary)) return true;
   return output.verdict !== "pass";
+}
+
+function canonicalRuntimeRecoveryHash(value: Record<string, unknown>, label: string) {
+  try {
+    return canonicalEvolutionValueSha256(value);
+  } catch (error) {
+    throw new Error(`${label} is not canonical: ${error instanceof Error ? error.message : String(error)}`);
+  }
 }
 
 function runtimeHostEvidenceCommands(nodePath: string) {
@@ -4980,7 +5078,7 @@ function recoverRuntimeIntegrationHostEvidenceFailure(
         changedFiles: [],
         checks: [
           { name: "Docker host receipt", status: docker.exitCode === 0 ? "passed" : "failed", evidence: dockerVersion },
-          { name: "runtime integration tests", status: testCounts.failed === 0 && testCounts.passed === 54 ? "passed" : "failed", evidence: `${testCounts.passed}/${testCounts.total}` },
+          { name: "runtime integration tests", status: testCountsPassed ? "passed" : "failed", evidence: `${testCounts.passed}/${testCounts.total}` },
           { name: "PostgreSQL restart persistence", status: allPassed ? "passed" : "failed", evidence: hostEvidenceId },
           { name: "loopback HTTP 10588", status: allPassed ? "passed" : "failed", evidence: hostEvidenceId },
           { name: "host readback payloads", status: readbackEvidencePassed ? "passed" : "failed", evidence: hostEvidenceId },
