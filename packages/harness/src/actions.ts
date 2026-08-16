@@ -5019,65 +5019,67 @@ function materializeAttemptArtifactsForVerification(
   checks.push({ name: "materialized file readback", status: "passed", evidence: requestSha256 });
 
   try {
-    harness.createTask({
-      id: materializationTaskId,
-      runId: action.runId,
-      role: "worker",
-      goal: "Host-materialize the frozen attempt artifact set for independent verification",
-      prompt: "This system task is completed only from host-owned fixed-action evidence; no model execution is allowed.",
-      dependsOn: [planner.id],
-      doneWhen: [
-        "the source attempt and receipt attempt are independently bound",
-        "the exact file path and SHA-256 set is materialized into one clean isolated worktree",
-        "excluded paths are absent and all side-effect counters remain zero",
-      ],
-      worktreePath: action.worktreePath,
-      config: {
-        systemTask: true,
-        hostAttemptArtifactMaterialization: {
-          contractId: action.contractId,
-          requestSha256,
-          sourceTaskId: sourceTask.id,
-          sourceAttemptId: sourceAttempt.id,
-          receiptAttemptId: receiptAttempt.id,
-        },
-      },
-    });
-    harness.recordAttempt({
-      id: materializationAttemptId,
-      taskId: materializationTaskId,
-      input: {
-        executor: "harness-action",
-        actionType: action.type,
-        contractId: action.contractId,
-        requestSha256,
-      },
-      output: {
-        status: "done",
-        summary: `Host materialized ${action.files.length} exact historical attempt artifacts for independent verification.`,
-        changedFiles: action.files.map((file) => file.path),
-        checks,
-        artifacts: [
-          { kind: "worktree", path: action.worktreePath, branch: action.branch },
-          ...action.files.map((file) => ({ kind: "file", ...file })),
-          {
-            kind: "host_attempt_artifact_materialization",
+    harness.runInTransaction((db) => {
+      harness.createTaskWithDb(db, {
+        id: materializationTaskId,
+        runId: action.runId,
+        role: "worker",
+        goal: "Host-materialize the frozen attempt artifact set for independent verification",
+        prompt: "This system task is completed only from host-owned fixed-action evidence; no model execution is allowed.",
+        dependsOn: [planner.id],
+        doneWhen: [
+          "the source attempt and receipt attempt are independently bound",
+          "the exact file path and SHA-256 set is materialized into one clean isolated worktree",
+          "excluded paths are absent and all side-effect counters remain zero",
+        ],
+        worktreePath: action.worktreePath,
+        config: {
+          systemTask: true,
+          hostAttemptArtifactMaterialization: {
             contractId: action.contractId,
             requestSha256,
             sourceTaskId: sourceTask.id,
             sourceAttemptId: sourceAttempt.id,
             receiptAttemptId: receiptAttempt.id,
-            worktreePath: action.worktreePath,
-            branch: action.branch,
-            parentSha: action.expectedParentSha,
-            files: action.files,
-            excludedPaths: action.excludedPaths,
-            sideEffectCounters: zeroSideEffectCounters(),
-            responseLossRecovered,
           },
-        ],
-        problems: [],
-      },
+        },
+      });
+      harness.recordAttemptWithDb(db, {
+        id: materializationAttemptId,
+        taskId: materializationTaskId,
+        input: {
+          executor: "harness-action",
+          actionType: action.type,
+          contractId: action.contractId,
+          requestSha256,
+        },
+        output: {
+          status: "done",
+          summary: `Host materialized ${action.files.length} exact historical attempt artifacts for independent verification.`,
+          changedFiles: action.files.map((file) => file.path),
+          checks,
+          artifacts: [
+            { kind: "worktree", path: action.worktreePath, branch: action.branch },
+            ...action.files.map((file) => ({ kind: "file", ...file })),
+            {
+              kind: "host_attempt_artifact_materialization",
+              contractId: action.contractId,
+              requestSha256,
+              sourceTaskId: sourceTask.id,
+              sourceAttemptId: sourceAttempt.id,
+              receiptAttemptId: receiptAttempt.id,
+              worktreePath: action.worktreePath,
+              branch: action.branch,
+              parentSha: action.expectedParentSha,
+              files: action.files,
+              excludedPaths: action.excludedPaths,
+              sideEffectCounters: zeroSideEffectCounters(),
+              responseLossRecovered,
+            },
+          ],
+          problems: [],
+        },
+      });
     });
   } catch (error) {
     return failedHostEvidenceAction(action, `Host materialized files but could not persist the system task receipt: ${errorMessage(error)}`, checks);
