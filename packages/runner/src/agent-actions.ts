@@ -433,7 +433,7 @@ function parseDesignProposalData(
       record.evolutionPack,
       expectedProjectId,
       `${label}.evolutionPack`,
-      { allowHostReceiptAdapterAlias: true },
+      { allowHostReceiptAdapterAliases: true },
     )
     : undefined;
   const causalHypothesis = hasCausalHypothesis

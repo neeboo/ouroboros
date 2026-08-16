@@ -1091,10 +1091,14 @@ describe("target-system evolution contracts", () => {
     ).toThrow();
   });
 
-  test("strict evolution pack parsing rejects the transient host receipt adapter alias", () => {
+  test.each([
+    ["host receipt", { id: "host-receipt", kind: "host-receipt" }],
+    ["blocked run outcome", { id: "signal_blocked_correction_abc", kind: "blocked-run-outcome" }],
+    ["host corpus receipt", { id: "action_host_receipt_abc", kind: "host-corpus-receipt" }],
+  ])("strict evolution pack parsing rejects the transient %s adapter alias", (_name, source) => {
     expect(() => targetEvolutionModule.parseEvolutionPackV1({
       ...validEvolutionPack(),
-      observation: { signalSources: [{ id: "host-receipt", kind: "host-receipt" }] },
+      observation: { signalSources: [source] },
     }, PROJECT_ID)).toThrow(/kind must be one of/);
   });
 

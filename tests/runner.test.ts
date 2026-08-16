@@ -555,6 +555,7 @@ describe("runner", () => {
         hostReceiptDesignAdapter: {
           schemaVersion: 1,
           actionEvidenceRef: expect.stringMatching(/^action:action_/),
+          correctionSignalRef: signal.id,
           targetVersion: 5,
           manifestSha256: expect.stringMatching(/^[0-9a-f]{64}$/),
           comparisonSha256: expect.stringMatching(/^[0-9a-f]{64}$/),

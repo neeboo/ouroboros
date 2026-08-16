@@ -187,7 +187,7 @@ export function parseEvolutionPackV1(
   value: unknown,
   expectedProjectId: string,
   label = "evolutionPack",
-  options: { allowHostReceiptAdapterAlias?: boolean } = {},
+  options: { allowHostReceiptAdapterAliases?: boolean } = {},
 ): EvolutionPackV1 {
   requireString(
     expectedProjectId,
@@ -239,7 +239,7 @@ export function parseEvolutionPackV1(
     parseSignalSource(
       source,
       `${label}.observation.signalSources[${index}]`,
-      options.allowHostReceiptAdapterAlias === true,
+      options.allowHostReceiptAdapterAliases === true,
     ),
   );
   requireNonEmpty(signalSources, `${label}.observation.signalSources`);
@@ -1305,16 +1305,21 @@ function parseEvolutionInstancePack(value: unknown, label: string): NonNullable<
 function parseSignalSource(
   value: unknown,
   label: string,
-  allowHostReceiptAdapterAlias: boolean,
+  allowHostReceiptAdapterAliases: boolean,
 ): EvolutionPackV1["observation"]["signalSources"][number] {
   const record = strictObject(value, ["id", "kind", "freshnessMs"], label);
   const id = requireOpaqueRef(record.id, `${label}.id`);
-  // A host-receipt-bound Designer may emit this one legacy spelling before
-  // the fixed action has access to the task adapter. Preserve it only as a
-  // transient marker so the model-computed pack hash still verifies; the
-  // fixed action must replace the whole source with the exact action ref
-  // before persistence. Every other unknown kind still fails here.
-  const kind = allowHostReceiptAdapterAlias && id === "host-receipt" && record.kind === "host-receipt"
+  // A host-receipt-bound Designer may emit these controlled spellings before
+  // the fixed action has access to its authoritative task adapter. Preserve
+  // them only as transient markers so the model-computed pack hash verifies;
+  // the fixed action replaces them with exact external refs and then parses
+  // the pack again under the public enum. Every other unknown kind fails here.
+  const isManagedAlias = allowHostReceiptAdapterAliases && (
+    (id === "host-receipt" && record.kind === "host-receipt")
+    || (id.startsWith("signal_") && record.kind === "blocked-run-outcome")
+    || (id.startsWith("action_") && record.kind === "host-corpus-receipt")
+  );
+  const kind = isManagedAlias
     ? record.kind as never
     : requireEnum(record.kind, SIGNAL_SOURCE_KINDS, `${label}.kind`);
   const freshnessMs = record.freshnessMs === undefined

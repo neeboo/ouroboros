@@ -497,9 +497,14 @@ function adaptHostReceiptBoundProposal(
     const rawSources = rawObservation && typeof rawObservation === "object" && !Array.isArray(rawObservation)
       ? (rawObservation as Record<string, unknown>).signalSources
       : undefined;
-    if (Array.isArray(rawSources) && rawSources.some((source) => source && typeof source === "object"
-      && !Array.isArray(source) && (source as Record<string, unknown>).id === "host-receipt")) {
-      throw new Error("host-receipt signal source requires a fixed host receipt design adapter");
+    if (Array.isArray(rawSources) && rawSources.some((source) => {
+      if (!source || typeof source !== "object" || Array.isArray(source)) return false;
+      const record = source as Record<string, unknown>;
+      return record.kind === "host-receipt"
+        || record.kind === "blocked-run-outcome"
+        || record.kind === "host-corpus-receipt";
+    })) {
+      throw new Error("host receipt managed signal source requires a fixed host receipt design adapter");
     }
     return rawProposal;
   }
@@ -508,6 +513,8 @@ function adaptHostReceiptBoundProposal(
     || typeof adapter.actionId !== "string"
     || typeof adapter.actionEvidenceRef !== "string"
     || adapter.actionEvidenceRef !== `action:${adapter.actionId}`
+    || typeof adapter.correctionSignalRef !== "string"
+    || !adapter.correctionSignalRef.startsWith("signal_")
     || adapter.targetVersion !== 5
     || typeof adapter.manifestSha256 !== "string"
     || typeof adapter.comparisonSha256 !== "string") {
@@ -518,6 +525,14 @@ function adaptHostReceiptBoundProposal(
     throw new Error("host receipt design adapter requires the authoritative evidence bundle");
   }
   const bundle = rawBundle as Record<string, unknown>;
+  const blockedSignals = Array.isArray(bundle.blockedSignals) ? bundle.blockedSignals : [];
+  const correctionSignal = blockedSignals.find((entry) => entry && typeof entry === "object" && !Array.isArray(entry)
+    && (entry as Record<string, unknown>).id === adapter.correctionSignalRef) as Record<string, unknown> | undefined;
+  if (!correctionSignal
+    || correctionSignal.projectId !== projectId
+    || correctionSignal.status !== "active") {
+    throw new Error("host receipt design adapter does not match its authoritative correction signal");
+  }
   const receipts = Array.isArray(bundle.hostCorpusReceipts) ? bundle.hostCorpusReceipts : [];
   const receipt = receipts.find((entry) => entry && typeof entry === "object" && !Array.isArray(entry)
     && (entry as Record<string, unknown>).actionId === adapter.actionId) as Record<string, unknown> | undefined;
@@ -548,6 +563,7 @@ function adaptHostReceiptBoundProposal(
 
   const adapted = structuredClone(rawProposal);
   const evidenceRefs = optionalStringArray(adapted.evidenceRefs, "proposeDesign payload.proposal.evidenceRefs") ?? [];
+  if (!evidenceRefs.includes(adapter.correctionSignalRef)) evidenceRefs.push(adapter.correctionSignalRef);
   if (!evidenceRefs.includes(adapter.actionEvidenceRef)) evidenceRefs.push(adapter.actionEvidenceRef);
   adapted.evidenceRefs = evidenceRefs;
   if (!adapted.evolutionPack || typeof adapted.evolutionPack !== "object" || Array.isArray(adapted.evolutionPack)) {
@@ -564,9 +580,16 @@ function adaptHostReceiptBoundProposal(
   }
   const signalSources = rawSignalSources.filter((source) => {
     if (!source || typeof source !== "object" || Array.isArray(source)) return true;
-    const id = (source as Record<string, unknown>).id;
-    return id !== "host-receipt" && id !== adapter.actionEvidenceRef;
+    const record = source as Record<string, unknown>;
+    const id = record.id;
+    return record.kind !== "host-receipt"
+      && record.kind !== "blocked-run-outcome"
+      && record.kind !== "host-corpus-receipt"
+      && id !== adapter.correctionSignalRef
+      && id !== adapter.actionId
+      && id !== adapter.actionEvidenceRef;
   });
+  signalSources.push({ id: adapter.correctionSignalRef, kind: "external-ref" });
   signalSources.push({ id: adapter.actionEvidenceRef, kind: "external-ref" });
   const normalizedPack = parseEvolutionPackV1({
     ...rawPack,

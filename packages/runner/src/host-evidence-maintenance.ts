@@ -376,6 +376,7 @@ function ensureVersionedDesigner(
     schemaVersion: 1 as const,
     actionId: action.eventId,
     actionEvidenceRef,
+    correctionSignalRef: marker.sourceSignalId,
     targetVersion: marker.targetVersion,
     manifestSha256: receipt.manifestSha256,
     comparisonSha256: receipt.comparisonSha256,
@@ -405,6 +406,7 @@ function ensureVersionedDesigner(
       prompt: [
         `Use the verified host receipt ${action.eventId} to decide version ${marker.targetVersion}.`,
         `The fixed adapter supplies actionEvidenceRef=${actionEvidenceRef}; proposal.evidenceRefs must retain this exact reference.`,
+        `The fixed adapter also supplies correctionSignalRef=${marker.sourceSignalId}; proposal.evidenceRefs and observation sources are normalized to this exact reference.`,
         `Cite signal ${marker.sourceSignalId}. Receipt-owned fields are injected by the control plane: evolutionPack.version=${marker.targetVersion}, evaluationContract.comparison, holdout commitment, manifest hash, comparison hash, and maturityGateContract.packRef.`,
         "Do not rewrite, downgrade, or replace those receipt-owned fields. Design only the target business problem, mechanism, professional creative approach, and delivery path.",
         "The business design must cover 短剧、互动游戏剧、电视剧和电影, ainovel 原创能力, 专业编剧审核与评分, and 互动第四墙和共生.",

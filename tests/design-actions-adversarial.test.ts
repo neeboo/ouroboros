@@ -2797,6 +2797,7 @@ describe("design-action transition coordinator (production authority path)", () 
           schemaVersion: 1,
           actionId,
           actionEvidenceRef: `action:${actionId}`,
+          correctionSignalRef: defectSignalId,
           targetVersion: 5,
           manifestSha256: successorComparison.corpusSnapshotSha256,
           comparisonSha256: canonicalEvolutionValueSha256(successorComparison),
@@ -2816,6 +2817,8 @@ describe("design-action transition coordinator (production authority path)", () 
     ];
     proposal.evolutionPack.observation.signalSources = [
       ...proposal.evolutionPack.observation.signalSources,
+      { id: defectSignalId, kind: "blocked-run-outcome" as never },
+      { id: actionId, kind: "host-corpus-receipt" as never },
       { id: "host-receipt", kind: "host-receipt" as never },
     ];
     proposal.evidenceRefs = [defectSignalId];
@@ -2847,8 +2850,12 @@ describe("design-action transition coordinator (production authority path)", () 
     const storedSources = storedProposal.proposal.evolutionPack?.observation.signalSources ?? [];
     expect(storedSources).toEqual([
       { id: "run-evidence", kind: "run-evidence" },
+      { id: defectSignalId, kind: "external-ref" },
       { id: `action:${actionId}`, kind: "external-ref" },
     ]);
+    expect(storedProposal.proposal.maturityGateContract?.packRef.contentSha256).toBe(
+      canonicalEvolutionValueSha256(storedProposal.proposal.evolutionPack),
+    );
     expect(storedProposal.proposal).toMatchObject({
       evidenceRefs: [defectSignalId, `action:${actionId}`],
       problem: expect.stringContaining("短剧"),
@@ -2914,7 +2921,7 @@ describe("design-action transition coordinator (production authority path)", () 
     }))).toThrow(/signalSources\[1\]\.kind must be one of/);
   });
 
-  test("host receipt signal source alias cannot persist without the fixed adapter", async () => {
+  test("host receipt managed signal source aliases cannot persist without the fixed adapter", async () => {
     const projectId = harness.createProject({ name: "unbound-host-receipt-alias", rootPath: dir });
     seedActiveCharter(projectId);
     const signalId = seedActiveSignal(projectId);
@@ -2922,10 +2929,11 @@ describe("design-action transition coordinator (production authority path)", () 
     const taskId = harness.createTask({ runId, role: "designer", goal: "Propose", prompt: "Propose." });
     const proposal = targetEvolutionEnvelope(projectId);
     proposal.evidenceRefs = [signalId];
-    proposal.evolutionPack.observation.signalSources.push({
-      id: "host-receipt",
-      kind: "host-receipt" as never,
-    });
+    proposal.evolutionPack.observation.signalSources.push(
+      { id: signalId, kind: "blocked-run-outcome" as never },
+      { id: "action_unbound_receipt", kind: "host-corpus-receipt" as never },
+      { id: "host-receipt", kind: "host-receipt" as never },
+    );
     proposal.maturityGateContract = {
       ...proposal.maturityGateContract,
       packRef: {
