@@ -5,14 +5,17 @@ import { tmpdir } from "node:os";
 import {
   applyHarnessAction,
   canonicalEvolutionValueSha256,
+  credentialPathPolicyFromFrozenPatterns,
   Harness,
   validateDshFilePolicyAgainstFrozenRuntime,
 } from "../packages/harness/src";
+import type { DshCredentialPathPolicyV1 } from "../packages/harness/src";
 import {
   createTasksFromOutputHook,
   resolveExecutionRoute,
   startCodexResumableAttempt,
 } from "../packages/runner/src";
+import { normalizeDshFilePolicy } from "../packages/runner/src/executors/dsh-process-policy";
 
 const STAGES = [
   { id: "backend-runtime", role: "worker", executor: "dsh-cli", repositoryId: "target-backend", dependsOn: [] },
@@ -82,6 +85,13 @@ describe("runtime integration task execution contracts", () => {
         }),
       });
       if (stage.role === "worker") {
+        const dshFilePolicyJson = JSON.stringify(task.config?.dshFilePolicy);
+        expect(dshFilePolicyJson.includes("**/.env*")).toBe(false);
+        expect(dshFilePolicyJson.includes("**/*api_key*")).toBe(false);
+        expect(normalizeDshFilePolicy(task.config?.dshFilePolicy)).toMatchObject({
+          source: "frozen-design-mutation-surfaces",
+          sha256: expect.stringMatching(/^[a-f0-9]{64}$/),
+        });
         expect(task.config).toMatchObject({
           dshProfileIsolation: "base-headless",
           dshModelTransport: "host-brokered-deepseek",
@@ -93,6 +103,13 @@ describe("runtime integration task execution contracts", () => {
             allowedPaths: repository.allowedPaths,
             readOnlyPaths: repository.readOnlyPaths,
             forbiddenPaths: expect.arrayContaining(repository.forbiddenPaths),
+            credentialPathPolicy: {
+              schemaVersion: 1,
+              source: "frozen-runtime-credential-isolation",
+              deniedSubtrees: ["story-mesh/.ainovel/**"],
+              deniedBasenamePrefixes: [".env"],
+              deniedFilenameTokens: ["api_key", "credential", "secret", "token"],
+            },
           },
         });
         expect(resolveExecutionRoute({
@@ -121,10 +138,14 @@ describe("runtime integration task execution contracts", () => {
       source: "frozen-runtime-integration-boundary",
       allowedPaths: [...backend.allowedPaths],
       readOnlyPaths: [...backend.readOnlyPaths],
-      forbiddenPaths: [
-        ...backend.forbiddenPaths,
-        ...fixture.boundary.credentialIsolation.forbiddenPaths,
-      ],
+      forbiddenPaths: [...backend.forbiddenPaths],
+      credentialPathPolicy: {
+        schemaVersion: 1 as const,
+        source: "frozen-runtime-credential-isolation" as const,
+        deniedSubtrees: ["story-mesh/.ainovel/**"],
+        deniedBasenamePrefixes: [".env"],
+        deniedFilenameTokens: ["api_key", "credential", "secret", "token"],
+      } satisfies DshCredentialPathPolicyV1,
     };
     const mutationSurfaces = [
       {
@@ -149,10 +170,8 @@ describe("runtime integration task execution contracts", () => {
       source: "frozen-design-mutation-surfaces",
       allowedPaths: [...backend.allowedPaths].sort(),
       readOnlyPaths: [...backend.readOnlyPaths].sort(),
-      forbiddenPaths: [...new Set([
-        ...backend.forbiddenPaths,
-        ...fixture.boundary.credentialIsolation.forbiddenPaths,
-      ])].sort(),
+      forbiddenPaths: [...backend.forbiddenPaths].sort(),
+      credentialPathPolicy: policy.credentialPathPolicy,
     });
 
     expect(() => validateDshFilePolicyAgainstFrozenRuntime({
@@ -171,6 +190,26 @@ describe("runtime integration task execution contracts", () => {
       boundary: fixture.boundary,
       mutationSurfaces,
     })).toThrow("allowed write path exceeds");
+
+    expect(() => validateDshFilePolicyAgainstFrozenRuntime({
+      policy: {
+        ...policy,
+        credentialPathPolicy: {
+          ...policy.credentialPathPolicy,
+          deniedFilenameTokens: ["api_key", "credential", "secret"],
+        },
+      },
+      repositoryId: "target-backend",
+      boundary: fixture.boundary,
+      mutationSurfaces,
+    })).toThrow("credential path policy");
+
+    expect(() => validateDshFilePolicyAgainstFrozenRuntime({
+      policy: { ...policy, forbiddenPaths: [...policy.forbiddenPaths, "**/*api_key*"] },
+      repositoryId: "target-backend",
+      boundary: fixture.boundary,
+      mutationSurfaces,
+    })).toThrow("unsafe path");
   });
 
   test("an incomplete stored runtime Worker is blocked before hooks or a Codex client", async () => {
@@ -304,6 +343,80 @@ describe("runtime integration task execution contracts", () => {
       status: "done",
       artifacts: [expect.objectContaining({ taskIds: replacementTaskIds, reused: true })],
     });
+
+    const secondBackendTaskId = replacementTaskIds[0]!;
+    const secondAttemptId = harness.startAttempt({ taskId: secondBackendTaskId, input: { preparation: "credential-path-policy" } });
+    harness.finishAttempt({
+      attemptId: secondAttemptId,
+      output: {
+        status: "blocked",
+        summary: "DSH policy preflight failed before model startup",
+        changedFiles: [],
+        checks: [],
+        artifacts: [],
+        problems: ["DSH file policy forbiddenPaths contains an unsafe path: **/*api_key*"],
+      },
+    });
+    const second = applyHarnessAction(harness, {
+      type: "recoverRuntimeIntegrationTaskGraphPreparationFailure",
+      runId: fixture.runId,
+      taskId: secondBackendTaskId,
+      attemptId: secondAttemptId,
+      reason: "legacy credential globs failed before model startup",
+    } as never);
+    expect(second.status).toBe("done");
+    const secondReplacementTaskIds = second.artifacts.find((candidate) =>
+      candidate.kind === "runtime_integration_task_graph_preparation_recovery")!.taskIds as string[];
+    expect(secondReplacementTaskIds).toHaveLength(5);
+    expect(secondReplacementTaskIds).not.toEqual(replacementTaskIds);
+    expect(replacementTaskIds.map((id) => harness.getTask(id)?.status)).toEqual(Array(5).fill("blocked"));
+    expect(secondReplacementTaskIds.map((id) => harness.getTask(id)?.status)).toEqual(Array(5).fill("todo"));
+    expect(harness.getRun(fixture.runId)!.context.runtimeIntegrationTaskGraphPreparationRecoveries).toHaveLength(2);
+    expect(harness.getRun(fixture.runId)!.context.repairReplanBudget).toEqual(beforeBudget);
+    expect(harness.getRunOverview({ runId: fixture.runId, eventLimit: 0 }).tasks.filter((task) => task.role === "goal-review")).toHaveLength(0);
+
+    const exhaustedBackendId = secondReplacementTaskIds[0]!;
+    const exhaustedAttemptId = harness.startAttempt({ taskId: exhaustedBackendId, input: { preparation: "third-policy-failure" } });
+    harness.finishAttempt({
+      attemptId: exhaustedAttemptId,
+      output: {
+        status: "blocked",
+        summary: "third preparation failure",
+        changedFiles: [], checks: [], artifacts: [],
+        problems: ["DSH file policy failed again"],
+      },
+    });
+    const exhausted = applyHarnessAction(harness, {
+      type: "recoverRuntimeIntegrationTaskGraphPreparationFailure",
+      runId: fixture.runId,
+      taskId: exhaustedBackendId,
+      attemptId: exhaustedAttemptId,
+      reason: "third DSH policy preparation failure",
+    } as never);
+    expect(exhausted).toMatchObject({
+      status: "blocked",
+      problems: [expect.stringContaining("exhausted (2/2)")],
+    });
+    expect(harness.getRunOverview({ runId: fixture.runId, eventLimit: 0 }).tasks
+      .filter((task) => task.config?.runtimeIntegrationExecutionContract)).toHaveLength(15);
+  });
+
+  test("maps only the frozen credential classifier vocabulary", () => {
+    expect(credentialPathPolicyFromFrozenPatterns([
+      "story-mesh/.ainovel/**",
+      "**/.env*",
+      "**/*api_key*",
+      "**/*token*",
+      "**/*credential*",
+      "**/*secret*",
+    ])).toEqual({
+      schemaVersion: 1,
+      source: "frozen-runtime-credential-isolation",
+      deniedSubtrees: ["story-mesh/.ainovel/**"],
+      deniedBasenamePrefixes: [".env"],
+      deniedFilenameTokens: ["api_key", "credential", "secret", "token"],
+    });
+    expect(() => credentialPathPolicyFromFrozenPatterns(["**/*payment*"])).toThrow("unsafe path");
   });
 });
 
@@ -376,7 +489,7 @@ function governedRuntimeFixture(harness: Harness, root: string, options: { legac
     boundarySha256: canonicalEvolutionValueSha256(boundaryBody),
     taskGraph: STAGES.map((stage) => ({ ...stage, dependsOn: [...stage.dependsOn] })),
     credentialIsolation: {
-      forbiddenPaths: ["story-mesh/.ainovel/**", "**/.env*", "**/*token*", "**/*credential*", "**/*secret*"],
+      forbiddenPaths: ["story-mesh/.ainovel/**", "**/.env*", "**/*api_key*", "**/*token*", "**/*credential*", "**/*secret*"],
       modelReceivesCredentials: false,
       hostInjectionOnly: true,
     },

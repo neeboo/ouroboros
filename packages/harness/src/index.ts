@@ -8,6 +8,15 @@ export { checkpointDatabase, initDatabase, withDatabase, withReadOnlyDatabase } 
 export type { HarnessDatabase } from "./database";
 export { makeId } from "./ids";
 export {
+  credentialPathPolicyFromFrozenPatterns,
+  DSH_CREDENTIAL_BASENAME_PREFIXES,
+  DSH_CREDENTIAL_FILENAME_TOKENS,
+  normalizeDshCredentialPathPolicy,
+  normalizeDshFilePolicyContract,
+  normalizeDshPolicyPaths,
+} from "./dsh-file-policy";
+export type { DshCredentialPathPolicyV1, DshFilePolicyContractV1 } from "./dsh-file-policy";
+export {
   projectRuntimeIntegrationTaskGraph,
   RUNTIME_INTEGRATION_TASK_GRAPH,
   runtimeIntegrationTaskExecutionProblem,

@@ -1,4 +1,9 @@
 import { join } from "node:path";
+import {
+  credentialPathPolicyFromFrozenPatterns,
+  normalizeDshFilePolicyContract,
+  type DshFilePolicyContractV1,
+} from "./dsh-file-policy";
 import { canonicalEvolutionValueSha256 } from "./target-evolution";
 import type { Task, TaskConfig } from "./types";
 
@@ -31,13 +36,7 @@ export interface RuntimeIntegrationTaskProjection {
   config: TaskConfig;
 }
 
-export interface FrozenRuntimeDshFilePolicy {
-  schemaVersion: 1;
-  source: "frozen-design-mutation-surfaces";
-  allowedPaths: string[];
-  readOnlyPaths: string[];
-  forbiddenPaths: string[];
-}
+export type FrozenRuntimeDshFilePolicy = DshFilePolicyContractV1;
 
 export function validateDshFilePolicyAgainstFrozenRuntime(input: {
   policy: unknown;
@@ -45,12 +44,8 @@ export function validateDshFilePolicyAgainstFrozenRuntime(input: {
   boundary: unknown;
   mutationSurfaces: unknown;
 }): FrozenRuntimeDshFilePolicy {
-  const policy = requireObject(input.policy, "dshFilePolicy");
-  if (policy.schemaVersion !== 1) throw new Error("DSH file policy schema is invalid");
-  const allowedPaths = normalizedPolicyPatterns(policy.allowedPaths, "dshFilePolicy.allowedPaths");
-  const readOnlyPaths = normalizedPolicyPatterns(policy.readOnlyPaths ?? [], "dshFilePolicy.readOnlyPaths");
-  const forbiddenPaths = normalizedPolicyPatterns(policy.forbiddenPaths, "dshFilePolicy.forbiddenPaths");
-  if (allowedPaths.length === 0) throw new Error("DSH file policy must retain a frozen allowed write path");
+  const policy = normalizeDshFilePolicyContract(input.policy);
+  const { allowedPaths, readOnlyPaths, forbiddenPaths } = policy;
 
   const boundary = requireObject(input.boundary, "runtimeIntegrationBoundary");
   const repositoryId = stringValue(input.repositoryId);
@@ -78,17 +73,17 @@ export function validateDshFilePolicyAgainstFrozenRuntime(input: {
     surface.allowedPaths.some((frozen) => policyPatternContains(frozen, candidate))));
   if (!matchingSurface) throw new Error("DSH allowed write path exceeds the frozen design mutation surfaces");
 
-  const requiredForbidden = [
-    ...normalizedPolicyPatterns(repository.forbiddenPaths, `${repositoryId}.forbiddenPaths`),
-    ...normalizedPolicyPatterns(
-      objectOrNull(boundary.credentialIsolation)?.forbiddenPaths ?? [],
-      "runtimeIntegrationBoundary.credentialIsolation.forbiddenPaths",
-    ),
-  ];
+  const requiredForbidden = normalizedPolicyPatterns(repository.forbiddenPaths, `${repositoryId}.forbiddenPaths`);
   for (const required of requiredForbidden) {
     if (!forbiddenPaths.includes(required)) {
       throw new Error(`DSH file policy is missing frozen forbidden path: ${required}`);
     }
+  }
+  const expectedCredentialPathPolicy = credentialPathPolicyFromFrozenPatterns(
+    objectOrNull(boundary.credentialIsolation)?.forbiddenPaths ?? [],
+  );
+  if (JSON.stringify(policy.credentialPathPolicy) !== JSON.stringify(expectedCredentialPathPolicy)) {
+    throw new Error("DSH credential path policy drifted from frozen credential isolation");
   }
   const deniedWritePaths = new Set([...readOnlyPaths, ...forbiddenPaths]);
   const requiredReadOnly = normalizedPolicyPatterns(repository.readOnlyPaths ?? [], `${repositoryId}.readOnlyPaths`);
@@ -103,6 +98,7 @@ export function validateDshFilePolicyAgainstFrozenRuntime(input: {
     allowedPaths,
     readOnlyPaths,
     forbiddenPaths,
+    credentialPathPolicy: expectedCredentialPathPolicy,
   };
 }
 
@@ -211,13 +207,14 @@ export function projectRuntimeIntegrationTaskGraph(input: {
           dshRequiredPlugins: [],
           dshModelTransport: "host-brokered-deepseek",
           dshToolNetwork: "deny",
-          dshFilePolicy: {
+          dshFilePolicy: normalizeDshFilePolicyContract({
             schemaVersion: 1,
             source: "frozen-runtime-integration-boundary",
             allowedPaths: repository.allowedPaths,
             readOnlyPaths: repository.readOnlyPaths,
-            forbiddenPaths: [...new Set([...repository.forbiddenPaths, ...frozen.credentialForbiddenPaths])],
-          },
+            forbiddenPaths: repository.forbiddenPaths,
+            credentialPathPolicy: credentialPathPolicyFromFrozenPatterns(frozen.credentialForbiddenPaths),
+          }),
         }
       : {
           ...shared,

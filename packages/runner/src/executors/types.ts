@@ -1,4 +1,4 @@
-import type { AttemptOutput } from "@ouroboros/harness";
+import type { AttemptOutput, DshFilePolicyContractV1 } from "@ouroboros/harness";
 import type { TaskExecutor } from "../types";
 import type { DshCommandResolver } from "../dsh-readiness";
 
@@ -112,10 +112,7 @@ export interface DshCliExecutorOptions {
   filePolicy?: DshFilePolicy;
 }
 
-export interface DshFilePolicy {
-  schemaVersion: 1;
+export type DshFilePolicy = DshFilePolicyContractV1 | (Omit<DshFilePolicyContractV1, "source" | "readOnlyPaths"> & {
   source: "frozen-design-mutation-surfaces" | "frozen-runtime-integration-boundary";
-  allowedPaths: string[];
   readOnlyPaths?: string[];
-  forbiddenPaths: string[];
-}
+});

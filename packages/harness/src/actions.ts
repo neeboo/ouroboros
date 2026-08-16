@@ -611,6 +611,7 @@ const EXACT_GIT_INDEX_MAX_PATH_BYTES = 1024;
 const EXACT_GIT_INDEX_MAX_COMMIT_MESSAGE_BYTES = 4096;
 const EXACT_GIT_REMOTE_TIMEOUT_MS = 30_000;
 const EXACT_GIT_REMOTE_MAX_OUTPUT_BYTES = 24 * 1024;
+const RUNTIME_INTEGRATION_PREPARATION_RECOVERY_LIMIT = 2;
 const FROZEN_DESIGN_CONTEXT_KEYS = new Set([
   "source",
   "projectId",
@@ -637,6 +638,7 @@ const FROZEN_DESIGN_CONTEXT_KEYS = new Set([
   "runtimeIntegrationBoundary",
   "runtimeIntegrationTaskGraphRecovery",
   "runtimeIntegrationTaskGraphPreparationRecovery",
+  "runtimeIntegrationTaskGraphPreparationRecoveries",
 ]);
 
 function frozenDesignContextKeys(keys: Iterable<string>): string[] {
@@ -2757,29 +2759,21 @@ function recoverRuntimeIntegrationTaskGraphPreparationFailureWithDb(
   if (!run || run.context.source !== "design" || run.context.retired === true) {
     throw new Error(`runtime integration preparation recovery requires an active design delivery: ${action.runId}`);
   }
-  const previousReceipt = objectRecordOrNull(run.context.runtimeIntegrationTaskGraphRecovery);
-  if (!previousReceipt) throw new Error("runtime integration preparation recovery requires the frozen task graph receipt");
-  const currentTaskIds = exactStringArray(previousReceipt.taskIds, "runtime integration task graph taskIds");
-  const plannerTaskId = exactNonEmptyStringField(previousReceipt, "plannerTaskId");
-  const plannerAttemptId = exactNonEmptyStringField(previousReceipt, "plannerAttemptId");
-  const recoveryKey = stableFingerprint({
-    runId: run.id,
-    taskId: action.taskId,
-    attemptId: action.attemptId,
-    priorRecoveryKey: previousReceipt.recoveryKey,
-  });
-  const existingReceipt = objectRecordOrNull(run.context.runtimeIntegrationTaskGraphPreparationRecovery);
+  const originalReceipt = objectRecordOrNull(run.context.runtimeIntegrationTaskGraphRecovery);
+  if (!originalReceipt) throw new Error("runtime integration preparation recovery requires the frozen task graph receipt");
+  const latestReceipt = objectRecordOrNull(run.context.runtimeIntegrationTaskGraphPreparationRecovery);
+  const storedHistory = Array.isArray(run.context.runtimeIntegrationTaskGraphPreparationRecoveries)
+    ? run.context.runtimeIntegrationTaskGraphPreparationRecoveries.map((value) => objectRecord(value, "preparation recovery history"))
+    : latestReceipt ? [latestReceipt] : [];
+  const existingReceipt = storedHistory.find((receipt) =>
+    receipt.sourceTaskId === action.taskId && receipt.sourceAttemptId === action.attemptId);
   if (existingReceipt) {
     const replacementIds = exactStringArray(existingReceipt.taskIds, "preparation recovery taskIds");
-    if (existingReceipt.recoveryKey !== recoveryKey
-      || existingReceipt.sourceTaskId !== action.taskId
-      || existingReceipt.sourceAttemptId !== action.attemptId
-      || replacementIds.length !== RUNTIME_INTEGRATION_TASK_GRAPH.length) {
-      throw new Error("runtime integration preparation recovery conflicts with the durable receipt");
-    }
+    const retiredTaskIds = exactStringArray(existingReceipt.retiredTaskIds, "preparation recovery retiredTaskIds");
     if (replacementIds.some((id) => !overview.tasks.find((task) => task.id === id))) {
       throw new Error("runtime integration preparation recovery receipt points to missing tasks");
     }
+    const recoveryKey = exactNonEmptyStringField(existingReceipt, "recoveryKey");
     return doneResult(action.type, `Runtime integration preparation recovery ${recoveryKey} reused.`, [
       { name: "dead attempt", status: "passed", evidence: action.attemptId },
       { name: "replacement graph", status: "passed", evidence: "reused" },
@@ -2790,19 +2784,40 @@ function recoverRuntimeIntegrationTaskGraphPreparationFailureWithDb(
       sourceTaskId: action.taskId,
       sourceAttemptId: action.attemptId,
       taskIds: replacementIds,
-      retiredTaskIds: currentTaskIds,
+      retiredTaskIds,
       recoveryKey,
       reused: true,
     }]);
   }
+
+  const previousReceipt = latestReceipt ?? originalReceipt;
+  if (storedHistory.length >= RUNTIME_INTEGRATION_PREPARATION_RECOVERY_LIMIT) {
+    throw new Error(`runtime integration preparation recovery exhausted (${storedHistory.length}/${RUNTIME_INTEGRATION_PREPARATION_RECOVERY_LIMIT})`);
+  }
+  const currentTaskIds = exactStringArray(previousReceipt.taskIds, "runtime integration task graph taskIds");
+  const plannerTaskId = exactNonEmptyStringField(previousReceipt, "plannerTaskId");
+  const plannerAttemptId = exactNonEmptyStringField(previousReceipt, "plannerAttemptId");
+  const recoveryKey = stableFingerprint({
+    runId: run.id,
+    taskId: action.taskId,
+    attemptId: action.attemptId,
+    priorRecoveryKey: previousReceipt.recoveryKey,
+  });
 
   if (currentTaskIds[0] !== action.taskId || currentTaskIds.length !== RUNTIME_INTEGRATION_TASK_GRAPH.length) {
     throw new Error("runtime integration preparation recovery only accepts the frozen backend stage");
   }
   const sourceTask = overview.tasks.find((task) => task.id === action.taskId);
   const sourceAttempt = overview.sessions.find((session) => session.attemptId === action.attemptId);
-  if (!sourceTask || sourceTask.status !== "running" || sourceAttempt?.taskId !== sourceTask.id || sourceAttempt.status !== "running") {
-    throw new Error("runtime integration preparation recovery source attempt is not running");
+  const persistedSourceAttempt = sourceAttempt ? harness.getAttemptWithDb(db, sourceAttempt.attemptId) : null;
+  const isRunningPreparation = sourceTask?.status === "running" && sourceAttempt?.status === "running";
+  const blockedEvidence = [persistedSourceAttempt?.error, ...(sourceAttempt?.output.problems ?? [])]
+    .filter((value): value is string => typeof value === "string" && value.length > 0)
+    .join("\n");
+  const isClosedPreparation = sourceTask?.status === "blocked" && sourceAttempt?.status === "blocked"
+    && /DSH file policy/i.test(blockedEvidence);
+  if (!sourceTask || sourceAttempt?.taskId !== sourceTask.id || (!isRunningPreparation && !isClosedPreparation)) {
+    throw new Error("runtime integration preparation recovery source attempt is neither active nor a closed DSH policy failure");
   }
   const sourceContract = objectRecord(sourceTask.config?.runtimeIntegrationExecutionContract, "runtimeIntegrationExecutionContract");
   if (sourceContract.stageId !== "backend-runtime") {
@@ -2810,8 +2825,12 @@ function recoverRuntimeIntegrationTaskGraphPreparationFailureWithDb(
   }
   const sourceThreads = overview.threads.filter((thread) =>
     thread.attemptId === action.attemptId && thread.taskId === action.taskId && thread.status === "running");
-  if (sourceThreads.length === 0 || sourceThreads.some((thread) => thread.pid !== null && actionProcessIsAlive(thread.pid))) {
+  if (isRunningPreparation && (sourceThreads.length === 0
+    || sourceThreads.some((thread) => thread.pid !== null && actionProcessIsAlive(thread.pid)))) {
     throw new Error("runtime integration preparation recovery requires a dead execution lease");
+  }
+  if (isClosedPreparation && sourceThreads.length > 0) {
+    throw new Error("closed runtime integration preparation failure still has a running execution thread");
   }
   const currentTasks = currentTaskIds.map((id) => overview.tasks.find((task) => task.id === id));
   if (currentTasks.some((task) => !task)
@@ -2856,33 +2875,35 @@ function recoverRuntimeIntegrationTaskGraphPreparationFailureWithDb(
   });
 
   const reason = limitUtf8Output(sanitizeEvolutionErrorText(action.reason), 2_048);
-  harness.finishAttemptWithDb(db, {
-    attemptId: action.attemptId,
-    output: {
-      status: "blocked",
-      summary: "Host recovered a dead runtime integration preparation attempt",
-      changedFiles: [],
-      checks: [
-        { name: "model startup", status: "failed", evidence: "not started" },
-        { name: "dead execution lease", status: "passed", evidence: sourceThreads.map((thread) => `${thread.id}:${thread.pid ?? "no-pid"}`).join(",") },
-      ],
-      artifacts: [{
-        kind: "runtime_integration_preparation_failure",
-        runId: run.id,
-        taskId: sourceTask.id,
-        attemptId: action.attemptId,
-        threadIds: sourceThreads.map((thread) => thread.id),
-        priorPids: sourceThreads.map((thread) => thread.pid),
-      }],
-      problems: [reason],
-    },
-  });
-  db.query(
-    `update execution_threads
-     set status = 'interrupted', pid = null, heartbeat_at = current_timestamp,
-         interrupted_at = current_timestamp, interrupt_reason = $reason, updated_at = current_timestamp
-     where attempt_id = $attemptId and status = 'running'`,
-  ).run({ $attemptId: action.attemptId, $reason: reason });
+  if (isRunningPreparation) {
+    harness.finishAttemptWithDb(db, {
+      attemptId: action.attemptId,
+      output: {
+        status: "blocked",
+        summary: "Host recovered a dead runtime integration preparation attempt",
+        changedFiles: [],
+        checks: [
+          { name: "model startup", status: "failed", evidence: "not started" },
+          { name: "dead execution lease", status: "passed", evidence: sourceThreads.map((thread) => `${thread.id}:${thread.pid ?? "no-pid"}`).join(",") },
+        ],
+        artifacts: [{
+          kind: "runtime_integration_preparation_failure",
+          runId: run.id,
+          taskId: sourceTask.id,
+          attemptId: action.attemptId,
+          threadIds: sourceThreads.map((thread) => thread.id),
+          priorPids: sourceThreads.map((thread) => thread.pid),
+        }],
+        problems: [reason],
+      },
+    });
+    db.query(
+      `update execution_threads
+       set status = 'interrupted', pid = null, heartbeat_at = current_timestamp,
+           interrupted_at = current_timestamp, interrupt_reason = $reason, updated_at = current_timestamp
+       where attempt_id = $attemptId and status = 'running'`,
+    ).run({ $attemptId: action.attemptId, $reason: reason });
+  }
   for (const taskId of currentTaskIds.slice(1)) {
     const retired = db.query(
       "update tasks set status = 'blocked', updated_at = current_timestamp where id = $taskId and status = 'todo'",
@@ -2918,11 +2939,16 @@ function recoverRuntimeIntegrationTaskGraphPreparationFailureWithDb(
   harness.updateRunWithDb(db, {
     runId: run.id,
     status: "todo",
-    contextPatch: { runtimeIntegrationTaskGraphPreparationRecovery: receipt },
+    contextPatch: {
+      runtimeIntegrationTaskGraphPreparationRecovery: receipt,
+      runtimeIntegrationTaskGraphPreparationRecoveries: [...storedHistory, receipt],
+    },
   });
   return doneResult(action.type, `Runtime integration preparation recovery ${recoveryKey} materialized.`, [
-    { name: "dead attempt closed", status: "passed", evidence: action.attemptId },
-    { name: "execution thread interrupted", status: "passed", evidence: sourceThreads.map((thread) => thread.id).join(",") },
+    { name: "preparation attempt terminal", status: "passed", evidence: `${action.attemptId}:${isRunningPreparation ? "closed-by-action" : "already-blocked"}` },
+    { name: "execution lease terminal", status: "passed", evidence: isRunningPreparation
+      ? sourceThreads.map((thread) => thread.id).join(",")
+      : "already-closed" },
     { name: "old graph retired", status: "passed", evidence: currentTaskIds.join(",") },
     { name: "replacement graph", status: "passed", evidence: replacementTaskIds.join(",") },
     { name: "repair budget", status: "passed", evidence: "unchanged" },

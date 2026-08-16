@@ -3,6 +3,11 @@ import { existsSync, lstatSync, readFileSync, readdirSync, realpathSync } from "
 import { chmod, lstat, mkdir, realpath, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { basename, dirname, join, resolve, sep } from "node:path";
+import {
+  normalizeDshFilePolicyContract,
+  type DshCredentialPathPolicyV1,
+  type DshFilePolicyContractV1,
+} from "@ouroboros/harness";
 
 const DARWIN_DSH_DENIED_EXECUTABLES = [
   "/Applications/ChatGPT.app/Contents/Resources/codex",
@@ -58,12 +63,7 @@ export interface DshHostReadProfile {
   deniedReadPathsSha256: string;
 }
 
-export interface NormalizedDshFilePolicy {
-  schemaVersion: 1;
-  source: "frozen-design-mutation-surfaces";
-  allowedPaths: string[];
-  readOnlyPaths: string[];
-  forbiddenPaths: string[];
+export interface NormalizedDshFilePolicy extends DshFilePolicyContractV1 {
   sha256: string;
 }
 
@@ -72,6 +72,7 @@ export function darwinDshHostReadProfile(input: {
   permissionMode?: "read-only" | "workspace-write";
   allowedPaths?: string[];
   forbiddenPaths?: string[];
+  credentialPathPolicy?: DshCredentialPathPolicyV1;
   temporaryWritePaths?: string[];
 }): DshHostReadProfile {
   const deniedReadPaths = dshControlReadPaths(input.workspaceRoot);
@@ -80,6 +81,7 @@ export function darwinDshHostReadProfile(input: {
       workspaceRoot: input.permissionMode === "workspace-write" ? input.workspaceRoot : null,
       allowedPaths: input.permissionMode === "workspace-write" ? input.allowedPaths : [],
       forbiddenPaths: input.forbiddenPaths,
+      credentialPathPolicy: input.credentialPathPolicy,
       temporaryWritePaths: input.temporaryWritePaths,
     }),
     ...deniedReadPaths.flatMap((path) => [
@@ -171,6 +173,7 @@ export async function prepareDshProcessPolicy(input: {
     permissionMode: input.permissionMode,
     allowedPaths: input.filePolicy?.allowedPaths,
     forbiddenPaths: [...(input.filePolicy?.readOnlyPaths ?? []), ...(input.filePolicy?.forbiddenPaths ?? [])],
+    credentialPathPolicy: input.filePolicy?.credentialPathPolicy,
     temporaryWritePaths: [toolHome],
   });
   const runnerSource = darwinDshPolicyRunnerSource(toolProfile.profile, toolHome);
@@ -193,9 +196,9 @@ export async function prepareDshProcessPolicy(input: {
 async function prepareAllowedPolicyDirectories(workspaceRoot: string, allowedPaths: string[]) {
   const root = canonicalExistingDirectory(workspaceRoot);
   for (const pattern of allowedPaths) {
-    const relativeDirectory = pattern.slice(0, -3);
+    const relativeDirectory = pattern.endsWith("/**") ? pattern.slice(0, -3) : dirname(pattern);
     let current = root;
-    for (const segment of relativeDirectory.split("/").filter(Boolean)) {
+    for (const segment of relativeDirectory.split("/").filter((value) => value && value !== ".")) {
       const next = join(current, segment);
       try {
         const stat = await lstat(next);
@@ -229,6 +232,7 @@ export function darwinDshProcessProfile(input: {
   temporaryWritePaths?: string[];
   allowedPaths?: string[];
   forbiddenPaths?: string[];
+  credentialPathPolicy?: DshCredentialPathPolicyV1;
   protectedExecutables?: readonly string[];
 }) {
   const forms = [
@@ -239,11 +243,21 @@ export function darwinDshProcessProfile(input: {
     `(allow file-write* (literal ${sbplString("/dev/null")}))`,
   ];
   if (input.workspaceRoot) {
-    for (const path of resolvePolicyPaths(input.workspaceRoot, input.allowedPaths ?? [])) {
-      forms.push(`(allow file-write* (subpath ${sbplString(path)}))`);
+    for (const entry of resolvePolicyPaths(input.workspaceRoot, input.allowedPaths ?? [])) {
+      forms.push(`(allow file-write* (${entry.subtree ? "subpath" : "literal"} ${sbplString(entry.path)}))`);
     }
-    for (const path of resolvePolicyPaths(input.workspaceRoot, input.forbiddenPaths ?? [])) {
-      forms.push(`(deny file-write* (subpath ${sbplString(path)}))`);
+    for (const entry of resolvePolicyPaths(input.workspaceRoot, input.forbiddenPaths ?? [])) {
+      forms.push(`(deny file-write* (${entry.subtree ? "subpath" : "literal"} ${sbplString(entry.path)}))`);
+    }
+    if (input.credentialPathPolicy) {
+      for (const entry of resolvePolicyPaths(input.workspaceRoot, input.credentialPathPolicy.deniedSubtrees)) {
+        forms.push(`(deny file-read* (subpath ${sbplString(entry.path)}))`);
+        forms.push(`(deny file-write* (subpath ${sbplString(entry.path)}))`);
+      }
+      for (const pattern of credentialPathRegexes(input.workspaceRoot, input.credentialPathPolicy)) {
+        forms.push(`(deny file-read* (regex #${sbplString(pattern)}))`);
+        forms.push(`(deny file-write* (regex #${sbplString(pattern)}))`);
+      }
     }
   }
   for (const path of [...new Set(input.temporaryWritePaths ?? [input.temporaryRoot ?? tmpdir(), "/tmp"])]) {
@@ -260,55 +274,47 @@ export function darwinDshProcessProfile(input: {
 }
 
 export function normalizeDshFilePolicy(input: unknown): NormalizedDshFilePolicy {
-  if (!input || typeof input !== "object" || Array.isArray(input)) {
-    throw new Error("DSH workspace-write requires a frozen file policy");
-  }
-  const record = input as Record<string, unknown>;
-  const keys = Object.keys(record).sort();
-  const oldKeys = ["allowedPaths", "forbiddenPaths", "schemaVersion", "source"];
-  const currentKeys = ["allowedPaths", "forbiddenPaths", "readOnlyPaths", "schemaVersion", "source"];
-  if (JSON.stringify(keys) !== JSON.stringify(oldKeys) && JSON.stringify(keys) !== JSON.stringify(currentKeys)) {
-    throw new Error("DSH file policy contains unknown or missing fields");
-  }
-  if (record.schemaVersion !== 1
-    || (record.source !== "frozen-design-mutation-surfaces" && record.source !== "frozen-runtime-integration-boundary")) {
-    throw new Error("DSH file policy schema or source is invalid");
-  }
-  const allowedPaths = normalizePolicyPatterns(record.allowedPaths, "allowedPaths");
-  const readOnlyPaths = normalizePolicyPatterns(record.readOnlyPaths ?? [], "readOnlyPaths");
-  const forbiddenPaths = normalizePolicyPatterns(record.forbiddenPaths, "forbiddenPaths");
-  if (allowedPaths.length === 0) throw new Error("DSH file policy must allow at least one frozen path");
-  const normalized = {
-    schemaVersion: 1 as const,
-    source: "frozen-design-mutation-surfaces" as const,
-    allowedPaths,
-    readOnlyPaths,
-    forbiddenPaths,
-  };
+  const normalized = normalizeDshFilePolicyContract(input);
   return { ...normalized, sha256: createHash("sha256").update(JSON.stringify(normalized)).digest("hex") };
 }
 
-function normalizePolicyPatterns(value: unknown, name: string) {
-  if (!Array.isArray(value) || value.some((entry) => typeof entry !== "string")) {
-    throw new Error(`DSH file policy ${name} must be a string array`);
-  }
-  const patterns = [...new Set(value.map((entry) => entry.trim()))].sort();
-  for (const pattern of patterns) {
-    if (!pattern || pattern.startsWith("/") || pattern.includes("..") || !pattern.endsWith("/**") || pattern.slice(0, -3).includes("*")) {
-      throw new Error(`DSH file policy ${name} contains an unsafe path: ${pattern}`);
-    }
-  }
-  return patterns;
+function credentialPathRegexes(workspaceRoot: string, policy: DshCredentialPathPolicyV1) {
+  const root = caseInsensitiveRegexLiteral(existsSync(workspaceRoot) ? realpathSync(workspaceRoot) : resolve(workspaceRoot));
+  return [
+    ...policy.deniedSubtrees.flatMap((pattern) => {
+      const subtree = caseInsensitiveRegexLiteral(pattern.slice(0, -3));
+      return [`^${root}/${subtree}(/|$)`, `(^|/)${subtree}(/|$)`];
+    }),
+    ...policy.deniedBasenamePrefixes.flatMap((prefix) => {
+      const value = `${caseInsensitiveRegexLiteral(prefix)}[^/]*(/|$)`;
+      return [`^${root}/(.*/)?${value}`, `(^|/)${value}`];
+    }),
+    ...policy.deniedFilenameTokens.flatMap((token) => {
+      const value = `[^/]*${caseInsensitiveRegexLiteral(token)}[^/]*$`;
+      return [`^${root}/(.*/)?${value}`, `(^|/)${value}`];
+    }),
+  ];
+}
+
+function regexLiteral(value: string) {
+  return value.replace(/[\\^$.*+?()[\]{}|]/g, "\\$&");
+}
+
+function caseInsensitiveRegexLiteral(value: string) {
+  return [...value].map((character) => /[a-z]/i.test(character)
+    ? `[${character.toLowerCase()}${character.toUpperCase()}]`
+    : character === "." ? "[.]" : regexLiteral(character)).join("");
 }
 
 function resolvePolicyPaths(workspaceRoot: string, patterns: string[]) {
   const root = resolve(workspaceRoot);
   return patterns.map((pattern) => {
-    const path = resolve(root, pattern.slice(0, -3));
+    const subtree = pattern.endsWith("/**");
+    const path = resolve(root, subtree ? pattern.slice(0, -3) : pattern);
     if (path !== root && !path.startsWith(`${root}${sep}`)) {
       throw new Error(`DSH file policy escapes the workspace: ${pattern}`);
     }
-    return path;
+    return { path, subtree };
   });
 }
 

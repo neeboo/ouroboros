@@ -1,10 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import { existsSync, readFileSync } from "node:fs";
-import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { createDshCliExecutor } from "../packages/runner/src";
-import type { ResolvedExecutionRoute, RunCommandInput } from "../packages/runner/src";
+import type { DshFilePolicy, ResolvedExecutionRoute, RunCommandInput } from "../packages/runner/src";
 import { prepareDshModelTransportBroker } from "../packages/runner/src/executors/dsh-model-transport";
 import {
   darwinDshHostReadProfile,
@@ -52,11 +52,19 @@ const routeFixture: ResolvedExecutionRoute = {
   executionMode: "generic",
 };
 
-const frozenDshFilePolicy = {
+const frozenDshFilePolicy: DshFilePolicy = {
   schemaVersion: 1 as const,
   source: "frozen-design-mutation-surfaces" as const,
   allowedPaths: ["config/evolution/**", "tests/evolution/**"],
+  readOnlyPaths: [],
   forbiddenPaths: ["db/**", ".git/orbs/**", ".ouroboros/**", ".orbs/**"],
+  credentialPathPolicy: {
+    schemaVersion: 1 as const,
+    source: "frozen-runtime-credential-isolation" as const,
+    deniedSubtrees: ["story-mesh/.ainovel/**"],
+    deniedBasenamePrefixes: [".env"],
+    deniedFilenameTokens: ["api_key", "credential", "secret", "token"],
+  },
 };
 
 function executorInput(prompt = "Implement the bounded task and return the required JSON.") {
@@ -82,6 +90,123 @@ function availableDshResolution() {
 }
 
 describe("DeepSeek Harness CLI executor", () => {
+  test("accepts only bounded credential classifiers outside ordinary path globs", () => {
+    const normalized = normalizeDshFilePolicy(frozenDshFilePolicy);
+    expect(normalized.credentialPathPolicy).toEqual(frozenDshFilePolicy.credentialPathPolicy);
+    expect(() => normalizeDshFilePolicy({
+      ...frozenDshFilePolicy,
+      forbiddenPaths: [...frozenDshFilePolicy.forbiddenPaths, "**/*api_key*"],
+    })).toThrow("unsafe path");
+    expect(() => normalizeDshFilePolicy({
+      ...frozenDshFilePolicy,
+      credentialPathPolicy: {
+        ...frozenDshFilePolicy.credentialPathPolicy,
+        deniedFilenameTokens: ["api_key", "credential", "payment", "secret", "token"],
+      },
+    })).toThrow("credential path policy");
+    expect(normalizeDshFilePolicy({
+      ...frozenDshFilePolicy,
+      allowedPaths: ["src-react/app/navigation.ts", "src-react/app/router.tsx"],
+    }).allowedPaths).toEqual(["src-react/app/navigation.ts", "src-react/app/router.tsx"]);
+    expect(() => normalizeDshFilePolicy({
+      ...frozenDshFilePolicy,
+      allowedPaths: ["src-react/app/*.tsx"],
+    })).toThrow("unsafe path");
+  });
+
+  test.skipIf(process.platform !== "darwin")("allows exact frozen files without allowing a sibling", async () => {
+    const workspace = await mkdtemp(join(homedir(), ".orbs-dsh-exact-file-policy-"));
+    const exactFile = join(workspace, "src-react", "app", "navigation.ts");
+    const siblingFile = join(workspace, "src-react", "app", "unfrozen.ts");
+    const filePolicy = normalizeDshFilePolicy({
+      schemaVersion: 1,
+      source: "frozen-design-mutation-surfaces",
+      allowedPaths: ["src-react/app/navigation.ts"],
+      readOnlyPaths: [],
+      forbiddenPaths: [],
+    });
+    let bundle: Awaited<ReturnType<typeof prepareDshProcessPolicy>> = null;
+    try {
+      bundle = await prepareDshProcessPolicy({
+        workspaceRoot: workspace,
+        permissionMode: "workspace-write",
+        filePolicy,
+      });
+      const profile = darwinDshProcessProfile({ workspaceRoot: workspace, allowedPaths: filePolicy.allowedPaths });
+      const write = (path: string) => Bun.spawnSync({
+        cmd: ["/usr/bin/sandbox-exec", "-p", profile, "--", "/bin/sh", "-c", `printf ok > ${JSON.stringify(path)}`],
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      expect(write(exactFile).exitCode).toBe(0);
+      expect(write(siblingFile).exitCode).not.toBe(0);
+    } finally {
+      await bundle?.cleanup();
+      await rm(workspace, { recursive: true, force: true });
+    }
+  });
+
+  test.skipIf(process.platform !== "darwin")("denies frozen credential filenames and subtrees without broad glob support", async () => {
+    const workspace = await mkdtemp(join(homedir(), ".orbs-dsh-credential-policy-"));
+    const externalRepository = await mkdtemp(join(homedir(), ".orbs-dsh-external-repository-"));
+    const ordinary = join(workspace, "src", "ordinary.txt");
+    const secretPaths = [
+      join(workspace, ".env.local"),
+      join(workspace, ".env", "nested.json"),
+      join(workspace, "src", ".ENV.production"),
+      join(workspace, "src", "service_api_key.json"),
+      join(workspace, "src", "SERVICE_API_KEY.JSON"),
+      join(workspace, "src", "access-token.txt"),
+      join(workspace, "src", "credential.json"),
+      join(workspace, "src", "client-secret.txt"),
+      join(workspace, "story-mesh", ".ainovel", "config.json"),
+    ];
+    await mkdir(join(workspace, "src"), { recursive: true });
+    await mkdir(join(workspace, "story-mesh", ".ainovel"), { recursive: true });
+    await writeFile(ordinary, "ordinary\n");
+    for (const path of secretPaths) {
+      await mkdir(dirname(path), { recursive: true });
+      await writeFile(path, "credential-sentinel\n");
+    }
+    const secretAlias = join(workspace, "src", "ordinary-alias.txt");
+    await symlink(join(workspace, ".env.local"), secretAlias);
+    const externalAinovel = join(externalRepository, "story-mesh", ".ainovel", "config.json");
+    const externalEnv = join(externalRepository, ".env.production");
+    const externalToken = join(externalRepository, "src", "service-token.json");
+    await mkdir(dirname(externalAinovel), { recursive: true });
+    await writeFile(externalAinovel, "external-credential-sentinel\n");
+    await writeFile(externalEnv, "external-credential-sentinel\n");
+    await mkdir(dirname(externalToken), { recursive: true });
+    await writeFile(externalToken, "external-credential-sentinel\n");
+    const filePolicy = normalizeDshFilePolicy(frozenDshFilePolicy);
+    const profile = darwinDshProcessProfile({
+      workspaceRoot: workspace,
+      allowedPaths: filePolicy.allowedPaths,
+      forbiddenPaths: [...filePolicy.readOnlyPaths, ...filePolicy.forbiddenPaths],
+      credentialPathPolicy: filePolicy.credentialPathPolicy,
+    });
+    const read = (path: string) => Bun.spawnSync({
+      cmd: ["/usr/bin/sandbox-exec", "-p", profile, "--", "/bin/cat", path],
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    try {
+      expect(read(ordinary).exitCode).toBe(0);
+      for (const path of secretPaths) {
+        const denied = read(path);
+        expect(denied.exitCode).not.toBe(0);
+        expect(denied.stdout.toString()).not.toContain("credential-sentinel");
+      }
+      expect(read(secretAlias).exitCode).not.toBe(0);
+      expect(read(externalAinovel).exitCode).not.toBe(0);
+      expect(read(externalEnv).exitCode).not.toBe(0);
+      expect(read(externalToken).exitCode).not.toBe(0);
+    } finally {
+      await rm(workspace, { recursive: true, force: true });
+      await rm(externalRepository, { recursive: true, force: true });
+    }
+  });
+
   test("brokers only authenticated DeepSeek chat completions without exposing the host key", async () => {
     const upstream: Array<{ url: string; authorization: string | null; body: string }> = [];
     const broker = await prepareDshModelTransportBroker({
