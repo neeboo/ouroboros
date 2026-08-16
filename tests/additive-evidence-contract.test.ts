@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { applyHarnessAction, canonicalEvolutionValueSha256, Harness } from "../packages/harness/src";
@@ -315,7 +315,297 @@ describe("additive evidence-contract delivery", () => {
     })).toThrow(/latest repair lineage.*has no passing verifier/i);
     expect(harness.getRun(fixture.deliveryRunId)?.status).toBe("todo");
   });
+
+  test("verified evidence-only closeout freezes both isolated worktrees into one unstarted integration Designer", async () => {
+    const fixture = seedAdditiveDelivery(harness, dir, true);
+    const worktrees = await seedIntegrationWorktrees(harness, dir);
+    applyHarnessAction(harness, {
+      type: "materializeAdditiveEvidenceContractRecovery",
+      runId: fixture.deliveryRunId,
+      plannerTaskId: fixture.plannerTaskId,
+    } as never);
+    const graph = harness.getRun(fixture.deliveryRunId)!.context.additiveEvidenceContractTaskGraph as Record<string, string>;
+    reconcileAdditiveEvidenceContract({ harness, runId: fixture.deliveryRunId });
+    harness.recordAttempt({
+      taskId: graph.verifierTaskId,
+      input: { executor: "codex-resumable", permissionMode: "read-only" },
+      output: {
+        status: "done",
+        verdict: "pass",
+        summary: "The evidence-only overlay passed.",
+        changedFiles: [],
+        checks: Array.from({ length: 16 }, (_, index) => ({ name: `check-${index}`, status: "passed" })),
+        artifacts: [],
+        problems: [],
+      },
+    });
+    expect(applyHarnessAction(harness, {
+      type: "prepareRunDrain",
+      runId: fixture.deliveryRunId,
+      maxTries: 3,
+    })).toMatchObject({ status: "done" });
+
+    const result = applyHarnessAction(harness, {
+      type: "materializeOverallGoalIntegrationDesigner",
+      runId: fixture.deliveryRunId,
+    } as never);
+    const replay = applyHarnessAction(harness, {
+      type: "materializeOverallGoalIntegrationDesigner",
+      runId: fixture.deliveryRunId,
+    } as never);
+    const receipt = result.artifacts.find((artifact) => artifact.kind === "overall_goal_integration_designer_trigger")!;
+
+    expect(result).toMatchObject({
+      status: "done",
+      actionType: "materializeOverallGoalIntegrationDesigner",
+      artifacts: [expect.objectContaining({
+        kind: "overall_goal_integration_designer_trigger",
+        sourceRunId: fixture.deliveryRunId,
+        blockedRuntimeRunId: "run_source_blocked",
+        backendFileCount: 2,
+        frontendFileCount: 2,
+        reused: false,
+      })],
+    });
+    expect(replay).toMatchObject({ status: "done", eventId: result.eventId });
+    const nextRunId = String(receipt.runId);
+    const nextTaskId = String(receipt.taskId);
+    const nextOverview = harness.getRunOverview({ runId: nextRunId, eventLimit: 0 });
+    expect(nextOverview.run).toMatchObject({
+      status: "todo",
+      context: {
+        source: "target-system-design",
+        parentRunId: fixture.deliveryRunId,
+        overallGoalComplete: false,
+        overallGoalIntegrationEvidence: {
+          sourceRunId: fixture.deliveryRunId,
+          blockedRuntimeRunId: "run_source_blocked",
+          worktrees: [
+            expect.objectContaining({
+              repositoryId: "target-backend",
+              head: worktrees.backendHead,
+              branch: worktrees.backendBranch,
+              files: [
+                expect.objectContaining({ path: "src/domain/runtime.ts", sha256: expect.stringMatching(/^[0-9a-f]{64}$/) }),
+                expect.objectContaining({
+                  path: "tests/runtime-integration/.tmp/host-evidence.json",
+                  commitDisposition: "must-exclude-unless-frozen-contract-explicitly-allows",
+                }),
+              ],
+            }),
+            expect.objectContaining({
+              repositoryId: "target-frontend",
+              head: worktrees.frontendHead,
+              branch: worktrees.frontendBranch,
+              files: [
+                expect.objectContaining({ path: "src-react/app/navigation.ts" }),
+                expect.objectContaining({ path: "src-react/features/studio-os/page.tsx" }),
+              ],
+            }),
+          ],
+          runtimeSwitchEvidence: { status: "unverified" },
+        },
+      },
+    });
+    expect(nextOverview.tasks).toEqual([
+      expect.objectContaining({
+        id: nextTaskId,
+        role: "designer",
+        status: "todo",
+        config: expect.objectContaining({
+          readOnly: true,
+          forbidImplementation: true,
+          forbidBrowser: true,
+          browserProcessPolicy: "deny",
+          forbidNextTasks: true,
+          forbidNextRuns: true,
+        }),
+      }),
+    ]);
+    expect(nextOverview.sessions).toHaveLength(0);
+    expect(nextOverview.threads).toHaveLength(0);
+    expect(harness.getRun("run_source_blocked")).toMatchObject({
+      status: "blocked",
+      context: { repairReplanBudget: { used: 1, limit: 3 } },
+    });
+    expect(harness.getRun(fixture.deliveryRunId)?.status).toBe("done");
+  });
+
+  test("overall-goal integration trigger fails closed when a worktree writes outside its frozen repository boundary", async () => {
+    const fixture = seedAdditiveDelivery(harness, dir, true);
+    const worktrees = await seedIntegrationWorktrees(harness, dir);
+    await writeFile(join(worktrees.backendPath, "README.md"), "unauthorized\n");
+    applyHarnessAction(harness, {
+      type: "materializeAdditiveEvidenceContractRecovery",
+      runId: fixture.deliveryRunId,
+      plannerTaskId: fixture.plannerTaskId,
+    } as never);
+    const graph = harness.getRun(fixture.deliveryRunId)!.context.additiveEvidenceContractTaskGraph as Record<string, string>;
+    reconcileAdditiveEvidenceContract({ harness, runId: fixture.deliveryRunId });
+    harness.recordAttempt({
+      taskId: graph.verifierTaskId,
+      input: { executor: "codex-resumable" },
+      output: { status: "done", verdict: "pass", summary: "pass", changedFiles: [], checks: [], artifacts: [], problems: [] },
+    });
+    applyHarnessAction(harness, { type: "prepareRunDrain", runId: fixture.deliveryRunId, maxTries: 3 });
+
+    const result = applyHarnessAction(harness, {
+      type: "materializeOverallGoalIntegrationDesigner",
+      runId: fixture.deliveryRunId,
+    } as never);
+    expect(result).toMatchObject({ status: "blocked" });
+    expect(result.problems.join("\n")).toMatch(/outside the frozen allowed paths/i);
+    expect(harness.listRuns({ limit: 100 }).filter((run) => run.context.overallGoalIntegrationEvidence)).toHaveLength(0);
+  });
 });
+
+async function seedIntegrationWorktrees(harness: Harness, rootPath: string) {
+  const backendRoot = join(rootPath, "backend-root");
+  const frontendRoot = join(rootPath, "frontend-root");
+  const backendPath = join(backendRoot, ".ouroboros/worktrees/run_source_blocked-target-backend");
+  const frontendPath = join(frontendRoot, ".ouroboros/worktrees/run_source_blocked-target-frontend");
+  const initialize = async (repositoryRoot: string, worktreePath: string, branch: string, frontend = false) => {
+    await mkdir(repositoryRoot, { recursive: true });
+    runGit(repositoryRoot, ["init"]);
+    runGit(repositoryRoot, ["config", "user.email", "orbs@example.test"]);
+    runGit(repositoryRoot, ["config", "user.name", "Ouroboros"]);
+    await writeFile(join(repositoryRoot, "baseline.txt"), "baseline\n");
+    if (frontend) {
+      await mkdir(join(repositoryRoot, "src-react/app"), { recursive: true });
+      await writeFile(join(repositoryRoot, "src-react/app/navigation.ts"), "export const navigation = [];\n");
+    }
+    runGit(repositoryRoot, ["add", "."]);
+    runGit(repositoryRoot, ["commit", "-m", "baseline"]);
+    const head = runGit(repositoryRoot, ["rev-parse", "HEAD"]);
+    await mkdir(join(repositoryRoot, ".ouroboros/worktrees"), { recursive: true });
+    runGit(repositoryRoot, ["worktree", "add", "-b", branch, worktreePath, head]);
+    return head;
+  };
+  const backendBranch = "codex/orbs-source_block-target-backend";
+  const frontendBranch = "codex/orbs-source_block-target-frontend";
+  const backendHead = await initialize(backendRoot, backendPath, backendBranch);
+  const frontendHead = await initialize(frontendRoot, frontendPath, frontendBranch, true);
+  await mkdir(join(backendPath, "src/domain"), { recursive: true });
+  await mkdir(join(backendPath, "tests/runtime-integration/.tmp"), { recursive: true });
+  await writeFile(join(backendPath, "src/domain/runtime.ts"), "export const runtime = true;\n");
+  await writeFile(join(backendPath, "tests/runtime-integration/.tmp/host-evidence.json"), "{}\n");
+  await mkdir(join(frontendPath, "src-react/features/studio-os"), { recursive: true });
+  await writeFile(join(frontendPath, "src-react/app/navigation.ts"), "export const navigation = ['studio'];\n");
+  await writeFile(join(frontendPath, "src-react/features/studio-os/page.tsx"), "export const Page = () => null;\n");
+
+  const sourceRun = harness.getRun("run_source_blocked")!;
+  const boundaryBody = {
+    schemaVersion: 1,
+    repositories: [
+      {
+        id: "target-backend",
+        role: "backend",
+        projectId: sourceRun.projectId,
+        repoPath: backendRoot,
+        expectedHead: backendHead,
+        access: "isolated-write",
+        allowedPaths: ["src/domain/**", "tests/runtime-integration/**"],
+        readOnlyPaths: ["config/evolution/**", "tests/evolution/**"],
+        forbiddenPaths: [".git/orbs/**", ".orbs/**", ".ouroboros/**", "db/**"],
+      },
+      {
+        id: "target-frontend",
+        role: "frontend",
+        projectId: "project_frontend",
+        repoPath: frontendRoot,
+        expectedHead: frontendHead,
+        access: "new-isolated-worktree",
+        allowedPaths: ["src-react/features/studio-os/**", "src-react/app/navigation.ts"],
+        readOnlyPaths: [],
+        forbiddenPaths: [".git/orbs/**", ".orbs/**", ".ouroboros/**", "db/**"],
+      },
+      {
+        id: "ainovel-source",
+        role: "ainovel",
+        projectId: null,
+        repoPath: rootPath,
+        expectedHead: "a".repeat(40),
+        access: "read-only",
+        allowedPaths: ["src/**"],
+        readOnlyPaths: ["src/**"],
+        forbiddenPaths: [".ainovel/**"],
+      },
+      {
+        id: "dsh-source",
+        role: "dsh",
+        projectId: null,
+        repoPath: rootPath,
+        expectedHead: "b".repeat(40),
+        access: "read-only",
+        allowedPaths: ["apps/cli/src/**"],
+        readOnlyPaths: ["apps/cli/src/**"],
+        forbiddenPaths: [".orbs/**"],
+      },
+    ],
+    gateway: { host: "127.0.0.1", port: 10588, browserAllowed: false },
+  };
+  const runtimeIntegrationBoundary = {
+    ...boundaryBody,
+    boundarySha256: canonicalEvolutionValueSha256(boundaryBody),
+  };
+  const sourceBundleBody = {
+    schemaVersion: 1,
+    purpose: "runtime-integration-after-verified-package",
+    targetProjectId: sourceRun.projectId,
+    runtimeIntegrationBoundary,
+    boundarySha256: runtimeIntegrationBoundary.boundarySha256,
+  };
+  harness.updateRun({
+    runId: sourceRun.id,
+    status: "blocked",
+    contextPatch: {
+      targetSystemEvidenceBundle: {
+        ...sourceBundleBody,
+        bundleSha256: canonicalEvolutionValueSha256(sourceBundleBody),
+      },
+    },
+  });
+  for (const [repositoryId, worktreePath, expectedHead] of [
+    ["target-backend", backendPath, backendHead],
+    ["target-frontend", frontendPath, frontendHead],
+  ] as const) {
+    const taskId = harness.createTask({
+      runId: sourceRun.id,
+      role: "system",
+      goal: `Bind ${repositoryId}`,
+      prompt: "Host-owned binding.",
+      worktreePath,
+      config: {
+        repositoryId,
+        repositoryRoot: repositoryId === "target-backend" ? backendRoot : frontendRoot,
+        expectedHead,
+        worktreeStrategy: {
+          schemaVersion: 1,
+          mode: "isolated-repository-chain",
+          repositoryId,
+          repositoryRoot: repositoryId === "target-backend" ? backendRoot : frontendRoot,
+          expectedHead,
+          path: worktreePath,
+          isolated: true,
+          writesUserWorktree: false,
+        },
+      },
+    });
+    harness.recordAttempt({
+      taskId,
+      input: { executor: "harness-action" },
+      output: { status: "done", summary: "bound", changedFiles: [], checks: [], artifacts: [], problems: [] },
+    });
+  }
+  harness.updateRunStatus({ runId: sourceRun.id, status: "blocked" });
+  return { backendPath, frontendPath, backendHead, frontendHead, backendBranch, frontendBranch };
+}
+
+function runGit(cwd: string, args: string[]) {
+  const result = Bun.spawnSync(["git", "-C", cwd, ...args], { stdout: "pipe", stderr: "pipe" });
+  if (result.exitCode !== 0) throw new Error(result.stderr.toString());
+  return result.stdout.toString().trim();
+}
 
 function seedAdditiveDelivery(harness: Harness, rootPath: string, includeLegacyBareTasks = false) {
   const projectId = harness.createProject({ name: "evidence target", rootPath });

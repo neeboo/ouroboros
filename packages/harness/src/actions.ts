@@ -226,6 +226,10 @@ export type HarnessAction =
       systemTaskId: string;
     }
   | {
+      type: "materializeOverallGoalIntegrationDesigner";
+      runId: string;
+    }
+  | {
       type: "materializeRuntimeIntegrationDesignRecovery";
       sourceRunId: string;
       sourceTaskId: string;
@@ -694,6 +698,8 @@ const FROZEN_DESIGN_CONTEXT_KEYS = new Set([
   "additiveEvidenceContractTaskGraph",
   "additiveEvidenceContractOverlay",
   "additiveEvidenceContractOverlayState",
+  "overallGoalIntegrationContinuation",
+  "overallGoalIntegrationEvidence",
 ]);
 
 function frozenDesignContextKeys(keys: Iterable<string>): string[] {
@@ -927,6 +933,13 @@ export function parseHarnessAction(value: unknown): HarnessAction {
       type,
       runId: exactSafeIdentifierField(record, "runId"),
       systemTaskId: exactSafeIdentifierField(record, "systemTaskId"),
+    };
+  }
+  if (type === "materializeOverallGoalIntegrationDesigner") {
+    assertOnlyFields(record, type, ["type", "runId"]);
+    return {
+      type,
+      runId: exactSafeIdentifierField(record, "runId"),
     };
   }
   if (type === "materializeFrozenEvidenceConflictDesigner") {
@@ -1404,7 +1417,7 @@ export function parseHarnessAction(value: unknown): HarnessAction {
     };
   }
   throw new Error(
-    "harness action type must be reclaimRunningTasks, retryTask, reconcileRunEvidence, recordSignal, linkResearchEvidence, materializeDesignerActionRecovery, materializeDesignDeliveryRecovery, materializeDesignWorkerRuntimeRecovery, materializeDesignWorkerTransportRecovery, materializeVerifierRepairRecovery, recoverRuntimeIntegrationHostEvidenceFailure, reconcileVerifierRepairHandoff, buildVersionedCorpusManifest, bindHostEvidenceMaintenanceReceipt, materializeHostEvidenceMaintenanceDelivery, materializeAdditiveEvidenceContractRecovery, recordAdditiveEvidenceContractOverlay, materializeRuntimeIntegrationDesignRecovery, materializeFrozenEvidenceConflictDesigner, materializeRuntimeIntegrationTaskGraphRecovery, recoverRuntimeIntegrationTaskGraphPreparationFailure, installLocalDshCli, recoverRuntimeIntegrationDshInstallationFailure, recoverRuntimeIntegrationDshRuntimeBindingFailure, markRunTodo, updateRunContext, amendRunContract, retireRun, retireTask, prepareRunDrain, completeSystemTask, integrateVerifiedRun, pushExactGitRef, createExactGitRef, commitExactGitIndex, stageExactWorkerFilesForVerification, materializeAttemptArtifactsForVerification, verifySealedCorpusForVerification, registerEvolutionProfile, recordProductionEpisode, registerHarnessVariant, activateHarnessRevision, freezeMatchedExperiment, interruptAttemptAndCreateTask, interruptRunningAttemptsAndCreateTask, acceptGuardrailProposal, startSubsession, collectSubsessions, cancelSubsessions, or runWatchdogPass",
+    "harness action type must be reclaimRunningTasks, retryTask, reconcileRunEvidence, recordSignal, linkResearchEvidence, materializeDesignerActionRecovery, materializeDesignDeliveryRecovery, materializeDesignWorkerRuntimeRecovery, materializeDesignWorkerTransportRecovery, materializeVerifierRepairRecovery, recoverRuntimeIntegrationHostEvidenceFailure, reconcileVerifierRepairHandoff, buildVersionedCorpusManifest, bindHostEvidenceMaintenanceReceipt, materializeHostEvidenceMaintenanceDelivery, materializeAdditiveEvidenceContractRecovery, recordAdditiveEvidenceContractOverlay, materializeOverallGoalIntegrationDesigner, materializeRuntimeIntegrationDesignRecovery, materializeFrozenEvidenceConflictDesigner, materializeRuntimeIntegrationTaskGraphRecovery, recoverRuntimeIntegrationTaskGraphPreparationFailure, installLocalDshCli, recoverRuntimeIntegrationDshInstallationFailure, recoverRuntimeIntegrationDshRuntimeBindingFailure, markRunTodo, updateRunContext, amendRunContract, retireRun, retireTask, prepareRunDrain, completeSystemTask, integrateVerifiedRun, pushExactGitRef, createExactGitRef, commitExactGitIndex, stageExactWorkerFilesForVerification, materializeAttemptArtifactsForVerification, verifySealedCorpusForVerification, registerEvolutionProfile, recordProductionEpisode, registerHarnessVariant, activateHarnessRevision, freezeMatchedExperiment, interruptAttemptAndCreateTask, interruptRunningAttemptsAndCreateTask, acceptGuardrailProposal, startSubsession, collectSubsessions, cancelSubsessions, or runWatchdogPass",
   );
 }
 
@@ -1491,6 +1504,10 @@ export function applyHarnessAction(
 
   if (action.type === "recordAdditiveEvidenceContractOverlay") {
     return applyAdditiveEvidenceContractOverlayAtomically(harness, action);
+  }
+
+  if (action.type === "materializeOverallGoalIntegrationDesigner") {
+    return applyOverallGoalIntegrationDesignerAtomically(harness, action, options);
   }
 
   if (action.type === "materializeRuntimeIntegrationDesignRecovery") {
@@ -2312,6 +2329,7 @@ type VersionedCorpusManifestAction = Extract<HarnessAction, { type: "buildVersio
 type HostEvidenceMaintenanceDeliveryAction = Extract<HarnessAction, { type: "materializeHostEvidenceMaintenanceDelivery" }>;
 type AdditiveEvidenceContractRecoveryAction = Extract<HarnessAction, { type: "materializeAdditiveEvidenceContractRecovery" }>;
 type AdditiveEvidenceContractOverlayAction = Extract<HarnessAction, { type: "recordAdditiveEvidenceContractOverlay" }>;
+type OverallGoalIntegrationDesignerAction = Extract<HarnessAction, { type: "materializeOverallGoalIntegrationDesigner" }>;
 
 function applyAdditiveEvidenceContractRecoveryAtomically(
   harness: Harness,
@@ -2656,6 +2674,457 @@ function applyAdditiveEvidenceContractOverlayAtomically(
     });
     return { ...result, eventId };
   });
+}
+
+interface OverallGoalWorktreeFileReceipt {
+  path: string;
+  status: "modified" | "untracked";
+  sha256: string;
+  sizeBytes: number;
+  commitDisposition: "eligible" | "must-exclude-unless-frozen-contract-explicitly-allows";
+}
+
+interface OverallGoalWorktreeReceipt {
+  schemaVersion: 1;
+  repositoryId: "target-backend" | "target-frontend";
+  repositoryRoot: string;
+  worktreePath: string;
+  branch: string;
+  head: string;
+  commonGitDir: string;
+  allowedPaths: string[];
+  readOnlyPaths: string[];
+  forbiddenPaths: string[];
+  files: OverallGoalWorktreeFileReceipt[];
+  receiptSha256: string;
+}
+
+function applyOverallGoalIntegrationDesignerAtomically(
+  harness: Harness,
+  action: OverallGoalIntegrationDesignerAction,
+  options: HarnessActionOptions,
+): HarnessActionResult & { eventId: string } {
+  const git = options.runGit ?? defaultGitRunner;
+  return harness.runInImmediateTransaction((db) => {
+    const request = safeRequest(action);
+    const prior = harness.listHarnessActionEventsWithDb(db, {
+      actionType: action.type,
+      statuses: ["done"],
+      limit: 1_000,
+    }).find((event) => stableFingerprint(event.request) === stableFingerprint(request));
+    if (prior) return { ...(prior.result as unknown as HarnessActionResult), eventId: prior.id };
+
+    let result: HarnessActionResult;
+    try {
+      const overview = harness.getRunOverviewWithDb(db, { runId: action.runId, eventLimit: 0 });
+      const run = overview.run;
+      const closeout = objectRecord(run?.context.additiveEvidenceContractCloseout, "additiveEvidenceContractCloseout");
+      if (!run || !run.projectId || run.status !== "done" || run.context.source !== "design"
+        || closeout.schemaVersion !== 1 || closeout.status !== "verified"
+        || closeout.packageOnly !== true || closeout.evidenceContractOnly !== true
+        || closeout.targetFilesChanged !== 0) {
+        throw new Error("overall-goal integration continuation requires one verified evidence-only design closeout");
+      }
+      const readiness = describeRunCompletionReadiness(overview);
+      if (readiness.blockers.length > 0) {
+        throw new Error(`evidence-only closeout is no longer completion-ready: ${readiness.blockers.map((item) => item.reason).join("; ")}`);
+      }
+      if (overview.tasks.some((task) => task.status === "todo" || task.status === "running")
+        || overview.threads.some((thread) => thread.status === "running")) {
+        throw new Error("evidence-only closeout still has active tasks or execution threads");
+      }
+      const verifierTaskId = exactContextId(closeout.verifierTaskId, "overall-goal closeout verifier task");
+      const verifierAttemptId = exactContextId(closeout.verifierAttemptId, "overall-goal closeout verifier attempt");
+      const verifier = overview.tasks.find((task) => task.id === verifierTaskId);
+      const verifierSession = overview.sessions.find((session) =>
+        session.taskId === verifierTaskId && session.attemptId === verifierAttemptId);
+      if (!verifier || verifier.role !== "verifier" || verifier.status !== "done"
+        || !verifierSession || verifierSession.status !== "done" || verifierSession.output.verdict !== "pass"
+        || (verifierSession.output.problems ?? []).length !== 0
+        || (verifierSession.output.changedFiles ?? []).length !== 0) {
+        throw new Error("overall-goal continuation lost its independent passing overlay Verifier");
+      }
+      const overlayEventId = exactContextId(closeout.overlayActionEventId, "overall-goal overlay action event");
+      const overlayEvent = harness.getHarnessActionEventWithDb(db, { id: overlayEventId });
+      if (!overlayEvent || overlayEvent.status !== "done"
+        || overlayEvent.actionType !== "recordAdditiveEvidenceContractOverlay"
+        || overlayEvent.request.runId !== run.id) {
+        throw new Error("overall-goal continuation lost its audited overlay action receipt");
+      }
+      const blockedRuntimeRunId = exactContextId(closeout.sourceRunId, "overall-goal blocked runtime run");
+      const blockedRun = harness.getRunWithDb(db, blockedRuntimeRunId);
+      const blockedOverview = blockedRun
+        ? harness.getRunOverviewWithDb(db, { runId: blockedRun.id, eventLimit: 0 })
+        : null;
+      if (!blockedRun || !blockedOverview || blockedRun.projectId !== run.projectId || blockedRun.status !== "blocked"
+        || blockedOverview.tasks.some((task) => task.status === "todo" || task.status === "running")
+        || blockedOverview.threads.some((thread) => thread.status === "running")) {
+        throw new Error("overall-goal continuation requires the drained blocked runtime source run");
+      }
+      const sourceRepairBudgetSha256 = canonicalEvolutionValueSha256(blockedRun.context.repairReplanBudget);
+      if (closeout.sourceRepairBudgetSha256 !== sourceRepairBudgetSha256) {
+        throw new Error("blocked runtime Repair budget changed after evidence-only verification");
+      }
+      const sourceBundle = objectRecord(blockedRun.context.targetSystemEvidenceBundle, "blocked runtime targetSystemEvidenceBundle");
+      const sourceBundleSha256 = exactSha256Field(sourceBundle, "bundleSha256");
+      const { bundleSha256: _sourceBundleSha256, ...sourceBundleBody } = sourceBundle;
+      if (canonicalEvolutionValueSha256(sourceBundleBody) !== sourceBundleSha256) {
+        throw new Error("blocked runtime authoritative evidence bundle hash drifted");
+      }
+      const boundaryRecord = objectRecord(sourceBundle.runtimeIntegrationBoundary, "runtimeIntegrationBoundary");
+      const normalizedBoundary = parseRuntimeIntegrationBoundaryInput({
+        schemaVersion: boundaryRecord.schemaVersion,
+        repositories: boundaryRecord.repositories,
+        gateway: boundaryRecord.gateway,
+      });
+      const boundarySha256 = exactSha256Field(boundaryRecord, "boundarySha256");
+      if (canonicalEvolutionValueSha256(normalizedBoundary) !== boundarySha256
+        || sourceBundle.boundarySha256 !== boundarySha256) {
+        throw new Error("blocked runtime repository boundary hash drifted");
+      }
+      const additiveBundle = objectRecord(run.context.targetSystemEvidenceBundle, "additive targetSystemEvidenceBundle");
+      const verifiedRuntime = Array.isArray(additiveBundle.verifiedRuntime)
+        ? additiveBundle.verifiedRuntime.map((item, index) => {
+            const receipt = objectRecord(item, `verifiedRuntime[${index}]`);
+            return {
+              taskId: exactContextId(receipt.taskId, `verifiedRuntime[${index}].taskId`),
+              attemptId: exactContextId(receipt.attemptId, `verifiedRuntime[${index}].attemptId`),
+              stageId: exactNonEmptyStringField(receipt, "stageId"),
+              outputSha256: exactSha256Field(receipt, "outputSha256"),
+              profileReceiptSha256: exactSha256Field(receipt, "profileReceiptSha256"),
+            };
+          })
+        : [];
+      if (verifiedRuntime.length !== 5 || new Set(verifiedRuntime.map((receipt) => receipt.stageId)).size !== 5) {
+        throw new Error("overall-goal continuation requires all five distinct verified runtime stage receipts");
+      }
+      const worktrees = (["target-backend", "target-frontend"] as const).map((repositoryId) => {
+        const repository = normalizedBoundary.repositories.find((candidate) => candidate.id === repositoryId);
+        if (!repository) throw new Error(`runtime boundary is missing ${repositoryId}`);
+        return readOverallGoalWorktreeReceipt(git, blockedOverview, blockedRun.id, repositoryId, repository);
+      });
+      const evidenceBody = {
+        schemaVersion: 1,
+        purpose: "overall-goal-integration-closeout",
+        projectId: run.projectId,
+        sourceRunId: run.id,
+        blockedRuntimeRunId: blockedRun.id,
+        overallGoalComplete: false,
+        evidenceOnlyCloseout: {
+          graphSha256: exactSha256Field(closeout, "graphSha256"),
+          overlaySha256: exactSha256Field(closeout, "overlaySha256"),
+          bundleSha256: exactSha256Field(closeout, "bundleSha256"),
+          overlayActionEventId: overlayEvent.id,
+          verifierTaskId,
+          verifierAttemptId,
+          verifierOutputSha256: canonicalEvolutionValueSha256(verifierSession.output),
+        },
+        frozenRuntimeBoundary: {
+          boundarySha256,
+          sourceBundleSha256,
+          sourceRepairBudgetSha256,
+        },
+        verifiedRuntime,
+        worktrees,
+        commitRequirements: {
+          independentVerifierPerRepository: true,
+          exactPathAndSha256Readback: true,
+          exactStagingCommitPushPerRepository: true,
+          excludeTemporaryAndControlFiles: true,
+          preserveUserMainWorktrees: true,
+        },
+        runtimeSwitchEvidence: {
+          status: "unverified",
+          requiredReceipts: [
+            "Docker rebuild and healthy container identity",
+            "PostgreSQL persistence and restart readback",
+            "127.0.0.1:10588 HTTP health and evidence identity",
+            "local runtime process commit and worktree binding",
+          ],
+        },
+        immutableConstraints: {
+          recoverBlockedRuntimeRun: false,
+          modifyFrozenPackage: false,
+          writeUserMainWorktrees: false,
+          browserAllowed: false,
+        },
+      };
+      const evidence = { ...evidenceBody, evidenceSha256: canonicalEvolutionValueSha256(evidenceBody) };
+      const existing = objectRecordOrNull(run.context.overallGoalIntegrationContinuation);
+      if (existing) {
+        if (existing.evidenceSha256 !== evidence.evidenceSha256
+          || typeof existing.runId !== "string" || typeof existing.taskId !== "string") {
+          throw new Error("overall-goal integration continuation conflicts with its prior frozen receipt");
+        }
+        const existingRun = harness.getRunWithDb(db, existing.runId);
+        const existingTask = existingRun
+          ? harness.getRunOverviewWithDb(db, { runId: existingRun.id, eventLimit: 0 }).tasks
+            .find((task) => task.id === existing.taskId)
+          : null;
+        if (!existingRun || !existingTask) throw new Error("overall-goal integration continuation points to missing state");
+        result = doneResult(action.type, `Overall-goal integration Designer ${existingTask.id} trigger reused.`, [
+          { name: "frozen evidence", status: "passed", evidence: evidence.evidenceSha256 },
+          { name: "Designer attempts", status: "passed", evidence: "0 at creation" },
+        ], [{
+          kind: "overall_goal_integration_designer_trigger",
+          runId: existingRun.id,
+          taskId: existingTask.id,
+          sourceRunId: run.id,
+          blockedRuntimeRunId: blockedRun.id,
+          evidenceSha256: evidence.evidenceSha256,
+          backendFileCount: worktrees[0]!.files.length,
+          frontendFileCount: worktrees[1]!.files.length,
+          reused: true,
+        }]);
+      } else {
+        const continuationKey = canonicalEvolutionValueSha256({
+          sourceRunId: run.id,
+          graphSha256: closeout.graphSha256,
+          evidenceSha256: evidence.evidenceSha256,
+        });
+        const runId = `run_${createHash("sha1").update(`overall-goal-integration|${continuationKey}`).digest("hex")}`;
+        const taskId = `task_${createHash("sha1").update(`overall-goal-integration-task|${continuationKey}`).digest("hex")}`;
+        const signalId = `signal_overall_goal_${createHash("sha256").update(continuationKey).digest("hex").slice(0, 32)}`;
+        if (harness.getRunWithDb(db, runId)) {
+          throw new Error("overall-goal integration stable IDs already exist without a source receipt");
+        }
+        const now = new Date().toISOString();
+        harness.createStrategySignalWithDb(db, {
+          id: signalId,
+          projectId: run.projectId,
+          signalClass: "system",
+          source: `overall-goal-continuation:${run.id}`,
+          title: "Verified runtime worktrees require governed integration closeout",
+          summary: "The additive evidence contract passed, while backend and frontend isolated worktrees remain uncommitted and runtime switch-over evidence remains unverified.",
+          observationTime: now,
+          confidence: 1,
+          evidence: [
+            `run:${run.id}`,
+            `run:${blockedRun.id}`,
+            `action:${overlayEvent.id}`,
+            `attempt:${verifierAttemptId}`,
+            ...worktrees.map((worktree) => `worktree-receipt:${worktree.receiptSha256}`),
+          ],
+          runId: run.id,
+          taskId: verifierTaskId,
+          attemptId: verifierAttemptId,
+          payload: {
+            kind: "overall-goal-integration-needed",
+            evidenceSha256: evidence.evidenceSha256,
+            packageOnly: true,
+            evidenceContractOnly: true,
+            overallGoalComplete: false,
+            sideEffectCounters: zeroSideEffectCounters(),
+          },
+        });
+        harness.createRunWithDb(db, {
+          id: runId,
+          goal: "Design the governed integration closeout for the verified backend and frontend runtime worktrees",
+          projectId: run.projectId,
+          projectRoot: run.projectRoot,
+          context: {
+            source: "target-system-design",
+            parentRunId: run.id,
+            projectId: run.projectId,
+            founderCharterId: run.context.founderCharterId,
+            designCharterId: run.context.designCharterId ?? run.context.founderCharterId,
+            overallGoalComplete: false,
+            overallGoalIntegrationEvidence: evidence,
+            targetSystemEvidenceBundle: {
+              schemaVersion: 1,
+              purpose: "overall-goal-integration-closeout",
+              signalId,
+              evidenceSha256: evidence.evidenceSha256,
+              sourceRunId: run.id,
+              blockedRuntimeRunId: blockedRun.id,
+              overallGoalComplete: false,
+            },
+          },
+        });
+        harness.createTaskWithDb(db, {
+          id: taskId,
+          runId,
+          role: "designer",
+          goal: "Propose a bounded integration closeout for the two verified isolated worktrees, or quiesce",
+          prompt: [
+            "Use only the host-frozen overallGoalIntegrationEvidence in task config.",
+            "The prior run completed an additive evidence contract only; the overall target delivery is still incomplete.",
+            "Propose at most one zero-cost governed integration closeout, or return a mutation-free quiescent decision.",
+            "A proposal must require independent read-only verification for backend and frontend, exact per-repository path/SHA staging, commit and push receipts, and explicit exclusion of temporary/control files.",
+            "It must also require Docker, PostgreSQL, HTTP 127.0.0.1:10588, and local runtime switch-over receipts bound to the integrated commits.",
+            "Do not recover the blocked runtime run, modify the frozen package, write either user main worktree, execute tests, start a browser, commit files, or implement anything in this Designer task.",
+            "Zero-spend compliant proposals use the existing cost-only authority gate. Paid, publishing, copyright, or production commitments retain their existing human checkpoints.",
+          ].join("\n"),
+          doneWhen: [
+            "the exact overlay, Verifier, five-stage and worktree receipts are read back",
+            "temporary and control-file exclusions are explicit per repository",
+            "commit, push, Docker, PostgreSQL, HTTP 10588 and runtime switch-over evidence are frozen",
+            "one governed zero-cost proposal is emitted or a justified mutation-free quiescent decision is recorded",
+            "no implementation, commit, target test, browser, production mutation, or user-worktree write occurs",
+          ],
+          config: {
+            executor: "codex-resumable",
+            permissionMode: "read-only",
+            readOnly: true,
+            forbidImplementation: true,
+            forbidBrowser: true,
+            browserProcessPolicy: "deny",
+            forbidNextTasks: true,
+            forbidNextRuns: true,
+            overallGoalIntegrationEvidence: evidence,
+          },
+        });
+        const continuation = {
+          schemaVersion: 1,
+          runId,
+          taskId,
+          signalId,
+          evidenceSha256: evidence.evidenceSha256,
+          blockedRuntimeRunId: blockedRun.id,
+          sourceRepairBudgetSha256,
+          createdAt: now,
+        };
+        harness.updateRunWithDb(db, {
+          runId: run.id,
+          contextPatch: { overallGoalIntegrationContinuation: continuation },
+        });
+        result = doneResult(action.type, `Overall-goal integration Designer ${taskId} created without execution.`, [
+          { name: "evidence-only closeout", status: "passed", evidence: run.id },
+          { name: "five-stage runtime receipts", status: "passed", evidence: "5" },
+          { name: "backend worktree", status: "passed", evidence: worktrees[0]!.receiptSha256 },
+          { name: "frontend worktree", status: "passed", evidence: worktrees[1]!.receiptSha256 },
+          { name: "blocked runtime budget", status: "passed", evidence: sourceRepairBudgetSha256 },
+          { name: "Designer attempts", status: "passed", evidence: "0" },
+        ], [{
+          kind: "overall_goal_integration_designer_trigger",
+          runId,
+          taskId,
+          signalId,
+          sourceRunId: run.id,
+          blockedRuntimeRunId: blockedRun.id,
+          evidenceSha256: evidence.evidenceSha256,
+          backendFileCount: worktrees[0]!.files.length,
+          frontendFileCount: worktrees[1]!.files.length,
+          reused: false,
+        }]);
+      }
+    } catch (error) {
+      result = blockedResult(action.type, `Overall-goal integration Designer blocked: ${errorMessage(error)}`, [errorMessage(error)]);
+    }
+    const eventId = harness.recordHarnessActionEventWithDb(db, {
+      actionType: action.type,
+      status: result.status,
+      request,
+      result: resultToRecord(result),
+    });
+    return { ...result, eventId };
+  });
+}
+
+function readOverallGoalWorktreeReceipt(
+  git: GitRunner,
+  overview: RunOverview,
+  sourceRunId: string,
+  repositoryId: "target-backend" | "target-frontend",
+  repository: RuntimeIntegrationRepositoryBoundary,
+): OverallGoalWorktreeReceipt {
+  const candidates = overview.tasks.filter((task) =>
+    task.worktreePath
+    && task.config?.repositoryId === repositoryId
+    && task.config?.expectedHead === repository.expectedHead);
+  const worktreePaths = [...new Set(candidates.map((task) => task.worktreePath!))];
+  if (worktreePaths.length !== 1) {
+    throw new Error(`${repositoryId} must resolve to exactly one frozen isolated worktree`);
+  }
+  const worktreePath = realpathSync(worktreePaths[0]!);
+  const repositoryRoot = realpathSync(repository.repoPath);
+  const expectedParent = join(repositoryRoot, ".ouroboros", "worktrees");
+  if (realpathSync(dirname(worktreePath)) !== realpathSync(expectedParent)) {
+    throw new Error(`${repositoryId} worktree is outside the frozen isolated worktree root`);
+  }
+  const expectedBranch = `codex/orbs-${sourceRunId.replace(/^run_/, "").slice(0, 12)}-${repositoryId}`;
+  const top = checkedGitOutput(git, worktreePath, ["rev-parse", "--show-toplevel"], `${repositoryId} top-level`);
+  const head = checkedGitOutput(git, worktreePath, ["rev-parse", "HEAD"], `${repositoryId} HEAD`);
+  const branch = checkedGitOutput(git, worktreePath, ["branch", "--show-current"], `${repositoryId} branch`);
+  const commonGitDir = realpathSync(checkedGitOutput(
+    git,
+    worktreePath,
+    ["rev-parse", "--path-format=absolute", "--git-common-dir"],
+    `${repositoryId} common Git directory`,
+  ));
+  const sourceCommonGitDir = realpathSync(checkedGitOutput(
+    git,
+    repositoryRoot,
+    ["rev-parse", "--path-format=absolute", "--git-common-dir"],
+    `${repositoryId} source common Git directory`,
+  ));
+  if (realpathSync(top) !== worktreePath || head !== repository.expectedHead || branch !== expectedBranch
+    || commonGitDir !== sourceCommonGitDir) {
+    throw new Error(
+      `${repositoryId} worktree identity, branch, HEAD, or Git boundary drifted `
+      + `(top=${realpathSync(top)}, worktree=${worktreePath}, head=${head}, expectedHead=${repository.expectedHead}, `
+      + `branch=${branch}, expectedBranch=${expectedBranch}, common=${commonGitDir}, sourceCommon=${sourceCommonGitDir})`,
+    );
+  }
+  const status = git({
+    cwd: worktreePath,
+    args: ["status", "--porcelain=v1", "-z", "--untracked-files=all"],
+    maxOutputBytes: MAX_INTEGRATION_CLOSURE_TOTAL_BYTES,
+  });
+  if (status.exitCode !== 0) throw new Error(`${repositoryId} worktree status failed`);
+  const records = status.stdout.split("\0").filter((record) => record.length > 0);
+  if (records.length === 0 || records.length > MAX_INTEGRATION_CLOSURE_PATHS) {
+    throw new Error(`${repositoryId} worktree must contain a bounded non-empty delivery candidate`);
+  }
+  let totalBytes = 0;
+  const files = records.map((record): OverallGoalWorktreeFileReceipt => {
+    if (record.length < 4 || record[2] !== " ") throw new Error(`${repositoryId} worktree status is malformed`);
+    const indexStatus = record[0]!;
+    const worktreeStatus = record[1]!;
+    const path = record.slice(3);
+    if (!((indexStatus === "?" && worktreeStatus === "?") || (indexStatus === " " && worktreeStatus === "M"))) {
+      throw new Error(`${repositoryId} worktree contains staged, deleted, renamed, or unsupported state: ${path}`);
+    }
+    if (!repository.allowedPaths.some((pattern) => evolutionPathMatches(pattern, path))
+      || repository.readOnlyPaths.some((pattern) => evolutionPathMatches(pattern, path))
+      || repository.forbiddenPaths.some((pattern) => evolutionPathMatches(pattern, path))) {
+      throw new Error(`${repositoryId} path is outside the frozen allowed paths: ${path}`);
+    }
+    const absolute = join(worktreePath, path);
+    const stat = lstatSync(absolute);
+    if (!stat.isFile() || stat.isSymbolicLink() || stat.size > MAX_INTEGRATION_CLOSURE_FILE_BYTES
+      || !realpathSync(absolute).startsWith(`${worktreePath}${sep}`)) {
+      throw new Error(`${repositoryId} candidate is not one bounded regular file: ${path}`);
+    }
+    totalBytes += stat.size;
+    if (totalBytes > MAX_INTEGRATION_CLOSURE_TOTAL_BYTES) {
+      throw new Error(`${repositoryId} candidate exceeds the bounded total byte limit`);
+    }
+    const sha256 = sha256File(absolute);
+    if (!sha256) throw new Error(`${repositoryId} candidate could not be hashed: ${path}`);
+    const temporary = path.startsWith(".tmp/") || path.includes("/.tmp/");
+    return {
+      path,
+      status: indexStatus === "?" ? "untracked" : "modified",
+      sha256,
+      sizeBytes: stat.size,
+      commitDisposition: temporary ? "must-exclude-unless-frozen-contract-explicitly-allows" : "eligible",
+    };
+  }).sort((left, right) => left.path.localeCompare(right.path));
+  const body = {
+    schemaVersion: 1 as const,
+    repositoryId,
+    repositoryRoot,
+    worktreePath,
+    branch,
+    head,
+    commonGitDir,
+    allowedPaths: [...repository.allowedPaths],
+    readOnlyPaths: [...repository.readOnlyPaths],
+    forbiddenPaths: [...repository.forbiddenPaths],
+    files,
+  };
+  return { ...body, receiptSha256: canonicalEvolutionValueSha256(body) };
 }
 
 function applyHostEvidenceMaintenanceDeliveryAtomically(
