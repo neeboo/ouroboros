@@ -88,7 +88,11 @@ export {
   proxyEnvForChildProcess,
   proxyEnvFromScutilOutput,
 } from "./executors/proxy-env";
-export { createApplyDesignActionsHook, reconcileDeferredDesignAuthority } from "./hooks/apply-design-actions";
+export {
+  createApplyDesignActionsHook,
+  projectOverallGoalIntegrationDesignActions,
+  reconcileDeferredDesignAuthority,
+} from "./hooks/apply-design-actions";
 export type {
   ApplyDesignActionsHookOptions,
   ReconcileDeferredDesignAuthorityInput,

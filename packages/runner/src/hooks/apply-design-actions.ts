@@ -64,6 +64,19 @@ export interface AppliedDesignAction {
   externalRefId?: string;
 }
 
+export function projectOverallGoalIntegrationDesignActions(
+  actions: DesignActionInput[],
+): DesignActionInput[] {
+  if (actions.length === 0) return [];
+  if (actions.length === 1 && actions[0]?.type === "proposeDesign") return actions;
+  if (actions.length === 2) {
+    const proposal = actions.find((action) => action.type === "proposeDesign");
+    const signal = actions.find((action) => action.type === "recordSignal");
+    if (proposal && signal) return [proposal];
+  }
+  throw new Error("overall-goal integration Designer must emit one proposeDesign action or quiesce");
+}
+
 const NOW_EPOCH = () => Date.now();
 
 // High-risk flag fields derived conservatively by the production adapter.
@@ -105,16 +118,24 @@ export function createApplyDesignActionsHook(options: ApplyDesignActionsHookOpti
     if (output.status !== "done") {
       return { decision: "exit" };
     }
-    const actions = output.designActions ?? [];
+    let actions = output.designActions ?? [];
+    let overallGoalActionProblem: string | null = null;
+    if (task.config?.overallGoalIntegrationDesignAdapter) {
+      try {
+        actions = projectOverallGoalIntegrationDesignActions(actions);
+      } catch (error) {
+        overallGoalActionProblem = error instanceof Error ? error.message : String(error);
+      }
+    }
     if (task.config?.runtimeIntegrationDesignAdapter || task.config?.overallGoalIntegrationDesignAdapter) {
       const evidenceProblem = runtimeIntegrationEvidenceProblem(run, task);
       const actionProblem = task.config?.runtimeIntegrationDesignAdapter
         ? (actions.length === 1 && actions[0]?.type === "proposeDesign"
             ? null
             : "runtime integration Designer must emit exactly one proposeDesign action")
-        : (actions.length === 0 || (actions.length === 1 && actions[0]?.type === "proposeDesign")
+        : (overallGoalActionProblem ?? (actions.length === 0 || (actions.length === 1 && actions[0]?.type === "proposeDesign")
             ? null
-            : "overall-goal integration Designer must emit one proposeDesign action or quiesce");
+            : "overall-goal integration Designer must emit one proposeDesign action or quiesce"));
       const problem = evidenceProblem ?? actionProblem;
       if (problem) {
         closeRuntimeIntegrationEvidenceFailure({ harness: options.harness, run, task, problem });

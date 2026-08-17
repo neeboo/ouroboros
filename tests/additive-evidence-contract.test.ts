@@ -11,6 +11,7 @@ import {
 import {
   createApplyDesignActionsHook,
   createTasksFromOutputHook,
+  projectOverallGoalIntegrationDesignActions,
   reconcileAdditiveEvidenceContract,
 } from "../packages/runner/src";
 
@@ -26,6 +27,41 @@ describe("additive evidence-contract delivery", () => {
 
   afterEach(async () => {
     await rm(dir, { recursive: true, force: true });
+  });
+
+  test("overall-goal action projection keeps one concrete proposal, preserves quiescence, and rejects signal-only output", () => {
+    const signal = {
+      type: "recordSignal" as const,
+      payload: {
+        projectId: "project_target",
+        signalClass: "system" as const,
+        source: "designer",
+        title: "Verified worktrees await integration",
+        summary: "The runtime worktrees still require governed integration.",
+        observationTime: "2026-08-17T00:00:00.000Z",
+        confidence: 1,
+        evidence: ["run:source"],
+      },
+    };
+    const proposal = {
+      type: "proposeDesign" as const,
+      payload: {
+        projectId: "project_target",
+        title: "Governed integration closeout",
+        proposal: {
+          problem: "Two verified isolated worktrees remain uncommitted.",
+          recommendation: "Verify, commit, push, and bind the local runtime.",
+        },
+      },
+    };
+
+    expect(projectOverallGoalIntegrationDesignActions([])).toEqual([]);
+    expect(projectOverallGoalIntegrationDesignActions([proposal as never])).toEqual([proposal]);
+    expect(projectOverallGoalIntegrationDesignActions([signal as never, proposal as never])).toEqual([proposal]);
+    expect(() => projectOverallGoalIntegrationDesignActions([signal as never]))
+      .toThrow("overall-goal integration Designer must emit one proposeDesign action or quiesce");
+    expect(() => projectOverallGoalIntegrationDesignActions([proposal as never, signal as never, signal as never]))
+      .toThrow("overall-goal integration Designer must emit one proposeDesign action or quiesce");
   });
 
   test("fixed recovery retires bare tasks and materializes one host overlay followed by one read-only verifier", () => {
@@ -466,7 +502,7 @@ describe("additive evidence-contract delivery", () => {
     expect(harness.getRun(fixture.deliveryRunId)?.status).toBe("done");
   });
 
-  test("a missing-bundle-hash Designer failure is retired once and replaced by one host-projected Designer", async () => {
+  test("a governed closeout action-shape failure is retired once and replaced with the same frozen bundle", async () => {
     const fixture = seedAdditiveDelivery(harness, dir, true);
     await seedIntegrationWorktrees(harness, dir);
     const charter = harness.createFounderCharter({
@@ -515,13 +551,38 @@ describe("additive evidence-contract delivery", () => {
       input: { executor: "codex-resumable", permissionMode: "read-only" },
       output: {
         status: "blocked",
-        summary: "The integration scheme is valid but its host bundle is incomplete.",
+        summary: "The integration scheme is valid but included one redundant recordSignal action.",
         changedFiles: [],
         checks: [],
         artifacts: [],
-        problems: ["target-system authoritative evidence bundle is missing bundleSha256"],
+        problems: ["overall-goal integration Designer must emit one proposeDesign action or quiesce"],
         nextTasks: [],
         nextRuns: [],
+      },
+    });
+    const validationFingerprint = "7".repeat(64);
+    harness.updateRun({
+      runId: failedRunId,
+      contextPatch: {
+        overallGoalIntegrationDesignFailure: {
+          schemaVersion: 1,
+          fingerprint: validationFingerprint,
+          sourceTaskId: failedTaskId,
+          sourceAttemptId: null,
+          problem: "overall-goal integration Designer must emit one proposeDesign action or quiesce",
+        },
+      },
+    });
+    const originalReceipt = harness.getRun(fixture.deliveryRunId)!.context
+      .overallGoalIntegrationContinuation as Record<string, unknown>;
+    harness.updateRun({
+      runId: fixture.deliveryRunId,
+      contextPatch: {
+        overallGoalIntegrationRecovery: {
+          ...originalReceipt,
+          failedDesignerRunId: "run_prior_failed",
+          validationFingerprint: "8".repeat(64),
+        },
       },
     });
 
@@ -541,6 +602,7 @@ describe("additive evidence-contract delivery", () => {
     expect(recovered).toMatchObject({ status: "done" });
     expect(replay).toMatchObject({ status: "done", eventId: recovered.eventId });
     expect(nextRunId).not.toBe(failedRunId);
+    expect(recoveredReceipt.validationFingerprint).toBe(validationFingerprint);
     expect(harness.getRun(failedRunId)).toMatchObject({
       status: "blocked",
       context: {
@@ -562,9 +624,11 @@ describe("additive evidence-contract delivery", () => {
     const task = nextOverview.tasks[0]!;
     const adapter = task.config!.overallGoalIntegrationDesignAdapter as Record<string, unknown>;
     const bundle = nextOverview.run!.context.targetSystemEvidenceBundle as Record<string, unknown>;
+    const failedBundle = harness.getRun(failedRunId)!.context.targetSystemEvidenceBundle as Record<string, unknown>;
     const { adapterSha256, ...adapterBody } = adapter;
     expect(adapterSha256).toBe(canonicalEvolutionValueSha256(adapterBody));
     expect(adapter.evidenceBundleSha256).toBe(bundle.bundleSha256);
+    expect(bundle.bundleSha256).toBe(failedBundle.bundleSha256);
 
     const hook = createApplyDesignActionsHook({ harness });
     const hookResult = await hook({
@@ -580,6 +644,18 @@ describe("additive evidence-contract delivery", () => {
         artifacts: [],
         problems: [],
         designActions: [{
+          type: "recordSignal",
+          payload: {
+            projectId: nextOverview.run!.projectId!,
+            signalClass: "system",
+            source: "designer",
+            title: "Verified runtime worktrees await governed integration",
+            summary: "The concrete closeout proposal below supersedes this redundant model signal.",
+            observationTime: "2026-08-17T00:00:00.000Z",
+            confidence: 1,
+            evidence: ["model-invented-ref"],
+          },
+        }, {
           type: "proposeDesign",
           payload: {
             projectId: nextOverview.run!.projectId!,
@@ -625,6 +701,8 @@ describe("additive evidence-contract delivery", () => {
     });
     expect(proposal.proposal.problem).toContain("isolated worktrees");
     expect(proposal.proposal.recommendation).toContain("runtime switch");
+    expect(harness.listStrategySignals({ projectId: nextOverview.run!.projectId! }))
+      .toHaveLength(1);
     expect(harness.getRun("run_source_blocked")).toMatchObject({
       status: "blocked",
       context: { repairReplanBudget: { used: 1, limit: 3 } },

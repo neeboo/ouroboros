@@ -2860,7 +2860,7 @@ function applyOverallGoalIntegrationDesignerAtomically(
         evidenceSha256: evidence.evidenceSha256,
         failedDesignerRunId: action.failedDesignerRunId ?? null,
       });
-      const signalId = `signal_overall_goal_${signalSeed.slice(0, 32)}`;
+      let signalId = `signal_overall_goal_${signalSeed.slice(0, 32)}`;
       const temporaryAndControlExclusions = {
         targetBackend: [
           ...worktrees[0]!.files
@@ -2880,7 +2880,7 @@ function applyOverallGoalIntegrationDesignerAtomically(
         evidenceSha256: evidence.evidenceSha256,
         temporaryAndControlExclusions,
       };
-      const targetSystemEvidenceBundle = {
+      let targetSystemEvidenceBundle = {
         ...authoritativeBundleBody,
         bundleSha256: canonicalEvolutionValueSha256(authoritativeBundleBody),
       };
@@ -2936,11 +2936,15 @@ function applyOverallGoalIntegrationDesignerAtomically(
         investment,
         resourceRequest,
       };
-      const overallGoalIntegrationDesignAdapter = {
+      let overallGoalIntegrationDesignAdapter = {
         ...adapterBody,
         adapterSha256: canonicalEvolutionValueSha256(adapterBody),
       };
-      const existing = objectRecordOrNull(run.context.overallGoalIntegrationContinuation);
+      const initialContinuation = objectRecordOrNull(run.context.overallGoalIntegrationContinuation);
+      const latestRecovery = objectRecordOrNull(run.context.overallGoalIntegrationRecovery);
+      const existing = action.failedDesignerRunId
+        ? [latestRecovery, initialContinuation].find((receipt) => receipt?.runId === action.failedDesignerRunId) ?? null
+        : initialContinuation;
       let recoveryFailure: {
         failedRunId: string;
         failedTaskId: string;
@@ -2961,7 +2965,8 @@ function applyOverallGoalIntegrationDesignerAtomically(
         const failedSession = [...failedOverview.sessions].reverse().find((session) =>
           session.taskId === existing.taskId && session.status === "blocked");
         const problem = failedSession?.output.problems?.find((item) =>
-          item === "target-system authoritative evidence bundle is missing bundleSha256");
+          item === "target-system authoritative evidence bundle is missing bundleSha256"
+          || item === "overall-goal integration Designer must emit one proposeDesign action or quiesce");
         if (!failedOverview.run || failedOverview.run.projectId !== run.projectId
           || failedOverview.run.context.source !== "target-system-design"
           || failedOverview.run.context.parentRunId !== run.id
@@ -2969,15 +2974,43 @@ function applyOverallGoalIntegrationDesignerAtomically(
           || !failedSession || !problem
           || failedOverview.tasks.some((task) => task.status === "todo" || task.status === "running")
           || failedOverview.threads.some((thread) => thread.status === "running")) {
-          throw new Error("overall-goal Designer recovery requires the drained exact missing-bundle-hash failure");
+          throw new Error("overall-goal Designer recovery requires one drained recoverable host-adapter failure");
         }
-        const fingerprint = canonicalEvolutionValueSha256({
+        const recordedFailure = objectRecordOrNull(failedOverview.run.context.overallGoalIntegrationDesignFailure);
+        const computedFingerprint = canonicalEvolutionValueSha256({
           failedRunId: failedOverview.run.id,
           failedTaskId: failedTask.id,
           failedAttemptId: failedSession.attemptId,
           problem,
           evidenceSha256: evidence.evidenceSha256,
         });
+        const fingerprint = recordedFailure
+          && recordedFailure.sourceTaskId === failedTask.id
+          && recordedFailure.problem === problem
+          && typeof recordedFailure.fingerprint === "string"
+          ? recordedFailure.fingerprint
+          : computedFingerprint;
+        const failedBundle = objectRecordOrNull(failedOverview.run.context.targetSystemEvidenceBundle);
+        const failedAdapter = objectRecordOrNull(failedTask.config?.overallGoalIntegrationDesignAdapter);
+        if (failedBundle && failedAdapter) {
+          const { bundleSha256: failedBundleSha256, ...failedBundleBody } = failedBundle;
+          const { adapterSha256: failedAdapterSha256, ...failedAdapterBody } = failedAdapter;
+          if (typeof failedBundleSha256 === "string"
+            && canonicalEvolutionValueSha256(failedBundleBody) === failedBundleSha256
+            && failedBundle.purpose === "overall-goal-integration-closeout"
+            && failedBundle.targetProjectId === run.projectId
+            && failedBundle.evidenceSha256 === evidence.evidenceSha256
+            && typeof failedBundle.signalId === "string"
+            && failedAdapter.schemaVersion === 1
+            && failedAdapter.signalId === failedBundle.signalId
+            && failedAdapter.evidenceBundleSha256 === failedBundleSha256
+            && typeof failedAdapterSha256 === "string"
+            && canonicalEvolutionValueSha256(failedAdapterBody) === failedAdapterSha256) {
+            signalId = failedBundle.signalId;
+            targetSystemEvidenceBundle = structuredClone(failedBundle) as typeof targetSystemEvidenceBundle;
+            overallGoalIntegrationDesignAdapter = structuredClone(failedAdapter) as typeof overallGoalIntegrationDesignAdapter;
+          }
+        }
         harness.updateRunWithDb(db, {
           runId: failedOverview.run.id,
           contextPatch: {
@@ -3041,34 +3074,44 @@ function applyOverallGoalIntegrationDesignerAtomically(
           throw new Error("overall-goal integration stable IDs already exist without a source receipt");
         }
         const now = new Date().toISOString();
-        harness.createStrategySignalWithDb(db, {
-          id: signalId,
-          projectId: run.projectId,
-          signalClass: "system",
-          source: `overall-goal-continuation:${run.id}`,
-          title: "Verified runtime worktrees require governed integration closeout",
-          summary: "The additive evidence contract passed, while backend and frontend isolated worktrees remain uncommitted and runtime switch-over evidence remains unverified.",
-          observationTime: now,
-          confidence: 1,
-          evidence: [
-            `run:${run.id}`,
-            `run:${blockedRun.id}`,
-            `action:${overlayEvent.id}`,
-            `attempt:${verifierAttemptId}`,
-            ...worktrees.map((worktree) => `worktree-receipt:${worktree.receiptSha256}`),
-          ],
-          runId: run.id,
-          taskId: verifierTaskId,
-          attemptId: verifierAttemptId,
-          payload: {
-            kind: "overall-goal-integration-needed",
-            evidenceSha256: evidence.evidenceSha256,
-            packageOnly: true,
-            evidenceContractOnly: true,
-            overallGoalComplete: false,
-            sideEffectCounters: zeroSideEffectCounters(),
-          },
-        });
+        const frozenSignal = harness.getStrategySignalWithDb(db, { id: signalId });
+        if (frozenSignal) {
+          if (frozenSignal.projectId !== run.projectId
+            || frozenSignal.source !== `overall-goal-continuation:${run.id}`
+            || frozenSignal.payload.evidenceSha256 !== evidence.evidenceSha256
+            || frozenSignal.status !== "active") {
+            throw new Error("overall-goal integration frozen signal conflicts with the recovery bundle");
+          }
+        } else {
+          harness.createStrategySignalWithDb(db, {
+            id: signalId,
+            projectId: run.projectId,
+            signalClass: "system",
+            source: `overall-goal-continuation:${run.id}`,
+            title: "Verified runtime worktrees require governed integration closeout",
+            summary: "The additive evidence contract passed, while backend and frontend isolated worktrees remain uncommitted and runtime switch-over evidence remains unverified.",
+            observationTime: now,
+            confidence: 1,
+            evidence: [
+              `run:${run.id}`,
+              `run:${blockedRun.id}`,
+              `action:${overlayEvent.id}`,
+              `attempt:${verifierAttemptId}`,
+              ...worktrees.map((worktree) => `worktree-receipt:${worktree.receiptSha256}`),
+            ],
+            runId: run.id,
+            taskId: verifierTaskId,
+            attemptId: verifierAttemptId,
+            payload: {
+              kind: "overall-goal-integration-needed",
+              evidenceSha256: evidence.evidenceSha256,
+              packageOnly: true,
+              evidenceContractOnly: true,
+              overallGoalComplete: false,
+              sideEffectCounters: zeroSideEffectCounters(),
+            },
+          });
+        }
         harness.createRunWithDb(db, {
           id: runId,
           goal: "Design the governed integration closeout for the verified backend and frontend runtime worktrees",
