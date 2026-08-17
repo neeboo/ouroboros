@@ -3013,6 +3013,156 @@ describe("runner", () => {
     expect(JSON.stringify(readback)).not.toContain("host-only diagnostic");
   });
 
+  test("overall-goal verifier receives an exact host manifest receipt without repo writes or heredoc", async () => {
+    const repositoryRoot = join(dir, "manifest-repository");
+    await mkdir(join(repositoryRoot, "src"), { recursive: true });
+    git(repositoryRoot, ["init"]);
+    git(repositoryRoot, ["config", "user.email", "orbs@example.test"]);
+    git(repositoryRoot, ["config", "user.name", "Ouroboros"]);
+    await writeFile(join(repositoryRoot, "baseline.txt"), "baseline\n");
+    git(repositoryRoot, ["add", "baseline.txt"]);
+    git(repositoryRoot, ["commit", "-m", "baseline"]);
+    git(repositoryRoot, ["checkout", "-b", "codex/exact-manifest"]);
+    const contents = "export const runtime = 'verified';\n";
+    await writeFile(join(repositoryRoot, "src/runtime.ts"), contents);
+    const head = git(repositoryRoot, ["rev-parse", "HEAD"]).stdout.trim();
+    const sha256 = createHash("sha256").update(contents).digest("hex");
+    const runId = harness.createRun({ goal: "Verify the isolated backend manifest" });
+    const taskId = harness.createTask({
+      runId,
+      role: "verifier",
+      goal: "verify-backend",
+      prompt: "Independently decide from the host-owned exact manifest receipt.",
+      worktreePath: repositoryRoot,
+      config: {
+        executor: "codex-resumable",
+        permissionMode: "read-only",
+        verifierScope: "hash-path-index-readback-only",
+        frozenRepositoryReceipt: {
+          schemaVersion: 1,
+          repositoryId: "target-backend",
+          repositoryRoot,
+          worktreePath: repositoryRoot,
+          commonGitDir: join(repositoryRoot, ".git"),
+          branch: "codex/exact-manifest",
+          head,
+          files: [{
+            path: "src/runtime.ts",
+            status: "untracked",
+            sha256,
+            sizeBytes: Buffer.byteLength(contents),
+            commitDisposition: "eligible",
+          }],
+        },
+      },
+    });
+    const statusBefore = git(repositoryRoot, ["status", "--porcelain=v1", "--untracked-files=all"]).stdout.trim();
+    let observedPrompt = "";
+    let startCalls = 0;
+
+    await runCodexResumableLoop({
+      harness,
+      runId,
+      limit: 1,
+      maxRounds: 1,
+      maxTries: 1,
+      cwd: repositoryRoot,
+      hostReadbackForTask: readHostCapabilityReadback,
+      clientFactory: () => ({
+        start: async ({ prompt }) => {
+          startCalls += 1;
+          observedPrompt = prompt;
+          return {
+            status: "done" as const,
+            sessionId: "session_exact_manifest",
+            outputPath: join(dir, "exact-manifest-output.json"),
+            stdout: "",
+            stderr: "",
+            events: [],
+            output: { status: "done" as const, verdict: "pass" as const, summary: "receipt verified" },
+          };
+        },
+        resume: async () => { throw new Error("unused"); },
+      }),
+    });
+
+    const attempt = harness.listLatestAttemptsForTasks([taskId])[0]!;
+    const readback = harness.getAttempt(attempt.attemptId)?.input.hostCapabilityReadback as Record<string, any>;
+    expect(startCalls, JSON.stringify(harness.getAttempt(attempt.attemptId)?.output)).toBe(1);
+    expect(readback.repositoryManifest).toMatchObject({
+      status: "verified",
+      source: "host-owned-exact-manifest-preflight",
+      repositoryId: "target-backend",
+      head: { expected: head, actual: head },
+      branch: { expected: "codex/exact-manifest", actual: "codex/exact-manifest" },
+      targetFilesChanged: 0,
+      indexChanged: false,
+      files: [{ path: "src/runtime.ts", sha256, sizeBytes: Buffer.byteLength(contents), matches: true }],
+    });
+    expect(observedPrompt).toContain("## Host-Owned Exact Repository Manifest");
+    expect(observedPrompt).not.toContain("<<");
+    expect(git(repositoryRoot, ["status", "--porcelain=v1", "--untracked-files=all"]).stdout.trim()).toBe(statusBefore);
+  });
+
+  test("overall-goal verifier blocks before model start when the exact host manifest drifts", async () => {
+    const repositoryRoot = join(dir, "drifted-manifest-repository");
+    await mkdir(join(repositoryRoot, "src"), { recursive: true });
+    git(repositoryRoot, ["init"]);
+    git(repositoryRoot, ["config", "user.email", "orbs@example.test"]);
+    git(repositoryRoot, ["config", "user.name", "Ouroboros"]);
+    await writeFile(join(repositoryRoot, "baseline.txt"), "baseline\n");
+    git(repositoryRoot, ["add", "baseline.txt"]);
+    git(repositoryRoot, ["commit", "-m", "baseline"]);
+    const head = git(repositoryRoot, ["rev-parse", "HEAD"]).stdout.trim();
+    await writeFile(join(repositoryRoot, "src/runtime.ts"), "drifted\n");
+    const runId = harness.createRun({ goal: "Reject a drifted manifest" });
+    const taskId = harness.createTask({
+      runId,
+      role: "verifier",
+      goal: "verify-backend",
+      prompt: "Verify it.",
+      worktreePath: repositoryRoot,
+      config: {
+        executor: "codex-resumable",
+        permissionMode: "read-only",
+        verifierScope: "hash-path-index-readback-only",
+        frozenRepositoryReceipt: {
+          repositoryId: "target-backend",
+          repositoryRoot,
+          worktreePath: repositoryRoot,
+          commonGitDir: join(repositoryRoot, ".git"),
+          branch: git(repositoryRoot, ["branch", "--show-current"]).stdout.trim(),
+          head,
+          files: [{ path: "src/runtime.ts", status: "untracked", sha256: "a".repeat(64), sizeBytes: 8 }],
+        },
+      },
+    });
+    let startCalls = 0;
+
+    await runCodexResumableLoop({
+      harness,
+      runId,
+      limit: 1,
+      maxRounds: 1,
+      maxTries: 1,
+      cwd: repositoryRoot,
+      hostReadbackForTask: readHostCapabilityReadback,
+      clientFactory: () => ({
+        start: async () => {
+          startCalls += 1;
+          throw new Error("model must not start for a drifted host receipt");
+        },
+        resume: async () => { throw new Error("unused"); },
+      }),
+    });
+
+    expect(startCalls).toBe(0);
+    expect(harness.getTask(taskId)?.status).toBe("blocked");
+    expect(harness.listLatestAttemptsForTasks([taskId])).toEqual([
+      expect.objectContaining({ status: "blocked", summary: "host-owned exact repository manifest preflight failed" }),
+    ]);
+  });
+
   test("runner-owned goal review applies the browser process deny policy", async () => {
     const runId = harness.createRun({ goal: "Review without browser side effects" });
     harness.createTask({

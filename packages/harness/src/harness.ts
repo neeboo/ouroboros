@@ -1029,12 +1029,39 @@ export class Harness {
     }
     const task = taskFromRow(row);
     const previousRecovery = task.config?.deadAttemptRecovery;
-    const previousCount = typeof previousRecovery === "object" && previousRecovery !== null
+    const configuredPreviousCount = typeof previousRecovery === "object" && previousRecovery !== null
       && Number.isInteger((previousRecovery as { count?: unknown }).count)
       && Number((previousRecovery as { count: number }).count) >= 0
       ? Number((previousRecovery as { count: number }).count)
       : 0;
-    const requestedLimit = input.maxRecoveries ?? 1;
+    const recoveryRunRow = db.query("select * from runs where id = $runId")
+      .get({ $runId: task.runId }) as RunRow | null;
+    const recoveryRun = recoveryRunRow ? runFromRow(recoveryRunRow) : null;
+    const frozenGraphSameTaskRecovery = task.role === "verifier"
+      && recoveryRun?.context.overallGoalIntegrationCloseout != null
+      && overallGoalIntegrationTaskExecutionProblem({
+        runId: task.runId,
+        closeout: recoveryRun.context.overallGoalIntegrationCloseout,
+        evidenceBundle: recoveryRun.context.targetSystemEvidenceBundle,
+        graph: recoveryRun.context.overallGoalIntegrationCloseoutTaskGraph,
+        task,
+      }) === null;
+    const priorSameTaskRecoveryCount = frozenGraphSameTaskRecovery
+      ? (db.query(
+          `select output_json from attempts where task_id = $taskId and id != $attemptId and status = 'blocked'`,
+        ).all({ $taskId: task.id, $attemptId: input.attemptId }) as Array<{ output_json: string }>).filter((attempt) => {
+          try {
+            const parsed = JSON.parse(attempt.output_json) as AttemptOutput;
+            return (parsed.artifacts ?? []).some((artifact) => artifact != null
+              && typeof artifact === "object"
+              && (artifact as Record<string, unknown>).recoveryMode === "same-task");
+          } catch {
+            return false;
+          }
+        }).length
+      : 0;
+    const previousCount = Math.max(configuredPreviousCount, priorSameTaskRecoveryCount);
+    const requestedLimit = frozenGraphSameTaskRecovery ? 1 : input.maxRecoveries ?? 1;
     const recoveryLimit = typeof previousRecovery === "object" && previousRecovery !== null
       && Number.isInteger((previousRecovery as { limit?: unknown }).limit)
       && Number((previousRecovery as { limit: number }).limit) >= 0
@@ -1062,11 +1089,58 @@ export class Harness {
         canRetry = false;
       }
     }
-    const recoveryCount = canRetry ? previousCount + 1 : recoveryLimit;
     const eventRows = db.query(
       `select id from attempt_events where attempt_id = $attemptId order by sequence desc limit 8`,
     ).all({ $attemptId: input.attemptId }) as Array<{ id: string }>;
     const durableEventRefs = eventRows.map((event) => event.id).reverse();
+    let recoveryTaskId: string | null = null;
+    if (canRetry && !frozenGraphSameTaskRecovery) {
+      recoveryTaskId = `task_recovery_${input.attemptId.replace(/^attempt_/, "")}`;
+      const sourceAttemptInput = JSON.parse(row.source_attempt_input_json) as Record<string, unknown>;
+      const inheritedExecutionContract = Object.fromEntries(
+        ["sandbox", "permissionMode", "browserProcessPolicy", "forbidBrowser", "forbidImplementation"]
+          .flatMap((key) => sourceAttemptInput[key] === undefined ? [] : [[key, sourceAttemptInput[key]]]),
+      );
+      const eventList = durableEventRefs.length > 0 ? durableEventRefs.join(", ") : "none recorded";
+      try {
+        this.createTaskWithDb(db, {
+          id: recoveryTaskId,
+          runId: task.runId,
+          parentId: task.id,
+          cycleId: task.cycleId,
+          role: task.role,
+          goal: task.goal,
+          prompt: [
+            `Recover the interrupted ${task.role} task under its existing frozen contract.`,
+            `Source task: ${task.id}`,
+            `Source attempt: ${input.attemptId}`,
+            `Durable event refs: ${eventList}`,
+            `Latest control-plane failure: ${input.reason}`,
+            "Continue from those persisted event references. Do not repeat the full evidence scan and do not broaden the role or permissions.",
+            "Return one structured terminal result.",
+          ].join("\n"),
+          dependsOn: task.dependsOn,
+          doneWhen: task.doneWhen,
+          worktreePath: task.worktreePath,
+          config: {
+            ...inheritedExecutionContract,
+            ...(task.config ?? {}),
+            deadAttemptRecovery: {
+              count: previousCount + 1,
+              limit: recoveryLimit,
+              sourceTaskId: task.id,
+              sourceAttemptId: input.attemptId,
+              durableEventRefs,
+            },
+          },
+        });
+      } catch (error) {
+        governanceBlocker = error instanceof Error ? error.message : String(error);
+        canRetry = false;
+        recoveryTaskId = null;
+      }
+    }
+    const recoveryCount = canRetry ? previousCount + 1 : recoveryLimit;
     const output: AttemptOutput = input.output
       ? {
           ...input.output,
@@ -1080,6 +1154,11 @@ export class Harness {
               ownerPid: row.owner_pid,
               durableEventRefs,
               reason: input.reason,
+              ...(frozenGraphSameTaskRecovery && canRetry ? {
+                recoveryMode: "same-task",
+                recoveryCount,
+                recoveryLimit,
+              } : {}),
             },
           ],
           problems: [...(input.output.problems ?? []), input.reason, ...(governanceBlocker ? [governanceBlocker] : [])],
@@ -1095,6 +1174,11 @@ export class Harness {
             attemptId: input.attemptId,
             ownerPid: row.owner_pid,
             durableEventRefs,
+            ...(frozenGraphSameTaskRecovery && canRetry ? {
+              recoveryMode: "same-task",
+              recoveryCount,
+              recoveryLimit,
+            } : {}),
           }],
           problems: [input.reason, ...(governanceBlocker ? [governanceBlocker] : [])],
         };
@@ -1112,46 +1196,10 @@ export class Harness {
       $reason: governanceBlocker ?? input.reason,
     });
 
-    let recoveryTaskId: string | null = null;
-    if (canRetry) {
-      recoveryTaskId = `task_recovery_${input.attemptId.replace(/^attempt_/, "")}`;
-      const sourceAttemptInput = JSON.parse(row.source_attempt_input_json) as Record<string, unknown>;
-      const inheritedExecutionContract = Object.fromEntries(
-        ["sandbox", "permissionMode", "browserProcessPolicy", "forbidBrowser", "forbidImplementation"]
-          .flatMap((key) => sourceAttemptInput[key] === undefined ? [] : [[key, sourceAttemptInput[key]]]),
-      );
-      const eventList = durableEventRefs.length > 0 ? durableEventRefs.join(", ") : "none recorded";
-      this.createTaskWithDb(db, {
-        id: recoveryTaskId,
-        runId: task.runId,
-        parentId: task.id,
-        cycleId: task.cycleId,
-        role: task.role,
-        goal: task.goal,
-        prompt: [
-          `Recover the interrupted ${task.role} task under its existing frozen contract.`,
-          `Source task: ${task.id}`,
-          `Source attempt: ${input.attemptId}`,
-          `Durable event refs: ${eventList}`,
-          `Latest control-plane failure: ${input.reason}`,
-          "Continue from those persisted event references. Do not repeat the full evidence scan and do not broaden the role or permissions.",
-          "Return one structured terminal result.",
-        ].join("\n"),
-        dependsOn: task.dependsOn,
-        doneWhen: task.doneWhen,
-        worktreePath: task.worktreePath,
-        config: {
-          ...inheritedExecutionContract,
-          ...(task.config ?? {}),
-          deadAttemptRecovery: {
-            count: recoveryCount,
-            limit: recoveryLimit,
-            sourceTaskId: task.id,
-            sourceAttemptId: input.attemptId,
-            durableEventRefs,
-          },
-        },
-      });
+    if (canRetry && frozenGraphSameTaskRecovery) {
+      db.query(
+        `update tasks set status = 'todo', updated_at = current_timestamp where id = $taskId`,
+      ).run({ $taskId: task.id });
     }
     return {
       taskId: task.id,

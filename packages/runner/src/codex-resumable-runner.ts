@@ -59,6 +59,7 @@ import { resolveExecutionRoute } from "./execution-routing";
 import type { ResolvedExecutionRoute } from "./execution-routing";
 import type { AttemptInputFactory, ExecutorEventRecorder, StartHook, StartHookResult, StopHook, StopHookResult, TaskExecutorFactory } from "./types";
 import type { AttemptReplayCache } from "./executors/types";
+import { hostCapabilityReadbackProblem } from "./host-capability-readback";
 import type { HostCapabilityReadback, HostReadbackForTask } from "./host-capability-readback";
 import {
   assertPersistedVerifierExecutionEnvironmentReceipt,
@@ -510,7 +511,12 @@ class CodexResumableOrchestrator {
       return this.blockNewAttemptForHarnessRevision({ run, task, sessionName, cwd, route, error });
     }
     const hostCapabilityReadback = await this.hostReadbackForTask(run, task, cwd);
-    const prompt = this.promptForTask(run, task, loadedHarnessRevision, hostCapabilityReadback);
+    const hostReadbackProblem = hostCapabilityReadbackProblem(hostCapabilityReadback);
+    if (hostReadbackProblem) {
+      return this.blockNewAttemptForHostReadback({ run, task, sessionName, cwd, route, hostCapabilityReadback, problem: hostReadbackProblem });
+    }
+    const sameTaskRecovery = this.sameTaskRecoveryContext(task);
+    const prompt = this.promptForTask(run, task, loadedHarnessRevision, hostCapabilityReadback, sameTaskRecovery);
     const oversized = promptBudgetEvidence(prompt, "runner client start");
     if (oversized) {
       const attemptId = this.harness.recordAttempt({
@@ -540,6 +546,7 @@ class CodexResumableOrchestrator {
       ...attemptInputForRoute(route, cwd),
       ...(this.input.genericAttemptInput?.({ run, task, sessionName, cwd, route }) ?? {}),
       ...(hostCapabilityReadback ? { hostCapabilityReadback } : {}),
+      ...(sameTaskRecovery ? { sameTaskRecovery } : {}),
       ...harnessRevisionAttemptInput(loadedHarnessRevision),
       ...hostCapabilityInput,
       ...verifierExecutionEnvironmentAttemptInput(verifierExecutionEnvironment),
@@ -957,7 +964,12 @@ class CodexResumableOrchestrator {
           return this.blockNewAttemptForHarnessRevision({ run, task, sessionName, cwd, route, error });
         }
         const hostCapabilityReadback = await this.hostReadbackForTask(run, task, cwd);
-        const prompt = this.promptForTask(run, task, loadedHarnessRevision, hostCapabilityReadback);
+        const hostReadbackProblem = hostCapabilityReadbackProblem(hostCapabilityReadback);
+        if (hostReadbackProblem) {
+          return this.blockNewAttemptForHostReadback({ run, task, sessionName, cwd, route, hostCapabilityReadback, problem: hostReadbackProblem });
+        }
+        const sameTaskRecovery = this.sameTaskRecoveryContext(task);
+        const prompt = this.promptForTask(run, task, loadedHarnessRevision, hostCapabilityReadback, sameTaskRecovery);
         const oversized = promptBudgetEvidence(prompt, "runner client start");
         if (oversized) {
           const attemptId = this.harness.recordAttempt({
@@ -994,6 +1006,7 @@ class CodexResumableOrchestrator {
           permissionMode: permissionModeForTask(task, this.input.codexOptions?.sandbox ?? "workspace-write"),
           ...(this.input.genericAttemptInput?.({ run, task, sessionName, cwd, route }) ?? {}),
           ...(hostCapabilityReadback ? { hostCapabilityReadback } : {}),
+          ...(sameTaskRecovery ? { sameTaskRecovery } : {}),
           ...harnessRevisionAttemptInput(loadedHarnessRevision),
           ...hostCapabilityInput,
           ...verifierExecutionEnvironmentAttemptInput(verifierExecutionEnvironment),
@@ -1329,8 +1342,9 @@ class CodexResumableOrchestrator {
     task: Task,
     loadedHarnessRevision: LoadedHarnessRevision | null = null,
     hostCapabilityReadback: HostCapabilityReadback | null = null,
+    sameTaskRecovery: Record<string, unknown> | null = null,
   ) {
-    return buildTaskPrompt({
+    const prompt = buildTaskPrompt({
       run,
       task,
       dependencyAttempts: task.dependsOn.length > 0 ? this.harness.listLatestAttemptsForTasks(task.dependsOn) : [],
@@ -1339,6 +1353,32 @@ class CodexResumableOrchestrator {
       loadedHarnessRevision: loadedHarnessRevision?.harnessRevision ?? null,
       hostCapabilityReadback,
     });
+    if (!sameTaskRecovery) return prompt;
+    return [
+      prompt,
+      "",
+      "## Bounded Same-Task Recovery",
+      "The previous process ended without a terminal verifier result. This is the sole retry of the same frozen graph task.",
+      JSON.stringify(sameTaskRecovery, null, 2),
+      "Use the durable event references and host-owned manifest receipt; do not repeat the full repository scan or broaden permissions.",
+    ].join("\n");
+  }
+
+  private sameTaskRecoveryContext(task: Task) {
+    const latest = this.harness.listLatestAttemptsForTasks([task.id])[0];
+    if (!latest || latest.status !== "blocked") return null;
+    const attempt = this.harness.getAttempt(latest.attemptId);
+    const artifact = (attempt?.output.artifacts ?? []).find((value) => value != null
+      && typeof value === "object"
+      && (value as Record<string, unknown>).recoveryMode === "same-task") as Record<string, unknown> | undefined;
+    if (!artifact) return null;
+    return {
+      sourceTaskId: task.id,
+      sourceAttemptId: latest.attemptId,
+      durableEventRefs: Array.isArray(artifact.durableEventRefs) ? artifact.durableEventRefs : [],
+      recoveryCount: artifact.recoveryCount,
+      recoveryLimit: artifact.recoveryLimit,
+    };
   }
 
   private async hostReadbackForTask(
@@ -1347,6 +1387,49 @@ class CodexResumableOrchestrator {
     cwd: string,
   ) {
     return this.input.hostReadbackForTask?.({ run, task, cwd }) ?? null;
+  }
+
+  private blockNewAttemptForHostReadback(input: {
+    run: NonNullable<ReturnType<Harness["getRun"]>>;
+    task: Task;
+    sessionName: string;
+    cwd: string;
+    route: ResolvedExecutionRoute;
+    hostCapabilityReadback: HostCapabilityReadback | null;
+    problem: string;
+  }) {
+    const attemptId = this.harness.recordAttempt({
+      taskId: input.task.id,
+      input: {
+        sessionName: input.sessionName,
+        cwd: input.cwd,
+        executor: input.route.backend.kind,
+        hostCapabilityReadback: input.hostCapabilityReadback,
+      },
+      output: {
+        status: "blocked",
+        summary: "host-owned exact repository manifest preflight failed",
+        changedFiles: [],
+        checks: [{ name: "host-owned exact repository manifest", status: "failed", evidence: input.problem }],
+        artifacts: [{ kind: "host_owned_exact_repository_manifest", receipt: input.hostCapabilityReadback?.repositoryManifest }],
+        problems: [input.problem],
+      },
+    });
+    this.upsertAttemptThread({
+      runId: input.run.id,
+      task: input.task,
+      attemptId,
+      sessionName: input.sessionName,
+      cwd: input.cwd,
+      status: "blocked",
+    });
+    return {
+      taskId: input.task.id,
+      attemptId,
+      sessionName: input.sessionName,
+      status: "blocked" as const,
+      codexSessionId: null,
+    };
   }
 
   private blockNewAttemptForHarnessRevision(input: {

@@ -13,6 +13,7 @@ import {
   createTasksFromOutputHook,
   projectOverallGoalIntegrationDesignActions,
   reconcileAdditiveEvidenceContract,
+  runCodexResumableLoop,
 } from "../packages/runner/src";
 
 describe("additive evidence-contract delivery", () => {
@@ -887,6 +888,167 @@ describe("additive evidence-contract delivery", () => {
     expect(() => harness.assertTaskExecutionAllowed({ taskId: tasks[2]!.id })).toThrow("host-fixed-action");
     expect(overview.tasks.some((task) => task.role === "goal-review")).toBe(false);
     expect(overview.run?.context.repairReplanBudget).toEqual({ used: 0, limit: 3, entries: [] });
+  });
+
+  test("overall-goal verifier recovery reuses the frozen task and terminalizes the dead lease atomically", async () => {
+    const fixture = seedOverallGoalIntegrationDelivery(harness, dir, false);
+    applyHarnessAction(harness, {
+      type: "materializeOverallGoalIntegrationTaskGraph",
+      runId: fixture.deliveryRunId,
+      plannerTaskId: fixture.plannerTaskId,
+    } as never);
+    const initial = harness.getRunOverview({ runId: fixture.deliveryRunId, eventLimit: 0 });
+    const graph = initial.run!.context.overallGoalIntegrationCloseoutTaskGraph as {
+      stages: Array<{ stageId: string; taskId: string }>;
+    };
+    const verifierTaskId = graph.stages.find((stage) => stage.stageId === "verify-backend")!.taskId;
+    const taskCount = initial.tasks.length;
+    const attemptId = harness.startAttempt({
+      taskId: verifierTaskId,
+      input: { executor: "codex-resumable", sandbox: "read-only", codexSessionId: "missing-rollout" },
+    });
+    const eventId = harness.recordAttemptEvent({
+      attemptId,
+      sequence: 1,
+      stream: "system",
+      text: "read-only heredoc was rejected before a terminal verdict",
+    });
+    harness.upsertExecutionThread({
+      id: `thread_${attemptId}`,
+      runId: fixture.deliveryRunId,
+      taskId: verifierTaskId,
+      attemptId,
+      ownerType: "runner",
+      ownerId: "dead-overall-goal-verifier",
+      role: "verifier",
+      status: "running",
+      pid: 99_999_999,
+      sessionName: "overall-goal-verifier",
+      worktreePath: fixture.backendWorktree,
+    });
+
+    const recovered = harness.recoverRunningAttempt({
+      attemptId,
+      reason: "local resumable child exited without terminal output",
+      maxRecoveries: 3,
+    });
+
+    expect(recovered).toMatchObject({
+      taskId: verifierTaskId,
+      sourceAttemptId: attemptId,
+      recoveryTaskId: null,
+      status: "todo",
+      recoveryCount: 1,
+      recoveryLimit: 1,
+    });
+    expect(harness.getAttempt(attemptId)).toMatchObject({
+      status: "blocked",
+      output: {
+        artifacts: [expect.objectContaining({
+          kind: "dead_execution_lease",
+          recoveryMode: "same-task",
+          durableEventRefs: [eventId],
+        })],
+      },
+    });
+    expect(harness.getTask(verifierTaskId)?.status).toBe("todo");
+    expect(harness.getRunOverview({ runId: fixture.deliveryRunId, eventLimit: 0 }).threads)
+      .toContainEqual(expect.objectContaining({ attemptId, status: "orphaned" }));
+    expect(harness.getRunOverview({ runId: fixture.deliveryRunId, eventLimit: 0 }).tasks).toHaveLength(taskCount);
+    expect(harness.getRun(fixture.deliveryRunId)?.context.repairReplanBudget)
+      .toEqual({ used: 0, limit: 3, entries: [] });
+
+    let retryPrompt = "";
+    await runCodexResumableLoop({
+      harness,
+      runId: fixture.deliveryRunId,
+      limit: 1,
+      maxRounds: 1,
+      maxTries: 1,
+      cwd: dir,
+      clientFactory: () => ({
+        start: async ({ prompt }) => {
+          retryPrompt = prompt;
+          return {
+            status: "done" as const,
+            sessionId: "same-task-retry-session",
+            outputPath: join(dir, "same-task-retry.json"),
+            stdout: "",
+            stderr: "",
+            events: [],
+            output: { status: "done" as const, verdict: "pass" as const, summary: "verified from the frozen receipt" },
+          };
+        },
+        resume: async () => { throw new Error("unused"); },
+      }),
+    });
+    expect(retryPrompt).toContain("## Bounded Same-Task Recovery");
+    expect(retryPrompt).toContain(eventId);
+    expect(harness.getTask(verifierTaskId)?.status).toBe("done");
+    expect(harness.getRunOverview({ runId: fixture.deliveryRunId, eventLimit: 0 }).tasks).toHaveLength(taskCount);
+  });
+
+  test("overall-goal verifier same-task recovery is bounded and never adds a sixth graph node", () => {
+    const fixture = seedOverallGoalIntegrationDelivery(harness, dir, false);
+    applyHarnessAction(harness, {
+      type: "materializeOverallGoalIntegrationTaskGraph",
+      runId: fixture.deliveryRunId,
+      plannerTaskId: fixture.plannerTaskId,
+    } as never);
+    const overview = harness.getRunOverview({ runId: fixture.deliveryRunId, eventLimit: 0 });
+    const graph = overview.run!.context.overallGoalIntegrationCloseoutTaskGraph as {
+      stages: Array<{ stageId: string; taskId: string }>;
+    };
+    const taskId = graph.stages.find((stage) => stage.stageId === "verify-backend")!.taskId;
+    const taskCount = overview.tasks.length;
+    const fail = (suffix: string) => {
+      const attemptId = harness.startAttempt({ taskId, input: { executor: "codex-resumable", codexSessionId: suffix } });
+      harness.upsertExecutionThread({
+        id: `thread_${attemptId}`, runId: fixture.deliveryRunId, taskId, attemptId,
+        ownerType: "runner", ownerId: suffix, role: "verifier", status: "running",
+        pid: 99_999_999, sessionName: suffix, worktreePath: fixture.backendWorktree,
+      });
+      return harness.recoverRunningAttempt({ attemptId, reason: `dead owner ${suffix}`, maxRecoveries: 1 });
+    };
+
+    expect(fail("first")).toMatchObject({ status: "todo", recoveryCount: 1, recoveryTaskId: null });
+    expect(fail("second")).toMatchObject({ status: "blocked", recoveryCount: 1, recoveryTaskId: null });
+    expect(harness.getTask(taskId)?.status).toBe("blocked");
+    expect(harness.getRunOverview({ runId: fixture.deliveryRunId, eventLimit: 0 }).tasks).toHaveLength(taskCount);
+  });
+
+  test("a rejected recovery child cannot roll a terminalized source attempt back to running", () => {
+    const fixture = seedAdditiveDelivery(harness, dir, false);
+    applyHarnessAction(harness, {
+      type: "materializeAdditiveEvidenceContractRecovery",
+      runId: fixture.deliveryRunId,
+      plannerTaskId: fixture.plannerTaskId,
+    } as never);
+    const overview = harness.getRunOverview({ runId: fixture.deliveryRunId, eventLimit: 0 });
+    const systemTask = overview.tasks.find((task) => task.config?.additiveEvidenceContractOverlay)!;
+    const verifierTask = overview.tasks.find((task) => task.config?.additiveEvidenceContractVerifier)!;
+    harness.recordAttempt({
+      taskId: systemTask.id,
+      input: { executor: "harness-action" },
+      output: { status: "done", summary: "overlay done", changedFiles: [], checks: [], artifacts: [], problems: [] },
+    });
+    const runId = fixture.deliveryRunId;
+    const taskId = verifierTask.id;
+    const attemptId = harness.startAttempt({ taskId, input: { executor: "codex-resumable" } });
+    harness.upsertExecutionThread({
+      id: `thread_${attemptId}`, runId, taskId, attemptId, ownerType: "runner", ownerId: "dead-designer",
+      role: "designer", status: "running", pid: 99_999_999, sessionName: "dead-designer",
+    });
+
+    const recovered = harness.recoverRunningAttempt({ attemptId, reason: "dead governed designer", maxRecoveries: 1 });
+
+    expect(recovered).toMatchObject({ taskId, status: "blocked", recoveryTaskId: null });
+    expect(harness.getAttempt(attemptId)).toMatchObject({ status: "blocked" });
+    expect(harness.runInTransaction((db) => db.query("select finished_at from attempts where id = $id")
+      .get({ $id: attemptId }) as { finished_at: string | null })).toEqual({ finished_at: expect.any(String) });
+    expect(harness.getTask(taskId)?.status).toBe("blocked");
+    expect(harness.getRunOverview({ runId, eventLimit: 0 }).threads)
+      .toContainEqual(expect.objectContaining({ attemptId, status: "interrupted" }));
   });
 
   test("overall-goal Planner output is projected before generic tasks can fall back to a model executor", async () => {
