@@ -89,6 +89,25 @@ export function createTasksFromOutputHook(options: { harness: Harness }): StopHo
       };
     }
     const evidenceBundle = run.context.targetSystemEvidenceBundle;
+    const overallGoalIntegrationDelivery = task.role === "planner"
+      && (task.config?.overallGoalIntegrationCloseout != null || run.context.overallGoalIntegrationCloseout != null)
+      && evidenceBundle !== null
+      && typeof evidenceBundle === "object"
+      && !Array.isArray(evidenceBundle)
+      && (evidenceBundle as Record<string, unknown>).purpose === "overall-goal-integration-closeout";
+    if (overallGoalIntegrationDelivery) {
+      const materialized = applyHarnessAction(options.harness, {
+        type: "materializeOverallGoalIntegrationTaskGraph",
+        runId: run.id,
+        plannerTaskId: task.id,
+      });
+      return {
+        decision: "exit",
+        checks: materialized.checks,
+        artifacts: materialized.artifacts,
+        problems: materialized.status === "blocked" ? materialized.problems : [],
+      };
+    }
     const additiveEvidenceDelivery = task.role === "planner"
       && evidenceBundle !== null
       && typeof evidenceBundle === "object"

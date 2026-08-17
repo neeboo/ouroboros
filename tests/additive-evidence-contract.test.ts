@@ -821,6 +821,97 @@ describe("additive evidence-contract delivery", () => {
     expect(result.problems.join("\n")).toMatch(/outside the frozen allowed paths/i);
     expect(harness.listRuns({ limit: 100 }).filter((run) => run.context.overallGoalIntegrationEvidence)).toHaveLength(0);
   });
+
+  test("overall-goal closeout recovery replaces five bare tasks with the frozen verifier and host-action graph", () => {
+    const fixture = seedOverallGoalIntegrationDelivery(harness, dir, true);
+    for (const taskId of fixture.legacyTaskIds) {
+      expect(() => harness.assertTaskExecutionAllowed({ taskId }))
+        .toThrow(/overallGoalIntegrationCloseoutTaskGraph|overall-goal integration task graph|outside the frozen overall-goal/i);
+    }
+
+    const result = applyHarnessAction(harness, {
+      type: "materializeOverallGoalIntegrationTaskGraph",
+      runId: fixture.deliveryRunId,
+      plannerTaskId: fixture.plannerTaskId,
+    } as never);
+    const replay = applyHarnessAction(harness, {
+      type: "materializeOverallGoalIntegrationTaskGraph",
+      runId: fixture.deliveryRunId,
+      plannerTaskId: fixture.plannerTaskId,
+    } as never);
+
+    expect(result).toMatchObject({ status: "done", actionType: "materializeOverallGoalIntegrationTaskGraph" });
+    expect(replay).toMatchObject({ status: "done", eventId: result.eventId });
+    expect(fixture.legacyTaskIds.map((id) => harness.getTask(id)?.status)).toEqual(Array(5).fill("blocked"));
+    const overview = harness.getRunOverview({ runId: fixture.deliveryRunId, eventLimit: 0 });
+    const graph = overview.run!.context.overallGoalIntegrationCloseoutTaskGraph as {
+      stages: Array<{ stageId: string; taskId: string }>;
+    };
+    const tasks = graph.stages.map((stage) => harness.getTask(stage.taskId)!);
+    expect(tasks.map((task) => [task.goal, task.role])).toEqual([
+      ["verify-backend", "verifier"],
+      ["verify-frontend", "verifier"],
+      ["commit-push-backend", "system"],
+      ["commit-push-frontend", "system"],
+      ["runtime-switch-evidence", "system"],
+    ]);
+    expect(tasks[0]).toMatchObject({
+      parentId: fixture.plannerTaskId,
+      dependsOn: [fixture.plannerTaskId],
+      worktreePath: fixture.backendWorktree,
+      config: {
+        executor: "codex-resumable", permissionMode: "read-only", repositoryId: "target-backend",
+        readOnly: true, identitySeparated: true, forbidBrowser: true, browserProcessPolicy: "deny",
+      },
+    });
+    expect(tasks[1]).toMatchObject({ dependsOn: [tasks[0]!.id], worktreePath: fixture.frontendWorktree });
+    expect(tasks[2]).toMatchObject({
+      role: "system",
+      dependsOn: [tasks[0]!.id, tasks[1]!.id],
+      config: { executor: "host-fixed-action", systemTask: true, modelExecutionAllowed: false },
+    });
+    expect(tasks[3]!.dependsOn).toEqual([tasks[0]!.id, tasks[1]!.id, tasks[2]!.id]);
+    expect(tasks[4]).toMatchObject({
+      role: "system",
+      dependsOn: [tasks[2]!.id, tasks[3]!.id],
+      config: {
+        executor: "host-fixed-action",
+        hostCapabilities: { loopback: { host: "127.0.0.1", ports: [10588] } },
+      },
+    });
+    const statusById = new Map(overview.tasks.map((task) => [task.id, task.status]));
+    expect(overview.tasks.filter((task) => task.status === "todo"
+      && task.dependsOn.every((dependency) => statusById.get(dependency) === "done"))
+      .map((task) => task.id)).toEqual([tasks[0]!.id]);
+    expect(harness.assertTaskExecutionAllowed({ taskId: tasks[0]!.id })).toBe(true);
+    expect(() => harness.assertTaskExecutionAllowed({ taskId: tasks[2]!.id })).toThrow("host-fixed-action");
+    expect(overview.tasks.some((task) => task.role === "goal-review")).toBe(false);
+    expect(overview.run?.context.repairReplanBudget).toEqual({ used: 0, limit: 3, entries: [] });
+  });
+
+  test("overall-goal Planner output is projected before generic tasks can fall back to a model executor", async () => {
+    const fixture = seedOverallGoalIntegrationDelivery(harness, dir, false);
+    const result = await createTasksFromOutputHook({ harness })({
+      run: harness.getRun(fixture.deliveryRunId)!,
+      task: harness.getTask(fixture.plannerTaskId)!,
+      sessionName: "overall-goal-planner",
+      prompt: "Plan it.",
+      output: {
+        status: "done", summary: "five stages", changedFiles: [], checks: [], artifacts: [], problems: [],
+        nextTasks: [
+          { role: "verifier", goal: "verify-backend", prompt: "verify" },
+          { role: "verifier", goal: "verify-frontend", prompt: "verify", dependsOn: ["verify-backend"] },
+          { role: "worker", goal: "commit-push-backend", prompt: "commit", dependsOn: ["verify-backend", "verify-frontend"] },
+          { role: "worker", goal: "commit-push-frontend", prompt: "commit", dependsOn: ["verify-backend", "verify-frontend", "commit-push-backend"] },
+          { role: "worker", goal: "runtime-switch-evidence", prompt: "switch", dependsOn: ["commit-push-backend", "commit-push-frontend"] },
+        ],
+      },
+    });
+    expect(result).toMatchObject({ decision: "exit", problems: [] });
+    const overview = harness.getRunOverview({ runId: fixture.deliveryRunId, eventLimit: 0 });
+    expect(overview.tasks.filter((task) => task.role === "worker")).toHaveLength(0);
+    expect(overview.tasks.filter((task) => task.config?.executor === "host-fixed-action")).toHaveLength(3);
+  });
 });
 
 async function seedIntegrationWorktrees(harness: Harness, rootPath: string) {
@@ -1122,4 +1213,75 @@ function seedAdditiveDelivery(harness: Harness, rootPath: string, includeLegacyB
     badWorkerId,
     badVerifierId,
   };
+}
+
+function seedOverallGoalIntegrationDelivery(harness: Harness, rootPath: string, includeLegacyBareTasks: boolean) {
+  const projectId = harness.createProject({ name: "overall closeout target", rootPath });
+  const designRunId = harness.createRun({ goal: "Govern integration", projectId, context: { source: "target-system-design" } });
+  const designerTaskId = harness.createTask({ runId: designRunId, role: "designer", goal: "Design closeout", prompt: "Design it." });
+  const proposal = harness.createDesignProposal({
+    id: `design_overall_${includeLegacyBareTasks ? "legacy" : "hook"}`,
+    projectId,
+    runId: designRunId,
+    taskId: designerTaskId,
+    title: "Close out isolated worktrees",
+    problem: "Verified worktrees remain unintegrated.",
+    recommendation: "Verify, commit, push, and bind runtime evidence.",
+    status: "accepted",
+    proposal: {
+      problem: "Verified worktrees remain unintegrated.",
+      recommendation: "Verify, commit, push, and bind runtime evidence.",
+      evidenceRefs: ["signal_overall_goal_test"],
+      evaluationContract: { baseline: ["unintegrated"], successMetrics: ["integrated"], guardMetrics: ["bounded"], requiredEvidence: ["receipts"] },
+      investment: { reversibility: "easy", portfolio: "core", classification: "evidence-maintenance", oneTimeCost: 0, recurringCost: 0, timeBudget: "60 minutes" },
+    } as never,
+  });
+  const decision = harness.recordDesignDecision({
+    id: `decision_overall_${includeLegacyBareTasks ? "legacy" : "hook"}`,
+    proposalId: proposal.id,
+    decision: "approved",
+    actorKind: "auto",
+    reasons: ["zero cost"],
+  });
+  const deliveryRunId = harness.createRun({ goal: "Integrate", projectId, context: {} });
+  const plannerTaskId = `task_overall_planner_${includeLegacyBareTasks ? "legacy" : "hook"}`;
+  const verifierContract = proposal.proposal.evaluationContract;
+  const frozenDesignPlanner = {
+    schemaVersion: 1, canonicalPlannerTaskId: plannerTaskId, designProposalId: proposal.id,
+    designDecisionId: decision.id, verifierContractSha256: canonicalEvolutionValueSha256(verifierContract),
+  };
+  harness.createTask({ id: plannerTaskId, runId: deliveryRunId, role: "planner", goal: "Plan closeout", prompt: "Plan it.", config: { frozenDesignPlanner, verifierContract } });
+  const attemptId = harness.startAttempt({ taskId: plannerTaskId, input: { executor: "codex-resumable" } });
+  harness.finishAttempt({ attemptId, output: { status: "done", summary: "planned", changedFiles: [], checks: [], artifacts: [], problems: [] } });
+  const legacyTaskIds = includeLegacyBareTasks ? [
+    ["verifier", "verify-backend"], ["verifier", "verify-frontend"], ["worker", "commit-push-backend"],
+    ["worker", "commit-push-frontend"], ["worker", "runtime-switch-evidence"],
+  ].map(([role, goal], index) => harness.createTask({
+    runId: deliveryRunId, role: role!, goal: goal!, prompt: "legacy", dependsOn: index === 0 ? [] : [plannerTaskId], config: { verifierContract },
+  })) : [];
+  const backendWorktree = join(rootPath, "backend-isolated");
+  const frontendWorktree = join(rootPath, "frontend-isolated");
+  const worktree = (repositoryId: string, repositoryRoot: string, worktreePath: string, branch: string, marker: string) => ({
+    schemaVersion: 1, repositoryId, repositoryRoot, worktreePath, branch, head: marker.repeat(40), commonGitDir: join(repositoryRoot, ".git"),
+    allowedPaths: repositoryId === "target-backend" ? ["src/**", "tests/runtime-integration/**"] : ["src-react/**"],
+    readOnlyPaths: [], forbiddenPaths: [".ouroboros/**", ".orbs/**", ".git/orbs/**", "db/**"],
+    files: [
+      { path: repositoryId === "target-backend" ? "src/runtime.ts" : "src-react/runtime.tsx", status: "untracked", sha256: marker.repeat(64), sizeBytes: 12, commitDisposition: "eligible" },
+      ...(repositoryId === "target-backend" ? [{ path: "tests/runtime-integration/.tmp/host-evidence.json", status: "untracked", sha256: "f".repeat(64), sizeBytes: 2, commitDisposition: "must-exclude-unless-frozen-contract-explicitly-allows" }] : []),
+    ],
+    receiptSha256: marker.repeat(64),
+  });
+  const bundleBody = {
+    schemaVersion: 1, purpose: "overall-goal-integration-closeout", projectId, sourceRunId: "run_evidence", blockedRuntimeRunId: "run_blocked",
+    overallGoalComplete: false,
+    worktrees: [worktree("target-backend", join(rootPath, "backend"), backendWorktree, "codex/backend", "a"), worktree("target-frontend", join(rootPath, "frontend"), frontendWorktree, "codex/frontend", "b")],
+    temporaryAndControlExclusions: { targetBackend: ["tests/runtime-integration/.tmp/host-evidence.json", ".ouroboros/**", ".orbs/**", ".git/orbs/**", "db/**"], targetFrontend: [".ouroboros/**", ".orbs/**", ".git/orbs/**", "db/**"] },
+  };
+  const bundle = { ...bundleBody, bundleSha256: canonicalEvolutionValueSha256(bundleBody) };
+  const closeout = { schemaVersion: 1, bundleSha256: bundle.bundleSha256, stages: ["verify-backend", "verify-frontend", "commit-push-backend", "commit-push-frontend", "runtime-switch-evidence"], browserAllowed: false, paidUsd: 0 };
+  harness.updateRun({
+    runId: deliveryRunId,
+    contextPatch: { source: "design", parentRunId: designRunId, designProposalId: proposal.id, designDecisionId: decision.id, targetSystemEvidenceBundle: bundle, overallGoalIntegrationCloseout: closeout, repairReplanBudget: { used: 0, limit: 3, entries: [] } },
+  });
+  return { deliveryRunId, plannerTaskId, legacyTaskIds, backendWorktree, frontendWorktree };
 }

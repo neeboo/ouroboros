@@ -29,6 +29,7 @@ import {
   RUNTIME_INTEGRATION_TASK_GRAPH,
   runtimeIntegrationTaskExecutionProblem,
 } from "./runtime-integration-tasks";
+import { projectOverallGoalIntegrationTaskGraph } from "./overall-goal-integration-tasks";
 import {
   advanceAfterRepair,
   blockAfterRepair,
@@ -229,6 +230,11 @@ export type HarnessAction =
       type: "materializeOverallGoalIntegrationDesigner";
       runId: string;
       failedDesignerRunId?: string;
+    }
+  | {
+      type: "materializeOverallGoalIntegrationTaskGraph";
+      runId: string;
+      plannerTaskId: string;
     }
   | {
       type: "materializeRuntimeIntegrationDesignRecovery";
@@ -703,6 +709,7 @@ const FROZEN_DESIGN_CONTEXT_KEYS = new Set([
   "overallGoalIntegrationEvidence",
   "overallGoalIntegrationRecovery",
   "overallGoalIntegrationCloseout",
+  "overallGoalIntegrationCloseoutTaskGraph",
 ]);
 
 function frozenDesignContextKeys(keys: Iterable<string>): string[] {
@@ -946,6 +953,14 @@ export function parseHarnessAction(value: unknown): HarnessAction {
       ...(record.failedDesignerRunId === undefined ? {} : {
         failedDesignerRunId: exactSafeIdentifierField(record, "failedDesignerRunId"),
       }),
+    };
+  }
+  if (type === "materializeOverallGoalIntegrationTaskGraph") {
+    assertOnlyFields(record, type, ["type", "runId", "plannerTaskId"]);
+    return {
+      type,
+      runId: exactSafeIdentifierField(record, "runId"),
+      plannerTaskId: exactSafeIdentifierField(record, "plannerTaskId"),
     };
   }
   if (type === "materializeFrozenEvidenceConflictDesigner") {
@@ -1423,7 +1438,7 @@ export function parseHarnessAction(value: unknown): HarnessAction {
     };
   }
   throw new Error(
-    "harness action type must be reclaimRunningTasks, retryTask, reconcileRunEvidence, recordSignal, linkResearchEvidence, materializeDesignerActionRecovery, materializeDesignDeliveryRecovery, materializeDesignWorkerRuntimeRecovery, materializeDesignWorkerTransportRecovery, materializeVerifierRepairRecovery, recoverRuntimeIntegrationHostEvidenceFailure, reconcileVerifierRepairHandoff, buildVersionedCorpusManifest, bindHostEvidenceMaintenanceReceipt, materializeHostEvidenceMaintenanceDelivery, materializeAdditiveEvidenceContractRecovery, recordAdditiveEvidenceContractOverlay, materializeOverallGoalIntegrationDesigner, materializeRuntimeIntegrationDesignRecovery, materializeFrozenEvidenceConflictDesigner, materializeRuntimeIntegrationTaskGraphRecovery, recoverRuntimeIntegrationTaskGraphPreparationFailure, installLocalDshCli, recoverRuntimeIntegrationDshInstallationFailure, recoverRuntimeIntegrationDshRuntimeBindingFailure, markRunTodo, updateRunContext, amendRunContract, retireRun, retireTask, prepareRunDrain, completeSystemTask, integrateVerifiedRun, pushExactGitRef, createExactGitRef, commitExactGitIndex, stageExactWorkerFilesForVerification, materializeAttemptArtifactsForVerification, verifySealedCorpusForVerification, registerEvolutionProfile, recordProductionEpisode, registerHarnessVariant, activateHarnessRevision, freezeMatchedExperiment, interruptAttemptAndCreateTask, interruptRunningAttemptsAndCreateTask, acceptGuardrailProposal, startSubsession, collectSubsessions, cancelSubsessions, or runWatchdogPass",
+    "harness action type must be reclaimRunningTasks, retryTask, reconcileRunEvidence, recordSignal, linkResearchEvidence, materializeDesignerActionRecovery, materializeDesignDeliveryRecovery, materializeDesignWorkerRuntimeRecovery, materializeDesignWorkerTransportRecovery, materializeVerifierRepairRecovery, recoverRuntimeIntegrationHostEvidenceFailure, reconcileVerifierRepairHandoff, buildVersionedCorpusManifest, bindHostEvidenceMaintenanceReceipt, materializeHostEvidenceMaintenanceDelivery, materializeAdditiveEvidenceContractRecovery, recordAdditiveEvidenceContractOverlay, materializeOverallGoalIntegrationDesigner, materializeOverallGoalIntegrationTaskGraph, materializeRuntimeIntegrationDesignRecovery, materializeFrozenEvidenceConflictDesigner, materializeRuntimeIntegrationTaskGraphRecovery, recoverRuntimeIntegrationTaskGraphPreparationFailure, installLocalDshCli, recoverRuntimeIntegrationDshInstallationFailure, recoverRuntimeIntegrationDshRuntimeBindingFailure, markRunTodo, updateRunContext, amendRunContract, retireRun, retireTask, prepareRunDrain, completeSystemTask, integrateVerifiedRun, pushExactGitRef, createExactGitRef, commitExactGitIndex, stageExactWorkerFilesForVerification, materializeAttemptArtifactsForVerification, verifySealedCorpusForVerification, registerEvolutionProfile, recordProductionEpisode, registerHarnessVariant, activateHarnessRevision, freezeMatchedExperiment, interruptAttemptAndCreateTask, interruptRunningAttemptsAndCreateTask, acceptGuardrailProposal, startSubsession, collectSubsessions, cancelSubsessions, or runWatchdogPass",
   );
 }
 
@@ -1514,6 +1529,9 @@ export function applyHarnessAction(
 
   if (action.type === "materializeOverallGoalIntegrationDesigner") {
     return applyOverallGoalIntegrationDesignerAtomically(harness, action, options);
+  }
+  if (action.type === "materializeOverallGoalIntegrationTaskGraph") {
+    return applyOverallGoalIntegrationTaskGraphAtomically(harness, action);
   }
 
   if (action.type === "materializeRuntimeIntegrationDesignRecovery") {
@@ -2336,6 +2354,7 @@ type HostEvidenceMaintenanceDeliveryAction = Extract<HarnessAction, { type: "mat
 type AdditiveEvidenceContractRecoveryAction = Extract<HarnessAction, { type: "materializeAdditiveEvidenceContractRecovery" }>;
 type AdditiveEvidenceContractOverlayAction = Extract<HarnessAction, { type: "recordAdditiveEvidenceContractOverlay" }>;
 type OverallGoalIntegrationDesignerAction = Extract<HarnessAction, { type: "materializeOverallGoalIntegrationDesigner" }>;
+type OverallGoalIntegrationTaskGraphAction = Extract<HarnessAction, { type: "materializeOverallGoalIntegrationTaskGraph" }>;
 
 function applyAdditiveEvidenceContractRecoveryAtomically(
   harness: Harness,
@@ -3217,6 +3236,156 @@ function applyOverallGoalIntegrationDesignerAtomically(
       }
     } catch (error) {
       result = blockedResult(action.type, `Overall-goal integration Designer blocked: ${errorMessage(error)}`, [errorMessage(error)]);
+    }
+    const eventId = harness.recordHarnessActionEventWithDb(db, {
+      actionType: action.type,
+      status: result.status,
+      request,
+      result: resultToRecord(result),
+    });
+    return { ...result, eventId };
+  });
+}
+
+function applyOverallGoalIntegrationTaskGraphAtomically(
+  harness: Harness,
+  action: OverallGoalIntegrationTaskGraphAction,
+): HarnessActionResult & { eventId: string } {
+  return harness.runInImmediateTransaction((db) => {
+    const request = safeRequest(action);
+    const prior = harness.listHarnessActionEventsWithDb(db, {
+      actionType: action.type,
+      statuses: ["done"],
+      limit: 1_000,
+    }).find((event) => stableFingerprint(event.request) === stableFingerprint(request));
+    if (prior) return { ...(prior.result as unknown as HarnessActionResult), eventId: prior.id };
+
+    let result: HarnessActionResult;
+    try {
+      const overview = harness.getRunOverviewWithDb(db, { runId: action.runId, eventLimit: 0 });
+      const run = overview.run;
+      if (!run || !run.projectId || run.context.source !== "design" || run.context.retired === true) {
+        throw new Error("overall-goal task graph requires one active project-bound design delivery");
+      }
+      const closeout = objectRecord(run.context.overallGoalIntegrationCloseout, "overallGoalIntegrationCloseout");
+      const bundle = objectRecord(run.context.targetSystemEvidenceBundle, "targetSystemEvidenceBundle");
+      if (bundle.purpose !== "overall-goal-integration-closeout") {
+        throw new Error("overall-goal task graph requires the authoritative closeout bundle");
+      }
+      const planner = overview.tasks.find((task) => task.id === action.plannerTaskId);
+      if (!planner || planner.role !== "planner" || !["running", "done"].includes(planner.status)) {
+        throw new Error("overall-goal task graph requires its running or done frozen Planner");
+      }
+      const frozenPlanner = objectRecord(planner.config?.frozenDesignPlanner, "frozenDesignPlanner");
+      const verifierContract = objectRecord(planner.config?.verifierContract, "verifierContract");
+      const proposalId = exactNonEmptyStringField(frozenPlanner, "designProposalId");
+      const decisionId = exactNonEmptyStringField(frozenPlanner, "designDecisionId");
+      if (frozenPlanner.canonicalPlannerTaskId !== planner.id
+        || proposalId !== run.context.designProposalId
+        || decisionId !== run.context.designDecisionId) {
+        throw new Error("overall-goal task graph Planner authority binding drifted");
+      }
+      const proposal = harness.getDesignProposalWithDb(db, { id: proposalId });
+      const decision = proposal
+        ? harness.listDesignDecisionsWithDb(db, { proposalId }).find((candidate) => candidate.id === decisionId)
+        : null;
+      if (!proposal || proposal.projectId !== run.projectId || proposal.status !== "accepted"
+        || !decision || decision.decision !== "approved") {
+        throw new Error("overall-goal task graph requires an accepted proposal and approved decision");
+      }
+      const budgetBefore = canonicalEvolutionValueSha256(run.context.repairReplanBudget ?? null);
+      const stableTaskIds = [
+        "verify-backend", "verify-frontend", "commit-push-backend", "commit-push-frontend", "runtime-switch-evidence",
+      ].map((stage) => `task_${createHash("sha1").update(`overall-goal-closeout|${run.id}|${planner.id}|${stage}`).digest("hex")}`);
+      const projected = projectOverallGoalIntegrationTaskGraph({
+        runId: run.id,
+        plannerTaskId: planner.id,
+        proposalId,
+        decisionId,
+        closeout,
+        evidenceBundle: bundle,
+        verifierContract,
+        frozenDesignPlanner: frozenPlanner,
+        taskIds: stableTaskIds,
+      });
+      const existingGraph = objectRecordOrNull(run.context.overallGoalIntegrationCloseoutTaskGraph);
+      if (existingGraph) {
+        if (existingGraph.graphSha256 !== projected.graph.graphSha256
+          || stableTaskIds.some((id) => !overview.tasks.some((task) => task.id === id))) {
+          throw new Error("overall-goal task graph conflicts with its durable receipt");
+        }
+        result = doneResult(action.type, `Overall-goal integration graph ${projected.graph.graphSha256} reused.`, [
+          { name: "frozen graph", status: "passed", evidence: String(projected.graph.graphSha256) },
+          { name: "Repair budget", status: "passed", evidence: "unchanged" },
+        ], [{ kind: "overall_goal_integration_task_graph", runId: run.id, taskIds: stableTaskIds, reused: true }]);
+      } else {
+        const stageGoals = new Set(projected.tasks.map((task) => task.goal));
+        const legacy = overview.tasks.filter((task) => task.id !== planner.id && stageGoals.has(task.goal));
+        if (legacy.some((task) => task.status !== "todo")
+          || legacy.some((task) => overview.sessions.some((session) => session.taskId === task.id))
+          || legacy.length !== 0 && (legacy.length !== 5 || new Set(legacy.map((task) => task.goal)).size !== 5)) {
+          throw new Error("overall-goal task graph recovery requires either no downstream tasks or exactly five unstarted legacy tasks");
+        }
+        const otherActive = overview.tasks.filter((task) => task.id !== planner.id
+          && !legacy.some((candidate) => candidate.id === task.id)
+          && (task.status === "todo" || task.status === "running"));
+        if (otherActive.length > 0 || overview.threads.some((thread) => thread.status === "running" && thread.taskId !== planner.id)) {
+          throw new Error("overall-goal task graph recovery found unrelated active work");
+        }
+        const retiredTaskIds: string[] = [];
+        db.transaction(() => {
+          for (const task of legacy) {
+            const config = {
+              ...(task.config ?? {}),
+              retired: true,
+              retiredReason: "replaced by the frozen overall-goal integration host graph",
+              retiredByAction: action.type,
+            };
+            const updated = db.query("update tasks set status = 'blocked', config_json = $configJson, updated_at = current_timestamp where id = $taskId and status = 'todo'")
+              .run({ $taskId: task.id, $configJson: JSON.stringify(config) });
+            if (updated.changes === 1) retiredTaskIds.push(task.id);
+          }
+          harness.updateRunWithDb(db, {
+            runId: run.id,
+            status: "todo",
+            contextPatch: { overallGoalIntegrationCloseoutTaskGraph: projected.graph },
+          });
+          for (const task of projected.tasks) {
+            harness.createTaskWithDb(db, {
+              id: task.id,
+              runId: run.id,
+              parentId: task.parentId,
+              role: task.role,
+              goal: task.goal,
+              prompt: task.prompt,
+              dependsOn: task.dependsOn,
+              doneWhen: task.doneWhen,
+              worktreePath: task.worktreePath,
+              config: task.config,
+            });
+          }
+        })();
+        const budgetAfter = canonicalEvolutionValueSha256(harness.getRunWithDb(db, run.id)?.context.repairReplanBudget ?? null);
+        if (budgetAfter !== budgetBefore) throw new Error("overall-goal task graph changed the prior Repair budget");
+        result = doneResult(action.type, `Overall-goal integration graph ${projected.graph.graphSha256} materialized.`, [
+          { name: "accepted proposal", status: "passed", evidence: proposalId },
+          { name: "approved decision", status: "passed", evidence: decisionId },
+          { name: "authoritative bundle", status: "passed", evidence: String(bundle.bundleSha256) },
+          { name: "single ready stage", status: "passed", evidence: stableTaskIds[0]! },
+          { name: "Repair budget", status: "passed", evidence: "unchanged" },
+          { name: "Goal Review", status: "passed", evidence: "not created" },
+        ], [{
+          kind: "overall_goal_integration_task_graph",
+          runId: run.id,
+          plannerTaskId: planner.id,
+          taskIds: stableTaskIds,
+          retiredTaskIds,
+          graphSha256: projected.graph.graphSha256,
+          reused: false,
+        }]);
+      }
+    } catch (error) {
+      result = blockedResult(action.type, `Overall-goal integration task graph blocked: ${errorMessage(error)}`, [errorMessage(error)]);
     }
     const eventId = harness.recordHarnessActionEventWithDb(db, {
       actionType: action.type,

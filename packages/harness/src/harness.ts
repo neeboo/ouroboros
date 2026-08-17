@@ -16,6 +16,7 @@ import {
 import { makeId } from "./ids";
 import { toJson } from "./json";
 import { runtimeIntegrationTaskExecutionProblem } from "./runtime-integration-tasks";
+import { overallGoalIntegrationTaskExecutionProblem } from "./overall-goal-integration-tasks";
 import { assertRunCompletionReady } from "./completion-readiness";
 import {
   attemptEventFromRow,
@@ -3627,6 +3628,7 @@ function assertTaskGovernanceBoundaryWithDb(db: HarnessDatabase, input: CreateTa
   }
   const run = runFromRow(runRow);
   assertAdditiveEvidenceContractTaskWithDb(db, run, input);
+  assertOverallGoalIntegrationTaskWithDb(db, run, input);
   const boundary = run.context.runtimeIntegrationBoundary;
   const boundaryRecord = boundary && typeof boundary === "object" && !Array.isArray(boundary)
     ? boundary as Record<string, unknown>
@@ -3760,6 +3762,35 @@ function assertTaskGovernanceBoundaryWithDb(db: HarnessDatabase, input: CreateTa
   if (!plannerFound) {
     throw new Error(`design child ${run.id} Worker must be downstream of its frozen Planner task`);
   }
+}
+
+function assertOverallGoalIntegrationTaskWithDb(db: HarnessDatabase, run: Run, input: CreateTaskInput) {
+  const closeout = run.context.overallGoalIntegrationCloseout;
+  if (!closeout || typeof closeout !== "object" || Array.isArray(closeout) || input.role === "planner") return;
+  const candidate: Task = {
+    id: input.id ?? "<pending-overall-goal-task>",
+    runId: input.runId,
+    parentId: input.parentId ?? null,
+    cycleId: input.cycleId ?? "<pending-cycle>",
+    status: "todo",
+    role: input.role,
+    goal: input.goal,
+    prompt: input.prompt,
+    dependsOn: input.dependsOn ?? [],
+    doneWhen: input.doneWhen ?? [],
+    config: input.config,
+    worktreePath: input.worktreePath ?? null,
+    sessionRef: null,
+    contextVersion: 1,
+  };
+  const problem = overallGoalIntegrationTaskExecutionProblem({
+    runId: run.id,
+    closeout,
+    evidenceBundle: run.context.targetSystemEvidenceBundle,
+    graph: run.context.overallGoalIntegrationCloseoutTaskGraph,
+    task: candidate,
+  });
+  if (problem) throw new Error(problem);
 }
 
 function assertAdditiveEvidenceContractTaskWithDb(db: HarnessDatabase, run: Run, input: CreateTaskInput) {

@@ -27,6 +27,12 @@ export type {
   RuntimeIntegrationPlannedTask,
   RuntimeIntegrationTaskProjection,
 } from "./runtime-integration-tasks";
+export {
+  OVERALL_GOAL_INTEGRATION_STAGES,
+  overallGoalIntegrationTaskExecutionProblem,
+  projectOverallGoalIntegrationTaskGraph,
+} from "./overall-goal-integration-tasks";
+export type { OverallGoalIntegrationProjection } from "./overall-goal-integration-tasks";
 export { filterOuroborosRuntimePaths, isOuroborosRuntimePath, OUROBOROS_RUNTIME_PATHS } from "./runtime-paths";
 export {
   isStrictIsoTimestamp,

@@ -2518,6 +2518,7 @@ const PROTECTED_DESIGN_CONTEXT_KEYS = [
   "targetSystemEvidenceBundle",
   "runtimeIntegrationBoundary",
   "overallGoalIntegrationCloseout",
+  "overallGoalIntegrationCloseoutTaskGraph",
 ] as const;
 
 interface DesignDeliveryPlan {
