@@ -2,8 +2,17 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { applyHarnessAction, canonicalEvolutionValueSha256, Harness } from "../packages/harness/src";
-import { createTasksFromOutputHook, reconcileAdditiveEvidenceContract } from "../packages/runner/src";
+import {
+  type AttemptOutput,
+  applyHarnessAction,
+  canonicalEvolutionValueSha256,
+  Harness,
+} from "../packages/harness/src";
+import {
+  createApplyDesignActionsHook,
+  createTasksFromOutputHook,
+  reconcileAdditiveEvidenceContract,
+} from "../packages/runner/src";
 
 describe("additive evidence-contract delivery", () => {
   let dir: string;
@@ -407,6 +416,25 @@ describe("additive evidence-contract delivery", () => {
         },
       },
     });
+    const authoritativeBundle = nextOverview.run!.context.targetSystemEvidenceBundle as Record<string, unknown>;
+    const { bundleSha256, ...bundleBody } = authoritativeBundle;
+    expect(bundleSha256).toBe(canonicalEvolutionValueSha256(bundleBody));
+    expect(authoritativeBundle).toMatchObject({
+      purpose: "overall-goal-integration-closeout",
+      overallGoalComplete: false,
+      evidenceOnlyCloseout: { verifierAttemptId: expect.any(String) },
+      verifiedRuntime: expect.arrayContaining([
+        expect.objectContaining({ taskId: expect.any(String), attemptId: expect.any(String) }),
+      ]),
+      worktrees: [
+        expect.objectContaining({ repositoryId: "target-backend", receiptSha256: expect.any(String) }),
+        expect.objectContaining({ repositoryId: "target-frontend", receiptSha256: expect.any(String) }),
+      ],
+      temporaryAndControlExclusions: expect.objectContaining({
+        targetBackend: expect.arrayContaining(["tests/runtime-integration/.tmp/host-evidence.json"]),
+      }),
+      runtimeSwitchEvidence: { status: "unverified", requiredReceipts: expect.any(Array) },
+    });
     expect(nextOverview.tasks).toEqual([
       expect.objectContaining({
         id: nextTaskId,
@@ -419,6 +447,13 @@ describe("additive evidence-contract delivery", () => {
           browserProcessPolicy: "deny",
           forbidNextTasks: true,
           forbidNextRuns: true,
+          targetSystemEvidenceBundle: authoritativeBundle,
+          overallGoalIntegrationDesignAdapter: expect.objectContaining({
+            schemaVersion: 1,
+            signalId: expect.any(String),
+            evidenceBundleSha256: bundleSha256,
+            adapterSha256: expect.any(String),
+          }),
         }),
       }),
     ]);
@@ -429,6 +464,171 @@ describe("additive evidence-contract delivery", () => {
       context: { repairReplanBudget: { used: 1, limit: 3 } },
     });
     expect(harness.getRun(fixture.deliveryRunId)?.status).toBe("done");
+  });
+
+  test("a missing-bundle-hash Designer failure is retired once and replaced by one host-projected Designer", async () => {
+    const fixture = seedAdditiveDelivery(harness, dir, true);
+    await seedIntegrationWorktrees(harness, dir);
+    const charter = harness.createFounderCharter({
+      projectId: harness.getRun(fixture.deliveryRunId)!.projectId!,
+      mission: "Finish verified target integration safely.",
+      charter: {
+        mission: "Finish verified target integration safely.",
+        capitalPolicy: {
+          currency: "USD",
+          experimentBudget: 1_000,
+          recurringSpendApprovalAbove: 0,
+          portfolio: { core: 5, growth: 3, exploration: 2 },
+        },
+        authority: {
+          autoResearch: true,
+          autoReversibleExperiments: true,
+          humanApprovalPolicy: "cost-only",
+          requireHumanFor: ["cost"],
+        },
+      },
+      activate: true,
+    });
+    harness.updateRun({ runId: fixture.deliveryRunId, contextPatch: { founderCharterId: charter.id } });
+    applyHarnessAction(harness, {
+      type: "materializeAdditiveEvidenceContractRecovery",
+      runId: fixture.deliveryRunId,
+      plannerTaskId: fixture.plannerTaskId,
+    } as never);
+    const graph = harness.getRun(fixture.deliveryRunId)!.context.additiveEvidenceContractTaskGraph as Record<string, string>;
+    reconcileAdditiveEvidenceContract({ harness, runId: fixture.deliveryRunId });
+    harness.recordAttempt({
+      taskId: graph.verifierTaskId,
+      input: { executor: "codex-resumable" },
+      output: { status: "done", verdict: "pass", summary: "pass", changedFiles: [], checks: [], artifacts: [], problems: [] },
+    });
+    applyHarnessAction(harness, { type: "prepareRunDrain", runId: fixture.deliveryRunId, maxTries: 3 });
+    const first = applyHarnessAction(harness, {
+      type: "materializeOverallGoalIntegrationDesigner",
+      runId: fixture.deliveryRunId,
+    } as never);
+    const firstReceipt = first.artifacts.find((artifact) => artifact.kind === "overall_goal_integration_designer_trigger")!;
+    const failedRunId = String(firstReceipt.runId);
+    const failedTaskId = String(firstReceipt.taskId);
+    harness.recordAttempt({
+      taskId: failedTaskId,
+      input: { executor: "codex-resumable", permissionMode: "read-only" },
+      output: {
+        status: "blocked",
+        summary: "The integration scheme is valid but its host bundle is incomplete.",
+        changedFiles: [],
+        checks: [],
+        artifacts: [],
+        problems: ["target-system authoritative evidence bundle is missing bundleSha256"],
+        nextTasks: [],
+        nextRuns: [],
+      },
+    });
+
+    const recovered = applyHarnessAction(harness, {
+      type: "materializeOverallGoalIntegrationDesigner",
+      runId: fixture.deliveryRunId,
+      failedDesignerRunId: failedRunId,
+    } as never);
+    const replay = applyHarnessAction(harness, {
+      type: "materializeOverallGoalIntegrationDesigner",
+      runId: fixture.deliveryRunId,
+      failedDesignerRunId: failedRunId,
+    } as never);
+    const recoveredReceipt = recovered.artifacts.find((artifact) => artifact.kind === "overall_goal_integration_designer_trigger")!;
+    const nextRunId = String(recoveredReceipt.runId);
+    const nextTaskId = String(recoveredReceipt.taskId);
+    expect(recovered).toMatchObject({ status: "done" });
+    expect(replay).toMatchObject({ status: "done", eventId: recovered.eventId });
+    expect(nextRunId).not.toBe(failedRunId);
+    expect(harness.getRun(failedRunId)).toMatchObject({
+      status: "blocked",
+      context: {
+        retired: true,
+        overallGoalIntegrationDesignFailure: expect.objectContaining({
+          fingerprint: expect.any(String),
+          sourceTaskId: failedTaskId,
+        }),
+      },
+    });
+    expect(harness.getRunOverview({ runId: failedRunId, eventLimit: 0 }).tasks
+      .filter((task) => task.role === "goal-review")).toHaveLength(0);
+
+    const nextOverview = harness.getRunOverview({ runId: nextRunId, eventLimit: 0 });
+    expect(nextOverview.run).toMatchObject({ status: "todo", context: { supersedesRunId: failedRunId } });
+    expect(nextOverview.sessions).toHaveLength(0);
+    expect(nextOverview.threads).toHaveLength(0);
+    expect(nextOverview.tasks).toEqual([expect.objectContaining({ id: nextTaskId, role: "designer", status: "todo" })]);
+    const task = nextOverview.tasks[0]!;
+    const adapter = task.config!.overallGoalIntegrationDesignAdapter as Record<string, unknown>;
+    const bundle = nextOverview.run!.context.targetSystemEvidenceBundle as Record<string, unknown>;
+    const { adapterSha256, ...adapterBody } = adapter;
+    expect(adapterSha256).toBe(canonicalEvolutionValueSha256(adapterBody));
+    expect(adapter.evidenceBundleSha256).toBe(bundle.bundleSha256);
+
+    const hook = createApplyDesignActionsHook({ harness });
+    const hookResult = await hook({
+      run: nextOverview.run!,
+      task,
+      sessionName: "overall-goal-designer",
+      prompt: task.prompt,
+      output: {
+        status: "done",
+        summary: "Propose the bounded integration closeout.",
+        changedFiles: [],
+        checks: [],
+        artifacts: [],
+        problems: [],
+        designActions: [{
+          type: "proposeDesign",
+          payload: {
+            projectId: nextOverview.run!.projectId!,
+            title: "Governed integration closeout",
+            status: "proposed",
+            charterId: charter.id,
+            proposal: {
+              problem: "Two verified isolated worktrees remain uncommitted and are not bound to the active local runtime.",
+              recommendation: "Verify each repository independently, commit and push exact hashes, then prove the local runtime switch.",
+              evidenceRefs: ["model-invented-ref"],
+              options: [{
+                name: "Bounded exact integration",
+                benefits: ["preserves verified work"],
+                costs: ["bounded local engineering time"],
+                risks: ["receipt drift blocks completion"],
+                lockIn: [],
+              }],
+              additions: ["repository commit receipts", "runtime switch receipt"],
+              removals: [],
+              targetOutcome: "Both repositories are pushed and the local runtime identifies those commits.",
+              assumptions: [],
+              uncertainty: [],
+              evaluationContract: {
+                baseline: ["model supplied baseline must be replaced"],
+                successMetrics: ["model supplied metric must be replaced"],
+                guardMetrics: [],
+                requiredEvidence: ["model supplied evidence must be replaced"],
+              },
+              investment: { reversibility: "hard", portfolio: "exploration", oneTimeCost: 99 },
+            },
+          },
+        }],
+      } as AttemptOutput,
+    });
+    expect(hookResult.problems).toBeUndefined();
+    const proposal = harness.listDesignProposals({ projectId: nextOverview.run!.projectId! })
+      .find((candidate) => candidate.runId === nextRunId)!;
+    expect(proposal.proposal).toMatchObject({
+      evidenceRefs: [adapter.signalId],
+      evaluationContract: adapter.evaluationContract,
+      investment: adapter.investment,
+      resourceRequest: adapter.resourceRequest,
+    });
+    expect(proposal.proposal.problem).toContain("isolated worktrees");
+    expect(proposal.proposal.recommendation).toContain("runtime switch");
+    expect(harness.getRun("run_source_blocked")).toMatchObject({
+      status: "blocked",
+      context: { repairReplanBudget: { used: 1, limit: 3 } },
+    });
   });
 
   test("overall-goal integration trigger fails closed when a worktree writes outside its frozen repository boundary", async () => {

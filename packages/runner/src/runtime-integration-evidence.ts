@@ -27,6 +27,54 @@ function sameValue(left: unknown, right: unknown) {
 }
 
 export function runtimeIntegrationEvidenceProblem(run: Run, task: Task, harness?: Harness): string | null {
+  if (task.config?.overallGoalIntegrationDesignAdapter) {
+    try {
+      const bundle = record(run.context.targetSystemEvidenceBundle, "targetSystemEvidenceBundle");
+      const taskBundle = record(task.config.targetSystemEvidenceBundle, "task targetSystemEvidenceBundle");
+      if (!sameValue(bundle, taskBundle)) {
+        throw new Error("overall-goal integration task evidence bundle drifted from the run bundle");
+      }
+      const bundleSha256 = exactSha(bundle.bundleSha256, "targetSystemEvidenceBundle.bundleSha256");
+      const { bundleSha256: _bundleSha256, ...bundleBody } = bundle;
+      if (canonicalEvolutionValueSha256(bundleBody) !== bundleSha256
+        || bundle.purpose !== "overall-goal-integration-closeout"
+        || bundle.targetProjectId !== run.projectId
+        || bundle.overallGoalComplete !== false) {
+        throw new Error("overall-goal integration authoritative evidence bundle is invalid");
+      }
+      const evidence = record(run.context.overallGoalIntegrationEvidence, "overallGoalIntegrationEvidence");
+      if (bundle.evidenceSha256 !== exactSha(evidence.evidenceSha256, "overallGoalIntegrationEvidence.evidenceSha256")) {
+        throw new Error("overall-goal integration evidence hash drifted from the authoritative bundle");
+      }
+      const runtimeReceipts = Array.isArray(bundle.verifiedRuntime) ? bundle.verifiedRuntime : [];
+      const worktrees = Array.isArray(bundle.worktrees) ? bundle.worktrees : [];
+      if (runtimeReceipts.length !== 5 || worktrees.length !== 2
+        || worktrees.some((entry) => {
+          const worktree = record(entry, "overall-goal worktree receipt");
+          exactSha(worktree.receiptSha256, "overall-goal worktree receiptSha256");
+          return !Array.isArray(worktree.files) || worktree.files.length === 0;
+        })) {
+        throw new Error("overall-goal integration bundle is missing five-stage or worktree receipts");
+      }
+      const exclusions = record(bundle.temporaryAndControlExclusions, "temporaryAndControlExclusions");
+      const runtimeSwitch = record(bundle.runtimeSwitchEvidence, "runtimeSwitchEvidence");
+      if (!Array.isArray(exclusions.targetBackend) || !Array.isArray(exclusions.targetFrontend)
+        || runtimeSwitch.status !== "unverified" || !Array.isArray(runtimeSwitch.requiredReceipts)) {
+        throw new Error("overall-goal integration exclusions or runtime-unverified receipt is incomplete");
+      }
+      const adapter = record(task.config.overallGoalIntegrationDesignAdapter, "overallGoalIntegrationDesignAdapter");
+      const adapterSha256 = exactSha(adapter.adapterSha256, "overallGoalIntegrationDesignAdapter.adapterSha256");
+      const { adapterSha256: _adapterSha256, ...adapterBody } = adapter;
+      if (canonicalEvolutionValueSha256(adapterBody) !== adapterSha256
+        || adapter.evidenceBundleSha256 !== bundleSha256
+        || adapter.signalId !== bundle.signalId) {
+        throw new Error("overall-goal integration adapter is detached from its authoritative bundle");
+      }
+      return null;
+    } catch (error) {
+      return error instanceof Error ? error.message : String(error);
+    }
+  }
   if (!task.config?.runtimeIntegrationDesignAdapter) {
     const boundary = run.context.runtimeIntegrationBoundary;
     const graph = recordOrNull(boundary)?.taskGraph;
@@ -136,6 +184,62 @@ export function closeRuntimeIntegrationEvidenceFailure(input: {
   attemptId?: string;
 }) {
   if (!input.run.projectId) return;
+  if (input.task.config?.overallGoalIntegrationDesignAdapter) {
+    const fingerprint = canonicalEvolutionValueSha256({
+      runId: input.run.id,
+      taskId: input.task.id,
+      problem: input.problem,
+      bundle: input.run.context.targetSystemEvidenceBundle ?? null,
+    });
+    const existing = input.run.context.overallGoalIntegrationDesignFailure;
+    if (existing && typeof existing === "object" && !Array.isArray(existing)
+      && (existing as Record<string, unknown>).fingerprint === fingerprint) {
+      return;
+    }
+    const recordedAt = new Date().toISOString();
+    applyHarnessAction(input.harness, {
+      type: "updateRunContext",
+      runId: input.run.id,
+      status: "blocked",
+      contextPatch: {
+        retired: true,
+        retiredReason: "overall-goal-authoritative-evidence-validation-failed",
+        overallGoalIntegrationDesignFailure: {
+          schemaVersion: 1,
+          fingerprint,
+          sourceTaskId: input.task.id,
+          sourceAttemptId: input.attemptId ?? null,
+          problem: input.problem.slice(0, 1_024),
+          recordedAt,
+        },
+      },
+      reason: "overall-goal Designer failed authoritative evidence validation",
+    });
+    applyHarnessAction(input.harness, {
+      type: "recordSignal",
+      projectId: input.run.projectId,
+      sourceRunId: input.run.id,
+      signalClass: "system",
+      source: `blocked-run-outcome:${input.run.id}`,
+      title: "Overall-goal integration Designer evidence validation failed",
+      summary: "The host-bound integration Designer stopped at its first validation fingerprint without a continuation or Goal Review.",
+      observationTime: recordedAt,
+      confidence: 1,
+      evidence: [
+        `run:${input.run.id}`,
+        `task:${input.task.id}`,
+        ...(input.attemptId ? [`attempt:${input.attemptId}`] : []),
+        `sha256:${fingerprint}`,
+      ],
+      payload: {
+        outcome: "evidence-defect",
+        defectKind: "overall-goal-authoritative-evidence-invalid",
+        validationFingerprint: fingerprint,
+        nextStep: "new-independent-overall-goal-designer-trigger",
+      },
+    });
+    return;
+  }
   if (!input.task.config?.runtimeIntegrationDesignAdapter) {
     applyHarnessAction(input.harness, {
       type: "updateRunContext",

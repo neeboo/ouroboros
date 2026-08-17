@@ -228,6 +228,7 @@ export type HarnessAction =
   | {
       type: "materializeOverallGoalIntegrationDesigner";
       runId: string;
+      failedDesignerRunId?: string;
     }
   | {
       type: "materializeRuntimeIntegrationDesignRecovery";
@@ -700,6 +701,7 @@ const FROZEN_DESIGN_CONTEXT_KEYS = new Set([
   "additiveEvidenceContractOverlayState",
   "overallGoalIntegrationContinuation",
   "overallGoalIntegrationEvidence",
+  "overallGoalIntegrationRecovery",
 ]);
 
 function frozenDesignContextKeys(keys: Iterable<string>): string[] {
@@ -936,10 +938,13 @@ export function parseHarnessAction(value: unknown): HarnessAction {
     };
   }
   if (type === "materializeOverallGoalIntegrationDesigner") {
-    assertOnlyFields(record, type, ["type", "runId"]);
+    assertOnlyFields(record, type, ["type", "runId", "failedDesignerRunId"]);
     return {
       type,
       runId: exactSafeIdentifierField(record, "runId"),
+      ...(record.failedDesignerRunId === undefined ? {} : {
+        failedDesignerRunId: exactSafeIdentifierField(record, "failedDesignerRunId"),
+      }),
     };
   }
   if (type === "materializeFrozenEvidenceConflictDesigner") {
@@ -2850,8 +2855,155 @@ function applyOverallGoalIntegrationDesignerAtomically(
         },
       };
       const evidence = { ...evidenceBody, evidenceSha256: canonicalEvolutionValueSha256(evidenceBody) };
+      const signalSeed = canonicalEvolutionValueSha256({
+        sourceRunId: run.id,
+        evidenceSha256: evidence.evidenceSha256,
+        failedDesignerRunId: action.failedDesignerRunId ?? null,
+      });
+      const signalId = `signal_overall_goal_${signalSeed.slice(0, 32)}`;
+      const temporaryAndControlExclusions = {
+        targetBackend: [
+          ...worktrees[0]!.files
+            .filter((file) => file.commitDisposition !== "eligible")
+            .map((file) => file.path),
+          ".ouroboros/**",
+          ".orbs/**",
+          ".git/orbs/**",
+          "db/**",
+        ],
+        targetFrontend: [".ouroboros/**", ".orbs/**", ".git/orbs/**", "db/**"],
+      };
+      const authoritativeBundleBody = {
+        ...evidenceBody,
+        targetProjectId: run.projectId,
+        signalId,
+        evidenceSha256: evidence.evidenceSha256,
+        temporaryAndControlExclusions,
+      };
+      const targetSystemEvidenceBundle = {
+        ...authoritativeBundleBody,
+        bundleSha256: canonicalEvolutionValueSha256(authoritativeBundleBody),
+      };
+      const evaluationContract = {
+        baseline: [
+          `backend worktree receipt ${worktrees[0]!.receiptSha256} is uncommitted at ${worktrees[0]!.head}`,
+          `frontend worktree receipt ${worktrees[1]!.receiptSha256} is uncommitted at ${worktrees[1]!.head}`,
+          "runtime switch evidence is unverified and overallGoalComplete is false",
+        ],
+        successMetrics: [
+          "both repositories pass independent exact path and SHA-256 verification",
+          "both isolated branches have exact commit, push, and remote-ref readback receipts",
+          "Docker, PostgreSQL restart, HTTP 127.0.0.1:10588, and local process receipts bind to the integrated commits",
+        ],
+        guardMetrics: [
+          "no temporary or control path is staged or committed",
+          "no user main worktree is written",
+          "the blocked runtime run and frozen package remain unchanged",
+          "zero paid spend and no browser execution",
+        ],
+        requiredEvidence: [
+          "one independent read-only verifier receipt per repository",
+          "one exact staged-path and SHA-256 manifest per repository",
+          "commit, tree, parent, branch, push, remote ref, and remote SHA readback per repository",
+          "Docker rebuild and healthy container identity bound to both commits",
+          "PostgreSQL persistence and restart readback bound to the backend commit",
+          "HTTP 127.0.0.1:10588 health and evidence identity bound to both commits",
+          "local runtime process and worktree identity bound to the integrated commits",
+        ],
+      };
+      const investment = {
+        reversibility: "easy" as const,
+        portfolio: "core" as const,
+        classification: "evidence-maintenance" as const,
+        oneTimeCost: 0,
+        recurringCost: 0,
+        timeBudget: "At most 60 minutes; stop on any receipt, path, push, or runtime identity mismatch.",
+      };
+      const resourceRequest = {
+        schemaVersion: 1 as const,
+        value: 5,
+        informationGain: 5,
+        maxDurationMinutes: 60,
+        maxParallelTasks: 2,
+        humanReviewMinutes: 0,
+        paidUsd: 0 as const,
+      };
+      const adapterBody = {
+        schemaVersion: 1 as const,
+        signalId,
+        evidenceBundleSha256: targetSystemEvidenceBundle.bundleSha256,
+        evaluationContract,
+        investment,
+        resourceRequest,
+      };
+      const overallGoalIntegrationDesignAdapter = {
+        ...adapterBody,
+        adapterSha256: canonicalEvolutionValueSha256(adapterBody),
+      };
       const existing = objectRecordOrNull(run.context.overallGoalIntegrationContinuation);
-      if (existing) {
+      let recoveryFailure: {
+        failedRunId: string;
+        failedTaskId: string;
+        failedAttemptId: string;
+        problem: string;
+        fingerprint: string;
+      } | null = null;
+      if (action.failedDesignerRunId) {
+        if (!existing || existing.runId !== action.failedDesignerRunId || typeof existing.taskId !== "string"
+          || existing.evidenceSha256 !== evidence.evidenceSha256) {
+          throw new Error("overall-goal Designer recovery does not match the original continuation receipt");
+        }
+        const failedOverview = harness.getRunOverviewWithDb(db, {
+          runId: action.failedDesignerRunId,
+          eventLimit: 0,
+        });
+        const failedTask = failedOverview.tasks.find((task) => task.id === existing.taskId);
+        const failedSession = [...failedOverview.sessions].reverse().find((session) =>
+          session.taskId === existing.taskId && session.status === "blocked");
+        const problem = failedSession?.output.problems?.find((item) =>
+          item === "target-system authoritative evidence bundle is missing bundleSha256");
+        if (!failedOverview.run || failedOverview.run.projectId !== run.projectId
+          || failedOverview.run.context.source !== "target-system-design"
+          || failedOverview.run.context.parentRunId !== run.id
+          || failedTask?.role !== "designer" || failedTask.status !== "blocked"
+          || !failedSession || !problem
+          || failedOverview.tasks.some((task) => task.status === "todo" || task.status === "running")
+          || failedOverview.threads.some((thread) => thread.status === "running")) {
+          throw new Error("overall-goal Designer recovery requires the drained exact missing-bundle-hash failure");
+        }
+        const fingerprint = canonicalEvolutionValueSha256({
+          failedRunId: failedOverview.run.id,
+          failedTaskId: failedTask.id,
+          failedAttemptId: failedSession.attemptId,
+          problem,
+          evidenceSha256: evidence.evidenceSha256,
+        });
+        harness.updateRunWithDb(db, {
+          runId: failedOverview.run.id,
+          contextPatch: {
+            retired: true,
+            retiredReason: "superseded-by-authoritative-overall-goal-designer",
+            overallGoalIntegrationDesignFailure: {
+              schemaVersion: 1,
+              fingerprint,
+              sourceTaskId: failedTask.id,
+              sourceAttemptId: failedSession.attemptId,
+              problem,
+            },
+          },
+        });
+        if (failedOverview.run.status !== "blocked") {
+          harness.updateRunStatusWithDb(db, { runId: failedOverview.run.id, status: "blocked" });
+        }
+        recoveryFailure = {
+          failedRunId: failedOverview.run.id,
+          failedTaskId: failedTask.id,
+          failedAttemptId: failedSession.attemptId,
+          problem,
+          fingerprint,
+        };
+      }
+      if (existing && !recoveryFailure) {
         if (existing.evidenceSha256 !== evidence.evidenceSha256
           || typeof existing.runId !== "string" || typeof existing.taskId !== "string") {
           throw new Error("overall-goal integration continuation conflicts with its prior frozen receipt");
@@ -2880,11 +3032,11 @@ function applyOverallGoalIntegrationDesignerAtomically(
         const continuationKey = canonicalEvolutionValueSha256({
           sourceRunId: run.id,
           graphSha256: closeout.graphSha256,
-          evidenceSha256: evidence.evidenceSha256,
+          bundleSha256: targetSystemEvidenceBundle.bundleSha256,
+          recoveryFingerprint: recoveryFailure?.fingerprint ?? null,
         });
         const runId = `run_${createHash("sha1").update(`overall-goal-integration|${continuationKey}`).digest("hex")}`;
         const taskId = `task_${createHash("sha1").update(`overall-goal-integration-task|${continuationKey}`).digest("hex")}`;
-        const signalId = `signal_overall_goal_${createHash("sha256").update(continuationKey).digest("hex").slice(0, 32)}`;
         if (harness.getRunWithDb(db, runId)) {
           throw new Error("overall-goal integration stable IDs already exist without a source receipt");
         }
@@ -2925,20 +3077,14 @@ function applyOverallGoalIntegrationDesignerAtomically(
           context: {
             source: "target-system-design",
             parentRunId: run.id,
+            ...(recoveryFailure ? { supersedesRunId: recoveryFailure.failedRunId } : {}),
             projectId: run.projectId,
             founderCharterId: run.context.founderCharterId,
             designCharterId: run.context.designCharterId ?? run.context.founderCharterId,
             overallGoalComplete: false,
             overallGoalIntegrationEvidence: evidence,
-            targetSystemEvidenceBundle: {
-              schemaVersion: 1,
-              purpose: "overall-goal-integration-closeout",
-              signalId,
-              evidenceSha256: evidence.evidenceSha256,
-              sourceRunId: run.id,
-              blockedRuntimeRunId: blockedRun.id,
-              overallGoalComplete: false,
-            },
+            targetSystemEvidenceBundle,
+            overallGoalIntegrationDesignAdapter,
           },
         });
         harness.createTaskWithDb(db, {
@@ -2947,7 +3093,9 @@ function applyOverallGoalIntegrationDesignerAtomically(
           role: "designer",
           goal: "Propose a bounded integration closeout for the two verified isolated worktrees, or quiesce",
           prompt: [
-            "Use only the host-frozen overallGoalIntegrationEvidence in task config.",
+            "Use only the host-frozen targetSystemEvidenceBundle and overallGoalIntegrationDesignAdapter in task config.",
+            `Authoritative evidence bundle SHA-256: ${targetSystemEvidenceBundle.bundleSha256}`,
+            "The host adapter owns evidence references, evaluation evidence, zero-cost investment fields, and the resource request. Write only the concrete integration problem, recommendation, options, additions, removals, outcome, assumptions, and uncertainty.",
             "The prior run completed an additive evidence contract only; the overall target delivery is still incomplete.",
             "Propose at most one zero-cost governed integration closeout, or return a mutation-free quiescent decision.",
             "A proposal must require independent read-only verification for backend and frontend, exact per-repository path/SHA staging, commit and push receipts, and explicit exclusion of temporary/control files.",
@@ -2972,6 +3120,8 @@ function applyOverallGoalIntegrationDesignerAtomically(
             forbidNextTasks: true,
             forbidNextRuns: true,
             overallGoalIntegrationEvidence: evidence,
+            targetSystemEvidenceBundle,
+            overallGoalIntegrationDesignAdapter,
           },
         });
         const continuation = {
@@ -2982,11 +3132,18 @@ function applyOverallGoalIntegrationDesignerAtomically(
           evidenceSha256: evidence.evidenceSha256,
           blockedRuntimeRunId: blockedRun.id,
           sourceRepairBudgetSha256,
+          bundleSha256: targetSystemEvidenceBundle.bundleSha256,
+          ...(recoveryFailure ? {
+            failedDesignerRunId: recoveryFailure.failedRunId,
+            validationFingerprint: recoveryFailure.fingerprint,
+          } : {}),
           createdAt: now,
         };
         harness.updateRunWithDb(db, {
           runId: run.id,
-          contextPatch: { overallGoalIntegrationContinuation: continuation },
+          contextPatch: recoveryFailure
+            ? { overallGoalIntegrationRecovery: continuation }
+            : { overallGoalIntegrationContinuation: continuation },
         });
         result = doneResult(action.type, `Overall-goal integration Designer ${taskId} created without execution.`, [
           { name: "evidence-only closeout", status: "passed", evidence: run.id },
@@ -2994,6 +3151,7 @@ function applyOverallGoalIntegrationDesignerAtomically(
           { name: "backend worktree", status: "passed", evidence: worktrees[0]!.receiptSha256 },
           { name: "frontend worktree", status: "passed", evidence: worktrees[1]!.receiptSha256 },
           { name: "blocked runtime budget", status: "passed", evidence: sourceRepairBudgetSha256 },
+          { name: "authoritative evidence bundle", status: "passed", evidence: targetSystemEvidenceBundle.bundleSha256 },
           { name: "Designer attempts", status: "passed", evidence: "0" },
         ], [{
           kind: "overall_goal_integration_designer_trigger",
@@ -3005,6 +3163,11 @@ function applyOverallGoalIntegrationDesignerAtomically(
           evidenceSha256: evidence.evidenceSha256,
           backendFileCount: worktrees[0]!.files.length,
           frontendFileCount: worktrees[1]!.files.length,
+          bundleSha256: targetSystemEvidenceBundle.bundleSha256,
+          ...(recoveryFailure ? {
+            supersedesRunId: recoveryFailure.failedRunId,
+            validationFingerprint: recoveryFailure.fingerprint,
+          } : {}),
           reused: false,
         }]);
       }

@@ -106,11 +106,15 @@ export function createApplyDesignActionsHook(options: ApplyDesignActionsHookOpti
       return { decision: "exit" };
     }
     const actions = output.designActions ?? [];
-    if (task.config?.runtimeIntegrationDesignAdapter) {
+    if (task.config?.runtimeIntegrationDesignAdapter || task.config?.overallGoalIntegrationDesignAdapter) {
       const evidenceProblem = runtimeIntegrationEvidenceProblem(run, task);
-      const actionProblem = actions.length === 1 && actions[0]?.type === "proposeDesign"
-        ? null
-        : "runtime integration Designer must emit exactly one proposeDesign action";
+      const actionProblem = task.config?.runtimeIntegrationDesignAdapter
+        ? (actions.length === 1 && actions[0]?.type === "proposeDesign"
+            ? null
+            : "runtime integration Designer must emit exactly one proposeDesign action")
+        : (actions.length === 0 || (actions.length === 1 && actions[0]?.type === "proposeDesign")
+            ? null
+            : "overall-goal integration Designer must emit one proposeDesign action or quiesce");
       const problem = evidenceProblem ?? actionProblem;
       if (problem) {
         closeRuntimeIntegrationEvidenceFailure({ harness: options.harness, run, task, problem });
@@ -193,7 +197,7 @@ export function createApplyDesignActionsHook(options: ApplyDesignActionsHookOpti
     });
 
     if (problems.length > 0) {
-      if (task.config?.runtimeIntegrationDesignAdapter) {
+      if (task.config?.runtimeIntegrationDesignAdapter || task.config?.overallGoalIntegrationDesignAdapter) {
         closeRuntimeIntegrationEvidenceFailure({
           harness: options.harness,
           run,
@@ -515,6 +519,18 @@ function adaptHostReceiptBoundProposal(
   rawProposal: Record<string, unknown>,
   projectId: string,
 ): Record<string, unknown> {
+  const rawOverallGoalAdapter = task.config?.overallGoalIntegrationDesignAdapter;
+  if (rawOverallGoalAdapter && typeof rawOverallGoalAdapter === "object" && !Array.isArray(rawOverallGoalAdapter)) {
+    return adaptOverallGoalIntegrationProposal(
+      runContext,
+      rawOverallGoalAdapter as Record<string, unknown>,
+      rawProposal,
+      projectId,
+    );
+  }
+  if (objectRecordOrNull(runContext.targetSystemEvidenceBundle)?.purpose === "overall-goal-integration-closeout") {
+    throw new Error("overall-goal integration design requires a fixed host projection adapter");
+  }
   const rawRuntimeAdapter = task.config?.runtimeIntegrationDesignAdapter;
   if (rawRuntimeAdapter && typeof rawRuntimeAdapter === "object" && !Array.isArray(rawRuntimeAdapter)) {
     return adaptRuntimeIntegrationBoundProposal(
@@ -754,6 +770,77 @@ function adaptHostReceiptBoundProposal(
   }
   Object.assign(adapted, normalizedContracts);
   return adapted;
+}
+
+function adaptOverallGoalIntegrationProposal(
+  runContext: Record<string, unknown>,
+  adapter: Record<string, unknown>,
+  rawProposal: Record<string, unknown>,
+  projectId: string,
+): Record<string, unknown> {
+  const adapterSha256 = adapter.adapterSha256;
+  const adapterBody = Object.fromEntries(Object.entries(adapter).filter(([key]) => key !== "adapterSha256"));
+  const bundle = objectRecordOrNull(runContext.targetSystemEvidenceBundle);
+  if (adapter.schemaVersion !== 1
+    || typeof adapterSha256 !== "string"
+    || canonicalEvolutionValueSha256(adapterBody) !== adapterSha256
+    || typeof adapter.signalId !== "string"
+    || !adapter.signalId.startsWith("signal_overall_goal_")
+    || typeof adapter.evidenceBundleSha256 !== "string"
+    || !bundle
+    || bundle.purpose !== "overall-goal-integration-closeout"
+    || bundle.targetProjectId !== projectId
+    || bundle.signalId !== adapter.signalId
+    || bundle.bundleSha256 !== adapter.evidenceBundleSha256
+    || bundle.overallGoalComplete !== false) {
+    throw new Error("overall-goal integration design adapter is malformed or detached from its authoritative bundle");
+  }
+  const { bundleSha256: _bundleSha256, ...bundleBody } = bundle;
+  if (canonicalEvolutionValueSha256(bundleBody) !== bundle.bundleSha256) {
+    throw new Error("overall-goal integration authoritative evidence bundle hash mismatch");
+  }
+  const evaluationContract = objectRecordOrNull(adapter.evaluationContract);
+  const investment = objectRecordOrNull(adapter.investment);
+  const resourceRequest = objectRecordOrNull(adapter.resourceRequest);
+  if (!evaluationContract || !investment || !resourceRequest
+    || investment.classification !== "evidence-maintenance"
+    || investment.oneTimeCost !== 0 || investment.recurringCost !== 0
+    || resourceRequest.paidUsd !== 0) {
+    throw new Error("overall-goal integration host projection is incomplete or not zero-cost");
+  }
+  const problem = typeof rawProposal.problem === "string" ? rawProposal.problem.trim() : "";
+  const recommendation = typeof rawProposal.recommendation === "string" ? rawProposal.recommendation.trim() : "";
+  const additions = Array.isArray(rawProposal.additions)
+    ? rawProposal.additions.filter((item): item is string => typeof item === "string" && item.trim().length > 0)
+    : [];
+  const options = Array.isArray(rawProposal.options) ? rawProposal.options : [];
+  const concreteOption = options.some((option) => {
+    const record = objectRecordOrNull(option);
+    return record
+      && typeof record.name === "string" && record.name.trim().length >= 4
+      && [record.benefits, record.costs, record.risks].every((items) =>
+        Array.isArray(items) && items.some((item) => typeof item === "string" && item.trim().length > 0));
+  });
+  if (problem.length < 12 || recommendation.length < 12 || additions.length === 0 || !concreteOption) {
+    throw new Error("overall-goal integration design must provide a substantive problem, recommendation, option, and additions");
+  }
+  const modelFields = Object.fromEntries([
+    "problem",
+    "recommendation",
+    "options",
+    "additions",
+    "removals",
+    "targetOutcome",
+    "assumptions",
+    "uncertainty",
+  ].filter((key) => rawProposal[key] !== undefined).map((key) => [key, structuredClone(rawProposal[key])]));
+  return normalizeTargetEvolutionProposalStrict({
+    ...modelFields,
+    evidenceRefs: [adapter.signalId],
+    evaluationContract: structuredClone(evaluationContract),
+    investment: structuredClone(investment),
+    resourceRequest: structuredClone(resourceRequest),
+  }, projectId);
 }
 
 function adaptRuntimeIntegrationBoundProposal(
