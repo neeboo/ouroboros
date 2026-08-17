@@ -702,6 +702,7 @@ const FROZEN_DESIGN_CONTEXT_KEYS = new Set([
   "overallGoalIntegrationContinuation",
   "overallGoalIntegrationEvidence",
   "overallGoalIntegrationRecovery",
+  "overallGoalIntegrationCloseout",
 ]);
 
 function frozenDesignContextKeys(keys: Iterable<string>): string[] {

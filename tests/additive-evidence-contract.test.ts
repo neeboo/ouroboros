@@ -707,6 +707,92 @@ describe("additive evidence-contract delivery", () => {
       status: "blocked",
       context: { repairReplanBudget: { used: 1, limit: 3 } },
     });
+
+    const continuation = harness.getRunOverview({ runId: nextRunId, eventLimit: 0 }).tasks
+      .find((candidate) => candidate.config?.designContinuation);
+    expect(continuation).toMatchObject({ role: "designer" });
+    const deliveryOutput = {
+      status: "done",
+      summary: "Create the single governed integration closeout delivery.",
+      changedFiles: [],
+      checks: [],
+      artifacts: [],
+      problems: [],
+      designActions: [{
+        type: "createRunsFromDesign",
+        payload: {
+          proposalId: proposal.id,
+          runs: [{
+            goal: "Integrate the two frozen isolated worktrees with exact receipts.",
+            prompt: "Verify each repository, commit and push exact paths, then collect frozen runtime-switch receipts.",
+            doneWhen: ["all host-frozen closeout receipts pass"],
+          }],
+        },
+      }],
+    } as AttemptOutput;
+    const deliveryResult = await hook({
+      run: harness.getRun(nextRunId)!,
+      task: continuation!,
+      sessionName: "overall-goal-create-delivery",
+      prompt: continuation!.prompt,
+      output: deliveryOutput,
+    });
+    expect(deliveryResult.problems).toBeUndefined();
+    const created = (deliveryResult.artifacts as Array<Record<string, unknown>> | undefined)
+      ?.find((artifact) => artifact.kind === "created_run") as
+      | { runId: string; plannerTaskId: string }
+      | undefined;
+    expect(created).toBeDefined();
+    const delivery = harness.getRunOverview({ runId: created!.runId, eventLimit: 0 });
+    expect(delivery.run).toMatchObject({
+      status: "todo",
+      context: {
+        designProposalId: proposal.id,
+        designDecisionId: expect.any(String),
+        targetSystemEvidenceBundle: expect.objectContaining({
+          purpose: "overall-goal-integration-closeout",
+          bundleSha256: bundle.bundleSha256,
+        }),
+        overallGoalIntegrationCloseout: expect.objectContaining({
+          schemaVersion: 1,
+          bundleSha256: bundle.bundleSha256,
+          signalId: adapter.signalId,
+          browserAllowed: false,
+          paidUsd: 0,
+        }),
+      },
+    });
+    expect(delivery.tasks).toEqual([expect.objectContaining({
+      id: created!.plannerTaskId,
+      role: "planner",
+      status: "todo",
+      config: expect.objectContaining({
+        permissionMode: "read-only",
+        forbidImplementation: true,
+        forbidBrowser: true,
+        browserProcessPolicy: "deny",
+        overallGoalIntegrationCloseout: expect.objectContaining({
+          bundleSha256: bundle.bundleSha256,
+          stages: [
+            "verify-backend",
+            "verify-frontend",
+            "commit-push-backend",
+            "commit-push-frontend",
+            "runtime-switch-evidence",
+          ],
+        }),
+      }),
+    })]);
+    const replayResult = await hook({
+      run: harness.getRun(nextRunId)!,
+      task: continuation!,
+      sessionName: "overall-goal-create-delivery-replay",
+      prompt: continuation!.prompt,
+      output: deliveryOutput,
+    });
+    expect(replayResult.problems).toBeUndefined();
+    expect(harness.listRuns({ limit: 100 }).filter((run) => run.context.designProposalId === proposal.id))
+      .toHaveLength(1);
   });
 
   test("overall-goal integration trigger fails closed when a worktree writes outside its frozen repository boundary", async () => {

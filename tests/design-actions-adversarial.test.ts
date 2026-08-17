@@ -2993,6 +2993,75 @@ describe("design-action transition coordinator (production authority path)", () 
     });
   });
 
+  test("ordinary evidence-maintenance cannot borrow the overall-goal closeout delivery path", async () => {
+    const projectId = harness.createProject({ name: "ordinary-evidence-maintenance", rootPath: dir });
+    const charterId = seedActiveCharter(projectId);
+    const signalId = seedActiveSignal(projectId, {
+      title: "Ordinary maintenance signal",
+      summary: "A local evidence index needs routine maintenance.",
+      payload: { outcome: "evidence-defect", defectKind: "ordinary-index-gap" },
+    });
+    const designRunId = harness.createRun({
+      goal: "Consider ordinary evidence maintenance",
+      projectId,
+      context: { source: "target-system-design" },
+    });
+    const designTaskId = harness.createTask({
+      runId: designRunId,
+      role: "designer",
+      goal: "Propose ordinary evidence maintenance",
+      prompt: "Keep it zero cost.",
+    });
+    const proposal = harness.createDesignProposal({
+      id: "design_ordinary_evidence_maintenance",
+      projectId,
+      runId: designRunId,
+      taskId: designTaskId,
+      charterId,
+      title: "Maintain the local evidence index",
+      problem: "The local evidence index lacks one routine readback.",
+      recommendation: "Add one bounded readback without changing delivery state.",
+      status: "accepted",
+      proposal: {
+        ...lowRiskEnvelope(signalId),
+        investment: {
+          reversibility: "easy",
+          portfolio: "core",
+          classification: "evidence-maintenance",
+          oneTimeCost: 0,
+          recurringCost: 0,
+          timeBudget: "one bounded pass",
+        },
+      } as never,
+    });
+    harness.recordDesignDecision({
+      id: "decision_ordinary_evidence_maintenance",
+      proposalId: proposal.id,
+      charterId,
+      decision: "approved",
+      actorKind: "auto",
+      reasons: ["Zero-cost routine evidence maintenance."],
+    });
+
+    const result = await runHook({
+      status: "done",
+      summary: "Create one routine maintenance delivery.",
+      designActions: [{
+        type: "createRunsFromDesign",
+        payload: {
+          proposalId: proposal.id,
+          runs: [{ goal: "Maintain evidence", prompt: "Read back the index." }],
+        },
+      }],
+    } as AttemptOutput, designRunId, designTaskId);
+
+    expect(result.problems).toEqual([
+      "evidence-maintenance delivery requires exactly one project-owned frozen-corpus-unrealizable signal",
+    ]);
+    expect(harness.listRuns({ limit: 100 }).filter((run) => run.context.designProposalId === proposal.id))
+      .toHaveLength(0);
+  });
+
   test("host receipt adapter still rejects unrelated unknown signal source kinds", () => {
     const projectId = "project_host_receipt_unknown_kind";
     const proposal = targetEvolutionEnvelope(projectId);

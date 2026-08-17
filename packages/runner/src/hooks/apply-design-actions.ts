@@ -2049,7 +2049,14 @@ function applyCreateRunsFromDesignWithDb(
     authority: approval.authority,
     charterId: resolvedCharterId,
   };
-  const hostEvidenceMaintenance = deriveHostEvidenceMaintenanceDelivery({
+  const overallGoalIntegrationCloseout = deriveOverallGoalIntegrationCloseoutDelivery({
+    harness,
+    db,
+    proposal,
+    sourceRun: proposalSourceRun,
+    projectId: proposalProjectId,
+  });
+  const hostEvidenceMaintenance = overallGoalIntegrationCloseout ? null : deriveHostEvidenceMaintenanceDelivery({
     harness,
     db,
     proposal,
@@ -2147,7 +2154,18 @@ function applyCreateRunsFromDesignWithDb(
       : designDeliveryPlan({
           runGoal: plannedRun.goal,
           plannerGoal: `Plan run: ${plannedRun.goal}`,
-          plannerPrompt: runtimeIntegrationBoundary
+          plannerPrompt: overallGoalIntegrationCloseout
+            ? [
+                "Materialize only the host-frozen overall-goal integration closeout task graph.",
+                `Authoritative evidence bundle: ${overallGoalIntegrationCloseout.bundleSha256}`,
+                `Frozen stages: ${overallGoalIntegrationCloseout.stages.join(" -> ")}.`,
+                "Create independent read-only repository Verifiers before any exact staging, commit, or push action.",
+                "Commit and push only the host-frozen eligible paths and SHA-256 values from each isolated worktree.",
+                "Exclude every temporary and control path frozen in the closeout contract.",
+                "After both remote SHA readbacks, collect Docker, PostgreSQL restart, HTTP 127.0.0.1:10588, and local runtime switch receipts bound to both commits.",
+                "Do not write either user main worktree, recover the blocked runtime run, modify the frozen package, use a browser, inherit target credentials, access unlisted network resources, or spend money.",
+              ].join("\n")
+            : runtimeIntegrationBoundary
             ? [
                 plannedRun.prompt,
                 "The host-frozen runtime integration boundary is authoritative and may not be broadened or replaced.",
@@ -2157,13 +2175,31 @@ function applyCreateRunsFromDesignWithDb(
                 "Use DSH for Workers and an identity-separated read-only Verifier for non-browser Docker/PostgreSQL/HTTP/127.0.0.1:10588 evidence.",
               ].join("\n")
             : plannedRun.prompt,
-          plannerDoneWhen: plannedRun.doneWhen ?? [
-            "Planner returns a small nextTasks graph for this run",
-            "Every generated task honors the frozen design evaluation contract",
-            "The run can be drained by the supervisor without manual task injection",
-          ],
+          plannerDoneWhen: overallGoalIntegrationCloseout
+            ? [
+                "the frozen five-stage closeout graph is materialized without extra tasks",
+                "backend and frontend independent Verifiers precede exact host commit and push actions",
+                "runtime switch evidence depends on both remote SHA readbacks",
+                "temporary, control, frozen package, blocked run, and user main worktree boundaries remain unchanged",
+              ]
+            : plannedRun.doneWhen ?? [
+                "Planner returns a small nextTasks graph for this run",
+                "Every generated task honors the frozen design evaluation contract",
+                "The run can be drained by the supervisor without manual task injection",
+              ],
           plannerConfig: {
             ...(plannedRun.modelPreference ? { modelPreference: plannedRun.modelPreference } : {}),
+            ...(overallGoalIntegrationCloseout ? {
+              executor: "codex-resumable",
+              permissionMode: "read-only",
+              readOnly: true,
+              forbidImplementation: true,
+              forbidBrowser: true,
+              browserProcessPolicy: "deny",
+              forbidNextRuns: true,
+              overallGoalIntegrationCloseout,
+              targetSystemEvidenceBundle: proposalSourceRun.context.targetSystemEvidenceBundle,
+            } : {}),
             ...(runtimeIntegrationBoundary ? {
               runtimeIntegrationBoundary,
               runtimeIntegrationTaskGraph: runtimeTaskGraph,
@@ -2222,6 +2258,7 @@ function applyCreateRunsFromDesignWithDb(
       designRemovals: frozenRemovals,
       designApprovalAuthority: approvalAuthority,
       designDeliveryPlan: canonicalDeliveryPlan,
+      ...(overallGoalIntegrationCloseout ? { overallGoalIntegrationCloseout } : {}),
       ...(frozenResourceAllocation ? { resourceAllocation: frozenResourceAllocation } : {}),
       ...(frozenEvolution
         ? {
@@ -2480,6 +2517,7 @@ const PROTECTED_DESIGN_CONTEXT_KEYS = [
   "harnessRevision",
   "targetSystemEvidenceBundle",
   "runtimeIntegrationBoundary",
+  "overallGoalIntegrationCloseout",
 ] as const;
 
 interface DesignDeliveryPlan {
@@ -3572,6 +3610,127 @@ interface HostEvidenceMaintenanceDelivery {
   sourceProposalId: string;
   sourceDecisionId: string;
   targetVersion: number;
+}
+
+interface OverallGoalIntegrationCloseoutDelivery {
+  schemaVersion: 1;
+  purpose: "overall-goal-integration-closeout";
+  sourceDesignerRunId: string;
+  bundleSha256: string;
+  signalId: string;
+  stages: [
+    "verify-backend",
+    "verify-frontend",
+    "commit-push-backend",
+    "commit-push-frontend",
+    "runtime-switch-evidence",
+  ];
+  worktrees: unknown[];
+  temporaryAndControlExclusions: Record<string, unknown>;
+  runtimeSwitchEvidence: Record<string, unknown>;
+  preserveUserMainWorktrees: true;
+  browserAllowed: false;
+  paidUsd: 0;
+}
+
+function deriveOverallGoalIntegrationCloseoutDelivery(input: {
+  harness: Harness;
+  db: HarnessDatabase;
+  proposal: DesignProposal;
+  sourceRun: Run;
+  projectId: string;
+}): OverallGoalIntegrationCloseoutDelivery | null {
+  const investment = objectRecordOrNull(input.proposal.proposal.investment);
+  const bundle = objectRecordOrNull(input.sourceRun.context.targetSystemEvidenceBundle);
+  if (investment?.classification !== "evidence-maintenance"
+    || bundle?.purpose !== "overall-goal-integration-closeout") {
+    return null;
+  }
+  const adapter = objectRecordOrNull(input.sourceRun.context.overallGoalIntegrationDesignAdapter);
+  const bundleSha256 = bundle.bundleSha256;
+  const signalId = bundle.signalId;
+  const { bundleSha256: _bundleSha256, ...bundleBody } = bundle;
+  if (input.proposal.runId !== input.sourceRun.id
+    || input.sourceRun.projectId !== input.projectId
+    || input.sourceRun.context.source !== "target-system-design"
+    || bundle.targetProjectId !== input.projectId
+    || bundle.overallGoalComplete !== false
+    || typeof bundleSha256 !== "string"
+    || canonicalEvolutionValueSha256(bundleBody) !== bundleSha256
+    || typeof signalId !== "string"
+    || !signalId.startsWith("signal_overall_goal_")
+    || !adapter) {
+    throw new Error("overall-goal integration closeout is detached from its authoritative source bundle");
+  }
+  const adapterSha256 = adapter.adapterSha256;
+  const { adapterSha256: _adapterSha256, ...adapterBody } = adapter;
+  if (adapter.schemaVersion !== 1
+    || adapter.signalId !== signalId
+    || adapter.evidenceBundleSha256 !== bundleSha256
+    || typeof adapterSha256 !== "string"
+    || canonicalEvolutionValueSha256(adapterBody) !== adapterSha256) {
+    throw new Error("overall-goal integration closeout adapter hash or bundle binding drifted");
+  }
+  const evidenceRefs = input.proposal.proposal.evidenceRefs ?? [];
+  const proposalInvestment = objectRecordOrNull(input.proposal.proposal.investment);
+  const adapterInvestment = objectRecordOrNull(adapter.investment);
+  const resourceRequest = objectRecordOrNull(input.proposal.proposal.resourceRequest);
+  const adapterResourceRequest = objectRecordOrNull(adapter.resourceRequest);
+  const proposalEvaluation = objectRecordOrNull(input.proposal.proposal.evaluationContract);
+  const adapterEvaluation = objectRecordOrNull(adapter.evaluationContract);
+  const governedEvaluationFields = ["baseline", "successMetrics", "guardMetrics", "requiredEvidence", "reviewAt"];
+  if (evidenceRefs.length !== 1 || evidenceRefs[0] !== signalId
+    || !proposalInvestment || !adapterInvestment
+    || stableCanonicalJson(proposalInvestment) !== stableCanonicalJson(adapterInvestment)
+    || proposalInvestment.oneTimeCost !== 0 || proposalInvestment.recurringCost !== 0
+    || !resourceRequest || !adapterResourceRequest
+    || stableCanonicalJson(resourceRequest) !== stableCanonicalJson(adapterResourceRequest)
+    || resourceRequest.paidUsd !== 0
+    || !proposalEvaluation || !adapterEvaluation
+    || governedEvaluationFields.some((field) =>
+      stableCanonicalJson(proposalEvaluation[field]) !== stableCanonicalJson(adapterEvaluation[field]))) {
+    throw new Error("overall-goal integration closeout proposal drifted from its host projection");
+  }
+  const signal = input.harness.getStrategySignalWithDb(input.db, { id: signalId });
+  if (!signal || signal.projectId !== input.projectId || signal.status !== "active"
+    || signal.source !== `overall-goal-continuation:${bundle.sourceRunId}`
+    || signal.payload.kind !== "overall-goal-integration-needed"
+    || signal.payload.evidenceSha256 !== bundle.evidenceSha256
+    || signal.payload.overallGoalComplete !== false) {
+    throw new Error("overall-goal integration closeout signal is missing or no longer authoritative");
+  }
+  const worktrees = Array.isArray(bundle.worktrees) ? bundle.worktrees : [];
+  const repositoryIds = worktrees.map((entry) => objectRecordOrNull(entry)?.repositoryId);
+  const exclusions = objectRecordOrNull(bundle.temporaryAndControlExclusions);
+  const runtimeSwitchEvidence = objectRecordOrNull(bundle.runtimeSwitchEvidence);
+  if (worktrees.length !== 2
+    || !repositoryIds.includes("target-backend")
+    || !repositoryIds.includes("target-frontend")
+    || !exclusions
+    || !runtimeSwitchEvidence
+    || runtimeSwitchEvidence.status !== "unverified") {
+    throw new Error("overall-goal integration closeout bundle is missing repository or runtime-switch evidence");
+  }
+  return {
+    schemaVersion: 1,
+    purpose: "overall-goal-integration-closeout",
+    sourceDesignerRunId: input.sourceRun.id,
+    bundleSha256,
+    signalId,
+    stages: [
+      "verify-backend",
+      "verify-frontend",
+      "commit-push-backend",
+      "commit-push-frontend",
+      "runtime-switch-evidence",
+    ],
+    worktrees: structuredClone(worktrees),
+    temporaryAndControlExclusions: structuredClone(exclusions),
+    runtimeSwitchEvidence: structuredClone(runtimeSwitchEvidence),
+    preserveUserMainWorktrees: true,
+    browserAllowed: false,
+    paidUsd: 0,
+  };
 }
 
 function deriveHostEvidenceMaintenanceDelivery(input: {
