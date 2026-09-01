@@ -340,8 +340,8 @@ orbs run-loop \
   --executor codex-resumable \
   --cwd /Users/ghostcorn/dev/ouroboros \
   --sandbox workspace-write \
-  --timeout-ms 1800000 \
-  --idle-timeout-ms 300000 \
+  --timeout-ms 3600000 \
+  --idle-timeout-ms 3600000 \
   --stop-hook create-tasks,create-verifier,create-repair,context-summary \
   --concurrency auto \
   --worktree-root /Users/ghostcorn/dev/ouroboros-worktrees \

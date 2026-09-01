@@ -8096,6 +8096,8 @@ describe("Harness actions", () => {
     const recordedThreadId = recordedThread!.id;
     expect(calls[0]!.threadId).toBe(recordedThreadId);
     expect(recordedThreadId).not.toBe("thread_runner_replacement_should_not_win");
+    expect(calls[0]!.timeoutMs).toBe(60 * 60 * 1000);
+    expect(calls[0]!.idleTimeoutMs).toBe(60 * 60 * 1000);
     expect(recordedThread).toMatchObject({
       ownerType: "subsession",
       taskId,

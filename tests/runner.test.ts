@@ -3234,7 +3234,7 @@ describe("runner", () => {
       },
     });
 
-    expect(observedTimeouts).toEqual([{ timeoutMs: 30 * 60 * 1000, idleTimeoutMs: 5 * 60 * 1000 }]);
+    expect(observedTimeouts).toEqual([{ timeoutMs: 60 * 60 * 1000, idleTimeoutMs: 60 * 60 * 1000 }]);
   });
 
   test("runner-owned codex loop blocks running starts that have no resumable session id", async () => {

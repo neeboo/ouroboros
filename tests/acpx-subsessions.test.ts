@@ -25,6 +25,11 @@ function fakeRunSync(responses: Record<string, CommandResult>) {
 }
 
 describe("acpx subsession runner", () => {
+  test("defaults hard and idle execution timeouts to 60 minutes", () => {
+    expect(SUBSESSION_DEFAULT_TIMEOUT_MS).toBe(60 * 60 * 1000);
+    expect(SUBSESSION_DEFAULT_IDLE_TIMEOUT_MS).toBe(60 * 60 * 1000);
+  });
+
   test("acpxSubsessionBaseCommand includes --cwd and a resolved acpx agent", () => {
     const base = acpxSubsessionBaseCommand(
       { id: "claude-code", kind: "acpx", agent: "claude", approval: "approve-reads" },

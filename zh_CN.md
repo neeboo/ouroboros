@@ -168,8 +168,8 @@ bun run orbs -- run-loop \
   --executor codex-resumable \
   --cwd "$(pwd)" \
   --sandbox workspace-write \
-  --timeout-ms 1800000 \
-  --idle-timeout-ms 300000 \
+  --timeout-ms 3600000 \
+  --idle-timeout-ms 3600000 \
   --stop-hook create-tasks,create-verifier,create-repair,context-summary \
   --concurrency 3 \
   --worktree-root .ouroboros/worktrees \

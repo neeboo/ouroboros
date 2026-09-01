@@ -72,8 +72,8 @@ import {
 } from "./verifier-execution-environment";
 
 const DEFAULT_RUNNING_ATTEMPT_STALE_MS = 5 * 60 * 1000;
-const DEFAULT_GENERIC_ATTEMPT_IDLE_TIMEOUT_MS = 5 * 60 * 1000;
-const DEFAULT_GENERIC_ATTEMPT_HARD_TIMEOUT_MS = 30 * 60 * 1000;
+const DEFAULT_GENERIC_ATTEMPT_IDLE_TIMEOUT_MS = 60 * 60 * 1000;
+const DEFAULT_GENERIC_ATTEMPT_HARD_TIMEOUT_MS = 60 * 60 * 1000;
 const DEFAULT_GENERIC_ATTEMPT_HEARTBEAT_MS = 30 * 1000;
 
 export type CodexResumableClientFactory = (input: {

@@ -50,8 +50,8 @@ export interface CommandResult {
   stderr: string;
 }
 
-export const SUBSESSION_DEFAULT_TIMEOUT_MS = 30 * 60 * 1000;
-export const SUBSESSION_DEFAULT_IDLE_TIMEOUT_MS = 10 * 60 * 1000;
+export const SUBSESSION_DEFAULT_TIMEOUT_MS = 60 * 60 * 1000;
+export const SUBSESSION_DEFAULT_IDLE_TIMEOUT_MS = 60 * 60 * 1000;
 
 export function createAcpxSubsessionRunner(options: AcpxSubsessionRunnerOptions = {}): SubsessionRunner {
   const runCommand = options.runCommand ?? runLocalCommand;
