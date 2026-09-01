@@ -6477,7 +6477,7 @@ function materializeTimedOutRuntimeSemanticRepairContinuationWithDb(input: {
       if (marker.progressRetryUsed === true) {
         const canRefineContract = marker.contractRefinementUsed !== true
           && progressReceipt.status === "completed"
-          && (session.output.problems ?? []).some((problem) => /command timed out after 1800000ms/i.test(problem));
+          && (session.output.problems ?? []).some((problem) => /command timed out after (?:1800000|3600000)ms/i.test(problem));
         if (canRefineContract) {
           const identities = frozenRuntimeSemanticIdentities(run.context);
           const refinementPrompt = [
@@ -9607,9 +9607,9 @@ function realpathRegularFile(path: string, label: string) {
   return real;
 }
 
-const SUBSESSION_DEFAULT_TIMEOUT_MS = 30 * 60 * 1000;
+const SUBSESSION_DEFAULT_TIMEOUT_MS = 60 * 60 * 1000;
 const SUBSESSION_MAX_TIMEOUT_MS = 4 * 60 * 60 * 1000;
-const SUBSESSION_DEFAULT_IDLE_TIMEOUT_MS = 10 * 60 * 1000;
+const SUBSESSION_DEFAULT_IDLE_TIMEOUT_MS = 60 * 60 * 1000;
 const SUBSESSION_MAX_IDLE_TIMEOUT_MS = 60 * 60 * 1000;
 const SUBSESSION_MAX_PER_TASK = 3;
 const SUBSESSION_MIN_PROMPT_LENGTH = 24;

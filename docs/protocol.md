@@ -784,8 +784,8 @@ Three actions cover the lifecycle:
   "role": "optional child role",
   "backend": "claude-code",
   "sessionName": "optional suffix slug",
-  "timeoutMs": 1800000,
-  "idleTimeoutMs": 300000
+  "timeoutMs": 3600000,
+  "idleTimeoutMs": 3600000
 }
 {
   "type": "collectSubsessions",
@@ -808,7 +808,7 @@ Validation rules:
 - `backend` must be declared in `run.context.agentBackends` (or be a built-in like `claude-code`, `codex`, `codex-resumable`, `codex-cli`, or `noop`). Unknown backends are blocked.
 - Prompt strings shorter than 24 characters are blocked as too small to be meaningful.
 - A parent task may hold at most `maxSubsessionsPerTask = 3` running children.
-- Timeouts default to 30 minutes (`timeoutMs`) and 10 minutes (`idleTimeoutMs`) and are clamped to four-hour and one-hour upper bounds.
+- Execution and idle timeouts both default to 60 minutes (`timeoutMs` and `idleTimeoutMs`) and are clamped to four-hour and one-hour upper bounds.
 - `collectSubsessions` and `cancelSubsessions` are blocked when the parent task has no recorded child subsession threads.
 
 `startSubsession` records a `harness_action_events` row, upserts a child `execution_threads` row with `owner_type = "subsession"` and the resolved backend/cwd/session, then calls an injected `subsessionRunner.start` to spawn acpx asynchronously. The action returns the thread id, session name, backend, cwd, and policy checks; long-running acpx output is observed by the runner, not by the action caller.
